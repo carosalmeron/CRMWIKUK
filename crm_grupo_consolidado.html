@@ -398,8 +398,13 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
   const misClientes=clientesFB&&clientesFB.length>0 ? clientesFB : (CLIENTES_POR_AGENTE[id]||[]);
   const mCurso=MUESTRAS_SEED.filter(m=>m.agente===id).length;
   const ePend=ESTRATEGIAS_SEED.filter(e=>e.estado==="en_curso"&&e.agente===id).length;
-  const misOps=opsBD.filter(o=>(o.agente===id||o.agenteId===id)&&
-    !["ganada","perdida","cerrada_ganada","cerrada_perdida"].some(e=>o.etapa===e||o.estado===e));
+  const misOps=opsBD.filter(o=>{
+    const oid=(o.agente||o.agenteId||"").toLowerCase();
+    const uid=id.toLowerCase();
+    const catV=(usuario.catalogoVendedor||"").toLowerCase();
+    const match=oid===uid||(catV&&oid===catV);
+    return match&&!["ganada","perdida","cerrada_ganada","cerrada_perdida"].some(e=>o.etapa===e||o.estado===e);
+  });
   const misProy=PROYECTOS_SEED.filter(p=>p.estado==="activo"&&p.equipo?.includes(id));
   const misInc=INCIDENCIAS_SEED.filter(i=>i.autor===id&&i.estado==="abierta");
   const totalSem=misClientes.length,visitados=Math.min(totalSem,8),pendVisita=totalSem-visitados;
@@ -5034,21 +5039,31 @@ function GestorOportunidades({usuario}){
   const esRolDir=["director","ceo"].includes(usuario?.rol);
   const miEquipoOpo=usuario?.equipo;
 
-  // Pre-filtro por rol — agente SOLO ve las suyas (comparación sin distinción mayús/minús)
+  // Pre-filtro por rol — agente SOLO ve las suyas
+  // Compara contra: id del CRM, catalogoVendedor (cartera), y campo agente/agenteId
   const oposMiRol=useMemo(()=>{
     const uid=(usuario.id||"").toLowerCase();
+    const catV=(usuario.catalogoVendedor||"").toLowerCase(); // ej: "carlosg", "rpiedra"
+    // Todos los identificadores posibles del agente (sin vacíos)
+    const misIds=[uid,catV].filter(Boolean);
+
+    function esDelAgente(o){
+      const oId=(o.agenteId||o.agente||"").toLowerCase();
+      return misIds.some(myId=>oId===myId);
+    }
+
     return opos.filter(o=>{
-      if(esRolAgente){
-        return (o.agenteId||"").toLowerCase()===uid||(o.agente||"").toLowerCase()===uid;
-      }
+      if(esRolAgente) return esDelAgente(o);
       if(esRolJefe){
         const agId=(o.agenteId||o.agente||"").toLowerCase();
         const ag=USUARIOS.find(u=>u.id.toLowerCase()===agId);
-        return ag?.equipo===miEquipoOpo||o.equipoId===miEquipoOpo||o.equipo===miEquipoOpo;
+        // También buscar por catalogoVendedor si el agente es dinámico
+        const agDin=ag||USUARIOS.find(u=>(u.catalogoVendedor||"").toLowerCase()===agId);
+        return agDin?.equipo===miEquipoOpo||o.equipoId===miEquipoOpo||o.equipo===miEquipoOpo;
       }
       return true; // director/ceo ve todas
     });
-  },[opos,usuario.id,esRolAgente,esRolJefe,miEquipoOpo]);
+  },[opos,usuario.id,usuario.catalogoVendedor,esRolAgente,esRolJefe,miEquipoOpo]);
 
   const activas=oposMiRol.filter(o=>!["ganada","perdida","cerrada_ganada","cerrada_perdida"].includes(o.estado));
   const sinAsignar=oposMiRol.filter(o=>!o.agenteId&&!["ganada","perdida"].includes(o.estado));
@@ -7144,9 +7159,18 @@ function App(props){
   const opsAbiertas=oportunidadesDB.filter(o=>{
     const cerrada=["ganada","perdida","cerrada_ganada","cerrada_perdida"].some(e=>o.etapa===e||o.estado===e);
     if(cerrada) return false;
-    const oid=(o.agente||o.agenteId||"").toLowerCase();
-    if(esAgente) return oid===usuario.id.toLowerCase()||oid===(usuario.crmId||"").toLowerCase();
-    if(esJefe){const ag=USUARIOS.find(u=>u.id.toLowerCase()===oid);return ag?.equipo===miEquipo||o.equipo===miEquipo;}
+    if(esAgente){
+      const oid=(o.agente||o.agenteId||"").toLowerCase();
+      const uid=usuario.id.toLowerCase();
+      const catV=(usuario.catalogoVendedor||"").toLowerCase();
+      return oid===uid||(catV&&oid===catV);
+    }
+    if(esJefe){
+      const agId=(o.agenteId||o.agente||"").toLowerCase();
+      const ag=USUARIOS.find(u=>u.id.toLowerCase()===agId)||
+               USUARIOS.find(u=>(u.catalogoVendedor||"").toLowerCase()===agId);
+      return ag?.equipo===miEquipo||o.equipo===miEquipo;
+    }
     return true;
   }).length;
 
