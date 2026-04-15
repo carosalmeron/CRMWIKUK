@@ -348,12 +348,15 @@ function BottomNav({items,current,onChange}){
 }
 
 // ─── DASHBOARD AGENTE ─────────────────────────────────────────────
-function DashAgente({usuario, onNav}){
+function DashAgente({usuario, onNav, oportunidadesDB}){
   const {id,equipo,color}=usuario;
+  const opsBD=oportunidadesDB||OPORTUNIDADES_SEED;
   const mPend=MUESTRAS_SEED.filter(m=>m.estado==="pendiente"&&m.agente===id).length;
   const mCurso=MUESTRAS_SEED.filter(m=>m.agente===id).length;
   const ePend=ESTRATEGIAS_SEED.filter(e=>e.estado==="en_curso"&&e.agente===id).length;
-  const misOps=OPORTUNIDADES_SEED.filter(o=>o.agente===id&&!o.etapa?.includes("cerrada"));
+  // Usar datos reales de Firebase — acepta tanto campo agente como agenteId
+  const misOps=opsBD.filter(o=>(o.agente===id||o.agenteId===id)&&
+    !["ganada","perdida","cerrada_ganada","cerrada_perdida"].some(e=>o.etapa===e||o.estado===e));
   const misProy=PROYECTOS_SEED.filter(p=>p.estado==="activo"&&p.equipo?.includes(id));
   const misInc=INCIDENCIAS_SEED.filter(i=>i.autor===id&&i.estado==="abierta");
   const misClientes=CLIENTES_POR_AGENTE[id]||[];
@@ -4290,8 +4293,10 @@ function Paso6({form,usuario,onSave,onBack}){
 
 // WIZARD
 function Wizard({usuario,opoEditar,onSave,onClose,datosEscaneados}){
+  const esAgente=usuario?.rol==="agente";
   // Si vienen datos de tarjeta, arranca en paso 2 directamente
   const [paso,setPaso]=useState(datosEscaneados&&!opoEditar?2:1);
+  const defaultAgenteId=esAgente?usuario.id:""; // agente siempre se auto-asigna
   const [form,setForm]=useState(opoEditar?{
     tipo:      opoEditar.tipo||"",
     tipologia: opoEditar.tipologia||"",
@@ -4308,10 +4313,10 @@ function Wizard({usuario,opoEditar,onSave,onClose,datosEscaneados}){
     tarjetaVisita:           opoEditar.tarjetaVisita||null,
     imagenes:                opoEditar.imagenes||[],
     descripcionOportunidad:  opoEditar.descripcionOportunidad||"",
-    agenteId:                opoEditar.agenteId||"",
+    agenteId:                opoEditar.agenteId||defaultAgenteId,
   }:datosEscaneados?{
     tipo:"nuevo_cliente", tipologia:"", nif:"", dir:"", imagenes:[], tarjetaVisita:null,
-    descripcionCliente:"", descripcionOportunidad:"", agenteId:"",
+    descripcionCliente:"", descripcionOportunidad:"", agenteId:defaultAgenteId,
     nombre:   datosEscaneados.empresa||datosEscaneados.nombre||"",
     contacto: datosEscaneados.nombre||"",
     cargo:    datosEscaneados.cargo||"",
@@ -4319,7 +4324,7 @@ function Wizard({usuario,opoEditar,onSave,onClose,datosEscaneados}){
     email:    datosEscaneados.email||"",
     web:      datosEscaneados.web||"",
     ciudad:   datosEscaneados.direccion||"",
-  }:{tipo:"",tipologia:"",nombre:"",nif:"",contacto:"",cargo:"",tel:"",email:"",web:"",ciudad:"",dir:"",descripcionCliente:"",tarjetaVisita:null,imagenes:[],descripcionOportunidad:"",agenteId:""});
+  }:{tipo:"",tipologia:"",nombre:"",nif:"",contacto:"",cargo:"",tel:"",email:"",web:"",ciudad:"",dir:"",descripcionCliente:"",tarjetaVisita:null,imagenes:[],descripcionOportunidad:"",agenteId:defaultAgenteId});
   const upd=(k,v)=>setForm(f=>({...f,[k]:v}));
   const save=()=>{
     const ag=USUARIOS.find(v=>v.id===form.agenteId);
@@ -4364,9 +4369,9 @@ function Wizard({usuario,opoEditar,onSave,onClose,datosEscaneados}){
         {paso===1&&<Paso1 form={form} upd={upd} onNext={()=>setPaso(2)}/>}
         {paso===2&&<Paso2 form={form} upd={upd} onNext={()=>setPaso(3)} onBack={()=>setPaso(1)} desdeTarjeta={!!datosEscaneados&&!opoEditar}/>}
         {paso===3&&<Paso3 form={form} upd={upd} onNext={()=>setPaso(4)} onBack={()=>setPaso(2)}/>}
-        {paso===4&&<Paso4 form={form} upd={upd} onNext={()=>setPaso(5)} onBack={()=>setPaso(3)}/>}
-        {paso===5&&<Paso5 form={form} upd={upd} onNext={()=>setPaso(6)} onBack={()=>setPaso(4)}/>}
-        {paso===6&&<Paso6 form={form} usuario={usuario} onSave={save} onBack={()=>setPaso(5)}/>}
+        {paso===4&&<Paso4 form={form} upd={upd} onNext={()=>setPaso(esAgente?6:5)} onBack={()=>setPaso(3)}/>}
+        {paso===5&&!esAgente&&<Paso5 form={form} upd={upd} onNext={()=>setPaso(6)} onBack={()=>setPaso(4)}/>}
+        {paso===6&&<Paso6 form={form} usuario={usuario} onSave={save} onBack={()=>setPaso(esAgente?4:5)}/>}
       </div>
     </div>
   </div>);
@@ -4744,11 +4749,11 @@ function GestorOportunidades({usuario}){
   const esRolDir=["director","ceo"].includes(usuario?.rol);
   const miEquipoOpo=usuario?.equipo;
 
-  // Pre-filtro por rol
+  // Pre-filtro por rol — agente SOLO ve las suyas
   const oposMiRol=useMemo(()=>opos.filter(o=>{
-    if(esRolAgente) return o.agenteId===usuario.id;
+    if(esRolAgente) return o.agenteId===usuario.id||o.agente===usuario.id;
     if(esRolJefe){
-      const ag=USUARIOS.find(u=>u.id===o.agenteId);
+      const ag=USUARIOS.find(u=>u.id===(o.agenteId||o.agente));
       return ag?.equipo===miEquipoOpo||o.equipoId===miEquipoOpo;
     }
     return true; // director/ceo ve todas
@@ -4876,10 +4881,13 @@ function GestorOportunidades({usuario}){
             <input value={q} onChange={e=>setQ(e.target.value)} placeholder="🔍 Buscar…" style={{width:"100%",padding:"9px 32px 9px 12px",borderRadius:9,border:`1.5px solid ${T.border}`,fontSize:13,outline:"none",fontFamily:"inherit"}}/>
             {q&&<button onClick={()=>setQ("")} style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:T.muted,fontSize:15}}>×</button>}
           </div>
+          {/* Selector de agente: solo jefes y directores */}
+          {!esRolAgente&&(
           <select value={filtroAg} onChange={e=>setFiltroAg(e.target.value)} style={{padding:"9px 12px",borderRadius:9,border:`1.5px solid ${T.border}`,fontSize:13,outline:"none",background:"#fff",cursor:"pointer"}}>
             <option value="todos">{esRolJefe?`Todos (${miEquipoOpo})`:"Todos los agentes"}</option>
             {AGENTES.filter(v=>esRolJefe?v.equipo===miEquipoOpo:true).map(v=><option key={v.id} value={v.id}>{v.nombre}</option>)}
           </select>
+          )}
           <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
             {[["activas","Activas",T.blue],["sin_asignar","Sin asignar",T.amber],["ganadas","Convertidas",T.green],["perdidas","Perdidas",T.red],["todas","Todas",T.muted]].map(([k,l,c])=>(
               <button key={k} onClick={()=>setFiltroEst(k)} style={{padding:"7px 12px",borderRadius:7,border:`1.5px solid ${filtroEst===k?c:T.border}`,background:filtroEst===k?c+"18":"#fff",color:filtroEst===k?c:T.muted,fontWeight:filtroEst===k?700:400,fontSize:11,cursor:"pointer"}}>{l}</button>
@@ -6498,6 +6506,7 @@ function App(props){
   const [incidenciasDB,setIncidenciasDB]=useState(INCIDENCIAS_SEED);
   const [fbCargando,setFbCargando]=useState(false);
   const [fbStatus,setFbStatus]=useState(""); // "ok" | "error" | ""
+  const [oportunidadesDB,setOportunidadesDB]=useState(OPORTUNIDADES_SEED);
 
   useEffect(()=>{
     if(!usuario) return;
@@ -6507,10 +6516,17 @@ function App(props){
       fbLeer("estrategias"),
       fbLeer("incidencias"),
       fbLeer("visitas"),
-    ]).then(([muestras,estrategias,incidencias,visitas])=>{
+      fbCargar(), // oportunidades
+    ]).then(([muestras,estrategias,incidencias,visitas,opos])=>{
       if(muestras.length>0) setMuestrasDB(muestras.filter(m=>!m.eliminada));
       if(estrategias.length>0) setEstrategiasDB(estrategias.filter(e=>!e.eliminada));
       if(incidencias.length>0) setIncidenciasDB(incidencias);
+      if(opos.length>0){
+        // Normalizar campo agente: aceptar tanto agenteId como agente
+        const norm=opos.map(o=>({...o,agente:o.agente||o.agenteId,agenteId:o.agenteId||o.agente}));
+        const fbIds=new Set(norm.map(o=>o.id));
+        setOportunidadesDB([...norm,...OPORTUNIDADES_SEED.filter(o=>!fbIds.has(o.id))]);
+      }
 
       // Reconstruir actividadSemana desde Firebase para el agente actual
       if(usuario?.rol==="agente"){
@@ -6622,7 +6638,10 @@ function App(props){
     const pctMM=Math.round(mbMesEq/mbMesObjEq*100);
     const pctMA=Math.round(mbAnualEq/mbAnualObjEq*100);
 
-    const opsEq=OPORTUNIDADES_SEED.filter(o=>agentesEquipo.find(a=>a.id===o.agente)&&!o.etapa?.includes("cerrada"));
+    const opsEq=(oportunidadesDB||OPORTUNIDADES_SEED).filter(o=>{
+      const ag=agentesEquipo.find(a=>a.id===o.agente||a.id===o.agenteId);
+      return ag&&!["ganada","perdida","cerrada_ganada","cerrada_perdida"].some(e=>o.etapa===e||o.estado===e);
+    });
     const incEq=incidenciasDB.filter(i=>i.equipo===miEquipo&&i.estado==="abierta");
     const estEq=estrategiasDB.filter(e=>e.estado==="en_curso"&&agentesEquipo.find(a=>a.id===e.agente));
     const mEq=muestrasDB.filter(m=>agentesEquipo.find(a=>a.id===m.agente));
@@ -6903,7 +6922,7 @@ function App(props){
         )}
 
         {/* AGENTE */}
-        {esAgente&&section==="dashboard"&&  <DashAgente usuario={usuario} onNav={setSection}/>}
+        {esAgente&&section==="dashboard"&&  <DashAgente usuario={usuario} onNav={setSection} oportunidadesDB={oportunidadesDB}/>}
         {esAgente&&section==="clientes"&&   <GestorClientes usuario={usuario} actividad={actividadSemana} onActividad={onActividad} onBack={()=>setSection("dashboard")}/>}
         {esAgente&&section==="informe"&&    <Informe usuario={usuario} actividadSemana={actividadSemana}/>}
         {esAgente&&section==="muestras"&&   <MisMuestras usuario={usuario}/>}
