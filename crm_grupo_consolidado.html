@@ -69,6 +69,23 @@ const USUARIOS = [
   {id:"resp_id",  nombre:"Resp. I+D",             rol:"tipologia", tipologia:"id",              color:"#7C3AED",icon:"🔬"},
 ];
 
+// ── Normalizar cliente desde Firebase (distintos esquemas de campo) ──
+// Soporta campos en MAYÚSCULAS, minúsculas o camelCase
+function normCliente(c){
+  if(!c) return c;
+  var n=c.NOMBRE||c.nombre||c.name||c.razonSocial||c.RAZON_SOCIAL||c.cliente||'';
+  var id=c.id||c.ID||c.CODIGO||c.codigo||c.code||c.COD_CLIENTE||n;
+  var tel=c.TEL||c.tel||c.TELEFONO||c.telefono||c.phone||c.PHONE||'';
+  var dir=c.DIR||c.dir||c.DIRECCION||c.direccion||c.address||c.ADDRESS||c.LOCALIDAD||c.localidad||'';
+  var ruta=c.RUTA||c.ruta||c.ZONA||c.zona||c.route||0;
+  var agente=c.AGENTE||c.agente||c.VENDEDOR||c.vendedor||c.agenteId||'';
+  return Object.assign({},c,{
+    id:String(id), nombre:n, tel:tel, dir:dir,
+    ruta:Number(ruta)||0, agente:agente,
+    _raw:c
+  });
+}
+
 // Tipos de incidencia con responsable y color
 const INC_TIPOS = {
   logistica:      {label:"🚚 Logística",        color:"#0EA5E9", resp:"resp_log"},
@@ -5403,7 +5420,7 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
   const semana=14;
 
   // Helper nombre de cliente compatible con distintos esquemas Firebase
-  const cNombre=(c)=>c.nombre||c.name||c.razonSocial||c.cliente||'Sin nombre';
+  const cNombre=(c)=>c.nombre||c.NOMBRE||c.name||'Sin nombre';
   const cId=(c)=>c.id||c.ID||c.codigo||c.code||String(Math.random());
 
   // Rutas disponibles — si ningún cliente tiene ruta, usamos ruta 0 = "Sin ruta" para mostrar todos
@@ -6558,16 +6575,35 @@ function App(props){
         setOportunidadesDB([...norm,...OPORTUNIDADES_SEED.filter(o=>!fbIds.has(o.id))]);
       }
       if(clientes.length>0){
-        // Organizar clientes por agente para compatibilidad
+        // Estructura real Firebase:
+        // { grupoAgente: "BARBELANNE", nombre: "3L FAMILY", activo: true, id: "C00001", ... }
+        // El campo grupoAgente coincide con catalogoVendedor del portal
+        
+        // Filtrar solo activos
+        const activos=clientes.filter(c=>c.activo!==false);
+        
+        // Obtener catalogoVendedor del usuario actual (set desde el portal admin)
+        const miVendedor=usuario.catalogoVendedor||
+          sessionStorage.getItem('gc_portal_user')&&
+          JSON.parse(sessionStorage.getItem('gc_portal_user')||'{}').catalogoVendedor||null;
+        
+        // Organizar por grupoAgente (clave principal) y por agente (fallback)
+        const porGrupo={};
         const porAgente={};
-        clientes.forEach(c=>{
+        activos.forEach(c=>{
+          // Por grupoAgente
+          if(c.grupoAgente){
+            if(!porGrupo[c.grupoAgente]) porGrupo[c.grupoAgente]=[];
+            porGrupo[c.grupoAgente].push(c);
+          }
+          // Por agente (fallback)
           const ag=c.agente||c.agenteId;
           if(ag){
             if(!porAgente[ag]) porAgente[ag]=[];
             porAgente[ag].push(c);
           }
         });
-        setClientesDB(porAgente);
+        setClientesDB({_porGrupo:porGrupo,_porAgente:porAgente,_todos:activos});
       }
 
       // Reconstruir actividadSemana desde Firebase para el agente actual
@@ -6617,10 +6653,30 @@ function App(props){
   const esJefeOmas=esJefe||esDir;
   const miEquipo=usuario.equipo;
 
-  // Helper: obtener clientes de un agente — Firebase primero, fallback a seed
+  // Helper: obtener clientes de un agente
+  // Firebase usa grupoAgente (= catalogoVendedor del portal, ej: "CARLOSG", "DAVIDMAG")
   const getClientesPara=(agenteId)=>{
-    if(clientesDB&&clientesDB[agenteId]&&clientesDB[agenteId].length>0){
-      return clientesDB[agenteId];
+    if(clientesDB){
+      // 1. Buscar por grupoAgente usando catalogoVendedor del usuario del portal
+      const portalUserStr=sessionStorage.getItem('gc_portal_user')||localStorage.getItem('gc_portal_user');
+      let catalogoVendedor=null;
+      try{
+        const pu=JSON.parse(portalUserStr||'{}');
+        // Buscar el usuario actual en los datos del portal
+        catalogoVendedor=pu.catalogoVendedor||null;
+      }catch(e){}
+      
+      if(catalogoVendedor&&clientesDB._porGrupo&&clientesDB._porGrupo[catalogoVendedor]){
+        return clientesDB._porGrupo[catalogoVendedor];
+      }
+      // 2. Fallback: buscar por agente ID
+      if(clientesDB._porAgente&&clientesDB._porAgente[agenteId]){
+        return clientesDB._porAgente[agenteId];
+      }
+      // 3. Si CEO/Director: todos los clientes
+      if(["director","ceo"].includes(usuario.rol)&&clientesDB._todos){
+        return clientesDB._todos;
+      }
     }
     return CLIENTES_POR_AGENTE[agenteId]||[];
   };
