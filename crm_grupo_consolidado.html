@@ -77,7 +77,9 @@ function normCliente(c){
   var id=c.id||c.ID||c.CODIGO||c.codigo||c.code||c.COD_CLIENTE||n;
   var tel=c.TEL||c.tel||c.TELEFONO||c.telefono||c.phone||c.PHONE||'';
   var dir=c.DIR||c.dir||c.DIRECCION||c.direccion||c.address||c.ADDRESS||c.LOCALIDAD||c.localidad||'';
-  var ruta=c.RUTA||c.ruta||c.ZONA||c.zona||c.route||0;
+  // Firebase usa "semanas" (array) o "semana" (número) como campo de ruta
+  var semanaRaw=c.semana||c.SEMANA||(Array.isArray(c.semanas)&&c.semanas.length>0?c.semanas[0]:null)||c.ruta||c.RUTA||0;
+  var ruta=Number(semanaRaw)||0;
   var agente=c.AGENTE||c.agente||c.VENDEDOR||c.vendedor||c.agenteId||'';
   return Object.assign({},c,{
     id:String(id), nombre:n, tel:tel, dir:dir,
@@ -5411,31 +5413,52 @@ function HistorialClientes({usuario, actividad}){
 }
 
 function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
-  // Usar clientes reales de Firebase, fallback a seed
   const clientes=clientesFB&&clientesFB.length>0 ? clientesFB : (CLIENTES_POR_AGENTE[usuario.id]||[]);
-  const [rutaSel,setRutaSel]=useState(null);
+  const [rutaSel,setRutaSel]=useState(null); // número de ruta seleccionada, o "sinRuta"
   const [clienteSel,setClienteSel]=useState(null);
   const [tabSel,setTabSel]=useState("visita");
   const [busqueda,setBusqueda]=useState("");
-  const semana=14;
+  const [asignandoRuta,setAsignandoRuta]=useState(null); // id cliente al que se asigna ruta
+  const [nuevaRuta,setNuevaRuta]=useState("");
+  const [clientesLocal,setClientesLocal]=useState(null); // override local para rutas asignadas
+  const semanaActual=14;
 
-  // Helper nombre de cliente compatible con distintos esquemas Firebase
-  const cNombre=(c)=>c.nombre||c.NOMBRE||c.name||'Sin nombre';
-  const cId=(c)=>c.id||c.ID||c.codigo||c.code||String(Math.random());
+  // clientes efectivos (pueden tener rutas asignadas localmente)
+  const clientesEfectivos=clientesLocal||clientes;
 
-  // Rutas disponibles — si ningún cliente tiene ruta, usamos ruta 0 = "Sin ruta" para mostrar todos
-  const tieneRutas=clientes.some(c=>c.ruta&&Number(c.ruta)>0);
-  const rutasDisp=tieneRutas
-    ? [...new Set(clientes.map(c=>Number(c.ruta)||0).filter(r=>r>0))].sort((a,b)=>a-b)
-    : [0]; // ruta 0 = todos los clientes sin clasificar
+  // El campo "semana" de Firebase ES la ruta
+  const getRouteNum=(c)=>{
+    const v=c.semana||c.ruta;
+    if(v&&Number(v)>0) return Number(v);
+    return 0;
+  };
+
+  // Grupos de rutas disponibles (solo con semana > 0)
+  const rutasNums=[...new Set(clientesEfectivos.map(c=>getRouteNum(c)).filter(r=>r>0))].sort((a,b)=>a-b);
+  const sinRuta=clientesEfectivos.filter(c=>getRouteNum(c)===0);
 
   const getAct=(cid)=>actividad[cid]||{visitas:[],muestras:[],estrategia:null,incidencia:null};
+
+  // Asignar ruta a un cliente → guarda en Firebase + actualiza local
+  const asignarRuta=(cliente,ruta)=>{
+    const rutaNum=Number(ruta);
+    if(!rutaNum||rutaNum<=0) return;
+    const updated={...cliente,semana:rutaNum,ruta:rutaNum};
+    fbEscribir("clientes",cliente.id,updated);
+    setClientesLocal(prev=>{
+      const base=prev||clientes;
+      return base.map(c=>c.id===cliente.id?updated:c);
+    });
+    setAsignandoRuta(null);
+    setNuevaRuta("");
+  };
+
+  const getAct2=(cid)=>actividad[cid]||{visitas:[],muestras:[],estrategia:null,incidencias:[]};
 
   // ── FICHA CLIENTE ─────────────────────────────────────────────────
   if(clienteSel){
     const act=getAct(clienteSel.id);
     const ultimaVisita=act.visitas?.slice(-1)[0];
-
     const TABS=[
       {id:"visita",   icon:"👋",label:"Visita"},
       {id:"muestras", icon:"📦",label:"Muestras"},
@@ -5636,7 +5659,7 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
 
   // ── LISTA CLIENTES DE RUTA ────────────────────────────────────────
   if(rutaSel!==null){
-    const clientesRuta=rutaSel===0 ? clientes : clientes.filter(c=>Number(c.ruta||0)===rutaSel);
+    const clientesRuta=rutaSel===0 ? clientes : clientes.filter(c=>getRouteNum(c)===rutaSel);
     const clientesFiltrados=busqueda
       ? clientesRuta.filter(c=>cNombre(c).toLowerCase().includes(busqueda.toLowerCase()))
       : clientesRuta;
@@ -5651,7 +5674,7 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
               padding:"12px 20px",borderRadius:12,marginBottom:14,width:"100%",
               boxSizing:"border-box"}}>
             <span style={{fontSize:24,lineHeight:1}}>←</span>
-            <span>{rutaSel===0?"Todos los clientes":"Mis rutas"}</span>
+            <span>{rutaSel===0?"Todos los clientes":"Mis semanas"}</span>
           </button>
           <p style={{margin:"0 0 2px",fontSize:20,fontWeight:800,color:"#fff"}}>
             {rutaSel===0?"👥 Todos los clientes":`Ruta ${rutaSel}`}
@@ -5730,35 +5753,198 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
     );
   }
 
-  // ── SELECCIÓN DE RUTA ─────────────────────────────────────────────
-  const totalVisitados=clientes.filter(c=>getAct(c.id).visitas?.length>0).length;
-  const totalMuestras=clientes.reduce((s,c)=>s+(getAct(c.id).muestras?.length||0),0);
+  // ── LISTA DE CLIENTES SIN RUTA (para asignar) ─────────────────────
+  if(rutaSel==="sinRuta"){
+    const clientesFiltrados=busqueda
+      ? sinRuta.filter(c=>(c.nombre||'').toLowerCase().includes(busqueda.toLowerCase()))
+      : sinRuta;
+    return(
+      <div style={{padding:"0 0 100px",background:"#F8FAFC",minHeight:"100vh"}}>
+        <div style={{background:"linear-gradient(135deg,#92400E,#B45309)",padding:"16px 16px 20px"}}>
+          <button onClick={()=>{setRutaSel(null);setBusqueda('');}}
+            style={{display:"flex",alignItems:"center",gap:10,background:"rgba(255,255,255,.15)",
+              border:"1.5px solid rgba(255,255,255,.3)",color:"#fff",fontSize:14,fontWeight:700,
+              cursor:"pointer",padding:"10px 18px",borderRadius:10,marginBottom:12,
+              width:"100%",boxSizing:"border-box"}}>
+            <span style={{fontSize:20}}>←</span><span>Mis rutas</span>
+          </button>
+          <p style={{margin:"0 0 2px",fontSize:20,fontWeight:800,color:"#fff"}}>⚠️ Sin ruta asignada</p>
+          <p style={{margin:0,fontSize:12,color:"rgba(255,255,255,.7)"}}>
+            {sinRuta.length} clientes pendientes de asignar ruta
+          </p>
+        </div>
+        <div style={{padding:"12px 16px 0"}}>
+          <input value={busqueda} onChange={e=>setBusqueda(e.target.value)}
+            placeholder="🔍 Buscar cliente..."
+            style={{width:"100%",padding:"10px 14px",borderRadius:10,border:`1px solid ${T.border}`,
+              fontSize:14,fontFamily:"inherit",outline:"none",boxSizing:"border-box"}}/>
+        </div>
+        <div style={{padding:"12px 16px"}}>
+          {clientesFiltrados.map(c=>(
+            <div key={c.id} style={{background:"#fff",borderRadius:14,padding:"14px 16px",
+              marginBottom:10,border:"1.5px solid #FDE68A",
+              boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
+              <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:asignandoRuta===c.id?10:0}}>
+                <div style={{width:40,height:40,borderRadius:10,
+                  background:"linear-gradient(135deg,#92400E,#B45309)",
+                  color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",
+                  fontSize:14,fontWeight:800,flexShrink:0}}>
+                  {(c.nombre||'?').charAt(0)}
+                </div>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{margin:0,fontSize:14,fontWeight:700,color:T.text,
+                    overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                    {c.nombre}
+                  </p>
+                  {c.codigoERP&&<p style={{margin:"2px 0 0",fontSize:11,color:T.muted,fontFamily:"monospace"}}>{c.codigoERP}</p>}
+                </div>
+                <button onClick={()=>{setAsignandoRuta(asignandoRuta===c.id?null:c.id);setNuevaRuta("");}}
+                  style={{padding:"7px 14px",borderRadius:8,border:"none",
+                    background:asignandoRuta===c.id?"#E2E8F0":"#0F172A",
+                    color:asignandoRuta===c.id?T.muted:"#fff",
+                    fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"inherit",flexShrink:0}}>
+                  {asignandoRuta===c.id?"Cancelar":"Asignar ruta"}
+                </button>
+              </div>
+              {asignandoRuta===c.id&&(
+                <div style={{display:"flex",gap:8,alignItems:"center",paddingTop:8,borderTop:`1px solid ${T.border}`}}>
+                  <span style={{fontSize:12,color:T.muted,flexShrink:0}}>Ruta nº:</span>
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap",flex:1}}>
+                    {[1,2,3,4,5,6,7,8].concat(rutasNums.filter(r=>r>8)).map(r=>(
+                      <button key={r} onClick={()=>asignarRuta(c,r)}
+                        style={{width:36,height:36,borderRadius:8,border:`2px solid ${rutasNums.includes(r)?T.blue:T.border}`,
+                          background:rutasNums.includes(r)?"#EFF6FF":"#F8FAFC",
+                          color:rutasNums.includes(r)?T.blue:T.text,
+                          fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                        {r}
+                      </button>
+                    ))}
+                    <div style={{display:"flex",gap:4}}>
+                      <input type="number" value={nuevaRuta} onChange={e=>setNuevaRuta(e.target.value)}
+                        placeholder="Otra" min="1"
+                        style={{width:60,padding:"6px 8px",borderRadius:8,border:`1.5px solid ${T.border}`,
+                          fontSize:13,fontFamily:"inherit",outline:"none",textAlign:"center"}}/>
+                      {nuevaRuta&&Number(nuevaRuta)>0&&(
+                        <button onClick={()=>asignarRuta(c,nuevaRuta)}
+                          style={{padding:"6px 12px",borderRadius:8,border:"none",
+                            background:T.green,color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                          ✓
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+          {clientesFiltrados.length===0&&(
+            <div style={{textAlign:"center",padding:"40px 20px",color:T.muted}}>
+              <p style={{fontSize:32,margin:"0 0 8px"}}>🔍</p>
+              <p style={{fontWeight:700}}>Sin resultados</p>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── LISTA DE CLIENTES DE UNA RUTA ─────────────────────────────────
+  if(rutaSel!==null){
+    const clientesRuta=clientesEfectivos.filter(c=>getRouteNum(c)===rutaSel);
+    const clientesFiltrados=busqueda
+      ? clientesRuta.filter(c=>(c.nombre||'').toLowerCase().includes(busqueda.toLowerCase()))
+      : clientesRuta;
+    return(
+      <div style={{padding:"0 0 100px",background:"#F8FAFC",minHeight:"100vh"}}>
+        <div style={{background:"linear-gradient(135deg,#0F172A,#1E293B)",padding:"16px 16px 20px"}}>
+          <button onClick={()=>{setRutaSel(null);setBusqueda('');}}
+            style={{display:"flex",alignItems:"center",gap:10,
+              background:"rgba(255,255,255,.12)",border:"1.5px solid rgba(255,255,255,.25)",
+              color:"#fff",fontSize:14,fontWeight:700,cursor:"pointer",
+              padding:"10px 18px",borderRadius:10,marginBottom:12,
+              width:"100%",boxSizing:"border-box"}}>
+            <span style={{fontSize:20}}>←</span><span>Mis rutas</span>
+          </button>
+          <p style={{margin:"0 0 2px",fontSize:20,fontWeight:800,color:"#fff"}}>Ruta {rutaSel}</p>
+          <p style={{margin:0,fontSize:12,color:"#64748B"}}>
+            {clientesRuta.length} clientes · Semana {semanaActual}
+          </p>
+        </div>
+        <div style={{padding:"12px 16px 0"}}>
+          <input value={busqueda} onChange={e=>setBusqueda(e.target.value)}
+            placeholder="🔍 Buscar cliente..."
+            style={{width:"100%",padding:"10px 14px",borderRadius:10,border:`1px solid ${T.border}`,
+              fontSize:14,fontFamily:"inherit",outline:"none",boxSizing:"border-box"}}/>
+        </div>
+        <div style={{padding:"12px 16px"}}>
+          {clientesFiltrados.length===0&&<div style={{textAlign:"center",padding:"40px",color:T.muted}}><p style={{fontSize:32}}>🔍</p><p style={{fontWeight:700}}>Sin resultados</p></div>}
+          {clientesFiltrados.map(c=>{
+            const act=getAct(c.id);
+            const ult=act.visitas?.slice(-1)[0];
+            const rOp=ult?[
+              {k:"pedido",label:"✅ Pedido",color:T.green},
+              {k:"llamada",label:"📞 Llamada",color:T.blue},
+              {k:"visita_sin_pedido",label:"👋 Visita s/pedido",color:T.amber},
+              {k:"no_contesta",label:"📵 No contesta",color:T.muted},
+              {k:"primera_visita",label:"🆕 Primera",color:T.purple},
+            ].find(r=>r.k===ult?.resultado):null;
+            return(
+              <div key={c.id} onClick={()=>{setClienteSel(c);setTabSel("visita");}}
+                style={{background:"#fff",borderRadius:14,padding:"14px 16px",
+                  marginBottom:10,cursor:"pointer",
+                  border:`1px solid ${T.border}`,
+                  borderLeft:`4px solid ${rOp?rOp.color:T.border}`,
+                  boxShadow:"0 1px 4px rgba(0,0,0,.04)",
+                  display:"flex",alignItems:"center",gap:14}}>
+                <div style={{width:42,height:42,borderRadius:11,
+                  background:`linear-gradient(135deg,${usuario.color||T.navy},${usuario.color||T.navy}99)`,
+                  color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",
+                  fontSize:16,fontWeight:800,flexShrink:0}}>
+                  {(c.nombre||'?').charAt(0)}
+                </div>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{margin:0,fontSize:14,fontWeight:700,color:T.text,
+                    overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                    {c.nombre}
+                  </p>
+                  <div style={{display:"flex",gap:8,marginTop:3,flexWrap:"wrap"}}>
+                    {c.codigoERP&&<span style={{fontSize:11,color:T.muted,fontFamily:"monospace"}}>{c.codigoERP}</span>}
+                    {c.tel&&<span style={{fontSize:11,color:T.muted}}>📞 {c.tel}</span>}
+                    {rOp&&<span style={{fontSize:11,fontWeight:600,color:rOp.color}}>{rOp.label}</span>}
+                  </div>
+                </div>
+                <span style={{color:T.muted,fontSize:18}}>›</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  // ── PANTALLA PRINCIPAL: SELECCIÓN DE RUTA ─────────────────────────
+  const totalVisitados=clientesEfectivos.filter(c=>getAct(c.id).visitas?.length>0).length;
+  const totalMuestras=clientesEfectivos.reduce((s,c)=>s+(getAct(c.id).muestras?.length||0),0);
 
   return(
     <div style={{padding:"0 0 100px",background:"#F8FAFC",minHeight:"100vh"}}>
-      {/* Header */}
       <div style={{background:"linear-gradient(135deg,#0F172A,#1E293B)",
         padding:"16px 16px 22px",position:"relative",overflow:"hidden"}}>
         <div style={{position:"absolute",right:-20,top:-20,width:100,height:100,
           borderRadius:"50%",background:"rgba(255,255,255,.04)"}}/>
         <p style={{margin:"0 0 3px",fontSize:11,fontWeight:700,color:"#4B5563",
-          letterSpacing:".1em",textTransform:"uppercase"}}>{usuario.equipo} · Semana {semana}</p>
-        <p style={{margin:"0 0 12px",fontSize:22,fontWeight:800,color:"#fff"}}>
-          📋 Mis clientes
-        </p>
-        {/* Resumen semana */}
+          letterSpacing:".1em",textTransform:"uppercase"}}>{usuario.equipo}</p>
+        <p style={{margin:"0 0 12px",fontSize:22,fontWeight:800,color:"#fff"}}>📋 Mis clientes</p>
         <div style={{display:"flex",gap:8}}>
           {[
-            {label:"Visitados",value:totalVisitados,total:clientes.length,color:"#4ADE80"},
+            {label:"Visitados",value:totalVisitados,total:clientesEfectivos.length,color:"#4ADE80"},
             {label:"Muestras",value:totalMuestras,color:"#C4B5FD"},
           ].map(k=>(
-            <div key={k.label} style={{flex:1,background:"rgba(255,255,255,.08)",
-              borderRadius:10,padding:"10px 12px"}}>
+            <div key={k.label} style={{flex:1,background:"rgba(255,255,255,.08)",borderRadius:10,padding:"10px 12px"}}>
               <p style={{margin:0,fontSize:20,fontWeight:900,color:k.color,lineHeight:1}}>
                 {k.value}{k.total?`/${k.total}`:""}
               </p>
-              <p style={{margin:"3px 0 0",fontSize:10,color:"rgba(255,255,255,.5)",
-                fontWeight:600}}>{k.label}</p>
+              <p style={{margin:"3px 0 0",fontSize:10,color:"rgba(255,255,255,.5)",fontWeight:600}}>{k.label}</p>
             </div>
           ))}
         </div>
@@ -5766,27 +5952,35 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
 
       <div style={{padding:"16px"}}>
         <p style={{margin:"0 0 12px",fontSize:11,fontWeight:700,color:T.muted,
-          textTransform:"uppercase",letterSpacing:".08em"}}>Selecciona una ruta</p>
-        {rutasDisp.map(r=>{
-          const cli=r===0 ? clientes : clientes.filter(c=>Number(c.ruta||0)===r);
+          textTransform:"uppercase",letterSpacing:".08em"}}>
+          {rutasNums.length>0?"Selecciona una ruta":`${clientesEfectivos.length} clientes`}
+        </p>
+
+        {clientesEfectivos.length===0&&(
+          <div style={{background:"#FFF7ED",border:"1px solid #F59E0B",borderRadius:12,padding:"14px 16px",marginBottom:12}}>
+            <p style={{margin:"0 0 4px",fontWeight:700,fontSize:13,color:"#92400E"}}>⚠️ Sin clientes asignados</p>
+            <p style={{margin:0,fontSize:12,color:"#92400E"}}>
+              En el Admin del portal, asigna el código de vendedor correcto a este usuario.
+            </p>
+          </div>
+        )}
+
+        {/* Rutas con clientes */}
+        {rutasNums.map(r=>{
+          const cli=clientesEfectivos.filter(c=>getRouteNum(c)===r);
           const visitados=cli.filter(c=>getAct(c.id).visitas?.length>0).length;
           const muestrasR=cli.reduce((s,c)=>s+(getAct(c.id).muestras?.length||0),0);
-          const labelRuta=r===0?`Todos los clientes (${cli.length})`:`Ruta ${r}`;
           return(
             <div key={r} onClick={()=>setRutaSel(r)}
-              style={{background:"#fff",borderRadius:16,padding:"18px 20px",
-                marginBottom:10,cursor:"pointer",
-                border:`1px solid ${T.border}`,
-                boxShadow:"0 1px 4px rgba(0,0,0,.04)",
-                display:"flex",alignItems:"center",gap:16}}>
+              style={{background:"#fff",borderRadius:16,padding:"18px 20px",marginBottom:10,
+                cursor:"pointer",border:`1px solid ${T.border}`,
+                boxShadow:"0 1px 4px rgba(0,0,0,.04)",display:"flex",alignItems:"center",gap:16}}>
               <div style={{width:52,height:52,borderRadius:14,
                 background:"linear-gradient(135deg,#0F172A,#334155)",
                 color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",
-                fontSize:r===0?20:24,fontWeight:900,flexShrink:0}}>{r===0?"👥":r}</div>
+                fontSize:24,fontWeight:900,flexShrink:0}}>{r}</div>
               <div style={{flex:1}}>
-                <p style={{margin:"0 0 4px",fontSize:16,fontWeight:700,color:T.text}}>
-                  {labelRuta}
-                </p>
+                <p style={{margin:"0 0 4px",fontSize:16,fontWeight:700,color:T.text}}>Ruta {r}</p>
                 <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
                   <span style={{fontSize:11,color:visitados===cli.length&&cli.length>0?T.green:T.muted,fontWeight:600}}>
                     👥 {visitados}/{cli.length} visitados
@@ -5795,20 +5989,36 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
                 </div>
                 <div style={{height:3,borderRadius:99,background:T.border,marginTop:8,overflow:"hidden"}}>
                   <div style={{height:"100%",width:cli.length>0?`${Math.round(visitados/cli.length*100)}%`:"0%",
-                    borderRadius:99,background:visitados===cli.length&&cli.length>0?T.green:T.blue,
-                    transition:"width .5s"}}/>
+                    borderRadius:99,background:visitados===cli.length&&cli.length>0?T.green:T.blue,transition:"width .5s"}}/>
                 </div>
               </div>
               <span style={{color:T.muted,fontSize:20}}>›</span>
             </div>
           );
         })}
+
+        {/* Grupo sin ruta asignada */}
+        {sinRuta.length>0&&(
+          <div onClick={()=>setRutaSel("sinRuta")}
+            style={{background:"#FFF7ED",borderRadius:16,padding:"18px 20px",marginBottom:10,
+              cursor:"pointer",border:"1.5px solid #FDE68A",
+              display:"flex",alignItems:"center",gap:16}}>
+            <div style={{width:52,height:52,borderRadius:14,
+              background:"linear-gradient(135deg,#92400E,#B45309)",
+              color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",
+              fontSize:22,fontWeight:900,flexShrink:0}}>⚠️</div>
+            <div style={{flex:1}}>
+              <p style={{margin:"0 0 3px",fontSize:16,fontWeight:700,color:"#92400E"}}>Sin ruta asignada</p>
+              <p style={{margin:0,fontSize:12,color:"#B45309"}}>{sinRuta.length} clientes pendientes · Pulsa para asignar ruta</p>
+            </div>
+            <span style={{color:"#B45309",fontSize:20}}>›</span>
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-// ── SUB-COMPONENTES DE LA FICHA ───────────────────────────────────
 function VisitaTab({cliente,act,resultados,onGuardar}){
   const [res,setRes]=useState("");
   const [nota,setNota]=useState("");
@@ -6658,23 +6868,32 @@ function App(props){
   const getClientesPara=(agenteId)=>{
     if(clientesDB){
       // 1. Buscar por grupoAgente usando catalogoVendedor del usuario del portal
-      const portalUserStr=sessionStorage.getItem('gc_portal_user')||localStorage.getItem('gc_portal_user');
+      const portalUserStr=localStorage.getItem('gc_portal_user')||sessionStorage.getItem('gc_portal_user');
       let catalogoVendedor=null;
       try{
         const pu=JSON.parse(portalUserStr||'{}');
-        // Buscar el usuario actual en los datos del portal
         catalogoVendedor=pu.catalogoVendedor||null;
       }catch(e){}
       
       if(catalogoVendedor&&clientesDB._porGrupo&&clientesDB._porGrupo[catalogoVendedor]){
         return clientesDB._porGrupo[catalogoVendedor];
       }
-      // 2. Fallback: buscar por agente ID
+      // 2. Fallback: buscar por agente ID directo
       if(clientesDB._porAgente&&clientesDB._porAgente[agenteId]){
         return clientesDB._porAgente[agenteId];
       }
-      // 3. Si CEO/Director: todos los clientes
+      // 3. Fallback: filtrar por equipo del usuario
+      if(usuario.equipo&&clientesDB._todos){
+        const porEquipo=clientesDB._todos.filter(c=>c.equipo===usuario.equipo);
+        if(porEquipo.length>0) return porEquipo;
+      }
+      // 4. CEO/Director: todos los clientes
       if(["director","ceo"].includes(usuario.rol)&&clientesDB._todos){
+        return clientesDB._todos;
+      }
+      // 5. Si tenemos datos pero nada coincide, devolver todos (mejor que nada)
+      if(clientesDB._todos&&clientesDB._todos.length>0){
+        console.warn("getClientesPara: sin filtro exacto, mostrando todos. catalogoVendedor=",catalogoVendedor,"equipo=",usuario.equipo);
         return clientesDB._todos;
       }
     }
