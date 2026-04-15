@@ -6941,6 +6941,494 @@ function HistorialTab({visitas,muestras,estrategia,incidencias=[],resultados}){
 // Se comunica con el CRM padre vía postMessage
 function InformeActividad(){return null;}
 
+ function _optionalChain(ops) { let lastAccessLHS = undefined; let value = ops[0]; let i = 1; while (i < ops.length) { const op = ops[i]; const fn = ops[i + 1]; i += 2; if ((op === 'optionalAccess' || op === 'optionalCall') && value == null) { return undefined; } if (op === 'access' || op === 'optionalAccess') { lastAccessLHS = value; value = fn(value); } else if (op === 'call' || op === 'optionalCall') { value = fn((...args) => value.call(lastAccessLHS, ...args)); lastAccessLHS = undefined; } } return value; }function App(props){
+  const [usuario,setUsuario]=useState(function(){
+    // Auto-login desde portal: initializar directamente sin useEffect
+    return (props&&props._autoLogin)?props._autoLogin:null;
+  });
+  const [section,setSection]=useState("dashboard");
+  const [adminOpen,setAdminOpen]=useState(false);
+
+  // Actividad diaria compartida entre GestorClientes e Informe
+  const [actividadSemana,setActividadSemana]=useState({});
+  const onActividad=(cid,data)=>setActividadSemana(a=>({...a,[cid]:data}));
+
+  // ── Datos desde Firebase ──────────────────────────────────────────
+  const [muestrasDB,setMuestrasDB]=useState(MUESTRAS_SEED);
+  const [estrategiasDB,setEstrategiasDB]=useState(ESTRATEGIAS_SEED);
+  const [incidenciasDB,setIncidenciasDB]=useState(INCIDENCIAS_SEED);
+  const [fbCargando,setFbCargando]=useState(false);
+  const [fbStatus,setFbStatus]=useState(""); // "ok" | "error" | ""
+  const [oportunidadesDB,setOportunidadesDB]=useState(OPORTUNIDADES_SEED);
+  const [clientesDB,setClientesDB]=useState(null); // null = aún no cargado
+
+  // Cargar clientes del usuario — query específica por grupoAgente (mucho más rápido)
+  useEffect(()=>{
+    if(!usuario) return;
+    // Obtener el vendedor del usuario desde el hash de la URL o localStorage
+    let miVendedor=null;
+    try{
+      const hash=decodeURIComponent(window.location.hash.replace('#',''));
+      if(hash.includes('|')) miVendedor=hash.split('|')[1];
+    }catch(e){}
+    if(!miVendedor){
+      try{
+        const pu=JSON.parse(localStorage.getItem('gc_portal_user')||'{}');
+        miVendedor=pu.catalogoVendedor||null;
+      }catch(e){}
+    }
+
+    if(miVendedor){
+      // Query directa solo para este vendedor — evita cargar 6000+ docs
+      fbQueryGrupoAgente(miVendedor).then(clientes=>{
+        const activos=clientes.filter(c=>c.activo!==false);
+        const porGrupo={[miVendedor]:activos};
+        const porAgente={};
+        activos.forEach(c=>{const ag=c.agente||c.agenteId;if(ag){if(!porAgente[ag])porAgente[ag]=[];porAgente[ag].push(c);}});
+        setClientesDB({_porGrupo:porGrupo,_porAgente:porAgente,_todos:activos,_vendedor:miVendedor});
+      }).catch(()=>{});
+    } else if(["director","ceo"].includes(usuario.rol)){
+      // Director/CEO: carga todos (paginado completo)
+      fbLeerTodos("clientes").then(clientes=>{
+        const activos=clientes.filter(c=>c.activo!==false);
+        const porGrupo={};const porAgente={};
+        activos.forEach(c=>{
+          if(c.grupoAgente){if(!porGrupo[c.grupoAgente])porGrupo[c.grupoAgente]=[];porGrupo[c.grupoAgente].push(c);}
+          const ag=c.agente||c.agenteId;if(ag){if(!porAgente[ag])porAgente[ag]=[];porAgente[ag].push(c);}
+        });
+        setClientesDB({_porGrupo:porGrupo,_porAgente:porAgente,_todos:activos});
+      }).catch(()=>{});
+    }
+  },[_optionalChain([usuario, 'optionalAccess', _ => _.id])]);
+
+  useEffect(()=>{
+    if(!usuario) return;
+    setFbCargando(true);
+    Promise.all([
+      fbLeer("muestras"),
+      fbLeer("estrategias"),
+      fbLeer("incidencias"),
+      fbLeer("visitas"),
+      fbCargar(), // oportunidades
+    ]).then(([muestras,estrategias,incidencias,visitas,opos])=>{
+      if(muestras.length>0) setMuestrasDB(muestras.filter(m=>!m.eliminada));
+      if(estrategias.length>0) setEstrategiasDB(estrategias.filter(e=>!e.eliminada));
+      if(incidencias.length>0) setIncidenciasDB(incidencias);
+      if(opos.length>0){
+        const norm=opos.map(o=>({...o,agente:o.agente||o.agenteId,agenteId:o.agenteId||o.agente}));
+        const fbIds=new Set(norm.map(o=>o.id));
+        setOportunidadesDB([...norm,...OPORTUNIDADES_SEED.filter(o=>!fbIds.has(o.id))]);
+      }
+
+      // Reconstruir actividadSemana desde Firebase para el agente actual
+      if(_optionalChain([usuario, 'optionalAccess', _2 => _2.rol])==="agente"){
+        const actRec={};
+        // Visitas
+        visitas.filter(v=>v.agente===usuario.id).forEach(v=>{
+          if(!actRec[v.clienteId]) actRec[v.clienteId]={visitas:[],muestras:[],estrategia:null,incidencias:[]};
+          actRec[v.clienteId].visitas=[...(actRec[v.clienteId].visitas||[]),v];
+        });
+        // Muestras
+        muestras.filter(m=>m.agente===usuario.id&&!m.eliminada).forEach(m=>{
+          if(!actRec[m.clienteId]) actRec[m.clienteId]={visitas:[],muestras:[],estrategia:null,incidencias:[]};
+          actRec[m.clienteId].muestras=[...(actRec[m.clienteId].muestras||[]),m];
+        });
+        // Estrategias
+        estrategias.filter(e=>e.agente===usuario.id&&!e.eliminada).forEach(e=>{
+          if(!actRec[e.clienteId]) actRec[e.clienteId]={visitas:[],muestras:[],estrategia:null,incidencias:[]};
+          actRec[e.clienteId].estrategia=e;
+        });
+        // Incidencias
+        incidencias.filter(i=>i.agente===usuario.id).forEach(i=>{
+          if(!actRec[i.clienteId]) actRec[i.clienteId]={visitas:[],muestras:[],estrategia:null,incidencias:[]};
+          actRec[i.clienteId].incidencias=[...(actRec[i.clienteId].incidencias||[]),i];
+        });
+        if(Object.keys(actRec).length>0) setActividadSemana(actRec);
+      }
+
+      setFbStatus("ok");
+    }).catch(e=>{console.warn("Firebase error:",e);setFbStatus("error");})
+    .finally(()=>setFbCargando(false));
+  },[_optionalChain([usuario, 'optionalAccess', _3 => _3.id])]);
+
+  const handleLogin=(u)=>{
+    setUsuario(u);
+    setSection("dashboard");
+    if(u.rol==="admin") setAdminOpen(true);
+  };
+
+  // Registrar setter global para que postMessage pueda actualizar el estado React
+  useEffect(()=>{
+    window.__crmSetUsuario=function(u){
+      setUsuario(u);
+      setSection("dashboard");
+    };
+    return ()=>{window.__crmSetUsuario=null;};
+  },[]);
+
+  if(!usuario) return React.createElement(Login, { onLogin: handleLogin,});
+
+  if(adminOpen) return React.createElement(PanelAdmin, { onBack: ()=>{setAdminOpen(false);setUsuario(null);},});
+
+  const esAgente=usuario.rol==="agente";
+  const esJefe=usuario.rol==="jefe";
+  const esDir=["director","ceo"].includes(usuario.rol);
+  const esJefeOmas=esJefe||esDir;
+  const miEquipo=usuario.equipo;
+
+  // Helper: obtener clientes de un agente
+  // Firebase usa grupoAgente (= catalogoVendedor del portal, ej: "CARLOSG", "DAVIDMAG")
+  const getClientesPara=(agenteId)=>{
+    if(clientesDB){
+      // Obtener catalogoVendedor — 3 fuentes en orden de prioridad:
+      // 1. URL hash: crm_grupo_consolidado.html#crmId|CARLOSG
+      let catalogoVendedor=null;
+      try{
+        const hash=decodeURIComponent(window.location.hash.replace('#',''));
+        if(hash.includes('|')) catalogoVendedor=hash.split('|')[1];
+      }catch(e){}
+      // 2. localStorage (guardado por el portal)
+      if(!catalogoVendedor){
+        try{
+          const pu=JSON.parse(localStorage.getItem('gc_portal_user')||'{}');
+          catalogoVendedor=pu.catalogoVendedor||null;
+        }catch(e){}
+      }
+
+      if(catalogoVendedor&&clientesDB._porGrupo&&clientesDB._porGrupo[catalogoVendedor]){
+        return clientesDB._porGrupo[catalogoVendedor];
+      }
+      // 3. Fallback: buscar por agente ID directo
+      if(clientesDB._porAgente&&clientesDB._porAgente[agenteId]){
+        return clientesDB._porAgente[agenteId];
+      }
+      // 4. Fallback: filtrar por equipo del usuario
+      if(usuario.equipo&&clientesDB._todos){
+        const porEquipo=clientesDB._todos.filter(c=>c.equipo===usuario.equipo);
+        if(porEquipo.length>0) return porEquipo;
+      }
+      // 5. CEO/Director: todos los clientes
+      if(["director","ceo"].includes(usuario.rol)&&clientesDB._todos){
+        return clientesDB._todos;
+      }
+    }
+    return CLIENTES_POR_AGENTE[agenteId]||[];
+  };
+
+  // Clientes del usuario actual
+  const misClientesFB=getClientesPara(usuario.id);
+
+  // Filtros por rol usando datos de Firebase
+  const pend=muestrasDB.filter(m=>
+    m.estado==="pendiente"&&(esAgente?m.agente===usuario.id:
+    esJefe?_optionalChain([USUARIOS, 'access', _4 => _4.find, 'call', _5 => _5(u=>u.id===m.agente), 'optionalAccess', _6 => _6.equipo])===miEquipo:true)
+  ).length;
+
+  const estEnCurso=esAgente
+    ? estrategiasDB.filter(e=>e.estado==="en_curso"&&e.agente===usuario.id).length
+    : esJefe
+    ? estrategiasDB.filter(e=>e.estado==="pendiente_aprobacion"&&!e.escaladoA&&
+        (_optionalChain([USUARIOS, 'access', _7 => _7.find, 'call', _8 => _8(u=>u.id===e.agente), 'optionalAccess', _9 => _9.equipo])===miEquipo||e.equipo===miEquipo)).length
+    : estrategiasDB.filter(e=>e.estado==="pendiente_aprobacion"&&
+        (!e.escaladoA||e.escaladoA===usuario.id)).length;
+
+  const incAbiertas=incidenciasDB.filter(i=>
+    i.estado==="abierta"&&(esAgente?i.autor===usuario.id:
+    esJefe?i.equipo===miEquipo:true)
+  ).length;
+
+  // Badge oportunidades — datos reales de Firebase
+  const opsAbiertas=oportunidadesDB.filter(o=>{
+    const cerrada=["ganada","perdida","cerrada_ganada","cerrada_perdida"].some(e=>o.etapa===e||o.estado===e);
+    if(cerrada) return false;
+    if(esAgente){
+      const oid=(o.agente||o.agenteId||"").toLowerCase();
+      const uid=usuario.id.toLowerCase();
+      const catV=(usuario.catalogoVendedor||"").toLowerCase();
+      return oid===uid||(catV&&oid===catV);
+    }
+    if(esJefe){
+      const agId=(o.agenteId||o.agente||"").toLowerCase();
+      const ag=USUARIOS.find(u=>u.id.toLowerCase()===agId)||
+               USUARIOS.find(u=>(u.catalogoVendedor||"").toLowerCase()===agId);
+      return _optionalChain([ag, 'optionalAccess', _10 => _10.equipo])===miEquipo||o.equipo===miEquipo;
+    }
+    return true;
+  }).length;
+
+  const NAV_AGENTE=[
+    {id:"dashboard",    icon:"🏠",label:"Inicio",      color:usuario.color},
+    {id:"clientes",     icon:"📋",label:"Clientes",    color:T.blue},
+    {id:"informe",      icon:"📤",label:"Informe",     color:T.navy},
+    {id:"oportunidades",icon:"💼",label:"Ops",         color:T.navy,  badge:opsAbiertas},
+    {id:"muestras",     icon:"📦",label:"Muestras",    color:T.purple, badge:pend},
+    {id:"proyectos",    icon:"📁",label:"Proyectos",   color:T.purple},
+    {id:"estrategias",  icon:"🎯",label:"Estrategias", color:T.green,  badge:estEnCurso},
+    {id:"incidencias",  icon:"🚨",label:"Incidencias", color:T.red,    badge:incAbiertas},
+    {id:"actividad",    icon:"📊",label:"Actividad",   color:"#6366F1"},
+  ];
+
+  const NAV_JEFE=[
+    {id:"dashboard",    icon:"📊",label:"Mi equipo",   color:usuario.color},
+    {id:"clientes_eq",  icon:"📋",label:"Clientes",    color:T.blue},
+    {id:"estrategias",  icon:"🎯",label:"Estrategias", color:T.green,  badge:estEnCurso},
+    {id:"oportunidades",icon:"💼",label:"Ops",         color:T.navy,   badge:opsAbiertas},
+    {id:"proyectos",    icon:"📁",label:"Proyectos",   color:T.purple},
+    {id:"incidencias",  icon:"🚨",label:"Incidencias", color:T.red,    badge:incAbiertas},
+    {id:"usuarios",     icon:"👥",label:"Equipo",      color:T.blue},
+    {id:"actividad",    icon:"📊",label:"Actividad",   color:"#6366F1"},
+  ];
+
+  const NAV_DIR=[
+    {id:"dashboard",    icon:"📊",label:"Dashboard",    color:usuario.color},
+    {id:"clientes_eq",  icon:"📋",label:"Clientes",     color:T.blue},
+    {id:"estrategias",  icon:"🎯",label:"Estrategias",  color:T.green, badge:estEnCurso},
+    {id:"oportunidades",icon:"💼",label:"Ops",          color:T.navy,  badge:opsAbiertas},
+    {id:"proyectos",    icon:"📁",label:"Proyectos",    color:T.purple},
+    {id:"incidencias",  icon:"🚨",label:"Incidencias",  color:T.red,   badge:incAbiertas},
+    {id:"usuarios",     icon:"👥",label:"Equipo",       color:T.blue},
+    {id:"actividad",    icon:"📊",label:"Actividad",    color:"#6366F1"},
+  ];
+
+  const nav=esAgente?NAV_AGENTE:esJefe?NAV_JEFE:NAV_DIR;
+
+  // Dashboard del jefe: solo su equipo
+  const DashJefe=()=>{
+    const agentesEquipo=USUARIOS.filter(u=>u.rol==="agente"&&u.equipo===miEquipo);
+    const n=agentesEquipo.length||1;
+    const semana=14;
+    const vMesEq=n*24500,vMesObjEq=n*28750;
+    const vAnualEq=n*187400,vAnualObjEq=n*345000;
+    const mbMesEq=34.2,mbMesObjEq=32,mbAnualEq=33.8,mbAnualObjEq=32;
+    const pctVM=Math.round(vMesEq/vMesObjEq*100);
+    const pctVA=Math.round(vAnualEq/vAnualObjEq*100);
+    const pctMM=Math.round(mbMesEq/mbMesObjEq*100);
+    const pctMA=Math.round(mbAnualEq/mbAnualObjEq*100);
+
+    const opsEq=(oportunidadesDB||OPORTUNIDADES_SEED).filter(o=>{
+      const ag=agentesEquipo.find(a=>a.id===o.agente||a.id===o.agenteId);
+      return ag&&!["ganada","perdida","cerrada_ganada","cerrada_perdida"].some(e=>o.etapa===e||o.estado===e);
+    });
+    const incEq=incidenciasDB.filter(i=>i.equipo===miEquipo&&i.estado==="abierta");
+    // Estrategias pendientes de aprobación del jefe:
+    // — agentes en lista fija (USUARIOS) con equipo correcto
+    // — O campo equipo del doc = miEquipo (agentes dinámicos Firebase)
+    const estEq=estrategiasDB.filter(e=>
+      e.estado==="pendiente_aprobacion"&&!e.escaladoA&&
+      (agentesEquipo.find(a=>a.id===e.agente)||e.equipo===miEquipo)
+    );
+    const mEq=muestrasDB.filter(m=>agentesEquipo.find(a=>a.id===m.agente));
+    const proyEq=PROYECTOS_SEED.filter(p=>p.estado==="activo"&&agentesEquipo.find(a=>_optionalChain([p, 'access', _11 => _11.equipo, 'optionalAccess', _12 => _12.includes, 'call', _13 => _13(a.id)])));
+
+    const Ring=({pct,size=52,stroke=5})=>{
+      const r=size/2-stroke;
+      const circ=2*Math.PI*r;
+      const fill=circ*(1-Math.min(pct,100)/100);
+      const c=pct>=100?"#22C55E":pct>=80?"#F59E0B":"#EF4444";
+      return(
+        React.createElement('svg', { width: size, height: size, style: {flexShrink:0,transform:"rotate(-90deg)"},}
+          , React.createElement('circle', { cx: size/2, cy: size/2, r: r, fill: "none", stroke: "#E2E8F0", strokeWidth: stroke,})
+          , React.createElement('circle', { cx: size/2, cy: size/2, r: r, fill: "none", stroke: c, strokeWidth: stroke,
+            strokeDasharray: circ, strokeDashoffset: fill,
+            strokeLinecap: "round", style: {transition:"stroke-dashoffset .8s ease"},})
+        )
+      );
+    };
+
+    const MetricCard=({label,value,obj,pct,suffix="€",note})=>{
+      const c=pct>=100?"#22C55E":pct>=80?"#F59E0B":"#EF4444";
+      return(
+        React.createElement('div', { style: {flex:1,background:"#fff",borderRadius:16,padding:"18px 16px",
+          border:"1px solid #E2E8F0",
+          boxShadow:"0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06)"},}
+          , React.createElement('p', { style: {margin:"0 0 12px",fontSize:10,fontWeight:700,color:"#94A3B8",
+            textTransform:"uppercase",letterSpacing:".1em"},}, label)
+          , React.createElement('div', { style: {display:"flex",gap:12,alignItems:"center",marginBottom:14},}
+            , React.createElement('div', { style: {position:"relative",flexShrink:0},}
+              , React.createElement(Ring, { pct: pct,})
+              , React.createElement('span', { style: {position:"absolute",top:"50%",left:"50%",
+                transform:"translate(-50%,-50%)",fontSize:10,fontWeight:800,color:c},}, pct, "%")
+            )
+            , React.createElement('div', { style: {flex:1},}
+              , React.createElement('p', { style: {margin:0,fontSize:22,fontWeight:800,color:"#0F172A",
+                letterSpacing:"-0.03em",lineHeight:1},}
+                , typeof value==="number"&&value>999?fmt(value):value, suffix
+              )
+              , React.createElement('p', { style: {margin:"3px 0 0",fontSize:11,color:"#94A3B8"},}, "obj. "
+                 , typeof obj==="number"&&obj>999?fmt(obj):obj, suffix
+              )
+            )
+          )
+          , React.createElement('div', { style: {height:2,borderRadius:99,background:"#F1F5F9",overflow:"hidden"},}
+            , React.createElement('div', { style: {height:"100%",width:`${Math.min(pct,100)}%`,borderRadius:99,
+              background:c,transition:"width .8s ease"},})
+          )
+          , note&&React.createElement('p', { style: {margin:"8px 0 0",fontSize:10,color:"#94A3B8"},}, note)
+        )
+      );
+    };
+
+    const MODS=[
+      {icon:"🎯",label:"Estrategias pendientes",sub:`${estEq.length} pendiente${estEq.length!==1?"s":""} de aprobación`,count:estEq.length,nav:"estrategias",bg:"#FFFBEB",ic:"#F59E0B"},
+      {icon:"📁",label:"Proyectos activos",sub:proyEq.map(p=>p.nombre).join(", ")||"",count:proyEq.length,nav:"proyectos",bg:"#FFFBEB",ic:"#D97706"},
+      {icon:"💼",label:"Oportunidades abiertas",sub:`${fmt(opsEq.reduce((s,o)=>s+(o.valor||0),0))}€ pipeline`,count:opsEq.length,nav:"oportunidades",bg:"#F0F9FF",ic:"#0EA5E9"},
+      {icon:"🚨",label:"Incidencias abiertas",sub:"Pendientes de resolución",count:incEq.length,nav:"incidencias",bg:"#FFF1F2",ic:"#F43F5E",urgent:true},
+      {icon:"📦",label:"Muestras en curso",sub:`${mEq.length} muestra${mEq.length!==1?"s":""} activa${mEq.length!==1?"s":""}`,count:mEq.length,nav:"muestras",bg:"#F5F3FF",ic:"#7C3AED"},
+    ].filter(m=>m.count>0);
+
+    return(
+      React.createElement('div', { style: {background:"#F1F5F9",minHeight:"100vh",paddingBottom:100},}
+        , React.createElement('style', null, `.pend-row2:hover{background:#F8FAFC!important}`)
+
+        /* Header */
+        , React.createElement('div', { style: {background:"linear-gradient(135deg,#0F172A 0%,#1E293B 60%,#1E3A5F 100%)",
+          padding:"32px 20px 28px",position:"relative",overflow:"hidden"},}
+          , React.createElement('div', { style: {position:"absolute",right:-40,top:-40,width:180,height:180,borderRadius:"50%",background:"rgba(255,255,255,.03)"},})
+          , React.createElement('div', { style: {position:"absolute",right:40,bottom:-60,width:120,height:120,borderRadius:"50%",background:"rgba(255,255,255,.04)"},})
+
+          , React.createElement('div', { style: {display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16},}
+            , React.createElement('div', null
+              , React.createElement('div', { style: {display:"flex",gap:6,marginBottom:10},}
+                , React.createElement('span', { style: {background:"rgba(255,255,255,.1)",color:"rgba(255,255,255,.7)",
+                  fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:99,
+                  textTransform:"uppercase",letterSpacing:".08em"},}, miEquipo)
+                , React.createElement('span', { style: {background:"rgba(99,102,241,.3)",color:"#A5B4FC",
+                  fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:99},}, "Sem. " , semana)
+                , React.createElement('span', { style: {background:"rgba(255,255,255,.08)",color:"rgba(255,255,255,.5)",
+                  fontSize:10,fontWeight:600,padding:"3px 10px",borderRadius:99},}, n, " comerciales" )
+              )
+              , React.createElement('p', { style: {margin:0,fontSize:24,fontWeight:800,color:"#FFFFFF",
+                letterSpacing:"-0.03em",lineHeight:1.1},}
+                , usuario.nombre.split(" ").slice(0,2).join(" ")
+              )
+            )
+            , React.createElement('div', { style: {background:"rgba(255,255,255,.08)",backdropFilter:"blur(8px)",
+              border:"1px solid rgba(255,255,255,.12)",borderRadius:14,
+              padding:"12px 16px",textAlign:"center",flexShrink:0},}
+              , React.createElement('p', { style: {margin:"0 0 2px",fontSize:9,fontWeight:700,color:"rgba(255,255,255,.5)",
+                textTransform:"uppercase",letterSpacing:".1em"},}, "Equipo mes" )
+              , React.createElement('p', { style: {margin:0,fontSize:28,fontWeight:900,lineHeight:1,
+                color:pctVM>=100?"#4ADE80":pctVM>=80?"#FCD34D":"#FB7185"},}, pctVM, "%")
+              , React.createElement('p', { style: {margin:"2px 0 0",fontSize:9,color:"rgba(255,255,255,.4)"},}, "del objetivo" )
+            )
+          )
+          , React.createElement('div', null
+            , React.createElement('div', { style: {display:"flex",justifyContent:"space-between",marginBottom:6},}
+              , React.createElement('span', { style: {fontSize:11,color:"rgba(255,255,255,.5)"},}, "Ventas equipo mes"  )
+              , React.createElement('span', { style: {fontSize:11,color:"rgba(255,255,255,.7)",fontWeight:600},}
+                , fmt(vMesEq), "€ / "  , fmt(vMesObjEq), "€"
+              )
+            )
+            , React.createElement('div', { style: {height:4,borderRadius:99,background:"rgba(255,255,255,.12)",overflow:"hidden"},}
+              , React.createElement('div', { style: {height:"100%",width:`${Math.min(pctVM,100)}%`,borderRadius:99,
+                background:pctVM>=100?"#4ADE80":pctVM>=80?"#FCD34D":"#FB7185",transition:"width .8s"},})
+            )
+          )
+        )
+
+        , React.createElement('div', { style: {padding:"20px 16px 0"},}
+          /* 1 · Este mes */
+          , React.createElement('p', { style: {margin:"0 0 10px",fontSize:10,fontWeight:700,color:"#64748B",
+            textTransform:"uppercase",letterSpacing:".12em"},}, "Este mes — equipo"   )
+          , React.createElement('div', { style: {display:"flex",gap:10,marginBottom:22},}
+            , React.createElement(MetricCard, { label: "Ventas", value: vMesEq, obj: vMesObjEq, pct: pctVM,})
+            , React.createElement(MetricCard, { label: "Margen bruto" , value: mbMesEq, obj: mbMesObjEq, pct: pctMM, suffix: "%",})
+          )
+
+          /* 2 · Año */
+          , React.createElement('p', { style: {margin:"0 0 10px",fontSize:10,fontWeight:700,color:"#64748B",
+            textTransform:"uppercase",letterSpacing:".12em"},}, "Acumulado año — equipo"   )
+          , React.createElement('div', { style: {display:"flex",gap:10,marginBottom:22},}
+            , React.createElement(MetricCard, { label: "Ventas", value: vAnualEq, obj: vAnualObjEq, pct: pctVA,
+              note: `Proy. ${fmt(Math.round(vAnualEq/semana*52))}€`,})
+            , React.createElement(MetricCard, { label: "Margen bruto" , value: mbAnualEq, obj: mbAnualObjEq, pct: pctMA, suffix: "%",
+              note: `${mbAnualEq>=mbAnualObjEq?"+":""}${(mbAnualEq-mbAnualObjEq).toFixed(1)}pp`,})
+          )
+
+          /* 3 · Pendientes */
+          , MODS.length>0&&(
+            React.createElement(React.Fragment, null
+              , React.createElement('p', { style: {margin:"0 0 10px",fontSize:10,fontWeight:700,color:"#64748B",
+                textTransform:"uppercase",letterSpacing:".12em"},}, "Pendientes — equipo"  )
+              , React.createElement('div', { style: {background:"#fff",borderRadius:16,overflow:"hidden",
+                border:"1px solid #E2E8F0",
+                boxShadow:"0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06)",marginBottom:22},}
+                , MODS.map((m,i)=>(
+                  React.createElement('div', { key: m.nav, className: "pend-row2", onClick: ()=>setSection(m.nav),
+                    style: {display:"flex",alignItems:"center",gap:14,padding:"14px 16px",
+                      borderBottom:i<MODS.length-1?"1px solid #F1F5F9":"none",
+                      cursor:"pointer",transition:"background .15s"},}
+                    , React.createElement('div', { style: {width:38,height:38,borderRadius:11,background:m.bg,
+                      display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0},}, m.icon)
+                    , React.createElement('div', { style: {flex:1,minWidth:0},}
+                      , React.createElement('p', { style: {margin:0,fontSize:13,fontWeight:600,color:"#0F172A"},}, m.label)
+                      , m.sub&&React.createElement('p', { style: {margin:"2px 0 0",fontSize:11,color:"#94A3B8",
+                        overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"},}, m.sub)
+                    )
+                    , React.createElement('div', { style: {display:"flex",alignItems:"center",gap:8,flexShrink:0},}
+                      , React.createElement('span', { style: {fontSize:12,fontWeight:800,color:m.urgent?"#F43F5E":m.ic,
+                        background:m.bg,borderRadius:99,padding:"3px 10px"},}, m.count)
+                      , React.createElement('span', { style: {color:"#CBD5E1",fontSize:16},}, "›")
+                    )
+                  )
+                ))
+              )
+            )
+          )
+
+          /* Equipo */
+          , React.createElement('p', { style: {margin:"0 0 10px",fontSize:10,fontWeight:700,color:"#64748B",
+            textTransform:"uppercase",letterSpacing:".12em"},}, "Equipo · "  , miEquipo)
+          , React.createElement('div', { style: {background:"#fff",borderRadius:16,overflow:"hidden",
+            border:"1px solid #E2E8F0",
+            boxShadow:"0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06)"},}
+            , agentesEquipo.map((a,i)=>{
+              const mA=muestrasDB.filter(m=>m.agente===a.id).length;
+              const pctA=85;
+              const cA=pctA>=100?"#22C55E":pctA>=80?"#F59E0B":"#EF4444";
+              return(
+                React.createElement('div', { key: a.id, style: {display:"flex",gap:12,alignItems:"center",
+                  padding:"14px 16px",
+                  borderBottom:i<agentesEquipo.length-1?"1px solid #F1F5F9":"none"},}
+                  /* Avatar gradiente */
+                  , React.createElement('div', { style: {width:40,height:40,borderRadius:12,flexShrink:0,
+                    background:"linear-gradient(135deg,#1E293B,#334155)",
+                    display:"flex",alignItems:"center",justifyContent:"center",
+                    fontSize:13,fontWeight:700,color:"#fff",letterSpacing:"-.01em"},}
+                    , a.nombre.split(" ").map(w=>w[0]).slice(0,2).join("")
+                  )
+                  , React.createElement('div', { style: {flex:1,minWidth:0},}
+                    , React.createElement('div', { style: {display:"flex",gap:6,alignItems:"center",marginBottom:5},}
+                      , React.createElement('p', { style: {margin:0,fontSize:13,fontWeight:600,color:"#0F172A",
+                        overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"},}, a.nombre)
+                      , mA>0&&(
+                        React.createElement('span', { style: {background:"#FFFBEB",color:"#D97706",fontSize:9,
+                          fontWeight:700,padding:"2px 7px",borderRadius:99,flexShrink:0},}
+                          , mA, " muestras"
+                        )
+                      )
+                    )
+                    , React.createElement('div', { style: {display:"flex",alignItems:"center",gap:8},}
+                      , React.createElement('div', { style: {height:3,flex:1,borderRadius:99,background:"#F1F5F9",overflow:"hidden"},}
+                        , React.createElement('div', { style: {height:"100%",width:`${pctA}%`,borderRadius:99,
+                          background:cA,transition:"width .8s"},})
+                      )
+                      , React.createElement('span', { style: {fontSize:10,fontWeight:700,color:cA,flexShrink:0},}, pctA, "%")
+                    )
+                  )
+                  , React.createElement('div', { style: {textAlign:"right",flexShrink:0},}
+                    , React.createElement('p', { style: {margin:0,fontSize:13,fontWeight:700,color:"#0F172A"},}, "24.5k€")
+                    , React.createElement('p', { style: {margin:"1px 0 0",fontSize:10,color:"#94A3B8"},}, "ventas")
+                  )
+                )
+              );
+            })
+          )
+        )
+      )
+    );
+  };
+
 
 
 
@@ -7024,7 +7512,7 @@ function InformeActividad(){return null;}
         , section==="oportunidades"&&        React.createElement(GestorOportunidades, { usuario: usuario,})
         , section==="proyectos"&&            React.createElement(Proyectos, { usuario: usuario,})
         , section==="incidencias"&&          React.createElement(Incidencias, { usuario: usuario,})
-        , false
+        , section==="actividad"&&            React.createElement(InformeActividad, { usuario: usuario, oportunidadesDB: oportunidadesDB,})
 
         /* Equipo — jefe ve solo su equipo, director/CEO ven todos */
         , esJefeOmas&&section==="usuarios"&&(
@@ -7065,7 +7553,8 @@ function InformeActividad(){return null;}
 
 
 // ── Montar la app ──────────────────────────────────────────────────
-
+const container = document.getElementById('root');
+const root = ReactDOM.createRoot(container);
 (function(){
   // Buscar usuario del portal por 3 vías:
   // 1. URL hash: crm_grupo_consolidado.html#wk1
