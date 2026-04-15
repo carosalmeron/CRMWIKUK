@@ -3815,17 +3815,54 @@ async function fbLeer(coleccion, pageSize=200){
   try{
     let docs=[], nextPage=null, intentos=0;
     do{
-      const url=`${FB_BASE}/${coleccion}?pageSize=${pageSize}${nextPage?"&pageToken="+nextPage:""}`;
+      const url=`${FB_BASE}/${coleccion}?pageSize=300${nextPage?"&pageToken="+nextPage:""}`;
       const r=await fetch(url);
       if(!r.ok) return [];
       const data=await r.json();
       if(data.documents) docs=[...docs,...data.documents.map(fromFirestore)];
       nextPage=data.nextPageToken||null;
       intentos++;
-    }while(nextPage&&intentos<5);
+    }while(nextPage&&intentos<10);
     return docs;
   }catch(e){console.warn("FB leer:",e.message);return [];}
 }
+
+// Cargar TODOS los docs de una colección sin límite de páginas
+async function fbLeerTodos(coleccion){
+  try{
+    let docs=[], nextPage=null, intentos=0;
+    do{
+      const url=`${FB_BASE}/${coleccion}?pageSize=300${nextPage?"&pageToken="+nextPage:""}`;
+      const r=await fetch(url);
+      if(!r.ok) break;
+      const data=await r.json();
+      if(data.documents) docs=[...docs,...data.documents.map(fromFirestore)];
+      nextPage=data.nextPageToken||null;
+      intentos++;
+    }while(nextPage&&intentos<50);
+    return docs;
+  }catch(e){console.warn("FB leerTodos:",e.message);return [];}
+}
+
+// Query Firestore por grupoAgente — solo trae los clientes del vendedor
+async function fbQueryGrupoAgente(grupoAgente){
+  try{
+    const body={
+      structuredQuery:{
+        from:[{collectionId:"clientes"}],
+        where:{fieldFilter:{field:{fieldPath:"grupoAgente"},op:"EQUAL",value:{stringValue:grupoAgente}}},
+        limit:500
+      }
+    };
+    const project="grupo-consolidado-crm";
+    const url=`https://firestore.googleapis.com/v1/projects/${project}/databases/(default)/documents:runQuery`;
+    const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!r.ok) return [];
+    const data=await r.json();
+    return data.filter(d=>d.document).map(d=>fromFirestore(d.document));
+  }catch(e){console.warn("FB query:",e.message);return [];}
+}
+
 
 // ── Serializar a formato Firestore ────────────────────────────────
 function serializeToFirestore(datos){
@@ -5426,10 +5463,19 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
   // clientes efectivos (pueden tener rutas asignadas localmente)
   const clientesEfectivos=clientesLocal||clientes;
 
-  // El campo "semana" de Firebase ES la ruta
+  // El campo "semana" o "semanas" (array) de Firebase ES la ruta
   const getRouteNum=(c)=>{
-    const v=c.semana||c.ruta;
-    if(v&&Number(v)>0) return Number(v);
+    // Primero semana como número
+    if(c.semana&&Number(c.semana)>0) return Number(c.semana);
+    if(c.ruta&&Number(c.ruta)>0) return Number(c.ruta);
+    // semanas como array [1] o [1,2,3]
+    if(Array.isArray(c.semanas)&&c.semanas.length>0){
+      const n=Number(c.semanas[0]);
+      if(n>0) return n;
+    }
+    // semanaVisita u otros nombres posibles
+    if(c.semanaVisita&&Number(c.semanaVisita)>0) return Number(c.semanaVisita);
+    if(c.SEMANAVISITA&&Number(c.SEMANAVISITA)>0) return Number(c.SEMANAVISITA);
     return 0;
   };
 
@@ -5937,6 +5983,7 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
         <p style={{margin:"0 0 12px",fontSize:22,fontWeight:800,color:"#fff"}}>📋 Mis clientes</p>
         <div style={{display:"flex",gap:8}}>
           {[
+            {label:"Total",value:clientesEfectivos.length,color:"#60A5FA"},
             {label:"Visitados",value:totalVisitados,total:clientesEfectivos.length,color:"#4ADE80"},
             {label:"Muestras",value:totalMuestras,color:"#C4B5FD"},
           ].map(k=>(
@@ -5951,6 +5998,11 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
       </div>
 
       <div style={{padding:"16px"}}>
+        {/* DEBUG — eliminar cuando funcione */}
+        <div style={{background:"#EFF6FF",border:"1px solid #93C5FD",borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:11}}>
+          <span style={{fontWeight:700,color:"#1D4ED8"}}>🔍 Debug: </span>
+          <span style={{color:"#1E40AF"}}>{clientesEfectivos.length} clientes cargados · {rutasNums.length} rutas · {sinRuta.length} sin ruta</span>
+        </div>
         <p style={{margin:"0 0 12px",fontSize:11,fontWeight:700,color:T.muted,
           textTransform:"uppercase",letterSpacing:".08em"}}>
           {rutasNums.length>0?"Selecciona una ruta":`${clientesEfectivos.length} clientes`}
@@ -6765,6 +6817,45 @@ function App(props){
   const [oportunidadesDB,setOportunidadesDB]=useState(OPORTUNIDADES_SEED);
   const [clientesDB,setClientesDB]=useState(null); // null = aún no cargado
 
+  // Cargar clientes del usuario — query específica por grupoAgente (mucho más rápido)
+  useEffect(()=>{
+    if(!usuario) return;
+    // Obtener el vendedor del usuario desde el hash de la URL o localStorage
+    let miVendedor=null;
+    try{
+      const hash=decodeURIComponent(window.location.hash.replace('#',''));
+      if(hash.includes('|')) miVendedor=hash.split('|')[1];
+    }catch(e){}
+    if(!miVendedor){
+      try{
+        const pu=JSON.parse(localStorage.getItem('gc_portal_user')||'{}');
+        miVendedor=pu.catalogoVendedor||null;
+      }catch(e){}
+    }
+
+    if(miVendedor){
+      // Query directa solo para este vendedor — evita cargar 6000+ docs
+      fbQueryGrupoAgente(miVendedor).then(clientes=>{
+        const activos=clientes.filter(c=>c.activo!==false);
+        const porGrupo={[miVendedor]:activos};
+        const porAgente={};
+        activos.forEach(c=>{const ag=c.agente||c.agenteId;if(ag){if(!porAgente[ag])porAgente[ag]=[];porAgente[ag].push(c);}});
+        setClientesDB({_porGrupo:porGrupo,_porAgente:porAgente,_todos:activos,_vendedor:miVendedor});
+      }).catch(()=>{});
+    } else if(["director","ceo"].includes(usuario.rol)){
+      // Director/CEO: carga todos (paginado completo)
+      fbLeerTodos("clientes").then(clientes=>{
+        const activos=clientes.filter(c=>c.activo!==false);
+        const porGrupo={};const porAgente={};
+        activos.forEach(c=>{
+          if(c.grupoAgente){if(!porGrupo[c.grupoAgente])porGrupo[c.grupoAgente]=[];porGrupo[c.grupoAgente].push(c);}
+          const ag=c.agente||c.agenteId;if(ag){if(!porAgente[ag])porAgente[ag]=[];porAgente[ag].push(c);}
+        });
+        setClientesDB({_porGrupo:porGrupo,_porAgente:porAgente,_todos:activos});
+      }).catch(()=>{});
+    }
+  },[usuario?.id]);
+
   useEffect(()=>{
     if(!usuario) return;
     setFbCargando(true);
@@ -6774,8 +6865,7 @@ function App(props){
       fbLeer("incidencias"),
       fbLeer("visitas"),
       fbCargar(), // oportunidades
-      fbLeer("clientes",500), // clientes reales
-    ]).then(([muestras,estrategias,incidencias,visitas,opos,clientes])=>{
+    ]).then(([muestras,estrategias,incidencias,visitas,opos])=>{
       if(muestras.length>0) setMuestrasDB(muestras.filter(m=>!m.eliminada));
       if(estrategias.length>0) setEstrategiasDB(estrategias.filter(e=>!e.eliminada));
       if(incidencias.length>0) setIncidenciasDB(incidencias);
@@ -6783,37 +6873,6 @@ function App(props){
         const norm=opos.map(o=>({...o,agente:o.agente||o.agenteId,agenteId:o.agenteId||o.agente}));
         const fbIds=new Set(norm.map(o=>o.id));
         setOportunidadesDB([...norm,...OPORTUNIDADES_SEED.filter(o=>!fbIds.has(o.id))]);
-      }
-      if(clientes.length>0){
-        // Estructura real Firebase:
-        // { grupoAgente: "BARBELANNE", nombre: "3L FAMILY", activo: true, id: "C00001", ... }
-        // El campo grupoAgente coincide con catalogoVendedor del portal
-        
-        // Filtrar solo activos
-        const activos=clientes.filter(c=>c.activo!==false);
-        
-        // Obtener catalogoVendedor del usuario actual (set desde el portal admin)
-        const miVendedor=usuario.catalogoVendedor||
-          sessionStorage.getItem('gc_portal_user')&&
-          JSON.parse(sessionStorage.getItem('gc_portal_user')||'{}').catalogoVendedor||null;
-        
-        // Organizar por grupoAgente (clave principal) y por agente (fallback)
-        const porGrupo={};
-        const porAgente={};
-        activos.forEach(c=>{
-          // Por grupoAgente
-          if(c.grupoAgente){
-            if(!porGrupo[c.grupoAgente]) porGrupo[c.grupoAgente]=[];
-            porGrupo[c.grupoAgente].push(c);
-          }
-          // Por agente (fallback)
-          const ag=c.agente||c.agenteId;
-          if(ag){
-            if(!porAgente[ag]) porAgente[ag]=[];
-            porAgente[ag].push(c);
-          }
-        });
-        setClientesDB({_porGrupo:porGrupo,_porAgente:porAgente,_todos:activos});
       }
 
       // Reconstruir actividadSemana desde Firebase para el agente actual
