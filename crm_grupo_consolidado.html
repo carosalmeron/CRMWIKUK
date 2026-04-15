@@ -410,15 +410,16 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
   const totalSem=misClientes.length,visitados=Math.min(totalSem,8),pendVisita=totalSem-visitados;
 
   // ── Datos reales desde Firebase ──────────────────────────────────
-  const [kpi,setKpi]=useState(null);          // agentes_kpi doc
-  const [semanas,setSemanas]=useState([]);    // presupuesto semanal
+  const [kpi,setKpi]=useState(null);
+  const [semanas,setSemanas]=useState([]);
+  const [semMon,setSemMon]=useState([]); // monetizacion semanal
   const [loadingKpi,setLoadingKpi]=useState(true);
 
   useEffect(()=>{
     if(!crmId) return;
     const base=`https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents`;
 
-    // 1. Resumen KPI acumulado — usa catalogoVendedor como clave (ej: "rpiedra")
+    // 1. Resumen KPI acumulado
     const crmIdNorm=fbKey;
     fetch(`${base}/agentes_kpi/${crmIdNorm}_2026`)
       .then(r=>r.json())
@@ -432,27 +433,32 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
         setKpi(o);
       }).catch(()=>{}).finally(()=>setLoadingKpi(false));
 
-    // 2. Semanas (para "este mes" = últimas 4 semanas con dato)
-    fetch(`${base}:runQuery`,{
+    // Helper para parsear documentos Firestore
+    const parseDocs=(rows)=>(rows||[]).map(r=>r.document).filter(Boolean).map(doc=>{
+      const o={};
+      for(const [k,v] of Object.entries(doc.fields||{})){
+        o[k]=v.doubleValue??v.integerValue??v.stringValue??v.nullValue??null;
+        if(typeof o[k]==="string"&&!isNaN(o[k])) o[k]=parseFloat(o[k]);
+      }
+      return o;
+    });
+
+    const queryFB=(coleccion)=>fetch(`${base}:runQuery`,{
       method:"POST",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({structuredQuery:{
-        from:[{collectionId:"presupuesto"}],
+        from:[{collectionId:coleccion}],
         where:{fieldFilter:{field:{fieldPath:"agente"},op:"EQUAL",value:{stringValue:crmIdNorm}}},
         orderBy:[{field:{fieldPath:"semana"},direction:"ASCENDING"}],
         limit:53
       }})
-    }).then(r=>r.json()).then(rows=>{
-      const docs=(rows||[]).map(r=>r.document).filter(Boolean).map(doc=>{
-        const o={};
-        for(const [k,v] of Object.entries(doc.fields||{})){
-          o[k]=v.doubleValue??v.integerValue??v.stringValue??v.nullValue??null;
-          if(typeof o[k]==="string"&&!isNaN(o[k])) o[k]=parseFloat(o[k]);
-        }
-        return o;
-      });
-      setSemanas(docs);
-    }).catch(()=>{});
+    }).then(r=>r.json()).then(parseDocs).catch(()=>[]);
+
+    // 2. Presupuesto semanal
+    queryFB("presupuesto").then(docs=>setSemanas(docs));
+
+    // 3. Monetización semanal (promos y liquidaciones por semana)
+    queryFB("monetizacion").then(docs=>setSemMon(docs));
   },[crmId]);
 
   // ── Cálculo de valores ────────────────────────────────────────────
@@ -480,8 +486,17 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
   const mbAnual=parseFloat(((kpi?.mgMedio||0)*100).toFixed(1));
   const mbAnualObj=parseFloat(((kpi?.mgObjetivo||0.344)*100).toFixed(1));
 
-  // Promos y Liquidaciones acumuladas
-  const promoVal=kpi?.promoRealAcum||0;
+  // Promos y Liquidaciones — este mes (mismas 4 semanas que ventas)
+  const semMonOrd=[...semMon].sort((a,b)=>(a.semana||0)-(b.semana||0));
+  const semsMes=ultimas4.map(s=>semMonOrd.find(m=>m.semana===s.semana)).filter(Boolean);
+  const promoMesReal=semsMes.reduce((t,s)=>t+(s.promoReal!=null?s.promoReal:0),0);
+  const promoMesObj=semsMes.reduce((t,s)=>t+(s.promoObjetivo!=null?s.promoObjetivo:0),0);
+  const liqMesReal=semsMes.reduce((t,s)=>t+(s.liquidReal!=null?s.liquidReal:0),0);
+  const liqMesObj=semsMes.reduce((t,s)=>t+(s.liquidObjetivo!=null?s.liquidObjetivo:0),0);
+  const pctPMes=promoMesObj>0?Math.round(promoMesReal/promoMesObj*100):0;
+  const pctLMes=liqMesObj>0?Math.round(liqMesReal/liqMesObj*100):0;
+
+  // Promos y Liquidaciones acumuladas (para acumulado año)
   const promoObj=kpi?.promoObjAcum||0;
   const liqVal=kpi?.liquidRealAcum||0;
   const liqObj=kpi?.liquidObjAcum||0;
@@ -763,30 +778,32 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
           );
         })()}
 
-        {/* Promo y Liquidación */}
+        {/* Promo y Liquidación — este mes */}
         {(()=>{
-          const cP=pctP>=100?"#22C55E":pctP>=80?"#F59E0B":"#EF4444";
-          const cL=pctL>=100?"#22C55E":pctL>=80?"#F59E0B":"#EF4444";
+          const cP=pctPMes>=100?"#22C55E":pctPMes>=80?"#F59E0B":"#EF4444";
+          const cL=pctLMes>=100?"#22C55E":pctLMes>=80?"#F59E0B":"#EF4444";
           const MiniCard=({label,icon,val,obj,pct,c})=>(
             <div style={{flex:1,background:"#fff",borderRadius:14,padding:"14px",
               border:"1px solid #E2E8F0",boxShadow:"0 1px 3px rgba(0,0,0,.04)"}}>
-              <p style={{margin:"0 0 8px",fontSize:10,fontWeight:700,color:"#94A3B8",
+              <p style={{margin:"0 0 6px",fontSize:10,fontWeight:700,color:"#94A3B8",
                 textTransform:"uppercase",letterSpacing:".1em"}}>{icon} {label}</p>
-              <p style={{margin:"0 0 2px",fontSize:20,fontWeight:800,color:"#0F172A"}}>
-                {fmt(val)}€
+              <p style={{margin:"0 0 1px",fontSize:20,fontWeight:800,color:"#0F172A"}}>
+                {fmt(Math.round(val))}€
               </p>
-              <p style={{margin:"0 0 8px",fontSize:11,color:"#94A3B8"}}>obj. {fmt(obj)}€</p>
-              <div style={{height:4,borderRadius:99,background:"#F1F5F9",overflow:"hidden"}}>
+              <p style={{margin:"0 0 8px",fontSize:11,color:"#94A3B8"}}>obj. {fmt(Math.round(obj))}€</p>
+              <div style={{height:6,borderRadius:99,background:"#F1F5F9",overflow:"hidden"}}>
                 <div style={{height:"100%",width:`${Math.min(pct,100)}%`,
                   borderRadius:99,background:c,transition:"width .8s ease"}}/>
               </div>
-              <p style={{margin:"4px 0 0",fontSize:10,fontWeight:700,color:c}}>{pct}% del objetivo</p>
+              <p style={{margin:"5px 0 0",fontSize:11,fontWeight:700,color:c}}>
+                {obj>0?`${pct}% del obj.`:val>0?`${fmt(Math.round(val))}€`:"Sin objetivo"}
+              </p>
             </div>
           );
           return(
             <div style={{display:"flex",gap:10,marginBottom:22}}>
-              <MiniCard label="Promo acum." icon="🎯" val={Math.round(promoVal)} obj={Math.round(promoObj)} pct={pctP} c={cP}/>
-              <MiniCard label="Liquid. acum." icon="📋" val={Math.round(liqVal)} obj={Math.round(liqObj)} pct={pctL} c={cL}/>
+              <MiniCard label="Promo mes" icon="🎯" val={promoMesReal} obj={promoMesObj} pct={pctPMes} c={cP}/>
+              <MiniCard label="Liquid. mes" icon="🏷️" val={liqMesReal} obj={liqMesObj} pct={pctLMes} c={cL}/>
             </div>
           );
         })()}
@@ -6431,7 +6448,7 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
                       <button key={q.k}
                         onClick={function(e){
                           e.stopPropagation();
-                          if(yaEste) return; // ya registrado, no duplicar
+                          if(yaEste) return;
                           const entrada={
                             resultado:q.k,nota:"",
                             fecha:new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"})
@@ -6442,7 +6459,7 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
                           });
                         }}
                         style={{flex:1,padding:"9px 4px",border:"none",
-                          borderRight:qi<QUICK.length-1?"1px solid #F1F5F9":"none",
+                          borderRight:"1px solid #F1F5F9",
                           background:yaEste?q.bg:"#fff",cursor:yaEste?"default":"pointer",
                           fontFamily:"inherit",display:"flex",flexDirection:"column",
                           alignItems:"center",gap:2,transition:"background .15s",
@@ -6453,12 +6470,37 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
                       </button>
                     );
                   })}
-                  {/* Botón de entrar a detalle completo */}
+                  {/* Reasignación */}
+                  <button onClick={function(e){
+                      e.stopPropagation();
+                      const motivo=window.prompt(`Solicitar reasignación de "${nom}"\n\nMotivo (obligatorio):`);
+                      if(!motivo||!motivo.trim()) return;
+                      const solicitud={
+                        id:`reasig_${usuario.id}_${cid}_${Date.now()}`,
+                        clienteId:cid, clienteNombre:nom,
+                        agenteId:usuario.catalogoVendedor||usuario.id,
+                        agenteNombre:usuario.nombre,
+                        equipo:usuario.equipo||"",
+                        motivo:motivo.trim(),
+                        estado:"pendiente",
+                        fecha:new Date().toLocaleDateString("es-ES"),
+                      };
+                      fbEscribir("solicitudes_reasignacion",solicitud.id,solicitud)
+                        .then(()=>alert(`✅ Solicitud enviada a tu responsable`))
+                        .catch(()=>alert(`✅ Solicitud registrada`));
+                    }}
+                    style={{flex:1,padding:"9px 4px",border:"none",
+                      borderRight:"1px solid #F1F5F9",
+                      background:"#fff",cursor:"pointer",fontFamily:"inherit",
+                      display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+                    <span style={{fontSize:16}}>🔄</span>
+                    <span style={{fontSize:10,color:"#94A3B8"}}>Reasignar</span>
+                  </button>
+                  {/* Ficha completa */}
                   <button onClick={function(){setClienteSel(c);setTabSel("visita");}}
                     style={{flex:1,padding:"9px 4px",border:"none",
-                      borderLeft:"1px solid #F1F5F9",background:"#fff",
-                      cursor:"pointer",fontFamily:"inherit",display:"flex",
-                      flexDirection:"column",alignItems:"center",gap:2}}>
+                      background:"#fff",cursor:"pointer",fontFamily:"inherit",
+                      display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
                     <span style={{fontSize:16}}>📋</span>
                     <span style={{fontSize:10,color:"#94A3B8"}}>Ficha</span>
                   </button>
@@ -7299,6 +7341,383 @@ function HistorialTab({visitas,muestras,estrategia,incidencias=[],resultados}){
 
 
 // ─── APP PRINCIPAL ────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// INFORME DE ACTIVIDAD DIARIA
+// ═══════════════════════════════════════════════════════════════════
+function InformeActividad({usuario, oportunidadesDB}){
+  const esAgente=usuario.rol==="agente";
+  const esJefe=usuario.rol==="jefe";
+  const esDir=["director","ceo"].includes(usuario.rol);
+  const miEquipo=usuario.equipo;
+
+  // Fecha seleccionada (hoy por defecto)
+  const hoy=new Date();
+  const fmtDate=(d)=>d.toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"numeric"});
+  const fmtDateCorto=(d)=>d.toLocaleDateString("es-ES",{weekday:"short",day:"numeric",month:"short"});
+  const [fechaSel,setFechaStr]=useState(()=>fmtDate(hoy));
+
+  const cambiarDia=(delta)=>{
+    const parts=fechaSel.split("/");
+    const d=new Date(+parts[2],+parts[1]-1,+parts[0]);
+    d.setDate(d.getDate()+delta);
+    setFechaStr(fmtDate(d));
+  };
+  const esHoy=fechaSel===fmtDate(hoy);
+
+  // Datos desde Firebase
+  const [visitas,setVisitas]=useState([]);
+  const [muestras,setMuestras]=useState([]);
+  const [incidencias,setIncidencias]=useState([]);
+  const [cargando,setCargando]=useState(false);
+
+  useEffect(()=>{
+    setCargando(true);
+    Promise.all([
+      fbLeer("visitas"),
+      fbLeer("muestras"),
+      fbLeer("incidencias"),
+    ]).then(([v,m,i])=>{
+      setVisitas(v.filter(x=>!x.eliminada));
+      setMuestras(m.filter(x=>!x.eliminada));
+      setIncidencias(i);
+    }).catch(()=>{}).finally(()=>setCargando(false));
+  },[]);
+
+  // Filtro por fecha — normaliza formato dd/mm/yy vs dd/mm/yyyy
+  const matchFecha=(f)=>{
+    if(!f) return false;
+    const fs=String(f).trim();
+    // Convierte fechaSel (dd/mm/yyyy) a dd/mm/yy para comparar con registros cortos
+    const partes=fechaSel.split("/");
+    const corto=`${partes[0]}/${partes[1]}/${partes[2].slice(-2)}`;
+    return fs===fechaSel||fs===corto;
+  };
+
+  // Agentes visibles según rol
+  const agentesVisibles=USUARIOS.filter(u=>
+    u.rol==="agente"&&(esDir||u.equipo===miEquipo||(esAgente&&u.id===usuario.id))
+  );
+  const esDelAgente=(doc,agId)=>{
+    const catV=(agId==="self"?usuario.catalogoVendedor||usuario.id:agId)||"";
+    return (doc.agente||"").toLowerCase()===(agId||"").toLowerCase()
+      ||(catV&&(doc.agente||"").toLowerCase()===catV.toLowerCase());
+  };
+  const misIds=(ag)=>{
+    if(ag==="self"){
+      return [usuario.id.toLowerCase(),(usuario.catalogoVendedor||"").toLowerCase()].filter(Boolean);
+    }
+    return [ag.id.toLowerCase(),(ag.catalogoVendedor||"").toLowerCase()].filter(Boolean);
+  };
+  const matchAgente=(doc,ag)=>{
+    const ids=ag==="self"?misIds("self"):misIds(ag);
+    return ids.some(i=>(doc.agente||"").toLowerCase()===i);
+  };
+
+  // Datos del día para un agente
+  const datosDelDia=(agRef)=>{
+    const vDia=visitas.filter(v=>matchFecha(v.fecha)&&matchAgente(v,agRef));
+    const mDia=muestras.filter(m=>matchFecha(m.fecha||m.fechaEnvio)&&matchAgente(m,agRef));
+    const iDia=incidencias.filter(i=>matchFecha(i.fecha)&&matchAgente(i,agRef));
+    const uid=agRef==="self"?usuario.id:agRef.id;
+    const catV=agRef==="self"?usuario.catalogoVendedor:agRef.catalogoVendedor;
+    const opsDia=(oportunidadesDB||[]).filter(o=>{
+      const oid=(o.agenteId||o.agente||"").toLowerCase();
+      const ids=[uid.toLowerCase(),(catV||"").toLowerCase()].filter(Boolean);
+      const tocada=matchFecha(o.creadaEn)||(o.historial||[]).some(h=>matchFecha(h.fecha));
+      return tocada&&ids.some(i=>oid===i);
+    });
+    return {vDia,mDia,iDia,opsDia};
+  };
+
+  // ── BLOQUE AGENTE INDIVIDUAL ─────────────────────────────────────
+  const BloqueAgente=({agRef,nombre,color,icon,expandible=false})=>{
+    const [abierto,setAbierto]=useState(!expandible);
+    const {vDia,mDia,iDia,opsDia}=datosDelDia(agRef);
+    const pedidos=vDia.filter(v=>v.resultado==="pedido");
+    const RESS_LABEL={pedido:"✅ Pedido",llamada:"📞 Llamada",visita_sin_pedido:"👋 Sin pedido",no_contesta:"📵 N/C",primera_visita:"🆕 Primera"};
+    const RESS_COLOR={pedido:T.green,llamada:T.blue,visita_sin_pedido:T.amber,no_contesta:T.muted,primera_visita:T.purple};
+    const tipMuestras={};
+    mDia.forEach(m=>{const t=m.tipo||"Otras";tipMuestras[t]=(tipMuestras[t]||0)+1;});
+
+    return(
+      <div style={{background:"#fff",borderRadius:14,marginBottom:10,
+        border:"1px solid #E2E8F0",overflow:"hidden",
+        boxShadow:"0 1px 4px rgba(0,0,0,.05)"}}>
+
+        {/* Cabecera agente */}
+        <div onClick={()=>expandible&&setAbierto(a=>!a)}
+          style={{display:"flex",alignItems:"center",gap:12,padding:"14px 16px",
+            cursor:expandible?"pointer":"default",
+            background:abierto?"#fff":"#FAFAFA"}}>
+          <div style={{width:36,height:36,borderRadius:10,background:color+"20",
+            display:"flex",alignItems:"center",justifyContent:"center",
+            fontSize:18,flexShrink:0}}>{icon}</div>
+          <div style={{flex:1}}>
+            <p style={{margin:0,fontSize:14,fontWeight:700,color:T.text}}>{nombre}</p>
+          </div>
+          {/* KPIs rápidos en cabecera */}
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            {[
+              {n:vDia.length,   icon:"👋",c:"#3B82F6"},
+              {n:pedidos.length,icon:"✅",c:T.green},
+              {n:mDia.length,   icon:"📦",c:T.purple},
+              {n:iDia.length,   icon:"🚨",c:T.red},
+              {n:opsDia.length, icon:"💼",c:T.navy},
+            ].map((k,i)=>(
+              <div key={i} style={{textAlign:"center",minWidth:28}}>
+                <p style={{margin:0,fontSize:14,fontWeight:800,color:k.n>0?k.c:T.border}}>{k.n}</p>
+                <p style={{margin:0,fontSize:9}}>{k.icon}</p>
+              </div>
+            ))}
+            {expandible&&<span style={{color:T.muted,fontSize:14,marginLeft:4}}>{abierto?"▲":"▼"}</span>}
+          </div>
+        </div>
+
+        {/* Detalle expandido */}
+        {abierto&&(
+          <div style={{padding:"0 16px 16px",borderTop:"1px solid #F1F5F9"}}>
+
+            {/* Visitas del día */}
+            {vDia.length>0?(
+              <div style={{marginTop:14}}>
+                <p style={{margin:"0 0 8px",fontSize:10,fontWeight:700,color:T.muted,
+                  textTransform:"uppercase",letterSpacing:".06em"}}>
+                  👋 Visitas · {vDia.length}
+                </p>
+                {vDia.map((v,i)=>{
+                  const c=RESS_COLOR[v.resultado]||T.muted;
+                  const l=RESS_LABEL[v.resultado]||v.resultado;
+                  return(
+                    <div key={i} style={{display:"flex",gap:10,alignItems:"center",
+                      padding:"8px 0",borderBottom:i<vDia.length-1?"1px solid #F8FAFC":"none"}}>
+                      <span style={{fontSize:11,fontWeight:700,color:c,background:c+"15",
+                        borderRadius:6,padding:"2px 8px",flexShrink:0}}>{l}</span>
+                      <p style={{margin:0,fontSize:12,color:T.text,flex:1,
+                        overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                        {v.clienteNombre||v.clienteId||"—"}
+                      </p>
+                      {v.nota&&<p style={{margin:0,fontSize:11,color:T.muted,fontStyle:"italic",
+                        maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                        {v.nota}
+                      </p>}
+                    </div>
+                  );
+                })}
+              </div>
+            ):(
+              <p style={{margin:"12px 0 0",fontSize:12,color:T.muted}}>Sin visitas registradas</p>
+            )}
+
+            {/* Muestras por tipología */}
+            {mDia.length>0&&(
+              <div style={{marginTop:14}}>
+                <p style={{margin:"0 0 8px",fontSize:10,fontWeight:700,color:T.muted,
+                  textTransform:"uppercase",letterSpacing:".06em"}}>
+                  📦 Muestras · {mDia.length}
+                </p>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                  {Object.entries(tipMuestras).map(([tipo,n])=>(
+                    <span key={tipo} style={{background:T.purple+"15",color:T.purple,
+                      fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:99}}>
+                      {tipo} ×{n}
+                    </span>
+                  ))}
+                </div>
+                {mDia.slice(0,3).map((m,i)=>(
+                  <div key={i} style={{display:"flex",gap:8,alignItems:"center",
+                    padding:"6px 0",borderTop:"1px solid #F8FAFC",marginTop:6}}>
+                    <p style={{margin:0,fontSize:12,color:T.text,flex:1,
+                      overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                      {m.prodNombre||m.prod||"—"}
+                    </p>
+                    <span style={{fontSize:11,color:T.muted,flexShrink:0}}>{m.clienteNombre||""}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Incidencias */}
+            {iDia.length>0&&(
+              <div style={{marginTop:14}}>
+                <p style={{margin:"0 0 8px",fontSize:10,fontWeight:700,color:T.muted,
+                  textTransform:"uppercase",letterSpacing:".06em"}}>
+                  🚨 Incidencias · {iDia.length}
+                </p>
+                {iDia.map((inc,i)=>(
+                  <div key={i} style={{padding:"8px 10px",borderRadius:10,marginBottom:6,
+                    background:inc.estado==="cerrada"?"#F0FDF4":"#FEF2F2",
+                    border:`1px solid ${inc.estado==="cerrada"?T.green+"44":T.red+"44"}`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                      <span style={{fontSize:11,fontWeight:700,color:inc.estado==="cerrada"?T.green:T.red}}>
+                        {inc.estado==="cerrada"?"✅ Cerrada":"🔴 Abierta"}
+                      </span>
+                      <span style={{fontSize:10,color:T.muted}}>{inc.tipo||""}</span>
+                    </div>
+                    <p style={{margin:0,fontSize:12,color:T.text}}>{inc.clienteNombre||inc.clienteId||""}</p>
+                    {inc.descripcion&&<p style={{margin:"2px 0 0",fontSize:11,color:T.muted,
+                      overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                      {inc.descripcion}
+                    </p>}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Oportunidades */}
+            {opsDia.length>0&&(
+              <div style={{marginTop:14}}>
+                <p style={{margin:"0 0 8px",fontSize:10,fontWeight:700,color:T.muted,
+                  textTransform:"uppercase",letterSpacing:".06em"}}>
+                  💼 Oportunidades · {opsDia.length}
+                </p>
+                {opsDia.map((o,i)=>(
+                  <div key={i} style={{display:"flex",gap:10,alignItems:"center",
+                    padding:"7px 0",borderBottom:i<opsDia.length-1?"1px solid #F8FAFC":"none"}}>
+                    <span style={{fontSize:10,fontWeight:700,color:
+                      o.estado==="ganada"?T.green:o.estado==="perdida"?T.red:T.blue,
+                      background:o.estado==="ganada"?T.greenL:o.estado==="perdida"?T.redL:T.blueL,
+                      borderRadius:6,padding:"2px 8px",flexShrink:0}}>
+                      {o.estado==="ganada"?"✅ Ganada":o.estado==="perdida"?"❌ Perdida":"🔵 Activa"}
+                    </span>
+                    <p style={{margin:0,fontSize:12,color:T.text,flex:1,
+                      overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                      {o.nombre||"—"}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {vDia.length===0&&mDia.length===0&&iDia.length===0&&opsDia.length===0&&(
+              <div style={{textAlign:"center",padding:"20px 0",color:T.muted}}>
+                <p style={{fontSize:24,margin:"0 0 6px"}}>📭</p>
+                <p style={{margin:0,fontSize:13}}>Sin actividad registrada este día</p>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ── TOTALES EQUIPO ───────────────────────────────────────────────
+  const totalEquipo=agentesVisibles.map(ag=>{
+    const {vDia,mDia,iDia,opsDia}=datosDelDia(ag);
+    return {visitas:vDia.length,pedidos:vDia.filter(v=>v.resultado==="pedido").length,
+      muestras:mDia.length,incidencias:iDia.length,ops:opsDia.length};
+  }).reduce((acc,x)=>({
+    visitas:acc.visitas+x.visitas,pedidos:acc.pedidos+x.pedidos,
+    muestras:acc.muestras+x.muestras,incidencias:acc.incidencias+x.incidencias,
+    ops:acc.ops+x.ops
+  }),{visitas:0,pedidos:0,muestras:0,incidencias:0,ops:0});
+
+  return(
+    <div style={{padding:"0 0 100px",background:"#F1F5F9",minHeight:"100vh"}}>
+      {/* Header con selector de fecha */}
+      <div style={{background:"linear-gradient(135deg,#4338CA,#6366F1)",padding:"20px 16px 18px"}}>
+        <p style={{margin:"0 0 14px",fontSize:11,fontWeight:700,color:"rgba(255,255,255,.6)",
+          textTransform:"uppercase",letterSpacing:".1em"}}>📊 Informe de Actividad</p>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          <button onClick={()=>cambiarDia(-1)}
+            style={{width:36,height:36,borderRadius:10,border:"none",
+              background:"rgba(255,255,255,.15)",color:"#fff",fontSize:18,
+              cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>
+            ‹
+          </button>
+          <div style={{flex:1,textAlign:"center"}}>
+            <p style={{margin:0,fontSize:17,fontWeight:800,color:"#fff"}}>
+              {(()=>{
+                const parts=fechaSel.split("/");
+                const d=new Date(+parts[2],+parts[1]-1,+parts[0]);
+                return fmtDateCorto(d).charAt(0).toUpperCase()+fmtDateCorto(d).slice(1);
+              })()}
+            </p>
+            {esHoy&&<span style={{fontSize:10,background:"rgba(255,255,255,.2)",
+              color:"#fff",padding:"2px 10px",borderRadius:99,fontWeight:700}}>HOY</span>}
+          </div>
+          <button onClick={()=>cambiarDia(1)} disabled={esHoy}
+            style={{width:36,height:36,borderRadius:10,border:"none",
+              background:esHoy?"rgba(255,255,255,.06)":"rgba(255,255,255,.15)",
+              color:esHoy?"rgba(255,255,255,.3)":"#fff",fontSize:18,
+              cursor:esHoy?"default":"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>
+            ›
+          </button>
+          {!esHoy&&(
+            <button onClick={()=>setFechaStr(fmtDate(hoy))}
+              style={{padding:"6px 12px",borderRadius:9,border:"none",
+                background:"rgba(255,255,255,.2)",color:"#fff",fontSize:11,
+                fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>
+              HOY
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div style={{padding:"16px"}}>
+        {cargando&&(
+          <div style={{textAlign:"center",padding:"40px",color:T.muted}}>
+            <p style={{fontSize:28}}>⏳</p>
+            <p style={{fontSize:13}}>Cargando actividad…</p>
+          </div>
+        )}
+
+        {!cargando&&(
+          <>
+            {/* KPIs resumen totales (jefe/dir) o propios (agente) */}
+            {!esAgente&&(
+              <div style={{background:"linear-gradient(135deg,#4338CA,#6366F1)",
+                borderRadius:14,padding:"16px",marginBottom:16}}>
+                <p style={{margin:"0 0 12px",fontSize:10,fontWeight:700,
+                  color:"rgba(255,255,255,.7)",textTransform:"uppercase",letterSpacing:".06em"}}>
+                  {esJefe?`Equipo ${miEquipo}`:"Todos los equipos"} · Total del día
+                </p>
+                <div style={{display:"flex",gap:8}}>
+                  {[
+                    {label:"Visitas",  n:totalEquipo.visitas,   icon:"👋"},
+                    {label:"Pedidos",  n:totalEquipo.pedidos,   icon:"✅"},
+                    {label:"Muestras", n:totalEquipo.muestras,  icon:"📦"},
+                    {label:"Incid.",   n:totalEquipo.incidencias,icon:"🚨"},
+                    {label:"Ops",      n:totalEquipo.ops,       icon:"💼"},
+                  ].map(k=>(
+                    <div key={k.label} style={{flex:1,textAlign:"center",
+                      background:"rgba(255,255,255,.12)",borderRadius:10,padding:"10px 4px"}}>
+                      <p style={{margin:0,fontSize:20,fontWeight:900,color:"#fff",lineHeight:1}}>{k.n}</p>
+                      <p style={{margin:"3px 0 0",fontSize:9,color:"rgba(255,255,255,.6)"}}>{k.icon} {k.label}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Agente: su bloque propio */}
+            {esAgente&&(
+              <BloqueAgente
+                agRef="self"
+                nombre={usuario.nombre}
+                color={usuario.color||"#6366F1"}
+                icon={usuario.icon||"🧑‍💼"}
+                expandible={false}
+              />
+            )}
+
+            {/* Jefe/Dir: un bloque por agente (expandible) */}
+            {!esAgente&&agentesVisibles.map(ag=>(
+              <BloqueAgente
+                key={ag.id}
+                agRef={ag}
+                nombre={ag.nombre}
+                color={ag.color||"#6366F1"}
+                icon={ag.icon||"🧑‍💼"}
+                expandible={true}
+              />
+            ))}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function App(props){
   const [usuario,setUsuario]=useState(function(){
     // Auto-login desde portal: initializar directamente sin useEffect
@@ -7523,6 +7942,7 @@ function App(props){
     {id:"proyectos",    icon:"📁",label:"Proyectos",   color:T.purple},
     {id:"estrategias",  icon:"🎯",label:"Estrategias", color:T.green,  badge:estEnCurso},
     {id:"incidencias",  icon:"🚨",label:"Incidencias", color:T.red,    badge:incAbiertas},
+    {id:"actividad",    icon:"📊",label:"Actividad",   color:"#6366F1"},
   ];
 
   const NAV_JEFE=[
@@ -7533,6 +7953,7 @@ function App(props){
     {id:"proyectos",    icon:"📁",label:"Proyectos",   color:T.purple},
     {id:"incidencias",  icon:"🚨",label:"Incidencias", color:T.red,    badge:incAbiertas},
     {id:"usuarios",     icon:"👥",label:"Equipo",      color:T.blue},
+    {id:"actividad",    icon:"📊",label:"Actividad",   color:"#6366F1"},
   ];
 
   const NAV_DIR=[
@@ -7543,6 +7964,7 @@ function App(props){
     {id:"proyectos",    icon:"📁",label:"Proyectos",    color:T.purple},
     {id:"incidencias",  icon:"🚨",label:"Incidencias",  color:T.red,   badge:incAbiertas},
     {id:"usuarios",     icon:"👥",label:"Equipo",       color:T.blue},
+    {id:"actividad",    icon:"📊",label:"Actividad",    color:"#6366F1"},
   ];
 
   const nav=esAgente?NAV_AGENTE:esJefe?NAV_JEFE:NAV_DIR;
@@ -7867,6 +8289,7 @@ function App(props){
         {section==="oportunidades"&&        <GestorOportunidades usuario={usuario}/>}
         {section==="proyectos"&&            <Proyectos usuario={usuario}/>}
         {section==="incidencias"&&          <Incidencias usuario={usuario}/>}
+        {section==="actividad"&&            <InformeActividad usuario={usuario} oportunidadesDB={oportunidadesDB}/>}
 
         {/* Equipo — jefe ve solo su equipo, director/CEO ven todos */}
         {esJefeOmas&&section==="usuarios"&&(
