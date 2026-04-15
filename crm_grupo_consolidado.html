@@ -6480,17 +6480,13 @@ function HistorialTab({visitas,muestras,estrategia,incidencias=[],resultados}){
 
 
 // ─── APP PRINCIPAL ────────────────────────────────────────────────
-export default function App(props){
-  const [usuario,setUsuario]=useState(null);
+function App(props){
+  const [usuario,setUsuario]=useState(function(){
+    // Auto-login desde portal: initializar directamente sin useEffect
+    return (props&&props._autoLogin)?props._autoLogin:null;
+  });
   const [section,setSection]=useState("dashboard");
   const [adminOpen,setAdminOpen]=useState(false);
-
-  // Auto-login desde el portal
-  useEffect(()=>{
-    if(props&&props._autoLogin&&!usuario){
-      handleLogin(props._autoLogin);
-    }
-  },[]);
 
   // Actividad diaria compartida entre GestorClientes e Informe
   const [actividadSemana,setActividadSemana]=useState({});
@@ -6963,50 +6959,54 @@ export default function App(props){
 
 
 
-// ── Auto-login desde Portal (postMessage o sessionStorage) ──────────
-function tryPortalLogin(appRoot){
-  // Intentar desde sessionStorage (cargado antes que el componente)
-  try{
-    var stored=sessionStorage.getItem('portalUser');
-    if(stored){
-      var pu=JSON.parse(stored);
-      var crmId=pu.crmId||pu.id;
-      var crmUser=USUARIOS.find(function(u){return u.id===crmId;});
-      if(crmUser) return crmUser;
-    }
-  }catch(e){}
-  return null;
-}
-
 // ── Montar la app ──────────────────────────────────────────────────
 const container = document.getElementById('root');
 const root = ReactDOM.createRoot(container);
 
-// Comprobar si viene del portal
 (function(){
-  var autoUser=null;
-  try{
-    var stored=sessionStorage.getItem('portalUser');
-    if(stored){
-      var pu=JSON.parse(stored);
-      var crmId=pu.crmId||pu.id;
-      autoUser=USUARIOS.find(function(u){return u.id===crmId;});
-    }
-  }catch(e){}
+  // Buscar usuario del portal por 3 vías:
+  // 1. URL hash: crm_grupo_consolidado.html#wk1
+  // 2. localStorage gc_portal_user (compartido entre parent e iframe mismo dominio)
+  // 3. postMessage del portal
 
-  if(autoUser){
-    // Auto-login con usuario del portal
-    root.render(React.createElement(App,{_autoLogin:autoUser}));
-  } else {
-    root.render(React.createElement(App));
+  function findCrmUser(crmId){
+    return USUARIOS.find(function(u){return u.id===crmId;});
   }
 
-  // Escuchar postMessage del portal (por si sessionStorage no está disponible)
+  function getAutoUser(){
+    // Vía 1: URL hash
+    try{
+      var hash=window.location.hash.replace('#','');
+      if(hash){
+        var decoded=decodeURIComponent(hash);
+        var u=findCrmUser(decoded);
+        if(u) return u;
+      }
+    }catch(e){}
+
+    // Vía 2: localStorage (se comparte entre parent e iframe mismo origen)
+    try{
+      var stored=localStorage.getItem('gc_portal_user');
+      if(stored){
+        var pu=JSON.parse(stored);
+        var crmId=pu.crmId||pu.id;
+        var u=findCrmUser(crmId);
+        if(u) return u;
+      }
+    }catch(e){}
+
+    return null;
+  }
+
+  var autoUser=getAutoUser();
+  root.render(React.createElement(App,{_autoLogin:autoUser||null}));
+
+  // Vía 3: postMessage (por si las otras fallan — el portal lo envía al cargar)
   window.addEventListener('message',function(e){
     if(e.data&&e.data.type==='PORTAL_USER'){
       var pu=e.data.user;
       var crmId=pu.crmId||pu.id;
-      var crmUser=USUARIOS.find(function(u){return u.id===crmId;});
+      var crmUser=findCrmUser(crmId);
       if(crmUser){
         root.render(React.createElement(App,{_autoLogin:crmUser}));
       }
