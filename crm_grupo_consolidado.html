@@ -2234,7 +2234,7 @@ function EstrategiaAprobacionCard({e,usuario,onConfirmar,onRechazar,onEscalar}){
 // ═══════════════════════════════════════════════════════════════════
 // ESTRATEGIAS — vista clara por rol
 // ═══════════════════════════════════════════════════════════════════
-function MisEstrategias({usuario}){
+function MisEstrategias({usuario, clientesFB}){
   const esJefe  = usuario?.rol==="jefe"||usuario?.rol==="director"||usuario?.rol==="ceo";
   const esRolJefe = usuario?.rol==="jefe";
   const esRolDir  = usuario?.rol==="director";
@@ -2246,6 +2246,10 @@ function MisEstrategias({usuario}){
   const [cargando,setCargando]=useState(false);
   const [sel,setSel]=useState(null);
   const [filtroSec,setFiltroSec]=useState("todas");
+  const [nuevaOpen,setNuevaOpen]=useState(false);
+  const [nuevaForm,setNuevaForm]=useState({clienteNombre:"",clienteId:"",tipo:"recuperacion",texto:"",objetivo:"",ofertas:[]});
+  const [qCliente,setQCliente]=useState("");
+  const [guardandoNueva,setGuardandoNueva]=useState(false);
 
   useEffect(()=>{
     const unsub=GlobalStore.subscribe(data=>setEstrategiasLocal([...data]));
@@ -2359,6 +2363,28 @@ function MisEstrategias({usuario}){
   const activasAgente=esAgente?estrategias.filter(e=>e.agente===usuario.id&&e.estado==="en_curso"&&!e.resolucion):[];
   const misMostrar=esJefe?estrategias.filter(e=>deEquipo(e)&&e.estado==="en_curso"&&!e.resolucion):[];
 
+  // ── Guardar nueva estrategia desde lista ─────────────────────────
+  const guardarNuevaEstrategia=()=>{
+    if(!nuevaForm.texto.trim()||!nuevaForm.clienteNombre.trim()) return;
+    setGuardandoNueva(true);
+    const id=`est_${usuario.id}_${(nuevaForm.clienteId||nuevaForm.clienteNombre).replace(/\s+/g,"_")}_${Date.now()}`;
+    const doc={
+      id, agente:usuario.id, equipo:usuario.equipo||"",
+      cliente:nuevaForm.clienteNombre, clienteNombre:nuevaForm.clienteNombre,
+      clienteId:nuevaForm.clienteId||nuevaForm.clienteNombre,
+      tipo:nuevaForm.tipo, texto:nuevaForm.texto, objetivo:nuevaForm.objetivo,
+      ofertas:nuevaForm.ofertas||[], estado:"pendiente_aprobacion",
+      semana:14, fecha:new Date().toLocaleDateString("es-ES"),
+    };
+    const next=[doc,...estrategias];
+    GlobalStore.setEstrategias(next);
+    setEstrategiasLocal([...next]);
+    fbEscribir("estrategias",id,doc).catch(()=>{});
+    setNuevaOpen(false);
+    setNuevaForm({clienteNombre:"",clienteId:"",tipo:"recuperacion",texto:"",objetivo:"",ofertas:[]});
+    setQCliente(""); setGuardandoNueva(false);
+  };
+
   // ── DETALLE ─────────────────────────────────────────────────────
   if(sel){
     const esSuya=sel.agente===usuario.id;
@@ -2411,8 +2437,10 @@ function MisEstrategias({usuario}){
                         {/* Sin decisión explícita = aprobado al precio solicitado */}
                         {o.aprobada===undefined&&!o.elevadaA&&(
                           <p style={{margin:0,fontSize:12,color:T.green,fontWeight:700}}>
-                            Precio aprobado: <strong>{o.precioFinal}€/kg</strong>
-                            {o.dto&&<span style={{color:T.muted,marginLeft:6}}>(-{o.dto}%)</span>}
+                            Precio aprobado: <strong>{o.precioFinal||o.precioBase||"—"}€/kg</strong>
+                            {o.dto&&<span style={{color:T.red,fontWeight:700,marginLeft:6}}>(-{o.dto}%)</span>}
+                            {o.precioBase&&o.precioFinal&&o.precioBase!==o.precioFinal&&
+                              <span style={{color:T.muted,textDecoration:"line-through",marginLeft:6,fontWeight:400}}>{o.precioBase}€</span>}
                           </p>
                         )}
                         {o.aprobada===false&&<p style={{margin:0,fontSize:12,color:T.red,fontWeight:700}}>❌ No autorizado</p>}
@@ -2518,12 +2546,102 @@ function MisEstrategias({usuario}){
             {esAgente?"Mis recuperaciones":esRolJefe?`Equipo ${miEquipo}`:esRolDir?"Dirección":"CEO"}
           </p>
         </div>
-        <button onClick={recargar} disabled={cargando}
-          style={{background:"#fff",border:`1px solid ${T.border}`,borderRadius:9,
-            padding:"9px 14px",cursor:cargando?"default":"pointer",color:T.muted,fontSize:13}}>
-          {cargando?"⏳":"🔄"} Actualizar
-        </button>
+        <div style={{display:"flex",gap:8}}>
+          {esAgente&&(
+            <button onClick={()=>setNuevaOpen(v=>!v)}
+              style={{background:nuevaOpen?T.amber:T.navy,border:"none",borderRadius:9,
+                padding:"9px 14px",cursor:"pointer",color:"#fff",fontSize:13,fontWeight:700}}>
+              {nuevaOpen?"✕ Cancelar":"+ Nueva"}
+            </button>
+          )}
+          <button onClick={recargar} disabled={cargando}
+            style={{background:"#fff",border:`1px solid ${T.border}`,borderRadius:9,
+              padding:"9px 14px",cursor:cargando?"default":"pointer",color:T.muted,fontSize:13}}>
+            {cargando?"⏳":"🔄"}
+          </button>
+        </div>
       </div>
+
+      {/* ── FORMULARIO NUEVA ESTRATEGIA ── */}
+      {esAgente&&nuevaOpen&&(
+        <div style={{background:"#fff",borderRadius:16,padding:"18px",marginBottom:20,
+          border:`2px solid ${T.amber}`,boxShadow:"0 4px 20px rgba(0,0,0,.08)"}}>
+          <p style={{margin:"0 0 14px",fontSize:15,fontWeight:800,color:T.text}}>🎯 Nueva estrategia</p>
+
+          {/* Selección de cliente */}
+          <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Cliente</p>
+          <input value={qCliente} onChange={ev=>{
+              setQCliente(ev.target.value);
+              setNuevaForm(f=>({...f,clienteNombre:ev.target.value,clienteId:""}));
+            }}
+            placeholder="Buscar o escribir nombre del cliente…"
+            style={{width:"100%",border:`1.5px solid ${T.border}`,borderRadius:10,
+              padding:"10px 12px",fontSize:13,outline:"none",boxSizing:"border-box",marginBottom:4}}/>
+          {/* Sugerencias de cliente */}
+          {qCliente.length>=2&&(()=>{
+            const lista=(clientesFB||CLIENTES_POR_AGENTE[usuario.id]||[])
+              .filter(c=>(c.nombre||c.NOMBRE||"").toLowerCase().includes(qCliente.toLowerCase()))
+              .slice(0,6);
+            return lista.length>0?(
+              <div style={{border:`1px solid ${T.border}`,borderRadius:10,marginBottom:10,overflow:"hidden"}}>
+                {lista.map((c,i)=>{
+                  const nom=c.nombre||c.NOMBRE||c.name||"";
+                  return(
+                    <div key={c.id||i} onClick={()=>{
+                        setNuevaForm(f=>({...f,clienteNombre:nom,clienteId:c.id||nom}));
+                        setQCliente(nom);
+                      }}
+                      style={{padding:"9px 14px",cursor:"pointer",fontSize:13,
+                        borderBottom:i<lista.length-1?`1px solid ${T.border}`:"none",
+                        background:"#fff"}}
+                      onMouseEnter={e=>e.currentTarget.style.background="#F8FAFC"}
+                      onMouseLeave={e=>e.currentTarget.style.background="#fff"}>
+                      {nom}
+                    </div>
+                  );
+                })}
+              </div>
+            ):null;
+          })()}
+
+          {/* Tipo */}
+          <p style={{margin:"8px 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Tipo</p>
+          <div style={{display:"flex",gap:8,marginBottom:12}}>
+            {[{k:"recuperacion",icon:"🔄",label:"Recuperar"},{k:"nuevo",icon:"🌱",label:"Cliente nuevo"}].map(t=>(
+              <button key={t.k} onClick={()=>setNuevaForm(f=>({...f,tipo:t.k}))}
+                style={{flex:1,padding:"10px",borderRadius:10,cursor:"pointer",fontSize:12,
+                  border:`2px solid ${nuevaForm.tipo===t.k?T.amber:T.border}`,
+                  background:nuevaForm.tipo===t.k?T.amberL:"#fff",
+                  color:nuevaForm.tipo===t.k?T.amber:T.muted,fontWeight:nuevaForm.tipo===t.k?700:400}}>
+                {t.icon} {t.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Acción */}
+          <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Acción propuesta</p>
+          <textarea value={nuevaForm.texto} onChange={ev=>setNuevaForm(f=>({...f,texto:ev.target.value}))} rows={3}
+            placeholder="Muestra + visita personalizada, descuento especial…"
+            style={{width:"100%",border:`1.5px solid ${T.border}`,borderRadius:10,
+              padding:"10px 12px",fontSize:13,resize:"none",lineHeight:1.5,
+              outline:"none",boxSizing:"border-box",fontFamily:"inherit",marginBottom:10}}/>
+
+          {/* Objetivo */}
+          <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Objetivo</p>
+          <input value={nuevaForm.objetivo} onChange={ev=>setNuevaForm(f=>({...f,objetivo:ev.target.value}))}
+            placeholder="Recuperar pedido mensual, reactivar cuenta…"
+            style={{width:"100%",border:`1.5px solid ${T.border}`,borderRadius:10,
+              padding:"10px 12px",fontSize:13,outline:"none",boxSizing:"border-box",marginBottom:14}}/>
+
+          <button onClick={guardarNuevaEstrategia}
+            disabled={!nuevaForm.texto.trim()||!nuevaForm.clienteNombre.trim()||guardandoNueva}
+            style={{width:"100%",padding:"13px",borderRadius:11,border:"none",
+              background:nuevaForm.texto.trim()&&nuevaForm.clienteNombre.trim()?T.amber:"#CBD5E1",
+              color:"#fff",fontWeight:700,fontSize:14,cursor:"pointer"}}>
+            {guardandoNueva?"⏳ Guardando…":"✓ Solicitar estrategia"}
+          </button>
+        </div>
+      )}
 
       {/* Filtros rápidos */}
       {(()=>{
@@ -7305,7 +7423,7 @@ function App(props){
         {esDir&&section==="dashboard"&&     <DashDirector usuario={usuario} onNav={setSection}/>}
 
         {/* Compartidas — con filtrado por rol dentro de cada componente */}
-        {section==="estrategias"&&          <MisEstrategias usuario={usuario}/>}
+        {section==="estrategias"&&          <MisEstrategias usuario={usuario} clientesFB={misClientesFB}/>}
         {section==="oportunidades"&&        <GestorOportunidades usuario={usuario}/>}
         {section==="proyectos"&&            <Proyectos usuario={usuario}/>}
         {section==="incidencias"&&          <Incidencias usuario={usuario}/>}
