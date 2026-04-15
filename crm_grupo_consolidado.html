@@ -390,26 +390,350 @@ function BottomNav({items,current,onChange}){
 // ─── DASHBOARD AGENTE ─────────────────────────────────────────────
 function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
   const {id,equipo,color}=usuario;
+  const crmId=usuario.crmId||id;
   const opsBD=oportunidadesDB||OPORTUNIDADES_SEED;
-  // Usar clientes reales de Firebase, fallback a seed
   const misClientes=clientesFB&&clientesFB.length>0 ? clientesFB : (CLIENTES_POR_AGENTE[id]||[]);
-  const mPend=MUESTRAS_SEED.filter(m=>m.estado==="pendiente"&&m.agente===id).length;
   const mCurso=MUESTRAS_SEED.filter(m=>m.agente===id).length;
   const ePend=ESTRATEGIAS_SEED.filter(e=>e.estado==="en_curso"&&e.agente===id).length;
-  // Usar datos reales de Firebase — acepta tanto campo agente como agenteId
   const misOps=opsBD.filter(o=>(o.agente===id||o.agenteId===id)&&
     !["ganada","perdida","cerrada_ganada","cerrada_perdida"].some(e=>o.etapa===e||o.estado===e));
   const misProy=PROYECTOS_SEED.filter(p=>p.estado==="activo"&&p.equipo?.includes(id));
   const misInc=INCIDENCIAS_SEED.filter(i=>i.autor===id&&i.estado==="abierta");
   const totalSem=misClientes.length,visitados=Math.min(totalSem,8),pendVisita=totalSem-visitados;
-  const semana=14;
 
-  const vMes=24500,vMesObj=28750,mbMes=34.2,mbMesObj=32;
-  const vAnual=187400,vAnualObj=345000,mbAnual=33.8,mbAnualObj=32;
-  const pctVM=Math.round(vMes/vMesObj*100);
-  const pctVA=Math.round(vAnual/vAnualObj*100);
-  const pctMM=Math.round(mbMes/mbMesObj*100);
-  const pctMA=Math.round(mbAnual/mbAnualObj*100);
+  // ── Datos reales desde Firebase ──────────────────────────────────
+  const [kpi,setKpi]=useState(null);          // agentes_kpi doc
+  const [semanas,setSemanas]=useState([]);    // presupuesto semanal
+  const [loadingKpi,setLoadingKpi]=useState(true);
+
+  useEffect(()=>{
+    if(!crmId) return;
+    const base=`https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents`;
+
+    // 1. Resumen KPI acumulado
+    fetch(`${base}/agentes_kpi/${crmId}_2026`)
+      .then(r=>r.json())
+      .then(doc=>{
+        if(!doc.fields) return;
+        const o={};
+        for(const [k,v] of Object.entries(doc.fields)){
+          o[k]=v.doubleValue??v.integerValue??v.stringValue??v.nullValue??null;
+          if(typeof o[k]==="string"&&!isNaN(o[k])) o[k]=parseFloat(o[k]);
+        }
+        setKpi(o);
+      }).catch(()=>{}).finally(()=>setLoadingKpi(false));
+
+    // 2. Semanas (para "este mes" = últimas 4 semanas con dato)
+    fetch(`${base}:runQuery`,{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({structuredQuery:{
+        from:[{collectionId:"presupuesto"}],
+        where:{fieldFilter:{field:{fieldPath:"agente"},op:"EQUAL",value:{stringValue:crmId}}},
+        orderBy:[{field:{fieldPath:"semana"},direction:"ASCENDING"}],
+        limit:53
+      }})
+    }).then(r=>r.json()).then(rows=>{
+      const docs=(rows||[]).map(r=>r.document).filter(Boolean).map(doc=>{
+        const o={};
+        for(const [k,v] of Object.entries(doc.fields||{})){
+          o[k]=v.doubleValue??v.integerValue??v.stringValue??v.nullValue??null;
+          if(typeof o[k]==="string"&&!isNaN(o[k])) o[k]=parseFloat(o[k]);
+        }
+        return o;
+      });
+      setSemanas(docs);
+    }).catch(()=>{});
+  },[crmId]);
+
+  // ── Cálculo de valores ────────────────────────────────────────────
+  // Semana actual
+  const semanaActual=kpi?.semanaActual||14;
+
+  // "Este mes" = últimas 4 semanas con venta real
+  const semanasConReal=semanas.filter(s=>s.ventasReal!=null&&s.ventasReal>0);
+  const ultimas4=semanasConReal.slice(-4);
+  const vMes=ultimas4.reduce((s,r)=>s+(r.ventasReal||0),0)||0;
+  const vMesObj=ultimas4.reduce((s,r)=>s+(r.ventasPpto||0),0)||0;
+  const mgMes4=ultimas4.filter(s=>s.mgReal!=null).map(s=>s.mgReal);
+  const mbMes=mgMes4.length>0?parseFloat((mgMes4.reduce((a,b)=>a+b,0)/mgMes4.length*100).toFixed(1)):0;
+  const mbMesObj=parseFloat(((ultimas4[0]?.mgPpto||0.344)*100).toFixed(1));
+
+  // Acumulado año
+  const vAnual=kpi?.ventasRealAcum||0;
+  const vAnualObj=kpi?.ventasPptoAcum||0;
+  const mbAnual=parseFloat(((kpi?.mgMedio||0)*100).toFixed(1));
+  const mbAnualObj=parseFloat(((kpi?.mgObjetivo||0.344)*100).toFixed(1));
+
+  // Promos y Liquidaciones acumuladas
+  const promoVal=kpi?.promoRealAcum||0;
+  const promoObj=kpi?.promoObjAcum||0;
+  const liqVal=kpi?.liquidRealAcum||0;
+  const liqObj=kpi?.liquidObjAcum||0;
+
+  // % cumplimiento
+  const pctVM=vMesObj>0?Math.round(vMes/vMesObj*100):0;
+  const pctVA=vAnualObj>0?Math.round(vAnual/vAnualObj*100):0;
+  const pctMM=mbMesObj>0?Math.round(mbMes/mbMesObj*100):0;
+  const pctMA=mbAnualObj>0?Math.round(mbAnual/mbAnualObj*100):0;
+  const pctP=promoObj>0?Math.round(promoVal/promoObj*100):0;
+  const pctL=liqObj>0?Math.round(liqVal/liqObj*100):0;
+
+  // Sin datos Firebase: usar fallback hardcoded
+  const sinDatos=!kpi&&!loadingKpi;
+
+  // Anillo SVG de progreso
+  const Ring=({pct,size=56,stroke=5})=>{
+    const r=size/2-stroke;
+    const circ=2*Math.PI*r;
+    const fill=circ*(1-Math.min(pct,100)/100);
+    const c=pct>=100?"#22C55E":pct>=80?"#F59E0B":"#EF4444";
+    return(
+      <svg width={size} height={size} style={{flexShrink:0,transform:"rotate(-90deg)"}}>
+        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#E2E8F0" strokeWidth={stroke}/>
+        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={c} strokeWidth={stroke}
+          strokeDasharray={circ} strokeDashoffset={fill}
+          strokeLinecap="round" style={{transition:"stroke-dashoffset .8s ease"}}/>
+      </svg>
+    );
+  };
+
+  const MetricCard=({label,value,obj,pct,suffix="",note})=>{
+    const c=pct>=100?"#22C55E":pct>=80?"#F59E0B":"#EF4444";
+    return(
+      <div style={{flex:1,background:"#fff",borderRadius:16,padding:"18px 16px",
+        border:"1px solid #E2E8F0",
+        boxShadow:"0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06)"}}>
+        <p style={{margin:"0 0 12px",fontSize:10,fontWeight:700,color:"#94A3B8",
+          textTransform:"uppercase",letterSpacing:".1em"}}>{label}</p>
+        <div style={{display:"flex",gap:12,alignItems:"center",marginBottom:14}}>
+          <div style={{position:"relative",flexShrink:0}}>
+            <Ring pct={pct}/>
+            <span style={{position:"absolute",top:"50%",left:"50%",
+              transform:"translate(-50%,-50%) rotate(0deg)",
+              fontSize:11,fontWeight:800,color:c}}>{pct}%</span>
+          </div>
+          <div style={{flex:1,minWidth:0}}>
+            <p style={{margin:0,fontSize:24,fontWeight:800,color:"#0F172A",
+              letterSpacing:"-0.03em",lineHeight:1}}>
+              {typeof value==="number"&&value>999?fmt(value):value}{suffix}
+            </p>
+            <p style={{margin:"3px 0 0",fontSize:11,color:"#94A3B8"}}>
+              obj. {typeof obj==="number"&&obj>999?fmt(obj):obj}{suffix}
+            </p>
+          </div>
+        </div>
+        <div style={{height:2,borderRadius:99,background:"#F1F5F9",overflow:"hidden"}}>
+          <div style={{height:"100%",width:`${Math.min(pct,100)}%`,borderRadius:99,
+            background:c,transition:"width .8s ease"}}/>
+        </div>
+        {note&&<p style={{margin:"8px 0 0",fontSize:10,color:"#94A3B8"}}>{note}</p>}
+      </div>
+    );
+  };
+
+  const MODS=[
+    {icon:"🎯",label:"Estrategias en curso",sub:"Registra el avance semanal",count:ePend,nav:"estrategias",bg:"#EFF6FF",ic:"#3B82F6"},
+    {icon:"📁",label:"Proyectos activos",sub:misProy.map(p=>p.nombre).join(", ")||"",count:misProy.length,nav:"proyectos",bg:"#FFFBEB",ic:"#D97706"},
+    {icon:"💼",label:"Oportunidades abiertas",sub:`${fmt(misOps.reduce((s,o)=>s+(o.valor||0),0))}€ en pipeline`,count:misOps.length,nav:"oportunidades",bg:"#F0F9FF",ic:"#0EA5E9"},
+    {icon:"🚨",label:"Incidencias abiertas",sub:"Pendientes de resolución",count:misInc.length,nav:"incidencias",bg:"#FFF1F2",ic:"#F43F5E",urgent:true},
+    {icon:"📦",label:"Muestras en curso",sub:`${mCurso} muestra${mCurso!==1?"s":""} activa${mCurso!==1?"s":""}`,count:mCurso,nav:"muestras",bg:"#F5F3FF",ic:"#7C3AED"},
+  ].filter(m=>m.count>0);
+
+  const hayPend=MODS.length>0||totalSem>0;
+
+  return(
+    <div style={{background:"#F1F5F9",minHeight:"100vh",paddingBottom:100}}>
+      <style>{`
+        @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+        .pend-row:hover{background:#F8FAFC!important}
+      `}</style>
+
+      {/* ══ HEADER ══ */}
+      <div style={{background:"linear-gradient(135deg,#0F172A 0%,#1E293B 60%,#1E3A5F 100%)",
+        padding:"32px 20px 28px",position:"relative",overflow:"hidden"}}>
+        <div style={{position:"absolute",right:-40,top:-40,width:180,height:180,borderRadius:"50%",background:"rgba(255,255,255,.03)"}}/>
+        <div style={{position:"absolute",right:40,bottom:-60,width:120,height:120,borderRadius:"50%",background:"rgba(255,255,255,.04)"}}/>
+        <div style={{position:"absolute",left:-20,bottom:-20,width:100,height:100,borderRadius:"50%",background:"rgba(99,102,241,.1)"}}/>
+
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
+          <div>
+            <div style={{display:"flex",gap:6,marginBottom:10}}>
+              <span style={{background:"rgba(255,255,255,.1)",color:"rgba(255,255,255,.7)",
+                fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:99,
+                letterSpacing:".08em",textTransform:"uppercase"}}>{equipo}</span>
+              <span style={{background:"rgba(99,102,241,.3)",color:"#A5B4FC",
+                fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:99}}>Sem. {semanaActual}</span>
+              {loadingKpi&&<span style={{background:"rgba(255,255,255,.08)",color:"rgba(255,255,255,.4)",
+                fontSize:10,padding:"3px 10px",borderRadius:99}}>⏳ Cargando datos…</span>}
+              {kpi&&<span style={{background:"rgba(34,197,94,.2)",color:"#4ADE80",
+                fontSize:10,padding:"3px 10px",borderRadius:99}}>● Datos reales</span>}
+            </div>
+            <p style={{margin:0,fontSize:26,fontWeight:800,color:"#FFFFFF",
+              letterSpacing:"-0.03em",lineHeight:1.1}}>
+              {usuario.nombre.split(" ").slice(0,2).join(" ")}
+            </p>
+          </div>
+          <div style={{background:"rgba(255,255,255,.08)",backdropFilter:"blur(8px)",
+            border:"1px solid rgba(255,255,255,.12)",borderRadius:14,
+            padding:"12px 16px",textAlign:"center",flexShrink:0}}>
+            <p style={{margin:"0 0 2px",fontSize:9,fontWeight:700,color:"rgba(255,255,255,.5)",
+              textTransform:"uppercase",letterSpacing:".1em"}}>Acumulado</p>
+            <p style={{margin:0,fontSize:28,fontWeight:900,lineHeight:1,
+              color:pctVA>=100?"#4ADE80":pctVA>=80?"#FCD34D":"#FB7185"}}>{pctVA}%</p>
+            <p style={{margin:"2px 0 0",fontSize:9,color:"rgba(255,255,255,.4)"}}>del objetivo</p>
+          </div>
+        </div>
+
+        <div style={{marginBottom:6}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+            <span style={{fontSize:11,color:"rgba(255,255,255,.5)"}}>Ventas acumuladas S1–S{semanaActual}</span>
+            <span style={{fontSize:11,color:"rgba(255,255,255,.7)",fontWeight:600}}>
+              {fmt(vAnual)}€ / {fmt(vAnualObj)}€
+            </span>
+          </div>
+          <div style={{height:4,borderRadius:99,background:"rgba(255,255,255,.12)",overflow:"hidden"}}>
+            <div style={{height:"100%",width:`${Math.min(pctVA,100)}%`,borderRadius:99,
+              background:pctVA>=100?"#4ADE80":pctVA>=80?"#FCD34D":"#FB7185",
+              transition:"width .8s ease"}}/>
+          </div>
+        </div>
+      </div>
+
+      {/* ══ CONTENIDO ══ */}
+      <div style={{padding:"20px 16px 0"}}>
+
+        <div onClick={()=>onNav("clientes")}
+          style={{background:"#fff",borderRadius:16,padding:"14px 18px",
+            marginBottom:20,cursor:"pointer",
+            border:`1px solid ${T.border}`,
+            boxShadow:"0 2px 12px rgba(0,0,0,.06)",
+            display:"flex",gap:14,alignItems:"center"}}>
+          <div style={{width:46,height:46,borderRadius:13,
+            background:"linear-gradient(135deg,#0F172A,#334155)",
+            display:"flex",alignItems:"center",justifyContent:"center",
+            fontSize:22,flexShrink:0}}>📋</div>
+          <div style={{flex:1}}>
+            <p style={{margin:"0 0 3px",fontSize:14,fontWeight:800,color:T.text}}>
+              Mis clientes · Semana {semanaActual}
+            </p>
+            <p style={{margin:"0 0 6px",fontSize:11,color:T.muted}}>
+              {visitados} visitados · {pendVisita} por visitar · {totalSem} total
+            </p>
+            <div style={{height:3,borderRadius:99,background:T.border,overflow:"hidden"}}>
+              <div style={{height:"100%",
+                width:totalSem>0?`${Math.round(visitados/totalSem*100)}%`:"0%",
+                borderRadius:99,background:visitados===totalSem&&totalSem>0?T.green:T.blue}}/>
+            </div>
+          </div>
+          <span style={{color:T.muted,fontSize:20,flexShrink:0}}>›</span>
+        </div>
+
+        {/* — Últimas 4 semanas — */}
+        <p style={{margin:"0 0 10px",fontSize:10,fontWeight:700,color:"#64748B",
+          textTransform:"uppercase",letterSpacing:".12em"}}>
+          {ultimas4.length>0?`Últimas ${ultimas4.length} semanas (S${ultimas4[0]?.semana}–S${ultimas4[ultimas4.length-1]?.semana})`:"Últimas semanas"}
+        </p>
+        <div style={{display:"flex",gap:10,marginBottom:12,animation:"fadeUp .4s ease"}}>
+          <MetricCard label="Ventas" value={vMes} obj={Math.round(vMesObj)} pct={pctVM} suffix="€"/>
+          <MetricCard label="Margen bruto" value={mbMes} obj={mbMesObj} pct={pctMM} suffix="%"/>
+        </div>
+
+        {/* Promo y Liquidación */}
+        {(()=>{
+          const cP=pctP>=100?"#22C55E":pctP>=80?"#F59E0B":"#EF4444";
+          const cL=pctL>=100?"#22C55E":pctL>=80?"#F59E0B":"#EF4444";
+          const MiniCard=({label,icon,val,obj,pct,c})=>(
+            <div style={{flex:1,background:"#fff",borderRadius:14,padding:"14px",
+              border:"1px solid #E2E8F0",boxShadow:"0 1px 3px rgba(0,0,0,.04)"}}>
+              <p style={{margin:"0 0 8px",fontSize:10,fontWeight:700,color:"#94A3B8",
+                textTransform:"uppercase",letterSpacing:".1em"}}>{icon} {label}</p>
+              <p style={{margin:"0 0 2px",fontSize:20,fontWeight:800,color:"#0F172A"}}>
+                {fmt(val)}€
+              </p>
+              <p style={{margin:"0 0 8px",fontSize:11,color:"#94A3B8"}}>obj. {fmt(obj)}€</p>
+              <div style={{height:4,borderRadius:99,background:"#F1F5F9",overflow:"hidden"}}>
+                <div style={{height:"100%",width:`${Math.min(pct,100)}%`,
+                  borderRadius:99,background:c,transition:"width .8s ease"}}/>
+              </div>
+              <p style={{margin:"4px 0 0",fontSize:10,fontWeight:700,color:c}}>{pct}% del objetivo</p>
+            </div>
+          );
+          return(
+            <div style={{display:"flex",gap:10,marginBottom:22}}>
+              <MiniCard label="Promo acum." icon="🎯" val={Math.round(promoVal)} obj={Math.round(promoObj)} pct={pctP} c={cP}/>
+              <MiniCard label="Liquid. acum." icon="📋" val={Math.round(liqVal)} obj={Math.round(liqObj)} pct={pctL} c={cL}/>
+            </div>
+          );
+        })()}
+
+        {/* — Acumulado año — */}
+        <p style={{margin:"0 0 10px",fontSize:10,fontWeight:700,color:"#64748B",
+          textTransform:"uppercase",letterSpacing:".12em"}}>Acumulado año (S1–S{semanaActual})</p>
+        <div style={{display:"flex",gap:10,marginBottom:22,animation:"fadeUp .5s ease"}}>
+          <MetricCard label="Ventas" value={vAnual} obj={Math.round(vAnualObj)} pct={pctVA} suffix="€"
+            note={vAnual>0&&semanaActual>0?`Proy. ${fmt(Math.round(vAnual/semanaActual*52))}€ anuales`:""}/>
+          <MetricCard label="Margen bruto" value={mbAnual} obj={mbAnualObj} pct={pctMA} suffix="%"
+            note={mbAnual>0?`${mbAnual>=mbAnualObj?"+":""}${(mbAnual-mbAnualObj).toFixed(1)}pp vs obj.`:""}/>
+        </div>
+
+        {/* — Pendientes — */}
+        {hayPend&&(
+          <>
+            <p style={{margin:"0 0 10px",fontSize:10,fontWeight:700,color:"#64748B",
+              textTransform:"uppercase",letterSpacing:".12em"}}>Pendientes</p>
+            <div style={{background:"#fff",borderRadius:16,overflow:"hidden",
+              border:"1px solid #E2E8F0",
+              boxShadow:"0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06)",
+              marginBottom:22,animation:"fadeUp .6s ease"}}>
+              {MODS.map((m,i)=>(
+                <div key={m.nav} className="pend-row" onClick={()=>onNav(m.nav)}
+                  style={{display:"flex",alignItems:"center",gap:14,padding:"14px 16px",
+                    borderBottom:i<MODS.length-1||totalSem>0?"1px solid #F1F5F9":"none",
+                    cursor:"pointer",transition:"background .15s"}}>
+                  <div style={{width:38,height:38,borderRadius:11,background:m.bg,
+                    display:"flex",alignItems:"center",justifyContent:"center",
+                    fontSize:18,flexShrink:0}}>{m.icon}</div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{margin:0,fontSize:13,fontWeight:600,color:"#0F172A"}}>{m.label}</p>
+                    {m.sub&&<p style={{margin:"2px 0 0",fontSize:11,color:"#94A3B8",
+                      overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{m.sub}</p>}
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+                    <span style={{fontSize:12,fontWeight:800,color:m.urgent?"#F43F5E":m.ic,
+                      background:m.bg,borderRadius:99,
+                      padding:"3px 10px",minWidth:24,textAlign:"center"}}>{m.count}</span>
+                    <span style={{color:"#CBD5E1",fontSize:16,fontWeight:300}}>›</span>
+                  </div>
+                </div>
+              ))}
+              {totalSem>0&&(
+                <div style={{display:"flex",alignItems:"center",gap:14,padding:"14px 16px"}}>
+                  <div style={{width:38,height:38,borderRadius:11,background:"#F0FDF4",
+                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>👥</div>
+                  <div style={{flex:1}}>
+                    <p style={{margin:0,fontSize:13,fontWeight:600,color:"#0F172A"}}>Clientes esta semana</p>
+                    <p style={{margin:"2px 0 5px",fontSize:11,color:"#94A3B8"}}>
+                      {visitados} visitados · {pendVisita} pendientes · {totalSem} total
+                    </p>
+                    <div style={{height:3,borderRadius:99,background:"#F1F5F9",overflow:"hidden"}}>
+                      <div style={{height:"100%",width:`${Math.round(visitados/totalSem*100)}%`,
+                        borderRadius:99,background:"#22C55E",transition:"width .8s"}}/>
+                    </div>
+                  </div>
+                  <span style={{fontSize:12,fontWeight:800,color:"#22C55E",
+                    background:"#F0FDF4",borderRadius:99,padding:"3px 10px",flexShrink:0}}>
+                    {Math.round(visitados/totalSem*100)}%
+                  </span>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
 
   // Anillo SVG de progreso
   const Ring=({pct,size=56,stroke=5})=>{
