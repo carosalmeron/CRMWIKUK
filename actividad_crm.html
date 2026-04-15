@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Actividad CRM</title>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+html,body{margin:0;padding:0;background:#F1F5F9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const {useState,useEffect,useMemo,useRef,useCallback}=React;
+
+// ── Paleta ──────────────────────────────────────────────────────
+const T={
+  navy:"#0F1E2E",green:"#22C55E",greenL:"#F0FDF4",greenD:"#15803D",
+  amber:"#F59E0B",amberL:"#FFFBEB",red:"#EF4444",redL:"#FEF2F2",
+  blue:"#3B82F6",blueL:"#EFF6FF",purple:"#8B5CF6",purpleL:"#F5F3FF",
+  bg:"#F8FAFC",white:"#FFFFFF",border:"#E2E8F0",muted:"#94A3B8",text:"#0F172A",teal:"#0EA5E9",
+};
+const fmt=(n)=>new Intl.NumberFormat("es-ES",{minimumFractionDigits:0}).format(n);
+
+// ── USUARIOS fijos (mismos que CRM) ─────────────────────────────
+const USUARIOS=[
+  {id:"ceo",     nombre:"CEO",             rol:"ceo",      equipo:null,       color:T.purple,icon:"👑"},
+  {id:"dir",     nombre:"Jefe de Ventas",  rol:"director", equipo:null,       color:T.blue,  icon:"📊"},
+  {id:"rw1",     nombre:"Resp. WIKUK",     rol:"jefe",     equipo:"WIKUK",    color:T.green, icon:"🏆"},
+  {id:"ri1",     nombre:"Resp. INTERKEY",  rol:"jefe",     equipo:"INTERKEY", color:T.amber, icon:"🏆"},
+  {id:"wk1",     nombre:"David Mag",       rol:"agente",   equipo:"WIKUK",    color:T.green, icon:"🧑‍💼"},
+  {id:"wk2",     nombre:"Verónica",        rol:"agente",   equipo:"WIKUK",    color:"#10B981",icon:"🧑‍💼"},
+  {id:"wk3",     nombre:"Silvia",          rol:"agente",   equipo:"WIKUK",    color:"#059669",icon:"🧑‍💼"},
+  {id:"ik1",     nombre:"Carlos G.",       rol:"agente",   equipo:"INTERKEY", color:T.amber, icon:"🧑‍💼"},
+  {id:"ik2",     nombre:"Ricardo",         rol:"agente",   equipo:"INTERKEY", color:"#D97706",icon:"🧑‍💼"},
+];
+
+// ── Firebase ────────────────────────────────────────────────────
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+
+async function fbLeer(col){
+  try{
+    let docs=[],next=null;
+    do{
+      const r=await fetch(`${FB}/${col}?pageSize=200${next?"&pageToken="+next:""}`);
+      const d=await r.json();
+      (d.documents||[]).forEach(doc=>{
+        const o={id:doc.name.split("/").pop()};
+        Object.entries(doc.fields||{}).forEach(([k,v])=>{
+          o[k]=v.doubleValue??v.integerValue??v.stringValue??v.nullValue??null;
+          if(typeof o[k]==="string"&&o[k]!=""&&!isNaN(o[k])) o[k]=parseFloat(o[k]);
+        });
+        docs.push(o);
+      });
+      next=d.nextPageToken||null;
+    }while(next);
+    return docs;
+  }catch(e){return [];}
+}
+
+// ── Badge ────────────────────────────────────────────────────────
+function Badge({label,color}){
+  return <span style={{display:"inline-block",padding:"2px 8px",borderRadius:99,fontSize:10,
+    fontWeight:700,background:color+"22",color:color}}>{label}</span>;
+}
+
+function BloqueAgente({agRef,nombre,color,icon,expandible,datosDelDia,oportunidadesDB,fechaSel}){
+  const [abierto,setAbierto]=useState(!expandible);
+  const {vDia,mDia,iDia,opsDia}=datosDelDia(agRef);
+  const pedidos=vDia.filter(v=>v.resultado==="pedido");
+  const RESS_LABEL={pedido:"✅ Pedido",llamada:"📞 Llamada",visita_sin_pedido:"👋 Sin pedido",no_contesta:"📵 N/C",primera_visita:"🆕 Primera"};
+  const RESS_COLOR={pedido:T.green,llamada:T.blue,visita_sin_pedido:T.amber,no_contesta:T.muted,primera_visita:T.purple};
+  const tipMuestras={};
+  mDia.forEach(m=>{const t=m.tipo||"Otras";tipMuestras[t]=(tipMuestras[t]||0)+1;});
+
+  return(
+    <div style={{background:"#fff",borderRadius:14,marginBottom:10,
+      border:"1px solid #E2E8F0",overflow:"hidden",
+      boxShadow:"0 1px 4px rgba(0,0,0,.05)"}}>
+      {/* Cabecera */}
+      <div onClick={()=>expandible&&setAbierto(a=>!a)}
+        style={{display:"flex",alignItems:"center",gap:12,padding:"14px 16px",
+          cursor:expandible?"pointer":"default",background:"#fff"}}>
+        <div style={{width:36,height:36,borderRadius:10,background:color+"20",
+          display:"flex",alignItems:"center",justifyContent:"center",
+          fontSize:18,flexShrink:0}}>{icon}</div>
+        <div style={{flex:1}}>
+          <p style={{margin:0,fontSize:14,fontWeight:700,color:T.text}}>{nombre}</p>
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          {[
+            {n:vDia.length,   icon:"👋",c:"#3B82F6"},
+            {n:pedidos.length,icon:"✅",c:T.green},
+            {n:mDia.length,   icon:"📦",c:T.purple},
+            {n:iDia.length,   icon:"🚨",c:T.red},
+            {n:opsDia.length, icon:"💼",c:T.navy},
+          ].map((k,i)=>(
+            <div key={i} style={{textAlign:"center",minWidth:28}}>
+              <p style={{margin:0,fontSize:14,fontWeight:800,color:k.n>0?k.c:T.border}}>{k.n}</p>
+              <p style={{margin:0,fontSize:9}}>{k.icon}</p>
+            </div>
+          ))}
+          {expandible&&<span style={{color:T.muted,fontSize:14,marginLeft:4}}>{abierto?"▲":"▼"}</span>}
+        </div>
+      </div>
+
+      {abierto&&(
+        <div style={{padding:"0 16px 16px",borderTop:"1px solid #F1F5F9"}}>
+          {/* Visitas */}
+          {vDia.length>0?(
+            <div style={{marginTop:14}}>
+              <p style={{margin:"0 0 8px",fontSize:10,fontWeight:700,color:T.muted,
+                textTransform:"uppercase",letterSpacing:".06em"}}>👋 Visitas · {vDia.length}</p>
+              {vDia.map((v,i)=>{
+                const c=RESS_COLOR[v.resultado]||T.muted;
+                const l=RESS_LABEL[v.resultado]||v.resultado;
+                return(
+                  <div key={i} style={{display:"flex",gap:10,alignItems:"center",
+                    padding:"8px 0",borderBottom:i<vDia.length-1?"1px solid #F8FAFC":"none"}}>
+                    <span style={{fontSize:11,fontWeight:700,color:c,background:c+"15",
+                      borderRadius:6,padding:"2px 8px",flexShrink:0}}>{l}</span>
+                    <p style={{margin:0,fontSize:12,color:T.text,flex:1,
+                      overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                      {v.clienteNombre||v.clienteId||"—"}
+                    </p>
+                    {v.nota&&<p style={{margin:0,fontSize:11,color:T.muted,fontStyle:"italic",
+                      maxWidth:100,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.nota}</p>}
+                  </div>
+                );
+              })}
+            </div>
+          ):<p style={{margin:"12px 0 0",fontSize:12,color:T.muted}}>Sin visitas registradas</p>}
+
+          {/* Muestras */}
+          {mDia.length>0&&(
+            <div style={{marginTop:14}}>
+              <p style={{margin:"0 0 8px",fontSize:10,fontWeight:700,color:T.muted,
+                textTransform:"uppercase",letterSpacing:".06em"}}>📦 Muestras · {mDia.length}</p>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+                {Object.entries(tipMuestras).map(([tipo,n])=>(
+                  <span key={tipo} style={{background:T.purple+"15",color:T.purple,
+                    fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:99}}>
+                    {tipo} ×{n}
+                  </span>
+                ))}
+              </div>
+              {mDia.slice(0,3).map((m,i)=>(
+                <div key={i} style={{display:"flex",gap:8,alignItems:"center",
+                  padding:"5px 0",borderTop:"1px solid #F8FAFC"}}>
+                  <p style={{margin:0,fontSize:12,color:T.text,flex:1,
+                    overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                    {m.prodNombre||m.prod||"—"}
+                  </p>
+                  <span style={{fontSize:11,color:T.muted,flexShrink:0}}>{m.clienteNombre||""}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Incidencias */}
+          {iDia.length>0&&(
+            <div style={{marginTop:14}}>
+              <p style={{margin:"0 0 8px",fontSize:10,fontWeight:700,color:T.muted,
+                textTransform:"uppercase",letterSpacing:".06em"}}>🚨 Incidencias · {iDia.length}</p>
+              {iDia.map((inc,i)=>(
+                <div key={i} style={{padding:"8px 10px",borderRadius:10,marginBottom:6,
+                  background:inc.estado==="cerrada"?"#F0FDF4":"#FEF2F2",
+                  border:`1px solid ${inc.estado==="cerrada"?T.green+"44":T.red+"44"}`}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                    <span style={{fontSize:11,fontWeight:700,color:inc.estado==="cerrada"?T.green:T.red}}>
+                      {inc.estado==="cerrada"?"✅ Cerrada":"🔴 Abierta"}
+                    </span>
+                    <span style={{fontSize:10,color:T.muted}}>{inc.tipo||""}</span>
+                  </div>
+                  <p style={{margin:0,fontSize:12,color:T.text}}>{inc.clienteNombre||inc.clienteId||""}</p>
+                  {inc.descripcion&&<p style={{margin:"2px 0 0",fontSize:11,color:T.muted,
+                    overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{inc.descripcion}</p>}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Oportunidades */}
+          {opsDia.length>0&&(
+            <div style={{marginTop:14}}>
+              <p style={{margin:"0 0 8px",fontSize:10,fontWeight:700,color:T.muted,
+                textTransform:"uppercase",letterSpacing:".06em"}}>💼 Oportunidades · {opsDia.length}</p>
+              {opsDia.map((o,i)=>(
+                <div key={i} style={{display:"flex",gap:10,alignItems:"center",
+                  padding:"7px 0",borderBottom:i<opsDia.length-1?"1px solid #F8FAFC":"none"}}>
+                  <span style={{fontSize:10,fontWeight:700,flexShrink:0,padding:"2px 8px",borderRadius:6,
+                    color:o.estado==="ganada"?T.green:o.estado==="perdida"?T.red:T.blue,
+                    background:o.estado==="ganada"?T.greenL:o.estado==="perdida"?T.redL:T.blueL}}>
+                    {o.estado==="ganada"?"✅ Ganada":o.estado==="perdida"?"❌ Perdida":"🔵 Activa"}
+                  </span>
+                  <p style={{margin:0,fontSize:12,color:T.text,flex:1,
+                    overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{o.nombre||"—"}</p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {vDia.length===0&&mDia.length===0&&iDia.length===0&&opsDia.length===0&&(
+            <div style={{textAlign:"center",padding:"20px 0",color:T.muted}}>
+              <p style={{fontSize:24,margin:"0 0 6px"}}>📭</p>
+              <p style={{margin:0,fontSize:13}}>Sin actividad registrada este día</p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InformeActividad({usuario, oportunidadesDB}){
+  const esAgente=usuario.rol==="agente";
+  const esJefe=usuario.rol==="jefe";
+  const esDir=["director","ceo"].includes(usuario.rol);
+  const miEquipo=usuario.equipo;
+
+  const hoy=new Date();
+  const fmtDate=(d)=>d.toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"numeric"});
+  const fmtDateCorto=(d)=>{const s=d.toLocaleDateString("es-ES",{weekday:"short",day:"numeric",month:"short"});return s.charAt(0).toUpperCase()+s.slice(1);};
+
+  const [fechaSel,setFechaStr]=useState(()=>fmtDate(new Date()));
+  const [visitas,setVisitas]=useState([]);
+  const [muestras,setMuestras]=useState([]);
+  const [incidencias,setIncidencias]=useState([]);
+  const [cargando,setCargando]=useState(false);
+
+  const cambiarDia=(delta)=>{
+    const p=fechaSel.split("/");
+    const d=new Date(+p[2],+p[1]-1,+p[0]);
+    d.setDate(d.getDate()+delta);
+    setFechaStr(fmtDate(d));
+  };
+  const esHoy=fechaSel===fmtDate(hoy);
+
+  useEffect(()=>{
+    setCargando(true);
+    Promise.all([fbLeer("visitas"),fbLeer("muestras"),fbLeer("incidencias")])
+      .then(([v,m,i])=>{
+        setVisitas(v.filter(x=>!x.eliminada));
+        setMuestras(m.filter(x=>!x.eliminada));
+        setIncidencias(i);
+      }).catch(()=>{}).finally(()=>setCargando(false));
+  },[]);
+
+  // Normaliza fecha para comparar dd/mm/yyyy vs dd/mm/yy
+  const matchFecha=(f)=>{
+    if(!f) return false;
+    const fs=String(f).trim();
+    const p=fechaSel.split("/");
+    const corto=`${p[0]}/${p[1]}/${p[2].slice(-2)}`;
+    return fs===fechaSel||fs===corto;
+  };
+
+  const agentesVisibles=USUARIOS.filter(u=>
+    u.rol==="agente"&&(esDir||u.equipo===miEquipo||(esAgente&&u.id===usuario.id))
+  );
+
+  const matchAgente=(doc,agRef)=>{
+    const agId=agRef==="self"?usuario.id:agRef.id;
+    const catV=agRef==="self"?usuario.catalogoVendedor:agRef.catalogoVendedor;
+    const ids=[agId,(catV||"")].filter(Boolean).map(x=>x.toLowerCase());
+    return ids.some(x=>(doc.agente||"").toLowerCase()===x);
+  };
+
+  const datosDelDia=(agRef)=>{
+    const vDia=visitas.filter(v=>matchFecha(v.fecha)&&matchAgente(v,agRef));
+    const mDia=muestras.filter(m=>matchFecha(m.fecha||m.fechaEnvio)&&matchAgente(m,agRef));
+    const iDia=incidencias.filter(i=>matchFecha(i.fecha)&&matchAgente(i,agRef));
+    const agId=agRef==="self"?usuario.id:agRef.id;
+    const catV=agRef==="self"?usuario.catalogoVendedor:agRef.catalogoVendedor;
+    const ids=[agId,(catV||"")].filter(Boolean).map(x=>x.toLowerCase());
+    const opsDia=(oportunidadesDB||[]).filter(o=>{
+      const oid=(o.agenteId||o.agente||"").toLowerCase();
+      const tocada=matchFecha(o.creadaEn)||(o.historial||[]).some(h=>matchFecha(h.fecha));
+      return tocada&&ids.some(x=>oid===x);
+    });
+    return {vDia,mDia,iDia,opsDia};
+  };
+
+  const totalEquipo=agentesVisibles.reduce((acc,ag)=>{
+    const {vDia,mDia,iDia,opsDia}=datosDelDia(ag);
+    return {
+      visitas:acc.visitas+vDia.length,
+      pedidos:acc.pedidos+vDia.filter(v=>v.resultado==="pedido").length,
+      muestras:acc.muestras+mDia.length,
+      incidencias:acc.incidencias+iDia.length,
+      ops:acc.ops+opsDia.length
+    };
+  },{visitas:0,pedidos:0,muestras:0,incidencias:0,ops:0});
+
+  return(
+    <div style={{padding:"0 0 100px",background:"#F1F5F9",minHeight:"100vh"}}>
+      <div style={{background:"linear-gradient(135deg,#4338CA,#6366F1)",padding:"20px 16px 18px"}}>
+        <p style={{margin:"0 0 14px",fontSize:11,fontWeight:700,color:"rgba(255,255,255,.6)",
+          textTransform:"uppercase",letterSpacing:".1em"}}>📊 Informe de Actividad</p>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          <button onClick={()=>cambiarDia(-1)}
+            style={{width:36,height:36,borderRadius:10,border:"none",
+              background:"rgba(255,255,255,.15)",color:"#fff",fontSize:20,
+              cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",
+              fontFamily:"inherit"}}>‹</button>
+          <div style={{flex:1,textAlign:"center"}}>
+            <p style={{margin:"0 0 4px",fontSize:17,fontWeight:800,color:"#fff"}}>
+              {fmtDateCorto(new Date(+fechaSel.split("/")[2],+fechaSel.split("/")[1]-1,+fechaSel.split("/")[0]))}
+            </p>
+            {esHoy&&<span style={{fontSize:10,background:"rgba(255,255,255,.2)",
+              color:"#fff",padding:"2px 10px",borderRadius:99,fontWeight:700}}>HOY</span>}
+          </div>
+          <button onClick={()=>cambiarDia(1)} disabled={esHoy}
+            style={{width:36,height:36,borderRadius:10,border:"none",
+              background:esHoy?"rgba(255,255,255,.06)":"rgba(255,255,255,.15)",
+              color:esHoy?"rgba(255,255,255,.3)":"#fff",fontSize:20,
+              cursor:esHoy?"default":"pointer",fontFamily:"inherit",
+              display:"flex",alignItems:"center",justifyContent:"center"}}>›</button>
+          {!esHoy&&(
+            <button onClick={()=>setFechaStr(fmtDate(hoy))}
+              style={{padding:"6px 12px",borderRadius:9,border:"none",
+                background:"rgba(255,255,255,.2)",color:"#fff",fontSize:11,
+                fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>HOY</button>
+          )}
+        </div>
+      </div>
+
+      <div style={{padding:"16px"}}>
+        {cargando?(
+          <div style={{textAlign:"center",padding:"40px",color:T.muted}}>
+            <p style={{fontSize:28}}>⏳</p>
+            <p style={{fontSize:13}}>Cargando actividad…</p>
+          </div>
+        ):(
+          <>
+            {/* Totales equipo (jefe/dir) */}
+            {!esAgente&&(
+              <div style={{background:"linear-gradient(135deg,#4338CA,#6366F1)",
+                borderRadius:14,padding:"16px",marginBottom:16}}>
+                <p style={{margin:"0 0 12px",fontSize:10,fontWeight:700,
+                  color:"rgba(255,255,255,.7)",textTransform:"uppercase",letterSpacing:".06em"}}>
+                  {esJefe?`Equipo ${miEquipo}`:"Todos los equipos"} · Total del día
+                </p>
+                <div style={{display:"flex",gap:8}}>
+                  {[
+                    {label:"Visitas",  n:totalEquipo.visitas,   icon:"👋"},
+                    {label:"Pedidos",  n:totalEquipo.pedidos,   icon:"✅"},
+                    {label:"Muestras", n:totalEquipo.muestras,  icon:"📦"},
+                    {label:"Incid.",   n:totalEquipo.incidencias,icon:"🚨"},
+                    {label:"Ops",      n:totalEquipo.ops,       icon:"💼"},
+                  ].map(k=>(
+                    <div key={k.label} style={{flex:1,textAlign:"center",
+                      background:"rgba(255,255,255,.12)",borderRadius:10,padding:"10px 4px"}}>
+                      <p style={{margin:0,fontSize:20,fontWeight:900,color:"#fff",lineHeight:1}}>{k.n}</p>
+                      <p style={{margin:"3px 0 0",fontSize:9,color:"rgba(255,255,255,.6)"}}>{k.icon} {k.label}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {esAgente&&(
+              <BloqueAgente
+                agRef="self"
+                nombre={usuario.nombre}
+                color={usuario.color||"#6366F1"}
+                icon={usuario.icon||"🧑‍💼"}
+                expandible={false}
+                datosDelDia={datosDelDia}
+                oportunidadesDB={oportunidadesDB}
+                fechaSel={fechaSel}
+              />
+            )}
+
+            {!esAgente&&agentesVisibles.map(ag=>(
+              <BloqueAgente
+                key={ag.id}
+                agRef={ag}
+                nombre={ag.nombre}
+                color={ag.color||"#6366F1"}
+                icon={ag.icon||"🧑‍💼"}
+                expandible={true}
+                datosDelDia={datosDelDia}
+                oportunidadesDB={oportunidadesDB}
+                fechaSel={fechaSel}
+              />
+            ))}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── App ─────────────────────────────────────────────────────────
+function App(){
+  const [usuario,setUsuario]=useState(null);
+
+  useEffect(()=>{
+    // Leer usuario desde localStorage (guardado por el portal)
+    try{
+      const stored=localStorage.getItem("gc_portal_user");
+      if(stored){
+        const pu=JSON.parse(stored);
+        const crmId=pu.crmId||pu.id||pu.username;
+        const fixed=USUARIOS.find(u=>u.id===crmId);
+        const u=fixed
+          ?Object.assign({},fixed,{catalogoVendedor:pu.catalogoVendedor||null})
+          :{id:crmId,nombre:pu.nombre||crmId,rol:pu.rol==="crm_jefe"?"jefe":pu.rol==="crm_director"?"director":"agente",
+            equipo:pu.equipo||null,color:pu.color||"#6366F1",icon:"🧑‍💼",
+            catalogoVendedor:pu.catalogoVendedor||null};
+        setUsuario(u);
+      }
+    }catch(e){}
+    // postMessage desde CRM padre
+    window.addEventListener("message",function(e){
+      if(e.data&&e.data.type==="PORTAL_USER"){
+        const pu=e.data.user;
+        if(pu) setUsuario(pu);
+      }
+    });
+  },[]);
+
+  if(!usuario) return(
+    <div style={{padding:32,textAlign:"center",color:T.muted}}>
+      <p style={{fontSize:32}}>📊</p>
+      <p>Cargando usuario…</p>
+    </div>
+  );
+
+  return <InformeActividad usuario={usuario} oportunidadesDB={[]}/>;
+}
+
+const root=ReactDOM.createRoot(document.getElementById("root"));
+root.render(React.createElement(App));
+</script>
+</body>
+</html>
