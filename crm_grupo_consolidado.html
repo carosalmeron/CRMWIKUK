@@ -348,9 +348,11 @@ function BottomNav({items,current,onChange}){
 }
 
 // ─── DASHBOARD AGENTE ─────────────────────────────────────────────
-function DashAgente({usuario, onNav, oportunidadesDB}){
+function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
   const {id,equipo,color}=usuario;
   const opsBD=oportunidadesDB||OPORTUNIDADES_SEED;
+  // Usar clientes reales de Firebase, fallback a seed
+  const misClientes=clientesFB&&clientesFB.length>0 ? clientesFB : (CLIENTES_POR_AGENTE[id]||[]);
   const mPend=MUESTRAS_SEED.filter(m=>m.estado==="pendiente"&&m.agente===id).length;
   const mCurso=MUESTRAS_SEED.filter(m=>m.agente===id).length;
   const ePend=ESTRATEGIAS_SEED.filter(e=>e.estado==="en_curso"&&e.agente===id).length;
@@ -359,7 +361,6 @@ function DashAgente({usuario, onNav, oportunidadesDB}){
     !["ganada","perdida","cerrada_ganada","cerrada_perdida"].some(e=>o.etapa===e||o.estado===e));
   const misProy=PROYECTOS_SEED.filter(p=>p.estado==="activo"&&p.equipo?.includes(id));
   const misInc=INCIDENCIAS_SEED.filter(i=>i.autor===id&&i.estado==="abierta");
-  const misClientes=CLIENTES_POR_AGENTE[id]||[];
   const totalSem=misClientes.length,visitados=Math.min(totalSem,8),pendVisita=totalSem-visitados;
   const semana=14;
 
@@ -5392,8 +5393,9 @@ function HistorialClientes({usuario, actividad}){
   );
 }
 
-function GestorClientes({usuario, actividad, onActividad, onBack}){
-  const clientes=CLIENTES_POR_AGENTE[usuario.id]||[];
+function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
+  // Usar clientes reales de Firebase, fallback a seed
+  const clientes=clientesFB&&clientesFB.length>0 ? clientesFB : (CLIENTES_POR_AGENTE[usuario.id]||[]);
   const [rutaSel,setRutaSel]=useState(null);
   const [clienteSel,setClienteSel]=useState(null);
   const [tabSel,setTabSel]=useState("visita");
@@ -6507,6 +6509,7 @@ function App(props){
   const [fbCargando,setFbCargando]=useState(false);
   const [fbStatus,setFbStatus]=useState(""); // "ok" | "error" | ""
   const [oportunidadesDB,setOportunidadesDB]=useState(OPORTUNIDADES_SEED);
+  const [clientesDB,setClientesDB]=useState(null); // null = aún no cargado
 
   useEffect(()=>{
     if(!usuario) return;
@@ -6517,15 +6520,27 @@ function App(props){
       fbLeer("incidencias"),
       fbLeer("visitas"),
       fbCargar(), // oportunidades
-    ]).then(([muestras,estrategias,incidencias,visitas,opos])=>{
+      fbLeer("clientes",500), // clientes reales
+    ]).then(([muestras,estrategias,incidencias,visitas,opos,clientes])=>{
       if(muestras.length>0) setMuestrasDB(muestras.filter(m=>!m.eliminada));
       if(estrategias.length>0) setEstrategiasDB(estrategias.filter(e=>!e.eliminada));
       if(incidencias.length>0) setIncidenciasDB(incidencias);
       if(opos.length>0){
-        // Normalizar campo agente: aceptar tanto agenteId como agente
         const norm=opos.map(o=>({...o,agente:o.agente||o.agenteId,agenteId:o.agenteId||o.agente}));
         const fbIds=new Set(norm.map(o=>o.id));
         setOportunidadesDB([...norm,...OPORTUNIDADES_SEED.filter(o=>!fbIds.has(o.id))]);
+      }
+      if(clientes.length>0){
+        // Organizar clientes por agente para compatibilidad
+        const porAgente={};
+        clientes.forEach(c=>{
+          const ag=c.agente||c.agenteId;
+          if(ag){
+            if(!porAgente[ag]) porAgente[ag]=[];
+            porAgente[ag].push(c);
+          }
+        });
+        setClientesDB(porAgente);
       }
 
       // Reconstruir actividadSemana desde Firebase para el agente actual
@@ -6574,6 +6589,17 @@ function App(props){
   const esDir=["director","ceo"].includes(usuario.rol);
   const esJefeOmas=esJefe||esDir;
   const miEquipo=usuario.equipo;
+
+  // Helper: obtener clientes de un agente — Firebase primero, fallback a seed
+  const getClientesPara=(agenteId)=>{
+    if(clientesDB&&clientesDB[agenteId]&&clientesDB[agenteId].length>0){
+      return clientesDB[agenteId];
+    }
+    return CLIENTES_POR_AGENTE[agenteId]||[];
+  };
+
+  // Clientes del usuario actual
+  const misClientesFB=getClientesPara(usuario.id);
 
   // Filtros por rol usando datos de Firebase
   const pend=muestrasDB.filter(m=>
@@ -6931,9 +6957,9 @@ function App(props){
         )}
 
         {/* AGENTE */}
-        {esAgente&&section==="dashboard"&&  <DashAgente usuario={usuario} onNav={setSection} oportunidadesDB={oportunidadesDB}/>}
-        {esAgente&&section==="clientes"&&   <GestorClientes usuario={usuario} actividad={actividadSemana} onActividad={onActividad} onBack={()=>setSection("dashboard")}/>}
-        {esAgente&&section==="informe"&&    <Informe usuario={usuario} actividadSemana={actividadSemana}/>}
+        {esAgente&&section==="dashboard"&&  <DashAgente usuario={usuario} onNav={setSection} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB}/>}
+        {esAgente&&section==="clientes"&&   <GestorClientes usuario={usuario} actividad={actividadSemana} onActividad={onActividad} onBack={()=>setSection("dashboard")} clientesFB={misClientesFB}/>}
+        {esAgente&&section==="informe"&&    <Informe usuario={usuario} actividadSemana={actividadSemana} clientesFB={misClientesFB}/>}
         {esAgente&&section==="muestras"&&   <MisMuestras usuario={usuario}/>}
 
         {/* JEFE — dashboard filtrado a su equipo */}
