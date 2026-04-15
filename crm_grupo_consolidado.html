@@ -456,17 +456,23 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
   },[crmId]);
 
   // ── Cálculo de valores ────────────────────────────────────────────
-  // Semana actual
   const semanaActual=kpi?.semanaActual||14;
 
-  // "Este mes" = últimas 4 semanas con venta real
-  const semanasConReal=semanas.filter(s=>s.ventasReal!=null&&s.ventasReal>0);
-  const ultimas4=semanasConReal.slice(-4);
-  const vMes=ultimas4.reduce((s,r)=>s+(r.ventasReal||0),0)||0;
-  const vMesObj=ultimas4.reduce((s,r)=>s+(r.ventasPpto||0),0)||0;
-  const mgMes4=ultimas4.filter(s=>s.mgReal!=null).map(s=>s.mgReal);
-  const mbMes=mgMes4.length>0?parseFloat((mgMes4.reduce((a,b)=>a+b,0)/mgMes4.length*100).toFixed(1)):0;
-  const mbMesObj=parseFloat(((ultimas4[0]?.mgPpto||0.344)*100).toFixed(1));
+  // "Este mes" = las últimas 4 semanas del calendario con objetivo definido
+  // Incluye semanas con ventas negativas (devoluciones) y ceros (festivos)
+  const semanasOrdenadas=[...semanas].sort((a,b)=>(a.semana||0)-(b.semana||0));
+  const semanasConObj=semanasOrdenadas.filter(s=>s.ventasPpto!=null&&s.ventasPpto>0);
+  const ultimas4=semanasConObj.slice(-4); // últimas 4 semanas con objetivo
+  const vMes=ultimas4.reduce((s,r)=>s+(r.ventasReal!=null?r.ventasReal:0),0);
+  const vMesObj=ultimas4.reduce((s,r)=>s+(r.ventasPpto||0),0);
+  const semanasConMg=ultimas4.filter(s=>s.mgReal!=null&&typeof s.mgReal==="number");
+  const mbMes=semanasConMg.length>0
+    ?parseFloat((semanasConMg.reduce((a,b)=>a+b.mgReal,0)/semanasConMg.length*100).toFixed(1))
+    :0;
+  const mbMesObj=parseFloat(((ultimas4[0]?.mgPpto||kpi?.mgObjetivo||0.344)*100).toFixed(1));
+
+  // Semanas restantes del "mes actual" sin dato
+  const semanasRestantes=ultimas4.filter(s=>s.ventasReal==null).length;
 
   // Acumulado año
   const vAnual=kpi?.ventasRealAcum||0;
@@ -488,7 +494,6 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
   const pctP=promoObj>0?Math.round(promoVal/promoObj*100):0;
   const pctL=liqObj>0?Math.round(liqVal/liqObj*100):0;
 
-  // Sin datos Firebase: usar fallback hardcoded
   const sinDatos=!kpi&&!loadingKpi;
 
   // Anillo SVG de progreso
@@ -640,15 +645,123 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
           <span style={{color:T.muted,fontSize:20,flexShrink:0}}>›</span>
         </div>
 
-        {/* — Últimas 4 semanas — */}
-        <p style={{margin:"0 0 10px",fontSize:10,fontWeight:700,color:"#64748B",
-          textTransform:"uppercase",letterSpacing:".12em"}}>
-          {ultimas4.length>0?`Últimas ${ultimas4.length} semanas (S${ultimas4[0]?.semana}–S${ultimas4[ultimas4.length-1]?.semana})`:"Últimas semanas"}
-        </p>
-        <div style={{display:"flex",gap:10,marginBottom:12,animation:"fadeUp .4s ease"}}>
-          <MetricCard label="Ventas" value={vMes} obj={Math.round(vMesObj)} pct={pctVM} suffix="€"/>
-          <MetricCard label="Margen bruto" value={mbMes} obj={mbMesObj} pct={pctMM} suffix="%"/>
-        </div>
+        {/* — Este mes — */}
+        {(()=>{
+          const s1=ultimas4[0]?.semana, s4=ultimas4[ultimas4.length-1]?.semana;
+          const label=ultimas4.length>0?`Este mes · S${s1}–S${s4}`:"Este mes";
+          const falta=vMesObj>vMes?vMesObj-vMes:0;
+          const cV=pctVM>=100?"#22C55E":pctVM>=80?"#F59E0B":"#EF4444";
+          const cM=pctMM>=100?"#22C55E":pctMM>=80?"#F59E0B":"#EF4444";
+
+          return(
+            <>
+              <p style={{margin:"0 0 10px",fontSize:10,fontWeight:700,color:"#64748B",
+                textTransform:"uppercase",letterSpacing:".12em"}}>{label}</p>
+
+              {/* Tarjeta ventas del mes — visual tipo "llenado" */}
+              <div style={{background:"#fff",borderRadius:16,padding:"18px 16px",
+                marginBottom:10,border:"1px solid #E2E8F0",
+                boxShadow:"0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06)"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+                  <div>
+                    <p style={{margin:"0 0 2px",fontSize:10,fontWeight:700,color:"#94A3B8",
+                      textTransform:"uppercase",letterSpacing:".1em"}}>💰 Ventas del mes</p>
+                    <p style={{margin:0,fontSize:28,fontWeight:900,color:"#0F172A",
+                      letterSpacing:"-0.03em",lineHeight:1}}>
+                      {fmt(Math.round(vMes))}€
+                    </p>
+                    <p style={{margin:"3px 0 0",fontSize:12,color:"#94A3B8"}}>
+                      objetivo: <strong style={{color:"#64748B"}}>{fmt(Math.round(vMesObj))}€</strong>
+                    </p>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <p style={{margin:0,fontSize:32,fontWeight:900,color:cV,lineHeight:1}}>{pctVM}%</p>
+                    <p style={{margin:"2px 0 0",fontSize:10,color:"#94A3B8"}}>del objetivo</p>
+                  </div>
+                </div>
+
+                {/* Barra de llenado con marcas */}
+                <div style={{position:"relative",height:24,borderRadius:99,
+                  background:"#F1F5F9",overflow:"hidden",marginBottom:6}}>
+                  {/* Relleno real */}
+                  <div style={{position:"absolute",left:0,top:0,bottom:0,
+                    width:`${Math.min(pctVM,100)}%`,borderRadius:99,
+                    background:pctVM>=100?`linear-gradient(90deg,#22C55E,#4ADE80)`:
+                               pctVM>=80?`linear-gradient(90deg,#F59E0B,#FCD34D)`:
+                               `linear-gradient(90deg,#EF4444,#F87171)`,
+                    transition:"width 1s ease"}}/>
+                  {/* Marca objetivo 80% */}
+                  <div style={{position:"absolute",left:"80%",top:0,bottom:0,
+                    width:2,background:"rgba(255,255,255,.6)"}}/>
+                  {/* Texto dentro */}
+                  {pctVM>15&&(
+                    <span style={{position:"absolute",left:12,top:"50%",
+                      transform:"translateY(-50%)",fontSize:10,fontWeight:800,
+                      color:"rgba(255,255,255,.9)"}}>
+                      {fmt(Math.round(vMes))}€
+                    </span>
+                  )}
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:"#94A3B8"}}>
+                  <span>0€</span>
+                  <span style={{color:pctVM>=80?"#F59E0B":"#CBD5E1",fontWeight:700}}>▲ 80%</span>
+                  <span style={{fontWeight:700,color:"#64748B"}}>{fmt(Math.round(vMesObj))}€</span>
+                </div>
+
+                {/* Mensaje de situación */}
+                <div style={{marginTop:10,padding:"8px 12px",borderRadius:10,
+                  background:pctVM>=100?"#F0FDF4":pctVM>=80?"#FFFBEB":"#FEF2F2"}}>
+                  <p style={{margin:0,fontSize:12,fontWeight:600,color:cV}}>
+                    {pctVM>=100?"✅ ¡Objetivo del mes superado!":
+                     pctVM>=80?`⚡ Faltan ${fmt(Math.round(falta))}€ — muy cerca del objetivo`:
+                     semanasRestantes>0?`📅 ${semanasRestantes} sem. pendientes — faltan ${fmt(Math.round(falta))}€`:
+                     `❌ Faltan ${fmt(Math.round(falta))}€ para el objetivo`}
+                  </p>
+                </div>
+              </div>
+
+              {/* Tarjeta margen */}
+              <div style={{background:"#fff",borderRadius:16,padding:"16px",
+                marginBottom:22,border:"1px solid #E2E8F0",
+                boxShadow:"0 1px 3px rgba(0,0,0,.04)"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                  <div>
+                    <p style={{margin:"0 0 1px",fontSize:10,fontWeight:700,color:"#94A3B8",
+                      textTransform:"uppercase",letterSpacing:".1em"}}>📊 Margen bruto del mes</p>
+                    <p style={{margin:0,fontSize:26,fontWeight:900,color:"#0F172A",lineHeight:1}}>
+                      {mbMes>0?mbMes:"—"}%
+                    </p>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <p style={{margin:0,fontSize:28,fontWeight:900,color:cM,lineHeight:1}}>{mbMes>0?pctMM:0}%</p>
+                    <p style={{margin:"2px 0 0",fontSize:10,color:"#94A3B8"}}>obj. {mbMesObj}%</p>
+                  </div>
+                </div>
+                <div style={{height:12,borderRadius:99,background:"#F1F5F9",overflow:"hidden",position:"relative"}}>
+                  {/* Zona objetivo */}
+                  <div style={{position:"absolute",left:`${Math.min(mbMesObj-2,95)}%`,top:0,bottom:0,
+                    width:"4%",background:"rgba(99,102,241,.15)"}}/>
+                  {/* Valor real */}
+                  <div style={{height:"100%",width:`${Math.min(mbMes/50*100,100)}%`,
+                    borderRadius:99,background:cM,transition:"width 1s ease"}}/>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:10,
+                  color:"#94A3B8",marginTop:4}}>
+                  <span>0%</span>
+                  <span style={{color:"#6366F1",fontWeight:700}}>obj {mbMesObj}%</span>
+                  <span>50%</span>
+                </div>
+                {mbMes>0&&(
+                  <p style={{margin:"6px 0 0",fontSize:11,fontWeight:600,color:cM}}>
+                    {mbMes>=mbMesObj
+                      ?`✅ +${(mbMes-mbMesObj).toFixed(1)}pp sobre objetivo`
+                      :`⚠ ${(mbMesObj-mbMes).toFixed(1)}pp bajo objetivo`}
+                  </p>
+                )}
+              </div>
+            </>
+          );
+        })()}
 
         {/* Promo y Liquidación */}
         {(()=>{
@@ -5478,6 +5591,19 @@ function HistorialClientes({usuario, actividad}){
   const [q,setQ]=useState("");
   const [sel,setSel]=useState(null);
   const [tabSel,setTabSel]=useState("historial");
+  const [solicitudes,setSolicitudes]=useState([]);
+  const [reasigCliente,setReasigCliente]=useState(null); // solicitud en proceso de reasignar
+  const [nuevoAgente,setNuevoAgente]=useState("");
+
+  // Cargar solicitudes de reasignación al montar
+  useEffect(()=>{
+    fbLeer("solicitudes_reasignacion").then(docs=>{
+      const pendientes=docs.filter(d=>
+        d.estado==="pendiente"&&(esDir||d.equipo===miEquipo)
+      );
+      setSolicitudes(pendientes);
+    }).catch(()=>{});
+  },[]);
 
   const RESULTADOS_V=[
     {k:"pedido",           label:"✅ Pedido",         color:T.green},
@@ -5644,6 +5770,102 @@ function HistorialClientes({usuario, actividad}){
         📋 Clientes {esDir?"de todos los equipos":`del equipo ${miEquipo}`}
       </p>
 
+      {/* ── SOLICITUDES DE REASIGNACIÓN PENDIENTES ── */}
+      {solicitudes.length>0&&(
+        <div style={{marginBottom:20}}>
+          <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.amber,
+            textTransform:"uppercase",letterSpacing:".06em"}}>
+            🔔 Solicitudes de reasignación ({solicitudes.length})
+          </p>
+          {solicitudes.map(s=>(
+            <div key={s.id} style={{background:"#FFF7ED",borderRadius:14,padding:"14px 16px",
+              marginBottom:8,border:`1.5px solid #FED7AA`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+                <div>
+                  <p style={{margin:"0 0 2px",fontSize:14,fontWeight:800,color:T.text}}>{s.clienteNombre}</p>
+                  <p style={{margin:0,fontSize:12,color:"#92400E"}}>
+                    Solicitado por <strong>{s.agenteNombre}</strong> · {s.fecha}
+                  </p>
+                </div>
+              </div>
+              <p style={{margin:"0 0 10px",fontSize:12,color:T.text,
+                background:"rgba(0,0,0,.04)",borderRadius:8,padding:"8px 10px",
+                fontStyle:"italic"}}>
+                "{s.motivo}"
+              </p>
+              {/* Panel de reasignación */}
+              {reasigCliente===s.id?(
+                <div>
+                  <p style={{margin:"0 0 6px",fontSize:12,fontWeight:700,color:T.text}}>
+                    ¿A qué comercial reasignar?
+                  </p>
+                  <select value={nuevoAgente} onChange={e=>setNuevoAgente(e.target.value)}
+                    style={{width:"100%",padding:"9px 12px",borderRadius:9,border:`1.5px solid ${T.border}`,
+                      fontSize:13,outline:"none",marginBottom:10,background:"#fff",fontFamily:"inherit"}}>
+                    <option value="">— Seleccionar comercial —</option>
+                    {agentes.filter(a=>a.id!==s.agenteId&&`${a.catalogoVendedor||""}`.toLowerCase()!==s.agenteId?.toLowerCase()).map(a=>(
+                      <option key={a.id} value={a.id}>{a.nombre}</option>
+                    ))}
+                  </select>
+                  <div style={{display:"flex",gap:8}}>
+                    <button onClick={()=>{setReasigCliente(null);setNuevoAgente("");}}
+                      style={{flex:1,padding:"10px",borderRadius:9,border:`1px solid ${T.border}`,
+                        background:"#fff",color:T.muted,fontWeight:600,fontSize:12,cursor:"pointer",
+                        fontFamily:"inherit"}}>
+                      Cancelar
+                    </button>
+                    <button onClick={()=>{
+                        if(!nuevoAgente) return;
+                        const ag=agentes.find(a=>a.id===nuevoAgente);
+                        // Actualizar solicitud como resuelta
+                        const updated={...s,estado:"aprobada",reasignadoA:nuevoAgente,
+                          reasignadoANombre:ag?.nombre||nuevoAgente,
+                          fechaResolucion:new Date().toLocaleDateString("es-ES")};
+                        fbEscribir("solicitudes_reasignacion",s.id,updated);
+                        // Actualizar cliente en Firebase con nuevo agente
+                        fbEscribir("clientes",s.clienteId,{
+                          agenteId:nuevoAgente,
+                          grupoAgente:ag?.catalogoVendedor||nuevoAgente,
+                          agente:nuevoAgente
+                        });
+                        setSolicitudes(prev=>prev.filter(x=>x.id!==s.id));
+                        setReasigCliente(null);setNuevoAgente("");
+                        alert(`✅ Cliente reasignado a ${ag?.nombre||nuevoAgente}`);
+                      }}
+                      disabled={!nuevoAgente}
+                      style={{flex:2,padding:"10px",borderRadius:9,border:"none",
+                        background:nuevoAgente?T.green:"#CBD5E1",color:"#fff",
+                        fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>
+                      ✅ Confirmar reasignación
+                    </button>
+                  </div>
+                </div>
+              ):(
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>{
+                      // Rechazar solicitud
+                      fbEscribir("solicitudes_reasignacion",s.id,{...s,estado:"rechazada",
+                        fechaResolucion:new Date().toLocaleDateString("es-ES")});
+                      setSolicitudes(prev=>prev.filter(x=>x.id!==s.id));
+                    }}
+                    style={{flex:1,padding:"9px",borderRadius:9,border:`1px solid ${T.red}`,
+                      background:"#fff",color:T.red,fontWeight:600,fontSize:12,cursor:"pointer",
+                      fontFamily:"inherit"}}>
+                    ❌ Rechazar
+                  </button>
+                  <button onClick={()=>setReasigCliente(s.id)}
+                    style={{flex:2,padding:"9px",borderRadius:9,border:"none",
+                      background:T.amber,color:"#fff",fontWeight:700,fontSize:12,cursor:"pointer",
+                      fontFamily:"inherit"}}>
+                    🔄 Reasignar cliente
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Filtros */}
       <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap"}}>
         <div style={{flex:1,position:"relative",minWidth:180}}>
@@ -5712,6 +5934,8 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
   const [asignandoRuta,setAsignandoRuta]=useState(null); // id cliente al que se asigna ruta
   const [nuevaRuta,setNuevaRuta]=useState("");
   const [clientesLocal,setClientesLocal]=useState(null); // override local para rutas asignadas
+  const [showReasigForm,setShowReasigForm]=useState(false);
+  const [motivoReasig,setMotivoReasig]=useState("");
   const semanaActual=14;
   const semana=semanaActual; // alias — los callbacks usan "semana"
 
@@ -5826,6 +6050,65 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
             )}
           </div>
         </div>
+
+        {/* ── Solicitud de reasignación (solo agente) ── */}
+        {showReasigForm?(
+          <div style={{background:"#FFF7ED",borderBottom:`1px solid #FED7AA`,padding:"14px 16px"}}>
+            <p style={{margin:"0 0 6px",fontSize:13,fontWeight:700,color:"#92400E"}}>
+              🔄 Solicitar reasignación de {clienteSel.nombre}
+            </p>
+            <p style={{margin:"0 0 8px",fontSize:12,color:"#B45309"}}>
+              Tu responsable recibirá la solicitud y podrá reasignar el cliente a otro comercial.
+            </p>
+            <textarea value={motivoReasig} onChange={e=>setMotivoReasig(e.target.value)}
+              placeholder="Motivo: zona lejana, sin actividad, traspaso de área…"
+              rows={3} style={{width:"100%",border:"1.5px solid #FED7AA",borderRadius:10,
+                padding:"10px 12px",fontSize:13,resize:"none",fontFamily:"inherit",
+                outline:"none",boxSizing:"border-box",marginBottom:10}}/>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>{setShowReasigForm(false);setMotivoReasig("");}}
+                style={{flex:1,padding:"11px",borderRadius:9,border:"1.5px solid #FED7AA",
+                  background:"#fff",color:"#92400E",fontWeight:600,fontSize:13,cursor:"pointer",
+                  fontFamily:"inherit"}}>
+                Cancelar
+              </button>
+              <button onClick={()=>{
+                  if(!motivoReasig.trim()) return;
+                  const solicitud={
+                    id:`reasig_${usuario.id}_${clienteSel.id}_${Date.now()}`,
+                    clienteId:clienteSel.id, clienteNombre:clienteSel.nombre,
+                    agenteId:usuario.catalogoVendedor||usuario.id,
+                    agenteNombre:usuario.nombre,
+                    equipo:usuario.equipo||"",
+                    motivo:motivoReasig.trim(),
+                    estado:"pendiente",
+                    fecha:new Date().toLocaleDateString("es-ES"),
+                  };
+                  fbEscribir("solicitudes_reasignacion",solicitud.id,solicitud)
+                    .then(()=>alert("✅ Solicitud enviada a tu responsable."))
+                    .catch(()=>alert("✅ Solicitud registrada."));
+                  setShowReasigForm(false);
+                  setMotivoReasig("");
+                }}
+                disabled={!motivoReasig.trim()}
+                style={{flex:2,padding:"11px",borderRadius:9,border:"none",
+                  background:motivoReasig.trim()?"#F59E0B":"#CBD5E1",
+                  color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>
+                📤 Enviar solicitud
+              </button>
+            </div>
+          </div>
+        ):(
+          <div style={{padding:"6px 16px",background:"#fff",borderBottom:`1px solid ${T.border}`,
+            display:"flex",justifyContent:"flex-end"}}>
+            <button onClick={()=>setShowReasigForm(true)}
+              style={{background:"none",border:`1px solid ${T.border}`,borderRadius:8,
+                padding:"5px 13px",fontSize:11,color:T.muted,cursor:"pointer",
+                fontFamily:"inherit"}}>
+              🔄 Solicitar reasignación
+            </button>
+          </div>
+        )}
 
         {/* Tabs */}
         <div style={{display:"flex",background:"#fff",borderBottom:`1px solid ${T.border}`,
@@ -6107,27 +6390,79 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
               {k:"primera_visita",label:"🆕 Primera",color:"#8B5CF6"},
             ];
             const rOp=ult?RESS.find(function(r){return r.k===ult.resultado;}):null;
+
+            // Acciones rápidas: registrar visita sin entrar en ficha
+            const QUICK=[
+              {k:"pedido",      icon:"✅", label:"Pedido",    color:"#22C55E", bg:"#F0FDF4"},
+              {k:"llamada",     icon:"📞", label:"Llamada",   color:"#3B82F6", bg:"#EFF6FF"},
+              {k:"no_contesta", icon:"📵", label:"N/C",       color:"#94A3B8", bg:"#F8FAFC"},
+            ];
+
             return(
-              <div key={cid} onClick={function(){setClienteSel(c);setTabSel("visita");}}
-                style={{background:"#fff",borderRadius:12,padding:"14px 16px",marginBottom:8,
-                  cursor:"pointer",display:"flex",alignItems:"center",gap:12,
-                  border:"1px solid #E2E8F0",
-                  borderLeft:"4px solid "+(rOp?rOp.color:"#E2E8F0")}}>
-                <div style={{width:40,height:40,borderRadius:10,flexShrink:0,
-                  background:"linear-gradient(135deg,#0F172A,#334155)",
-                  color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",
-                  fontSize:15,fontWeight:800}}>
-                  {nom.charAt(0)}
-                </div>
-                <div style={{flex:1,minWidth:0}}>
-                  <p style={{margin:0,fontSize:14,fontWeight:700,color:"#0F172A",
-                    overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{nom}</p>
-                  <div style={{display:"flex",gap:8,marginTop:2,flexWrap:"wrap"}}>
-                    {cod&&<span style={{fontSize:11,color:"#94A3B8",fontFamily:"monospace"}}>{cod}</span>}
-                    {rOp&&<span style={{fontSize:11,fontWeight:600,color:rOp.color}}>{rOp.label}</span>}
+              <div key={cid} style={{background:"#fff",borderRadius:14,marginBottom:8,
+                border:"1px solid #E2E8F0",
+                borderLeft:"4px solid "+(rOp?rOp.color:"#E2E8F0"),
+                overflow:"hidden"}}>
+                {/* Fila principal — tap para entrar en ficha */}
+                <div onClick={function(){setClienteSel(c);setTabSel("visita");}}
+                  style={{display:"flex",alignItems:"center",gap:12,padding:"13px 14px",cursor:"pointer"}}>
+                  <div style={{width:40,height:40,borderRadius:10,flexShrink:0,
+                    background:"linear-gradient(135deg,#0F172A,#334155)",
+                    color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",
+                    fontSize:15,fontWeight:800}}>
+                    {nom.charAt(0)}
                   </div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{margin:0,fontSize:14,fontWeight:700,color:"#0F172A",
+                      overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{nom}</p>
+                    <div style={{display:"flex",gap:8,marginTop:2,flexWrap:"wrap",alignItems:"center"}}>
+                      {cod&&<span style={{fontSize:11,color:"#94A3B8",fontFamily:"monospace"}}>{cod}</span>}
+                      {rOp?<span style={{fontSize:11,fontWeight:600,color:rOp.color}}>{rOp.label}</span>
+                        :<span style={{fontSize:11,color:"#CBD5E1"}}>Sin actividad</span>}
+                    </div>
+                  </div>
+                  <span style={{color:"#94A3B8",fontSize:18,flexShrink:0}}>›</span>
                 </div>
-                <span style={{color:"#94A3B8",fontSize:18}}>›</span>
+                {/* Barra de acciones rápidas */}
+                <div style={{display:"flex",borderTop:"1px solid #F1F5F9"}}>
+                  {QUICK.map(function(q,qi){
+                    const yaEste=ult&&ult.resultado===q.k;
+                    return(
+                      <button key={q.k}
+                        onClick={function(e){
+                          e.stopPropagation();
+                          if(yaEste) return; // ya registrado, no duplicar
+                          const entrada={
+                            resultado:q.k,nota:"",
+                            fecha:new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"})
+                          };
+                          onActividad(cid,{...act,visitas:[...(act.visitas||[]),entrada]});
+                          fbEscribir("visitas",`${usuario.id}_${cid}_sem${semana}_${Date.now()}`,{
+                            ...entrada,clienteId:cid,clienteNombre:nom,agente:usuario.id,semana
+                          });
+                        }}
+                        style={{flex:1,padding:"9px 4px",border:"none",
+                          borderRight:qi<QUICK.length-1?"1px solid #F1F5F9":"none",
+                          background:yaEste?q.bg:"#fff",cursor:yaEste?"default":"pointer",
+                          fontFamily:"inherit",display:"flex",flexDirection:"column",
+                          alignItems:"center",gap:2,transition:"background .15s",
+                          opacity:yaEste?1:0.75}}>
+                        <span style={{fontSize:16}}>{q.icon}</span>
+                        <span style={{fontSize:10,fontWeight:yaEste?800:500,
+                          color:yaEste?q.color:"#94A3B8"}}>{q.label}</span>
+                      </button>
+                    );
+                  })}
+                  {/* Botón de entrar a detalle completo */}
+                  <button onClick={function(){setClienteSel(c);setTabSel("visita");}}
+                    style={{flex:1,padding:"9px 4px",border:"none",
+                      borderLeft:"1px solid #F1F5F9",background:"#fff",
+                      cursor:"pointer",fontFamily:"inherit",display:"flex",
+                      flexDirection:"column",alignItems:"center",gap:2}}>
+                    <span style={{fontSize:16}}>📋</span>
+                    <span style={{fontSize:10,color:"#94A3B8"}}>Ficha</span>
+                  </button>
+                </div>
               </div>
             );
           })}
