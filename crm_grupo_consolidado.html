@@ -291,6 +291,20 @@ function Login({onLogin}){
     {titulo:"🧑‍💼 Equipo WIKUK",ids:["wk1","wk2","wk3"]},
     {titulo:"🧑‍💼 Equipo INTERKEY",ids:["ik1","ik2"]},
   ];
+
+  // Debug: mostrar qué hay en localStorage
+  let debugInfo='';
+  try{
+    const stored=localStorage.getItem('gc_portal_user');
+    if(stored){
+      const pu=JSON.parse(stored);
+      debugInfo=`Usuario portal: ${pu.nombre||pu.username} | crmId: ${pu.crmId||'(vacío)'} | rol: ${pu.rol||'(vacío)'} | vendedor: ${pu.catalogoVendedor||'(vacío)'}`;
+    } else {
+      debugInfo='Sin datos de portal en localStorage';
+    }
+    const hash=window.location.hash;
+    if(hash) debugInfo+=` | Hash URL: ${decodeURIComponent(hash)}`;
+  }catch(e){ debugInfo='Error: '+e.message; }
   return(
     <div style={{minHeight:"100vh",background:"#EFEDE8",padding:"24px 16px"}}>
       {/* Logo */}
@@ -300,6 +314,13 @@ function Login({onLogin}){
         <p style={{margin:0,fontSize:24,fontWeight:900,color:T.navy,letterSpacing:-0.5}}>Grupo Consolidado</p>
         <p style={{margin:"4px 0 0",fontSize:13,color:T.muted}}>CRM Comercial · ¿Quién eres?</p>
       </div>
+
+      {debugInfo&&(
+        <div style={{background:"#FEF3C7",border:"1px solid #F59E0B",borderRadius:10,
+          padding:"10px 14px",marginBottom:20,fontSize:11,color:"#92400E",wordBreak:"break-all"}}>
+          🔍 Debug auto-login: {debugInfo}
+        </div>
+      )}
 
       {roles.map(g=>(
         <div key={g.titulo} style={{marginBottom:20}}>
@@ -7299,29 +7320,49 @@ const root = ReactDOM.createRoot(container);
   // 2. localStorage gc_portal_user (compartido entre parent e iframe mismo dominio)
   // 3. postMessage del portal
 
-  function findCrmUser(crmId){
-    return USUARIOS.find(function(u){return u.id===crmId;});
+  function buildUserFromPortal(pu){
+    // Construir usuario CRM desde datos del portal
+    if(!pu) return null;
+    var crmId=pu.crmId||pu.id||pu.username;
+    if(!crmId) return null;
+    // Primero buscar en USUARIOS fijos
+    var fixed=USUARIOS.find(function(u){return u.id===crmId;});
+    if(fixed) return fixed;
+    // Crear usuario dinámico
+    var rol=pu.rol||'agente';
+    if(rol==='crm_director'||rol==='director') rol='director';
+    else if(rol==='crm_jefe'||rol==='jefe') rol='jefe';
+    else rol='agente';
+    return {
+      id: crmId,
+      nombre: pu.nombre||pu.username||crmId,
+      rol: rol,
+      equipo: pu.equipo||null,
+      color: pu.color||'#64748B',
+      icon: '🧑‍💼',
+      catalogoVendedor: pu.catalogoVendedor||null
+    };
   }
 
   function getAutoUser(){
-    // Vía 1: URL hash
-    try{
-      var hash=window.location.hash.replace('#','');
-      if(hash){
-        var decoded=decodeURIComponent(hash);
-        var u=findCrmUser(decoded);
-        if(u) return u;
-      }
-    }catch(e){}
-
-    // Vía 2: localStorage (se comparte entre parent e iframe mismo origen)
+    // Prioridad 1: localStorage del portal (más fiable — tiene todos los datos)
     try{
       var stored=localStorage.getItem('gc_portal_user');
       if(stored){
         var pu=JSON.parse(stored);
-        var crmId=pu.crmId||pu.id;
-        var u=findCrmUser(crmId);
+        var u=buildUserFromPortal(pu);
         if(u) return u;
+      }
+    }catch(e){}
+
+    // Prioridad 2: URL hash — formato #crmId o #crmId|vendedor
+    try{
+      var hash=window.location.hash.replace('#','');
+      if(hash){
+        var decoded=decodeURIComponent(hash);
+        var crmId=decoded.includes('|')?decoded.split('|')[0].trim():decoded.trim();
+        var found=USUARIOS.find(function(u){return u.id===crmId;});
+        if(found) return found;
       }
     }catch(e){}
 
@@ -7335,8 +7376,7 @@ const root = ReactDOM.createRoot(container);
   window.addEventListener('message',function(e){
     if(e.data&&e.data.type==='PORTAL_USER'){
       var pu=e.data.user;
-      var crmId=pu.crmId||pu.id;
-      var crmUser=findCrmUser(crmId);
+      var crmUser=buildUserFromPortal(pu);
       if(crmUser){
         root.render(React.createElement(App,{_autoLogin:crmUser}));
       }
