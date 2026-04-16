@@ -612,7 +612,7 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
         </div>
 
         {/* — 3. Acciones urgentes — */}
-        <TareasWidget onNav={onNav}/>
+        <TareasWidget onNav={onNav} usuario={usuario}/>
 
         {/* — 4. Pendientes — */}
         {hayPend&&(
@@ -3465,28 +3465,40 @@ const TAREAS_SEED = [
 ];
 
 // Widget compacto para dashboards
-function TareasWidget({ onNav }) {
+function TareasWidget({ onNav, usuario }) {
   const [tareas, setTareas] = useState([]);
   const [cargando, setCargando] = useState(true);
 
+  const esAgente = usuario?.rol === "agente";
+  const miGrupo  = usuario?.nombre?.toUpperCase().replace(/ /g,"") || "";
+
+  const filtrarPorAgente = (lista) => {
+    if (!esAgente) return lista; // jefe/director/ceo ven todas
+    return lista.filter(t => {
+      // Agente ve sus tareas: por id, por grupoAgente o sin agente asignado
+      return !t.agente
+        || t.agente === usuario.id
+        || t.agente === usuario.user
+        || t.agente?.toUpperCase() === miGrupo;
+    });
+  };
+
   useEffect(() => {
     fbLeer("tareas").then(data => {
-      const todas = data.length > 0
-        ? data.filter(t => t.estado === "pendiente")
-        : TAREAS_SEED.filter(t => t.estado === "pendiente");
-      // Ordenar: urgente primero
-      todas.sort((a,b) => {
+      const pendientes = (data.length > 0 ? data : TAREAS_SEED)
+        .filter(t => t.estado === "pendiente" && !t.eliminada);
+      const filtradas = filtrarPorAgente(pendientes);
+      filtradas.sort((a,b) => {
         const ord = { urgente:0, alta:1, normal:2 };
         return (ord[a.prioridad]||2) - (ord[b.prioridad]||2);
       });
-      setTareas(todas);
-      // Sembrar en Firebase si vacío
+      setTareas(filtradas);
       if (data.length === 0) {
         TAREAS_SEED.forEach(t => fbEscribir("tareas", t.id, t));
       }
-    }).catch(() => setTareas(TAREAS_SEED.filter(t=>t.estado==="pendiente")))
+    }).catch(() => setTareas(filtrarPorAgente(TAREAS_SEED.filter(t=>t.estado==="pendiente"))))
     .finally(() => setCargando(false));
-  }, []);
+  }, [usuario?.id]);
 
   if (cargando || tareas.length === 0) return null;
 
@@ -3546,14 +3558,23 @@ function GestorTareas({ usuario }) {
   const [editTarea, setEditTarea] = useState(null);
   const [form, setForm] = useState({ titulo:"", descripcion:"", cliente:"", prioridad:"normal", vence:"", tipo:"contacto" });
 
+  const esAgente = usuario?.rol === "agente";
+  const miGrupo  = usuario?.nombre?.toUpperCase().replace(/ /g,"") || "";
+
+  const filtrarPorAgente = (lista) => {
+    if (!esAgente) return lista;
+    return lista.filter(t =>
+      !t.agente || t.agente === usuario.id || t.agente === usuario.user
+      || t.agente?.toUpperCase() === miGrupo
+    );
+  };
+
   const cargar = () => {
     fbLeer("tareas").then(data => {
-      if (data.length > 0) setTareas(data);
-      else {
-        setTareas(TAREAS_SEED);
-        TAREAS_SEED.forEach(t => fbEscribir("tareas", t.id, t));
-      }
-    }).catch(() => setTareas(TAREAS_SEED));
+      const todas = data.length > 0 ? data.filter(t=>!t.eliminada) : TAREAS_SEED;
+      setTareas(filtrarPorAgente(todas));
+      if (data.length === 0) TAREAS_SEED.forEach(t => fbEscribir("tareas", t.id, t));
+    }).catch(() => setTareas(filtrarPorAgente(TAREAS_SEED)));
   };
 
   useEffect(() => { cargar(); }, []);
@@ -3563,9 +3584,10 @@ function GestorTareas({ usuario }) {
   const guardar = () => {
     if (!form.titulo.trim()) return;
     const hoy = new Date().toLocaleDateString("es-ES");
+    const miAgente = usuario.grupoAgente || usuario.user || usuario.id || usuario.nombre?.toUpperCase().replace(/ /g,"");
     const t = editTarea
       ? {...editTarea,...form}
-      : { id:`tsk${Date.now()}`, ...form, estado:"pendiente", agente:usuario.id, creadaEn:hoy };
+      : { id:`tsk${Date.now()}`, ...form, estado:"pendiente", agente:miAgente, creadaEn:hoy };
     fbEscribir("tareas", t.id, t).then(() => {
       setTareas(prev => editTarea ? prev.map(x=>x.id===t.id?t:x) : [t,...prev]);
       setShowForm(false); setEditTarea(null);
@@ -3776,7 +3798,7 @@ function DashDirector({usuario, onNav}){
 
       {/* Acciones urgentes */}
       <div style={{marginBottom:4}}>
-        <TareasWidget onNav={onNav}/>
+        <TareasWidget onNav={onNav} usuario={usuario}/>
       </div>
 
       {/* KPI pipeline + proyectos */}
@@ -7304,6 +7326,7 @@ function App(props){
         <div style={{flex:1,background:"#fff",borderRadius:16,padding:"18px 16px",
           border:"1px solid #E2E8F0",
           boxShadow:"0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06)"}}>
+        <TareasWidget onNav={setSection} usuario={usuario}/>
           <p style={{margin:"0 0 12px",fontSize:10,fontWeight:700,color:"#94A3B8",
             textTransform:"uppercase",letterSpacing:".1em"}}>{label}</p>
           <div style={{display:"flex",gap:12,alignItems:"center",marginBottom:14}}>
