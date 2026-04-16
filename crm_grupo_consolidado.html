@@ -1489,9 +1489,15 @@ function ClienteRow({nombre,visita,ops,onSave}){
   );
 }
 
-function Informe({usuario}){
-  const clientes=CLIENTES_POR_AGENTE[usuario.id]||[];
-  const semana=14;
+function Informe({usuario, clientesFB}){
+  const clientes=clientesFB&&clientesFB.length>0?clientesFB:(CLIENTES_POR_AGENTE[usuario.id]||[]);
+  // Semana real según fecha actual
+  const getSemanaISO=()=>{
+    const d=new Date();
+    const startOfYear=new Date(d.getFullYear(),0,1);
+    return Math.ceil(((d-startOfYear)/86400000+startOfYear.getDay()+1)/7);
+  };
+  const semana=getSemanaISO();
   const [step,setStep]=useState(0);
   const [ventas,setVentas]=useState({venta:"",mb:"",promo:"",liq:""});
   const [visitas,setVisitas]=useState({});
@@ -1899,7 +1905,28 @@ function Informe({usuario}){
           <div style={{height:20}}/>
           <div style={{display:"flex",gap:8}}>
             <Btn onClick={()=>setStep(3)} outline color={T.muted}>← Atrás</Btn>
-            <Btn full onClick={()=>setEnviado(true)} color={T.green}>🚀 Enviar informe</Btn>
+            <Btn full onClick={()=>{
+              const doc={
+                id:`informe_${usuario.id}_s${semana}`,
+                agente:usuario.id,
+                agenteNombre:usuario.nombre,
+                grupoAgente:usuario.grupoAgente||usuario.id,
+                equipo:usuario.equipo||"",
+                semana,
+                ano:new Date().getFullYear(),
+                fechaEnvio:new Date().toLocaleDateString("es-ES"),
+                ventas:parseFloat(ventas.venta||0),
+                mb:parseFloat(ventas.mb||0),
+                promo:parseFloat(ventas.promo||0),
+                liq:parseFloat(ventas.liq||0),
+                numVisitas:Object.keys(visitas).length,
+                numMuestras:muestras.length,
+                estado:"enviado",
+              };
+              fbEscribir("informes", doc.id, doc).then(()=>{
+                setEnviado(true);
+              }).catch(()=>setEnviado(true));
+            }} color={T.green}>🚀 Enviar informe</Btn>
           </div>
         </div>
       )}
@@ -3495,86 +3522,140 @@ function TareasWidget({ onNav, usuario }) {
   const [tareas, setTareas] = useState([]);
   const [cargando, setCargando] = useState(true);
 
-  const esAgente = usuario?.rol === "agente";
-  const miGrupo  = usuario?.nombre?.toUpperCase().replace(/ /g,"") || "";
+  const esCeo      = usuario?.rol === "ceo";
+  const esDir      = usuario?.rol === "director";
+  const esJefe     = usuario?.rol === "jefe";
+  const esAgente   = usuario?.rol === "agente";
+  const esJefeOmas = esCeo || esDir || esJefe;
 
-  const filtrarPorAgente = (lista) => {
-    if (!esAgente) return lista; // jefe/director/ceo ven todas
-    const ag_usuario = new Set([
-      (usuario.id||"").toUpperCase(),
-      (usuario.user||"").toUpperCase(),
-      (usuario.username||"").toUpperCase(),
-      (usuario.grupoAgente||"").toUpperCase(),
-      miGrupo,
-    ].filter(Boolean));
-    return lista.filter(t => {
-      if (!t.agente) return true;
-      return ag_usuario.has(t.agente.toUpperCase());
-    });
+  const agentesEquipo = USUARIOS.filter(u =>
+    u.rol === "agente" && (esJefe ? u.equipo === usuario?.equipo : true)
+  );
+
+  const misIds = new Set([
+    (usuario?.id||"").toUpperCase(),
+    (usuario?.user||"").toUpperCase(),
+    (usuario?.grupoAgente||"").toUpperCase(),
+  ].filter(Boolean));
+
+  const filtrar = (lista) => {
+    if (esCeo || esDir) return lista;
+    if (esJefe) {
+      return lista.filter(t => {
+        if (!t.agente) return true; // sin asignar → jefe las ve
+        return agentesEquipo.some(a =>
+          a.id.toUpperCase() === (t.agente||"").toUpperCase() ||
+          (a.grupoAgente||"").toUpperCase() === (t.agente||"").toUpperCase()
+        );
+      });
+    }
+    // Agente: solo las suyas, nunca sin_asignar
+    if (!esAgente) return lista;
+    return lista.filter(t => t.agente && misIds.has(t.agente.toUpperCase()));
   };
 
   useEffect(() => {
     fbLeer("tareas").then(data => {
-      const pendientes = (data.length > 0 ? data : TAREAS_SEED)
-        .filter(t => t.estado === "pendiente" && !t.eliminada);
-      const filtradas = filtrarPorAgente(pendientes);
+      const src = data.length > 0 ? data : TAREAS_SEED;
+      const pendientes = src.filter(t => t.estado==="pendiente" && !t.eliminada);
+      const filtradas  = filtrar(pendientes);
+      // Urgentes y sin_asignar primero
       filtradas.sort((a,b) => {
+        const sinA = !a.agente ? -1 : 0;
+        const sinB = !b.agente ? -1 : 0;
+        if (sinA !== sinB) return sinA - sinB;
         const ord = { urgente:0, alta:1, normal:2 };
         return (ord[a.prioridad]||2) - (ord[b.prioridad]||2);
       });
       setTareas(filtradas);
-      if (data.length === 0) {
-        TAREAS_SEED.forEach(t => fbEscribir("tareas", t.id, t));
-      }
-    }).catch(() => setTareas(filtrarPorAgente(TAREAS_SEED.filter(t=>t.estado==="pendiente"))))
-    .finally(() => setCargando(false));
+      if (data.length === 0) TAREAS_SEED.forEach(t => fbEscribir("tareas", t.id, t));
+    }).catch(()=>{}).finally(()=>setCargando(false));
   }, [usuario?.id]);
 
   if (cargando || tareas.length === 0) return null;
 
-  const urgentes = tareas.filter(t => t.prioridad === "urgente").length;
+  const urgentes    = tareas.filter(t => t.prioridad==="urgente").length;
+  const sinAsignar  = tareas.filter(t => !t.agente).length;
 
   return (
     <div style={{marginBottom:22}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-        <p style={{margin:0,fontSize:10,fontWeight:700,color:"#64748B",textTransform:"uppercase",letterSpacing:".12em"}}>
-          Acciones pendientes
+        <p style={{margin:0,fontSize:10,fontWeight:700,color:"#64748B",
+          textTransform:"uppercase",letterSpacing:".12em"}}>
+          {esJefeOmas ? "Tareas del equipo" : "Mis acciones"}
         </p>
-        <span style={{fontSize:11,fontWeight:700,color:"#EF4444",background:"#FEF2F2",borderRadius:99,padding:"2px 8px"}}>
-          {urgentes > 0 ? `${urgentes} urgente${urgentes>1?"s":""}` : `${tareas.length} pendientes`}
-        </span>
+        <div style={{display:"flex",gap:5}}>
+          {esJefeOmas && sinAsignar > 0 && (
+            <span style={{fontSize:11,fontWeight:700,color:"#D97706",background:"#FFFBEB",
+              borderRadius:99,padding:"2px 8px"}}>
+              ⚠️ {sinAsignar} sin asignar
+            </span>
+          )}
+          {urgentes > 0 && (
+            <span style={{fontSize:11,fontWeight:700,color:"#EF4444",background:"#FEF2F2",
+              borderRadius:99,padding:"2px 8px"}}>
+              🔴 {urgentes} urgente{urgentes>1?"s":""}
+            </span>
+          )}
+        </div>
       </div>
       <div style={{background:"#fff",borderRadius:16,overflow:"hidden",border:"1px solid #E2E8F0",
         boxShadow:"0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06)"}}>
-        {tareas.slice(0,4).map((t,i) => {
-          const cfg = PRIORIDAD_CFG[t.prioridad] || PRIORIDAD_CFG.normal;
+        {tareas.slice(0,5).map((t,i) => {
+          const cfg    = PRIORIDAD_CFG[t.prioridad] || PRIORIDAD_CFG.normal;
+          const agObj  = esJefeOmas ? USUARIOS.find(u =>
+            u.id.toUpperCase()===(t.agente||"").toUpperCase() ||
+            (u.grupoAgente||"").toUpperCase()===(t.agente||"").toUpperCase()
+          ) : null;
+          const sinAg  = !t.agente;
           return (
             <div key={t.id} onClick={()=>onNav("tareas")}
-              style={{display:"flex",alignItems:"center",gap:12,padding:"12px 16px",
-                borderBottom:i<Math.min(tareas.length,4)-1?"1px solid #F1F5F9":"none",
-                cursor:"pointer"}}>
-              <span style={{fontSize:14,flexShrink:0}}>{cfg.icon}</span>
+              style={{display:"flex",alignItems:"center",gap:10,padding:"11px 16px",
+                borderBottom:i<Math.min(tareas.length,5)-1?"1px solid #F1F5F9":"none",
+                cursor:"pointer",
+                background:sinAg?"#FFFBEB":"#fff"}}>
+              <span style={{fontSize:13,flexShrink:0}}>{sinAg?"⚠️":cfg.icon}</span>
               <div style={{flex:1,minWidth:0}}>
                 <p style={{margin:0,fontSize:13,fontWeight:600,color:"#0F172A",
-                  overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.titulo}</p>
-                <p style={{margin:"1px 0 0",fontSize:11,color:"#94A3B8",
-                  overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.cliente}</p>
+                  overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                  {t.titulo}
+                </p>
+                <div style={{display:"flex",gap:5,alignItems:"center",marginTop:1}}>
+                  {t.cliente&&<p style={{margin:0,fontSize:11,color:"#94A3B8",
+                    overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{t.cliente}</p>}
+                  {esJefeOmas && (
+                    agObj
+                      ? <span style={{fontSize:10,fontWeight:700,color:agObj.color,
+                          background:agObj.color+"18",borderRadius:99,padding:"1px 6px",
+                          whiteSpace:"nowrap",flexShrink:0}}>
+                          {agObj.icon} {agObj.nombre}
+                        </span>
+                      : <span style={{fontSize:10,fontWeight:700,color:"#D97706",
+                          background:"#FEF3C7",borderRadius:99,padding:"1px 6px",
+                          whiteSpace:"nowrap",flexShrink:0}}>
+                          Sin asignar →
+                        </span>
+                  )}
+                </div>
               </div>
               {t.vence && (
-                <span style={{fontSize:10,fontWeight:700,color:cfg.color,background:cfg.bg,
-                  borderRadius:6,padding:"2px 7px",flexShrink:0,whiteSpace:"nowrap"}}>
+                <span style={{fontSize:10,fontWeight:700,color:sinAg?"#D97706":cfg.color,
+                  background:sinAg?"#FEF3C7":cfg.bg,borderRadius:6,
+                  padding:"2px 6px",flexShrink:0,whiteSpace:"nowrap"}}>
                   {t.vence}
                 </span>
               )}
             </div>
           );
         })}
-        {tareas.length > 4 && (
-          <div onClick={()=>onNav("tareas")} style={{padding:"10px 16px",textAlign:"center",
-            fontSize:12,color:"#3B82F6",fontWeight:600,cursor:"pointer",background:"#F8FAFC"}}>
-            Ver todas ({tareas.length}) →
-          </div>
-        )}
+        <div onClick={()=>onNav("tareas")} style={{padding:"9px 16px",textAlign:"center",
+          fontSize:12,color:"#3B82F6",fontWeight:600,cursor:"pointer",background:"#F8FAFC",
+          display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
+          {esJefeOmas && sinAsignar>0
+            ? <><span style={{color:"#D97706"}}>⚠️ {sinAsignar} sin asignar</span> · <span>Ver todas ({tareas.length}) →</span></>
+            : <span>Ver todas ({tareas.length}) →</span>
+          }
+        </div>
       </div>
     </div>
   );
@@ -3582,57 +3663,93 @@ function TareasWidget({ onNav, usuario }) {
 
 // Sección completa de gestión de tareas
 function GestorTareas({ usuario }) {
-  const [tareas, setTareas] = useState([]);
-  const [filtro, setFiltro] = useState("pendiente");
-  const [showForm, setShowForm] = useState(false);
-  const [editTarea, setEditTarea] = useState(null);
-  const [form, setForm] = useState({ titulo:"", descripcion:"", cliente:"", prioridad:"normal", vence:"", tipo:"contacto" });
+  const esCeo      = usuario?.rol === "ceo";
+  const esDir      = usuario?.rol === "director";
+  const esJefe     = usuario?.rol === "jefe";
+  const esAgente   = usuario?.rol === "agente";
+  const esJefeOmas = esCeo || esDir || esJefe;
 
-  const esAgente = usuario?.rol === "agente";
-  const miGrupo  = usuario?.nombre?.toUpperCase().replace(/ /g,"") || "";
+  const misIds = new Set([
+    (usuario.id||"").toUpperCase(),
+    (usuario.user||"").toUpperCase(),
+    (usuario.grupoAgente||"").toUpperCase(),
+  ].filter(Boolean));
 
-  const filtrarPorAgente = (lista) => {
-    if (!esAgente) return lista;
-    const ag_usuario = new Set([
-      (usuario.id||"").toUpperCase(),
-      (usuario.user||"").toUpperCase(),
-      (usuario.username||"").toUpperCase(),
-      (usuario.grupoAgente||"").toUpperCase(),
-      miGrupo,
-    ].filter(Boolean));
-    return lista.filter(t => !t.agente || ag_usuario.has(t.agente.toUpperCase()));
+  // Agentes disponibles para asignación
+  const agentesAsig = USUARIOS.filter(u =>
+    u.rol === "agente" && (esJefe ? u.equipo === usuario.equipo : true)
+  );
+
+  const [tareas,     setTareas]     = useState([]);
+  const [filtro,     setFiltro]     = useState("pendiente");
+  const [agFiltro,   setAgFiltro]   = useState("todos"); // filtro por agente (managers)
+  const [showForm,   setShowForm]   = useState(false);
+  const [editTarea,  setEditTarea]  = useState(null);
+  const [asignando,  setAsignando]  = useState(null); // tarea a reasignar
+  const [form, setForm] = useState({
+    titulo:"", descripcion:"", cliente:"", prioridad:"normal",
+    vence:"", tipo:"contacto", agenteId:"",
+  });
+
+  // ── Filtro jerárquico ──────────────────────────────────────────
+  const esMia = (t) => {
+    if (esCeo || esDir) return true;
+    if (esJefe) {
+      const agT = (t.agente||"").toUpperCase();
+      const esMiEquipo = agentesAsig.some(a =>
+        a.id.toUpperCase()===agT || (a.grupoAgente||"").toUpperCase()===agT
+      );
+      const sinAsignar = !t.agente;
+      return esMiEquipo || sinAsignar;
+    }
+    // Agente: NUNCA ve sin_asignar
+    if (!t.agente) return false;
+    return misIds.has(t.agente.toUpperCase());
   };
 
   const cargar = () => {
     fbLeer("tareas").then(data => {
-      const todas = data.length > 0 ? data.filter(t=>!t.eliminada) : TAREAS_SEED;
-      setTareas(filtrarPorAgente(todas));
+      const todas = (data.length > 0 ? data : TAREAS_SEED).filter(t => !t.eliminada);
+      setTareas(todas.filter(esMia));
       if (data.length === 0) TAREAS_SEED.forEach(t => fbEscribir("tareas", t.id, t));
-    }).catch(() => setTareas(filtrarPorAgente(TAREAS_SEED)));
+    }).catch(() => setTareas(TAREAS_SEED.filter(esMia)));
   };
 
-  useEffect(() => { cargar(); }, []);
+  useEffect(() => { cargar(); }, [usuario.id]);
 
   const upd = (k,v) => setForm(f => ({...f,[k]:v}));
 
   const guardar = () => {
     if (!form.titulo.trim()) return;
     const hoy = new Date().toLocaleDateString("es-ES");
-    const miAgente = usuario.grupoAgente || usuario.user || usuario.id || usuario.nombre?.toUpperCase().replace(/ /g,"");
+    const miId = usuario.grupoAgente || usuario.user || usuario.id;
+    const agenteDestino = esJefeOmas ? (form.agenteId || "") : miId;
     const t = editTarea
-      ? {...editTarea,...form}
-      : { id:`tsk${Date.now()}`, ...form, estado:"pendiente", agente:miAgente, creadaEn:hoy };
+      ? {...editTarea, ...form, agente: agenteDestino}
+      : { id:`tsk${Date.now()}`, ...form, agente:agenteDestino,
+          creadaPor:usuario.id, creadaPorNombre:usuario.nombre,
+          estado:"pendiente", creadaEn:hoy };
     fbEscribir("tareas", t.id, t).then(() => {
       setTareas(prev => editTarea ? prev.map(x=>x.id===t.id?t:x) : [t,...prev]);
       setShowForm(false); setEditTarea(null);
-      setForm({titulo:"",descripcion:"",cliente:"",prioridad:"normal",vence:"",tipo:"contacto"});
+      setForm({titulo:"",descripcion:"",cliente:"",prioridad:"normal",vence:"",tipo:"contacto",agenteId:""});
+    });
+  };
+
+  const asignar = (tarea, agenteId) => {
+    const updated = {...tarea, agente:agenteId,
+      asignadoEn:new Date().toLocaleDateString("es-ES"),
+      asignadoPor:usuario.nombre};
+    fbEscribir("tareas", tarea.id, updated).then(() => {
+      setTareas(prev => prev.map(t => t.id===tarea.id ? updated : t));
+      setAsignando(null);
     });
   };
 
   const marcarHecha = (tarea) => {
-    const upd = {...tarea, estado:"hecha", hechaEn:new Date().toLocaleDateString("es-ES")};
-    fbEscribir("tareas", tarea.id, upd).then(() =>
-      setTareas(prev => prev.map(t => t.id===tarea.id ? upd : t))
+    const u = {...tarea, estado:"hecha", hechaEn:new Date().toLocaleDateString("es-ES")};
+    fbEscribir("tareas", tarea.id, u).then(() =>
+      setTareas(prev => prev.map(t => t.id===tarea.id ? u : t))
     );
   };
 
@@ -3645,65 +3762,162 @@ function GestorTareas({ usuario }) {
   const abrirEditar = (t) => {
     setEditTarea(t);
     setForm({titulo:t.titulo,descripcion:t.descripcion||"",cliente:t.cliente||"",
-      prioridad:t.prioridad||"normal",vence:t.vence||"",tipo:t.tipo||"contacto"});
+      prioridad:t.prioridad||"normal",vence:t.vence||"",tipo:t.tipo||"contacto",
+      agenteId:t.agente||""});
     setShowForm(true);
   };
 
+  // ── Datos derivados ────────────────────────────────────────────
+  const sinAsignar = tareas.filter(t=>!t.agente&&!t.eliminada&&t.estado==="pendiente");
+  const pendCount  = tareas.filter(t=>!t.eliminada&&t.estado==="pendiente").length;
+  const urgCount   = tareas.filter(t=>!t.eliminada&&t.estado==="pendiente"&&t.prioridad==="urgente").length;
+  const hechasCount= tareas.filter(t=>!t.eliminada&&t.estado==="hecha").length;
+
   const filtradas = tareas
     .filter(t => !t.eliminada)
-    .filter(t => filtro === "todas" ? true : t.estado === filtro)
-    .sort((a,b) => { const o={urgente:0,alta:1,normal:2}; return (o[a.prioridad]||2)-(o[b.prioridad]||2); });
-
-  const pendCount = tareas.filter(t=>!t.eliminada&&t.estado==="pendiente").length;
-  const urgCount  = tareas.filter(t=>!t.eliminada&&t.estado==="pendiente"&&t.prioridad==="urgente").length;
+    .filter(t => filtro==="todas" ? true : t.estado===filtro)
+    .filter(t => agFiltro==="todos" ? true
+      : agFiltro==="sin_asignar" ? !t.agente
+      : (t.agente||"").toUpperCase()===(agFiltro||"").toUpperCase()
+        || USUARIOS.find(u=>u.id===agFiltro)?.grupoAgente===(t.agente||""))
+    .sort((a,b) => ({urgente:0,alta:1,normal:2}[a.prioridad]||2) - ({urgente:0,alta:1,normal:2}[b.prioridad]||2));
 
   const inp = {width:"100%",border:`1.5px solid ${T.border}`,borderRadius:9,padding:"10px 12px",
     fontSize:13,outline:"none",boxSizing:"border-box",fontFamily:"inherit"};
+  const TIPO_ICON = {muestra:"📦",precio:"💶",contacto:"📞",coordinacion:"🔄",otro:"📌"};
 
   return (
     <div style={{padding:"16px",paddingBottom:100}}>
 
-      {/* Header stats */}
-      <div style={{display:"flex",gap:8,marginBottom:16}}>
+      {/* ── KPI cards ── */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:14}}>
         {[
-          {n:pendCount,l:"Pendientes",c:T.amber},
-          {n:urgCount,l:"Urgentes",c:T.red},
-          {n:tareas.filter(t=>!t.eliminada&&t.estado==="hecha").length,l:"Hechas",c:T.green},
+          {n:pendCount, l:"Pendientes", c:T.amber},
+          {n:urgCount,  l:"Urgentes",   c:T.red},
+          {n:hechasCount,l:"Hechas",    c:T.green},
         ].map(s=>(
-          <div key={s.l} style={{flex:1,background:"#fff",border:`1px solid ${T.border}`,borderRadius:12,padding:"12px 10px",textAlign:"center"}}>
+          <div key={s.l} style={{background:"#fff",border:`1px solid ${T.border}`,borderRadius:12,padding:"12px 10px",textAlign:"center"}}>
             <p style={{margin:"0 0 2px",fontSize:22,fontWeight:800,color:s.c}}>{s.n}</p>
             <p style={{margin:0,fontSize:10,color:T.muted}}>{s.l}</p>
           </div>
         ))}
       </div>
 
-      {/* Filtros + botón nueva */}
-      <div style={{display:"flex",gap:8,marginBottom:14,alignItems:"center"}}>
+      {/* ── Sin asignar — alerta managers ── */}
+      {esJefeOmas && sinAsignar.length > 0 && (
+        <div style={{background:"#FFFBEB",border:`1.5px solid ${T.amber}`,borderRadius:12,
+          padding:"10px 14px",marginBottom:12,display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontSize:20}}>⚠️</span>
+          <div style={{flex:1}}>
+            <p style={{margin:0,fontSize:13,fontWeight:700,color:"#92400E"}}>
+              {sinAsignar.length} tarea{sinAsignar.length>1?"s":""} sin asignar
+            </p>
+            <p style={{margin:0,fontSize:11,color:"#B45309"}}>Requieren agente responsable</p>
+          </div>
+          <button onClick={()=>setAgFiltro(agFiltro==="sin_asignar"?"todos":"sin_asignar")}
+            style={{padding:"5px 12px",borderRadius:7,border:`1px solid ${T.amber}`,
+              background:agFiltro==="sin_asignar"?T.amber:"#fff",
+              color:agFiltro==="sin_asignar"?"#fff":"#92400E",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+            {agFiltro==="sin_asignar"?"Ver todas":"Ver →"}
+          </button>
+        </div>
+      )}
+
+      {/* ── Tarjetas de agente (managers) ── */}
+      {esJefeOmas && (
+        <div style={{marginBottom:12}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:6,marginBottom:6}}>
+            {/* Card Todos */}
+            <div onClick={()=>setAgFiltro("todos")}
+              style={{background:"#fff",borderRadius:11,padding:"10px 12px",cursor:"pointer",
+                border:`2px solid ${agFiltro==="todos"?T.navy:T.border}`,
+                gridColumn:"1/-1"}}>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <span style={{fontSize:18}}>🌐</span>
+                <div style={{flex:1}}>
+                  <p style={{margin:0,fontSize:12,fontWeight:700,color:T.text}}>
+                    {esCeo||esDir?"Todos los equipos":`Equipo ${usuario.equipo}`}
+                  </p>
+                  <p style={{margin:0,fontSize:10,color:T.muted}}>
+                    {pendCount} pendientes · {urgCount} urgentes · {sinAsignar.length} sin asignar
+                  </p>
+                </div>
+                {agFiltro==="todos"&&<span style={{color:T.navy,fontWeight:800}}>✓</span>}
+              </div>
+            </div>
+
+            {/* Tarjeta por agente */}
+            {agentesAsig.map(ag => {
+              const agTareas = tareas.filter(t => !t.eliminada &&
+                ((t.agente||"").toUpperCase()===ag.id.toUpperCase() ||
+                 (t.agente||"").toUpperCase()===(ag.grupoAgente||"").toUpperCase())
+              );
+              const agPend = agTareas.filter(t=>t.estado==="pendiente");
+              const agUrg  = agPend.filter(t=>t.prioridad==="urgente");
+              const sel    = agFiltro===ag.id;
+              return (
+                <div key={ag.id} onClick={()=>setAgFiltro(sel?"todos":ag.id)}
+                  style={{background:"#fff",borderRadius:11,padding:"10px 12px",cursor:"pointer",
+                    border:`2px solid ${sel?ag.color:T.border}`,
+                    background:sel?ag.color+"08":"#fff",
+                    opacity:agTareas.length?1:0.45}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                    <div style={{width:28,height:28,borderRadius:7,background:ag.color+"20",
+                      display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>
+                      {ag.icon||"🧑‍💼"}
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <p style={{margin:0,fontSize:12,fontWeight:700,color:T.text,
+                        overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ag.nombre}</p>
+                      <p style={{margin:0,fontSize:10,color:T.muted}}>{ag.equipo}</p>
+                    </div>
+                    {sel&&<span style={{fontSize:11,color:ag.color,fontWeight:800}}>✓</span>}
+                  </div>
+                  <div style={{display:"flex",gap:4}}>
+                    <span style={{flex:1,textAlign:"center",padding:"4px 2px",background:"#FFF7ED",
+                      borderRadius:6,fontSize:13,fontWeight:800,color:T.amber}}>{agPend.length}</span>
+                    <span style={{flex:1,textAlign:"center",padding:"4px 2px",background:"#FEF2F2",
+                      borderRadius:6,fontSize:13,fontWeight:800,color:T.red}}>{agUrg.length}</span>
+                  </div>
+                  <div style={{display:"flex",gap:4,marginTop:2}}>
+                    <span style={{flex:1,textAlign:"center",fontSize:9,color:T.muted}}>pend.</span>
+                    <span style={{flex:1,textAlign:"center",fontSize:9,color:T.muted}}>urg.</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── Filtros estado + botón nueva ── */}
+      <div style={{display:"flex",gap:8,marginBottom:12,alignItems:"center"}}>
         <div style={{display:"flex",gap:4,flex:1}}>
           {[["pendiente","Pendientes"],["hecha","Hechas"],["todas","Todas"]].map(([k,l])=>(
             <button key={k} onClick={()=>setFiltro(k)}
-              style={{flex:1,padding:"7px 8px",borderRadius:8,border:`1.5px solid ${filtro===k?T.navy:T.border}`,
+              style={{flex:1,padding:"7px 6px",borderRadius:8,
+                border:`1.5px solid ${filtro===k?T.navy:T.border}`,
                 background:filtro===k?T.navy:"#fff",color:filtro===k?"#fff":T.muted,
                 fontSize:11,fontWeight:filtro===k?700:400,cursor:"pointer"}}>{l}</button>
           ))}
         </div>
-        <button onClick={()=>{setEditTarea(null);setForm({titulo:"",descripcion:"",cliente:"",prioridad:"normal",vence:"",tipo:"contacto"});setShowForm(true);}}
+        <button onClick={()=>{setEditTarea(null);setForm({titulo:"",descripcion:"",cliente:"",prioridad:"normal",vence:"",tipo:"contacto",agenteId:""});setShowForm(true);}}
           style={{background:T.navy,color:"#fff",border:"none",borderRadius:9,
             padding:"8px 14px",fontSize:13,fontWeight:700,cursor:"pointer",flexShrink:0}}>
           + Nueva
         </button>
       </div>
 
-      {/* Formulario nueva / editar */}
+      {/* ── Formulario nueva / editar ── */}
       {showForm && (
-        <div style={{background:"#fff",border:`1.5px solid ${T.border}`,borderRadius:14,padding:16,marginBottom:14}}>
+        <div style={{background:"#fff",border:`1.5px solid ${T.border}`,borderRadius:14,padding:16,marginBottom:12}}>
           <p style={{margin:"0 0 12px",fontSize:14,fontWeight:700,color:T.text}}>
-            {editTarea ? "Editar tarea" : "Nueva tarea"}
+            {editTarea?"Editar tarea":"Nueva tarea"}
           </p>
           <div style={{display:"flex",flexDirection:"column",gap:10}}>
             <input style={inp} placeholder="Título de la acción *" value={form.titulo} onChange={e=>upd("titulo",e.target.value)}/>
             <input style={inp} placeholder="Cliente" value={form.cliente} onChange={e=>upd("cliente",e.target.value)}/>
-            <textarea style={{...inp,minHeight:60,resize:"vertical"}} placeholder="Descripción / notas" value={form.descripcion} onChange={e=>upd("descripcion",e.target.value)}/>
+            <textarea style={{...inp,minHeight:56,resize:"vertical"}} placeholder="Descripción / notas" value={form.descripcion} onChange={e=>upd("descripcion",e.target.value)}/>
             <div style={{display:"flex",gap:8}}>
               <select style={{...inp,flex:1}} value={form.prioridad} onChange={e=>upd("prioridad",e.target.value)}>
                 <option value="urgente">🔴 Urgente</option>
@@ -3719,11 +3933,24 @@ function GestorTareas({ usuario }) {
               </select>
             </div>
             <input style={inp} placeholder="Fecha límite (dd/mm/aaaa)" value={form.vence} onChange={e=>upd("vence",e.target.value)}/>
+            {/* Asignación — solo managers */}
+            {esJefeOmas && (
+              <select style={inp} value={form.agenteId} onChange={e=>upd("agenteId",e.target.value)}>
+                <option value="">⚪ Sin asignar (pendiente de agente)</option>
+                {agentesAsig.map(a=>(
+                  <option key={a.id} value={a.id}>{a.icon} {a.nombre} · {a.equipo}</option>
+                ))}
+              </select>
+            )}
             <div style={{display:"flex",gap:8}}>
-              <button onClick={guardar} style={{flex:1,background:T.navy,color:"#fff",border:"none",borderRadius:9,padding:"11px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+              <button onClick={guardar}
+                style={{flex:1,background:T.navy,color:"#fff",border:"none",borderRadius:9,
+                  padding:"11px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
                 {editTarea?"Guardar cambios":"Crear tarea"}
               </button>
-              <button onClick={()=>{setShowForm(false);setEditTarea(null);}} style={{padding:"11px 16px",border:`1px solid ${T.border}`,borderRadius:9,background:"#fff",fontSize:13,cursor:"pointer"}}>
+              <button onClick={()=>{setShowForm(false);setEditTarea(null);}}
+                style={{padding:"11px 16px",border:`1px solid ${T.border}`,borderRadius:9,
+                  background:"#fff",fontSize:13,cursor:"pointer"}}>
                 Cancelar
               </button>
             </div>
@@ -3731,54 +3958,100 @@ function GestorTareas({ usuario }) {
         </div>
       )}
 
-      {/* Lista de tareas */}
+      {/* ── Lista de tareas ── */}
       {filtradas.length === 0 ? (
         <div style={{textAlign:"center",padding:"40px 0",color:T.muted}}>
           <p style={{fontSize:32,margin:"0 0 8px"}}>✅</p>
-          <p style={{fontSize:14}}>No hay tareas {filtro === "pendiente" ? "pendientes" : ""}</p>
+          <p style={{fontSize:14}}>No hay tareas {filtro==="pendiente"?"pendientes":""}</p>
         </div>
       ) : (
         <div style={{display:"flex",flexDirection:"column",gap:8}}>
           {filtradas.map(t => {
             const cfg = PRIORIDAD_CFG[t.prioridad] || PRIORIDAD_CFG.normal;
-            const TIPO_ICON = {muestra:"📦",precio:"💶",contacto:"📞",coordinacion:"🔄",otro:"📌"};
+            const agObj = esJefeOmas ? USUARIOS.find(u=>
+              u.id===(t.agente||"") ||
+              (u.grupoAgente||"").toUpperCase()===(t.agente||"").toUpperCase()
+            ) : null;
             return (
               <div key={t.id} style={{background:"#fff",border:`1px solid ${T.border}`,
-                borderLeft:`4px solid ${cfg.color}`,borderRadius:12,padding:"14px 14px 14px 16px"}}>
+                borderLeft:`4px solid ${cfg.color}`,borderRadius:12,padding:"12px 14px 12px 16px"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
                   <div style={{flex:1,minWidth:0}}>
-                    <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:4,flexWrap:"wrap"}}>
+                    <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:3,flexWrap:"wrap"}}>
                       <span style={{fontSize:14}}>{TIPO_ICON[t.tipo]||"📌"}</span>
                       <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{t.titulo}</p>
                       <span style={{fontSize:10,fontWeight:700,color:cfg.color,background:cfg.bg,
                         borderRadius:5,padding:"1px 7px"}}>{cfg.label}</span>
+                      {/* Badge agente — visible para managers */}
+                      {esJefeOmas && (
+                        agObj
+                          ? <span style={{fontSize:10,fontWeight:700,color:agObj.color,
+                              background:agObj.color+"18",borderRadius:99,padding:"1px 8px"}}>
+                              {agObj.icon} {agObj.nombre}
+                            </span>
+                          : <span style={{fontSize:10,fontWeight:700,color:T.amber,
+                              background:"#FFFBEB",borderRadius:99,padding:"1px 8px"}}>
+                              ⚠️ Sin asignar
+                            </span>
+                      )}
                     </div>
-                    {t.cliente && <p style={{margin:"0 0 4px",fontSize:12,color:T.muted}}>🏢 {t.cliente}</p>}
-                    {t.descripcion && <p style={{margin:"0 0 6px",fontSize:12,color:"#475569",lineHeight:1.5}}>{t.descripcion}</p>}
-                    <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
-                      {t.vence&&<span style={{fontSize:11,color:cfg.color,fontWeight:600}}>📅 Vence: {t.vence}</span>}
+                    {t.cliente&&<p style={{margin:"0 0 3px",fontSize:12,color:T.muted}}>🏢 {t.cliente}</p>}
+                    {t.descripcion&&<p style={{margin:"0 0 5px",fontSize:12,color:"#475569",lineHeight:1.5}}>{t.descripcion}</p>}
+                    <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                      {t.vence&&<span style={{fontSize:11,color:cfg.color,fontWeight:600}}>📅 {t.vence}</span>}
                       {t.creadaEn&&<span style={{fontSize:11,color:T.muted}}>Creada: {t.creadaEn}</span>}
-                      {t.hechaEn&&<span style={{fontSize:11,color:T.green,fontWeight:600}}>✅ Hecha: {t.hechaEn}</span>}
+                      {t.asignadoPor&&<span style={{fontSize:11,color:T.muted}}>Asignada por: {t.asignadoPor}</span>}
+                      {t.hechaEn&&<span style={{fontSize:11,color:T.green,fontWeight:600}}>✅ {t.hechaEn}</span>}
                     </div>
                   </div>
                 </div>
-                {t.estado === "pendiente" && (
-                  <div style={{display:"flex",gap:6,marginTop:10}}>
+
+                {/* Panel de reasignación */}
+                {asignando===t.id && esJefeOmas && (
+                  <div style={{marginTop:10,padding:"10px 12px",background:"#F8FAFC",
+                    borderRadius:9,border:`1px solid ${T.border}`}}>
+                    <p style={{margin:"0 0 8px",fontSize:12,fontWeight:700,color:T.text}}>Asignar a:</p>
+                    <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                      {agentesAsig.map(a=>(
+                        <button key={a.id} onClick={()=>asignar(t,a.id)}
+                          style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",
+                            borderRadius:8,border:`1.5px solid ${T.border}`,background:"#fff",
+                            cursor:"pointer",textAlign:"left"}}>
+                          <span style={{fontSize:16}}>{a.icon}</span>
+                          <span style={{fontSize:12,fontWeight:600,color:T.text}}>{a.nombre}</span>
+                          <span style={{fontSize:11,color:T.muted,marginLeft:"auto"}}>{a.equipo}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <button onClick={()=>setAsignando(null)}
+                      style={{marginTop:8,width:"100%",padding:"6px",border:`1px solid ${T.border}`,
+                        borderRadius:8,background:"#fff",fontSize:12,cursor:"pointer",color:T.muted}}>
+                      Cancelar
+                    </button>
+                  </div>
+                )}
+
+                {/* Acciones */}
+                {t.estado==="pendiente" && asignando!==t.id && (
+                  <div style={{display:"flex",gap:5,marginTop:10,flexWrap:"wrap"}}>
                     <button onClick={()=>marcarHecha(t)}
-                      style={{flex:1,padding:"7px",border:`1px solid ${T.green}`,borderRadius:8,
+                      style={{flex:2,padding:"7px",border:`1px solid ${T.green}`,borderRadius:8,
                         background:"#F0FDF4",color:T.greenD,fontSize:12,fontWeight:700,cursor:"pointer"}}>
                       ✅ Marcar hecha
                     </button>
+                    {esJefeOmas && (
+                      <button onClick={()=>setAsignando(t.id)}
+                        style={{flex:1,padding:"7px",border:`1px solid ${T.blue}`,borderRadius:8,
+                          background:T.blueL,color:T.blue,fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                        👤 Asignar
+                      </button>
+                    )}
                     <button onClick={()=>abrirEditar(t)}
-                      style={{padding:"7px 12px",border:`1px solid ${T.border}`,borderRadius:8,
-                        background:"#fff",fontSize:12,cursor:"pointer"}}>
-                      ✏️ Editar
-                    </button>
+                      style={{padding:"7px 10px",border:`1px solid ${T.border}`,borderRadius:8,
+                        background:"#fff",fontSize:12,cursor:"pointer"}}>✏️</button>
                     <button onClick={()=>eliminar(t.id)}
                       style={{padding:"7px 10px",border:`1px solid #FECACA`,borderRadius:8,
-                        background:"#FEF2F2",color:T.red,fontSize:12,cursor:"pointer"}}>
-                      🗑️
-                    </button>
+                        background:"#FEF2F2",color:T.red,fontSize:12,cursor:"pointer"}}>🗑️</button>
                   </div>
                 )}
               </div>
@@ -7285,7 +7558,7 @@ function App(props){
     if(esJefe){const ag=USUARIOS.find(u=>u.id===(o.agenteId||o.agente));return ag?.equipo===miEquipo;}
     return true;
   }).length;
-  const urgCount=0; // tareas urgentes (cargadas dinámicamente en TareasWidget)
+  const urgCount=0; // badge dinámico cargado en TareasWidget — siempre 0 aquí
 
   const NAV_AGENTE=[
     {id:"dashboard",    icon:"🏠",label:"Inicio",      color:usuario.color},
@@ -7741,6 +8014,7 @@ function HistorialSemanal({ usuario }) {
   const [visitas, setVisitas] = useState([]);
   const [muestras, setMuestras] = useState([]);
   const [oportunidades, setOportunidades] = useState([]);
+  const [informes, setInformes] = useState([]);
   const [cargando, setCargando] = useState(true);
   const [tabSel, setTabSel] = useState("resumen");
   const [equipoSel, setEquipoSel] = useState("todos"); // "todos"|"WIKUK"|"INTERKEY"
@@ -7794,10 +8068,13 @@ function HistorialSemanal({ usuario }) {
       fbLeer("visitas"),
       fbLeer("muestras"),
       fbLeer("oportunidades"),
-    ]).then(([vis, mues, ops]) => {
+      fbLeer("informes"),
+    ]).then(([vis, mues, ops, infs]) => {
       setVisitas(vis.filter(v => esMio(v) && !v.eliminada));
       setMuestras(mues.filter(m => esMio(m) && !m.eliminada));
       setOportunidades(ops.filter(o => esMio(o) && !o.eliminada));
+      // Informes: director ve todos, agente solo los suyos
+      setInformes(esJefeOmas ? infs : infs.filter(i => esMio(i)));
     }).catch(() => {}).finally(() => setCargando(false));
   }, [usuario.id]);
 
@@ -7957,35 +8234,93 @@ function HistorialSemanal({ usuario }) {
   return (
     <div style={{padding:"16px",paddingBottom:100}}>
 
-      {/* Selector de semana */}
-      <div style={{background:"#fff",border:`1px solid ${T.border}`,borderRadius:14,
-        padding:"14px 16px",marginBottom:14,display:"flex",alignItems:"center",gap:12}}>
-        <button onClick={()=>setSemana(s=>Math.max(1,s-1))}
-          style={{width:36,height:36,borderRadius:9,border:`1.5px solid ${T.border}`,
-            background:"#fff",fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>‹</button>
-        <div style={{flex:1,textAlign:"center"}}>
-          <p style={{margin:0,fontSize:16,fontWeight:800,color:T.text}}>Semana {semana}</p>
-          <p style={{margin:0,fontSize:11,color:T.muted}}>
-            ~{semanaLabel(semana)} · 2026
-            {semana === SEMANA_ACTUAL && <span style={{color:T.green,fontWeight:600}}> · Semana actual</span>}
-          </p>
+      {/* Selector de semana con estado de informe */}
+      {(()=>{
+        // Informes de esta semana por agente
+        const infsSemana = informes.filter(i => Number(i.semana) === semana);
+        const agentesConInforme = new Set(infsSemana.map(i=>i.agente));
+        const agentesTotales = esJefeOmas
+          ? USUARIOS.filter(u=>u.rol==="agente"&&(esJefe?u.equipo===usuario.equipo:true)&&(equipoSel==="todos"?true:u.equipo===equipoSel)).length
+          : 1;
+        const todosCerrado = agentesTotales > 0 && agentesConInforme.size >= agentesTotales;
+        const alguno = agentesConInforme.size > 0;
+        const miInforme = !esJefeOmas && infsSemana.find(i=>i.agente===usuario.id);
+
+        const estadoColor = todosCerrado ? T.green : alguno ? T.amber : semana < SEMANA_ACTUAL ? T.red : T.muted;
+        const estadoIcon  = todosCerrado ? "✅" : alguno ? "⚠️" : semana < SEMANA_ACTUAL ? "❌" : "📋";
+        const estadoLabel = esJefeOmas
+          ? (todosCerrado ? `${agentesConInforme.size}/${agentesTotales} informes enviados`
+            : alguno ? `${agentesConInforme.size}/${agentesTotales} informes enviados`
+            : semana < SEMANA_ACTUAL ? "Ningún informe enviado"
+            : "Semana en curso")
+          : (miInforme ? `Informe enviado el ${miInforme.fechaEnvio}`
+            : semana < SEMANA_ACTUAL ? "Informe pendiente"
+            : "Semana en curso");
+
+        return (
+        <div style={{background:"#fff",border:`1.5px solid ${estadoColor}30`,borderRadius:14,
+          padding:"12px 16px",marginBottom:14}}>
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <button onClick={()=>setSemana(s=>Math.max(1,s-1))}
+              style={{width:36,height:36,borderRadius:9,border:`1.5px solid ${T.border}`,
+                background:"#fff",fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>‹</button>
+            <div style={{flex:1,textAlign:"center"}}>
+              <p style={{margin:"0 0 2px",fontSize:17,fontWeight:800,color:T.text}}>Semana {semana}</p>
+              <p style={{margin:0,fontSize:11,color:T.muted}}>
+                ~{semanaLabel(semana)} · 2026
+                {semana === SEMANA_ACTUAL && <span style={{color:T.blue,fontWeight:600}}> · En curso</span>}
+              </p>
+            </div>
+            <button onClick={()=>setSemana(s=>Math.min(SEMANA_ACTUAL,s+1))}
+              style={{width:36,height:36,borderRadius:9,border:`1.5px solid ${T.border}`,
+                background:"#fff",fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>›</button>
+          </div>
+
+          {/* Estado del informe */}
+          <div style={{marginTop:10,padding:"8px 12px",borderRadius:9,
+            background:estadoColor+"12",
+            display:"flex",alignItems:"center",gap:8}}>
+            <span style={{fontSize:16}}>{estadoIcon}</span>
+            <div style={{flex:1}}>
+              <p style={{margin:0,fontSize:12,fontWeight:600,color:estadoColor}}>{estadoLabel}</p>
+              {esJefeOmas && agentesConInforme.size>0 && (
+                <p style={{margin:"2px 0 0",fontSize:10,color:T.muted}}>
+                  {[...agentesConInforme].map(id=>USUARIOS.find(u=>u.id===id)?.nombre||id).join(" · ")}
+                </p>
+              )}
+              {esJefeOmas && agentesConInforme.size < agentesTotales && alguno && (
+                <p style={{margin:"2px 0 0",fontSize:10,color:T.red}}>
+                  Pendientes: {USUARIOS.filter(u=>u.rol==="agente"&&(esJefe?u.equipo===usuario.equipo:true)&&(equipoSel==="todos"?true:u.equipo===equipoSel)&&!agentesConInforme.has(u.id)).map(u=>u.nombre).join(", ")}
+                </p>
+              )}
+            </div>
+            {/* Mini progress para director */}
+            {esJefeOmas && agentesTotales > 1 && (
+              <div style={{width:48,height:48,flexShrink:0,position:"relative"}}>
+                <svg viewBox="0 0 48 48" style={{width:48,height:48,transform:"rotate(-90deg)"}}>
+                  <circle cx="24" cy="24" r="18" fill="none" stroke={T.border} strokeWidth="5"/>
+                  <circle cx="24" cy="24" r="18" fill="none" stroke={estadoColor} strokeWidth="5"
+                    strokeDasharray={`${2*Math.PI*18*Math.min(agentesConInforme.size/agentesTotales,1)} ${2*Math.PI*18}`}/>
+                </svg>
+                <span style={{position:"absolute",top:"50%",left:"50%",
+                  transform:"translate(-50%,-50%)",fontSize:11,fontWeight:800,color:estadoColor}}>
+                  {Math.round(agentesConInforme.size/agentesTotales*100)}%
+                </span>
+              </div>
+            )}
+          </div>
         </div>
-        <button onClick={()=>setSemana(s=>Math.min(SEMANA_ACTUAL,s+1))}
-          style={{width:36,height:36,borderRadius:9,border:`1.5px solid ${T.border}`,
-            background:"#fff",fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>›</button>
-      </div>
+        );
+      })()}
 
       {/* KPI cards semana */}
       {(()=>{
         const agentesActivos = [...new Set(visSemana.map(v=>v.agente||v.agenteId).filter(Boolean))].length;
-        const kpis = esCeo || esDirector ? [
-          {n:visSemana.length,     l:"Visitas totales",        c:T.blue,   sub:`${agentesActivos} agentes`},
-          {n:opsSemana.length,     l:"Oportunidades",          c:T.purple, sub:"abiertas esta semana"},
-          {n:[...new Set(visSemana.map(v=>v.agente).filter(Boolean))].length, l:"Agentes activos", c:T.amber, sub:"WIKUK + INTERKEY"},
-        ] : esJefe ? [
-          {n:visSemana.length,     l:"Visitas equipo",         c:T.blue,   sub:`equipo ${usuario.equipo}`},
-          {n:opsSemana.length,     l:"Oportunidades",          c:T.purple, sub:"abiertas"},
-          {n:visSemana.filter(v=>v.resultado==="pedido").length, l:"Con pedido", c:T.green, sub:"esta semana"},
+        const labelEquipo = esCeo||esDirector ? "WIKUK + INTERKEY" : `equipo ${usuario.equipo||""}`;
+        const kpis = esJefeOmas ? [
+          {n:visSemana.length,     l:"Visitas realizadas",  c:T.blue,   sub:`${agentesActivos} agente${agentesActivos!==1?"s":""} activos`},
+          {n:opsSemana.length,     l:"Oportunidades",       c:T.purple, sub:"abiertas esta semana"},
+          {n:visSemana.filter(v=>v.resultado==="pedido"||v.resultado==="seguimiento").length, l:"Con seguimiento", c:T.green, sub:labelEquipo},
         ] : [
           {n: objSemana?.vReal != null ? `${(objSemana.vReal/1000).toFixed(1)}k€` : "—",
            l:"Ventas", c: objSemana?.vReal > (objSemana?.vPpto||0) ? T.green : objSemana?.vReal > 0 ? T.amber : T.muted,
@@ -8187,7 +8522,7 @@ function HistorialSemanal({ usuario }) {
           {esJefeOmas && (visSemana.length > 0 || opsSemana.length > 0) && (
             <div style={{background:"#fff",border:`1px solid ${T.border}`,borderRadius:14,padding:16,marginBottom:12}}>
               <p style={{margin:"0 0 12px",fontSize:13,fontWeight:700,color:T.text}}>
-                {esCeo?"🌐 Todos los equipos":esDirector?"📊 Actividad equipos":`📊 Equipo ${usuario.equipo}`}
+                {esCeo?"🌐 Todos los equipos":esDirector?"📊 Actividad equipos":esJefe?`📊 Equipo ${usuario.equipo}`:"📊 Mi actividad"}
               </p>
               {USUARIOS.filter(u=>u.rol==="agente"&&(esJefe?u.equipo===usuario.equipo:true)&&(equipoSel==="todos"?true:u.equipo===equipoSel)&&(!agenteSel||u.id===agenteSel)).map(ag=>{
                 const agVis = visSemana.filter(v=>(v.agente||v.agenteId)===ag.id);
