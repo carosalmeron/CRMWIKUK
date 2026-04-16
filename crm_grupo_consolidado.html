@@ -5300,14 +5300,40 @@ function HistorialClientes({usuario, actividad}){
 
 function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
   const clientes=clientesFB&&clientesFB.length>0 ? clientesFB : (CLIENTES_POR_AGENTE[usuario.id]||[]);
-  const [rutaSel,setRutaSel]=useState(null); // número de ruta seleccionada, o "sinRuta"
+  const [rutaSel,setRutaSel]=useState(null);
   const [clienteSel,setClienteSel]=useState(null);
   const [tabSel,setTabSel]=useState("visita");
   const [busqueda,setBusqueda]=useState("");
-  const [asignandoRuta,setAsignandoRuta]=useState(null); // id cliente al que se asigna ruta
+  const [asignandoRuta,setAsignandoRuta]=useState(null);
   const [nuevaRuta,setNuevaRuta]=useState("");
-  const [clientesLocal,setClientesLocal]=useState(null); // override local para rutas asignadas
+  const [clientesLocal,setClientesLocal]=useState(null);
+  const [showReasignar,setShowReasignar]=useState(false);
+  const [nuevoAgente,setNuevoAgente]=useState("");
   const semanaActual=14;
+
+  const esJefeOmas=["jefe","director","ceo"].includes(usuario?.rol);
+  const agentesDisp=USUARIOS.filter(u=>u.rol==="agente"&&
+    (usuario?.rol==="jefe"?u.equipo===usuario.equipo:true));
+
+  const reasignarCliente=(cliente)=>{
+    if(!nuevoAgente) return;
+    const ag=USUARIOS.find(u=>u.id===nuevoAgente);
+    if(!ag) return;
+    const updated={...cliente,
+      GRUPOAGENTE:ag.grupoAgente||ag.id,
+      grupoAgente:ag.grupoAgente||ag.id,
+      agente:ag.id,
+    };
+    fbEscribir("clientes",cliente.id,updated).then(()=>{
+      setClientesLocal(prev=>{
+        const base=prev||clientes;
+        return base.map(c=>c.id===cliente.id?updated:c);
+      });
+      setShowReasignar(false);
+      setNuevoAgente("");
+      alert("✅ Cliente reasignado a "+ag.nombre);
+    });
+  };
 
   // clientes efectivos (pueden tener rutas asignadas localmente)
   const clientesEfectivos=clientesLocal||clientes;
@@ -5397,9 +5423,83 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
               <span style={{background:T.purpleL,color:T.purple,fontSize:10,
                 fontWeight:700,padding:"3px 8px",borderRadius:99}}>NUEVO</span>
             )}
+            {esJefeOmas&&(
+              <button onClick={()=>setShowReasignar(v=>!v)}
+                style={{background:"rgba(255,255,255,.12)",border:"1px solid rgba(255,255,255,.3)",
+                  color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer",
+                  padding:"5px 10px",borderRadius:8,flexShrink:0}}>
+                👤 Reasignar
+              </button>
+            )}
           </div>
+
+          {/* Panel reasignación agente */}
+          {esJefeOmas&&showReasignar&&(
+            <div style={{background:"rgba(255,255,255,.08)",borderRadius:10,
+              padding:"12px 14px",marginTop:10,border:"1px solid rgba(255,255,255,.2)"}}>
+              <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:"rgba(255,255,255,.6)",
+                textTransform:"uppercase"}}>
+                Agente actual: {clienteSel.GRUPOAGENTE||clienteSel.grupoAgente||"—"}
+              </p>
+              <select value={nuevoAgente} onChange={e=>setNuevoAgente(e.target.value)}
+                style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"none",
+                  fontSize:13,marginBottom:8,outline:"none",boxSizing:"border-box"}}>
+                <option value="">Seleccionar agente...</option>
+                {agentesDisp.map(a=>(
+                  <option key={a.id} value={a.id}>{a.icon} {a.nombre} · {a.equipo}</option>
+                ))}
+              </select>
+              <div style={{display:"flex",gap:6}}>
+                <button onClick={()=>{setShowReasignar(false);setNuevoAgente("");}}
+                  style={{flex:1,padding:"8px",borderRadius:8,border:"none",
+                    background:"rgba(255,255,255,.15)",color:"#fff",fontSize:12,cursor:"pointer"}}>
+                  Cancelar
+                </button>
+                <button onClick={()=>reasignarCliente(clienteSel)}
+                  disabled={!nuevoAgente}
+                  style={{flex:2,padding:"8px",borderRadius:8,border:"none",
+                    background:nuevoAgente?"#22C55E":"rgba(255,255,255,.1)",
+                    color:"#fff",fontWeight:700,fontSize:12,cursor:"pointer"}}>
+                  ✅ Confirmar reasignación
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Estado rápido */}
-          <div style={{display:"flex",gap:8,marginTop:10,flexWrap:"wrap"}}>
+          <div style={{display:"flex",gap:8,marginTop:10,flexWrap:"wrap",alignItems:"center"}}>
+            {/* Solicitar reasignación — solo agentes */}
+            {!esJefeOmas&&(
+              <button onClick={()=>{
+                const hoy=new Date().toLocaleDateString("es-ES");
+                const id="tsk_reasign_"+Date.now();
+                const doc={
+                  id,
+                  titulo:"Solicitud reasignación — "+(clienteSel.nombre||clienteSel.NOMBRE||"cliente"),
+                  descripcion:"El agente "+usuario.nombre+" solicita reasignar este cliente ("+
+                    (clienteSel.id||"")+" · "+(clienteSel.GRUPOAGENTE||clienteSel.grupoAgente||"sin agente")+
+                    ") a otro vendedor.",
+                  cliente:clienteSel.nombre||clienteSel.NOMBRE||"",
+                  clienteId:clienteSel.id||"",
+                  tipo:"coordinacion",
+                  prioridad:"normal",
+                  estado:"pendiente",
+                  agente:"",
+                  creadaPor:usuario.id,
+                  creadaPorNombre:usuario.nombre,
+                  creadaEn:hoy,
+                  esSolicitudReasignacion:true,
+                };
+                fbEscribir("tareas",id,doc).then(()=>
+                  alert("✅ Solicitud enviada al jefe de equipo. Recibirá la tarea de reasignación.")
+                );
+              }}
+                style={{background:"rgba(255,255,255,.1)",border:"1px solid rgba(255,255,255,.25)",
+                  color:"rgba(255,255,255,.8)",fontSize:11,fontWeight:600,cursor:"pointer",
+                  padding:"4px 12px",borderRadius:8,flexShrink:0,whiteSpace:"nowrap"}}>
+              🔄 Solicitar reasignación
+            </button>
+            )}
             {ultimaVisita&&(
               <div style={{background:"rgba(255,255,255,.08)",borderRadius:8,
                 padding:"4px 10px",fontSize:11,color:"rgba(255,255,255,.7)"}}>
