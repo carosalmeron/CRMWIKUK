@@ -7731,8 +7731,21 @@ function HistorialSemanal({ usuario }) {
   const [semana, setSemana] = useState(15);
   const [visitas, setVisitas] = useState([]);
   const [muestras, setMuestras] = useState([]);
+  const [oportunidades, setOportunidades] = useState([]);
   const [cargando, setCargando] = useState(true);
   const [tabSel, setTabSel] = useState("resumen");
+
+  // ── Roles y jerarquía de visibilidad ──────────────────────────
+  const esCeo      = usuario.rol === "ceo";
+  const esDirector = usuario.rol === "director";
+  const esJefe     = usuario.rol === "jefe";
+  const esAgentRol = usuario.rol === "agente";
+  const esJefeOmas = esCeo || esDirector || esJefe;
+
+  // Agentes del equipo propio (para jefes)
+  const agentesEquipo = USUARIOS
+    .filter(u => u.rol === "agente" && (esJefe ? u.equipo === usuario.equipo : true))
+    .map(u => u.id);
 
   const misIds = new Set([
     (usuario.id||"").toUpperCase(),
@@ -7741,22 +7754,43 @@ function HistorialSemanal({ usuario }) {
     (usuario.username||"").toUpperCase(),
   ].filter(Boolean));
 
-  const esMio = (doc) => misIds.has((doc.agente||doc.agenteGrupo||"").toUpperCase());
+  // Filtro según jerarquía:
+  // CEO       → todo sin filtro
+  // Director  → todo (todos los equipos + su propia prospección)
+  // Jefe      → su equipo + su propia prospección
+  // Agente    → solo lo suyo
+  const esMio = (doc) => {
+    if (esCeo || esDirector) return true;
+    if (esJefe) {
+      const agDoc = (doc.agente||doc.agenteId||doc.agenteGrupo||"").toLowerCase();
+      const esMiEquipo = agentesEquipo.some(id => id.toLowerCase() === agDoc);
+      const esMiCreacion = misIds.has((doc.creadoPor||"").toUpperCase())
+        || doc.creadoPor === usuario.id;
+      return esMiEquipo || esMiCreacion;
+    }
+    // Agente: solo los suyos
+    return misIds.has((doc.agente||doc.agenteGrupo||"").toUpperCase());
+  };
 
   useEffect(() => {
     setCargando(true);
     Promise.all([
       fbLeer("visitas"),
       fbLeer("muestras"),
-    ]).then(([vis, mues]) => {
+      fbLeer("oportunidades"),
+    ]).then(([vis, mues, ops]) => {
       setVisitas(vis.filter(v => esMio(v) && !v.eliminada));
       setMuestras(mues.filter(m => esMio(m) && !m.eliminada));
+      setOportunidades(ops.filter(o => esMio(o) && !o.eliminada));
     }).catch(() => {}).finally(() => setCargando(false));
   }, [usuario.id]);
 
-  const visSemana = visitas.filter(v => Number(v.semana) === semana);
+  const visSemana  = visitas.filter(v => Number(v.semana) === semana);
   const muesSemana = muestras.filter(m => Number(m.semana) === semana);
-  const objSemana = (OBJETIVOS_SEMANA[usuario.grupoAgente||"JLGARCIA"]||[]).find(o => o.s === semana);
+  const opsSemana  = oportunidades.filter(o => Number(o.semana) === semana);
+  const objSemana  = esAgentRol
+    ? (OBJETIVOS_SEMANA[usuario.grupoAgente||"JLGARCIA"]||[]).find(o => o.s === semana)
+    : null;
 
   // Agrupar visitas por resultado
   const resCounts = {};
@@ -7862,10 +7896,13 @@ function HistorialSemanal({ usuario }) {
   };
 
   const TABS = [
-    {id:"resumen",   label:"📊 Resumen"},
-    {id:"visitas",   label:`👥 Visitas (${visSemana.length})`},
-    {id:"muestras",  label:`📦 Muestras (${muesSemana.length})`},
-    {id:"evolucion", label:"📈 Evolución"},
+    {id:"resumen",    label:"📊 Resumen"},
+    {id:"visitas",    label:`👥 Visitas (${visSemana.length})`},
+    ...(esJefeOmas
+      ? [{id:"oportunidades", label:`💼 Oportunidades (${opsSemana.length})`}]
+      : [{id:"muestras", label:`📦 Muestras (${muesSemana.length})`}]
+    ),
+    {id:"evolucion",  label:"📈 Evolución"},
   ];
 
   if (cargando) return (
@@ -7897,8 +7934,17 @@ function HistorialSemanal({ usuario }) {
       </div>
 
       {/* KPI cards semana */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:14}}>
-        {[
+      {(()=>{
+        const agentesActivos = [...new Set(visSemana.map(v=>v.agente||v.agenteId).filter(Boolean))].length;
+        const kpis = esCeo || esDirector ? [
+          {n:visSemana.length,     l:"Visitas totales",        c:T.blue,   sub:`${agentesActivos} agentes`},
+          {n:opsSemana.length,     l:"Oportunidades",          c:T.purple, sub:"abiertas esta semana"},
+          {n:[...new Set(visSemana.map(v=>v.agente).filter(Boolean))].length, l:"Agentes activos", c:T.amber, sub:"WIKUK + INTERKEY"},
+        ] : esJefe ? [
+          {n:visSemana.length,     l:"Visitas equipo",         c:T.blue,   sub:`equipo ${usuario.equipo}`},
+          {n:opsSemana.length,     l:"Oportunidades",          c:T.purple, sub:"abiertas"},
+          {n:visSemana.filter(v=>v.resultado==="pedido").length, l:"Con pedido", c:T.green, sub:"esta semana"},
+        ] : [
           {n: objSemana?.vReal != null ? `${(objSemana.vReal/1000).toFixed(1)}k€` : "—",
            l:"Ventas", c: objSemana?.vReal > (objSemana?.vPpto||0) ? T.green : objSemana?.vReal > 0 ? T.amber : T.muted,
            sub: objSemana ? `obj. ${(objSemana.vPpto/1000).toFixed(1)}k€` : "Sin datos"},
@@ -7907,7 +7953,10 @@ function HistorialSemanal({ usuario }) {
            sub: objSemana ? `obj. ${objSemana.mgPpto}%` : "Sin datos"},
           {n: visSemana.length, l:"Visitas", c:T.blue,
            sub: `${visSemana.filter(v=>v.resultado==="pedido").length} con pedido`},
-        ].map(k => (
+        ];
+        return (
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:14}}>
+        {kpis.map(k => (
           <div key={k.l} style={{background:"#fff",border:`1px solid ${T.border}`,borderRadius:12,padding:"12px 10px",textAlign:"center"}}>
             <p style={{margin:"0 0 2px",fontSize:20,fontWeight:800,color:k.c}}>{k.n}</p>
             <p style={{margin:"0 0 2px",fontSize:10,color:T.muted}}>{k.l}</p>
@@ -7915,6 +7964,8 @@ function HistorialSemanal({ usuario }) {
           </div>
         ))}
       </div>
+        );
+      })()}
 
       {/* Tabs */}
       <div style={{display:"flex",gap:4,marginBottom:12,overflowX:"auto",paddingBottom:2}}>
@@ -7961,8 +8012,75 @@ function HistorialSemanal({ usuario }) {
             </div>
           )}
 
+          {/* Actividad por agente — CEO / Director / Jefe */}
+          {esJefeOmas && (visSemana.length > 0 || opsSemana.length > 0) && (
+            <div style={{background:"#fff",border:`1px solid ${T.border}`,borderRadius:14,padding:16,marginBottom:12}}>
+              <p style={{margin:"0 0 12px",fontSize:13,fontWeight:700,color:T.text}}>
+                {esCeo?"🌐 Todos los equipos":esDirector?"📊 Actividad equipos":`📊 Equipo ${usuario.equipo}`}
+              </p>
+              {USUARIOS.filter(u=>u.rol==="agente"&&(esJefe?u.equipo===usuario.equipo:true)).map(ag=>{
+                const agVis = visSemana.filter(v=>(v.agente||v.agenteId)===ag.id);
+                const agOps = opsSemana.filter(o=>(o.agente||o.agenteId||o.agenteGrupo)===ag.id);
+                if(!agVis.length && !agOps.length) return null;
+                return(
+                  <div key={ag.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 0",
+                    borderBottom:`1px solid ${T.border}`}}>
+                    <div style={{width:36,height:36,borderRadius:9,background:ag.color+"20",
+                      display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>
+                      {ag.icon||"🧑‍💼"}
+                    </div>
+                    <div style={{flex:1}}>
+                      <p style={{margin:"0 0 2px",fontSize:13,fontWeight:600,color:T.text}}>{ag.nombre}</p>
+                      <p style={{margin:0,fontSize:11,color:T.muted}}>{ag.equipo}</p>
+                    </div>
+                    <div style={{display:"flex",gap:8,flexShrink:0}}>
+                      {agVis.length>0&&<span style={{fontSize:11,fontWeight:700,color:T.blue,
+                        background:T.blueL,borderRadius:99,padding:"3px 10px"}}>
+                        👥 {agVis.length} visitas
+                      </span>}
+                      {agOps.length>0&&<span style={{fontSize:11,fontWeight:700,color:T.purple,
+                        background:T.purpleL,borderRadius:99,padding:"3px 10px"}}>
+                        💼 {agOps.length} ops
+                      </span>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Oportunidades resumen — solo director */}
+          {esJefeOmas && opsSemana.length > 0 && false && (
+            <div style={{background:"#fff",border:`1px solid ${T.border}`,borderRadius:14,padding:16,marginBottom:12}}>
+              <p style={{margin:"0 0 10px",fontSize:13,fontWeight:700,color:T.text}}>
+                💼 Oportunidades creadas · Semana {semana}
+              </p>
+              {[...new Set(opsSemana.map(o=>o.agente||o.agenteId).filter(Boolean))].map(ag => {
+                const agObj = USUARIOS.find(u=>u.id===ag);
+                const agOps = opsSemana.filter(o=>(o.agente||o.agenteId)===ag);
+                return (
+                  <div key={ag} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",
+                    borderBottom:`1px solid ${T.border}`}}>
+                    <span style={{fontSize:22}}>{agObj?.icon||"👤"}</span>
+                    <div style={{flex:1}}>
+                      <p style={{margin:0,fontSize:13,fontWeight:600}}>{agObj?.nombre||ag}</p>
+                      <p style={{margin:0,fontSize:11,color:T.muted}}>{agOps.length} oportunidad{agOps.length!==1?"es":""} asignadas</p>
+                    </div>
+                    <span style={{fontSize:12,fontWeight:700,color:T.blue,background:T.blueL,
+                      borderRadius:99,padding:"2px 10px"}}>{agOps.length}</span>
+                  </div>
+                );
+              })}
+              {opsSemana.filter(o=>!o.agente&&!o.agenteId).length > 0 && (
+                <div style={{padding:"8px 0",fontSize:12,color:T.amber}}>
+                  ⚠️ {opsSemana.filter(o=>!o.agente&&!o.agenteId).length} sin asignar
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Muestras resumen */}
-          {muesSemana.length > 0 && (
+          {!esDirector && muesSemana.length > 0 && (
             <div style={{background:"#fff",border:`1px solid ${T.border}`,borderRadius:14,padding:16}}>
               <p style={{margin:"0 0 10px",fontSize:13,fontWeight:700,color:T.text}}>
                 📦 Muestras semana {semana} ({muesSemana.length})
@@ -8000,19 +8118,26 @@ function HistorialSemanal({ usuario }) {
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
               {visSemana.map((v,i) => {
                 const cfg = RESULTADO_CFG[v.resultado||"sin_contacto"]||RESULTADO_CFG.sin_contacto;
+                const agObj = esJefeOmas ? USUARIOS.find(u=>u.id===(v.agente||v.agenteId)) : null;
                 return (
                   <div key={i} style={{background:"#fff",border:`1px solid ${T.border}`,
                     borderLeft:`4px solid ${cfg.color}`,borderRadius:12,padding:14}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,marginBottom:6}}>
                       <div style={{flex:1}}>
-                        <p style={{margin:"0 0 3px",fontSize:14,fontWeight:700,color:T.text}}>
-                          {v.clienteNombre}
-                        </p>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                          <p style={{margin:"0 0 3px",fontSize:14,fontWeight:700,color:T.text}}>
+                            {v.clienteNombre}
+                          </p>
+                          {agObj && <span style={{fontSize:11,fontWeight:600,color:agObj.color||T.muted,
+                            background:(agObj.color||T.muted)+"18",borderRadius:99,padding:"2px 8px",flexShrink:0}}>
+                            {agObj.icon} {agObj.nombre}
+                          </span>}
+                        </div>
                         <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
                           <span style={{fontSize:11,fontWeight:600,color:cfg.color,background:cfg.bg,
                             borderRadius:5,padding:"2px 7px"}}>{cfg.icon} {cfg.label}</span>
                           <span style={{fontSize:11,color:T.muted}}>📅 {v.fecha}</span>
-                          {v.clienteId && <span style={{fontSize:10,color:T.muted,fontFamily:"monospace"}}>{v.clienteId}</span>}
+                          {v.ciudad && <span style={{fontSize:11,color:T.muted}}>📍 {v.ciudad}</span>}
                         </div>
                       </div>
                     </div>
@@ -8073,14 +8198,71 @@ function HistorialSemanal({ usuario }) {
         </div>
       )}
 
+      {/* TAB OPORTUNIDADES — solo director */}
+      {tabSel==="oportunidades" && esDirector && (
+        <div>
+          {opsSemana.length === 0 ? (
+            <div style={{textAlign:"center",padding:"40px 0",color:T.muted}}>
+              <p style={{fontSize:32,margin:"0 0 8px"}}>📭</p>
+              <p style={{fontSize:14}}>No hay oportunidades creadas en la semana {semana}</p>
+            </div>
+          ) : (
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {opsSemana.map((o,i) => {
+                const TIPO_OPO = {nuevo_cliente:"🆕 Nuevo cliente",recuperacion:"🔄 Recuperación",expansion:"📈 Expansión"};
+                const ESTADO_OPO = {
+                  sin_asignar:{c:T.muted,l:"Sin asignar"},
+                  asignada:{c:T.blue,l:"Asignada"},
+                  seguimiento:{c:T.amber,l:"Seguimiento"},
+                  ganada:{c:T.green,l:"Convertida"},
+                  perdida:{c:T.red,l:"Perdida"},
+                };
+                const est = ESTADO_OPO[o.estado]||ESTADO_OPO.sin_asignar;
+                const agAsig = USUARIOS.find(u=>u.id===(o.agenteId||o.agente));
+                return (
+                  <div key={o.id||i} style={{background:"#fff",border:`1px solid ${T.border}`,
+                    borderRadius:12,padding:14}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,marginBottom:6}}>
+                      <div style={{flex:1}}>
+                        <p style={{margin:"0 0 3px",fontSize:14,fontWeight:700,color:T.text}}>{o.nombre}</p>
+                        <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+                          <span style={{fontSize:11,color:T.muted}}>{TIPO_OPO[o.tipo]||o.tipo}</span>
+                          <span style={{fontSize:11,fontWeight:600,color:est.c,background:est.c+"15",
+                            borderRadius:5,padding:"2px 7px"}}>{est.l}</span>
+                          {agAsig && <span style={{fontSize:11,color:T.muted}}>→ {agAsig.nombre}</span>}
+                          {o.ciudad && <span style={{fontSize:11,color:T.muted}}>📍 {o.ciudad}</span>}
+                        </div>
+                        {o.contacto && <p style={{margin:"4px 0 0",fontSize:12,color:T.muted}}>👤 {o.contacto}{o.cargo?` · ${o.cargo}`:""}</p>}
+                      </div>
+                    </div>
+                    {(o.descripcionOportunidad||o.descripcionCliente) && (
+                      <div style={{background:"#F8FAFC",borderRadius:8,padding:"8px 10px",fontSize:12,
+                        color:"#475569",lineHeight:1.6,marginTop:6}}>
+                        {o.descripcionOportunidad||o.descripcionCliente}
+                      </div>
+                    )}
+                    {o.notas && (
+                      <div style={{background:"#F8FAFC",borderRadius:8,padding:"8px 10px",fontSize:12,
+                        color:"#475569",lineHeight:1.6,marginTop:6,fontStyle:"italic"}}>
+                        📌 {o.notas}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* TAB EVOLUCIÓN */}
       {tabSel==="evolucion" && (
         <div>
-          <div style={{background:"#fff",border:`1px solid ${T.border}`,borderRadius:14,padding:16,marginBottom:12}}>
+          {!esDirector && <div style={{background:"#fff",border:`1px solid ${T.border}`,borderRadius:14,padding:16,marginBottom:12}}>
             <p style={{margin:"0 0 4px",fontSize:13,fontWeight:700,color:T.text}}>Ventas reales vs objetivo — 2026</p>
             <p style={{margin:"0 0 14px",fontSize:11,color:T.muted}}>Semanas con datos registrados</p>
             <BarChart data={semanasConDatos}/>
-          </div>
+          </div>}
 
           {/* Tabla resumen anual */}
           <div style={{background:"#fff",border:`1px solid ${T.border}`,borderRadius:14,padding:16}}>
