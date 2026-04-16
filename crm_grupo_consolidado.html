@@ -7184,6 +7184,12 @@ function HistorialSemanal({ usuario }) {
   const [oportunidades,setOportunidades]=React.useState([]);
   const [informes,    setInformes]    = React.useState([]);
   const [cargando,    setCargando]    = React.useState(true);
+  const [showFormVis, setShowFormVis] = React.useState(false);
+  const [tareaRapida, setTareaRapida] = React.useState(null); // {titulo, cliente, agenteId}
+  const [formVis,     setFormVis]     = React.useState({
+    clienteNombre:"", ciudad:"", contacto:"", resultado:"seguimiento",
+    nota:"", agenteId:"", urgente:false,
+  });
 
   const miEquipo = usuario.equipo;
   const misIds = new Set([
@@ -7302,6 +7308,52 @@ function HistorialSemanal({ usuario }) {
   };
 
   const agentesActivos=[...new Set(visSemana.map(v=>v.agente||v.agenteId).filter(Boolean))].length;
+
+  const crearTareaRapida = (titulo, cliente, agenteId) => {
+    const hoy = new Date().toLocaleDateString("es-ES");
+    const id  = "tsk"+Date.now();
+    const doc = {
+      id, titulo, cliente,
+      agente:     agenteId || "",
+      creadaPor:  usuario.id,
+      creadaPorNombre: usuario.nombre,
+      estado:     "pendiente",
+      prioridad:  "normal",
+      tipo:       "contacto",
+      creadaEn:   hoy,
+    };
+    fbEscribir("tareas", id, doc).then(()=>{
+      setTareaRapida(null);
+      alert("✅ Tarea creada: "+titulo);
+    });
+  };
+
+  const guardarVisita = () => {
+    if(!formVis.clienteNombre.trim()) return;
+    const hoy = new Date().toLocaleDateString("es-ES");
+    const id  = "vis_"+Date.now();
+    const doc = {
+      id,
+      clienteNombre: formVis.clienteNombre,
+      ciudad:        formVis.ciudad,
+      contacto:      formVis.contacto,
+      resultado:     formVis.resultado,
+      nota:          formVis.nota,
+      urgente:       formVis.urgente,
+      agente:        formVis.agenteId || usuario.id,
+      agenteAsignado:formVis.agenteId || usuario.id,
+      creadoPor:     usuario.id,
+      creadoPorNombre:usuario.nombre,
+      semana,
+      fecha:         hoy,
+      tipo:          "visita_director",
+    };
+    fbEscribir("visitas", id, doc).then(()=>{
+      setVisitas(prev=>[...prev, doc]);
+      setShowFormVis(false);
+      setFormVis({clienteNombre:"",ciudad:"",contacto:"",resultado:"seguimiento",nota:"",agenteId:"",urgente:false});
+    });
+  };
 
   if(cargando) return <div style={{padding:40,textAlign:"center",color:T.muted}}>⏳ Cargando historial…</div>;
 
@@ -7518,7 +7570,69 @@ function HistorialSemanal({ usuario }) {
       {/* Tab: Visitas */}
       {tabSel==="visitas"&&(
         <div style={{display:"flex",flexDirection:"column",gap:8}}>
-          {visSemana.length===0&&<div style={{textAlign:"center",padding:32,color:T.muted}}>Sin visitas esta semana</div>}
+
+          {/* Botón nueva visita — solo managers */}
+          {esJefeOmas&&(
+            <button onClick={()=>setShowFormVis(v=>!v)}
+              style={{display:"flex",alignItems:"center",gap:8,padding:"10px 16px",
+                borderRadius:12,border:"1.5px dashed "+(showFormVis?T.navy:T.border),
+                background:showFormVis?T.navy+"08":"#fff",cursor:"pointer",
+                fontSize:13,fontWeight:700,color:showFormVis?T.navy:T.muted}}>
+              <span style={{fontSize:18}}>{showFormVis?"×":"+"}</span>
+              {showFormVis?"Cancelar":"Registrar visita / evento"}
+            </button>
+          )}
+
+          {/* Formulario nueva visita */}
+          {esJefeOmas&&showFormVis&&(()=>{
+            const agentesDisp=USUARIOS.filter(u=>u.rol==="agente"&&(esJefe?u.equipo===miEquipo:true));
+            const inp={width:"100%",border:"1.5px solid "+T.border,borderRadius:9,
+              padding:"10px 12px",fontSize:13,outline:"none",boxSizing:"border-box",fontFamily:"inherit"};
+            return(
+            <div style={{background:"#fff",borderRadius:14,padding:16,border:"1.5px solid "+T.navy}}>
+              <p style={{margin:"0 0 12px",fontSize:14,fontWeight:700,color:T.text}}>Nueva visita · Semana {semana}</p>
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                <input style={inp} placeholder="Cliente / empresa *"
+                  value={formVis.clienteNombre} onChange={e=>setFormVis(f=>({...f,clienteNombre:e.target.value}))}/>
+                <div style={{display:"flex",gap:8}}>
+                  <input style={{...inp,flex:1}} placeholder="Ciudad"
+                    value={formVis.ciudad} onChange={e=>setFormVis(f=>({...f,ciudad:e.target.value}))}/>
+                  <input style={{...inp,flex:1}} placeholder="Contacto"
+                    value={formVis.contacto} onChange={e=>setFormVis(f=>({...f,contacto:e.target.value}))}/>
+                </div>
+                <select style={inp} value={formVis.resultado}
+                  onChange={e=>setFormVis(f=>({...f,resultado:e.target.value}))}>
+                  <option value="seguimiento">🟡 Seguimiento</option>
+                  <option value="pedido">✅ Pedido</option>
+                  <option value="primera_visita">🔵 Primera visita</option>
+                  <option value="no_contesta">⚪ No contesta</option>
+                  <option value="sin_contacto">⚪ Sin contacto</option>
+                </select>
+                <select style={inp} value={formVis.agenteId}
+                  onChange={e=>setFormVis(f=>({...f,agenteId:e.target.value}))}>
+                  <option value="">👤 Asignar a agente (opcional)</option>
+                  {agentesDisp.map(a=>(
+                    <option key={a.id} value={a.id}>{a.icon} {a.nombre} · {a.equipo}</option>
+                  ))}
+                </select>
+                <textarea style={{...inp,minHeight:60,resize:"vertical"}} placeholder="Notas / resultado de la visita"
+                  value={formVis.nota} onChange={e=>setFormVis(f=>({...f,nota:e.target.value}))}/>
+                <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,cursor:"pointer"}}>
+                  <input type="checkbox" checked={formVis.urgente}
+                    onChange={e=>setFormVis(f=>({...f,urgente:e.target.checked}))}/>
+                  🔴 Marcar como urgente
+                </label>
+                <button onClick={guardarVisita}
+                  style={{width:"100%",padding:"12px",background:T.navy,color:"#fff",
+                    border:"none",borderRadius:10,fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                  ✅ Guardar visita
+                </button>
+              </div>
+            </div>
+            );
+          })()}
+
+          {visSemana.length===0&&!showFormVis&&<div style={{textAlign:"center",padding:32,color:T.muted}}>Sin visitas esta semana</div>}
           {visSemana.map((v,i)=>{
             const ag=esJefeOmas?USUARIOS.find(u=>u.id===(v.agente||v.agenteId)||u.grupoAgente===(v.agente||"")):null;
             const rc=RES_COLORS[v.resultado]||T.muted;
@@ -7538,6 +7652,19 @@ function HistorialSemanal({ usuario }) {
                     {ag&&<span style={{fontSize:10,color:ag.color,fontWeight:600}}>{ag.nombre}</span>}
                   </div>
                 </div>
+                {esJefeOmas&&(
+                  <button
+                    onClick={()=>crearTareaRapida(
+                      "Seguimiento — "+(v.clienteNombre||v.empresa||"cliente"),
+                      v.clienteNombre||v.empresa||"",
+                      ag?.id||""
+                    )}
+                    style={{marginTop:8,width:"100%",padding:"6px",
+                      border:"1px solid "+T.border,borderRadius:8,background:"#F8FAFC",
+                      fontSize:11,color:T.muted,cursor:"pointer",fontWeight:600}}>
+                    📌 Crear tarea de seguimiento
+                  </button>
+                )}
               </div>
             );
           })}
@@ -7550,16 +7677,74 @@ function HistorialSemanal({ usuario }) {
           {opsSemana.length===0&&<div style={{textAlign:"center",padding:32,color:T.muted}}>Sin oportunidades esta semana</div>}
           {opsSemana.map((o,i)=>{
             const ag=USUARIOS.find(u=>u.id===(o.agenteId||o.agente)||u.grupoAgente===(o.agenteId||o.agente||""));
+            const sinAsignar=!o.agenteId&&!o.agente;
+            const [showAsignar,setShowAsignar]=React.useState(false);
+            const agentesDisp=USUARIOS.filter(u=>u.rol==="agente"&&(esJefe?u.equipo===miEquipo:true));
+
+            const asignarOpo=(agenteId)=>{
+              const updated={...o,agenteId,estado:"asignada"};
+              fbEscribir("oportunidades",o.id,updated).then(()=>{
+                setOportunidades(prev=>prev.map(x=>x.id===o.id?updated:x));
+                setShowAsignar(false);
+              });
+            };
+
             return(
-              <div key={i} style={{background:"#fff",borderRadius:12,padding:"12px 16px",border:"1px solid "+T.border}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+              <div key={i} style={{background:"#fff",borderRadius:12,padding:"12px 16px",
+                border:"1.5px solid "+(sinAsignar?T.amber:T.border)}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
                   <div style={{flex:1}}>
                     <p style={{margin:"0 0 2px",fontSize:13,fontWeight:700,color:T.text}}>{o.nombre||o.cliente||"—"}</p>
-                    <p style={{margin:0,fontSize:11,color:T.muted}}>{o.ciudad||""}</p>
+                    <p style={{margin:"0 0 3px",fontSize:11,color:T.muted}}>{o.ciudad||o.descripcionCliente||""}</p>
+                    {o.contacto&&<p style={{margin:0,fontSize:11,color:T.muted}}>👤 {o.contacto}</p>}
                   </div>
-                  {ag&&<span style={{fontSize:10,fontWeight:700,color:ag.color,background:ag.color+"18",
-                    borderRadius:99,padding:"2px 8px"}}>{ag.nombre}</span>}
+                  <div style={{flexShrink:0,textAlign:"right"}}>
+                    {ag
+                      ?<span style={{fontSize:10,fontWeight:700,color:ag.color,background:ag.color+"18",
+                          borderRadius:99,padding:"2px 8px",display:"block"}}>{ag.icon} {ag.nombre}</span>
+                      :<span style={{fontSize:10,fontWeight:700,color:T.amber,background:"#FFFBEB",
+                          borderRadius:99,padding:"2px 8px",display:"block"}}>⚠️ Sin asignar</span>
+                    }
+                  </div>
                 </div>
+
+                {/* Acciones */}
+                <div style={{display:"flex",gap:6,marginTop:8}}>
+                  <button onClick={()=>setShowAsignar(v=>!v)}
+                    style={{flex:1,padding:"6px",border:"1px solid "+T.blue,borderRadius:8,
+                      background:T.blueL,color:T.blue,fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                    {showAsignar?"× Cancelar":"👤 Asignar agente"}
+                  </button>
+                  <button onClick={()=>crearTareaRapida(
+                      "Seguimiento — "+(o.nombre||o.cliente||"oportunidad"),
+                      o.nombre||o.cliente||"",
+                      ag?.id||""
+                    )}
+                    style={{flex:1,padding:"6px",border:"1px solid "+T.border,borderRadius:8,
+                      background:"#F8FAFC",color:T.muted,fontSize:11,fontWeight:600,cursor:"pointer"}}>
+                    📌 Crear tarea
+                  </button>
+                </div>
+
+                {/* Panel asignación */}
+                {showAsignar&&(
+                  <div style={{marginTop:10,padding:"10px 12px",background:"#F8FAFC",
+                    borderRadius:9,border:"1px solid "+T.border}}>
+                    <p style={{margin:"0 0 8px",fontSize:12,fontWeight:700,color:T.text}}>Asignar a:</p>
+                    <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                      {agentesDisp.map(a=>(
+                        <button key={a.id} onClick={()=>asignarOpo(a.id)}
+                          style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",
+                            borderRadius:8,border:"1.5px solid "+T.border,background:"#fff",
+                            cursor:"pointer",textAlign:"left"}}>
+                          <span style={{fontSize:16}}>{a.icon}</span>
+                          <span style={{fontSize:12,fontWeight:600,color:T.text}}>{a.nombre}</span>
+                          <span style={{fontSize:11,color:T.muted,marginLeft:"auto"}}>{a.equipo}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}
