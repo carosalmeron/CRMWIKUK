@@ -293,6 +293,18 @@ function Login({onLogin}){
   ];
 
   // Debug: mostrar qué hay en localStorage
+  let debugInfo='';
+  try{
+    const stored=localStorage.getItem('gc_portal_user');
+    if(stored){
+      const pu=JSON.parse(stored);
+      debugInfo=`Usuario portal: ${pu.nombre||pu.username} | crmId: ${pu.crmId||'(vacío)'} | rol: ${pu.rol||'(vacío)'} | vendedor: ${pu.catalogoVendedor||'(vacío)'}`;
+    } else {
+      debugInfo='Sin datos de portal en localStorage';
+    }
+    const hash=window.location.hash;
+    if(hash) debugInfo+=` | Hash URL: ${decodeURIComponent(hash)}`;
+  }catch(e){ debugInfo='Error: '+e.message; }
   return(
     <div style={{minHeight:"100vh",background:"#EFEDE8",padding:"24px 16px"}}>
       {/* Logo */}
@@ -302,6 +314,13 @@ function Login({onLogin}){
         <p style={{margin:0,fontSize:24,fontWeight:900,color:T.navy,letterSpacing:-0.5}}>Grupo Consolidado</p>
         <p style={{margin:"4px 0 0",fontSize:13,color:T.muted}}>CRM Comercial · ¿Quién eres?</p>
       </div>
+
+      {debugInfo&&(
+        <div style={{background:"#FEF3C7",border:"1px solid #F59E0B",borderRadius:10,
+          padding:"10px 14px",marginBottom:20,fontSize:11,color:"#92400E",wordBreak:"break-all"}}>
+          🔍 Debug auto-login: {debugInfo}
+        </div>
+      )}
 
       {roles.map(g=>(
         <div key={g.titulo} style={{marginBottom:20}}>
@@ -371,128 +390,26 @@ function BottomNav({items,current,onChange}){
 // ─── DASHBOARD AGENTE ─────────────────────────────────────────────
 function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
   const {id,equipo,color}=usuario;
-  const crmId=usuario.crmId||id;
-  // La clave en Firebase usa el catalogoVendedor (cartera) o el username del portal, en minúsculas
-  // Orden: catalogoVendedor ("CARLOSG") > username ("carlosg") > crmId > id
-  const CLAVE_FIREBASE={ik1:"carlosg",ik2:"ricardo",wk1:"davidmag",wk2:"verolopez",wk3:"silvia",rw1:"wikuk",ri1:"interkey"};
-  const fbKey=(usuario.catalogoVendedor||usuario.username||CLAVE_FIREBASE[id]||usuario.crmId||id||"").toLowerCase();
   const opsBD=oportunidadesDB||OPORTUNIDADES_SEED;
+  // Usar clientes reales de Firebase, fallback a seed
   const misClientes=clientesFB&&clientesFB.length>0 ? clientesFB : (CLIENTES_POR_AGENTE[id]||[]);
+  const mPend=MUESTRAS_SEED.filter(m=>m.estado==="pendiente"&&m.agente===id).length;
   const mCurso=MUESTRAS_SEED.filter(m=>m.agente===id).length;
   const ePend=ESTRATEGIAS_SEED.filter(e=>e.estado==="en_curso"&&e.agente===id).length;
-  const misOps=opsBD.filter(o=>{
-    const oid=(o.agente||o.agenteId||"").toLowerCase();
-    const uid=id.toLowerCase();
-    const catV=(usuario.catalogoVendedor||"").toLowerCase();
-    const match=oid===uid||(catV&&oid===catV);
-    return match&&!["ganada","perdida","cerrada_ganada","cerrada_perdida"].some(e=>o.etapa===e||o.estado===e);
-  });
+  // Usar datos reales de Firebase — acepta tanto campo agente como agenteId
+  const misOps=opsBD.filter(o=>(o.agente===id||o.agenteId===id)&&
+    !["ganada","perdida","cerrada_ganada","cerrada_perdida"].some(e=>o.etapa===e||o.estado===e));
   const misProy=PROYECTOS_SEED.filter(p=>p.estado==="activo"&&p.equipo?.includes(id));
   const misInc=INCIDENCIAS_SEED.filter(i=>i.autor===id&&i.estado==="abierta");
   const totalSem=misClientes.length,visitados=Math.min(totalSem,8),pendVisita=totalSem-visitados;
+  const semana=14;
 
-  // ── Datos reales desde Firebase ──────────────────────────────────
-  const [kpi,setKpi]=useState(null);
-  const [semanas,setSemanas]=useState([]);
-  const [semMon,setSemMon]=useState([]); // monetizacion semanal
-  const [loadingKpi,setLoadingKpi]=useState(true);
-
-  useEffect(()=>{
-    if(!crmId) return;
-    const base=`https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents`;
-
-    // 1. Resumen KPI acumulado
-    const crmIdNorm=fbKey;
-    fetch(`${base}/agentes_kpi/${crmIdNorm}_2026`)
-      .then(r=>r.json())
-      .then(doc=>{
-        if(!doc.fields) return;
-        const o={};
-        for(const [k,v] of Object.entries(doc.fields)){
-          o[k]=v.doubleValue??v.integerValue??v.stringValue??v.nullValue??null;
-          if(typeof o[k]==="string"&&!isNaN(o[k])) o[k]=parseFloat(o[k]);
-        }
-        setKpi(o);
-      }).catch(()=>{}).finally(()=>setLoadingKpi(false));
-
-    // Helper para parsear documentos Firestore
-    const parseDocs=(rows)=>(rows||[]).map(r=>r.document).filter(Boolean).map(doc=>{
-      const o={};
-      for(const [k,v] of Object.entries(doc.fields||{})){
-        o[k]=v.doubleValue??v.integerValue??v.stringValue??v.nullValue??null;
-        if(typeof o[k]==="string"&&!isNaN(o[k])) o[k]=parseFloat(o[k]);
-      }
-      return o;
-    });
-
-    const queryFB=(coleccion)=>fetch(`${base}:runQuery`,{
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({structuredQuery:{
-        from:[{collectionId:coleccion}],
-        where:{fieldFilter:{field:{fieldPath:"agente"},op:"EQUAL",value:{stringValue:crmIdNorm}}},
-        orderBy:[{field:{fieldPath:"semana"},direction:"ASCENDING"}],
-        limit:53
-      }})
-    }).then(r=>r.json()).then(parseDocs).catch(()=>[]);
-
-    // 2. Presupuesto semanal
-    queryFB("presupuesto").then(docs=>setSemanas(docs));
-
-    // 3. Monetización semanal (promos y liquidaciones por semana)
-    queryFB("monetizacion").then(docs=>setSemMon(docs));
-  },[crmId]);
-
-  // ── Cálculo de valores ────────────────────────────────────────────
-  const semanaActual=kpi?.semanaActual||14;
-
-  // "Este mes" = las últimas 4 semanas del calendario con objetivo definido
-  // Incluye semanas con ventas negativas (devoluciones) y ceros (festivos)
-  const semanasOrdenadas=[...semanas].sort((a,b)=>(a.semana||0)-(b.semana||0));
-  const semanasConObj=semanasOrdenadas.filter(s=>s.ventasPpto!=null&&s.ventasPpto>0);
-  const ultimas4=semanasConObj.slice(-4); // últimas 4 semanas con objetivo
-  const vMes=ultimas4.reduce((s,r)=>s+(r.ventasReal!=null?r.ventasReal:0),0);
-  const vMesObj=ultimas4.reduce((s,r)=>s+(r.ventasPpto||0),0);
-  const semanasConMg=ultimas4.filter(s=>s.mgReal!=null&&typeof s.mgReal==="number");
-  const mbMes=semanasConMg.length>0
-    ?parseFloat((semanasConMg.reduce((a,b)=>a+b.mgReal,0)/semanasConMg.length*100).toFixed(1))
-    :0;
-  const mbMesObj=parseFloat(((ultimas4[0]?.mgPpto||kpi?.mgObjetivo||0.344)*100).toFixed(1));
-
-  // Semanas restantes del "mes actual" sin dato
-  const semanasRestantes=ultimas4.filter(s=>s.ventasReal==null).length;
-
-  // Acumulado año
-  const vAnual=kpi?.ventasRealAcum||0;
-  const vAnualObj=kpi?.ventasPptoAcum||0;
-  const mbAnual=parseFloat(((kpi?.mgMedio||0)*100).toFixed(1));
-  const mbAnualObj=parseFloat(((kpi?.mgObjetivo||0.344)*100).toFixed(1));
-
-  // Promos y Liquidaciones — este mes (mismas 4 semanas que ventas)
-  const semMonOrd=[...semMon].sort((a,b)=>(a.semana||0)-(b.semana||0));
-  const semsMes=ultimas4.map(s=>semMonOrd.find(m=>m.semana===s.semana)).filter(Boolean);
-  const promoMesReal=semsMes.reduce((t,s)=>t+(s.promoReal!=null?s.promoReal:0),0);
-  const promoMesObj=semsMes.reduce((t,s)=>t+(s.promoObjetivo!=null?s.promoObjetivo:0),0);
-  const liqMesReal=semsMes.reduce((t,s)=>t+(s.liquidReal!=null?s.liquidReal:0),0);
-  const liqMesObj=semsMes.reduce((t,s)=>t+(s.liquidObjetivo!=null?s.liquidObjetivo:0),0);
-  const pctPMes=promoMesObj>0?Math.round(promoMesReal/promoMesObj*100):0;
-  const pctLMes=liqMesObj>0?Math.round(liqMesReal/liqMesObj*100):0;
-
-  // Promos y Liquidaciones acumuladas (para acumulado año)
-  const promoVal=kpi?.promoRealAcum||0;
-  const promoObj=kpi?.promoObjAcum||0;
-  const liqVal=kpi?.liquidRealAcum||0;
-  const liqObj=kpi?.liquidObjAcum||0;
-
-  // % cumplimiento
-  const pctVM=vMesObj>0?Math.round(vMes/vMesObj*100):0;
-  const pctVA=vAnualObj>0?Math.round(vAnual/vAnualObj*100):0;
-  const pctMM=mbMesObj>0?Math.round(mbMes/mbMesObj*100):0;
-  const pctMA=mbAnualObj>0?Math.round(mbAnual/mbAnualObj*100):0;
-  const pctP=promoObj>0?Math.round(promoVal/promoObj*100):0;
-  const pctL=liqObj>0?Math.round(liqVal/liqObj*100):0;
-
-  const sinDatos=!kpi&&!loadingKpi;
+  const vMes=24500,vMesObj=28750,mbMes=34.2,mbMesObj=32;
+  const vAnual=187400,vAnualObj=345000,mbAnual=33.8,mbAnualObj=32;
+  const pctVM=Math.round(vMes/vMesObj*100);
+  const pctVA=Math.round(vAnual/vAnualObj*100);
+  const pctMM=Math.round(mbMes/mbMesObj*100);
+  const pctMA=Math.round(mbAnual/mbAnualObj*100);
 
   // Anillo SVG de progreso
   const Ring=({pct,size=56,stroke=5})=>{
@@ -510,6 +427,7 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
     );
   };
 
+  // Tarjeta métrica con anillo
   const MetricCard=({label,value,obj,pct,suffix="",note})=>{
     const c=pct>=100?"#22C55E":pct>=80?"#F59E0B":"#EF4444";
     return(
@@ -544,6 +462,7 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
     );
   };
 
+  // Config módulos pendientes
   const MODS=[
     {icon:"🎯",label:"Estrategias en curso",sub:"Registra el avance semanal",count:ePend,nav:"estrategias",bg:"#EFF6FF",ic:"#3B82F6"},
     {icon:"📁",label:"Proyectos activos",sub:misProy.map(p=>p.nombre).join(", ")||"",count:misProy.length,nav:"proyectos",bg:"#FFFBEB",ic:"#D97706"},
@@ -564,51 +483,50 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
       {/* ══ HEADER ══ */}
       <div style={{background:"linear-gradient(135deg,#0F172A 0%,#1E293B 60%,#1E3A5F 100%)",
         padding:"32px 20px 28px",position:"relative",overflow:"hidden"}}>
+        {/* Círculos decorativos */}
         <div style={{position:"absolute",right:-40,top:-40,width:180,height:180,borderRadius:"50%",background:"rgba(255,255,255,.03)"}}/>
         <div style={{position:"absolute",right:40,bottom:-60,width:120,height:120,borderRadius:"50%",background:"rgba(255,255,255,.04)"}}/>
         <div style={{position:"absolute",left:-20,bottom:-20,width:100,height:100,borderRadius:"50%",background:"rgba(99,102,241,.1)"}}/>
 
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
           <div>
+            {/* Pastillas */}
             <div style={{display:"flex",gap:6,marginBottom:10}}>
               <span style={{background:"rgba(255,255,255,.1)",color:"rgba(255,255,255,.7)",
                 fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:99,
                 letterSpacing:".08em",textTransform:"uppercase"}}>{equipo}</span>
               <span style={{background:"rgba(99,102,241,.3)",color:"#A5B4FC",
-                fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:99}}>Sem. {semanaActual}</span>
-              {loadingKpi&&<span style={{background:"rgba(255,255,255,.08)",color:"rgba(255,255,255,.4)",
-                fontSize:10,padding:"3px 10px",borderRadius:99}}>⏳ Cargando datos…</span>}
-              {kpi&&<span style={{background:"rgba(34,197,94,.2)",color:"#4ADE80",
-                fontSize:10,padding:"3px 10px",borderRadius:99}}>● Datos reales</span>}
-              {!kpi&&!loadingKpi&&fbKey&&<span style={{background:"rgba(239,68,68,.2)",color:"#FCA5A5",
-                fontSize:10,padding:"3px 10px",borderRadius:99}}>⚠ key:{fbKey}</span>}
+                fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:99}}>Sem. {semana}</span>
             </div>
             <p style={{margin:0,fontSize:26,fontWeight:800,color:"#FFFFFF",
               letterSpacing:"-0.03em",lineHeight:1.1}}>
               {usuario.nombre.split(" ").slice(0,2).join(" ")}
             </p>
           </div>
+
+          {/* Mini-tarjeta % mes */}
           <div style={{background:"rgba(255,255,255,.08)",backdropFilter:"blur(8px)",
             border:"1px solid rgba(255,255,255,.12)",borderRadius:14,
             padding:"12px 16px",textAlign:"center",flexShrink:0}}>
             <p style={{margin:"0 0 2px",fontSize:9,fontWeight:700,color:"rgba(255,255,255,.5)",
-              textTransform:"uppercase",letterSpacing:".1em"}}>Acumulado</p>
+              textTransform:"uppercase",letterSpacing:".1em"}}>Este mes</p>
             <p style={{margin:0,fontSize:28,fontWeight:900,lineHeight:1,
-              color:pctVA>=100?"#4ADE80":pctVA>=80?"#FCD34D":"#FB7185"}}>{pctVA}%</p>
+              color:pctVM>=100?"#4ADE80":pctVM>=80?"#FCD34D":"#FB7185"}}>{pctVM}%</p>
             <p style={{margin:"2px 0 0",fontSize:9,color:"rgba(255,255,255,.4)"}}>del objetivo</p>
           </div>
         </div>
 
+        {/* Barra progreso ventas mes */}
         <div style={{marginBottom:6}}>
           <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
-            <span style={{fontSize:11,color:"rgba(255,255,255,.5)"}}>Ventas acumuladas S1–S{semanaActual}</span>
+            <span style={{fontSize:11,color:"rgba(255,255,255,.5)"}}>Ventas mes</span>
             <span style={{fontSize:11,color:"rgba(255,255,255,.7)",fontWeight:600}}>
-              {fmt(vAnual)}€ / {fmt(vAnualObj)}€
+              {fmt(vMes)}€ / {fmt(vMesObj)}€
             </span>
           </div>
           <div style={{height:4,borderRadius:99,background:"rgba(255,255,255,.12)",overflow:"hidden"}}>
-            <div style={{height:"100%",width:`${Math.min(pctVA,100)}%`,borderRadius:99,
-              background:pctVA>=100?"#4ADE80":pctVA>=80?"#FCD34D":"#FB7185",
+            <div style={{height:"100%",width:`${Math.min(pctVM,100)}%`,borderRadius:99,
+              background:pctVM>=100?"#4ADE80":pctVM>=80?"#FCD34D":"#FB7185",
               transition:"width .8s ease"}}/>
           </div>
         </div>
@@ -617,6 +535,7 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
       {/* ══ CONTENIDO ══ */}
       <div style={{padding:"20px 16px 0"}}>
 
+        {/* ── Mi semana — acceso rápido ── */}
         <div onClick={()=>onNav("clientes")}
           style={{background:"#fff",borderRadius:16,padding:"14px 18px",
             marginBottom:20,cursor:"pointer",
@@ -629,7 +548,7 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
             fontSize:22,flexShrink:0}}>📋</div>
           <div style={{flex:1}}>
             <p style={{margin:"0 0 3px",fontSize:14,fontWeight:800,color:T.text}}>
-              Mis clientes · Semana {semanaActual}
+              Mis clientes · Semana {semana}
             </p>
             <p style={{margin:"0 0 6px",fontSize:11,color:T.muted}}>
               {visitados} visitados · {pendVisita} por visitar · {totalSem} total
@@ -643,165 +562,59 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
           <span style={{color:T.muted,fontSize:20,flexShrink:0}}>›</span>
         </div>
 
-        {/* — Este mes — */}
+        {/* — 1. Este mes — */}
+        <p style={{margin:"0 0 10px",fontSize:10,fontWeight:700,color:"#64748B",
+          textTransform:"uppercase",letterSpacing:".12em"}}>Este mes</p>
+        <div style={{display:"flex",gap:10,marginBottom:12,animation:"fadeUp .4s ease"}}>
+          <MetricCard label="Ventas" value={vMes} obj={vMesObj} pct={pctVM} suffix="€"/>
+          <MetricCard label="Margen bruto" value={mbMes} obj={mbMesObj} pct={pctMM} suffix="%"/>
+        </div>
+        {/* Promo y Liquidación */}
         {(()=>{
-          const s1=ultimas4[0]?.semana, s4=ultimas4[ultimas4.length-1]?.semana;
-          const label=ultimas4.length>0?`Este mes · S${s1}–S${s4}`:"Este mes";
-          const falta=vMesObj>vMes?vMesObj-vMes:0;
-          const cV=pctVM>=100?"#22C55E":pctVM>=80?"#F59E0B":"#EF4444";
-          const cM=pctMM>=100?"#22C55E":pctMM>=80?"#F59E0B":"#EF4444";
-
-          return(
-            <>
-              <p style={{margin:"0 0 10px",fontSize:10,fontWeight:700,color:"#64748B",
-                textTransform:"uppercase",letterSpacing:".12em"}}>{label}</p>
-
-              {/* Tarjeta ventas del mes — visual tipo "llenado" */}
-              <div style={{background:"#fff",borderRadius:16,padding:"18px 16px",
-                marginBottom:10,border:"1px solid #E2E8F0",
-                boxShadow:"0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06)"}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
-                  <div>
-                    <p style={{margin:"0 0 2px",fontSize:10,fontWeight:700,color:"#94A3B8",
-                      textTransform:"uppercase",letterSpacing:".1em"}}>💰 Ventas del mes</p>
-                    <p style={{margin:0,fontSize:28,fontWeight:900,color:"#0F172A",
-                      letterSpacing:"-0.03em",lineHeight:1}}>
-                      {fmt(Math.round(vMes))}€
-                    </p>
-                    <p style={{margin:"3px 0 0",fontSize:12,color:"#94A3B8"}}>
-                      objetivo: <strong style={{color:"#64748B"}}>{fmt(Math.round(vMesObj))}€</strong>
-                    </p>
-                  </div>
-                  <div style={{textAlign:"right"}}>
-                    <p style={{margin:0,fontSize:32,fontWeight:900,color:cV,lineHeight:1}}>{pctVM}%</p>
-                    <p style={{margin:"2px 0 0",fontSize:10,color:"#94A3B8"}}>del objetivo</p>
-                  </div>
-                </div>
-
-                {/* Barra de llenado con marcas */}
-                <div style={{position:"relative",height:24,borderRadius:99,
-                  background:"#F1F5F9",overflow:"hidden",marginBottom:6}}>
-                  {/* Relleno real */}
-                  <div style={{position:"absolute",left:0,top:0,bottom:0,
-                    width:`${Math.min(pctVM,100)}%`,borderRadius:99,
-                    background:pctVM>=100?`linear-gradient(90deg,#22C55E,#4ADE80)`:
-                               pctVM>=80?`linear-gradient(90deg,#F59E0B,#FCD34D)`:
-                               `linear-gradient(90deg,#EF4444,#F87171)`,
-                    transition:"width 1s ease"}}/>
-                  {/* Marca objetivo 80% */}
-                  <div style={{position:"absolute",left:"80%",top:0,bottom:0,
-                    width:2,background:"rgba(255,255,255,.6)"}}/>
-                  {/* Texto dentro */}
-                  {pctVM>15&&(
-                    <span style={{position:"absolute",left:12,top:"50%",
-                      transform:"translateY(-50%)",fontSize:10,fontWeight:800,
-                      color:"rgba(255,255,255,.9)"}}>
-                      {fmt(Math.round(vMes))}€
-                    </span>
-                  )}
-                </div>
-                <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:"#94A3B8"}}>
-                  <span>0€</span>
-                  <span style={{color:pctVM>=80?"#F59E0B":"#CBD5E1",fontWeight:700}}>▲ 80%</span>
-                  <span style={{fontWeight:700,color:"#64748B"}}>{fmt(Math.round(vMesObj))}€</span>
-                </div>
-
-                {/* Mensaje de situación */}
-                <div style={{marginTop:10,padding:"8px 12px",borderRadius:10,
-                  background:pctVM>=100?"#F0FDF4":pctVM>=80?"#FFFBEB":"#FEF2F2"}}>
-                  <p style={{margin:0,fontSize:12,fontWeight:600,color:cV}}>
-                    {pctVM>=100?"✅ ¡Objetivo del mes superado!":
-                     pctVM>=80?`⚡ Faltan ${fmt(Math.round(falta))}€ — muy cerca del objetivo`:
-                     semanasRestantes>0?`📅 ${semanasRestantes} sem. pendientes — faltan ${fmt(Math.round(falta))}€`:
-                     `❌ Faltan ${fmt(Math.round(falta))}€ para el objetivo`}
-                  </p>
-                </div>
-              </div>
-
-              {/* Tarjeta margen */}
-              <div style={{background:"#fff",borderRadius:16,padding:"16px",
-                marginBottom:22,border:"1px solid #E2E8F0",
-                boxShadow:"0 1px 3px rgba(0,0,0,.04)"}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                  <div>
-                    <p style={{margin:"0 0 1px",fontSize:10,fontWeight:700,color:"#94A3B8",
-                      textTransform:"uppercase",letterSpacing:".1em"}}>📊 Margen bruto del mes</p>
-                    <p style={{margin:0,fontSize:26,fontWeight:900,color:"#0F172A",lineHeight:1}}>
-                      {mbMes>0?mbMes:"—"}%
-                    </p>
-                  </div>
-                  <div style={{textAlign:"right"}}>
-                    <p style={{margin:0,fontSize:28,fontWeight:900,color:cM,lineHeight:1}}>{mbMes>0?pctMM:0}%</p>
-                    <p style={{margin:"2px 0 0",fontSize:10,color:"#94A3B8"}}>obj. {mbMesObj}%</p>
-                  </div>
-                </div>
-                <div style={{height:12,borderRadius:99,background:"#F1F5F9",overflow:"hidden",position:"relative"}}>
-                  {/* Zona objetivo */}
-                  <div style={{position:"absolute",left:`${Math.min(mbMesObj-2,95)}%`,top:0,bottom:0,
-                    width:"4%",background:"rgba(99,102,241,.15)"}}/>
-                  {/* Valor real */}
-                  <div style={{height:"100%",width:`${Math.min(mbMes/50*100,100)}%`,
-                    borderRadius:99,background:cM,transition:"width 1s ease"}}/>
-                </div>
-                <div style={{display:"flex",justifyContent:"space-between",fontSize:10,
-                  color:"#94A3B8",marginTop:4}}>
-                  <span>0%</span>
-                  <span style={{color:"#6366F1",fontWeight:700}}>obj {mbMesObj}%</span>
-                  <span>50%</span>
-                </div>
-                {mbMes>0&&(
-                  <p style={{margin:"6px 0 0",fontSize:11,fontWeight:600,color:cM}}>
-                    {mbMes>=mbMesObj
-                      ?`✅ +${(mbMes-mbMesObj).toFixed(1)}pp sobre objetivo`
-                      :`⚠ ${(mbMesObj-mbMes).toFixed(1)}pp bajo objetivo`}
-                  </p>
-                )}
-              </div>
-            </>
-          );
-        })()}
-
-        {/* Promo y Liquidación — este mes */}
-        {(()=>{
-          const cP=pctPMes>=100?"#22C55E":pctPMes>=80?"#F59E0B":"#EF4444";
-          const cL=pctLMes>=100?"#22C55E":pctLMes>=80?"#F59E0B":"#EF4444";
+          const promoVal=1200, promoObj=2000;
+          const liqVal=650, liqObj=1000;
+          const pctP=Math.round(promoVal/promoObj*100);
+          const pctL=Math.round(liqVal/liqObj*100);
+          const cP=pctP>=100?"#22C55E":pctP>=80?"#F59E0B":"#EF4444";
+          const cL=pctL>=100?"#22C55E":pctL>=80?"#F59E0B":"#EF4444";
           const MiniCard=({label,icon,val,obj,pct,c})=>(
             <div style={{flex:1,background:"#fff",borderRadius:14,padding:"14px",
               border:"1px solid #E2E8F0",boxShadow:"0 1px 3px rgba(0,0,0,.04)"}}>
-              <p style={{margin:"0 0 6px",fontSize:10,fontWeight:700,color:"#94A3B8",
+              <p style={{margin:"0 0 8px",fontSize:10,fontWeight:700,color:"#94A3B8",
                 textTransform:"uppercase",letterSpacing:".1em"}}>{icon} {label}</p>
-              <p style={{margin:"0 0 1px",fontSize:20,fontWeight:800,color:"#0F172A"}}>
-                {fmt(Math.round(val))}€
+              <p style={{margin:"0 0 2px",fontSize:20,fontWeight:800,color:"#0F172A"}}>
+                {fmt(val)}€
               </p>
-              <p style={{margin:"0 0 8px",fontSize:11,color:"#94A3B8"}}>obj. {fmt(Math.round(obj))}€</p>
-              <div style={{height:6,borderRadius:99,background:"#F1F5F9",overflow:"hidden"}}>
+              <p style={{margin:"0 0 8px",fontSize:11,color:"#94A3B8"}}>obj. {fmt(obj)}€</p>
+              <div style={{height:4,borderRadius:99,background:"#F1F5F9",overflow:"hidden"}}>
                 <div style={{height:"100%",width:`${Math.min(pct,100)}%`,
                   borderRadius:99,background:c,transition:"width .8s ease"}}/>
               </div>
-              <p style={{margin:"5px 0 0",fontSize:11,fontWeight:700,color:c}}>
-                {obj>0?`${pct}% del obj.`:val>0?`${fmt(Math.round(val))}€`:"Sin objetivo"}
-              </p>
+              <p style={{margin:"4px 0 0",fontSize:10,fontWeight:700,color:c}}>{pct}% del objetivo</p>
             </div>
           );
           return(
             <div style={{display:"flex",gap:10,marginBottom:22}}>
-              <MiniCard label="Promo mes" icon="🎯" val={promoMesReal} obj={promoMesObj} pct={pctPMes} c={cP}/>
-              <MiniCard label="Liquid. mes" icon="🏷️" val={liqMesReal} obj={liqMesObj} pct={pctLMes} c={cL}/>
+              <MiniCard label="Promo" icon="🎯" val={promoVal} obj={promoObj} pct={pctP} c={cP}/>
+              <MiniCard label="Liquidación" icon="📋" val={liqVal} obj={liqObj} pct={pctL} c={cL}/>
             </div>
           );
         })()}
 
-        {/* — Acumulado año — */}
+        {/* — 2. Año — */}
         <p style={{margin:"0 0 10px",fontSize:10,fontWeight:700,color:"#64748B",
-          textTransform:"uppercase",letterSpacing:".12em"}}>Acumulado año (S1–S{semanaActual})</p>
+          textTransform:"uppercase",letterSpacing:".12em"}}>Acumulado año</p>
         <div style={{display:"flex",gap:10,marginBottom:22,animation:"fadeUp .5s ease"}}>
-          <MetricCard label="Ventas" value={vAnual} obj={Math.round(vAnualObj)} pct={pctVA} suffix="€"
-            note={vAnual>0&&semanaActual>0?`Proy. ${fmt(Math.round(vAnual/semanaActual*52))}€ anuales`:""}/>
+          <MetricCard label="Ventas" value={vAnual} obj={vAnualObj} pct={pctVA} suffix="€"
+            note={`Proy. ${fmt(Math.round(vAnual/semana*52))}€ anuales`}/>
           <MetricCard label="Margen bruto" value={mbAnual} obj={mbAnualObj} pct={pctMA} suffix="%"
-            note={mbAnual>0?`${mbAnual>=mbAnualObj?"+":""}${(mbAnual-mbAnualObj).toFixed(1)}pp vs obj.`:""}/>
+            note={`${mbAnual>=mbAnualObj?"+":""}${(mbAnual-mbAnualObj).toFixed(1)}pp vs obj.`}/>
         </div>
 
-        {/* — Pendientes — */}
+        {/* — 3. Acciones urgentes — */}
+        <TareasWidget onNav={onNav}/>
+
+        {/* — 4. Pendientes — */}
         {hayPend&&(
           <>
             <p style={{margin:"0 0 10px",fontSize:10,fontWeight:700,color:"#64748B",
@@ -810,10 +623,11 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
               border:"1px solid #E2E8F0",
               boxShadow:"0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06)",
               marginBottom:22,animation:"fadeUp .6s ease"}}>
+
               {MODS.map((m,i)=>(
                 <div key={m.nav} className="pend-row" onClick={()=>onNav(m.nav)}
                   style={{display:"flex",alignItems:"center",gap:14,padding:"14px 16px",
-                    borderBottom:i<MODS.length-1||totalSem>0?"1px solid #F1F5F9":"none",
+                    borderBottom:i<MODS.length-(totalSem>0?0:1)||(i<MODS.length-1)?"1px solid #F1F5F9":"none",
                     cursor:"pointer",transition:"background .15s"}}>
                   <div style={{width:38,height:38,borderRadius:11,background:m.bg,
                     display:"flex",alignItems:"center",justifyContent:"center",
@@ -831,6 +645,8 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
                   </div>
                 </div>
               ))}
+
+              {/* Clientes semana */}
               {totalSem>0&&(
                 <div style={{display:"flex",alignItems:"center",gap:14,padding:"14px 16px"}}>
                   <div style={{width:38,height:38,borderRadius:11,background:"#F0FDF4",
@@ -882,7 +698,67 @@ const PRODUCTOS_LOCAL=[
   {codigo:"WE0059.25",nombre:"Pimienta Negra Grano S.25KG",formato:"S.25KG / SACO 25KG",precio:"14,57",cat:"Wikuk — Especias",sub:"Sal y Pimienta"},
   {codigo:"WE0092.1",nombre:"Pimienta Negra Machacada B.1KG",formato:"B.1KG / BOLSA 1KG",precio:"16,84",cat:"Wikuk — Especias",sub:"Sal y Pimienta"},
   {codigo:"WE0092.5",nombre:"Pimienta Negra Machacada B.5KG",formato:"B.5KG / BOLSA 5KG",precio:"16,39",cat:"Wikuk — Especias",sub:"Sal y Pimienta"},
-  {codigo:"WE0092.25",nombre:"Pimienta Negra Machacada S.25KG",formato:"S.25KG / SACO 25KG",precio:"15,48",cat:"Wikuk — Especias",sub:"Sal y Pimienta"}
+  {codigo:"WE0092.25",nombre:"Pimienta Negra Machacada S.25KG",formato:"S.25KG / SACO 25KG",precio:"15,48",cat:"Wikuk — Especias",sub:"Sal y Pimienta"},
+  {codigo:"WE0060.1",nombre:"Pimienta Negra Molida B.1KG",formato:"B.1KG / BOLSA 1KG",precio:"15,93",cat:"Wikuk — Especias",sub:"Sal y Pimienta"},
+  {codigo:"WE0060.5",nombre:"Pimienta Negra Molida B.5KG",formato:"B.5KG / BOLSA 5KG",precio:"15,48",cat:"Wikuk — Especias",sub:"Sal y Pimienta"},
+  {codigo:"WE0060.25",nombre:"Pimienta Negra Molida S.25KG",formato:"S.25KG / SACO 25KG",precio:"14,57",cat:"Wikuk — Especias",sub:"Sal y Pimienta"},
+  {codigo:"WE0064.1",nombre:"Cayena Molida B.1KG",formato:"B.1KG / BOLSA 1KG",precio:"6,83",cat:"Wikuk — Especias",sub:"Pimentón y Cayena"},
+  {codigo:"WE0064.5",nombre:"Cayena Molida B.5KG",formato:"B.5KG / BOLSA 5KG",precio:"6,38",cat:"Wikuk — Especias",sub:"Pimentón y Cayena"},
+  {codigo:"WE0064.25",nombre:"Cayena Molida S.25KG",formato:"S.25KG / SACO 25KG",precio:"5,64",cat:"Wikuk — Especias",sub:"Pimentón y Cayena"},
+  {codigo:"WE0067.1",nombre:"Cayena Ojo Pájaro 80/90 B.1KG",formato:"B.1KG / BOLSA 1KG",precio:"10,48",cat:"Wikuk — Especias",sub:"Pimentón y Cayena"},
+  {codigo:"WE0067.5",nombre:"Cayena Ojo Pájaro 80/90 B.5KG",formato:"B.5KG / BOLSA 5KG",precio:"10,02",cat:"Wikuk — Especias",sub:"Pimentón y Cayena"},
+  {codigo:"WE0067.25",nombre:"Cayena Ojo Pájaro 80/90 S.25KG",formato:"S.25KG / SACO 25KG",precio:"9,11",cat:"Wikuk — Especias",sub:"Pimentón y Cayena"},
+  {codigo:"WE0049.1",nombre:"Pimentón Dulce 140 Astas B.1KG",formato:"B.1KG / BOLSA 1KG",precio:"8,20",cat:"Wikuk — Especias",sub:"Pimentón y Cayena"},
+  {codigo:"WE0049.5",nombre:"Pimentón Dulce 140 Astas B.5KG",formato:"B.5KG / BOLSA 5KG",precio:"7,74",cat:"Wikuk — Especias",sub:"Pimentón y Cayena"},
+  {codigo:"WE0049.25",nombre:"Pimentón Dulce 140 Astas S.25KG",formato:"S.25KG / SACO 25KG",precio:"7,10",cat:"Wikuk — Especias",sub:"Pimentón y Cayena"},
+  {codigo:"WE0053.1",nombre:"Pimentón Picante B.1KG",formato:"B.1KG / BOLSA 1KG",precio:"6,83",cat:"Wikuk — Especias",sub:"Pimentón y Cayena"},
+  {codigo:"WE0053.5",nombre:"Pimentón Picante B.5KG",formato:"B.5KG / BOLSA 5KG",precio:"6,38",cat:"Wikuk — Especias",sub:"Pimentón y Cayena"},
+  {codigo:"WE0053.25",nombre:"Pimentón Picante S.25KG",formato:"S.25KG / SACO 25KG",precio:"5,73",cat:"Wikuk — Especias",sub:"Pimentón y Cayena"},
+  {codigo:"WE0051.1",nombre:"Pimentón Dulce Extra 140 Astas B.1KG",formato:"B.1KG / BOLSA 1KG",precio:"7,29",cat:"Wikuk — Especias",sub:"Pimentón y Cayena"},
+  {codigo:"WE0051.5",nombre:"Pimentón Dulce Extra 140 Astas B.5KG",formato:"B.5KG / BOLSA 5KG",precio:"6,92",cat:"Wikuk — Especias",sub:"Pimentón y Cayena"},
+  {codigo:"WE0051.25",nombre:"Pimentón Dulce Extra 140 Astas S.25KG",formato:"S.25KG / SACO 25KG",precio:"6,38",cat:"Wikuk — Especias",sub:"Pimentón y Cayena"},
+  {codigo:"WE0091.1",nombre:"Pimentón Ahumado B.1KG",formato:"B.1KG / BOLSA 1KG",precio:"9,20",cat:"Wikuk — Especias",sub:"Pimentón y Cayena"},
+  {codigo:"WE0091.5",nombre:"Pimentón Ahumado B.5KG",formato:"B.5KG / BOLSA 5KG",precio:"8,83",cat:"Wikuk — Especias",sub:"Pimentón y Cayena"},
+  {codigo:"WE0091.25",nombre:"Pimentón Ahumado S.25KG",formato:"S.25KG / SACO 25KG",precio:"8,29",cat:"Wikuk — Especias",sub:"Pimentón y Cayena"},
+  {codigo:"P-D",nombre:"Pimientos Largos Desrabados",formato:"S.11KG / SACO 11KG",precio:"7,74",cat:"Wikuk — Especias",sub:"Pimentón y Cayena"},
+  {codigo:"WE0042.1",nombre:"Orégano Hoja B.1KG",formato:"B.1KG / BOLSA 1KG",precio:"11,39",cat:"Wikuk — Especias",sub:"Hierbas"},
+  {codigo:"WE0042.5",nombre:"Orégano Hoja B.5KG",formato:"B.5KG / BOLSA 5KG",precio:"10,93",cat:"Wikuk — Especias",sub:"Hierbas"},
+  {codigo:"WE0042.10",nombre:"Orégano Hoja S.10KG",formato:"10KG / SACO 10KG",precio:"10,38",cat:"Wikuk — Especias",sub:"Hierbas"},
+  {codigo:"WE0047.1",nombre:"Perejil Hoja B.1KG",formato:"B.1KG / BOLSA 1KG",precio:"14,13",cat:"Wikuk — Especias",sub:"Hierbas"},
+  {codigo:"WE0047.7",nombre:"Perejil Hoja S.7KG",formato:"B.7KG / SACO 7KG",precio:"12,76",cat:"Wikuk — Especias",sub:"Hierbas"},
+  {codigo:"WE0088.1",nombre:"Tomillo Molido B.1KG",formato:"B.1KG / BOLSA 1KG",precio:"7,38",cat:"Wikuk — Especias",sub:"Hierbas"},
+  {codigo:"WE0088.5",nombre:"Tomillo Molido B.5KG",formato:"B.5KG / BOLSA 5KG",precio:"7,01",cat:"Wikuk — Especias",sub:"Hierbas"},
+  {codigo:"WE0088.25",nombre:"Tomillo Molido S.25KG",formato:"S.25KG / SACO 25KG",precio:"6,47",cat:"Wikuk — Especias",sub:"Hierbas"},
+  {codigo:"WE0006.1",nombre:"Anís Grano B.1KG",formato:"B.1KG / BOLSA 1KG",precio:"10,29",cat:"Wikuk — Especias",sub:"Especias simples"},
+  {codigo:"WE0006.5",nombre:"Anís Grano B.5KG",formato:"B.5KG / BOLSA 5KG",precio:"9,92",cat:"Wikuk — Especias",sub:"Especias simples"},
+  {codigo:"WE0006.25",nombre:"Anís Grano S.25KG",formato:"S.25KG / SACO 25KG",precio:"9,38",cat:"Wikuk — Especias",sub:"Especias simples"},
+  {codigo:"WE0080.1",nombre:"Anís Molido B.1KG",formato:"B.1KG / BOLSA 1KG",precio:"8,20",cat:"Wikuk — Especias",sub:"Especias simples"},
+  {codigo:"WE0080.5",nombre:"Anís Molido B.5KG",formato:"B.5KG / BOLSA 5KG",precio:"7,66",cat:"Wikuk — Especias",sub:"Especias simples"},
+  {codigo:"WE0080.25",nombre:"Anís Molido S.25KG",formato:"S.25KG / SACO 25KG",precio:"6,90",cat:"Wikuk — Especias",sub:"Especias simples"},
+  {codigo:"WE0010.1",nombre:"Canela Molida B.1KG",formato:"B.1KG / BOLSA 1KG",precio:"7,29",cat:"Wikuk — Especias",sub:"Especias simples"},
+  {codigo:"WE0010.5",nombre:"Canela Molida B.5KG",formato:"B.5KG / BOLSA 5KG",precio:"6,56",cat:"Wikuk — Especias",sub:"Especias simples"},
+  {codigo:"WE0010.20",nombre:"Canela Molida S.20KG",formato:"S.20KG / SACO 20KG",precio:"5,64",cat:"Wikuk — Especias",sub:"Especias simples"},
+  {codigo:"WE0018.1",nombre:"Clavo Molido B.1KG",formato:"B.1KG / BOLSA 1KG",precio:"13,42",cat:"Wikuk — Especias",sub:"Especias simples"},
+  {codigo:"WE0018.5",nombre:"Clavo Molido B.5KG",formato:"B.5KG / BOLSA 5KG",precio:"12,20",cat:"Wikuk — Especias",sub:"Especias simples"},
+  {codigo:"WE0018.25",nombre:"Clavo Molido S.25KG",formato:"S.25KG / SACO 25KG",precio:"11,66",cat:"Wikuk — Especias",sub:"Especias simples"},
+  {codigo:"WE0041.1",nombre:"Nuez Moscada Molida B.1KG",formato:"B.1KG / BOLSA 1KG",precio:"21,40",cat:"Wikuk — Especias",sub:"Especias simples"},
+  {codigo:"WE0041.5",nombre:"Nuez Moscada Molida B.5KG",formato:"B.5KG / BOLSA 5KG",precio:"20,94",cat:"Wikuk — Especias",sub:"Especias simples"},
+  {codigo:"WE0041.25",nombre:"Nuez Moscada Molida S.25KG",formato:"S.25KG / SACO 25KG",precio:"20,20",cat:"Wikuk — Especias",sub:"Especias simples"},
+  {codigo:"V00016",nombre:"Pan Crunchy Crumbs S/G 10KG",formato:"S.10KG / SACO 10KG",precio:"49,06",cat:"Wikuk — Especias",sub:"Pan rallado"},
+  {codigo:"V00000",nombre:"Pan Crunchy Crumbs S/G 12×200gr",formato:"BOLSA 200GR / CAJA 6×200GR",precio:"22,00",cat:"Wikuk — Especias",sub:"Pan rallado"},
+  {codigo:"V00127",nombre:"Pan Rallado Frumen G2 Natural 20KG",formato:"S.20KG / SACO 20KG",precio:"2,02",cat:"Wikuk — Especias",sub:"Pan rallado"},
+  {codigo:"V00128",nombre:"Pan Rallado Frumen G2 Color 20KG",formato:"S.20KG / SACO 20KG",precio:"2,06",cat:"Wikuk — Especias",sub:"Pan rallado"},
+  {codigo:"PRC2",nombre:"Pan Rallado S/G Sin Alérgenos Wikuk",formato:"S.15KG / SACO 15KG",precio:"5,18",cat:"Wikuk — Especias",sub:"Pan rallado"},
+  {codigo:"V0000B",nombre:"Huevo en Polvo B.2KG",formato:"B.2KG / BOLSA 5KG",precio:"30,73",cat:"Wikuk — Especias",sub:"Complementos"},
+  {codigo:"V0000A",nombre:"Huevo en Polvo B.5KG",formato:"B.5KG / BOLSA 5KG",precio:"29,52",cat:"Wikuk — Especias",sub:"Complementos"},
+  {codigo:"WP029.1",nombre:"Burger Albóndiga Color 029 B.1KG",formato:"B.1KG / CAJA 15×1KG",precio:"6,02",cat:"Wikuk — Preparados",sub:"Burger Meat"},
+  {codigo:"WP029.5",nombre:"Burger Albóndiga Color 029 B.5KG",formato:"B.5KG / CAJA 4×5KG",precio:"5,80",cat:"Wikuk — Preparados",sub:"Burger Meat"},
+  {codigo:"WP007.1",nombre:"Burger Meat 101 B.1KG",formato:"B.1KG / CAJA 15×1KG",precio:"4,78",cat:"Wikuk — Preparados",sub:"Burger Meat"},
+  {codigo:"WP007.5",nombre:"Burger Meat 101 B.5KG",formato:"B.5KG / CAJA 4×5KG",precio:"4,56",cat:"Wikuk — Preparados",sub:"Burger Meat"},
+  {codigo:"WP031.1",nombre:"Burger Meat 102C B.1KG",formato:"B.1KG / CAJA 15×1KG",precio:"5,36",cat:"Wikuk — Preparados",sub:"Burger Meat"},
+  {codigo:"WP031.5",nombre:"Burger Meat 102C B.5KG",formato:"B.5KG / CAJA 4×5KG",precio:"5,14",cat:"Wikuk — Preparados",sub:"Burger Meat"},
+  {codigo:"WP038.1",nombre:"Burger Meat 103 Max B.1KG",formato:"B.1KG / CAJA 15×1KG",precio:"5,19",cat:"Wikuk — Preparados",sub:"Burger Meat"},
+  {codigo:"WP038.5",nombre:"Burger Meat 103 Max B.5KG",formato:"B.5KG / CAJA 4×5KG",precio:"4,98",cat:"Wikuk — Preparados",sub:"Burger Meat"},
 ];
 
 // ─── PASO MUESTRAS con buscador de producto y cliente ────────────
@@ -1074,8 +950,366 @@ function MuestrasStep({muestras,onAdd,onDel,onEdit,clientes,onBack,onNext,color}
 }
 
 // ─── PASO RECUPERACIÓN DE CLIENTES ──────────────────────────────
-function RecuperacionStep(){return null;}
+function RecuperacionStep({estrategias,onBack,onNext,color,uid,todosClientes}){
+  const [tipo,setTipo]=useState(null);
+  const [acciones,setAcciones]=useState([]);
+  const [editId,setEditId]=useState(null);
+  const [clienteNombre,setClienteNombre]=useState("");
+  const [qCli,setQCli]=useState("");
+  const [showCli,setShowCli]=useState(false);
+  const [resultado,setResultado]=useState("");
+  const [nota,setNota]=useState("");
+  const [ofertas,setOfertas]=useState([]);
+  const [qProd,setQProd]=useState("");
+  const [showProd,setShowProd]=useState(false);
+  const [formOf,setFormOf]=useState({codigo:"",nombre:"",precioBase:"",dto:"",nota:""});
 
+  const cliResults=useMemo(()=>{
+    if(qCli.length<2) return [];
+    const q=qCli.toLowerCase();
+    return (todosClientes||[]).filter(c=>c.nombre.toLowerCase().includes(q)).slice(0,12);
+  },[qCli,todosClientes]);
+
+  const prodResults=useMemo(()=>{
+    if(qProd.length<2) return [];
+    const q=qProd.toLowerCase();
+    return PRODUCTOS_LOCAL.filter(p=>(p.codigo||"").toLowerCase().includes(q)||(p.nombre||"").toLowerCase().includes(q)).slice(0,20);
+  },[qProd]);
+
+  const precioFinal=useMemo(()=>{
+    if(!formOf.precioBase) return "";
+    const base=parseFloat(formOf.precioBase.replace(",","."));
+    if(isNaN(base)) return "";
+    if(formOf.dto){const dto=parseFloat(formOf.dto);return isNaN(dto)?base.toFixed(2):(base*(1-dto/100)).toFixed(2);}
+    return base.toFixed(2);
+  },[formOf.precioBase,formOf.dto]);
+
+  const RESULTADO_OPS=[
+    {k:"contactado", label:"📞 Contactado",      color:T.blue},
+    {k:"visita",     label:"👋 Visita realizada", color:T.amber},
+    {k:"pedido",     label:"✅ ¡Ha pedido!",      color:T.green},
+    {k:"sin_avance", label:"⏸ Sin avance",       color:T.muted},
+  ];
+
+  const resetForm=()=>{
+    setTipo(null);setEditId(null);setClienteNombre("");setQCli("");setShowCli(false);
+    setResultado("");setNota("");setOfertas([]);
+    setFormOf({codigo:"",nombre:"",precioBase:"",dto:"",nota:""});setQProd("");setShowProd(false);
+  };
+
+  const addOferta=()=>{
+    if(!formOf.nombre.trim()) return;
+    setOfertas(p=>[...p,{...formOf,precioFinal,id:`of${Date.now()}`}]);
+    setFormOf({codigo:"",nombre:"",precioBase:"",dto:"",nota:""});
+    setQProd(""); setShowProd(false);
+  };
+
+  const guardar=()=>{
+    if(!clienteNombre.trim()) return;
+    const acc={
+      id:editId||`acc${Date.now()}`,
+      tipo,clienteNombre:clienteNombre.trim(),
+      resultado,nota,ofertas,semana:14,agente:uid,
+    };
+    if(editId) setAcciones(a=>a.map(x=>x.id===editId?acc:x));
+    else setAcciones(a=>[...a,acc]);
+    resetForm();
+  };
+
+  const ISt={width:"100%",border:`1.5px solid ${T.border}`,borderRadius:10,
+    padding:"11px 12px",fontSize:13,outline:"none",boxSizing:"border-box"};
+
+  // ── Formulario ────────────────────────────────────────────────────
+  if(tipo){
+    const ac=tipo==="nuevo"?T.green:T.blue;
+    const ai=tipo==="nuevo"?"🌱":"🔄";
+    return(
+      <div>
+        <BackBar label="Recuperación" onBack={resetForm}/>
+        <p style={{margin:"0 0 20px",fontSize:16,fontWeight:800,color:T.text}}>
+          {ai} {editId?"Editar":"Nueva"} — {tipo==="nuevo"?"Cliente nuevo":"Recuperar cliente"}
+        </p>
+
+        {/* Cliente con autocomplete */}
+        <div style={{marginBottom:14,position:"relative"}}>
+          <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Cliente *</p>
+          <input value={clienteNombre}
+            onChange={e=>{setClienteNombre(e.target.value);setQCli(e.target.value);setShowCli(true);}}
+            onFocus={()=>setShowCli(true)}
+            placeholder="Busca o escribe el nombre del cliente…" style={ISt}/>
+          {showCli&&qCli.length>=2&&cliResults.length>0&&(
+            <div style={{position:"absolute",top:"calc(100% + 4px)",left:0,right:0,zIndex:50,
+              background:"#fff",border:`1.5px solid ${ac}`,borderRadius:10,
+              boxShadow:"0 4px 16px rgba(0,0,0,.1)",maxHeight:180,overflowY:"auto"}}>
+              {cliResults.map(c=>(
+                <button key={c.id} onClick={()=>{setClienteNombre(c.nombre);setQCli("");setShowCli(false);}}
+                  style={{width:"100%",padding:"10px 14px",border:"none",
+                    borderBottom:`1px solid ${T.border}`,background:"transparent",
+                    cursor:"pointer",textAlign:"left"}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:600,color:T.text}}>{c.nombre}</p>
+                  {c.dir&&<p style={{margin:0,fontSize:10,color:T.muted}}>📍 {c.dir}</p>}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Resultado — solo al editar una acción existente */}
+        {editId&&(<>
+          <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Resultado final</p>
+          <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:14}}>
+            {RESULTADO_OPS.map(r=>(
+              <button key={r.k} onClick={()=>setResultado(r.k)}
+                style={{padding:"8px 12px",borderRadius:9,cursor:"pointer",fontSize:12,
+                  border:`2px solid ${resultado===r.k?r.color:T.border}`,
+                  background:resultado===r.k?r.color+"15":"transparent",
+                  color:resultado===r.k?r.color:T.muted,
+                  fontWeight:resultado===r.k?700:400}}>
+                {r.label}
+              </button>
+            ))}
+          </div>
+        </>)}
+
+        {/* Nota */}
+        <div style={{marginBottom:18}}>
+          <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Nota / comentario</p>
+          <textarea value={nota} onChange={e=>setNota(e.target.value)} rows={2}
+            placeholder="Qué se habló, interés del cliente, próximos pasos…"
+            style={{...ISt,resize:"none",lineHeight:1.5,fontFamily:"inherit"}}/>
+        </div>
+
+        {/* ── OFERTAS DE PRODUCTO ── */}
+        <div style={{marginBottom:20}}>
+          <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:10}}>
+            <p style={{margin:0,fontSize:12,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>🏷️ Ofertas de precio</p>
+            {ofertas.length>0&&<span style={{background:ac,color:"#fff",borderRadius:99,
+              fontSize:10,fontWeight:800,padding:"2px 8px"}}>{ofertas.length}</span>}
+          </div>
+
+          {/* Ofertas añadidas */}
+          {ofertas.map(o=>(
+            <div key={o.id} style={{background:"#FFF",border:`1px solid ${T.border}`,
+              borderLeft:`3px solid ${ac}`,
+              borderRadius:11,padding:"11px 14px",marginBottom:8,display:"flex",gap:10,alignItems:"center"}}>
+              <div style={{flex:1}}>
+                {o.codigo&&<p style={{margin:0,fontSize:10,fontFamily:"monospace",color:ac,fontWeight:700}}>{o.codigo}</p>}
+                <p style={{margin:0,fontSize:13,fontWeight:700}}>{o.nombre}</p>
+                <div style={{display:"flex",gap:8,marginTop:3,alignItems:"center",flexWrap:"wrap"}}>
+                  {o.precioBase&&<span style={{fontSize:12,color:T.muted,
+                    textDecoration:o.dto?"line-through":"none"}}>{o.precioBase}€/kg</span>}
+                  {o.dto&&<span style={{fontSize:12,fontWeight:700,color:T.red}}>-{o.dto}%</span>}
+                  {o.precioFinal&&o.dto&&(
+                    <span style={{fontSize:13,fontWeight:800,color:T.green}}>→ {o.precioFinal}€/kg</span>
+                  )}
+                  {!o.dto&&o.precioFinal&&<span style={{fontSize:13,fontWeight:700,color:T.green}}>{o.precioFinal}€/kg</span>}
+                </div>
+                {o.nota&&<p style={{margin:"3px 0 0",fontSize:11,color:T.muted,fontStyle:"italic"}}>{o.nota}</p>}
+              </div>
+              <button onClick={()=>setOfertas(p=>p.filter(x=>x.id!==o.id))}
+                style={{background:"none",border:"none",cursor:"pointer",color:T.red,fontSize:18,flexShrink:0}}>🗑</button>
+            </div>
+          ))}
+
+          {/* Formulario nueva oferta */}
+          <div style={{background:T.bg,borderRadius:12,padding:"14px",border:`1.5px dashed ${ac}66`}}>
+            {/* Buscador producto */}
+            <div style={{display:"flex",gap:6,marginBottom:6}}>
+              <input value={formOf.nombre} onChange={e=>setFormOf(f=>({...f,nombre:e.target.value,codigo:"",precioBase:""}))}
+                placeholder="Producto…" style={{...ISt,flex:1,padding:"9px 11px"}}/>
+              <button onClick={()=>setShowProd(s=>!s)}
+                style={{padding:"0 13px",borderRadius:9,border:`1.5px solid ${ac}`,
+                  background:"#FFF",color:ac,fontWeight:700,cursor:"pointer",fontSize:16}}>🔍</button>
+            </div>
+            {formOf.codigo&&<p style={{margin:"0 0 6px",fontSize:10,color:ac,fontWeight:700,fontFamily:"monospace"}}>{formOf.codigo}</p>}
+
+            {/* Dropdown resultados */}
+            {showProd&&(
+              <div style={{border:`1.5px solid ${ac}`,borderRadius:9,background:"#FFF",
+                overflow:"hidden",marginBottom:8}}>
+                <input value={qProd} onChange={e=>setQProd(e.target.value)} autoFocus
+                  placeholder="Buscar por nombre o código…"
+                  style={{...ISt,padding:"8px 10px",borderRadius:0,border:"none",
+                    borderBottom:`1px solid ${T.border}`}}/>
+                <div style={{maxHeight:180,overflowY:"auto"}}>
+                  {qProd.length<2&&<p style={{padding:"10px",fontSize:12,color:T.muted,margin:0}}>Escribe 2 letras para buscar…</p>}
+                  {qProd.length>=2&&prodResults.length===0&&<p style={{padding:"10px",fontSize:12,color:T.muted,margin:0}}>Sin resultados</p>}
+                  {prodResults.map(p=>(
+                    <button key={p.codigo}
+                      onClick={()=>{setFormOf(f=>({...f,codigo:p.codigo,nombre:p.nombre,precioBase:p.precio||""}));setShowProd(false);setQProd("");}}
+                      style={{width:"100%",padding:"10px 14px",border:"none",
+                        borderBottom:`1px solid ${T.border}`,background:"transparent",
+                        cursor:"pointer",textAlign:"left",display:"flex",gap:10,alignItems:"center"}}>
+                      <div style={{flex:1,minWidth:0}}>
+                        <p style={{margin:0,fontSize:13,fontWeight:600,
+                          overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.nombre}</p>
+                        <p style={{margin:0,fontSize:10,color:T.muted}}>{p.codigo} · {p.cat}</p>
+                      </div>
+                      {p.precio&&<span style={{fontSize:12,fontWeight:700,color:T.green,flexShrink:0}}>{p.precio}€/kg</span>}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Precio base + descuento */}
+            <div style={{display:"flex",gap:8,marginBottom:8}}>
+              <div style={{flex:1}}>
+                <p style={{margin:"0 0 4px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Precio tarifa €/kg</p>
+                <input value={formOf.precioBase}
+                  onChange={e=>setFormOf(f=>({...f,precioBase:e.target.value}))}
+                  placeholder="0,00" style={{...ISt,padding:"10px 12px"}}/>
+              </div>
+              <div style={{flex:1}}>
+                <p style={{margin:"0 0 4px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Descuento %</p>
+                <input type="number" value={formOf.dto}
+                  onChange={e=>setFormOf(f=>({...f,dto:e.target.value}))}
+                  placeholder="0" style={{...ISt,padding:"10px 12px"}}/>
+              </div>
+            </div>
+
+            {/* Precio final calculado */}
+            {precioFinal&&(
+              <div style={{background:T.greenL,borderRadius:9,padding:"9px 14px",
+                marginBottom:8,display:"flex",gap:10,alignItems:"center"}}>
+                <span style={{fontSize:16}}>✓</span>
+                <div>
+                  <p style={{margin:0,fontSize:14,fontWeight:800,color:T.green}}>
+                    Precio oferta: {precioFinal}€/kg
+                  </p>
+                  {formOf.dto&&<p style={{margin:0,fontSize:11,color:T.green}}>
+                    Descuento del {formOf.dto}% sobre tarifa {formOf.precioBase}€/kg
+                  </p>}
+                </div>
+              </div>
+            )}
+
+            <input value={formOf.nota} onChange={e=>setFormOf(f=>({...f,nota:e.target.value}))}
+              placeholder="Nota de la oferta (opcional)" style={{...ISt,marginBottom:8}}/>
+
+            <button onClick={addOferta} disabled={!formOf.nombre.trim()}
+              style={{width:"100%",padding:"11px",borderRadius:9,border:"none",
+                background:formOf.nombre.trim()?ac:"#CBD5E1",
+                color:"#fff",fontWeight:700,fontSize:13,
+                cursor:formOf.nombre.trim()?"pointer":"default"}}>
+              + Añadir oferta
+            </button>
+          </div>
+        </div>
+
+        <button onClick={guardar} disabled={!clienteNombre.trim()}
+          style={{width:"100%",padding:"14px",borderRadius:12,border:"none",
+            background:clienteNombre.trim()?ac:"#CBD5E1",
+            color:"#fff",fontWeight:700,fontSize:15,
+            cursor:clienteNombre.trim()?"pointer":"default"}}>
+          {editId?"✓ Guardar cambios":"✓ Guardar acción"}
+        </button>
+      </div>
+    );
+  }
+
+  // ── Pantalla principal ──────────────────────────────────────────
+  return(
+    <div>
+      <p style={{margin:"0 0 4px",fontSize:17,fontWeight:800,color:T.text}}>🎯 Recuperación de clientes</p>
+      <p style={{margin:"0 0 20px",fontSize:12,color:T.muted}}>Acciones de captación y recuperación esta semana</p>
+
+      {/* Estrategias asignadas */}
+      {estrategias.length>0&&(
+        <div style={{marginBottom:20}}>
+          <p style={{margin:"0 0 10px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>
+            📌 Estrategias activas asignadas
+          </p>
+          {estrategias.map(e=>{
+            const ult=e.seguimientos?.slice(-1)[0];
+            return(
+              <Card key={e.id} style={{marginBottom:8,padding:"14px 16px",
+                borderLeft:`4px solid ${T.amber}`}}>
+                <p style={{margin:"0 0 2px",fontSize:14,fontWeight:800,color:T.text}}>{e.cliente}</p>
+                <p style={{margin:"0 0 6px",fontSize:12,color:T.muted}}>{e.estrategia}</p>
+                <div style={{background:T.amberL,borderRadius:7,padding:"4px 10px",display:"inline-block"}}>
+                  <span style={{fontSize:11,fontWeight:700,color:T.amber}}>🎯 {e.objetivo}</span>
+                </div>
+                {ult&&<p style={{margin:"6px 0 0",fontSize:11,color:T.muted}}>
+                  Último seguimiento S{ult.semana}: {ult.nota}
+                </p>}
+              </Card>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Acciones registradas */}
+      {acciones.length>0&&(
+        <div style={{marginBottom:20}}>
+          <p style={{margin:"0 0 10px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>
+            ✍️ Mis acciones esta semana
+          </p>
+          {acciones.map(a=>{
+            const res=RESULTADO_OPS.find(r=>r.k===a.resultado);
+            return(
+              <div key={a.id} style={{background:"#FFF",borderRadius:12,padding:"13px 16px",
+                marginBottom:8,border:`1px solid ${T.border}`,
+                borderLeft:`4px solid ${a.tipo==="nuevo"?T.green:T.blue}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                  <div style={{flex:1}}>
+                    <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:4}}>
+                      <span>{a.tipo==="nuevo"?"🌱":"🔄"}</span>
+                      <p style={{margin:0,fontSize:14,fontWeight:700,color:T.text}}>{a.clienteNombre}</p>
+                    </div>
+                    {res&&<Badge label={res.label} color={res.color}/>}
+                    {a.nota&&<p style={{margin:"4px 0 0",fontSize:12,color:T.muted,fontStyle:"italic"}}>
+                      "{a.nota.slice(0,60)}"
+                    </p>}
+                    {a.ofertas?.length>0&&<p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>
+                      🏷️ {a.ofertas.length} oferta{a.ofertas.length>1?"s":""} de precio
+                    </p>}
+                  </div>
+                  <div style={{display:"flex",gap:6,flexShrink:0}}>
+                    <button onClick={()=>{
+                      setTipo(a.tipo);setEditId(a.id);setClienteNombre(a.clienteNombre);
+                      setResultado(a.resultado||"");setNota(a.nota||"");setOfertas(a.ofertas||[]);
+                    }} style={{padding:"5px 10px",borderRadius:7,border:`1px solid ${T.border}`,
+                      background:"#FFF",color:T.blue,fontSize:12,cursor:"pointer"}}>✏️</button>
+                    <button onClick={()=>setAcciones(p=>p.filter(x=>x.id!==a.id))}
+                      style={{background:"none",border:"none",cursor:"pointer",color:T.red,fontSize:16}}>🗑</button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Nueva acción */}
+      <p style={{margin:"0 0 10px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Nueva acción</p>
+      {[
+        {t:"recuperacion",icon:"🔄",label:"Recuperar cliente",sub:"Cliente que ha dejado de comprar",color:T.blue},
+        {t:"nuevo",       icon:"🌱",label:"Cliente nuevo",    sub:"Primera visita o prospecto",      color:T.green},
+      ].map(opt=>(
+        <button key={opt.t} onClick={()=>setTipo(opt.t)}
+          style={{display:"flex",gap:14,alignItems:"center",padding:"16px",borderRadius:14,
+            border:`2px solid ${opt.color}33`,background:`${opt.color}08`,cursor:"pointer",
+            textAlign:"left",width:"100%",marginBottom:10,boxSizing:"border-box"}}>
+          <span style={{fontSize:28,flexShrink:0}}>{opt.icon}</span>
+          <div style={{flex:1}}>
+            <p style={{margin:0,fontSize:15,fontWeight:700,color:T.text}}>{opt.label}</p>
+            <p style={{margin:"2px 0 0",fontSize:12,color:T.muted}}>{opt.sub}</p>
+          </div>
+          <span style={{color:opt.color,fontSize:20}}>›</span>
+        </button>
+      ))}
+
+      <div style={{display:"flex",gap:8,marginTop:8}}>
+        <Btn onClick={onBack} outline color={T.muted}>← Atrás</Btn>
+        <Btn full onClick={onNext} color={color}>Siguiente → Muestras</Btn>
+      </div>
+    </div>
+  );
+}
+
+
+// ─── FORMULARIO NUEVO CLIENTE ─────────────────────────────────────
 function NuevoClienteForm({ruta,onGuardar,onBack}){
   const [form,setForm]=useState({nombre:"",contacto:"",telefono:"",email:"",poblacion:"",empresa:"",tarjeta:null});
   const fotoRef=React.useRef();
@@ -2003,7 +2237,7 @@ function EstrategiaAprobacionCard({e,usuario,onConfirmar,onRechazar,onEscalar}){
 // ═══════════════════════════════════════════════════════════════════
 // ESTRATEGIAS — vista clara por rol
 // ═══════════════════════════════════════════════════════════════════
-function MisEstrategias({usuario, clientesFB}){
+function MisEstrategias({usuario}){
   const esJefe  = usuario?.rol==="jefe"||usuario?.rol==="director"||usuario?.rol==="ceo";
   const esRolJefe = usuario?.rol==="jefe";
   const esRolDir  = usuario?.rol==="director";
@@ -2015,15 +2249,9 @@ function MisEstrategias({usuario, clientesFB}){
   const [cargando,setCargando]=useState(false);
   const [sel,setSel]=useState(null);
   const [filtroSec,setFiltroSec]=useState("todas");
-  const [nuevaOpen,setNuevaOpen]=useState(false);
-  const [nuevaForm,setNuevaForm]=useState({clienteNombre:"",clienteId:"",tipo:"recuperacion",texto:"",objetivo:"",ofertas:[]});
-  const [qCliente,setQCliente]=useState("");
-  const [guardandoNueva,setGuardandoNueva]=useState(false);
 
   useEffect(()=>{
     const unsub=GlobalStore.subscribe(data=>setEstrategiasLocal([...data]));
-    // Cargar Firebase automáticamente al montar el componente
-    recargar();
     return unsub;
   },[]);
 
@@ -2096,17 +2324,13 @@ function MisEstrategias({usuario, clientesFB}){
 
   // Clasificación
   const deEquipo=(e)=>{
-    if(esRolJefe){
-      const ag=USUARIOS.find(u=>u.id===e.agente);
-      // Agente en lista fija → comparar equipo; agente dinámico → comparar campo equipo del doc
-      return ag?.equipo===miEquipo||e.equipo===miEquipo;
-    }
+    if(esRolJefe){const ag=USUARIOS.find(u=>u.id===e.agente);return ag?.equipo===miEquipo||e.equipo===miEquipo;}
     return true;
   };
 
   const pendAprobMia=esRolJefe
     ? estrategias.filter(e=>e.estado==="pendiente_aprobacion"&&!e.escaladoA&&deEquipo(e))
-    : estrategias.filter(e=>e.estado==="pendiente_aprobacion"&&(!e.escaladoA||e.escaladoA===usuario.id));
+    : estrategias.filter(e=>e.estado==="pendiente_aprobacion"&&e.escaladoA===usuario.id);
 
   const elevadasPorMi=esJefe&&!esRolCeo
     ? estrategias.filter(e=>e.estado==="pendiente_aprobacion"&&e.escaladoA&&e.escaladoA!==usuario.id&&deEquipo(e))
@@ -2132,28 +2356,6 @@ function MisEstrategias({usuario, clientesFB}){
   const activasAgente=esAgente?estrategias.filter(e=>e.agente===usuario.id&&e.estado==="en_curso"&&!e.resolucion):[];
   const misMostrar=esJefe?estrategias.filter(e=>deEquipo(e)&&e.estado==="en_curso"&&!e.resolucion):[];
 
-  // ── Guardar nueva estrategia desde lista ─────────────────────────
-  const guardarNuevaEstrategia=()=>{
-    if(!nuevaForm.texto.trim()||!nuevaForm.clienteNombre.trim()) return;
-    setGuardandoNueva(true);
-    const id=`est_${usuario.id}_${(nuevaForm.clienteId||nuevaForm.clienteNombre).replace(/\s+/g,"_")}_${Date.now()}`;
-    const doc={
-      id, agente:usuario.id, equipo:usuario.equipo||"",
-      cliente:nuevaForm.clienteNombre, clienteNombre:nuevaForm.clienteNombre,
-      clienteId:nuevaForm.clienteId||nuevaForm.clienteNombre,
-      tipo:nuevaForm.tipo, texto:nuevaForm.texto, objetivo:nuevaForm.objetivo,
-      ofertas:nuevaForm.ofertas||[], estado:"pendiente_aprobacion",
-      semana:14, fecha:new Date().toLocaleDateString("es-ES"),
-    };
-    const next=[doc,...estrategias];
-    GlobalStore.setEstrategias(next);
-    setEstrategiasLocal([...next]);
-    fbEscribir("estrategias",id,doc).catch(()=>{});
-    setNuevaOpen(false);
-    setNuevaForm({clienteNombre:"",clienteId:"",tipo:"recuperacion",texto:"",objetivo:"",ofertas:[]});
-    setQCliente(""); setGuardandoNueva(false);
-  };
-
   // ── DETALLE ─────────────────────────────────────────────────────
   if(sel){
     const esSuya=sel.agente===usuario.id;
@@ -2174,23 +2376,16 @@ function MisEstrategias({usuario, clientesFB}){
               </p>
               <p style={{margin:"0 0 8px",fontSize:13,color:T.text}}>
                 Por <strong>{res.por}</strong> · {res.fecha}
+                {res.nota&&<span> — "{res.nota}"</span>}
               </p>
-              {/* Comentario del responsable destacado */}
-              {res.nota&&(
-                <div style={{background:"rgba(0,0,0,.05)",borderRadius:10,padding:"10px 12px",marginBottom:8}}>
-                  <p style={{margin:"0 0 2px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>💬 Comentario del responsable</p>
-                  <p style={{margin:0,fontSize:13,color:T.text,fontStyle:"italic"}}>"{res.nota}"</p>
-                </div>
-              )}
               {/* Resolución por producto */}
               {(sel.ofertas||[]).length>0&&(
                 <div style={{borderTop:`1px solid ${res.tipo==="aprobada"?T.green+"44":T.amber+"44"}`,paddingTop:10,marginTop:8}}>
-                  <p style={{margin:"0 0 6px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Precios aprobados</p>
                   {sel.ofertas.map((o,i)=>(
                     <div key={i} style={{display:"flex",gap:10,alignItems:"center",
                       padding:"8px 0",borderBottom:i<sel.ofertas.length-1?`1px solid ${T.border}`:"none"}}>
                       <span style={{fontSize:18,flexShrink:0}}>
-                        {o.aprobada===true?"✅":o.aprobada===false?"❌":o.elevadaA?"⏳":"✅"}
+                        {o.aprobada===true?"✅":o.aprobada===false?"❌":o.elevadaA?"⏳":"—"}
                       </span>
                       <div style={{flex:1,minWidth:0}}>
                         <p style={{margin:0,fontSize:13,fontWeight:600,
@@ -2203,18 +2398,8 @@ function MisEstrategias({usuario, clientesFB}){
                               <span style={{color:T.muted,textDecoration:"line-through",marginLeft:6}}>{o.precioOriginal}€</span>}
                           </p>
                         )}
-                        {/* Sin decisión explícita = aprobado al precio solicitado */}
-                        {o.aprobada===undefined&&!o.elevadaA&&(
-                          <p style={{margin:0,fontSize:12,color:T.green,fontWeight:700}}>
-                            Precio aprobado: <strong>{o.precioFinal||o.precioBase||"—"}€/kg</strong>
-                            {o.dto&&<span style={{color:T.red,fontWeight:700,marginLeft:6}}>(-{o.dto}%)</span>}
-                            {o.precioBase&&o.precioFinal&&o.precioBase!==o.precioFinal&&
-                              <span style={{color:T.muted,textDecoration:"line-through",marginLeft:6,fontWeight:400}}>{o.precioBase}€</span>}
-                          </p>
-                        )}
-                        {o.aprobada===false&&<p style={{margin:0,fontSize:12,color:T.red,fontWeight:700}}>❌ No autorizado</p>}
-                        {o.elevadaA&&<p style={{margin:0,fontSize:12,color:T.purple}}>⏳ Pendiente decisión superior</p>}
-                        {o.notaOferta&&<p style={{margin:"2px 0 0",fontSize:11,color:T.muted,fontStyle:"italic"}}>"{o.notaOferta}"</p>}
+                        {o.aprobada===false&&<p style={{margin:0,fontSize:12,color:T.red}}>No autorizado</p>}
+                        {o.elevadaA&&<p style={{margin:0,fontSize:12,color:T.purple}}>Pendiente decisión superior</p>}
                       </div>
                     </div>
                   ))}
@@ -2231,27 +2416,28 @@ function MisEstrategias({usuario, clientesFB}){
               onEscalar={(e,d,n)=>{escalarEstrategia(e,d,n);setSel(null);}}/>
           )}
 
-          {/* Info básica — siempre visible (con o sin resolución) */}
-          <Card style={{marginBottom:12}}>
-            <p style={{margin:"0 0 6px",fontSize:17,fontWeight:800}}>{sel.cliente||sel.clienteNombre}</p>
-            <p style={{margin:"0 0 6px",fontSize:13,color:T.muted}}>{sel.texto||sel.estrategia}</p>
-            {sel.objetivo&&<p style={{margin:0,fontSize:12,color:T.text}}>🎯 {sel.objetivo}</p>}
-            {/* Artículos solicitados — solo si no hay resolución que ya los muestre con precios */}
-            {!res&&(sel.ofertas||[]).length>0&&(
-              <div style={{marginTop:10,borderTop:`1px solid ${T.border}`,paddingTop:10}}>
-                <p style={{margin:"0 0 6px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Artículos solicitados</p>
-                {sel.ofertas.map((o,i)=>(
-                  <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",
-                    borderBottom:i<sel.ofertas.length-1?`1px solid ${T.border}`:"none"}}>
-                    <span style={{fontSize:12}}>{o.nombre}</span>
-                    <span style={{fontSize:12,fontWeight:700,color:T.green}}>
-                      {o.precioFinal}€/kg <span style={{color:T.red,fontWeight:600}}>-{o.dto}%</span>
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </Card>
+          {/* Info básica */}
+          {!res&&!(esJefe&&escaladoAMi&&sel.estado==="pendiente_aprobacion")&&(
+            <Card style={{marginBottom:12}}>
+              <p style={{margin:"0 0 6px",fontSize:17,fontWeight:800}}>{sel.cliente||sel.clienteNombre}</p>
+              <p style={{margin:"0 0 6px",fontSize:13,color:T.muted}}>{sel.texto||sel.estrategia}</p>
+              {sel.objetivo&&<p style={{margin:0,fontSize:12,color:T.text}}>🎯 {sel.objetivo}</p>}
+              {(sel.ofertas||[]).length>0&&(
+                <div style={{marginTop:10,borderTop:`1px solid ${T.border}`,paddingTop:10}}>
+                  <p style={{margin:"0 0 6px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Artículos solicitados</p>
+                  {sel.ofertas.map((o,i)=>(
+                    <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",
+                      borderBottom:i<sel.ofertas.length-1?`1px solid ${T.border}`:"none"}}>
+                      <span style={{fontSize:12}}>{o.nombre}</span>
+                      <span style={{fontSize:12,fontWeight:700,color:T.green}}>
+                        {o.precioFinal}€/kg <span style={{color:T.red,fontWeight:600}}>-{o.dto}%</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          )}
 
           {/* Historial de escalado */}
           {(sel.historialEscalado||[]).length>0&&(
@@ -2315,102 +2501,12 @@ function MisEstrategias({usuario, clientesFB}){
             {esAgente?"Mis recuperaciones":esRolJefe?`Equipo ${miEquipo}`:esRolDir?"Dirección":"CEO"}
           </p>
         </div>
-        <div style={{display:"flex",gap:8}}>
-          {esAgente&&(
-            <button onClick={()=>setNuevaOpen(v=>!v)}
-              style={{background:nuevaOpen?T.amber:T.navy,border:"none",borderRadius:9,
-                padding:"9px 14px",cursor:"pointer",color:"#fff",fontSize:13,fontWeight:700}}>
-              {nuevaOpen?"✕ Cancelar":"+ Nueva"}
-            </button>
-          )}
-          <button onClick={recargar} disabled={cargando}
-            style={{background:"#fff",border:`1px solid ${T.border}`,borderRadius:9,
-              padding:"9px 14px",cursor:cargando?"default":"pointer",color:T.muted,fontSize:13}}>
-            {cargando?"⏳":"🔄"}
-          </button>
-        </div>
+        <button onClick={recargar} disabled={cargando}
+          style={{background:"#fff",border:`1px solid ${T.border}`,borderRadius:9,
+            padding:"9px 14px",cursor:cargando?"default":"pointer",color:T.muted,fontSize:13}}>
+          {cargando?"⏳":"🔄"} Actualizar
+        </button>
       </div>
-
-      {/* ── FORMULARIO NUEVA ESTRATEGIA ── */}
-      {esAgente&&nuevaOpen&&(
-        <div style={{background:"#fff",borderRadius:16,padding:"18px",marginBottom:20,
-          border:`2px solid ${T.amber}`,boxShadow:"0 4px 20px rgba(0,0,0,.08)"}}>
-          <p style={{margin:"0 0 14px",fontSize:15,fontWeight:800,color:T.text}}>🎯 Nueva estrategia</p>
-
-          {/* Selección de cliente */}
-          <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Cliente</p>
-          <input value={qCliente} onChange={ev=>{
-              setQCliente(ev.target.value);
-              setNuevaForm(f=>({...f,clienteNombre:ev.target.value,clienteId:""}));
-            }}
-            placeholder="Buscar o escribir nombre del cliente…"
-            style={{width:"100%",border:`1.5px solid ${T.border}`,borderRadius:10,
-              padding:"10px 12px",fontSize:13,outline:"none",boxSizing:"border-box",marginBottom:4}}/>
-          {/* Sugerencias de cliente */}
-          {qCliente.length>=2&&(()=>{
-            const lista=(clientesFB||CLIENTES_POR_AGENTE[usuario.id]||[])
-              .filter(c=>(c.nombre||c.NOMBRE||"").toLowerCase().includes(qCliente.toLowerCase()))
-              .slice(0,6);
-            return lista.length>0?(
-              <div style={{border:`1px solid ${T.border}`,borderRadius:10,marginBottom:10,overflow:"hidden"}}>
-                {lista.map((c,i)=>{
-                  const nom=c.nombre||c.NOMBRE||c.name||"";
-                  return(
-                    <div key={c.id||i} onClick={()=>{
-                        setNuevaForm(f=>({...f,clienteNombre:nom,clienteId:c.id||nom}));
-                        setQCliente(nom);
-                      }}
-                      style={{padding:"9px 14px",cursor:"pointer",fontSize:13,
-                        borderBottom:i<lista.length-1?`1px solid ${T.border}`:"none",
-                        background:"#fff"}}
-                      onMouseEnter={e=>e.currentTarget.style.background="#F8FAFC"}
-                      onMouseLeave={e=>e.currentTarget.style.background="#fff"}>
-                      {nom}
-                    </div>
-                  );
-                })}
-              </div>
-            ):null;
-          })()}
-
-          {/* Tipo */}
-          <p style={{margin:"8px 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Tipo</p>
-          <div style={{display:"flex",gap:8,marginBottom:12}}>
-            {[{k:"recuperacion",icon:"🔄",label:"Recuperar"},{k:"nuevo",icon:"🌱",label:"Cliente nuevo"}].map(t=>(
-              <button key={t.k} onClick={()=>setNuevaForm(f=>({...f,tipo:t.k}))}
-                style={{flex:1,padding:"10px",borderRadius:10,cursor:"pointer",fontSize:12,
-                  border:`2px solid ${nuevaForm.tipo===t.k?T.amber:T.border}`,
-                  background:nuevaForm.tipo===t.k?T.amberL:"#fff",
-                  color:nuevaForm.tipo===t.k?T.amber:T.muted,fontWeight:nuevaForm.tipo===t.k?700:400}}>
-                {t.icon} {t.label}
-              </button>
-            ))}
-          </div>
-
-          {/* Acción */}
-          <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Acción propuesta</p>
-          <textarea value={nuevaForm.texto} onChange={ev=>setNuevaForm(f=>({...f,texto:ev.target.value}))} rows={3}
-            placeholder="Muestra + visita personalizada, descuento especial…"
-            style={{width:"100%",border:`1.5px solid ${T.border}`,borderRadius:10,
-              padding:"10px 12px",fontSize:13,resize:"none",lineHeight:1.5,
-              outline:"none",boxSizing:"border-box",fontFamily:"inherit",marginBottom:10}}/>
-
-          {/* Objetivo */}
-          <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Objetivo</p>
-          <input value={nuevaForm.objetivo} onChange={ev=>setNuevaForm(f=>({...f,objetivo:ev.target.value}))}
-            placeholder="Recuperar pedido mensual, reactivar cuenta…"
-            style={{width:"100%",border:`1.5px solid ${T.border}`,borderRadius:10,
-              padding:"10px 12px",fontSize:13,outline:"none",boxSizing:"border-box",marginBottom:14}}/>
-
-          <button onClick={guardarNuevaEstrategia}
-            disabled={!nuevaForm.texto.trim()||!nuevaForm.clienteNombre.trim()||guardandoNueva}
-            style={{width:"100%",padding:"13px",borderRadius:11,border:"none",
-              background:nuevaForm.texto.trim()&&nuevaForm.clienteNombre.trim()?T.amber:"#CBD5E1",
-              color:"#fff",fontWeight:700,fontSize:14,cursor:"pointer"}}>
-            {guardandoNueva?"⏳ Guardando…":"✓ Solicitar estrategia"}
-          </button>
-        </div>
-      )}
 
       {/* Filtros rápidos */}
       {(()=>{
@@ -3349,6 +3445,295 @@ function PanelAdmin({onBack}){
   );
 }
 
+
+// ══════════════════════════════════════════════════════════════════
+// TAREAS / ACCIONES URGENTES
+// ══════════════════════════════════════════════════════════════════
+
+const PRIORIDAD_CFG = {
+  urgente: { label:"Urgente", color:"#EF4444", bg:"#FEF2F2", icon:"🔴" },
+  alta:    { label:"Alta",    color:"#F59E0B", bg:"#FFFBEB", icon:"🟡" },
+  normal:  { label:"Normal",  color:"#3B82F6", bg:"#EFF6FF", icon:"🔵" },
+};
+
+const TAREAS_SEED = [
+  { id:"tsk001", titulo:"Precios culares cal. 55/60 — CASTELAO", descripcion:"Enviar precio urgente. Empieza proyecto mayo. Contacto: Rubén (Dir. General).", cliente:"CASA CASTELAO S.L.", clienteId:"U434114", prioridad:"urgente", estado:"pendiente", agente:"JLGARCIA", creadaEn:"08/04/2026", vence:"30/04/2026", tipo:"precio" },
+  { id:"tsk002", titulo:"Muestra Especta Pro Cal.60 — CASTELAO", descripcion:"Enviar muestra junto con precios. Proyecto culares cal.60.", cliente:"CASA CASTELAO S.L.", clienteId:"U434114", prioridad:"urgente", estado:"pendiente", agente:"JLGARCIA", creadaEn:"08/04/2026", vence:"20/04/2026", tipo:"muestra" },
+  { id:"tsk003", titulo:"2 sticks Maextra Pro 34 — LALINENSE", descripcion:"Enviar a la atención de Manuel López. Si da 2 días más de caducidad + brillo Brasil = cambio. Potencial 40.000 kg/año.", cliente:"EMBUTIDOS LALINENSE S.A.T.", clienteId:"U432202", prioridad:"alta", estado:"pendiente", agente:"JLGARCIA", creadaEn:"08/04/2026", vence:"18/04/2026", tipo:"muestra" },
+  { id:"tsk004", titulo:"Confirmar 2 calibres con JL — FLOR DE GALICIA", descripcion:"Esta semana confirmar los 2 calibres de Especta Pro que quiere probar Cristina (Gerente) y preparar envío.", cliente:"EMBUTIDOS LA FLOR DE GALICIA", clienteId:null, prioridad:"alta", estado:"pendiente", agente:"JLGARCIA", creadaEn:"08/04/2026", vence:"15/04/2026", tipo:"coordinacion" },
+  { id:"tsk005", titulo:"Contactar Ana López — FROIZ (preparados)", descripcion:"Ana López es responsable de calidad y compra de preparados en Supermercados Froiz. Pedro Magdalena nos pone en contacto.", cliente:"SUPERMERCADOS FROIZ", clienteId:null, prioridad:"alta", estado:"pendiente", agente:"JLGARCIA", creadaEn:"08/04/2026", vence:"22/04/2026", tipo:"contacto" },
+];
+
+// Widget compacto para dashboards
+function TareasWidget({ onNav }) {
+  const [tareas, setTareas] = useState([]);
+  const [cargando, setCargando] = useState(true);
+
+  useEffect(() => {
+    fbLeer("tareas").then(data => {
+      const todas = data.length > 0
+        ? data.filter(t => t.estado === "pendiente")
+        : TAREAS_SEED.filter(t => t.estado === "pendiente");
+      // Ordenar: urgente primero
+      todas.sort((a,b) => {
+        const ord = { urgente:0, alta:1, normal:2 };
+        return (ord[a.prioridad]||2) - (ord[b.prioridad]||2);
+      });
+      setTareas(todas);
+      // Sembrar en Firebase si vacío
+      if (data.length === 0) {
+        TAREAS_SEED.forEach(t => fbEscribir("tareas", t.id, t));
+      }
+    }).catch(() => setTareas(TAREAS_SEED.filter(t=>t.estado==="pendiente")))
+    .finally(() => setCargando(false));
+  }, []);
+
+  if (cargando || tareas.length === 0) return null;
+
+  const urgentes = tareas.filter(t => t.prioridad === "urgente").length;
+
+  return (
+    <div style={{marginBottom:22}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <p style={{margin:0,fontSize:10,fontWeight:700,color:"#64748B",textTransform:"uppercase",letterSpacing:".12em"}}>
+          Acciones pendientes
+        </p>
+        <span style={{fontSize:11,fontWeight:700,color:"#EF4444",background:"#FEF2F2",borderRadius:99,padding:"2px 8px"}}>
+          {urgentes > 0 ? `${urgentes} urgente${urgentes>1?"s":""}` : `${tareas.length} pendientes`}
+        </span>
+      </div>
+      <div style={{background:"#fff",borderRadius:16,overflow:"hidden",border:"1px solid #E2E8F0",
+        boxShadow:"0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06)"}}>
+        {tareas.slice(0,4).map((t,i) => {
+          const cfg = PRIORIDAD_CFG[t.prioridad] || PRIORIDAD_CFG.normal;
+          return (
+            <div key={t.id} onClick={()=>onNav("tareas")}
+              style={{display:"flex",alignItems:"center",gap:12,padding:"12px 16px",
+                borderBottom:i<Math.min(tareas.length,4)-1?"1px solid #F1F5F9":"none",
+                cursor:"pointer"}}>
+              <span style={{fontSize:14,flexShrink:0}}>{cfg.icon}</span>
+              <div style={{flex:1,minWidth:0}}>
+                <p style={{margin:0,fontSize:13,fontWeight:600,color:"#0F172A",
+                  overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.titulo}</p>
+                <p style={{margin:"1px 0 0",fontSize:11,color:"#94A3B8",
+                  overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.cliente}</p>
+              </div>
+              {t.vence && (
+                <span style={{fontSize:10,fontWeight:700,color:cfg.color,background:cfg.bg,
+                  borderRadius:6,padding:"2px 7px",flexShrink:0,whiteSpace:"nowrap"}}>
+                  {t.vence}
+                </span>
+              )}
+            </div>
+          );
+        })}
+        {tareas.length > 4 && (
+          <div onClick={()=>onNav("tareas")} style={{padding:"10px 16px",textAlign:"center",
+            fontSize:12,color:"#3B82F6",fontWeight:600,cursor:"pointer",background:"#F8FAFC"}}>
+            Ver todas ({tareas.length}) →
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Sección completa de gestión de tareas
+function GestorTareas({ usuario }) {
+  const [tareas, setTareas] = useState([]);
+  const [filtro, setFiltro] = useState("pendiente");
+  const [showForm, setShowForm] = useState(false);
+  const [editTarea, setEditTarea] = useState(null);
+  const [form, setForm] = useState({ titulo:"", descripcion:"", cliente:"", prioridad:"normal", vence:"", tipo:"contacto" });
+
+  const cargar = () => {
+    fbLeer("tareas").then(data => {
+      if (data.length > 0) setTareas(data);
+      else {
+        setTareas(TAREAS_SEED);
+        TAREAS_SEED.forEach(t => fbEscribir("tareas", t.id, t));
+      }
+    }).catch(() => setTareas(TAREAS_SEED));
+  };
+
+  useEffect(() => { cargar(); }, []);
+
+  const upd = (k,v) => setForm(f => ({...f,[k]:v}));
+
+  const guardar = () => {
+    if (!form.titulo.trim()) return;
+    const hoy = new Date().toLocaleDateString("es-ES");
+    const t = editTarea
+      ? {...editTarea,...form}
+      : { id:`tsk${Date.now()}`, ...form, estado:"pendiente", agente:usuario.id, creadaEn:hoy };
+    fbEscribir("tareas", t.id, t).then(() => {
+      setTareas(prev => editTarea ? prev.map(x=>x.id===t.id?t:x) : [t,...prev]);
+      setShowForm(false); setEditTarea(null);
+      setForm({titulo:"",descripcion:"",cliente:"",prioridad:"normal",vence:"",tipo:"contacto"});
+    });
+  };
+
+  const marcarHecha = (tarea) => {
+    const upd = {...tarea, estado:"hecha", hechaEn:new Date().toLocaleDateString("es-ES")};
+    fbEscribir("tareas", tarea.id, upd).then(() =>
+      setTareas(prev => prev.map(t => t.id===tarea.id ? upd : t))
+    );
+  };
+
+  const eliminar = (id) => {
+    fbEscribir("tareas", id, {id, eliminada:true}).then(() =>
+      setTareas(prev => prev.filter(t => t.id !== id))
+    );
+  };
+
+  const abrirEditar = (t) => {
+    setEditTarea(t);
+    setForm({titulo:t.titulo,descripcion:t.descripcion||"",cliente:t.cliente||"",
+      prioridad:t.prioridad||"normal",vence:t.vence||"",tipo:t.tipo||"contacto"});
+    setShowForm(true);
+  };
+
+  const filtradas = tareas
+    .filter(t => !t.eliminada)
+    .filter(t => filtro === "todas" ? true : t.estado === filtro)
+    .sort((a,b) => { const o={urgente:0,alta:1,normal:2}; return (o[a.prioridad]||2)-(o[b.prioridad]||2); });
+
+  const pendCount = tareas.filter(t=>!t.eliminada&&t.estado==="pendiente").length;
+  const urgCount  = tareas.filter(t=>!t.eliminada&&t.estado==="pendiente"&&t.prioridad==="urgente").length;
+
+  const inp = {width:"100%",border:`1.5px solid ${T.border}`,borderRadius:9,padding:"10px 12px",
+    fontSize:13,outline:"none",boxSizing:"border-box",fontFamily:"inherit"};
+
+  return (
+    <div style={{padding:"16px",paddingBottom:100}}>
+
+      {/* Header stats */}
+      <div style={{display:"flex",gap:8,marginBottom:16}}>
+        {[
+          {n:pendCount,l:"Pendientes",c:T.amber},
+          {n:urgCount,l:"Urgentes",c:T.red},
+          {n:tareas.filter(t=>!t.eliminada&&t.estado==="hecha").length,l:"Hechas",c:T.green},
+        ].map(s=>(
+          <div key={s.l} style={{flex:1,background:"#fff",border:`1px solid ${T.border}`,borderRadius:12,padding:"12px 10px",textAlign:"center"}}>
+            <p style={{margin:"0 0 2px",fontSize:22,fontWeight:800,color:s.c}}>{s.n}</p>
+            <p style={{margin:0,fontSize:10,color:T.muted}}>{s.l}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Filtros + botón nueva */}
+      <div style={{display:"flex",gap:8,marginBottom:14,alignItems:"center"}}>
+        <div style={{display:"flex",gap:4,flex:1}}>
+          {[["pendiente","Pendientes"],["hecha","Hechas"],["todas","Todas"]].map(([k,l])=>(
+            <button key={k} onClick={()=>setFiltro(k)}
+              style={{flex:1,padding:"7px 8px",borderRadius:8,border:`1.5px solid ${filtro===k?T.navy:T.border}`,
+                background:filtro===k?T.navy:"#fff",color:filtro===k?"#fff":T.muted,
+                fontSize:11,fontWeight:filtro===k?700:400,cursor:"pointer"}}>{l}</button>
+          ))}
+        </div>
+        <button onClick={()=>{setEditTarea(null);setForm({titulo:"",descripcion:"",cliente:"",prioridad:"normal",vence:"",tipo:"contacto"});setShowForm(true);}}
+          style={{background:T.navy,color:"#fff",border:"none",borderRadius:9,
+            padding:"8px 14px",fontSize:13,fontWeight:700,cursor:"pointer",flexShrink:0}}>
+          + Nueva
+        </button>
+      </div>
+
+      {/* Formulario nueva / editar */}
+      {showForm && (
+        <div style={{background:"#fff",border:`1.5px solid ${T.border}`,borderRadius:14,padding:16,marginBottom:14}}>
+          <p style={{margin:"0 0 12px",fontSize:14,fontWeight:700,color:T.text}}>
+            {editTarea ? "Editar tarea" : "Nueva tarea"}
+          </p>
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            <input style={inp} placeholder="Título de la acción *" value={form.titulo} onChange={e=>upd("titulo",e.target.value)}/>
+            <input style={inp} placeholder="Cliente" value={form.cliente} onChange={e=>upd("cliente",e.target.value)}/>
+            <textarea style={{...inp,minHeight:60,resize:"vertical"}} placeholder="Descripción / notas" value={form.descripcion} onChange={e=>upd("descripcion",e.target.value)}/>
+            <div style={{display:"flex",gap:8}}>
+              <select style={{...inp,flex:1}} value={form.prioridad} onChange={e=>upd("prioridad",e.target.value)}>
+                <option value="urgente">🔴 Urgente</option>
+                <option value="alta">🟡 Alta</option>
+                <option value="normal">🔵 Normal</option>
+              </select>
+              <select style={{...inp,flex:1}} value={form.tipo} onChange={e=>upd("tipo",e.target.value)}>
+                <option value="muestra">📦 Muestra</option>
+                <option value="precio">💶 Precio</option>
+                <option value="contacto">📞 Contacto</option>
+                <option value="coordinacion">🔄 Coordinación</option>
+                <option value="otro">📌 Otro</option>
+              </select>
+            </div>
+            <input style={inp} placeholder="Fecha límite (dd/mm/aaaa)" value={form.vence} onChange={e=>upd("vence",e.target.value)}/>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={guardar} style={{flex:1,background:T.navy,color:"#fff",border:"none",borderRadius:9,padding:"11px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                {editTarea?"Guardar cambios":"Crear tarea"}
+              </button>
+              <button onClick={()=>{setShowForm(false);setEditTarea(null);}} style={{padding:"11px 16px",border:`1px solid ${T.border}`,borderRadius:9,background:"#fff",fontSize:13,cursor:"pointer"}}>
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Lista de tareas */}
+      {filtradas.length === 0 ? (
+        <div style={{textAlign:"center",padding:"40px 0",color:T.muted}}>
+          <p style={{fontSize:32,margin:"0 0 8px"}}>✅</p>
+          <p style={{fontSize:14}}>No hay tareas {filtro === "pendiente" ? "pendientes" : ""}</p>
+        </div>
+      ) : (
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {filtradas.map(t => {
+            const cfg = PRIORIDAD_CFG[t.prioridad] || PRIORIDAD_CFG.normal;
+            const TIPO_ICON = {muestra:"📦",precio:"💶",contacto:"📞",coordinacion:"🔄",otro:"📌"};
+            return (
+              <div key={t.id} style={{background:"#fff",border:`1px solid ${T.border}`,
+                borderLeft:`4px solid ${cfg.color}`,borderRadius:12,padding:"14px 14px 14px 16px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:4,flexWrap:"wrap"}}>
+                      <span style={{fontSize:14}}>{TIPO_ICON[t.tipo]||"📌"}</span>
+                      <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{t.titulo}</p>
+                      <span style={{fontSize:10,fontWeight:700,color:cfg.color,background:cfg.bg,
+                        borderRadius:5,padding:"1px 7px"}}>{cfg.label}</span>
+                    </div>
+                    {t.cliente && <p style={{margin:"0 0 4px",fontSize:12,color:T.muted}}>🏢 {t.cliente}</p>}
+                    {t.descripcion && <p style={{margin:"0 0 6px",fontSize:12,color:"#475569",lineHeight:1.5}}>{t.descripcion}</p>}
+                    <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+                      {t.vence&&<span style={{fontSize:11,color:cfg.color,fontWeight:600}}>📅 Vence: {t.vence}</span>}
+                      {t.creadaEn&&<span style={{fontSize:11,color:T.muted}}>Creada: {t.creadaEn}</span>}
+                      {t.hechaEn&&<span style={{fontSize:11,color:T.green,fontWeight:600}}>✅ Hecha: {t.hechaEn}</span>}
+                    </div>
+                  </div>
+                </div>
+                {t.estado === "pendiente" && (
+                  <div style={{display:"flex",gap:6,marginTop:10}}>
+                    <button onClick={()=>marcarHecha(t)}
+                      style={{flex:1,padding:"7px",border:`1px solid ${T.green}`,borderRadius:8,
+                        background:"#F0FDF4",color:T.greenD,fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                      ✅ Marcar hecha
+                    </button>
+                    <button onClick={()=>abrirEditar(t)}
+                      style={{padding:"7px 12px",border:`1px solid ${T.border}`,borderRadius:8,
+                        background:"#fff",fontSize:12,cursor:"pointer"}}>
+                      ✏️ Editar
+                    </button>
+                    <button onClick={()=>eliminar(t.id)}
+                      style={{padding:"7px 10px",border:`1px solid #FECACA`,borderRadius:8,
+                        background:"#FEF2F2",color:T.red,fontSize:12,cursor:"pointer"}}>
+                      🗑️
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── DASHBOARD DIRECTOR/CEO ───────────────────────────────────────
 function DashDirector({usuario, onNav}){
   const EQUIPO_DATA=[
@@ -3388,6 +3773,11 @@ function DashDirector({usuario, onNav}){
           <div style={{height:"100%",width:`${Math.min(pct,100)}%`,background:pct>=100?T.green:T.amber,borderRadius:99}}/>
         </div>
       </Card>
+
+      {/* Acciones urgentes */}
+      <div style={{marginBottom:4}}>
+        <TareasWidget onNav={onNav}/>
+      </div>
 
       {/* KPI pipeline + proyectos */}
       <div style={{display:"flex",gap:10,marginBottom:20}}>
@@ -3665,7 +4055,6 @@ function CardScanner({onDatos, onClose}){
 
 
 // ─── OPORTUNIDADES ────────────────────────────────────────────────
-
 const AGENTES=USUARIOS.filter(v=>v.rol==="agente"||v.rol==="jefe");
 const Avt=({nombre="",color=T.navy,size=32})=>(
   <div style={{width:size,height:size,borderRadius:"50%",background:color+"22",border:`2px solid ${color}44`,
@@ -4282,11 +4671,7 @@ function Wizard({usuario,opoEditar,onSave,onClose,datosEscaneados}){
   const esAgente=usuario?.rol==="agente";
   // Si vienen datos de tarjeta, arranca en paso 2 directamente
   const [paso,setPaso]=useState(datosEscaneados&&!opoEditar?2:1);
-  // Para agentes dinámicos (no en USUARIOS), usar catalogoVendedor como agenteId
-  // Así la oportunidad queda asignada con un ID estable y reconocible
-  const defaultAgenteId=esAgente
-    ?(usuario.catalogoVendedor||usuario.id||"")
-    :"";
+  const defaultAgenteId=esAgente?usuario.id:""; // agente siempre se auto-asigna
   const [form,setForm]=useState(opoEditar?{
     tipo:      opoEditar.tipo||"",
     tipologia: opoEditar.tipologia||"",
@@ -4325,7 +4710,7 @@ function Wizard({usuario,opoEditar,onSave,onClose,datosEscaneados}){
       ...form,
       estado:form.agenteId?"asignada":"sin_asignar",
       creadaPorNombre:nombreCreador,
-      creadaPorId: usuario?.catalogoVendedor||usuario?.id||"",
+      creadaPorId:usuario?.id||"",
       creadaEn:new Date().toLocaleDateString("es-ES"),
       semana:semanaActual,
       esOportunidad:true,
@@ -4740,42 +5125,25 @@ function GestorOportunidades({usuario}){
   const miEquipoOpo=usuario?.equipo;
 
   // Pre-filtro por rol — agente SOLO ve las suyas
-  // Compara contra: id del CRM, catalogoVendedor (cartera), y campo agente/agenteId
-  const oposMiRol=useMemo(()=>{
-    const uid=(usuario.id||"").toLowerCase();
-    const catV=(usuario.catalogoVendedor||"").toLowerCase(); // ej: "carlosg", "rpiedra"
-    // Todos los identificadores posibles del agente (sin vacíos)
-    const misIds=[uid,catV].filter(Boolean);
-
-    function esDelAgente(o){
-      const oId=(o.agenteId||o.agente||"").toLowerCase();
-      const creadoPor=(o.creadaPorId||"").toLowerCase();
-      return misIds.some(myId=>oId===myId||creadoPor===myId);
+  const oposMiRol=useMemo(()=>opos.filter(o=>{
+    if(esRolAgente) return o.agenteId===usuario.id||o.agente===usuario.id;
+    if(esRolJefe){
+      const ag=USUARIOS.find(u=>u.id===(o.agenteId||o.agente));
+      return ag?.equipo===miEquipoOpo||o.equipoId===miEquipoOpo;
     }
+    return true; // director/ceo ve todas
+  }),[opos,usuario.id,esRolAgente,esRolJefe,miEquipoOpo]);
 
-    return opos.filter(o=>{
-      if(esRolAgente) return esDelAgente(o);
-      if(esRolJefe){
-        const agId=(o.agenteId||o.agente||"").toLowerCase();
-        const ag=USUARIOS.find(u=>u.id.toLowerCase()===agId);
-        // También buscar por catalogoVendedor si el agente es dinámico
-        const agDin=ag||USUARIOS.find(u=>(u.catalogoVendedor||"").toLowerCase()===agId);
-        return agDin?.equipo===miEquipoOpo||o.equipoId===miEquipoOpo||o.equipo===miEquipoOpo;
-      }
-      return true; // director/ceo ve todas
-    });
-  },[opos,usuario.id,usuario.catalogoVendedor,esRolAgente,esRolJefe,miEquipoOpo]);
-
-  const activas=oposMiRol.filter(o=>!["ganada","perdida","cerrada_ganada","cerrada_perdida"].includes(o.estado));
+  const activas=oposMiRol.filter(o=>!["ganada","perdida"].includes(o.estado));
   const sinAsignar=oposMiRol.filter(o=>!o.agenteId&&!["ganada","perdida"].includes(o.estado));
   const ganadas=oposMiRol.filter(o=>o.estado==="ganada");
 
   const filtradas=useMemo(()=>oposMiRol.filter(o=>{
-    if(filtroEst==="activas"&&["ganada","perdida","cerrada_ganada","cerrada_perdida"].includes(o.estado)) return false;
+    if(filtroEst==="activas"&&(o.esOportunidad===false||["ganada","perdida"].includes(o.estado))) return false;
     if(filtroEst==="sin_asignar"&&(o.agenteId||o.esOportunidad===false)) return false;
     if(filtroEst==="ganadas"&&o.estado!=="ganada") return false;
     if(filtroEst==="perdidas"&&o.estado!=="perdida") return false;
-    if(filtroAg!=="todos"&&(o.agenteId||"").toLowerCase()!==filtroAg.toLowerCase()) return false;
+    if(filtroAg!=="todos"&&o.agenteId!==filtroAg) return false;
     if(q&&!o.nombre.toLowerCase().includes(q.toLowerCase())) return false;
     return true;
   }),[opos,filtroEst,filtroAg,q]);
@@ -5174,19 +5542,6 @@ function HistorialClientes({usuario, actividad}){
   const [q,setQ]=useState("");
   const [sel,setSel]=useState(null);
   const [tabSel,setTabSel]=useState("historial");
-  const [solicitudes,setSolicitudes]=useState([]);
-  const [reasigCliente,setReasigCliente]=useState(null); // solicitud en proceso de reasignar
-  const [nuevoAgente,setNuevoAgente]=useState("");
-
-  // Cargar solicitudes de reasignación al montar
-  useEffect(()=>{
-    fbLeer("solicitudes_reasignacion").then(docs=>{
-      const pendientes=docs.filter(d=>
-        d.estado==="pendiente"&&(esDir||d.equipo===miEquipo)
-      );
-      setSolicitudes(pendientes);
-    }).catch(()=>{});
-  },[]);
 
   const RESULTADOS_V=[
     {k:"pedido",           label:"✅ Pedido",         color:T.green},
@@ -5353,102 +5708,6 @@ function HistorialClientes({usuario, actividad}){
         📋 Clientes {esDir?"de todos los equipos":`del equipo ${miEquipo}`}
       </p>
 
-      {/* ── SOLICITUDES DE REASIGNACIÓN PENDIENTES ── */}
-      {solicitudes.length>0&&(
-        <div style={{marginBottom:20}}>
-          <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.amber,
-            textTransform:"uppercase",letterSpacing:".06em"}}>
-            🔔 Solicitudes de reasignación ({solicitudes.length})
-          </p>
-          {solicitudes.map(s=>(
-            <div key={s.id} style={{background:"#FFF7ED",borderRadius:14,padding:"14px 16px",
-              marginBottom:8,border:`1.5px solid #FED7AA`}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
-                <div>
-                  <p style={{margin:"0 0 2px",fontSize:14,fontWeight:800,color:T.text}}>{s.clienteNombre}</p>
-                  <p style={{margin:0,fontSize:12,color:"#92400E"}}>
-                    Solicitado por <strong>{s.agenteNombre}</strong> · {s.fecha}
-                  </p>
-                </div>
-              </div>
-              <p style={{margin:"0 0 10px",fontSize:12,color:T.text,
-                background:"rgba(0,0,0,.04)",borderRadius:8,padding:"8px 10px",
-                fontStyle:"italic"}}>
-                "{s.motivo}"
-              </p>
-              {/* Panel de reasignación */}
-              {reasigCliente===s.id?(
-                <div>
-                  <p style={{margin:"0 0 6px",fontSize:12,fontWeight:700,color:T.text}}>
-                    ¿A qué comercial reasignar?
-                  </p>
-                  <select value={nuevoAgente} onChange={e=>setNuevoAgente(e.target.value)}
-                    style={{width:"100%",padding:"9px 12px",borderRadius:9,border:`1.5px solid ${T.border}`,
-                      fontSize:13,outline:"none",marginBottom:10,background:"#fff",fontFamily:"inherit"}}>
-                    <option value="">— Seleccionar comercial —</option>
-                    {agentes.filter(a=>a.id!==s.agenteId&&`${a.catalogoVendedor||""}`.toLowerCase()!==s.agenteId?.toLowerCase()).map(a=>(
-                      <option key={a.id} value={a.id}>{a.nombre}</option>
-                    ))}
-                  </select>
-                  <div style={{display:"flex",gap:8}}>
-                    <button onClick={()=>{setReasigCliente(null);setNuevoAgente("");}}
-                      style={{flex:1,padding:"10px",borderRadius:9,border:`1px solid ${T.border}`,
-                        background:"#fff",color:T.muted,fontWeight:600,fontSize:12,cursor:"pointer",
-                        fontFamily:"inherit"}}>
-                      Cancelar
-                    </button>
-                    <button onClick={()=>{
-                        if(!nuevoAgente) return;
-                        const ag=agentes.find(a=>a.id===nuevoAgente);
-                        // Actualizar solicitud como resuelta
-                        const updated={...s,estado:"aprobada",reasignadoA:nuevoAgente,
-                          reasignadoANombre:ag?.nombre||nuevoAgente,
-                          fechaResolucion:new Date().toLocaleDateString("es-ES")};
-                        fbEscribir("solicitudes_reasignacion",s.id,updated);
-                        // Actualizar cliente en Firebase con nuevo agente
-                        fbEscribir("clientes",s.clienteId,{
-                          agenteId:nuevoAgente,
-                          grupoAgente:ag?.catalogoVendedor||nuevoAgente,
-                          agente:nuevoAgente
-                        });
-                        setSolicitudes(prev=>prev.filter(x=>x.id!==s.id));
-                        setReasigCliente(null);setNuevoAgente("");
-                        alert(`✅ Cliente reasignado a ${ag?.nombre||nuevoAgente}`);
-                      }}
-                      disabled={!nuevoAgente}
-                      style={{flex:2,padding:"10px",borderRadius:9,border:"none",
-                        background:nuevoAgente?T.green:"#CBD5E1",color:"#fff",
-                        fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>
-                      ✅ Confirmar reasignación
-                    </button>
-                  </div>
-                </div>
-              ):(
-                <div style={{display:"flex",gap:8}}>
-                  <button onClick={()=>{
-                      // Rechazar solicitud
-                      fbEscribir("solicitudes_reasignacion",s.id,{...s,estado:"rechazada",
-                        fechaResolucion:new Date().toLocaleDateString("es-ES")});
-                      setSolicitudes(prev=>prev.filter(x=>x.id!==s.id));
-                    }}
-                    style={{flex:1,padding:"9px",borderRadius:9,border:`1px solid ${T.red}`,
-                      background:"#fff",color:T.red,fontWeight:600,fontSize:12,cursor:"pointer",
-                      fontFamily:"inherit"}}>
-                    ❌ Rechazar
-                  </button>
-                  <button onClick={()=>setReasigCliente(s.id)}
-                    style={{flex:2,padding:"9px",borderRadius:9,border:"none",
-                      background:T.amber,color:"#fff",fontWeight:700,fontSize:12,cursor:"pointer",
-                      fontFamily:"inherit"}}>
-                    🔄 Reasignar cliente
-                  </button>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
       {/* Filtros */}
       <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap"}}>
         <div style={{flex:1,position:"relative",minWidth:180}}>
@@ -5517,10 +5776,7 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
   const [asignandoRuta,setAsignandoRuta]=useState(null); // id cliente al que se asigna ruta
   const [nuevaRuta,setNuevaRuta]=useState("");
   const [clientesLocal,setClientesLocal]=useState(null); // override local para rutas asignadas
-  const [showReasigForm,setShowReasigForm]=useState(false);
-  const [motivoReasig,setMotivoReasig]=useState("");
   const semanaActual=14;
-  const semana=semanaActual; // alias — los callbacks usan "semana"
 
   // clientes efectivos (pueden tener rutas asignadas localmente)
   const clientesEfectivos=clientesLocal||clientes;
@@ -5633,65 +5889,6 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
             )}
           </div>
         </div>
-
-        {/* ── Solicitud de reasignación (solo agente) ── */}
-        {showReasigForm?(
-          <div style={{background:"#FFF7ED",borderBottom:`1px solid #FED7AA`,padding:"14px 16px"}}>
-            <p style={{margin:"0 0 6px",fontSize:13,fontWeight:700,color:"#92400E"}}>
-              🔄 Solicitar reasignación de {clienteSel.nombre}
-            </p>
-            <p style={{margin:"0 0 8px",fontSize:12,color:"#B45309"}}>
-              Tu responsable recibirá la solicitud y podrá reasignar el cliente a otro comercial.
-            </p>
-            <textarea value={motivoReasig} onChange={e=>setMotivoReasig(e.target.value)}
-              placeholder="Motivo: zona lejana, sin actividad, traspaso de área…"
-              rows={3} style={{width:"100%",border:"1.5px solid #FED7AA",borderRadius:10,
-                padding:"10px 12px",fontSize:13,resize:"none",fontFamily:"inherit",
-                outline:"none",boxSizing:"border-box",marginBottom:10}}/>
-            <div style={{display:"flex",gap:8}}>
-              <button onClick={()=>{setShowReasigForm(false);setMotivoReasig("");}}
-                style={{flex:1,padding:"11px",borderRadius:9,border:"1.5px solid #FED7AA",
-                  background:"#fff",color:"#92400E",fontWeight:600,fontSize:13,cursor:"pointer",
-                  fontFamily:"inherit"}}>
-                Cancelar
-              </button>
-              <button onClick={()=>{
-                  if(!motivoReasig.trim()) return;
-                  const solicitud={
-                    id:`reasig_${usuario.id}_${clienteSel.id}_${Date.now()}`,
-                    clienteId:clienteSel.id, clienteNombre:clienteSel.nombre,
-                    agenteId:usuario.catalogoVendedor||usuario.id,
-                    agenteNombre:usuario.nombre,
-                    equipo:usuario.equipo||"",
-                    motivo:motivoReasig.trim(),
-                    estado:"pendiente",
-                    fecha:new Date().toLocaleDateString("es-ES"),
-                  };
-                  fbEscribir("solicitudes_reasignacion",solicitud.id,solicitud)
-                    .then(()=>alert("✅ Solicitud enviada a tu responsable."))
-                    .catch(()=>alert("✅ Solicitud registrada."));
-                  setShowReasigForm(false);
-                  setMotivoReasig("");
-                }}
-                disabled={!motivoReasig.trim()}
-                style={{flex:2,padding:"11px",borderRadius:9,border:"none",
-                  background:motivoReasig.trim()?"#F59E0B":"#CBD5E1",
-                  color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>
-                📤 Enviar solicitud
-              </button>
-            </div>
-          </div>
-        ):(
-          <div style={{padding:"6px 16px",background:"#fff",borderBottom:`1px solid ${T.border}`,
-            display:"flex",justifyContent:"flex-end"}}>
-            <button onClick={()=>setShowReasigForm(true)}
-              style={{background:"none",border:`1px solid ${T.border}`,borderRadius:8,
-                padding:"5px 13px",fontSize:11,color:T.muted,cursor:"pointer",
-                fontFamily:"inherit"}}>
-              🔄 Solicitar reasignación
-            </button>
-          </div>
-        )}
 
         {/* Tabs */}
         <div style={{display:"flex",background:"#fff",borderBottom:`1px solid ${T.border}`,
@@ -5973,104 +6170,27 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
               {k:"primera_visita",label:"🆕 Primera",color:"#8B5CF6"},
             ];
             const rOp=ult?RESS.find(function(r){return r.k===ult.resultado;}):null;
-
-            // Acciones rápidas: registrar visita sin entrar en ficha
-            const QUICK=[
-              {k:"pedido",      icon:"✅", label:"Pedido",    color:"#22C55E", bg:"#F0FDF4"},
-              {k:"llamada",     icon:"📞", label:"Llamada",   color:"#3B82F6", bg:"#EFF6FF"},
-              {k:"no_contesta", icon:"📵", label:"N/C",       color:"#94A3B8", bg:"#F8FAFC"},
-            ];
-
             return(
-              <div key={cid} style={{background:"#fff",borderRadius:14,marginBottom:8,
-                border:"1px solid #E2E8F0",
-                borderLeft:"4px solid "+(rOp?rOp.color:"#E2E8F0"),
-                overflow:"hidden"}}>
-                {/* Fila principal — tap para entrar en ficha */}
-                <div onClick={function(){setClienteSel(c);setTabSel("visita");}}
-                  style={{display:"flex",alignItems:"center",gap:12,padding:"13px 14px",cursor:"pointer"}}>
-                  <div style={{width:40,height:40,borderRadius:10,flexShrink:0,
-                    background:"linear-gradient(135deg,#0F172A,#334155)",
-                    color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",
-                    fontSize:15,fontWeight:800}}>
-                    {nom.charAt(0)}
-                  </div>
-                  <div style={{flex:1,minWidth:0}}>
-                    <p style={{margin:0,fontSize:14,fontWeight:700,color:"#0F172A",
-                      overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{nom}</p>
-                    <div style={{display:"flex",gap:8,marginTop:2,flexWrap:"wrap",alignItems:"center"}}>
-                      {cod&&<span style={{fontSize:11,color:"#94A3B8",fontFamily:"monospace"}}>{cod}</span>}
-                      {rOp?<span style={{fontSize:11,fontWeight:600,color:rOp.color}}>{rOp.label}</span>
-                        :<span style={{fontSize:11,color:"#CBD5E1"}}>Sin actividad</span>}
-                    </div>
-                  </div>
-                  <span style={{color:"#94A3B8",fontSize:18,flexShrink:0}}>›</span>
+              <div key={cid} onClick={function(){setClienteSel(c);setTabSel("visita");}}
+                style={{background:"#fff",borderRadius:12,padding:"14px 16px",marginBottom:8,
+                  cursor:"pointer",display:"flex",alignItems:"center",gap:12,
+                  border:"1px solid #E2E8F0",
+                  borderLeft:"4px solid "+(rOp?rOp.color:"#E2E8F0")}}>
+                <div style={{width:40,height:40,borderRadius:10,flexShrink:0,
+                  background:"linear-gradient(135deg,#0F172A,#334155)",
+                  color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",
+                  fontSize:15,fontWeight:800}}>
+                  {nom.charAt(0)}
                 </div>
-                {/* Barra de acciones rápidas */}
-                <div style={{display:"flex",borderTop:"1px solid #F1F5F9"}}>
-                  {QUICK.map(function(q,qi){
-                    const yaEste=ult&&ult.resultado===q.k;
-                    return(
-                      <button key={q.k}
-                        onClick={function(e){
-                          e.stopPropagation();
-                          if(yaEste) return;
-                          const entrada={
-                            resultado:q.k,nota:"",
-                            fecha:new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"})
-                          };
-                          onActividad(cid,{...act,visitas:[...(act.visitas||[]),entrada]});
-                          fbEscribir("visitas",`${usuario.id}_${cid}_sem${semana}_${Date.now()}`,{
-                            ...entrada,clienteId:cid,clienteNombre:nom,agente:usuario.id,semana
-                          });
-                        }}
-                        style={{flex:1,padding:"9px 4px",border:"none",
-                          borderRight:"1px solid #F1F5F9",
-                          background:yaEste?q.bg:"#fff",cursor:yaEste?"default":"pointer",
-                          fontFamily:"inherit",display:"flex",flexDirection:"column",
-                          alignItems:"center",gap:2,transition:"background .15s",
-                          opacity:yaEste?1:0.75}}>
-                        <span style={{fontSize:16}}>{q.icon}</span>
-                        <span style={{fontSize:10,fontWeight:yaEste?800:500,
-                          color:yaEste?q.color:"#94A3B8"}}>{q.label}</span>
-                      </button>
-                    );
-                  })}
-                  {/* Reasignación */}
-                  <button onClick={function(e){
-                      e.stopPropagation();
-                      const motivo=window.prompt(`Solicitar reasignación de "${nom}"\n\nMotivo (obligatorio):`);
-                      if(!motivo||!motivo.trim()) return;
-                      const solicitud={
-                        id:`reasig_${usuario.id}_${cid}_${Date.now()}`,
-                        clienteId:cid, clienteNombre:nom,
-                        agenteId:usuario.catalogoVendedor||usuario.id,
-                        agenteNombre:usuario.nombre,
-                        equipo:usuario.equipo||"",
-                        motivo:motivo.trim(),
-                        estado:"pendiente",
-                        fecha:new Date().toLocaleDateString("es-ES"),
-                      };
-                      fbEscribir("solicitudes_reasignacion",solicitud.id,solicitud)
-                        .then(()=>alert(`✅ Solicitud enviada a tu responsable`))
-                        .catch(()=>alert(`✅ Solicitud registrada`));
-                    }}
-                    style={{flex:1,padding:"9px 4px",border:"none",
-                      borderRight:"1px solid #F1F5F9",
-                      background:"#fff",cursor:"pointer",fontFamily:"inherit",
-                      display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
-                    <span style={{fontSize:16}}>🔄</span>
-                    <span style={{fontSize:10,color:"#94A3B8"}}>Reasignar</span>
-                  </button>
-                  {/* Ficha completa */}
-                  <button onClick={function(){setClienteSel(c);setTabSel("visita");}}
-                    style={{flex:1,padding:"9px 4px",border:"none",
-                      background:"#fff",cursor:"pointer",fontFamily:"inherit",
-                      display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
-                    <span style={{fontSize:16}}>📋</span>
-                    <span style={{fontSize:10,color:"#94A3B8"}}>Ficha</span>
-                  </button>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{margin:0,fontSize:14,fontWeight:700,color:"#0F172A",
+                    overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{nom}</p>
+                  <div style={{display:"flex",gap:8,marginTop:2,flexWrap:"wrap"}}>
+                    {cod&&<span style={{fontSize:11,color:"#94A3B8",fontFamily:"monospace"}}>{cod}</span>}
+                    {rOp&&<span style={{fontSize:11,fontWeight:600,color:rOp.color}}>{rOp.label}</span>}
+                  </div>
                 </div>
+                <span style={{color:"#94A3B8",fontSize:18}}>›</span>
               </div>
             );
           })}
@@ -6109,6 +6229,11 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB}){
       </div>
 
       <div style={{padding:"16px"}}>
+        {/* DEBUG — eliminar cuando funcione */}
+        <div style={{background:"#EFF6FF",border:"1px solid #93C5FD",borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:11}}>
+          <span style={{fontWeight:700,color:"#1D4ED8"}}>🔍 Debug: </span>
+          <span style={{color:"#1E40AF"}}>{clientesEfectivos.length} clientes cargados · {rutasNums.length} rutas · {sinRuta.length} sin ruta</span>
+        </div>
         <p style={{margin:"0 0 12px",fontSize:11,fontWeight:700,color:T.muted,
           textTransform:"uppercase",letterSpacing:".08em"}}>
           {rutasNums.length>0?"Selecciona una ruta":`${clientesEfectivos.length} clientes`}
@@ -6901,30 +7026,7 @@ function HistorialTab({visitas,muestras,estrategia,incidencias=[],resultados}){
 }
 
 
-// ─── INFORME ACTIVIDAD — cargado como módulo separado ─────────────
-// El componente InformeActividad vive en actividad_crm.html (archivo separado)
-// Se comunica con el CRM padre vía postMessage
-function InformeActividad({usuario,oportunidadesDB}){
-  const iRef=useRef(null);
-  useEffect(()=>{
-    if(!iRef.current) return;
-    const send=()=>{
-      try{iRef.current.contentWindow.postMessage({type:"PORTAL_USER",user:usuario},"*");}catch(e){}
-    };
-    iRef.current.onload=send;
-    // Si ya cargó
-    setTimeout(send,500);
-  },[usuario?.id]);
-  return(
-    <iframe
-      ref={iRef}
-      src="actividad_crm.html"
-      style={{width:"100%",height:"calc(100vh - 120px)",border:"none",display:"block"}}
-      title="Actividad"
-    />
-  );
-}
-
+// ─── APP PRINCIPAL ────────────────────────────────────────────────
 function App(props){
   const [usuario,setUsuario]=useState(function(){
     // Auto-login desde portal: initializar directamente sin useEffect
@@ -7041,15 +7143,6 @@ function App(props){
     if(u.rol==="admin") setAdminOpen(true);
   };
 
-  // Registrar setter global para que postMessage pueda actualizar el estado React
-  useEffect(()=>{
-    window.__crmSetUsuario=function(u){
-      setUsuario(u);
-      setSection("dashboard");
-    };
-    return ()=>{window.__crmSetUsuario=null;};
-  },[]);
-
   if(!usuario) return <Login onLogin={handleLogin}/>;
 
   if(adminOpen) return <PanelAdmin onBack={()=>{setAdminOpen(false);setUsuario(null);}}/>;
@@ -7111,10 +7204,8 @@ function App(props){
   const estEnCurso=esAgente
     ? estrategiasDB.filter(e=>e.estado==="en_curso"&&e.agente===usuario.id).length
     : esJefe
-    ? estrategiasDB.filter(e=>e.estado==="pendiente_aprobacion"&&!e.escaladoA&&
-        (USUARIOS.find(u=>u.id===e.agente)?.equipo===miEquipo||e.equipo===miEquipo)).length
-    : estrategiasDB.filter(e=>e.estado==="pendiente_aprobacion"&&
-        (!e.escaladoA||e.escaladoA===usuario.id)).length;
+    ? estrategiasDB.filter(e=>e.estado==="pendiente_aprobacion"&&USUARIOS.find(u=>u.id===e.agente)?.equipo===miEquipo&&!e.escaladoA).length
+    : estrategiasDB.filter(e=>e.estado==="pendiente_aprobacion"&&e.escaladoA===usuario.id).length;
 
   const incAbiertas=incidenciasDB.filter(i=>
     i.estado==="abierta"&&(esAgente?i.autor===usuario.id:
@@ -7125,20 +7216,11 @@ function App(props){
   const opsAbiertas=oportunidadesDB.filter(o=>{
     const cerrada=["ganada","perdida","cerrada_ganada","cerrada_perdida"].some(e=>o.etapa===e||o.estado===e);
     if(cerrada) return false;
-    if(esAgente){
-      const oid=(o.agente||o.agenteId||"").toLowerCase();
-      const uid=usuario.id.toLowerCase();
-      const catV=(usuario.catalogoVendedor||"").toLowerCase();
-      return oid===uid||(catV&&oid===catV);
-    }
-    if(esJefe){
-      const agId=(o.agenteId||o.agente||"").toLowerCase();
-      const ag=USUARIOS.find(u=>u.id.toLowerCase()===agId)||
-               USUARIOS.find(u=>(u.catalogoVendedor||"").toLowerCase()===agId);
-      return ag?.equipo===miEquipo||o.equipo===miEquipo;
-    }
+    if(esAgente) return o.agente===usuario.id||o.agenteId===usuario.id;
+    if(esJefe){const ag=USUARIOS.find(u=>u.id===(o.agenteId||o.agente));return ag?.equipo===miEquipo;}
     return true;
   }).length;
+  const urgCount=0; // tareas urgentes (cargadas dinámicamente en TareasWidget)
 
   const NAV_AGENTE=[
     {id:"dashboard",    icon:"🏠",label:"Inicio",      color:usuario.color},
@@ -7149,7 +7231,8 @@ function App(props){
     {id:"proyectos",    icon:"📁",label:"Proyectos",   color:T.purple},
     {id:"estrategias",  icon:"🎯",label:"Estrategias", color:T.green,  badge:estEnCurso},
     {id:"incidencias",  icon:"🚨",label:"Incidencias", color:T.red,    badge:incAbiertas},
-    {id:"actividad",    icon:"📊",label:"Actividad",   color:"#6366F1"},
+    {id:"tareas",       icon:"📌",label:"Tareas",        color:T.red,    badge:urgCount},
+    {id:"ia",           icon:"🤖",label:"IA",           color:T.purple},
   ];
 
   const NAV_JEFE=[
@@ -7160,7 +7243,8 @@ function App(props){
     {id:"proyectos",    icon:"📁",label:"Proyectos",   color:T.purple},
     {id:"incidencias",  icon:"🚨",label:"Incidencias", color:T.red,    badge:incAbiertas},
     {id:"usuarios",     icon:"👥",label:"Equipo",      color:T.blue},
-    {id:"actividad",    icon:"📊",label:"Actividad",   color:"#6366F1"},
+    {id:"tareas",       icon:"📌",label:"Tareas",        color:T.red,    badge:urgCount},
+    {id:"ia",           icon:"🤖",label:"IA",           color:T.purple},
   ];
 
   const NAV_DIR=[
@@ -7171,7 +7255,8 @@ function App(props){
     {id:"proyectos",    icon:"📁",label:"Proyectos",    color:T.purple},
     {id:"incidencias",  icon:"🚨",label:"Incidencias",  color:T.red,   badge:incAbiertas},
     {id:"usuarios",     icon:"👥",label:"Equipo",       color:T.blue},
-    {id:"actividad",    icon:"📊",label:"Actividad",    color:"#6366F1"},
+    {id:"tareas",       icon:"📌",label:"Tareas",         color:T.red,    badge:urgCount},
+    {id:"ia",           icon:"🤖",label:"IA",            color:T.purple},
   ];
 
   const nav=esAgente?NAV_AGENTE:esJefe?NAV_JEFE:NAV_DIR;
@@ -7194,13 +7279,7 @@ function App(props){
       return ag&&!["ganada","perdida","cerrada_ganada","cerrada_perdida"].some(e=>o.etapa===e||o.estado===e);
     });
     const incEq=incidenciasDB.filter(i=>i.equipo===miEquipo&&i.estado==="abierta");
-    // Estrategias pendientes de aprobación del jefe:
-    // — agentes en lista fija (USUARIOS) con equipo correcto
-    // — O campo equipo del doc = miEquipo (agentes dinámicos Firebase)
-    const estEq=estrategiasDB.filter(e=>
-      e.estado==="pendiente_aprobacion"&&!e.escaladoA&&
-      (agentesEquipo.find(a=>a.id===e.agente)||e.equipo===miEquipo)
-    );
+    const estEq=estrategiasDB.filter(e=>e.estado==="en_curso"&&agentesEquipo.find(a=>a.id===e.agente));
     const mEq=muestrasDB.filter(m=>agentesEquipo.find(a=>a.id===m.agente));
     const proyEq=PROYECTOS_SEED.filter(p=>p.estado==="activo"&&agentesEquipo.find(a=>p.equipo?.includes(a.id)));
 
@@ -7253,7 +7332,7 @@ function App(props){
     };
 
     const MODS=[
-      {icon:"🎯",label:"Estrategias pendientes",sub:`${estEq.length} pendiente${estEq.length!==1?"s":""} de aprobación`,count:estEq.length,nav:"estrategias",bg:"#FFFBEB",ic:"#F59E0B"},
+      {icon:"🎯",label:"Estrategias en curso",sub:`${n} comerciales`,count:estEq.length,nav:"estrategias",bg:"#EFF6FF",ic:"#3B82F6"},
       {icon:"📁",label:"Proyectos activos",sub:proyEq.map(p=>p.nombre).join(", ")||"",count:proyEq.length,nav:"proyectos",bg:"#FFFBEB",ic:"#D97706"},
       {icon:"💼",label:"Oportunidades abiertas",sub:`${fmt(opsEq.reduce((s,o)=>s+(o.valor||0),0))}€ pipeline`,count:opsEq.length,nav:"oportunidades",bg:"#F0F9FF",ic:"#0EA5E9"},
       {icon:"🚨",label:"Incidencias abiertas",sub:"Pendientes de resolución",count:incEq.length,nav:"incidencias",bg:"#FFF1F2",ic:"#F43F5E",urgent:true},
@@ -7473,6 +7552,8 @@ function App(props){
                section==="proyectos"?"📁 Proyectos":
                section==="incidencias"?"🚨 Incidencias":
                section==="usuarios"?"👥 Equipo":
+               section==="tareas"?"📌 Tareas y acciones":
+               section==="ia"?"🤖 Asistente IA":
                section}
             </p>
           </div>
@@ -7492,11 +7573,21 @@ function App(props){
         {esDir&&section==="dashboard"&&     <DashDirector usuario={usuario} onNav={setSection}/>}
 
         {/* Compartidas — con filtrado por rol dentro de cada componente */}
-        {section==="estrategias"&&          <MisEstrategias usuario={usuario} clientesFB={misClientesFB}/>}
+        {section==="estrategias"&&          <MisEstrategias usuario={usuario}/>}
         {section==="oportunidades"&&        <GestorOportunidades usuario={usuario}/>}
         {section==="proyectos"&&            <Proyectos usuario={usuario}/>}
         {section==="incidencias"&&          <Incidencias usuario={usuario}/>}
-        {section==="actividad"&&            <InformeActividad usuario={usuario} oportunidadesDB={oportunidadesDB}/>}
+
+        {/* ASISTENTE IA — disponible para todos los roles */}
+        {section==="tareas"&& <GestorTareas usuario={usuario}/> }
+
+        {section==="ia"&&(
+          <AsistenteIA
+            usuario={usuario}
+            clientesFB={clientesDB?._todos||misClientesFB||[]}
+            oportunidadesDB={oportunidadesDB}
+          />
+        )}
 
         {/* Equipo — jefe ve solo su equipo, director/CEO ven todos */}
         {esJefeOmas&&section==="usuarios"&&(
@@ -7536,6 +7627,315 @@ function App(props){
 
 
 
+// ══════════════════════════════════════════════════════════════════
+// ASISTENTE IA — Managed Agents (managed-agents-2026-04-01)
+// ══════════════════════════════════════════════════════════════════
+function AsistenteIA({ usuario, clientesFB, oportunidadesDB }) {
+  const [apiKey, setApiKey]       = useState(() => sessionStorage.getItem("gc_anth_key") || "");
+  const [keyInput, setKeyInput]   = useState("");
+  const [messages, setMessages]   = useState([]);
+  const [input, setInput]         = useState("");
+  const [loading, setLoading]     = useState(false);
+  const [sessionId, setSessionId] = useState(null);
+  const [status, setStatus]       = useState("idle"); // idle|initing|ready|error
+  const [errorMsg, setErrorMsg]   = useState("");
+  const bottomRef = useRef(null);
+
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+
+  const ANTH = "https://api.anthropic.com/v1";
+  const BETA = "managed-agents-2026-04-01";
+
+  const hdrs = (key) => ({
+    "x-api-key": key,
+    "anthropic-version": "2023-06-01",
+    "anthropic-beta": BETA,
+    "content-type": "application/json",
+    "anthropic-dangerous-direct-browser-access": "true",
+  });
+
+  const buildContext = () => {
+    const clientes = clientesFB || [];
+    const ops      = (oportunidadesDB || []).filter(o =>
+      o.agenteId === usuario.id || o.agente === usuario.id
+    );
+    const misC = clientes.slice(0, 30);
+    const activas = ops.filter(o => o.esOportunidad);
+    return `USUARIO: ${usuario.nombre} | Rol: ${usuario.rol} | Equipo: ${usuario.equipo || "Global"}
+
+CLIENTES (${clientes.length} total, mostrando 30):
+${misC.map(c => `• ${c.nombre} — Grupo: ${c.grupoAgente} — Semana: ${c.semana||"—"}`).join("\n")}
+
+OPORTUNIDADES ACTIVAS (${activas.length}):
+${activas.slice(0,10).map(o => `• [${o.estado}] ${o.nombre} — ${(o.descripcionOportunidad||"").slice(0,80)}`).join("\n")}`;
+  };
+
+  const initSession = async (key) => {
+    setStatus("initing");
+    setErrorMsg("");
+    try {
+      // 1. Crear agente
+      const aRes = await fetch(`${ANTH}/agents`, {
+        method: "POST", headers: hdrs(key),
+        body: JSON.stringify({
+          name: "CRM Grupo Consolidado",
+          model: "claude-sonnet-4-6",
+          system: `Eres el asistente de ventas del CRM Grupo Consolidado (equipos WIKUK e INTERKEY).
+Ayudas a gestionar clientes, oportunidades, visitas, muestras y estrategias comerciales.
+Responde siempre en español. Sé concreto y orientado a la acción.
+
+${buildContext()}`,
+          tools: [{ type: "agent_toolset_20260401" }],
+        }),
+      });
+      if (!aRes.ok) throw new Error(`Agent ${aRes.status}: ${await aRes.text()}`);
+      const agent = await aRes.json();
+
+      // 2. Crear entorno
+      const eRes = await fetch(`${ANTH}/environments`, {
+        method: "POST", headers: hdrs(key),
+        body: JSON.stringify({
+          name: "crm-env",
+          config: { type: "cloud", networking: { type: "unrestricted" } },
+        }),
+      });
+      if (!eRes.ok) throw new Error(`Env ${eRes.status}: ${await eRes.text()}`);
+      const env = await eRes.json();
+
+      // 3. Crear sesión
+      const sRes = await fetch(`${ANTH}/sessions`, {
+        method: "POST", headers: hdrs(key),
+        body: JSON.stringify({
+          agent_id: agent.id,
+          agent_version: agent.version,
+          environment_id: env.id,
+        }),
+      });
+      if (!sRes.ok) throw new Error(`Session ${sRes.status}: ${await sRes.text()}`);
+      const sess = await sRes.json();
+
+      sessionStorage.setItem("gc_anth_key", key);
+      setApiKey(key);
+      setSessionId(sess.id);
+      setStatus("ready");
+      setMessages([{
+        role: "assistant",
+        text: `👋 Hola, **${usuario.nombre}**. Soy tu asistente de ventas. Tengo acceso a tus clientes y oportunidades. ¿En qué te ayudo?`,
+        streaming: false,
+      }]);
+    } catch (err) {
+      setStatus("error");
+      setErrorMsg(err.message);
+    }
+  };
+
+  const sendMessage = async () => {
+    if (!input.trim() || !sessionId || loading) return;
+    const userMsg = input.trim();
+    setInput("");
+    setMessages(prev => [...prev, { role: "user", text: userMsg }]);
+    setLoading(true);
+    let assistantText = "";
+    setMessages(prev => [...prev, { role: "assistant", text: "…", streaming: true }]);
+
+    try {
+      const res = await fetch(`${ANTH}/sessions/${sessionId}/events`, {
+        method: "POST",
+        headers: { ...hdrs(apiKey), accept: "text/event-stream" },
+        body: JSON.stringify({ type: "user", content: userMsg }),
+      });
+      if (!res.ok) throw new Error(`Events ${res.status}`);
+
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = dec.decode(value);
+        for (const line of chunk.split("\n")) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const ev = JSON.parse(line.slice(6));
+            if (ev.type === "content_block_delta" && ev.delta?.text) {
+              assistantText += ev.delta.text;
+              setMessages(prev => {
+                const u = [...prev];
+                u[u.length - 1] = { role: "assistant", text: assistantText, streaming: true };
+                return u;
+              });
+            }
+            if (ev.type === "session.status_idle") {
+              setMessages(prev => {
+                const u = [...prev];
+                u[u.length - 1] = { role: "assistant", text: assistantText || "✓", streaming: false };
+                return u;
+              });
+            }
+          } catch {}
+        }
+      }
+    } catch (err) {
+      setMessages(prev => {
+        const u = [...prev];
+        u[u.length - 1] = { role: "assistant", text: `❌ Error: ${err.message}`, streaming: false };
+        return u;
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // ── Pantalla de configuración de API key ───────────────────────
+  if (!apiKey || status === "idle" || status === "error") {
+    return (
+      <div style={{ padding: 20, maxWidth: 480, margin: "0 auto" }}>
+        <div style={{ textAlign: "center", marginBottom: 24 }}>
+          <span style={{ fontSize: 48 }}>🤖</span>
+          <p style={{ margin: "8px 0 4px", fontSize: 20, fontWeight: 900, color: T.text }}>Asistente IA</p>
+          <p style={{ margin: 0, fontSize: 13, color: T.muted }}>Powered by Claude Managed Agents</p>
+        </div>
+
+        <div style={{ background: T.blueL, borderRadius: 12, padding: 16, marginBottom: 20, fontSize: 13, color: "#1E40AF" }}>
+          <strong>¿Qué puede hacer?</strong>
+          <ul style={{ margin: "8px 0 0", paddingLeft: 18, lineHeight: 1.8 }}>
+            <li>Consultar y analizar tus clientes y oportunidades</li>
+            <li>Redactar emails y propuestas comerciales</li>
+            <li>Sugerir estrategias de recuperación</li>
+            <li>Preparar informes semanales</li>
+          </ul>
+        </div>
+
+        {status === "error" && (
+          <div style={{ background: T.redL, border: `1px solid ${T.red}`, borderRadius: 10, padding: 12, marginBottom: 16, fontSize: 12, color: T.red }}>
+            ⚠️ {errorMsg}
+          </div>
+        )}
+
+        <p style={{ margin: "0 0 8px", fontSize: 13, fontWeight: 600, color: T.text }}>API Key de Anthropic</p>
+        <input
+          type="password"
+          value={keyInput}
+          onChange={e => setKeyInput(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && keyInput.trim() && initSession(keyInput.trim())}
+          placeholder="sk-ant-…"
+          style={{ width: "100%", border: `1.5px solid ${T.border}`, borderRadius: 10, padding: "12px 14px",
+            fontSize: 14, outline: "none", boxSizing: "border-box", marginBottom: 12 }}
+        />
+        <button
+          onClick={() => keyInput.trim() && initSession(keyInput.trim())}
+          disabled={status === "initing" || !keyInput.trim()}
+          style={{ width: "100%", background: status === "initing" ? T.muted : T.navy, color: "#fff",
+            border: "none", borderRadius: 10, padding: "13px", fontSize: 14, fontWeight: 700,
+            cursor: status === "initing" ? "wait" : "pointer" }}>
+          {status === "initing" ? "⏳ Iniciando sesión…" : "Conectar asistente →"}
+        </button>
+        <p style={{ margin: "12px 0 0", fontSize: 11, color: T.muted, textAlign: "center" }}>
+          La key se guarda solo en esta sesión del navegador · Beta: managed-agents-2026-04-01
+        </p>
+      </div>
+    );
+  }
+
+  // ── Chat UI ────────────────────────────────────────────────────
+  const renderMd = (text) => {
+    // Mini markdown: negrita y saltos de línea
+    return text
+      .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+      .replace(/\n/g, "<br/>");
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 130px)" }}>
+      {/* Header */}
+      <div style={{ padding: "12px 16px", background: T.navy, display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ fontSize: 22 }}>🤖</span>
+        <div style={{ flex: 1 }}>
+          <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#fff" }}>Asistente CRM</p>
+          <p style={{ margin: 0, fontSize: 10, color: "#94A3B8" }}>
+            {status === "ready" ? "🟢 Sesión activa · claude-sonnet-4-6" : "Conectando…"}
+          </p>
+        </div>
+        <button
+          onClick={() => { setApiKey(""); setSessionId(null); setStatus("idle"); setMessages([]); sessionStorage.removeItem("gc_anth_key"); }}
+          style={{ background: "none", border: `1px solid #334155`, borderRadius: 7, padding: "5px 10px", color: "#94A3B8", fontSize: 11, cursor: "pointer" }}>
+          Cerrar
+        </button>
+      </div>
+
+      {/* Mensajes */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "16px", display: "flex", flexDirection: "column", gap: 12 }}>
+        {messages.map((m, i) => (
+          <div key={i} style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start" }}>
+            {m.role === "assistant" && (
+              <span style={{ fontSize: 20, marginRight: 8, flexShrink: 0, alignSelf: "flex-end" }}>🤖</span>
+            )}
+            <div style={{
+              maxWidth: "82%",
+              background: m.role === "user" ? T.navy : T.white,
+              color: m.role === "user" ? "#fff" : T.text,
+              border: m.role === "assistant" ? `1px solid ${T.border}` : "none",
+              borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "4px 16px 16px 16px",
+              padding: "10px 14px",
+              fontSize: 13,
+              lineHeight: 1.6,
+              boxShadow: "0 1px 4px rgba(0,0,0,.06)",
+            }}
+              dangerouslySetInnerHTML={{ __html: renderMd(m.text) + (m.streaming ? " <span style='opacity:.5'>▊</span>" : "") }}
+            />
+          </div>
+        ))}
+        {messages.length === 0 && (
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, color: T.muted }}>
+            <span style={{ fontSize: 40 }}>💬</span>
+            <p style={{ margin: 0, fontSize: 13 }}>Escribe tu primera pregunta…</p>
+          </div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Sugerencias rápidas */}
+      {messages.length <= 1 && (
+        <div style={{ padding: "0 16px 8px", display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {[
+            "¿Cuántos clientes tengo esta semana?",
+            "Resume mis oportunidades activas",
+            "Redacta un email de seguimiento",
+            "¿Qué clientes no he visitado?",
+          ].map(s => (
+            <button key={s} onClick={() => { setInput(s); }}
+              style={{ padding: "6px 12px", borderRadius: 99, border: `1.5px solid ${T.border}`,
+                background: "#fff", fontSize: 11, color: T.text, cursor: "pointer", whiteSpace: "nowrap" }}>
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Input */}
+      <div style={{ padding: "12px 16px", borderTop: `1px solid ${T.border}`, display: "flex", gap: 8, background: "#fff" }}>
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && !e.shiftKey && sendMessage()}
+          placeholder="Pregunta algo sobre tus clientes…"
+          disabled={loading}
+          style={{ flex: 1, border: `1.5px solid ${T.border}`, borderRadius: 10, padding: "10px 14px",
+            fontSize: 13, outline: "none", background: loading ? "#F8FAFC" : "#fff" }}
+        />
+        <button
+          onClick={sendMessage}
+          disabled={loading || !input.trim()}
+          style={{ background: loading || !input.trim() ? T.muted : T.navy, color: "#fff",
+            border: "none", borderRadius: 10, padding: "10px 16px", fontSize: 18,
+            cursor: loading || !input.trim() ? "not-allowed" : "pointer", flexShrink: 0 }}>
+          {loading ? "⏳" : "↑"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Montar la app ──────────────────────────────────────────────────
 const container = document.getElementById('root');
 const root = ReactDOM.createRoot(container);
@@ -7551,15 +7951,9 @@ const root = ReactDOM.createRoot(container);
     if(!pu) return null;
     var crmId=pu.crmId||pu.id||pu.username;
     if(!crmId) return null;
-    // Primero buscar en USUARIOS fijos — pero enriquecer con datos del portal
+    // Primero buscar en USUARIOS fijos
     var fixed=USUARIOS.find(function(u){return u.id===crmId;});
-    if(fixed){
-      // Añadir catalogoVendedor y username del portal (importantes para Firebase KPI)
-      return Object.assign({},fixed,{
-        catalogoVendedor: pu.catalogoVendedor||fixed.catalogoVendedor||null,
-        username: pu.username||pu.id||null
-      });
-    }
+    if(fixed) return fixed;
     // Crear usuario dinámico
     var rol=pu.rol||'agente';
     if(rol==='crm_director'||rol==='director') rol='director';
@@ -7572,8 +7966,7 @@ const root = ReactDOM.createRoot(container);
       equipo: pu.equipo||null,
       color: pu.color||'#64748B',
       icon: '🧑‍💼',
-      catalogoVendedor: pu.catalogoVendedor||null,
-      username: pu.username||null
+      catalogoVendedor: pu.catalogoVendedor||null
     };
   }
 
@@ -7593,15 +7986,9 @@ const root = ReactDOM.createRoot(container);
       var hash=window.location.hash.replace('#','');
       if(hash){
         var decoded=decodeURIComponent(hash);
-        var parts=decoded.split('|');
-        var crmId=parts[0].trim();
-        var vendHash=parts[1]||null;
-        if(crmId){
-          var found=USUARIOS.find(function(u){return u.id===crmId;});
-          if(found) return found;
-          // Usuario dinámico (no está en lista fija): crear con rol agente
-          return {id:crmId,nombre:crmId,rol:'agente',equipo:null,color:'#64748B',icon:'🧑‍💼',catalogoVendedor:vendHash||null};
-        }
+        var crmId=decoded.includes('|')?decoded.split('|')[0].trim():decoded.trim();
+        var found=USUARIOS.find(function(u){return u.id===crmId;});
+        if(found) return found;
       }
     }catch(e){}
 
@@ -7612,25 +7999,16 @@ const root = ReactDOM.createRoot(container);
   root.render(React.createElement(App,{_autoLogin:autoUser||null}));
 
   // Vía 3: postMessage (por si las otras fallan — el portal lo envía al cargar)
-  // Usa window.__crmSetUsuario registrado por App para actualizar el estado React correctamente
   window.addEventListener('message',function(e){
     if(e.data&&e.data.type==='PORTAL_USER'){
       var pu=e.data.user;
       var crmUser=buildUserFromPortal(pu);
       if(crmUser){
-        if(window.__crmSetUsuario){
-          // Si App ya está montada, actualizar su estado directamente
-          window.__crmSetUsuario(crmUser);
-        } else {
-          // Si App aún no registró el setter, re-renderizar (primer montaje)
-          if(window.__crmSetUsuario){window.__crmSetUsuario(crmUser);}
-          else{setTimeout(function(){if(window.__crmSetUsuario)window.__crmSetUsuario(crmUser);},300);}
-        }
+        root.render(React.createElement(App,{_autoLogin:crmUser}));
       }
     }
   });
 })();
-</script>
-
+  </script>
 </body>
 </html>
