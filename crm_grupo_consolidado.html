@@ -1510,7 +1510,26 @@ function Informe({usuario, clientesFB}){
   const [formV,setFormV]=useState({resultado:"pedido",notas:""});
   const [showNuevo,setShowNuevo]=useState(false);
   const [nuevosCreados,setNuevosCreados]=useState([]);
+  const [micActivo,setMicActivo]=useState(false);
+  const micRef=React.useRef(null);
   const fotoRef=React.useRef();
+
+  const usarMicrofono=(onTexto)=>{
+    const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+    if(!SR){alert("Micrófono no disponible. Usa Chrome o Edge.");return;}
+    if(micActivo){micRef.current?.stop();setMicActivo(false);return;}
+    const r=new SR();
+    r.lang="es-ES"; r.continuous=false; r.interimResults=false;
+    micRef.current=r;
+    r.onstart=()=>setMicActivo(true);
+    r.onend=()=>setMicActivo(false);
+    r.onerror=()=>setMicActivo(false);
+    r.onresult=(e)=>{
+      const txt=e.results[0][0].transcript;
+      onTexto(txt);
+    };
+    r.start();
+  };
 
   const guardarNuevo=(formData)=>{
     if(!formData.nombre.trim()) return;
@@ -1695,12 +1714,24 @@ function Informe({usuario, clientesFB}){
                 ))}
               </div>
               {/* Notas */}
-              <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Notas</p>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                <p style={{margin:0,fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Notas</p>
+                <button onClick={()=>usarMicrofono(txt=>setFormV(f=>({...f,notas:f.notas?f.notas+" "+txt:txt})))}
+                  style={{display:"flex",alignItems:"center",gap:5,padding:"4px 10px",
+                    borderRadius:99,border:"1.5px solid "+(micActivo?"#EF4444":T.border),
+                    background:micActivo?"#FEF2F2":"#F8FAFC",
+                    color:micActivo?"#EF4444":T.muted,
+                    fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                  {micActivo?"⏹ Escuchando...":"🎤 Dictar nota"}
+                </button>
+              </div>
               <textarea value={formV.notas} onChange={e=>setFormV(f=>({...f,notas:e.target.value}))} rows={3}
-                placeholder="Qué se habló, próximos pasos, interés en productos…"
-                style={{width:"100%",border:`1.5px solid ${formV.notas?T.blue:T.border}`,borderRadius:10,
-                  padding:"12px",fontSize:13,resize:"none",outline:"none",
-                  boxSizing:"border-box",lineHeight:1.5,fontFamily:"inherit",marginBottom:16}}/>
+                placeholder={micActivo?"🎤 Escucha activa — habla ahora...":"Qué se habló, próximos pasos, interés en productos…"}
+                style={{width:"100%",
+                  border:`1.5px solid ${micActivo?"#EF4444":formV.notas?T.blue:T.border}`,
+                  borderRadius:10,padding:"12px",fontSize:13,resize:"none",outline:"none",
+                  boxSizing:"border-box",lineHeight:1.5,fontFamily:"inherit",marginBottom:16,
+                  background:micActivo?"#FEF2F2":"#fff"}}/>
               <button onClick={guardarVisita}
                 style={{width:"100%",padding:"14px",borderRadius:12,border:"none",
                   background:T.navy,color:"#fff",fontWeight:700,fontSize:15,cursor:"pointer",marginBottom:16}}>
@@ -8017,8 +8048,11 @@ function AsistenteIA({ usuario, clientesFB, oportunidadesDB }) {
   const [conectado,setConectado]= React.useState(()=>!!sessionStorage.getItem("ant_key"));
   const [msgs,     setMsgs]     = React.useState([]);
   const [input,    setInput]    = React.useState("");
-  const [cargando, setCargando] = React.useState(false);
-  const endRef = React.useRef(null);
+  const [cargando,  setCargando]  = React.useState(false);
+  const [escuchando,setEscuchando]= React.useState(false);
+  const [vozActiva, setVozActiva] = React.useState(false);
+  const endRef    = React.useRef(null);
+  const reconRef  = React.useRef(null);
 
   React.useEffect(()=>{ endRef.current?.scrollIntoView({behavior:"smooth"}); },[msgs]);
 
@@ -8049,6 +8083,44 @@ function AsistenteIA({ usuario, clientesFB, oportunidadesDB }) {
       + "Ayuda con: análisis de clientes, redactar emails comerciales, propuestas, estrategias de recuperación, preparar informes. Responde siempre en español, de forma concisa y práctica.";
   },[usuario,clientesFB,oportunidadesDB]);
 
+  // ── Micrófono (Speech-to-Text) ─────────────────────
+  const iniciarEscucha = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if(!SR){
+      alert("Reconocimiento de voz no disponible. Usa Chrome o Edge.");
+      return;
+    }
+    if(escuchando){
+      reconRef.current?.stop();
+      setEscuchando(false);
+      return;
+    }
+    const r = new SR();
+    r.lang = "es-ES";
+    r.continuous = false;
+    r.interimResults = false;
+    reconRef.current = r;
+    r.onstart  = () => setEscuchando(true);
+    r.onend    = () => setEscuchando(false);
+    r.onerror  = () => setEscuchando(false);
+    r.onresult = (e) => {
+      const txt = e.results[0][0].transcript;
+      setInput(prev => prev ? prev + " " + txt : txt);
+    };
+    r.start();
+  };
+
+  // ── Text-to-Speech ───────────────────────────────────
+  const leerEnVoz = (texto) => {
+    if(!vozActiva || !window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+    const utt = new SpeechSynthesisUtterance(texto);
+    utt.lang = "es-ES";
+    utt.rate = 1.05;
+    utt.pitch = 1;
+    window.speechSynthesis.speak(utt);
+  };
+
   const enviar = async () => {
     if(!input.trim()||cargando) return;
     const userMsg = {role:"user", content:input.trim()};
@@ -8076,6 +8148,7 @@ function AsistenteIA({ usuario, clientesFB, oportunidadesDB }) {
       if(data.error) throw new Error(data.error.message);
       const reply = data.content?.[0]?.text || "Sin respuesta";
       setMsgs(p=>[...p,{role:"assistant",content:reply}]);
+      leerEnVoz(reply);
     } catch(e) {
       setMsgs(p=>[...p,{role:"assistant",content:`❌ Error: ${e.message}`}]);
     }
@@ -8186,24 +8259,56 @@ function AsistenteIA({ usuario, clientesFB, oportunidadesDB }) {
         <div ref={endRef}/>
       </div>
 
-      {/* Input */}
-      <div style={{padding:"12px 16px",borderTop:"1px solid #E2E8F0",background:"#fff",
-        display:"flex",gap:8,flexShrink:0}}>
-        <input value={input} onChange={e=>setInput(e.target.value)}
-          onKeyDown={e=>e.key==="Enter"&&!e.shiftKey&&enviar()}
-          placeholder="Escribe tu pregunta..."
-          disabled={cargando}
-          style={{flex:1,padding:"10px 14px",borderRadius:10,border:"1.5px solid #E2E8F0",
-            fontSize:13,outline:"none",fontFamily:"inherit"}}
-        />
-        <button onClick={enviar} disabled={cargando||!input.trim()}
-          style={{padding:"10px 18px",background:cargando||!input.trim()?"#E2E8F0":"#0F172A",
-            color:cargando||!input.trim()?"#94A3B8":"#fff",border:"none",
-            borderRadius:10,fontSize:13,fontWeight:700,cursor:cargando?"not-allowed":"pointer"}}>
-          {cargando?"...":"↑"}
-        </button>
+      {/* Input con voz */}
+      <div style={{padding:"10px 16px",borderTop:"1px solid #E2E8F0",background:"#fff",flexShrink:0}}>
+        {/* Controles de voz */}
+        <div style={{display:"flex",gap:6,marginBottom:8,justifyContent:"flex-end"}}>
+          <button onClick={iniciarEscucha}
+            style={{display:"flex",alignItems:"center",gap:5,padding:"5px 12px",
+              borderRadius:99,border:"1.5px solid "+(escuchando?"#EF4444":"#E2E8F0"),
+              background:escuchando?"#FEF2F2":"#F8FAFC",
+              color:escuchando?"#EF4444":"#64748B",
+              fontSize:11,fontWeight:700,cursor:"pointer",
+              animation:escuchando?"pulse 1s infinite":undefined}}>
+            {escuchando?"⏹ Escuchando...":"🎤 Voz"}
+          </button>
+          <button onClick={()=>{
+              setVozActiva(v=>!v);
+              if(vozActiva) window.speechSynthesis?.cancel();
+            }}
+            style={{display:"flex",alignItems:"center",gap:5,padding:"5px 12px",
+              borderRadius:99,border:"1.5px solid "+(vozActiva?"#3B82F6":"#E2E8F0"),
+              background:vozActiva?"#EFF6FF":"#F8FAFC",
+              color:vozActiva?"#3B82F6":"#64748B",
+              fontSize:11,fontWeight:700,cursor:"pointer"}}>
+            {vozActiva?"🔊 Voz ON":"🔇 Voz OFF"}
+          </button>
+        </div>
+        {/* Campo de texto */}
+        <div style={{display:"flex",gap:8}}>
+          <input value={input} onChange={e=>setInput(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&!e.shiftKey&&enviar()}
+            placeholder={escuchando?"🎤 Escuchando...":"Escribe o usa el micrófono..."}
+            disabled={cargando}
+            style={{flex:1,padding:"10px 14px",borderRadius:10,
+              border:"1.5px solid "+(escuchando?"#EF4444":"#E2E8F0"),
+              fontSize:13,outline:"none",fontFamily:"inherit",
+              background:escuchando?"#FEF2F2":"#fff"}}
+          />
+          <button onClick={enviar} disabled={cargando||!input.trim()}
+            style={{padding:"10px 18px",
+              background:cargando||!input.trim()?"#E2E8F0":"#0F172A",
+              color:cargando||!input.trim()?"#94A3B8":"#fff",
+              border:"none",borderRadius:10,fontSize:13,fontWeight:700,
+              cursor:cargando||!input.trim()?"not-allowed":"pointer"}}>
+            {cargando?"...":"↑"}
+          </button>
+        </div>
       </div>
-      <style>{`@keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}`}</style>
+      <style>{`
+        @keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+      `}</style>
     </div>
   );
 }
