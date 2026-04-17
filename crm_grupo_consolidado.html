@@ -6833,6 +6833,413 @@ function HistorialTab({visitas,muestras,estrategia,incidencias=[],resultados}){
 
 
 // ─── APP PRINCIPAL ────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// ASISTENTE IA — Powered by Claude · Anthropic
+// ═══════════════════════════════════════════════════════════════════
+function AsistenteIA({usuario, clientesFB, oportunidadesDB}){
+  const [apiKey, setApiKey] = React.useState(()=>sessionStorage.getItem("ant_key")||"");
+  const [conectado, setConectado] = React.useState(()=>!!sessionStorage.getItem("ant_key"));
+  const [msgs, setMsgs] = React.useState([]);
+  const [input, setInput] = React.useState("");
+  const [cargando, setCargando] = React.useState(false);
+  const [vozActiva, setVozActiva] = React.useState(false);
+  const [escuchando, setEscuchando] = React.useState(false);
+  const msgsEndRef = React.useRef(null);
+
+  const misClientes = clientesFB||[];
+  const misOps = (oportunidadesDB||[]).filter(o=>o.agente===usuario.id||o.agenteId===usuario.id);
+
+  const sistemaPrompt = React.useMemo(()=>{
+    const cliStr = misClientes.length>0
+      ? "Mis clientes ("+misClientes.length+"): "+misClientes.map(c=>"- "+(c.NOMBRE||c.nombre)).slice(0,15).join("\n")
+      : "";
+    const opsStr = misOps.length>0
+      ? "Mis oportunidades: "+misOps.map(o=>o.cliente+" "+fmt(o.valor||0)+"€ ("+o.etapa+")").join(", ")
+      : "";
+    return "Eres un asistente comercial experto para Grupo Consolidado (WIKUK + INTERKEY), empresa de ingredientes y tripas para la industria cárnica española.\n\n"
+      + "Usuario: "+usuario.nombre+" | Rol: "+usuario.rol+" | Equipo: "+(usuario.equipo||"dirección")+"\n\n"
+      + (opsStr ? opsStr+"\n\n" : "")
+      + (cliStr ? cliStr+"\n\n" : "")
+      + "Ayuda con: análisis de clientes, redactar emails comerciales, propuestas, estrategias de recuperación, preparar informes. Responde siempre en español, de forma concisa y práctica.";
+  },[usuario,clientesFB,oportunidadesDB]);
+
+  React.useEffect(()=>{
+    msgsEndRef.current?.scrollIntoView({behavior:"smooth"});
+  },[msgs]);
+
+  const conectar = () => {
+    if(!apiKey.trim()) return;
+    sessionStorage.setItem("ant_key", apiKey.trim());
+    setConectado(true);
+    setMsgs([{role:"assistant",content:"¡Hola "+usuario.nombre+"! Soy tu asistente IA. ¿En qué puedo ayudarte hoy?"}]);
+  };
+
+  const leerEnVoz = (text) => {
+    if(!vozActiva||!window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang="es-ES"; u.rate=1.0; u.pitch=1.0;
+    window.speechSynthesis.speak(u);
+  };
+
+  const iniciarEscucha = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if(!SR){ alert("Tu navegador no soporta reconocimiento de voz"); return; }
+    const rec = new SR();
+    rec.lang="es-ES"; rec.continuous=false; rec.interimResults=false;
+    setEscuchando(true);
+    rec.onresult=(e)=>{ setInput(e.results[0][0].transcript); setEscuchando(false); };
+    rec.onerror=()=>setEscuchando(false);
+    rec.onend=()=>setEscuchando(false);
+    rec.start();
+  };
+
+  const enviar = async () => {
+    if(!input.trim()||cargando) return;
+    const userMsg = {role:"user",content:input.trim()};
+    setMsgs(p=>[...p,userMsg]);
+    setInput(""); setCargando(true);
+    try {
+      const r = await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",
+        headers:{"Content-Type":"application/json","x-api-key":sessionStorage.getItem("ant_key")||"","anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+        body:JSON.stringify({
+          model:"claude-opus-4-5",max_tokens:1024,
+          system:sistemaPrompt,
+          messages:[...msgs,userMsg].filter(m=>m.role)
+        })
+      });
+      const data = await r.json();
+      if(data.error) throw new Error(data.error.message);
+      const reply = data.content?.[0]?.text || "Sin respuesta";
+      setMsgs(p=>[...p,{role:"assistant",content:reply}]);
+      leerEnVoz(reply);
+    } catch(e) {
+      setMsgs(p=>[...p,{role:"assistant",content:"❌ Error: "+e.message}]);
+    }
+    setCargando(false);
+  };
+
+  const desconectar = () => {
+    sessionStorage.removeItem("ant_key");
+    setConectado(false); setApiKey(""); setMsgs([]);
+  };
+
+  if(!conectado) return (
+    <div style={{padding:"32px 20px",maxWidth:480,margin:"0 auto"}}>
+      <div style={{textAlign:"center",marginBottom:32}}>
+        <div style={{fontSize:64,marginBottom:12}}>🤖</div>
+        <p style={{margin:"0 0 6px",fontSize:22,fontWeight:900,color:"#0F172A"}}>Asistente IA</p>
+        <p style={{margin:0,fontSize:13,color:"#64748B"}}>Powered by Claude · Anthropic</p>
+      </div>
+      <div style={{background:"#F0F9FF",borderRadius:12,padding:"14px 16px",marginBottom:20,fontSize:12,color:"#0369A1"}}>
+        <p style={{margin:"0 0 6px",fontWeight:700}}>¿Qué puede hacer?</p>
+        {"Consultar clientes · Redactar emails · Sugerir estrategias · Preparar informes".split(" · ").map(t=>(
+          <p key={t} style={{margin:"3px 0"}}>• {t}</p>
+        ))}
+      </div>
+      <p style={{margin:"0 0 6px",fontSize:12,fontWeight:700,color:"#0F172A"}}>API Key de Anthropic</p>
+      <input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)}
+        placeholder="sk-ant-..." onKeyDown={e=>e.key==="Enter"&&conectar()}
+        style={{width:"100%",padding:"12px 14px",borderRadius:10,border:"1.5px solid #E2E8F0",
+          fontSize:13,outline:"none",boxSizing:"border-box",marginBottom:12,fontFamily:"monospace"}}/>
+      <button onClick={conectar} style={{width:"100%",padding:"14px",background:"#0F172A",
+        color:"#fff",border:"none",borderRadius:10,fontSize:14,fontWeight:700,cursor:"pointer"}}>
+        Conectar asistente →
+      </button>
+      <p style={{margin:"12px 0 0",fontSize:11,color:"#94A3B8",textAlign:"center"}}>
+        La clave se guarda solo en este navegador (sessionStorage)
+      </p>
+    </div>
+  );
+
+  const SUGERENCIAS = [
+    "¿Qué clientes llevan más de 3 meses sin comprar?",
+    "Redacta un email de seguimiento para recuperar un cliente",
+    "¿Cuáles son mis oportunidades más urgentes?",
+    "Dame un análisis de mi pipeline actual",
+  ];
+
+  return(
+    <div style={{display:"flex",flexDirection:"column",height:"calc(100vh - 140px)"}}>
+      {/* Header IA */}
+      <div style={{padding:"12px 16px",borderBottom:`1px solid ${T.border}`,
+        background:"#fff",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontSize:24}}>🤖</span>
+          <div>
+            <p style={{margin:0,fontSize:14,fontWeight:800}}>Asistente IA</p>
+            <p style={{margin:0,fontSize:11,color:T.green}}>● Conectado</p>
+          </div>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={()=>setVozActiva(v=>!v)}
+            style={{padding:"6px 10px",borderRadius:8,border:`1.5px solid ${vozActiva?T.green:T.border}`,
+              background:vozActiva?"#D1FAE5":"#fff",fontSize:11,fontWeight:700,cursor:"pointer",
+              color:vozActiva?T.green:T.muted}}>
+            {vozActiva?"🔊 ON":"🔇 OFF"}
+          </button>
+          <button onClick={desconectar}
+            style={{padding:"6px 10px",borderRadius:8,border:`1px solid ${T.border}`,
+              background:"#fff",fontSize:11,color:T.muted,cursor:"pointer"}}>
+            Salir
+          </button>
+        </div>
+      </div>
+
+      {/* Mensajes */}
+      <div style={{flex:1,overflowY:"auto",padding:"16px"}}>
+        {msgs.length===0&&(
+          <div>
+            <p style={{margin:"0 0 12px",fontSize:12,color:T.muted,textAlign:"center"}}>Sugerencias:</p>
+            {SUGERENCIAS.map(s=>(
+              <button key={s} onClick={()=>setInput(s)}
+                style={{display:"block",width:"100%",marginBottom:8,padding:"10px 14px",
+                  borderRadius:10,border:`1px solid ${T.border}`,background:"#F8FAFC",
+                  fontSize:12,textAlign:"left",cursor:"pointer",color:T.text}}>
+                {s}
+              </button>
+            ))}
+          </div>
+        )}
+        {msgs.map((m,i)=>(
+          <div key={i} style={{marginBottom:12,display:"flex",
+            justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
+            <div style={{maxWidth:"85%",padding:"10px 14px",borderRadius:14,
+              background:m.role==="user"?T.navy:"#F1F5F9",
+              color:m.role==="user"?"#fff":T.text,fontSize:13,lineHeight:1.6}}>
+              {m.content}
+            </div>
+          </div>
+        ))}
+        {cargando&&(
+          <div style={{display:"flex",justifyContent:"flex-start",marginBottom:12}}>
+            <div style={{padding:"10px 14px",borderRadius:14,background:"#F1F5F9",
+              fontSize:13,color:T.muted}}>✦ Pensando…</div>
+          </div>
+        )}
+        <div ref={msgsEndRef}/>
+      </div>
+
+      {/* Input */}
+      <div style={{padding:"12px 16px",borderTop:`1px solid ${T.border}`,background:"#fff"}}>
+        <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+          <textarea value={input} onChange={e=>setInput(e.target.value)}
+            onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();enviar();}}}
+            placeholder="Escribe o dicta tu pregunta..."
+            rows={2}
+            style={{flex:1,padding:"10px 12px",borderRadius:10,
+              border:`1.5px solid ${input?T.blue:T.border}`,fontSize:13,
+              resize:"none",outline:"none",fontFamily:"inherit",boxSizing:"border-box"}}/>
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            <button onClick={iniciarEscucha}
+              style={{padding:"8px",borderRadius:8,border:`1px solid ${T.border}`,
+                background:escuchando?"#FEE2E2":"#fff",fontSize:18,cursor:"pointer",
+                color:escuchando?"#EF4444":T.muted}}>
+              🎤
+            </button>
+            <button onClick={enviar} disabled={!input.trim()||cargando}
+              style={{padding:"8px 12px",borderRadius:8,border:"none",
+                background:input.trim()&&!cargando?T.navy:"#E2E8F0",
+                color:input.trim()&&!cargando?"#fff":"#94A3B8",
+                fontWeight:700,fontSize:13,cursor:"pointer"}}>
+              →
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// HISTORIAL SEMANAL — Registro de actividad semana a semana
+// ═══════════════════════════════════════════════════════════════════
+function HistorialSemanal({usuario, clientesFB, oportunidadesDB}){
+  const [actividad, setActividad] = React.useState([]);
+  const [cargando, setCargando] = React.useState(true);
+  const [showForm, setShowForm] = React.useState(false);
+  const [form, setForm] = React.useState({
+    clienteNombre:"", tipo:"visita", notas:"", resultado:"seguimiento", fecha:"", urgente:false
+  });
+  const esAgente = usuario.rol==="agente";
+  const esJefe = ["jefe","director","ceo"].includes(usuario.rol);
+
+  React.useEffect(()=>{
+    const timer = setTimeout(()=>setCargando(false), 6000);
+    fbLeer("visitas").then(data=>{
+      clearTimeout(timer);
+      const mine = esAgente
+        ? data.filter(v=>v.agente===usuario.id||v.grupoAgente===usuario.grupoAgente)
+        : data;
+      mine.sort((a,b)=>(b.fecha||"").localeCompare(a.fecha||""));
+      setActividad(mine.slice(0,50));
+      setCargando(false);
+    }).catch(()=>{ clearTimeout(timer); setCargando(false); });
+  },[usuario.id]);
+
+  const clientesDisp = clientesFB||(window._clientesFB)||[];
+  const hoy = new Date().toISOString().slice(0,10);
+
+  const guardar = () => {
+    if(!form.notas.trim()) return;
+    const nueva = {
+      id:"vis_"+Date.now(),
+      ...form,
+      fecha: form.fecha||hoy,
+      agente: usuario.id,
+      grupoAgente: usuario.grupoAgente||"",
+      agenteNombre: usuario.nombre,
+      equipo: usuario.equipo||"",
+      creadaEn: hoy,
+    };
+    fbEscribir("visitas", nueva.id, nueva);
+    setActividad(prev=>[nueva,...prev]);
+    setForm({clienteNombre:"",tipo:"visita",notas:"",resultado:"seguimiento",fecha:"",urgente:false});
+    setShowForm(false);
+  };
+
+  const TIPOS = {
+    visita:{label:"🤝 Visita",color:"#0EA5E9"},
+    llamada:{label:"📞 Llamada",color:"#10B981"},
+    email:{label:"📧 Email",color:"#8B5CF6"},
+    feria:{label:"🏛 Feria",color:"#F59E0B"},
+    reunion:{label:"💼 Reunión",color:"#EF4444"},
+  };
+  const RESULTADOS = {
+    seguimiento:{label:"↗️ Seguimiento"},
+    pedido:{label:"✅ Pedido"},
+    muestra:{label:"📦 Muestra"},
+    sin_interes:{label:"❌ Sin interés"},
+    aplazado:{label:"⏸ Aplazado"},
+  };
+
+  return(
+    <div style={{padding:"16px"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <div>
+          <p style={{margin:0,fontSize:18,fontWeight:900,color:T.text}}>📅 Historial semanal</p>
+          <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{actividad.length} registros</p>
+        </div>
+        <button onClick={()=>setShowForm(f=>!f)}
+          style={{padding:"10px 16px",borderRadius:10,border:"none",background:T.navy,
+            color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+          + Registrar
+        </button>
+      </div>
+
+      {/* Formulario nueva actividad */}
+      {showForm&&(
+        <div style={{background:"#fff",borderRadius:14,padding:16,marginBottom:16,
+          border:`1.5px solid ${T.blue}`}}>
+          <p style={{margin:"0 0 12px",fontSize:14,fontWeight:800,color:T.text}}>Nueva actividad</p>
+          
+          <p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Cliente</p>
+          <SearchInput
+            value={form.clienteNombre}
+            onChange={v=>setForm(f=>({...f,clienteNombre:v}))}
+            placeholder="🔍 Buscar cliente..."
+            suggestions={clientesDisp
+              .filter(c=>{const n=(c.nombre||c.NOMBRE||"").toLowerCase();return form.clienteNombre.length>=2&&n.includes(form.clienteNombre.toLowerCase());})
+              .slice(0,8).map(c=>({label:c.nombre||c.NOMBRE,sub:c.id,tipo:"cliente"}))}
+            onSelect={s=>setForm(f=>({...f,clienteNombre:s.label}))}
+          />
+
+          <p style={{margin:"10px 0 4px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Tipo</p>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+            {Object.entries(TIPOS).map(([k,t])=>(
+              <button key={k} onClick={()=>setForm(f=>({...f,tipo:k}))}
+                style={{padding:"7px 12px",borderRadius:8,fontSize:12,cursor:"pointer",
+                  border:`2px solid ${form.tipo===k?t.color:T.border}`,
+                  background:form.tipo===k?t.color+"15":"#fff",
+                  color:form.tipo===k?t.color:T.muted,fontWeight:form.tipo===k?700:400}}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          <p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Resultado</p>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+            {Object.entries(RESULTADOS).map(([k,r])=>(
+              <button key={k} onClick={()=>setForm(f=>({...f,resultado:k}))}
+                style={{padding:"7px 10px",borderRadius:8,fontSize:11,cursor:"pointer",
+                  border:`2px solid ${form.resultado===k?T.navy:T.border}`,
+                  background:form.resultado===k?T.navy:"#fff",
+                  color:form.resultado===k?"#fff":T.muted}}>
+                {r.label}
+              </button>
+            ))}
+          </div>
+
+          <p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Notas *</p>
+          <textarea value={form.notas} onChange={e=>setForm(f=>({...f,notas:e.target.value}))}
+            rows={3} placeholder="¿Qué pasó? ¿Interés? ¿Próximos pasos?..."
+            style={{width:"100%",border:`1.5px solid ${form.notas?T.navy:T.border}`,borderRadius:10,
+              padding:"10px 12px",fontSize:13,resize:"none",outline:"none",
+              boxSizing:"border-box",fontFamily:"inherit",marginBottom:10}}/>
+
+          <div style={{display:"flex",gap:8}}>
+            <input type="date" value={form.fecha} onChange={e=>setForm(f=>({...f,fecha:e.target.value}))}
+              style={{flex:1,padding:"9px 10px",borderRadius:8,border:`1px solid ${T.border}`,
+                fontSize:12,outline:"none",fontFamily:"inherit"}}/>
+            <button onClick={()=>setShowForm(false)}
+              style={{padding:"9px 14px",borderRadius:8,border:`1px solid ${T.border}`,
+                background:"#fff",fontSize:12,cursor:"pointer",color:T.muted}}>
+              Cancelar
+            </button>
+            <button onClick={guardar} disabled={!form.notas.trim()}
+              style={{padding:"9px 16px",borderRadius:8,border:"none",fontSize:13,fontWeight:700,
+                background:form.notas.trim()?T.navy:"#E2E8F0",
+                color:form.notas.trim()?"#fff":"#94A3B8",cursor:"pointer"}}>
+              Guardar
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Lista de actividad */}
+      {cargando&&<div style={{textAlign:"center",padding:32,color:T.muted}}>⏳ Cargando...</div>}
+      {!cargando&&actividad.length===0&&(
+        <div style={{textAlign:"center",padding:40,color:T.muted}}>
+          <p style={{fontSize:32,marginBottom:8}}>📭</p>
+          <p>Sin actividad registrada todavía</p>
+        </div>
+      )}
+      {actividad.map((a,i)=>{
+        const tipo = TIPOS[a.tipo]||TIPOS.visita;
+        const res = RESULTADOS[a.resultado]||{label:"—"};
+        return(
+          <Card key={a.id||i} style={{marginBottom:8,padding:"12px 14px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+              <div style={{flex:1}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
+                  <span style={{fontSize:12,fontWeight:700,color:tipo.color,
+                    background:tipo.color+"15",padding:"2px 8px",borderRadius:6}}>
+                    {tipo.label}
+                  </span>
+                  <span style={{fontSize:11,color:T.muted}}>{res.label}</span>
+                </div>
+                {a.clienteNombre&&(
+                  <p style={{margin:"0 0 3px",fontSize:13,fontWeight:700,color:T.text}}>{a.clienteNombre}</p>
+                )}
+                <p style={{margin:0,fontSize:12,color:T.muted,lineHeight:1.5}}>{a.notas}</p>
+              </div>
+              <div style={{textAlign:"right",flexShrink:0,marginLeft:10}}>
+                <p style={{margin:0,fontSize:11,color:T.muted}}>{a.fecha||a.creadaEn||"—"}</p>
+                {esJefe&&a.agenteNombre&&(
+                  <p style={{margin:"2px 0 0",fontSize:10,color:T.blue,fontWeight:600}}>{a.agenteNombre}</p>
+                )}
+              </div>
+            </div>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+
 function App(props){
   const [usuario,setUsuario]=useState(function(){
     // Auto-login desde portal: initializar directamente sin useEffect
@@ -7036,6 +7443,8 @@ function App(props){
     {id:"proyectos",    icon:"📁",label:"Proyectos",   color:T.purple},
     {id:"estrategias",  icon:"🎯",label:"Estrategias", color:T.green,  badge:estEnCurso},
     {id:"incidencias",  icon:"🚨",label:"Incidencias", color:T.red,    badge:incAbiertas},
+    {id:"historial_sem", icon:"📅",label:"Historial",  color:T.blue},
+    {id:"ia",            icon:"🤖",label:"IA",          color:"#0F172A"},
   ];
 
   const NAV_JEFE=[
@@ -7350,6 +7759,8 @@ function App(props){
                section==="oportunidades"?"💼 Oportunidades":
                section==="proyectos"?"📁 Proyectos":
                section==="incidencias"?"🚨 Incidencias":
+               section==="historial_sem"?"📅 Historial semanal":
+               section==="ia"?"🤖 Asistente IA":
                section==="usuarios"?"👥 Equipo":
                section}
             </p>
@@ -7373,7 +7784,9 @@ function App(props){
         {section==="estrategias"&&          <MisEstrategias usuario={usuario}/>}
         {section==="oportunidades"&&        <GestorOportunidades usuario={usuario}/>}
         {section==="proyectos"&&            <Proyectos usuario={usuario}/>}
-        {section==="incidencias"&&          <Incidencias usuario={usuario}/>}
+        {section==="incidencias"&&          <Incidencias usuario={usuario} clientesFB={misClientesFB}/>}
+        {section==="historial_sem"&&        <HistorialSemanal usuario={usuario} clientesFB={misClientesFB} oportunidadesDB={oportunidadesDB}/>}
+        {section==="ia"&&                   <AsistenteIA usuario={usuario} clientesFB={misClientesFB} oportunidadesDB={oportunidadesDB}/>}
 
         {/* Equipo — jefe ve solo su equipo, director/CEO ven todos */}
         {esJefeOmas&&section==="usuarios"&&(
