@@ -4657,6 +4657,7 @@ function Detalle({opo,usuario,onClose,onUpdate,onEdit}){
     : [];
 
   const puedeReasignar=esJefe;
+  const puedesolicitarReasig=esAgente;
 
   const addNota=()=>{
     if(!nota.trim()) return;
@@ -4750,6 +4751,22 @@ function Detalle({opo,usuario,onClose,onUpdate,onEdit}){
               :<><div style={{width:40,height:40,borderRadius:10,background:T.muted,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>👤</div><p style={{margin:0,fontSize:13,color:T.muted,fontStyle:"italic",flex:1}}>Sin agente asignado</p></>}
               {puedeReasignar&&(
                 <button onClick={()=>setShowAsignar(s=>!s)} style={{padding:"7px 14px",borderRadius:8,border:`1px solid ${T.border}`,background:"#fff",color:T.blue,fontSize:12,fontWeight:600,cursor:"pointer"}}>{ag?"Reasignar":"Asignar"}</button>
+              )}
+              {puedesolicitarReasig&&(
+                <button onClick={()=>{
+                  const tId="reasig_"+Date.now();
+                  const hoy=new Date().toLocaleDateString("es-ES");
+                  fbEscribir("tareas",tId,{id:tId,titulo:"🔄 Solicitud reasignación: "+(sel?.NOMBRE||sel?.nombre||"cliente"),
+                    descripcion:"El comercial "+usuario.nombre+" solicita reasignación de cliente",
+                    tipo:"reasignacion",prioridad:"normal",estado:"pendiente",
+                    agente:usuario.id,agenteNombre:usuario.nombre,
+                    clienteId:sel?.id,clienteNombre:sel?.NOMBRE||sel?.nombre,
+                    creadaPor:usuario.id,creadaEn:hoy,esSolicitudReasignacion:true});
+                  alert("✅ Solicitud enviada al jefe");
+                }}
+                  style={{padding:"7px 14px",borderRadius:8,border:`1px solid ${T.amber}`,background:"#FFFBEB",color:T.amber,fontSize:12,fontWeight:600,cursor:"pointer"}}>
+                  🔄 Solicitar reasignación
+                </button>
               )}
             </div>
             {showAsignar&&<div style={{background:T.bg,borderRadius:10,padding:"12px 14px",border:`1px solid ${T.border}`}}>
@@ -5105,6 +5122,10 @@ function Proyectos({usuario}){
   const [filtro,setFiltro]=useState("activo");
   const [formOpen,setFormOpen]=useState(false);
   const [form,setForm]=useState({nombre:"",tipo:"lanzamiento",desc:"",fin:""});
+  const [nuevoHito,setNuevoHito]=useState({nombre:"",fecha:"",responsable:"",nota:""});
+  const [showCierre,setShowCierre]=useState(null);
+  const [notaCierre,setNotaCierre]=useState("");
+  const esJefeOmas=["jefe","director","ceo"].includes(usuario?.rol);
 
   const TIPOS={
     lanzamiento:{icon:"🚀",label:"Lanzamiento",  color:T.purple},
@@ -5112,6 +5133,35 @@ function Proyectos({usuario}){
     recuperacion:{icon:"🔄",label:"Recuperación", color:T.amber},
     expansion:  {icon:"📈",label:"Expansión",     color:T.green},
     otro:       {icon:"📌",label:"Otro",          color:T.muted},
+  };
+
+  const addHito=(proyId)=>{
+    if(!nuevoHito.nombre.trim()) return;
+    const hoy=new Date().toLocaleDateString("es-ES");
+    const hito={nombre:nuevoHito.nombre.trim(),fecha:nuevoHito.fecha,responsable:nuevoHito.responsable,nota:nuevoHito.nota||"",hecho:false,fechaHecho:""};
+    setProyectos(pp=>pp.map(p=>p.id===proyId?{...p,hitos:[...(p.hitos||[]),hito]}:p));
+    if(sel?.id===proyId){const up={...sel,hitos:[...(sel.hitos||[]),hito]};setSel(up);fbEscribir("proyectos",proyId,up);}
+    if(nuevoHito.responsable){
+      const resp=USUARIOS.find(u=>u.id===nuevoHito.responsable);
+      const DEPTOS_MAP={calidad:"🔬 Calidad",id:"I+D",produccion:"🏭 Producción",direccion:"📊 Dirección"};
+      const respNombre=resp?resp.nombre:(DEPTOS_MAP[nuevoHito.responsable]||nuevoHito.responsable);
+      const tareaId="hito_tsk_"+Date.now();
+      fbEscribir("tareas",tareaId,{id:tareaId,titulo:"📍 Hito: "+nuevoHito.nombre.trim(),
+        descripcion:"Hito del proyecto: "+(sel?.nombre||proyId),tipo:"proyecto",prioridad:"normal",
+        estado:"pendiente",agente:nuevoHito.responsable,agenteNombre:respNombre,
+        creadaPor:usuario.id,creadaPorNombre:usuario.nombre,creadaEn:hoy,
+        vence:nuevoHito.fecha||"",proyectoId:proyId,proyectoNombre:sel?.nombre||"",esHito:true});
+    }
+    setNuevoHito({nombre:"",fecha:"",responsable:"",nota:""});
+  };
+
+  const cerrarProyecto=(proyId,exito)=>{
+    const hoy=new Date().toLocaleDateString("es-ES");
+    const estado=exito?"cerrado_exito":"cerrado_perdido";
+    const updProy=p=>({...p,estado,fin:hoy,notaCierre:notaCierre.trim()});
+    setProyectos(pp=>pp.map(p=>p.id===proyId?updProy(p):p));
+    if(sel?.id===proyId){const up=updProy(sel);setSel(up);fbEscribir("proyectos",proyId,up);}
+    setShowCierre(null);setNotaCierre("");
   };
 
   const activos=proyectos.filter(p=>p.estado==="activo").length;
@@ -5181,25 +5231,160 @@ function Proyectos({usuario}){
         </Card>
 
         {/* Hitos */}
+        {/* Banner cierre */}
+        {(sel.estado==="cerrado_exito"||sel.estado==="cerrado_perdido")&&(
+          <div style={{background:sel.estado==="cerrado_exito"?T.greenL:"#FEF2F2",borderRadius:12,
+            padding:"14px 16px",marginBottom:16,
+            border:"1.5px solid "+(sel.estado==="cerrado_exito"?T.green:T.red)}}>
+            <p style={{margin:"0 0 4px",fontSize:15,fontWeight:800,
+              color:sel.estado==="cerrado_exito"?T.green:T.red}}>
+              {sel.estado==="cerrado_exito"?"✅ Proyecto cerrado con éxito":"❌ Proyecto cerrado sin éxito"}
+            </p>
+            {sel.fin&&<p style={{margin:"0 0 8px",fontSize:11,color:T.muted}}>📅 Fecha cierre: {sel.fin}</p>}
+            {sel.notaCierre&&(
+              <div style={{background:"rgba(255,255,255,.7)",borderRadius:8,padding:"10px 12px",
+                borderLeft:"3px solid "+(sel.estado==="cerrado_exito"?T.green:T.red)}}>
+                <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Conclusión</p>
+                <p style={{margin:0,fontSize:13,color:"#0F172A",lineHeight:1.6}}>{sel.notaCierre}</p>
+              </div>
+            )}
+          </div>
+        )}
+
         <p style={{margin:"0 0 10px",fontSize:13,fontWeight:800,color:T.text}}>📍 Hitos del proyecto</p>
-        {sel.hitos.length===0?(
+        {(sel.hitos||[]).length===0?(
           <div style={{textAlign:"center",padding:24,color:T.muted,background:T.white,borderRadius:13,border:`1px solid ${T.border}`}}>
             <span style={{fontSize:32,display:"block",marginBottom:6}}>📭</span>
             <p style={{margin:0}}>Sin hitos definidos</p>
           </div>
-        ):sel.hitos.map((h,i)=>(
-          <div key={i} onClick={()=>toggleHito(sel.id,i)}
-            style={{display:"flex",gap:12,alignItems:"center",padding:"13px 16px",borderRadius:12,
+        ):(sel.hitos||[]).map((h,realIdx)=>(
+          <div key={realIdx} style={{display:"flex",gap:12,alignItems:"flex-start",padding:"13px 16px",borderRadius:12,
               border:`2px solid ${h.hecho?T.green+"55":T.border}`,background:h.hecho?T.greenL:T.white,
-              marginBottom:8,cursor:"pointer",transition:"all .15s"}}>
-            <span style={{fontSize:22,flexShrink:0}}>{h.hecho?"✅":"⭕"}</span>
+              marginBottom:8,transition:"all .15s"}}>
+            <button onClick={()=>toggleHito(sel.id,realIdx)}
+              style={{background:"none",border:"none",cursor:"pointer",padding:0,fontSize:22,flexShrink:0,marginTop:2}}>
+              {h.hecho?"✅":"⭕"}
+            </button>
             <div style={{flex:1}}>
-              <p style={{margin:0,fontSize:13,fontWeight:h.hecho?600:700,color:h.hecho?T.muted:T.text,
+              <p style={{margin:"0 0 3px",fontSize:13,fontWeight:h.hecho?600:700,color:h.hecho?T.muted:T.text,
                 textDecoration:h.hecho?"line-through":"none"}}>{h.nombre}</p>
-              <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>Fecha: {h.fecha}</p>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                {h.fecha&&<span style={{fontSize:11,color:T.muted}}>📅 {h.fecha.includes("-")?new Date(h.fecha).toLocaleDateString("es-ES"):h.fecha}</span>}
+                {h.responsable&&(()=>{const u=USUARIOS.find(x=>x.id===h.responsable);return<span style={{fontSize:11,color:T.blue,fontWeight:600}}>👤 {u?u.icon+" "+u.nombre:h.responsable}</span>;})()}
+                {h.nota&&<span style={{fontSize:11,color:T.muted,fontStyle:"italic"}}>{h.nota}</span>}
+                {h.hecho&&h.fechaHecho&&<span style={{fontSize:11,color:T.green,fontWeight:600}}>✅ {h.fechaHecho}</span>}
+              </div>
             </div>
+            {!h.hecho&&(
+              <button onClick={()=>toggleHito(sel.id,realIdx)}
+                style={{padding:"5px 12px",borderRadius:8,border:"none",flexShrink:0,
+                  background:T.green,color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                ✅ Completar
+              </button>
+            )}
           </div>
         ))}
+
+        {/* Formulario nuevo hito */}
+        {sel.estado==="activo"&&(
+        <div style={{background:"#F8FAFC",borderRadius:12,padding:12,marginBottom:16,border:"1px dashed "+T.border}}>
+          <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>+ Nuevo hito</p>
+          <input value={nuevoHito.nombre} onChange={e=>setNuevoHito(f=>({...f,nombre:e.target.value}))}
+            placeholder="Descripción del hito *"
+            style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1.5px solid "+T.border,
+              fontSize:13,outline:"none",boxSizing:"border-box",fontFamily:"inherit",marginBottom:7}}/>
+          <div style={{display:"flex",gap:7,marginBottom:7}}>
+            <div style={{flex:1}}>
+              <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Fecha objetivo</p>
+              <input type="date" value={nuevoHito.fecha} onChange={e=>setNuevoHito(f=>({...f,fecha:e.target.value}))}
+                style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,
+                  fontSize:12,outline:"none",boxSizing:"border-box",fontFamily:"inherit"}}/>
+            </div>
+            <div style={{flex:1}}>
+              <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Departamento / Responsable</p>
+              {(()=>{
+                const comercialId=sel.responsableComercial||sel.agente||sel.responsable;
+                const comercial=USUARIOS.find(u=>u.id===comercialId);
+                return(
+                <select value={nuevoHito.responsable} onChange={e=>setNuevoHito(f=>({...f,responsable:e.target.value}))}
+                  style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,
+                    fontSize:12,outline:"none",boxSizing:"border-box",fontFamily:"inherit",background:"#fff"}}>
+                  <option value="">Sin asignar</option>
+                  {comercial&&<optgroup label="Comercial"><option value={comercial.id}>{comercial.icon} {comercial.nombre}</option></optgroup>}
+                  <optgroup label="Dirección">
+                    {USUARIOS.filter(u=>["jefe","director","ceo"].includes(u.rol)).map(u=>(
+                      <option key={u.id} value={u.id}>{u.icon} {u.nombre}</option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="Departamentos">
+                    {[{k:"calidad",l:"🔬 Calidad"},{k:"id",l:"I+D"},{k:"produccion",l:"🏭 Producción"},{k:"direccion",l:"📊 Dirección"}].map(d=>(
+                      <option key={d.k} value={d.k}>{d.l}</option>
+                    ))}
+                  </optgroup>
+                </select>
+                );
+              })()}
+            </div>
+          </div>
+          <input value={nuevoHito.nota||""} onChange={e=>setNuevoHito(f=>({...f,nota:e.target.value}))}
+            placeholder="Nota del hito (opcional)"
+            style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,
+              fontSize:12,outline:"none",boxSizing:"border-box",fontFamily:"inherit",marginBottom:7}}/>
+          <button onClick={()=>addHito(sel.id)} disabled={!nuevoHito.nombre.trim()}
+            style={{width:"100%",padding:"9px",borderRadius:8,border:"none",fontSize:12,fontWeight:700,cursor:"pointer",
+              background:nuevoHito.nombre.trim()?T.navy:"#E2E8F0",
+              color:nuevoHito.nombre.trim()?"#fff":"#94A3B8"}}>
+            ✅ Añadir hito
+          </button>
+        </div>)}
+
+        {/* Botones cierre */}
+        {(esJefeOmas||(sel.responsableComercial===usuario.id||sel.agente===usuario.id||sel.responsable===usuario.id))&&sel.estado==="activo"&&(
+          <div style={{marginTop:8,marginBottom:16}}>
+            {!showCierre&&(
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={()=>{setShowCierre("exito");setNotaCierre("");}}
+                  style={{flex:1,padding:"11px",borderRadius:10,border:"1.5px solid "+T.green,
+                    background:T.greenL,color:T.green,fontWeight:700,fontSize:13,cursor:"pointer"}}>
+                  ✅ Cerrar — Éxito
+                </button>
+                <button onClick={()=>{setShowCierre("perdido");setNotaCierre("");}}
+                  style={{flex:1,padding:"11px",borderRadius:10,
+                    border:"1.5px solid "+T.red,background:"#FEF2F2",
+                    color:T.red,fontWeight:700,fontSize:13,cursor:"pointer"}}>
+                  ❌ Cerrar sin éxito
+                </button>
+              </div>
+            )}
+            {showCierre&&(
+              <div style={{background:"#fff",borderRadius:14,padding:16,
+                border:"1.5px solid "+(showCierre==="exito"?T.green:T.red)}}>
+                <p style={{margin:"0 0 10px",fontSize:14,fontWeight:800,
+                  color:showCierre==="exito"?T.green:T.red}}>
+                  {showCierre==="exito"?"✅ Cerrar con éxito":"❌ Cerrar sin éxito"}
+                </p>
+                <textarea value={notaCierre} onChange={e=>setNotaCierre(e.target.value)} rows={4}
+                  placeholder={showCierre==="exito"?"Resultado, pedido obtenido, cliente satisfecho...":"Por qué no se cerró: precio, competencia, timing..."}
+                  style={{width:"100%",padding:"10px 12px",borderRadius:9,border:"1.5px solid "+T.border,
+                    fontSize:13,outline:"none",boxSizing:"border-box",resize:"none",fontFamily:"inherit",marginBottom:10}}/>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>{setShowCierre(null);setNotaCierre("");}}
+                    style={{flex:1,padding:"10px",borderRadius:9,border:"1px solid "+T.border,
+                      background:"#fff",color:T.muted,fontSize:13,fontWeight:600,cursor:"pointer"}}>
+                    Cancelar
+                  </button>
+                  <button onClick={()=>{if(!notaCierre.trim()){alert("Escribe el resultado antes de cerrar");return;}cerrarProyecto(sel.id,showCierre==="exito");}}
+                    disabled={!notaCierre.trim()}
+                    style={{flex:2,padding:"10px",borderRadius:9,border:"none",
+                      background:notaCierre.trim()?(showCierre==="exito"?T.green:T.red):"#E2E8F0",
+                      color:notaCierre.trim()?"#fff":"#94A3B8",fontWeight:700,fontSize:13,cursor:"pointer"}}>
+                    Confirmar cierre →
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Equipo */}
         <p style={{margin:"16px 0 8px",fontSize:13,fontWeight:800,color:T.text}}>👥 Equipo</p>
