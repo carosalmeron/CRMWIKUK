@@ -671,6 +671,9 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB}){
             note={`${mbAnual>=mbAnualObj?"+":""}${(mbAnual-mbAnualObj).toFixed(1)}pp vs obj.`}/>
         </div>
 
+        {/* — Hitos de proyecto asignados — */}
+        <HitosProyectoWidget usuario={usuario} onNav={onNav}/>
+
         {/* — 3. Acciones urgentes — */}
         <TareasWidget onNav={onNav} usuario={usuario}/>
 
@@ -3927,6 +3930,105 @@ const TAREAS_SEED = [
 ];
 
 // Widget compacto para dashboards
+function HitosProyectoWidget({usuario, onNav}){
+  const [hitosAsig, setHitosAsig] = React.useState([]);
+
+  React.useEffect(()=>{
+    fbLeer("proyectos").then(proyectos=>{
+      const miId=usuario.id;
+      const miGrupo=(usuario.grupoAgente||"").toLowerCase();
+      const result=[];
+      proyectos.filter(p=>p.estado==="activo").forEach(p=>{
+        (p.hitos||[]).forEach((h,i)=>{
+          if(!h.hecho && h.responsable && (
+            h.responsable===miId ||
+            h.responsable===miGrupo ||
+            h.responsable===usuario.grupoAgente
+          )){
+            result.push({...h,proyectoId:p.id,proyectoNombre:p.nombre,hitoIdx:i});
+          }
+        });
+      });
+      setHitosAsig(result);
+    }).catch(()=>{});
+  },[usuario.id]);
+
+  if(hitosAsig.length===0) return null;
+
+  return(
+    <div style={{marginBottom:16}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <p style={{margin:0,fontSize:13,fontWeight:800,color:"#0F172A"}}>
+          📍 Mis hitos de proyecto
+          <span style={{marginLeft:8,background:"#7C3AED",color:"#fff",
+            fontSize:10,fontWeight:800,borderRadius:99,padding:"2px 8px"}}>
+            {hitosAsig.length}
+          </span>
+        </p>
+        <button onClick={()=>onNav("proyectos")}
+          style={{background:"none",border:"none",fontSize:12,color:"#7C3AED",
+            fontWeight:600,cursor:"pointer"}}>Ver proyectos →</button>
+      </div>
+      {hitosAsig.map((h,i)=>{
+        const vence=h.fecha?new Date(h.fecha.split("/").reverse().join("-")):null;
+        const hoy=new Date();
+        const diasRestantes=vence?Math.ceil((vence-hoy)/(1000*60*60*24)):null;
+        const urgente=diasRestantes!==null&&diasRestantes<=3;
+        return(
+          <div key={i}
+            style={{background:"#fff",borderRadius:12,padding:"12px 14px",marginBottom:8,
+              border:`1.5px solid ${urgente?"#EF4444":"#E9D5FF"}`,
+              borderLeft:`4px solid ${urgente?"#EF4444":"#7C3AED"}`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+              <div style={{flex:1,minWidth:0,cursor:"pointer"}} onClick={()=>onNav("proyectos")}>
+                <p style={{margin:"0 0 2px",fontSize:13,fontWeight:700,color:"#0F172A",
+                  overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                  {urgente?"🔴 ":""}{h.nombre}
+                </p>
+                <p style={{margin:0,fontSize:11,color:"#64748B"}}>
+                  📁 {h.proyectoNombre}
+                </p>
+              </div>
+              <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:5,flexShrink:0}}>
+                {h.fecha&&(
+                  <span style={{fontSize:11,fontWeight:700,
+                    color:urgente?"#EF4444":"#7C3AED",
+                    background:urgente?"#FEF2F2":"#F5F3FF",
+                    borderRadius:6,padding:"2px 8px"}}>
+                    {diasRestantes!==null
+                      ?diasRestantes<0?"Vencido":diasRestantes===0?"Hoy":diasRestantes===1?"Mañana":`${diasRestantes}d`
+                      :h.fecha}
+                  </span>
+                )}
+                <button onClick={()=>{
+                  const hoy2=new Date().toLocaleDateString("es-ES");
+                  fbLeer("proyectos").then(proyectos=>{
+                    const proy=proyectos.find(p=>p.id===h.proyectoId);
+                    if(!proy) return;
+                    const hitos=(proy.hitos||[]).map((x,idx)=>
+                      idx===h.hitoIdx?{...x,hecho:true,fechaHecho:hoy2}:x
+                    );
+                    const hechos2=hitos.filter(x=>x.hecho).length;
+                    const progreso=Math.round(hechos2/hitos.length*100);
+                    const updated={...proy,hitos,progreso};
+                    fbEscribir("proyectos",proy.id,updated).then(()=>{
+                      setHitosAsig(prev=>prev.filter((_,j)=>j!==i));
+                    });
+                  });
+                }}
+                  style={{padding:"4px 10px",borderRadius:7,border:"none",
+                    background:"#22C55E",color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                  ✅ Completar
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function TareasWidget({ onNav, usuario }) {
   const [tareas, setTareas] = useState([]);
   const [cargando, setCargando] = useState(true);
@@ -5297,10 +5399,37 @@ function Proyectos({usuario}){
 
   const addHito=(proyId)=>{
     if(!nuevoHito.nombre.trim()) return;
+    const hoy=new Date().toLocaleDateString("es-ES");
     const hito={nombre:nuevoHito.nombre.trim(),fecha:nuevoHito.fecha,responsable:nuevoHito.responsable,hecho:false,fechaHecho:""};
     const updProy=p=>({...p,hitos:[...(p.hitos||[]),hito]});
     setProyectos(pp=>pp.map(p=>p.id===proyId?updProy(p):p));
     if(sel?.id===proyId){const up=updProy(sel);setSel(up);fbEscribir("proyectos",proyId,up);}
+
+    // Auto-crear tarea para el responsable asignado
+    if(nuevoHito.responsable){
+      const resp=USUARIOS.find(u=>u.id===nuevoHito.responsable);
+      const DEPTOS_MAP={calidad:"🔬 Calidad",id:"⚗️ I+D",produccion:"🏭 Producción",direccion:"📊 Dirección"};
+      const respNombre=resp?resp.nombre:(DEPTOS_MAP[nuevoHito.responsable]||nuevoHito.responsable);
+      const tareaId="hito_tsk_"+Date.now();
+      const tarea={
+        id:tareaId,
+        titulo:"📍 Hito: "+nuevoHito.nombre.trim(),
+        descripcion:"Hito del proyecto: "+(sel?.nombre||proyId),
+        tipo:"proyecto",
+        prioridad:"normal",
+        estado:"pendiente",
+        agente:nuevoHito.responsable,
+        agenteNombre:respNombre,
+        creadaPor:usuario.id,
+        creadaPorNombre:usuario.nombre,
+        creadaEn:hoy,
+        vence:nuevoHito.fecha||"",
+        proyectoId:proyId,
+        proyectoNombre:sel?.nombre||"",
+        esHito:true,
+      };
+      fbEscribir("tareas",tareaId,tarea);
+    }
     setNuevoHito({nombre:"",fecha:"",responsable:""});
   };
 
@@ -5343,7 +5472,8 @@ function Proyectos({usuario}){
   // Detalle proyecto
   if(sel){
     const tipo=TIPOS[sel.tipo]||TIPOS.otro;
-    const hechos=(sel.hitos||[]).filter(h=>h.hecho).length;
+    const hitosValidos=(sel.hitos||[]).filter(h=>h.nombre||h.titulo||h.descripcion);
+  const hechos=hitosValidos.filter(h=>h.hecho).length;
     return(
       <div style={{padding:"16px 16px 100px"}}>
         <BackBar label="Volver" onBack={()=>setSel(null)}/>
@@ -5372,7 +5502,7 @@ function Proyectos({usuario}){
           <div style={{height:8,borderRadius:99,background:T.border}}>
             <div style={{height:"100%",width:`${sel.progreso}%`,background:sel.progreso===100?T.green:tipo.color,borderRadius:99,transition:"width .4s"}}/>
           </div>
-          <p style={{margin:"6px 0 0",fontSize:11,color:T.muted}}>{hechos}/{sel.hitos.length} hitos completados · Hasta {sel.fin}</p>
+          <p style={{margin:"6px 0 0",fontSize:11,color:T.muted}}>{hechos}/{hitosValidos.length} hitos completados · Hasta {sel.fin}</p>
         </Card>
 
         {/* Hitos */}
@@ -5382,7 +5512,7 @@ function Proyectos({usuario}){
             <span style={{fontSize:32,display:"block",marginBottom:6}}>📭</span>
             <p style={{margin:0}}>Sin hitos definidos</p>
           </div>
-        ):(sel.hitos||[]).map((h,i)=>(
+        ):(sel.hitos||[]).filter(h=>h.nombre||h.titulo||h.descripcion).map((h,i)=>(
           <div key={i} style={{display:"flex",gap:12,alignItems:"flex-start",padding:"13px 16px",borderRadius:12,
               border:`2px solid ${h.hecho?T.green+"55":T.border}`,background:h.hecho?T.greenL:T.white,
               marginBottom:8,transition:"all .15s"}}>
@@ -5441,10 +5571,9 @@ function Proyectos({usuario}){
                     ))}
                   </optgroup>
                   <optgroup label="Departamentos">
-                    <option value="calidad">🔬 Calidad</option>
-                    <option value="id">⚗️ I+D</option>
-                    <option value="produccion">🏭 Producción</option>
-                    <option value="direccion">📊 Dirección</option>
+                    {DEPTOS_PROY.map(d=>(
+                      <option key={d.k} value={d.k}>{d.icon} {d.label}</option>
+                    ))}
                   </optgroup>
                 </select>
                 );
