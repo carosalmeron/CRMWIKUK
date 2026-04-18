@@ -4224,7 +4224,7 @@ function TareasWidget({ onNav, usuario }) {
 }
 
 // Sección completa de gestión de tareas
-function GestorTareas({ usuario }) {
+function GestorTareas({ usuario, clientesFB }) {
   const esCeo      = usuario?.rol === "ceo";
   const esDir      = usuario?.rol === "director";
   const esJefe     = usuario?.rol === "jefe";
@@ -4568,10 +4568,22 @@ function GestorTareas({ usuario }) {
               value={form.cliente}
               onChange={v=>upd("cliente",v)}
               placeholder="🔍 Buscar cliente..."
-              suggestions={(window._clientesFB||[])
+              suggestions={(clientesFB||window._clientesFB||[])
                 .filter(c=>{const n=(c.nombre||c.NOMBRE||"").toLowerCase();return form.cliente.length>=2&&n.includes(form.cliente.toLowerCase());})
-                .slice(0,8).map(c=>({label:c.nombre||c.NOMBRE,sub:c.id,tipo:"cliente"}))}
-              onSelect={s=>upd("cliente",s.label)}
+                .slice(0,8).map(c=>{
+                  // Buscar al agente dueño del cliente
+                  const grupoAg=(c.grupoAgente||c.GRUPOAGENTE||"").toLowerCase();
+                  const ag=USUARIOS.find(u=>(u.grupoAgente||"").toLowerCase()===grupoAg||u.id.toLowerCase()===grupoAg);
+                  const subStr=ag?`${c.id||""} · 👤 ${ag.nombre}`:(c.id||"");
+                  return {label:c.nombre||c.NOMBRE,sub:subStr,tipo:"cliente",obj:{...c,_agenteId:ag?.id}};
+                })}
+              onSelect={s=>{
+                upd("cliente",s.label);
+                // Auto-asignar agente del cliente (solo si jefe/director y no hay ya uno)
+                if(esJefeOmas&&s.obj?._agenteId){
+                  upd("agenteId",s.obj._agenteId);
+                }
+              }}
             />
             <textarea style={{...inp,minHeight:56,resize:"vertical"}} placeholder="Descripción / notas" value={form.descripcion} onChange={e=>upd("descripcion",e.target.value)}/>
             <div style={{display:"flex",gap:8}}>
@@ -7905,36 +7917,33 @@ function App(props){
   // Firebase usa grupoAgente (= catalogoVendedor del portal, ej: "CARLOSG", "DAVIDMAG")
   const getClientesPara=(agenteId)=>{
     if(clientesDB){
-      // Obtener catalogoVendedor — 3 fuentes en orden de prioridad:
-      // 1. URL hash: crm_grupo_consolidado.html#crmId|CARLOSG
+      // CEO/Director: todos los clientes (prioridad máxima)
+      if(["director","ceo"].includes(usuario.rol)&&clientesDB._todos){
+        return clientesDB._todos;
+      }
+      // Jefe: todos los clientes de su equipo
+      if(usuario.rol==="jefe"&&usuario.equipo&&clientesDB._todos){
+        const porEquipo=clientesDB._todos.filter(c=>c.equipo===usuario.equipo||(c.EQUIPO||"").toUpperCase()===usuario.equipo.toUpperCase());
+        if(porEquipo.length>0) return porEquipo;
+        return clientesDB._todos; // fallback: todos si no hay campo equipo
+      }
+      // Agente: obtener catalogoVendedor
       let catalogoVendedor=null;
       try{
         const hash=decodeURIComponent(window.location.hash.replace('#',''));
         if(hash.includes('|')) catalogoVendedor=hash.split('|')[1];
       }catch(e){}
-      // 2. localStorage (guardado por el portal)
       if(!catalogoVendedor){
         try{
           const pu=JSON.parse(localStorage.getItem('gc_portal_user')||'{}');
           catalogoVendedor=pu.catalogoVendedor||null;
         }catch(e){}
       }
-
       if(catalogoVendedor&&clientesDB._porGrupo&&clientesDB._porGrupo[catalogoVendedor]){
         return clientesDB._porGrupo[catalogoVendedor];
       }
-      // 3. Fallback: buscar por agente ID directo
       if(clientesDB._porAgente&&clientesDB._porAgente[agenteId]){
         return clientesDB._porAgente[agenteId];
-      }
-      // 4. Fallback: filtrar por equipo del usuario
-      if(usuario.equipo&&clientesDB._todos){
-        const porEquipo=clientesDB._todos.filter(c=>c.equipo===usuario.equipo);
-        if(porEquipo.length>0) return porEquipo;
-      }
-      // 5. CEO/Director: todos los clientes
-      if(["director","ceo"].includes(usuario.rol)&&clientesDB._todos){
-        return clientesDB._todos;
       }
     }
     return CLIENTES_POR_AGENTE[agenteId]||[];
@@ -8333,7 +8342,7 @@ function App(props){
 
         {/* Secciones nuevas */}
         {section==="historial"&& <HistorialSemanal usuario={usuario}/> }
-        {section==="tareas"&&    <GestorTareas usuario={usuario}/> }
+        {section==="tareas"&&    <GestorTareas usuario={usuario} clientesFB={misClientesFB}/> }
         {section==="ia"&&(
           <AsistenteIA
             usuario={usuario}
