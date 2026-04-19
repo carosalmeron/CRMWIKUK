@@ -7871,6 +7871,330 @@ function HistorialTab({visitas,muestras,estrategia,incidencias=[],resultados}){
 
 
 // ─── APP PRINCIPAL ────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// INFORME SEMANAL DEL JEFE — Resumen ejecutivo agregado
+// ═══════════════════════════════════════════════════════════════════
+function InformeJefe({usuario, oportunidadesDB}){
+  const [semana,setSemana]=useState(()=>{
+    const now=new Date();
+    const start=new Date(now.getFullYear(),0,1);
+    const d=Math.floor((now-start)/86400000);
+    return Math.ceil((d+start.getDay()+1)/7);
+  });
+  const [informes,setInformes]=useState([]);
+  const [visitas,setVisitas]=useState([]);
+  const [muestras,setMuestras]=useState([]);
+  const [tareas,setTareas]=useState([]);
+  const [proyectos,setProyectos]=useState([]);
+  const [incidencias,setIncidencias]=useState([]);
+  const [cargando,setCargando]=useState(true);
+  const [expandido,setExpandido]=useState({});
+
+  const esDir=["director","ceo"].includes(usuario.rol);
+  const miEquipo=usuario.equipo;
+  const agentesVis=USUARIOS.filter(u=>u.rol==="agente"&&(esDir||u.equipo===miEquipo));
+
+  React.useEffect(()=>{
+    Promise.all([
+      fbLeer("informes").catch(()=>[]),
+      fbLeer("visitas").catch(()=>[]),
+      fbLeer("muestras").catch(()=>[]),
+      fbLeer("tareas").catch(()=>[]),
+      fbLeer("proyectos").catch(()=>[]),
+      fbLeer("incidencias").catch(()=>[]),
+    ]).then(([inf,vis,mue,tar,pro,inc])=>{
+      setInformes(inf||[]);
+      setVisitas(vis||[]);
+      setMuestras(mue||[]);
+      setTareas(tar||[]);
+      setProyectos(pro||[]);
+      setIncidencias(inc||[]);
+      setCargando(false);
+    });
+  },[]);
+
+  // Filtrar solo datos del equipo
+  const pertenece=(item)=>{
+    const aid=item.agente||item.agenteId||item.agenteNombre||"";
+    if(esDir) return true;
+    return agentesVis.some(a=>
+      a.id===aid||a.nombre===aid||
+      (a.grupoAgente&&a.grupoAgente.toLowerCase()===String(aid).toLowerCase())
+    );
+  };
+
+  const infsSem=informes.filter(i=>Number(i.semana)===semana&&pertenece(i));
+  const visSem=visitas.filter(v=>pertenece(v));
+  const muesSem=muestras.filter(m=>pertenece(m));
+  const tareasSem=tareas.filter(t=>!t.eliminada&&pertenece(t));
+  const opsSem=(oportunidadesDB||OPORTUNIDADES_SEED).filter(o=>{
+    const ag=USUARIOS.find(u=>u.id===(o.agente||o.agenteId));
+    if(esDir) return true;
+    return ag?.equipo===miEquipo;
+  });
+
+  // ── 1. VENTAS ──
+  const totVentas=infsSem.reduce((s,i)=>s+(Number(i.ventas)||Number(i.venta)||0),0);
+  const porEquipo=["WIKUK","INTERKEY"].map(eq=>{
+    const agEq=agentesVis.filter(a=>a.equipo===eq);
+    const vEq=infsSem.filter(i=>agEq.some(a=>a.id===(i.agente||i.agenteId))).reduce((s,i)=>s+(Number(i.ventas)||Number(i.venta)||0),0);
+    return {eq,ventas:vEq,n:agEq.length};
+  });
+
+  // ── 2. DETALLES POR VENDEDOR ──
+  const porVendedor=agentesVis.map(a=>{
+    const infsA=infsSem.filter(i=>i.agente===a.id||i.agenteId===a.id);
+    const visA=visSem.filter(v=>v.agente===a.id||v.agenteId===a.id);
+    const muesA=muesSem.filter(m=>m.agente===a.id);
+    const opsA=opsSem.filter(o=>o.agente===a.id||o.agenteId===a.id);
+    const vRaw=infsA.reduce((s,i)=>s+(Number(i.ventas)||Number(i.venta)||0),0);
+    return {agente:a,visitas:visA.length,muestras:muesA.length,ventas:vRaw,ops:opsA.length};
+  }).filter(v=>v.visitas>0||v.ventas>0||v.muestras>0);
+
+  // ── 3. FERIAS / EVENTOS ──
+  const ferias=visSem.filter(v=>v.tipo==="feria"||v.tipo==="evento"||v.tipo==="reunion");
+
+  // ── 4. MUESTRAS ──
+  const muestEnviadas=muesSem.filter(m=>m.estado==="enviada"||m.estado==="en_curso");
+  const muestCerradas=muesSem.filter(m=>m.estado==="cerrada"||m.estado==="pedido"||m.resultado==="pedido");
+
+  // ── 5. PROYECTOS ──
+  const proyCerrados=proyectos.filter(p=>p.estado==="cerrado_exito"||p.estado==="cerrado_perdido");
+  const proyConHitos=proyectos.filter(p=>p.estado==="activo"&&(p.hitos||[]).length>0);
+  const hitosSemana=proyConHitos.flatMap(p=>(p.hitos||[]).map(h=>({...h,proyecto:p.nombre,proyectoId:p.id}))).filter(h=>h.hecho||h.fecha);
+
+  // ── 6. OPORTUNIDADES ──
+  const opsAbi=opsSem.filter(o=>!["cerrada_ganada","cerrada_perdida","ganada","perdida"].some(e=>o.etapa===e||o.estado===e));
+  const opsGan=opsSem.filter(o=>o.etapa==="cerrada_ganada"||o.estado==="ganada");
+  const opsPer=opsSem.filter(o=>o.etapa==="cerrada_perdida"||o.estado==="perdida");
+  const valPipeline=opsAbi.reduce((s,o)=>s+(Number(o.valor)||0),0);
+
+  // ── 7. TAREAS ──
+  const tareasPend=tareasSem.filter(t=>t.estado==="pendiente");
+  const tareasHechas=tareasSem.filter(t=>t.estado==="hecha");
+  const tareasUrg=tareasPend.filter(t=>t.prioridad==="urgente");
+
+  const Seccion=({id,icon,titulo,kpi,color,children})=>{
+    const abierto=expandido[id]!==false;
+    return(
+      <div style={{background:"#fff",borderRadius:14,marginBottom:10,
+        border:`1px solid ${T.border}`,overflow:"hidden"}}>
+        <div onClick={()=>setExpandido(e=>({...e,[id]:!abierto}))}
+          style={{padding:"14px 16px",cursor:"pointer",display:"flex",alignItems:"center",gap:10,
+            borderLeft:`4px solid ${color||T.navy}`}}>
+          <span style={{fontSize:22}}>{icon}</span>
+          <div style={{flex:1}}>
+            <p style={{margin:0,fontSize:14,fontWeight:800,color:T.text}}>{titulo}</p>
+            {kpi&&<p style={{margin:"2px 0 0",fontSize:12,color:color||T.navy,fontWeight:700}}>{kpi}</p>}
+          </div>
+          <span style={{color:T.muted,fontSize:16,
+            transform:abierto?"rotate(90deg)":"rotate(0deg)",transition:"transform .2s"}}>›</span>
+        </div>
+        {abierto&&(
+          <div style={{padding:"0 16px 16px",borderTop:`1px solid ${T.border}`}}>
+            {children}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  if(cargando) return <div style={{padding:40,textAlign:"center",color:T.muted}}>⏳ Cargando informe…</div>;
+
+  return(
+    <div style={{padding:"16px 16px 100px"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <div>
+          <p style={{margin:0,fontSize:20,fontWeight:900,color:T.text}}>📊 Informe semanal</p>
+          <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
+            {esDir?"Todos los equipos":`Equipo ${miEquipo}`}
+          </p>
+        </div>
+        <div style={{display:"flex",gap:6,alignItems:"center"}}>
+          <button onClick={()=>setSemana(s=>s-1)} style={{padding:"6px 12px",borderRadius:8,border:`1px solid ${T.border}`,background:"#fff",cursor:"pointer",fontSize:14}}>‹</button>
+          <span style={{fontSize:13,fontWeight:700,color:T.text,minWidth:80,textAlign:"center"}}>Semana {semana}</span>
+          <button onClick={()=>setSemana(s=>s+1)} style={{padding:"6px 12px",borderRadius:8,border:`1px solid ${T.border}`,background:"#fff",cursor:"pointer",fontSize:14}}>›</button>
+        </div>
+      </div>
+
+      {/* ── 1. VENTAS ── */}
+      <Seccion id="ventas" icon="💰" titulo="Ventas de la semana"
+        kpi={fmt(totVentas)+"€  ·  "+infsSem.length+" informes"} color={T.green}>
+        {porEquipo.some(e=>e.ventas>0)?porEquipo.map(e=>(
+          <div key={e.eq} style={{padding:"10px 12px",background:"#F8FAFC",borderRadius:10,marginBottom:8,
+            display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <p style={{margin:0,fontSize:13,fontWeight:700,color:e.eq==="WIKUK"?T.green:T.amber}}>{e.eq}</p>
+              <p style={{margin:0,fontSize:10,color:T.muted}}>{e.n} comerciales</p>
+            </div>
+            <p style={{margin:0,fontSize:16,fontWeight:900,color:T.text}}>{fmt(e.ventas)}€</p>
+          </div>
+        )):<p style={{margin:"12px 0",fontSize:12,color:T.muted,textAlign:"center"}}>Sin informes enviados esta semana</p>}
+      </Seccion>
+
+      {/* ── 2. DETALLES POR VENDEDOR ── */}
+      <Seccion id="vendedores" icon="👥" titulo="Detalle por vendedor"
+        kpi={porVendedor.length+" con actividad"} color={T.blue}>
+        {porVendedor.length>0?porVendedor.map(v=>(
+          <div key={v.agente.id} style={{padding:"10px 12px",background:"#F8FAFC",borderRadius:10,marginBottom:8}}>
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
+              <span style={{fontSize:18}}>{v.agente.icon}</span>
+              <div style={{flex:1}}>
+                <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{v.agente.nombre}</p>
+                <p style={{margin:0,fontSize:10,color:T.muted}}>{v.agente.equipo}</p>
+              </div>
+              <p style={{margin:0,fontSize:15,fontWeight:900,color:T.green}}>{fmt(v.ventas)}€</p>
+            </div>
+            <div style={{display:"flex",gap:4,fontSize:10}}>
+              <span style={{flex:1,padding:"3px 6px",background:"#EFF6FF",color:T.blue,borderRadius:5,textAlign:"center",fontWeight:700}}>👁 {v.visitas} vis</span>
+              <span style={{flex:1,padding:"3px 6px",background:"#F5F3FF",color:T.purple,borderRadius:5,textAlign:"center",fontWeight:700}}>📦 {v.muestras} mu</span>
+              <span style={{flex:1,padding:"3px 6px",background:"#F0F9FF",color:"#0EA5E9",borderRadius:5,textAlign:"center",fontWeight:700}}>💼 {v.ops} ops</span>
+            </div>
+          </div>
+        )):<p style={{margin:"12px 0",fontSize:12,color:T.muted,textAlign:"center"}}>Sin actividad registrada</p>}
+      </Seccion>
+
+      {/* ── 3. FERIAS / EVENTOS ── */}
+      <Seccion id="ferias" icon="🏛" titulo="Ferias, eventos y reuniones"
+        kpi={ferias.length+" este período"} color={T.amber}>
+        {ferias.length>0?ferias.slice(0,10).map((f,i)=>(
+          <div key={i} style={{padding:"8px 12px",borderLeft:`3px solid ${T.amber}`,background:"#FFFBEB",
+            borderRadius:"0 8px 8px 0",marginBottom:6}}>
+            <p style={{margin:"0 0 2px",fontSize:12,fontWeight:700,color:T.text}}>
+              {f.tipo==="feria"?"🏛":f.tipo==="evento"?"🎟":"💼"} {f.clienteNombre||f.titulo||"—"}
+            </p>
+            <p style={{margin:0,fontSize:11,color:T.muted}}>{f.fecha||f.creadaEn} · {f.agenteNombre||""}</p>
+            {f.notas&&<p style={{margin:"4px 0 0",fontSize:11,color:"#92400E",fontStyle:"italic"}}>{f.notas.slice(0,120)}</p>}
+          </div>
+        )):<p style={{margin:"12px 0",fontSize:12,color:T.muted,textAlign:"center"}}>Sin ferias ni eventos registrados</p>}
+      </Seccion>
+
+      {/* ── 4. MUESTRAS ── */}
+      <Seccion id="muestras" icon="📦" titulo="Muestras"
+        kpi={muestEnviadas.length+" enviadas · "+muestCerradas.length+" cerradas"} color={T.purple}>
+        <div style={{display:"flex",gap:8,marginBottom:10}}>
+          <div style={{flex:1,padding:"10px",background:"#F5F3FF",borderRadius:10,textAlign:"center"}}>
+            <p style={{margin:0,fontSize:22,fontWeight:900,color:T.purple}}>{muestEnviadas.length}</p>
+            <p style={{margin:0,fontSize:10,color:T.muted}}>Enviadas</p>
+          </div>
+          <div style={{flex:1,padding:"10px",background:"#F0FDF4",borderRadius:10,textAlign:"center"}}>
+            <p style={{margin:0,fontSize:22,fontWeight:900,color:T.green}}>{muestCerradas.length}</p>
+            <p style={{margin:0,fontSize:10,color:T.muted}}>Con pedido</p>
+          </div>
+        </div>
+        {muesSem.slice(0,5).map((m,i)=>(
+          <div key={i} style={{padding:"7px 10px",background:"#F8FAFC",borderRadius:8,marginBottom:5,fontSize:11}}>
+            <span style={{fontWeight:700,color:T.text}}>{m.clienteNombre||m.cliente||"—"}</span>
+            <span style={{color:T.muted}}> · {m.producto||"—"} · </span>
+            <span style={{color:m.estado==="cerrada"?T.green:T.amber,fontWeight:700}}>{m.estado||"pendiente"}</span>
+          </div>
+        ))}
+      </Seccion>
+
+      {/* ── 5. PROYECTOS ── */}
+      <Seccion id="proyectos" icon="📁" titulo="Proyectos"
+        kpi={proyConHitos.length+" activos · "+proyCerrados.length+" cerrados"} color={T.purple}>
+        {proyConHitos.length>0&&(
+          <div style={{marginBottom:10}}>
+            <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Hitos activos</p>
+            {proyConHitos.slice(0,5).map(p=>{
+              const hechos=(p.hitos||[]).filter(h=>h.hecho).length;
+              const tot=(p.hitos||[]).length;
+              const proxHito=(p.hitos||[]).find(h=>!h.hecho);
+              return(
+                <div key={p.id} style={{padding:"8px 10px",background:"#F8FAFC",borderRadius:8,marginBottom:6}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                    <span style={{fontSize:12,fontWeight:700,color:T.text}}>{p.nombre}</span>
+                    <span style={{fontSize:11,color:T.green,fontWeight:700}}>{hechos}/{tot}</span>
+                  </div>
+                  {proxHito&&<p style={{margin:0,fontSize:10,color:T.amber}}>⏳ {proxHito.nombre}{proxHito.fecha?` (${proxHito.fecha})`:""}</p>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {proyCerrados.length>0&&(
+          <div>
+            <p style={{margin:"10px 0 6px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Cerrados recientemente</p>
+            {proyCerrados.slice(0,3).map(p=>(
+              <div key={p.id} style={{padding:"6px 10px",fontSize:11,
+                background:p.estado==="cerrado_exito"?"#F0FDF4":"#FEF2F2",borderRadius:8,marginBottom:5,
+                display:"flex",justifyContent:"space-between"}}>
+                <span style={{color:T.text,fontWeight:600}}>{p.nombre}</span>
+                <span style={{color:p.estado==="cerrado_exito"?T.green:T.red,fontWeight:700}}>
+                  {p.estado==="cerrado_exito"?"✅ éxito":"❌ sin éxito"}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Seccion>
+
+      {/* ── 6. OPORTUNIDADES ── */}
+      <Seccion id="ops" icon="💼" titulo="Oportunidades"
+        kpi={opsAbi.length+" abiertas · "+fmt(valPipeline)+"€ pipeline"} color={"#0EA5E9"}>
+        <div style={{display:"flex",gap:8,marginBottom:10}}>
+          <div style={{flex:1,padding:"10px",background:"#F0F9FF",borderRadius:10,textAlign:"center"}}>
+            <p style={{margin:0,fontSize:18,fontWeight:900,color:"#0EA5E9"}}>{opsAbi.length}</p>
+            <p style={{margin:0,fontSize:10,color:T.muted}}>Abiertas</p>
+          </div>
+          <div style={{flex:1,padding:"10px",background:"#F0FDF4",borderRadius:10,textAlign:"center"}}>
+            <p style={{margin:0,fontSize:18,fontWeight:900,color:T.green}}>{opsGan.length}</p>
+            <p style={{margin:0,fontSize:10,color:T.muted}}>Ganadas</p>
+          </div>
+          <div style={{flex:1,padding:"10px",background:"#FEF2F2",borderRadius:10,textAlign:"center"}}>
+            <p style={{margin:0,fontSize:18,fontWeight:900,color:T.red}}>{opsPer.length}</p>
+            <p style={{margin:0,fontSize:10,color:T.muted}}>Perdidas</p>
+          </div>
+        </div>
+        {opsAbi.slice(0,5).map(o=>{
+          const ag=USUARIOS.find(u=>u.id===(o.agente||o.agenteId));
+          return(
+            <div key={o.id} style={{padding:"8px 10px",background:"#F8FAFC",borderRadius:8,marginBottom:5,
+              display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div style={{flex:1,minWidth:0}}>
+                <p style={{margin:0,fontSize:12,fontWeight:700,color:T.text,
+                  overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{o.cliente}</p>
+                <p style={{margin:0,fontSize:10,color:T.muted}}>{ag?.nombre||"—"} · {o.etapa}</p>
+              </div>
+              <p style={{margin:0,fontSize:13,fontWeight:800,color:"#0EA5E9"}}>{fmt(o.valor||0)}€</p>
+            </div>
+          );
+        })}
+      </Seccion>
+
+      {/* ── 7. TAREAS ── */}
+      <Seccion id="tareas" icon="📌" titulo="Tareas de la semana"
+        kpi={tareasPend.length+" pendientes · "+tareasHechas.length+" hechas"} color={T.red}>
+        <div style={{display:"flex",gap:8,marginBottom:10}}>
+          <div style={{flex:1,padding:"10px",background:"#FFFBEB",borderRadius:10,textAlign:"center"}}>
+            <p style={{margin:0,fontSize:18,fontWeight:900,color:T.amber}}>{tareasPend.length}</p>
+            <p style={{margin:0,fontSize:10,color:T.muted}}>Pendientes</p>
+          </div>
+          <div style={{flex:1,padding:"10px",background:"#FEF2F2",borderRadius:10,textAlign:"center"}}>
+            <p style={{margin:0,fontSize:18,fontWeight:900,color:T.red}}>{tareasUrg.length}</p>
+            <p style={{margin:0,fontSize:10,color:T.muted}}>Urgentes</p>
+          </div>
+          <div style={{flex:1,padding:"10px",background:"#F0FDF4",borderRadius:10,textAlign:"center"}}>
+            <p style={{margin:0,fontSize:18,fontWeight:900,color:T.green}}>{tareasHechas.length}</p>
+            <p style={{margin:0,fontSize:10,color:T.muted}}>Hechas</p>
+          </div>
+        </div>
+        {tareasUrg.slice(0,5).map(t=>(
+          <div key={t.id} style={{padding:"7px 10px",background:"#FEF2F2",borderLeft:`3px solid ${T.red}`,
+            borderRadius:"0 8px 8px 0",marginBottom:5}}>
+            <p style={{margin:0,fontSize:12,fontWeight:700,color:T.text}}>{t.titulo}</p>
+            <p style={{margin:"2px 0 0",fontSize:10,color:T.muted}}>
+              {t.clienteNombre||t.cliente||"—"} · {t.agenteNombre||"sin asignar"}
+            </p>
+          </div>
+        ))}
+      </Seccion>
+    </div>
+  );
+}
+
+
 function App(props){
   const [usuario,setUsuario]=useState(function(){
     // Auto-login desde portal: initializar directamente sin useEffect
@@ -8108,6 +8432,7 @@ function App(props){
 
   const NAV_JEFE=[
     {id:"dashboard",    icon:"📊",label:"Mi equipo",   color:usuario.color},
+    {id:"informes_hub", icon:"📋",label:"Informes",    color:T.navy},
     {id:"historial",    icon:"📅",label:"Historial",   color:T.purple},
     {id:"tareas",       icon:"📌",label:"Tareas",      color:T.red,   badge:urgCount},
     {id:"clientes_eq",  icon:"📋",label:"Clientes",    color:T.blue},
@@ -8121,6 +8446,7 @@ function App(props){
 
   const NAV_DIR=[
     {id:"dashboard",    icon:"📊",label:"Dashboard",    color:usuario.color},
+    {id:"informes_hub", icon:"📋",label:"Informes",    color:T.navy},
     {id:"historial",    icon:"📅",label:"Historial",    color:T.purple},
     {id:"tareas",       icon:"📌",label:"Tareas",       color:T.red,   badge:urgCount},
     {id:"clientes_eq",  icon:"📋",label:"Clientes",     color:T.blue},
@@ -8418,7 +8744,9 @@ function App(props){
               overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
               {section==="clientes"?"📋 Mis clientes":
                section==="clientes_eq"?"📋 Clientes del equipo":
-               section==="informe"?"📤 Informe semanal":
+               section==="informes_hub"?"📋 Informes":
+               section==="informe"?"📤 Mi informe":
+               section==="informe_jefe"?"📋 Informe ejecutivo semanal":
                section==="muestras"?"📦 Muestras":
                section==="estrategias"?"🎯 Estrategias":
                section==="oportunidades"?"💼 Oportunidades":
@@ -8436,7 +8764,46 @@ function App(props){
         {/* AGENTE */}
         {esAgente&&section==="dashboard"&&  <DashAgente usuario={usuario} onNav={setSection} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB}/>}
         {esAgente&&section==="clientes"&&   <GestorClientes usuario={usuario} actividad={actividadSemana} onActividad={onActividad} onBack={()=>setSection("dashboard")} clientesFB={misClientesFB}/>}
-        {esAgente&&section==="informe"&&    <Informe usuario={usuario} actividadSemana={actividadSemana} clientesFB={misClientesFB}/>}
+        {section==="informe"&&              <Informe usuario={usuario} actividadSemana={actividadSemana} clientesFB={misClientesFB}/>}
+        {section==="informe_jefe"&&         <InformeJefe usuario={usuario} oportunidadesDB={oportunidadesDB}/>}
+        {section==="informes_hub"&&(
+          <div style={{padding:"20px 16px"}}>
+            <p style={{margin:"0 0 4px",fontSize:20,fontWeight:900,color:T.text}}>📋 Informes</p>
+            <p style={{margin:"0 0 20px",fontSize:12,color:T.muted}}>Registra tu actividad o consulta el resumen del equipo</p>
+
+            <div onClick={()=>setSection("informe")}
+              style={{background:"#fff",borderRadius:14,padding:"20px",marginBottom:12,
+                border:`1.5px solid ${T.border}`,cursor:"pointer",
+                display:"flex",alignItems:"center",gap:14,
+                boxShadow:"0 1px 3px rgba(0,0,0,.04)"}}>
+              <div style={{width:52,height:52,borderRadius:12,background:"#EFF6FF",
+                display:"flex",alignItems:"center",justifyContent:"center",fontSize:26,flexShrink:0}}>📤</div>
+              <div style={{flex:1}}>
+                <p style={{margin:"0 0 3px",fontSize:15,fontWeight:800,color:T.text}}>Mi informe semanal</p>
+                <p style={{margin:0,fontSize:12,color:T.muted,lineHeight:1.4}}>
+                  Registra tus visitas, ferias, eventos, muestras y cierra la semana
+                </p>
+              </div>
+              <span style={{color:T.muted,fontSize:20}}>›</span>
+            </div>
+
+            <div onClick={()=>setSection("informe_jefe")}
+              style={{background:"#fff",borderRadius:14,padding:"20px",
+                border:`1.5px solid ${T.border}`,cursor:"pointer",
+                display:"flex",alignItems:"center",gap:14,
+                boxShadow:"0 1px 3px rgba(0,0,0,.04)"}}>
+              <div style={{width:52,height:52,borderRadius:12,background:"#F0FDF4",
+                display:"flex",alignItems:"center",justifyContent:"center",fontSize:26,flexShrink:0}}>📊</div>
+              <div style={{flex:1}}>
+                <p style={{margin:"0 0 3px",fontSize:15,fontWeight:800,color:T.text}}>Informe ejecutivo</p>
+                <p style={{margin:0,fontSize:12,color:T.muted,lineHeight:1.4}}>
+                  Resumen agregado del equipo: ventas, proyectos, hitos, ops y tareas
+                </p>
+              </div>
+              <span style={{color:T.muted,fontSize:20}}>›</span>
+            </div>
+          </div>
+        )}
         {esAgente&&section==="muestras"&&   <MisMuestras usuario={usuario} clientesFB={misClientesFB}/>}
 
         {/* JEFE — dashboard filtrado a su equipo */}
@@ -8505,6 +8872,7 @@ function App(props){
 function HistorialSemanal({ usuario }) {
   const esCeo      = usuario.rol === "ceo";
   const esDirector = usuario.rol === "director";
+  const esDir      = esDirector; // alias para compat
   const esJefe     = usuario.rol === "jefe";
   const esAgentRol = usuario.rol === "agente";
   const esJefeOmas = esCeo || esDirector || esJefe;
@@ -8517,6 +8885,8 @@ function HistorialSemanal({ usuario }) {
   const [semana,      setSemana]      = React.useState(SEMANA_ACTUAL);
   const [equipoSel,   setEquipoSel]   = React.useState("todos");
   const [agenteSel,   setAgenteSel]   = React.useState(null);
+  const [treeHistRootOpen, setTreeHistRootOpen] = React.useState(false);
+  const [treeHistEqOpen,   setTreeHistEqOpen]   = React.useState(null);
   const [tabSel,      setTabSel]      = React.useState("resumen");
   const [visitas,     setVisitas]     = React.useState([]);
   const [muestras,    setMuestras]    = React.useState([]);
@@ -8873,29 +9243,75 @@ function HistorialSemanal({ usuario }) {
         );
       })()}
 
-      {/* Filtro equipo + tarjetas agente (solo managers) */}
+      {/* ── Árbol jerárquico: Todos → Equipo → Vendedor (solo managers) ── */}
       {esJefeOmas&&(
         <div style={{marginBottom:14}}>
-          <div style={{display:"flex",gap:6,marginBottom:10}}>
-            {[{k:"todos",l:"🌐 Todos",c:"#0F1E2E"},{k:"WIKUK",l:"🟢 WIKUK",c:T.green},{k:"INTERKEY",l:"🟡 INTERKEY",c:T.amber}]
-              .filter(e=>esJefe?e.k==="todos"||e.k===miEquipo:true)
-              .map(e=>{
-                const eqV=visSemanaTodas.filter(v=>e.k==="todos"?true:USUARIOS.find(u=>u.id===(v.agente||v.agenteId))?.equipo===e.k);
-                const sel=equipoSel===e.k;
-                return(
-                  <button key={e.k} onClick={()=>{setEquipoSel(e.k);setAgenteSel(null);}}
-                    style={{flex:1,padding:"7px 10px",borderRadius:10,cursor:"pointer",
-                      border:"2px solid "+(sel?e.c:T.border),background:sel?e.c+"12":"#fff"}}>
-                    <span style={{fontSize:12,fontWeight:700,color:sel?e.c:T.text,display:"block"}}>{e.l}</span>
-                    <span style={{fontSize:10,color:sel?e.c:T.muted}}>{eqV.length}v</span>
-                  </button>
-                );
-              })
-            }
-          </div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-            {USUARIOS.filter(u=>u.rol==="agente"&&(esJefe?u.equipo===miEquipo:true)&&
-              (equipoSel==="todos"?true:u.equipo===equipoSel)).map(ag=>{
+          {/* Nivel 1: Todos */}
+          {(esCeo||esDir)&&(
+            <div onClick={()=>{
+                const wasSel=equipoSel==="todos"&&!agenteSel;
+                if(wasSel){
+                  setTreeHistRootOpen(o=>!o);
+                } else {
+                  setEquipoSel("todos");setAgenteSel(null);setTreeHistEqOpen(null);
+                  setTreeHistRootOpen(true);
+                }
+              }}
+              style={{background:equipoSel==="todos"&&!agenteSel?T.navy:"#fff",
+                borderRadius:11,padding:"10px 14px",cursor:"pointer",
+                border:"2px solid "+(equipoSel==="todos"&&!agenteSel?T.navy:T.border),
+                marginBottom:6,display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:18}}>🌐</span>
+              <div style={{flex:1}}>
+                <p style={{margin:0,fontSize:13,fontWeight:700,
+                  color:equipoSel==="todos"&&!agenteSel?"#fff":T.text}}>Todos los equipos</p>
+                <p style={{margin:0,fontSize:10,
+                  color:equipoSel==="todos"&&!agenteSel?"rgba(255,255,255,.65)":T.muted}}>
+                  {visSemanaTodas.length} visitas esta semana
+                </p>
+              </div>
+              {equipoSel==="todos"&&!agenteSel&&<span style={{color:"#fff",fontWeight:800,marginRight:4}}>✓</span>}
+              <span style={{color:equipoSel==="todos"&&!agenteSel?"rgba(255,255,255,.8)":T.muted,
+                fontSize:18,transform:treeHistRootOpen?"rotate(90deg)":"rotate(0deg)",
+                display:"inline-block",transition:"transform .2s"}}>›</span>
+            </div>
+          )}
+
+          {/* Nivel 2: Equipos (solo director/CEO, o directo si jefe) */}
+          {((esCeo||esDir)&&treeHistRootOpen?["WIKUK","INTERKEY"]:esJefe?[miEquipo]:[]).map(eq=>{
+            const eqColor=eq==="WIKUK"?T.green:T.amber;
+            const agEq=USUARIOS.filter(u=>u.rol==="agente"&&u.equipo===eq);
+            const vEq=visSemanaTodas.filter(v=>agEq.some(a=>a.id===(v.agente||v.agenteId)||(a.grupoAgente&&a.grupoAgente===v.agente))).length;
+            const isOpen=treeHistEqOpen===eq;
+            const isSel=equipoSel===eq&&!agenteSel;
+            return(
+              <div key={eq} style={{marginBottom:6,marginLeft:(esCeo||esDir)?12:0,
+                borderLeft:(esCeo||esDir)?"2px solid "+T.border:"none",paddingLeft:(esCeo||esDir)?10:0}}>
+                <div onClick={()=>{
+                    if(isSel){setTreeHistEqOpen(isOpen?null:eq);}
+                    else{setEquipoSel(eq);setAgenteSel(null);setTreeHistEqOpen(eq);}
+                  }}
+                  style={{background:isSel?eqColor+"15":"#fff",borderRadius:11,padding:"10px 14px",
+                    cursor:"pointer",border:"2px solid "+(isSel?eqColor:T.border),
+                    display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{width:30,height:30,borderRadius:8,background:eqColor+"20",
+                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,
+                    color:eqColor,fontWeight:800,flexShrink:0}}>{eq[0]}</div>
+                  <div style={{flex:1}}>
+                    <p style={{margin:0,fontSize:13,fontWeight:700,color:isSel?eqColor:T.text}}>{eq}</p>
+                    <p style={{margin:0,fontSize:10,color:T.muted}}>
+                      {agEq.length} comerciales · {vEq} visitas
+                    </p>
+                  </div>
+                  {isSel&&<span style={{color:eqColor,fontWeight:800}}>✓</span>}
+                  <span style={{color:isOpen?eqColor:T.muted,fontSize:16,
+                    transform:isOpen?"rotate(90deg)":"rotate(0deg)",display:"inline-block",transition:"transform .2s"}}>›</span>
+                </div>
+
+                {/* Nivel 3: Vendedores */}
+                {isOpen&&(
+                  <div style={{marginLeft:12,borderLeft:"2px solid "+eqColor+"22",paddingLeft:10,marginTop:6}}>
+                    {agEq.map(ag=>{
               const agV=visSemanaTodas.filter(v=>(v.agente||v.agenteId)===ag.id||(ag.grupoAgente&&v.agente===ag.grupoAgente));
               const agO=opsSemanaTodas.filter(o=>(o.agente||o.agenteId)===ag.id);
               const ped=agV.filter(v=>v.resultado==="pedido").length;
@@ -8938,7 +9354,11 @@ function HistorialSemanal({ usuario }) {
                 </div>
               );
             })}
-          </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
           {agenteSel&&(()=>{
             const ag=USUARIOS.find(u=>u.id===agenteSel);
             return ag?(
