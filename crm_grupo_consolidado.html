@@ -8372,6 +8372,124 @@ function MiInformeJefe({usuario, oportunidadesDB, clientesFB, onNav}){
 }
 
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Carga de objetivos/presupuesto/monetización desde Firebase.
+// - Intenta 3 colecciones candidatas (objetivos, presupuesto, monetizacion)
+// - Mapea el campo COMERCIAL (nombre en xlsx) al id CRM usando USUARIOS.grupoAgente
+// - Muta AGENTES_DATA en-place agregando por semana actual, mes actual y año
+// - Reporta progreso detallado en consola (window.F12 → Console)
+// Devuelve true si actualizó al menos un agente, false si no encontró datos.
+// ═══════════════════════════════════════════════════════════════════════════
+async function cargarObjetivosFB(){
+  const anio = new Date().getFullYear();
+  const mesAct = new Date().getMonth(); // 0-11
+  const semActual = getSemanaISO();
+
+  // Mes de una semana ISO (aprox, por el lunes de esa semana).
+  const mesDeSemana = (sem) => {
+    const jan1 = new Date(anio, 0, 1);
+    const offset = (sem - 1) * 7 * 86400000;
+    return new Date(jan1.getTime() + offset).getMonth();
+  };
+
+  // Getter defensivo: busca variantes del nombre del campo y devuelve número (0 si no existe).
+  const num = (doc, ...variants) => {
+    for (const v of variants) {
+      const raw = doc[v];
+      if (raw === undefined || raw === null || raw === '') continue;
+      const n = typeof raw === 'number' ? raw : parseFloat(String(raw).replace(/[^0-9.\-]/g,''));
+      if (!isNaN(n)) return n;
+    }
+    return 0;
+  };
+  // Getter string
+  const str = (doc, ...variants) => {
+    for (const v of variants) {
+      if (doc[v] !== undefined && doc[v] !== null) return String(doc[v]);
+    }
+    return '';
+  };
+
+  // 1. Leer de las 3 colecciones candidatas y consolidar
+  const COLECCIONES = ['objetivos','presupuesto','monetizacion'];
+  const todosLosDocs = [];
+  for (const col of COLECCIONES) {
+    try {
+      const docs = await fbLeerTodos(col);
+      console.log(`[OBJETIVOS] Colección '${col}': ${docs.length} docs encontrados`);
+      if (docs.length > 0) {
+        console.log(`[OBJETIVOS] Muestra de '${col}':`, docs[0]);
+        todosLosDocs.push(...docs.map(d => ({...d, _source: col})));
+      }
+    } catch(e) {
+      console.warn(`[OBJETIVOS] Error leyendo '${col}':`, e.message);
+    }
+  }
+
+  if (todosLosDocs.length === 0) {
+    console.warn('[OBJETIVOS] ⚠️ Ninguna colección contiene datos. Verifica el nombre de la colección en Firestore.');
+    return false;
+  }
+  console.log(`[OBJETIVOS] Total docs combinados: ${todosLosDocs.length}. Semana actual: ${semActual}, mes actual: ${mesAct+1}, año: ${anio}`);
+
+  // 2. Para cada agente, agregar sus datos
+  let agentesActualizados = 0;
+  for (const agente of AGENTES_DATA) {
+    const usuario = USUARIOS.find(u => u.id === agente.id);
+    const comercial = (usuario?.grupoAgente || '').toUpperCase();
+    if (!comercial) { console.warn(`[OBJETIVOS] Agente ${agente.id} sin grupoAgente, saltando`); continue; }
+
+    const docsAgente = todosLosDocs.filter(d => {
+      const c = str(d,'COMERCIAL','comercial','Comercial','COMMERCIAL').toUpperCase();
+      const a = num(d,'AÑO','ANO','anio','ano','year','Año');
+      return c === comercial && a === anio;
+    });
+
+    if (docsAgente.length === 0) {
+      console.log(`[OBJETIVOS] ${comercial}: 0 docs para el año ${anio}`);
+      continue;
+    }
+
+    // Semana actual
+    const docSem = docsAgente.find(d => num(d,'SEMANA','semana','Semana','week') === semActual);
+    if (docSem) {
+      agente.vSem      = num(docSem,'VENTAS REAL','VENTAS_REAL','ventasReal','ventas_real');
+      agente.oSem      = num(docSem,'VENTAS PPTO.','VENTAS PPTO','VENTAS_PPTO','ventasPpto','ventas_ppto');
+      agente.promoSem  = num(docSem,'PROMO REAL','PROMO_REAL','promoReal');
+      agente.oPromoSem = num(docSem,'PROMO OBJETIVO','PROMO_OBJETIVO','promoObjetivo');
+      agente.liqSem    = num(docSem,'LIQUID. REAL','LIQUID REAL','LIQUID_REAL','liquidReal');
+      agente.oLiqSem   = num(docSem,'LIQUID. OBJETIVO','LIQUID OBJETIVO','LIQUID_OBJETIVO','liquidObjetivo');
+      const mgR = num(docSem,'MG REAL','MG_REAL','mgReal');
+      const mgP = num(docSem,'MG PPTO','MG_PPTO','mgPpto');
+      agente.mb  = (mgR>0 && mgR<1) ? mgR*100 : mgR;
+      agente.oMb = (mgP>0 && mgP<1) ? mgP*100 : mgP;
+    }
+
+    // Mes actual
+    const docsMes = docsAgente.filter(d => mesDeSemana(num(d,'SEMANA','semana','Semana','week')) === mesAct);
+    agente.vMes       = docsMes.reduce((s,d)=>s+num(d,'VENTAS REAL','ventasReal'),0);
+    agente.oMes       = docsMes.reduce((s,d)=>s+num(d,'VENTAS PPTO.','VENTAS PPTO','ventasPpto'),0);
+    agente.promoMes   = docsMes.reduce((s,d)=>s+num(d,'PROMO REAL','promoReal'),0);
+    agente.oPromoMes  = docsMes.reduce((s,d)=>s+num(d,'PROMO OBJETIVO','promoObjetivo'),0);
+    agente.liqMes     = docsMes.reduce((s,d)=>s+num(d,'LIQUID. REAL','LIQUID REAL','liquidReal'),0);
+    agente.oLiqMes    = docsMes.reduce((s,d)=>s+num(d,'LIQUID. OBJETIVO','LIQUID OBJETIVO','liquidObjetivo'),0);
+
+    // Año completo
+    agente.vAnual      = docsAgente.reduce((s,d)=>s+num(d,'VENTAS REAL','ventasReal'),0);
+    agente.oAnual      = docsAgente.reduce((s,d)=>s+num(d,'VENTAS PPTO.','VENTAS PPTO','ventasPpto'),0);
+    agente.promoAnual  = docsAgente.reduce((s,d)=>s+num(d,'PROMO REAL','promoReal'),0);
+    agente.oPromoAnual = docsAgente.reduce((s,d)=>s+num(d,'PROMO OBJETIVO','promoObjetivo'),0);
+    agente.liqAnual    = docsAgente.reduce((s,d)=>s+num(d,'LIQUID. REAL','LIQUID REAL','liquidReal'),0);
+    agente.oLiqAnual   = docsAgente.reduce((s,d)=>s+num(d,'LIQUID. OBJETIVO','LIQUID OBJETIVO','liquidObjetivo'),0);
+
+    agentesActualizados++;
+    console.log(`[OBJETIVOS] ✓ ${comercial} (id=${agente.id}): sem ${semActual}=${agente.vSem}€/obj ${agente.oSem}€, mes=${agente.vMes}€/obj ${agente.oMes}€, año=${agente.vAnual}€/obj ${agente.oAnual}€`);
+  }
+
+  console.log(`[OBJETIVOS] → ${agentesActualizados}/${AGENTES_DATA.length} agentes poblados con datos de Firebase`);
+  return agentesActualizados > 0;
+}
+
 function App(props){
   const [usuario,setUsuario]=useState(function(){
     // Auto-login desde portal: initializar directamente sin useEffect
@@ -8392,6 +8510,14 @@ function App(props){
   const [fbStatus,setFbStatus]=useState(""); // "ok" | "error" | ""
   const [oportunidadesDB,setOportunidadesDB]=useState(OPORTUNIDADES_SEED);
   const [clientesDB,setClientesDB]=useState(null); // null = aún no cargado
+  const [objVer,setObjVer]=useState(0); // incrementa al cargar objetivos de Firebase (fuerza re-render de dashboards)
+
+  // Cargar objetivos/presupuesto/monetización al arrancar — una vez por sesión
+  useEffect(()=>{
+    cargarObjetivosFB().then(ok=>{
+      if(ok) setObjVer(v=>v+1);
+    });
+  },[]);
 
   // Cargar clientes del usuario — query específica por grupoAgente (mucho más rápido)
   useEffect(()=>{
@@ -8967,7 +9093,7 @@ function App(props){
         )}
 
         {/* AGENTE */}
-        {esAgente&&section==="dashboard"&&  <DashAgente usuario={usuario} onNav={setSection} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB}/>}
+        {esAgente&&section==="dashboard"&&  <DashAgente key={"ag-"+objVer} usuario={usuario} onNav={setSection} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB}/>}
         {esAgente&&section==="clientes"&&   <GestorClientes usuario={usuario} actividad={actividadSemana} onActividad={onActividad} onBack={()=>setSection("dashboard")} clientesFB={misClientesFB}/>}
         {section==="informe"&&esAgente&&    <Informe usuario={usuario} actividadSemana={actividadSemana} clientesFB={misClientesFB}/>}
         {section==="informe"&&!esAgente&&   <MiInformeJefe usuario={usuario} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB} onNav={setSection}/>}
@@ -9013,11 +9139,11 @@ function App(props){
         {esAgente&&section==="muestras"&&   <MisMuestras usuario={usuario} clientesFB={misClientesFB}/>}
 
         {/* JEFE — dashboard filtrado a su equipo */}
-        {esJefe&&section==="dashboard"&&    <DashJefe/>}
+        {esJefe&&section==="dashboard"&&    <DashJefe key={"jefe-"+objVer}/>}
         {esJefeOmas&&section==="clientes_eq"&& <HistorialClientes usuario={usuario} actividad={actividadSemana}/>}
 
         {/* DIRECTOR / CEO — dashboard global */}
-        {esDir&&section==="dashboard"&&     <DashDirector usuario={usuario} onNav={setSection}/>}
+        {esDir&&section==="dashboard"&&     <DashDirector key={"dir-"+objVer} usuario={usuario} onNav={setSection}/>}
 
         {/* Compartidas — con filtrado por rol dentro de cada componente */}
         {section==="estrategias"&&          <MisEstrategias usuario={usuario}/>}
