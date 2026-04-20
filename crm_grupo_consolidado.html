@@ -60,6 +60,7 @@ const USUARIOS = [
   {id:"wk3",     nombre:"Silvia",           rol:"agente",      equipo:"WIKUK",    color:"#059669",icon:"🧑‍💼", grupoAgente:"SILVIA"},
   {id:"ik1",     nombre:"Carlos G.",        rol:"agente",      equipo:"INTERKEY", color:T.amber,  icon:"🧑‍💼", grupoAgente:"CARLOSG"},
   {id:"ik2",     nombre:"Ricardo",          rol:"agente",      equipo:"INTERKEY", color:"#D97706",icon:"🧑‍💼", grupoAgente:"RICARDO"},
+  {id:"rpiedra", nombre:"Ramon",            rol:"agente",      equipo:"WIKUK",    color:"#E11D48",icon:"🧑‍💼", grupoAgente:"RPIEDRA"},
   {id:"jl",      nombre:"Jose Luis",        rol:"agente",      equipo:"WIKUK",    color:"#6366F1",icon:"🧑‍💼", grupoAgente:"JLGARCIA"},
   // Responsables por tipología
   {id:"resp_log", nombre:"Resp. Logística",      rol:"tipologia", tipologia:"logistica",      color:"#0EA5E9",icon:"🚚"},
@@ -103,6 +104,11 @@ const AGENTES_DATA=[
     liqSem:0,oLiqSem:0,     liqMes:0,oLiqMes:0,     liqAnual:0,oLiqAnual:0,
     mb:0,oMb:0},
   {id:"ik2",nombre:"Ricardo",equipo:"INTERKEY",color:"#D97706",
+    vSem:0,oSem:0, vMes:0,oMes:0, vAnual:0,oAnual:0,
+    promoSem:0,oPromoSem:0, promoMes:0,oPromoMes:0, promoAnual:0,oPromoAnual:0,
+    liqSem:0,oLiqSem:0,     liqMes:0,oLiqMes:0,     liqAnual:0,oLiqAnual:0,
+    mb:0,oMb:0},
+  {id:"rpiedra",nombre:"Ramon",equipo:"WIKUK",color:"#E11D48",
     vSem:0,oSem:0, vMes:0,oMes:0, vAnual:0,oAnual:0,
     promoSem:0,oPromoSem:0, promoMes:0,oPromoMes:0, promoAnual:0,oPromoAnual:0,
     liqSem:0,oLiqSem:0,     liqMes:0,oLiqMes:0,     liqAnual:0,oLiqAnual:0,
@@ -8406,96 +8412,107 @@ async function cargarObjetivosFB(){
     }
     return 0;
   };
-  // Getter string
-  const str = (doc, ...variants) => {
-    for (const v of variants) {
-      if (doc[v] !== undefined && doc[v] !== null) return String(doc[v]);
+
+  // Mapear un doc de agentes_kpi o presupuesto/monetizacion al agente de AGENTES_DATA.
+  // Matchea por crmId (preferido), luego por campo agente, luego por nombre.
+  const findAgente = (doc) => {
+    for (const ag of AGENTES_DATA) {
+      if (doc.crmId && doc.crmId === ag.id) return ag;
+      const usr = USUARIOS.find(u => u.id === ag.id);
+      const grp = (usr?.grupoAgente || '').toUpperCase();
+      if (doc.agente && String(doc.agente).toUpperCase() === grp) return ag;
+      if (doc.agente && String(doc.agente).toLowerCase() === ag.id) return ag;
+      if (doc.nombre && String(doc.nombre).toLowerCase() === String(ag.nombre||'').toLowerCase()) return ag;
     }
-    return '';
+    return null;
   };
 
-  // 1. Leer de las 3 colecciones candidatas y consolidar
-  const COLECCIONES = ['objetivos','presupuesto','monetizacion'];
+  let agentesActualizados = 0;
+
+  // ══ PASO 1: agentes_kpi → totales anuales (2 docs, instantáneo) ══
+  try {
+    const kpis = await fbLeerTodos('agentes_kpi');
+    console.log(`[OBJETIVOS] agentes_kpi: ${kpis.length} docs`);
+    for (const kpi of kpis) {
+      const ag = findAgente(kpi);
+      if (!ag) { console.log(`[OBJETIVOS] agentes_kpi doc sin match: agente=${kpi.agente}, nombre=${kpi.nombre}`); continue; }
+
+      // Totales anuales (ya pre-agregados)
+      ag.vAnual      = num(kpi, 'ventasRealAcum');
+      ag.oAnual      = num(kpi, 'ventasPptoAcum');
+      ag.promoAnual  = num(kpi, 'promoRealAcum');
+      ag.oPromoAnual = num(kpi, 'promoObjAcum');
+      ag.liqAnual    = num(kpi, 'liquidRealAcum');
+      ag.oLiqAnual   = num(kpi, 'liquidObjAcum');
+      const mgM = num(kpi, 'mgMedio');
+      const mgO = num(kpi, 'mgObjetivo');
+      ag.mb  = (mgM > 0 && mgM < 1) ? +(mgM * 100).toFixed(1) : mgM;
+      ag.oMb = (mgO > 0 && mgO < 1) ? +(mgO * 100).toFixed(1) : mgO;
+
+      agentesActualizados++;
+      console.log(`[OBJETIVOS] ✓ KPI ${ag.nombre} (${ag.id}): año=${ag.vAnual}€/obj ${ag.oAnual}€, promo=${ag.promoAnual}€, liq=${ag.liqAnual}€, MB=${ag.mb}%`);
+    }
+  } catch(e) { console.warn('[OBJETIVOS] Error leyendo agentes_kpi:', e.message); }
+
+  // ══ PASO 2: presupuesto + monetizacion → datos por semana/mes ══
   const todosLosDocs = [];
-  for (const col of COLECCIONES) {
+  for (const col of ['presupuesto','monetizacion']) {
     try {
       const docs = await fbLeerTodos(col);
-      console.log(`[OBJETIVOS] Colección '${col}': ${docs.length} docs encontrados`);
-      if (docs.length > 0) {
-        const campos = Object.keys(docs[0]).sort();
-        console.log(`[OBJETIVOS] Campos de '${col}' (${campos.length}): ${campos.join(', ')}`);
-        console.log(`[OBJETIVOS] Doc ejemplo '${col}' (JSON):`, JSON.stringify(docs[0]));
-        todosLosDocs.push(...docs.map(d => ({...d, _source: col})));
+      console.log(`[OBJETIVOS] ${col}: ${docs.length} docs`);
+      if (docs.length > 0) todosLosDocs.push(...docs);
+    } catch(e) { console.warn(`[OBJETIVOS] Error leyendo ${col}:`, e.message); }
+  }
+
+  if (todosLosDocs.length > 0) {
+    console.log(`[OBJETIVOS] Total presupuesto+monetizacion: ${todosLosDocs.length} docs. Sem actual: ${semActual}, mes: ${mesAct+1}`);
+
+    for (const ag of AGENTES_DATA) {
+      const usr = USUARIOS.find(u => u.id === ag.id);
+      const grp = (usr?.grupoAgente || '').toUpperCase();
+
+      const docsAg = todosLosDocs.filter(d => {
+        const a = num(d,'ano','AÑO','anio');
+        if (a !== anio) return false;
+        if (d.crmId && d.crmId === ag.id) return true;
+        if (d.agente && String(d.agente).toUpperCase() === grp) return true;
+        if (d.agente && String(d.agente).toLowerCase() === ag.id) return true;
+        return false;
+      });
+
+      if (docsAg.length === 0) continue;
+
+      // Semana actual
+      const docSem = docsAg.find(d => num(d,'semana','SEMANA') === semActual);
+      if (docSem) {
+        ag.vSem      = num(docSem,'ventasReal','VENTAS REAL');
+        ag.oSem      = num(docSem,'ventasPpto','VENTAS PPTO.','VENTAS PPTO');
+        ag.promoSem  = num(docSem,'promoReal','PROMO REAL');
+        ag.oPromoSem = num(docSem,'promoObjetivo','PROMO OBJETIVO');
+        ag.liqSem    = num(docSem,'liquidReal','LIQUID. REAL','LIQUID REAL');
+        ag.oLiqSem   = num(docSem,'liquidObjetivo','LIQUID. OBJETIVO','LIQUID OBJETIVO');
+        if (!ag.mb) {
+          const mgR = num(docSem,'mgReal','MG REAL');
+          const mgP = num(docSem,'mgPpto','MG PPTO');
+          ag.mb  = (mgR>0 && mgR<1) ? +(mgR*100).toFixed(1) : mgR;
+          ag.oMb = (mgP>0 && mgP<1) ? +(mgP*100).toFixed(1) : mgP;
+        }
       }
-    } catch(e) {
-      console.warn(`[OBJETIVOS] Error leyendo '${col}':`, e.message);
+
+      // Mes actual (sumar semanas que caen en este mes)
+      const docsMes = docsAg.filter(d => mesDeSemana(num(d,'semana','SEMANA')) === mesAct);
+      ag.vMes       = docsMes.reduce((s,d)=>s+num(d,'ventasReal','VENTAS REAL'),0);
+      ag.oMes       = docsMes.reduce((s,d)=>s+num(d,'ventasPpto','VENTAS PPTO.','VENTAS PPTO'),0);
+      ag.promoMes   = docsMes.reduce((s,d)=>s+num(d,'promoReal','PROMO REAL'),0);
+      ag.oPromoMes  = docsMes.reduce((s,d)=>s+num(d,'promoObjetivo','PROMO OBJETIVO'),0);
+      ag.liqMes     = docsMes.reduce((s,d)=>s+num(d,'liquidReal','LIQUID. REAL','LIQUID REAL'),0);
+      ag.oLiqMes    = docsMes.reduce((s,d)=>s+num(d,'liquidObjetivo','LIQUID. OBJETIVO','LIQUID OBJETIVO'),0);
+
+      console.log(`[OBJETIVOS] → ${ag.nombre}: sem ${semActual}=${ag.vSem}€, mes=${ag.vMes}€/obj ${ag.oMes}€`);
     }
   }
 
-  if (todosLosDocs.length === 0) {
-    console.warn('[OBJETIVOS] ⚠️ Ninguna colección contiene datos. Verifica el nombre de la colección en Firestore.');
-    return false;
-  }
-  console.log(`[OBJETIVOS] Total docs combinados: ${todosLosDocs.length}. Semana actual: ${semActual}, mes actual: ${mesAct+1}, año: ${anio}`);
-
-  // 2. Para cada agente, agregar sus datos
-  let agentesActualizados = 0;
-  for (const agente of AGENTES_DATA) {
-    const usuario = USUARIOS.find(u => u.id === agente.id);
-    const comercial = (usuario?.grupoAgente || '').toUpperCase();
-
-    // Match por crmId (preferido), fallback a agente en minúsculas o nombre
-    const docsAgente = todosLosDocs.filter(d => {
-      const a = num(d,'ano','AÑO','anio','year','Año','AGNO','ANO');
-      if (a !== anio) return false;
-      if (d.crmId && d.crmId === agente.id) return true;
-      if (d.agente && String(d.agente).toUpperCase() === comercial) return true;
-      if (d.nombre && String(d.nombre).toLowerCase() === String(usuario?.nombre||'').toLowerCase()) return true;
-      return false;
-    });
-
-    if (docsAgente.length === 0) {
-      console.log(`[OBJETIVOS] ${comercial||agente.id}: 0 docs para el año ${anio}`);
-      continue;
-    }
-
-    // Semana actual
-    const docSem = docsAgente.find(d => num(d,'SEMANA','semana','Semana','week') === semActual);
-    if (docSem) {
-      agente.vSem      = num(docSem,'VENTAS REAL','VENTAS_REAL','ventasReal','ventas_real');
-      agente.oSem      = num(docSem,'VENTAS PPTO.','VENTAS PPTO','VENTAS_PPTO','ventasPpto','ventas_ppto');
-      agente.promoSem  = num(docSem,'PROMO REAL','PROMO_REAL','promoReal');
-      agente.oPromoSem = num(docSem,'PROMO OBJETIVO','PROMO_OBJETIVO','promoObjetivo');
-      agente.liqSem    = num(docSem,'LIQUID. REAL','LIQUID REAL','LIQUID_REAL','liquidReal');
-      agente.oLiqSem   = num(docSem,'LIQUID. OBJETIVO','LIQUID OBJETIVO','LIQUID_OBJETIVO','liquidObjetivo');
-      const mgR = num(docSem,'MG REAL','MG_REAL','mgReal');
-      const mgP = num(docSem,'MG PPTO','MG_PPTO','mgPpto');
-      agente.mb  = (mgR>0 && mgR<1) ? mgR*100 : mgR;
-      agente.oMb = (mgP>0 && mgP<1) ? mgP*100 : mgP;
-    }
-
-    // Mes actual
-    const docsMes = docsAgente.filter(d => mesDeSemana(num(d,'SEMANA','semana','Semana','week')) === mesAct);
-    agente.vMes       = docsMes.reduce((s,d)=>s+num(d,'VENTAS REAL','ventasReal'),0);
-    agente.oMes       = docsMes.reduce((s,d)=>s+num(d,'VENTAS PPTO.','VENTAS PPTO','ventasPpto'),0);
-    agente.promoMes   = docsMes.reduce((s,d)=>s+num(d,'PROMO REAL','promoReal'),0);
-    agente.oPromoMes  = docsMes.reduce((s,d)=>s+num(d,'PROMO OBJETIVO','promoObjetivo'),0);
-    agente.liqMes     = docsMes.reduce((s,d)=>s+num(d,'LIQUID. REAL','LIQUID REAL','liquidReal'),0);
-    agente.oLiqMes    = docsMes.reduce((s,d)=>s+num(d,'LIQUID. OBJETIVO','LIQUID OBJETIVO','liquidObjetivo'),0);
-
-    // Año completo
-    agente.vAnual      = docsAgente.reduce((s,d)=>s+num(d,'VENTAS REAL','ventasReal'),0);
-    agente.oAnual      = docsAgente.reduce((s,d)=>s+num(d,'VENTAS PPTO.','VENTAS PPTO','ventasPpto'),0);
-    agente.promoAnual  = docsAgente.reduce((s,d)=>s+num(d,'PROMO REAL','promoReal'),0);
-    agente.oPromoAnual = docsAgente.reduce((s,d)=>s+num(d,'PROMO OBJETIVO','promoObjetivo'),0);
-    agente.liqAnual    = docsAgente.reduce((s,d)=>s+num(d,'LIQUID. REAL','LIQUID REAL','liquidReal'),0);
-    agente.oLiqAnual   = docsAgente.reduce((s,d)=>s+num(d,'LIQUID. OBJETIVO','LIQUID OBJETIVO','liquidObjetivo'),0);
-
-    agentesActualizados++;
-    console.log(`[OBJETIVOS] ✓ ${comercial} (id=${agente.id}): sem ${semActual}=${agente.vSem}€/obj ${agente.oSem}€, mes=${agente.vMes}€/obj ${agente.oMes}€, año=${agente.vAnual}€/obj ${agente.oAnual}€`);
-  }
-
-  console.log(`[OBJETIVOS] → ${agentesActualizados}/${AGENTES_DATA.length} agentes poblados con datos de Firebase`);
+  console.log(`[OBJETIVOS] ══ ${agentesActualizados} agentes con KPI anual desde Firebase ══`);
   return agentesActualizados > 0;
 }
 
