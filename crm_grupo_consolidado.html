@@ -2166,27 +2166,43 @@ function MisMuestras({usuario, clientesFB}){
   const [sel,setSel]=useState(null);
   const [fb,setFb]=useState("positivo");
   const [nota,setNota]=useState("");
-  const [comentario,setComentario]=useState(""); // para añadir comentarios sin cambiar estado
+  const [comentario,setComentario]=useState("");
   const [filtro,setFiltro]=useState("pendiente");
+  const [filtroAgente,setFiltroAgente]=useState("todos");
   const [showNueva,setShowNueva]=useState(false);
   const [nuevaForm,setNuevaForm]=useState({clienteNombre:"",prod:"",tipo:"Deshidratada",uds:"",nota:""});
   const [showNuevoCliente,setShowNuevoCliente]=useState(false);
   const [nuevoCliente,setNuevoCliente]=useState({nombre:"",contacto:"",tel:"",email:"",poblacion:"",pais:"España",notas:""});
+
+  const esAgente=usuario.rol==="agente";
+  const esJefe=usuario.rol==="jefe";
+  const esDir=["director","ceo"].includes(usuario.rol);
+  const esJefeOmas=esJefe||esDir;
+  const miEquipo=usuario.equipo;
+  const agentesEquipo=USUARIOS.filter(u=>u.rol==="agente"&&(esDir||u.equipo===miEquipo));
 
   // Resolver todos los IDs CRM del usuario
   const misIds=resolverMisIds(usuario);
 
   useEffect(()=>{
     fbLeer("muestras").then(data=>{
-      console.log("[MUESTRAS] Total Firebase:",data.length,"| misIds:",Array.from(misIds));
-      const propias = data.length > 0
-        ? data.filter(m => !m.eliminada && misIds.has((m.agente||"").toUpperCase()))
-        : MUESTRAS_SEED.filter(m => misIds.has((m.agente||"").toUpperCase()));
-      console.log("[MUESTRAS] Propias encontradas:",propias.length, propias.length>0?"| ejemplo agente="+propias[0].agente:"| agentes en FB:", [...new Set(data.slice(0,20).map(m=>m.agente))]);
-      setMuestras(propias.length > 0 ? propias : (data.length===0 ? MUESTRAS_SEED : []));
-    }).catch((e)=>{
-      console.warn("[MUESTRAS] Error cargando:",e.message);
-      setMuestras(MUESTRAS_SEED.filter(m=>misIds.has((m.agente||"").toUpperCase())));
+      if(data.length===0){setMuestras(MUESTRAS_SEED);setCargando(false);return;}
+      let propias;
+      if(esAgente){
+        // Agente: solo las suyas
+        propias=data.filter(m=>!m.eliminada&&misIds.has((m.agente||"").toUpperCase()));
+      } else if(esJefe){
+        // Jefe: todas las de su equipo
+        const idsEquipo=new Set(agentesEquipo.map(a=>a.id.toUpperCase()));
+        agentesEquipo.forEach(a=>{if(a.grupoAgente)idsEquipo.add(a.grupoAgente.toUpperCase());});
+        propias=data.filter(m=>!m.eliminada&&idsEquipo.has((m.agente||"").toUpperCase()));
+      } else {
+        // Director/CEO: todas
+        propias=data.filter(m=>!m.eliminada);
+      }
+      setMuestras(propias);
+    }).catch(()=>{
+      setMuestras(MUESTRAS_SEED);
     }).finally(()=>setCargando(false));
   },[usuario.id]);
 
@@ -2238,10 +2254,22 @@ function MisMuestras({usuario, clientesFB}){
     setSel(null); setNota("");
   };
 
-  const visibles=filtro==="todas"?muestras:filtro==="positivo"?muestras.filter(m=>m.estado==="positivo"||m.estado==="pedido"):muestras.filter(m=>m.estado===filtro);
-  const pend=muestras.filter(m=>m.estado==="pendiente").length;
-  const pos=muestras.filter(m=>m.estado==="positivo"||m.estado==="pedido").length;
-  const ko=muestras.filter(m=>m.estado==="ko").length;
+  const visiblesPorAg=filtroAgente==="todos"?muestras:muestras.filter(m=>(m.agente||"").toUpperCase()===filtroAgente.toUpperCase());
+  const visibles=filtro==="todas"?visiblesPorAg:filtro==="positivo"?visiblesPorAg.filter(m=>m.estado==="positivo"||m.estado==="pedido"):visiblesPorAg.filter(m=>m.estado===filtro);
+  const pend=visiblesPorAg.filter(m=>m.estado==="pendiente").length;
+  const pos=visiblesPorAg.filter(m=>m.estado==="positivo"||m.estado==="pedido").length;
+  const ko=visiblesPorAg.filter(m=>m.estado==="ko").length;
+
+  // Contar muestras por agente (para jefe/director)
+  const muestrasPorAg=useMemo(()=>{
+    const map={};
+    muestras.forEach(m=>{
+      const ag=(m.agente||"desconocido");
+      if(!map[ag]) map[ag]=0;
+      map[ag]++;
+    });
+    return map;
+  },[muestras]);
 
   if(cargando) return <div style={{padding:40,textAlign:"center",color:T.muted}}>⏳ Cargando muestras…</div>;
 
@@ -2568,7 +2596,37 @@ function MisMuestras({usuario, clientesFB}){
         </div>
       )}
 
-      {/* KPIs */}
+      {/* Filtro por vendedor — solo jefe/director */}
+      {esJefeOmas&&(
+        <div style={{marginBottom:16}}>
+          <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>
+            Filtrar por vendedor · {muestras.length} muestras totales
+          </p>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+            <button onClick={()=>setFiltroAgente("todos")}
+              style={{padding:"7px 12px",borderRadius:9,border:`2px solid ${filtroAgente==="todos"?T.navy:T.border}`,
+                background:filtroAgente==="todos"?T.navy:"#fff",color:filtroAgente==="todos"?"#fff":T.muted,
+                fontSize:12,fontWeight:700,cursor:"pointer"}}>
+              Todos ({muestras.length})
+            </button>
+            {agentesEquipo.map(ag=>{
+              const count=muestrasPorAg[ag.id]||0;
+              if(count===0) return null;
+              const activo=filtroAgente.toUpperCase()===ag.id.toUpperCase();
+              return(
+                <button key={ag.id} onClick={()=>setFiltroAgente(activo?"todos":ag.id)}
+                  style={{padding:"7px 12px",borderRadius:9,border:`2px solid ${activo?ag.color||T.blue:T.border}`,
+                    background:activo?(ag.color||T.blue)+"15":"#fff",color:activo?ag.color||T.blue:T.muted,
+                    fontSize:12,fontWeight:activo?700:500,cursor:"pointer"}}>
+                  {ag.icon} {ag.nombre} ({count})
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* KPIs — MisMuestras */}
       <div style={{display:"flex",gap:10,marginBottom:20}}>
         {[{l:"⏳ Pendiente",v:pend,c:T.amber,f:"pendiente"},{l:"✅ Positivo",v:pos,c:T.green,f:"positivo"},{l:"❌ KO",v:ko,c:T.red,f:"ko"}].map(k=>(
           <div key={k.l} onClick={()=>setFiltro(x=>x===k.f?"todas":k.f)}
@@ -2601,7 +2659,9 @@ function MisMuestras({usuario, clientesFB}){
                 <span style={{fontSize:28}}>{estado.icon}</span>
                 <div style={{flex:1}}>
                   <p style={{margin:0,fontSize:14,fontWeight:700,color:T.text}}>{m.prod}</p>
-                  <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{m.cliente} · S{m.semana}</p>
+                  <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{m.cliente} · S{m.semana}
+                    {esJefeOmas&&(()=>{const ag=USUARIOS.find(u=>u.id===m.agente);return ag?` · ${ag.icon} ${ag.nombre}`:m.agente?` · ${m.agente}`:""})()}
+                  </p>
                   {m.nota&&<p style={{margin:"4px 0 0",fontSize:12,color:estado.color,fontStyle:"italic"}}>"{m.nota}"</p>}
                   {(m.historial||[]).length>0&&<p style={{margin:"3px 0 0",fontSize:10,color:T.blue,fontWeight:600}}>💬 {m.historial.length} comentario{m.historial.length>1?"s":""}</p>}
                 </div>
