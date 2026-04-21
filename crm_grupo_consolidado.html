@@ -72,6 +72,28 @@ let USUARIOS = [
   {id:"resp_id",  nombre:"Resp. I+D",             rol:"tipologia", tipologia:"id",              color:"#7C3AED",icon:"🔬"},
 ];
 
+// ── Helper: resolver todos los IDs CRM de un usuario ────────────
+// El portal puede asignar IDs distintos (ej: "U_xxx") al CRM (ej: "ik4").
+// Esta función devuelve un Set con todos los posibles IDs para comparar.
+function resolverMisIds(usuario){
+  if(!usuario) return new Set();
+  const ids=new Set([
+    (usuario.id||"").toUpperCase(),
+    (usuario.user||"").toUpperCase(),
+    (usuario.username||"").toUpperCase(),
+    (usuario.grupoAgente||"").toUpperCase(),
+  ].filter(Boolean));
+  if(usuario.grupoAgente){
+    const match=USUARIOS.find(u=>u.grupoAgente&&u.grupoAgente.toUpperCase()===(usuario.grupoAgente||"").toUpperCase());
+    if(match) ids.add(match.id.toUpperCase());
+  }
+  return ids;
+}
+// Comparar si un campo agente coincide con el usuario actual
+function esDelUsuario(agenteField, misIds){
+  return agenteField && misIds.has((agenteField||"").toUpperCase());
+}
+
 // ── Carga dinámica de USUARIOS desde Firebase ───────────────────
 // Si existen docs en la colección "usuarios", se fusionan con el seed:
 // - Firebase tiene prioridad (actualiza nombre, color, equipo, etc.)
@@ -2086,19 +2108,8 @@ function MisMuestras({usuario, clientesFB}){
   const [showNueva,setShowNueva]=useState(false);
   const [nuevaForm,setNuevaForm]=useState({clienteNombre:"",prod:"",tipo:"Deshidratada",uds:"",nota:""});
 
-  // Normalizar todos los posibles identificadores del usuario
-  const misIds=new Set([
-    (usuario.id||"").toUpperCase(),
-    (usuario.user||"").toUpperCase(),
-    (usuario.username||"").toUpperCase(),
-    (usuario.grupoAgente||"").toUpperCase(),
-  ].filter(Boolean));
-  // Si el grupoAgente coincide con un USUARIOS entry, añadir también su id CRM
-  // (resuelve portal IDs dinámicos como "U_xxx" que no coinciden con "ik4")
-  if(usuario.grupoAgente){
-    const match=USUARIOS.find(u=>u.grupoAgente&&u.grupoAgente.toUpperCase()===(usuario.grupoAgente||"").toUpperCase());
-    if(match) misIds.add(match.id.toUpperCase());
-  }
+  // Resolver todos los IDs CRM del usuario
+  const misIds=resolverMisIds(usuario);
 
   useEffect(()=>{
     fbLeer("muestras").then(data=>{
@@ -4060,15 +4071,7 @@ function TareasWidget({ onNav, usuario }) {
     u.rol === "agente" && (esJefe ? u.equipo === usuario?.equipo : true)
   );
 
-  const misIds = new Set([
-    (usuario?.id||"").toUpperCase(),
-    (usuario?.user||"").toUpperCase(),
-    (usuario?.grupoAgente||"").toUpperCase(),
-  ].filter(Boolean));
-  if(usuario?.grupoAgente){
-    const match=USUARIOS.find(u=>u.grupoAgente&&u.grupoAgente.toUpperCase()===(usuario.grupoAgente||"").toUpperCase());
-    if(match) misIds.add(match.id.toUpperCase());
-  }
+  const misIds = resolverMisIds(usuario);
 
   const filtrar = (lista) => {
     if (esCeo || esDir) return lista;
@@ -4228,15 +4231,7 @@ function GestorTareas({ usuario, clientesFB }) {
   const esAgente   = usuario?.rol === "agente";
   const esJefeOmas = esCeo || esDir || esJefe;
 
-  const misIds = new Set([
-    (usuario.id||"").toUpperCase(),
-    (usuario.user||"").toUpperCase(),
-    (usuario.grupoAgente||"").toUpperCase(),
-  ].filter(Boolean));
-  if(usuario.grupoAgente){
-    const match=USUARIOS.find(u=>u.grupoAgente&&u.grupoAgente.toUpperCase()===(usuario.grupoAgente||"").toUpperCase());
-    if(match) misIds.add(match.id.toUpperCase());
-  }
+  const misIds = resolverMisIds(usuario);
 
   // Agentes disponibles para asignación
   const agentesAsig = USUARIOS.filter(u =>
@@ -5508,14 +5503,24 @@ function GestorOportunidades({usuario}){
   const miEquipoOpo=usuario?.equipo;
 
   // Pre-filtro por rol — agente SOLO ve las suyas
+  // Resolver ID CRM real desde grupoAgente (portal puede usar ID distinto)
+  const misCrmIds=useMemo(()=>{
+    const ids=new Set([usuario.id,(usuario.user||""),(usuario.grupoAgente||"")].filter(Boolean));
+    if(usuario.grupoAgente){
+      const match=USUARIOS.find(u=>u.grupoAgente&&u.grupoAgente.toUpperCase()===(usuario.grupoAgente||"").toUpperCase());
+      if(match) ids.add(match.id);
+    }
+    return ids;
+  },[usuario.id,usuario.grupoAgente]);
+
   const oposMiRol=useMemo(()=>opos.filter(o=>{
-    if(esRolAgente) return o.agenteId===usuario.id||o.agente===usuario.id;
+    if(esRolAgente) return misCrmIds.has(o.agenteId)||misCrmIds.has(o.agente);
     if(esRolJefe){
       const ag=USUARIOS.find(u=>u.id===(o.agenteId||o.agente));
       return ag?.equipo===miEquipoOpo||o.equipoId===miEquipoOpo;
     }
     return true; // director/ceo ve todas
-  }),[opos,usuario.id,esRolAgente,esRolJefe,miEquipoOpo]);
+  }),[opos,misCrmIds,esRolAgente,esRolJefe,miEquipoOpo]);
 
   const activas=oposMiRol.filter(o=>!["ganada","perdida"].includes(o.estado));
   const sinAsignar=oposMiRol.filter(o=>!o.agenteId&&!["ganada","perdida"].includes(o.estado));
@@ -8584,6 +8589,19 @@ function App(props){
   const [section,setSection]=useState("dashboard");
   const [adminOpen,setAdminOpen]=useState(false);
 
+  // ── Normalizar ID del usuario al CRM ID real ─────────────────────
+  // Si el portal asigna un ID tipo "U_xxx" pero en USUARIOS existe un
+  // agente con el mismo grupoAgente, actualiza usuario.id al ID del CRM.
+  // Esto hace que TODOS los filtros (===usuario.id) funcionen sin cambios.
+  useEffect(()=>{
+    if(!usuario||!usuario.grupoAgente) return;
+    const match=USUARIOS.find(u=>u.grupoAgente&&u.grupoAgente.toUpperCase()===(usuario.grupoAgente||"").toUpperCase());
+    if(match&&match.id!==usuario.id){
+      console.log("[AUTH] Normalizando ID:",usuario.id,"→",match.id,"(via grupoAgente:",usuario.grupoAgente+")");
+      setUsuario(prev=>({...prev,...match,catalogoVendedor:prev.catalogoVendedor||prev.grupoAgente}));
+    }
+  },[usuario?.grupoAgente]);
+
   // Actividad diaria compartida entre GestorClientes e Informe
   const [actividadSemana,setActividadSemana]=useState({});
   const onActividad=(cid,data)=>setActividadSemana(a=>({...a,[cid]:data}));
@@ -8811,10 +8829,11 @@ function App(props){
   ).length;
 
   // Badge oportunidades — datos reales de Firebase
+  const appMisIds=resolverMisIds(usuario);
   const opsAbiertas=oportunidadesDB.filter(o=>{
     const cerrada=["ganada","perdida","cerrada_ganada","cerrada_perdida"].some(e=>o.etapa===e||o.estado===e);
     if(cerrada) return false;
-    if(esAgente) return o.agente===usuario.id||o.agenteId===usuario.id;
+    if(esAgente) return esDelUsuario(o.agente,appMisIds)||esDelUsuario(o.agenteId,appMisIds);
     if(esJefe){const ag=USUARIOS.find(u=>u.id===(o.agenteId||o.agente));return ag?.equipo===miEquipo;}
     return true;
   }).length;
@@ -9357,15 +9376,7 @@ function HistorialSemanal({ usuario }) {
   });
 
   const miEquipo = usuario.equipo;
-  const misIds = new Set([
-    (usuario.id||"").toUpperCase(),
-    (usuario.user||"").toUpperCase(),
-    (usuario.grupoAgente||"").toUpperCase(),
-  ].filter(Boolean));
-  if(usuario.grupoAgente){
-    const match=USUARIOS.find(u=>u.grupoAgente&&u.grupoAgente.toUpperCase()===(usuario.grupoAgente||"").toUpperCase());
-    if(match) misIds.add(match.id.toUpperCase());
-  }
+  const misIds = resolverMisIds(usuario);
 
   const agentesEquipo = USUARIOS.filter(u =>
     u.rol==="agente" && (esJefe ? u.equipo===miEquipo : true)
@@ -10135,8 +10146,9 @@ function AsistenteIA({ usuario, clientesFB, oportunidadesDB }) {
   };
 
   const contextSistema = React.useMemo(()=>{
+    const ctxIds=resolverMisIds(usuario);
     const misOps = (oportunidadesDB||[]).filter(o=>
-      o.agente===usuario.id||o.agenteId===usuario.id||
+      esDelUsuario(o.agente,ctxIds)||esDelUsuario(o.agenteId,ctxIds)||
       ["director","ceo"].includes(usuario.rol)
     ).slice(0,20);
     const misClientes = (clientesFB||[]).slice(0,30);
