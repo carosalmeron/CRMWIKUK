@@ -11,6 +11,8 @@
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <!-- Babel standalone para JSX -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- SheetJS para exportar Excel -->
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
 
   <style>
     *,*::before,*::after{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
@@ -23,6 +25,13 @@
     @keyframes spin{to{transform:rotate(360deg)}}
     .pend-row:hover{background:#F8FAFC !important;}
     #root{min-height:100vh;}
+    @media print{
+      body{background:#fff !important;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+      *{-webkit-print-color-adjust:exact !important;print-color-adjust:exact !important;}
+      #reporting-print{padding:0 !important;}
+      nav,button[style*="Salir"],button[style*="Hub"],button[style*="Inicio"],
+      [style*="position: fixed"]{display:none !important;}
+    }
   </style>
 </head>
 <body>
@@ -9715,6 +9724,7 @@ function App(props){
     {id:"incidencias",  icon:"🚨",label:"Incidencias", color:T.red,    badge:incAbiertas},
     {id:"historial",    icon:"📅",label:"Historial",    color:T.purple},
     {id:"tareas",       icon:"📌",label:"Tareas",        color:T.red},
+    {id:"reporting",    icon:"📈",label:"Reporting",     color:T.navy},
     {id:"ia",           icon:"🤖",label:"IA",             color:T.purple},
   ];
 
@@ -9729,6 +9739,7 @@ function App(props){
     {id:"oportunidades",icon:"💼",label:"Ops",         color:T.navy,  badge:opsAbiertas},
     {id:"proyectos",    icon:"📁",label:"Proyectos",   color:T.purple},
     {id:"incidencias",  icon:"🚨",label:"Incidencias", color:T.red,   badge:incAbiertas},
+    {id:"reporting",    icon:"📈",label:"Reporting",    color:T.navy},
     {id:"ia",           icon:"🤖",label:"IA",          color:T.purple},
   ];
 
@@ -9743,6 +9754,7 @@ function App(props){
     {id:"oportunidades",icon:"💼",label:"Ops",          color:T.navy,  badge:opsAbiertas},
     {id:"proyectos",    icon:"📁",label:"Proyectos",    color:T.purple},
     {id:"incidencias",  icon:"🚨",label:"Incidencias",  color:T.red,   badge:incAbiertas},
+    {id:"reporting",    icon:"📈",label:"Reporting",     color:T.navy},
     {id:"ia",           icon:"🤖",label:"IA",           color:T.purple},
   ];
 
@@ -10290,6 +10302,7 @@ function App(props){
                section==="usuarios"?"👥 Equipo":
                section==="historial"?"📅 Historial semanal":
                section==="tareas"?"📌 Tareas y acciones":
+               section==="reporting"?"📈 Reporting":
                section==="ia"?"🤖 Asistente IA":
                section}
             </p>
@@ -10359,6 +10372,7 @@ function App(props){
         {/* Secciones nuevas */}
         {section==="historial"&& <HistorialSemanal usuario={usuario}/> }
         {section==="tareas"&&    <GestorTareas usuario={usuario} clientesFB={misClientesFB}/> }
+        {section==="reporting"&& <Reporting usuario={usuario} muestrasDB={muestrasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} estrategiasDB={estrategiasDB} clientesDB={clientesDB} misClientesFB={misClientesFB}/>}
         {section==="ia"&&(
           <AsistenteIA
             usuario={usuario}
@@ -10413,6 +10427,274 @@ function App(props){
 
 
 
+
+// ─── REPORTING Y EXPORTACIÓN ─────────────────────────────────────
+function exportarExcel(datos, nombre, columnas){
+  if(!window.XLSX){alert("Error: librería de Excel no cargada");return;}
+  const ws=XLSX.utils.json_to_sheet(datos.map(d=>{
+    const row={};
+    columnas.forEach(c=>{row[c.label]=typeof c.fn==="function"?c.fn(d):(d[c.key]||"");});
+    return row;
+  }));
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,nombre.slice(0,31));
+  XLSX.writeFile(wb,`${nombre}_${new Date().toLocaleDateString("es-ES").replace(/\//g,"-")}.xlsx`);
+}
+
+function MiniBar({datos,color,height=80,labels}){
+  if(!datos||datos.length===0) return null;
+  const max=Math.max(...datos,1);
+  const w=100/datos.length;
+  return(
+    <div style={{position:"relative",height,display:"flex",alignItems:"flex-end",gap:2}}>
+      {datos.map((v,i)=>(
+        <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+          <span style={{fontSize:9,fontWeight:700,color:v===max?color:"#94A3B8"}}>{v}</span>
+          <div style={{width:"100%",height:Math.max(4,v/max*(height-20)),background:color,
+            borderRadius:"4px 4px 0 0",opacity:v===0?.15:1,transition:"height .3s"}}/>
+          {labels&&labels[i]&&<span style={{fontSize:8,color:"#94A3B8"}}>{labels[i]}</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Reporting({usuario,muestrasDB,oportunidadesDB,incidenciasDB,estrategiasDB,clientesDB,misClientesFB}){
+  const esAgente=usuario.rol==="agente";
+  const esJefe=usuario.rol==="jefe";
+  const esDir=["director","ceo"].includes(usuario.rol);
+  const miEquipo=usuario.equipo;
+  const appMisIds=resolverMisIds(usuario);
+  const [printing,setPrinting]=useState(false);
+
+  // Filtrar datos según rol
+  const misMuestras=useMemo(()=>{
+    if(esDir) return muestrasDB;
+    if(esJefe){
+      const ags=new Set(USUARIOS.filter(u=>u.rol==="agente"&&u.equipo===miEquipo).flatMap(u=>[u.id.toUpperCase(),(u.grupoAgente||"").toUpperCase()]).filter(Boolean));
+      return muestrasDB.filter(m=>ags.has((m.agente||"").toUpperCase()));
+    }
+    return muestrasDB.filter(m=>appMisIds.has((m.agente||"").toUpperCase()));
+  },[muestrasDB,usuario.id]);
+
+  const misOpos=useMemo(()=>{
+    if(esDir) return oportunidadesDB;
+    if(esJefe){
+      const ags=new Set(USUARIOS.filter(u=>u.rol==="agente"&&u.equipo===miEquipo).map(u=>u.id));
+      return oportunidadesDB.filter(o=>ags.has(o.agente||o.agenteId));
+    }
+    return oportunidadesDB.filter(o=>esDelUsuario(o.agente,appMisIds)||esDelUsuario(o.agenteId,appMisIds));
+  },[oportunidadesDB,usuario.id]);
+
+  const misInc=useMemo(()=>{
+    if(esDir) return incidenciasDB;
+    if(esJefe) return incidenciasDB.filter(i=>i.equipo===miEquipo);
+    return incidenciasDB.filter(i=>i.autor===usuario.id);
+  },[incidenciasDB,usuario.id]);
+
+  const clientes=clientesDB?._todos||misClientesFB||[];
+
+  // KPIs
+  const mPend=misMuestras.filter(m=>m.estado==="pendiente").length;
+  const mPos=misMuestras.filter(m=>m.estado==="positivo"||m.estado==="pedido").length;
+  const mKo=misMuestras.filter(m=>m.estado==="ko").length;
+  const oActivas=misOpos.filter(o=>!["ganada","perdida","cerrada_ganada","cerrada_perdida"].includes(o.estado||o.etapa)).length;
+  const oGanadas=misOpos.filter(o=>o.estado==="ganada"||o.etapa==="ganada").length;
+  const incAb=misInc.filter(i=>i.estado!=="cerrada"&&i.estado!=="resuelta").length;
+
+  // Muestras por semana (últimas 8 semanas)
+  const hoy=new Date();
+  const semActual=Math.ceil(((hoy-new Date(hoy.getFullYear(),0,1))/86400000+new Date(hoy.getFullYear(),0,1).getDay()+1)/7);
+  const semLabels=[];const semDatos=[];const semPos=[];
+  for(let i=7;i>=0;i--){
+    const s=semActual-i;
+    semLabels.push("S"+s);
+    semDatos.push(misMuestras.filter(m=>parseInt(m.semana)===s).length);
+    semPos.push(misMuestras.filter(m=>parseInt(m.semana)===s&&(m.estado==="positivo"||m.estado==="pedido")).length);
+  }
+
+  // Muestras por agente
+  const porAgente=useMemo(()=>{
+    const map={};
+    misMuestras.forEach(m=>{
+      const ag=m.agente||"—";
+      if(!map[ag]) map[ag]={total:0,positivo:0,ko:0,pendiente:0};
+      map[ag].total++;
+      if(m.estado==="positivo"||m.estado==="pedido") map[ag].positivo++;
+      else if(m.estado==="ko") map[ag].ko++;
+      else map[ag].pendiente++;
+    });
+    return Object.entries(map).map(([id,v])=>{
+      const u=USUARIOS.find(u=>u.id===id);
+      return{nombre:u?u.nombre:id,...v,tasa:v.total>0?Math.round(v.positivo/v.total*100):0};
+    }).sort((a,b)=>b.total-a.total);
+  },[misMuestras]);
+
+  // Exportar funciones
+  const exportMuestras=()=>exportarExcel(misMuestras,"Muestras",[
+    {label:"Producto",key:"prod"},{label:"Cliente",key:"cliente"},{label:"Tipo",key:"tipo"},
+    {label:"Semana",key:"semana"},{label:"Fecha",key:"fecha"},{label:"Estado",key:"estado"},
+    {label:"Agente",key:"agente"},{label:"Equipo",key:"equipo"},
+    {label:"Estado Muestra",key:"estadoMuestra"},{label:"Nota",key:"nota"},
+    {label:"Comentarios",fn:m=>(m.historial||[]).length},
+  ]);
+
+  const exportOpos=()=>exportarExcel(misOpos,"Oportunidades",[
+    {label:"Nombre",fn:o=>o.nombre||o.cliente},{label:"Cliente",key:"cliente"},
+    {label:"Estado",fn:o=>o.estado||o.etapa},{label:"Valor (€)",key:"valor"},
+    {label:"Probabilidad (%)",key:"prob"},{label:"Agente",key:"agente"},
+    {label:"Producto",key:"prod"},{label:"Fecha",key:"fecha"},
+  ]);
+
+  const exportClientes=()=>exportarExcel(clientes,"Clientes",[
+    {label:"Nombre",fn:c=>c.nombre||c.NOMBRE},{label:"Contacto",key:"contacto"},
+    {label:"Teléfono",key:"tel"},{label:"Email",key:"email"},
+    {label:"Población",fn:c=>c.poblacion||c.ciudad||c.dir||""},{label:"País",key:"pais"},
+    {label:"Agente",fn:c=>c.grupoAgente||c.GRUPOAGENTE||c.agente||""},{label:"Notas",key:"notas"},
+  ]);
+
+  const exportInc=()=>exportarExcel(misInc,"Incidencias",[
+    {label:"Título",fn:i=>i.titulo||i.asunto},{label:"Cliente",key:"cliente"},
+    {label:"Tipo",key:"tipo"},{label:"Estado",key:"estado"},
+    {label:"Fecha",key:"fecha"},{label:"Descripción",key:"descripcion"},
+  ]);
+
+  const imprimirPDF=()=>{
+    setPrinting(true);
+    setTimeout(()=>{window.print();setPrinting(false);},300);
+  };
+
+  return(
+    <div id="reporting-print" style={{padding:"0 0 100px"}}>
+      {/* Header */}
+      <div style={{padding:"16px",marginBottom:8}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <div>
+            <p style={{margin:0,fontSize:18,fontWeight:900,color:T.text}}>📈 Reporting</p>
+            <p style={{margin:"2px 0 0",fontSize:12,color:T.muted}}>
+              {esDir?"Global":esJefe?`Equipo ${miEquipo}`:"Mis datos"} · S{semActual} · {new Date().toLocaleDateString("es-ES")}
+            </p>
+          </div>
+          <button onClick={imprimirPDF}
+            style={{padding:"8px 16px",borderRadius:8,border:"none",background:T.navy,
+              color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+            🖨️ PDF
+          </button>
+        </div>
+      </div>
+
+      {/* KPIs */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,padding:"0 16px",marginBottom:20}}>
+        {[
+          {icon:"📦",label:"Muestras",v:misMuestras.length,sub:`${mPos} positivas · ${mPend} pendientes`,c:T.purple},
+          {icon:"💼",label:"Oportunidades",v:misOpos.length,sub:`${oActivas} activas · ${oGanadas} ganadas`,c:T.navy},
+          {icon:"🚨",label:"Incidencias",v:misInc.length,sub:`${incAb} abiertas`,c:T.red},
+        ].map(k=>(
+          <div key={k.label} style={{background:"#fff",borderRadius:12,padding:"14px 12px",
+            border:`1px solid ${T.border}`,textAlign:"center"}}>
+            <span style={{fontSize:22}}>{k.icon}</span>
+            <p style={{margin:"4px 0 0",fontSize:24,fontWeight:900,color:k.c}}>{k.v}</p>
+            <p style={{margin:"2px 0 0",fontSize:9,color:T.muted}}>{k.sub}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Gráfico — Muestras por semana */}
+      <div style={{background:"#fff",borderRadius:14,padding:16,margin:"0 16px 16px",border:`1px solid ${T.border}`}}>
+        <p style={{margin:"0 0 12px",fontSize:13,fontWeight:800,color:T.text}}>📊 Muestras por semana</p>
+        <div style={{display:"flex",gap:4,marginBottom:8}}>
+          <span style={{fontSize:10,color:T.purple,fontWeight:700}}>● Total</span>
+          <span style={{fontSize:10,color:T.green,fontWeight:700}}>● Positivas</span>
+        </div>
+        <MiniBar datos={semDatos} color={T.purple} labels={semLabels} height={90}/>
+        <div style={{marginTop:6}}>
+          <MiniBar datos={semPos} color={T.green} height={40}/>
+        </div>
+      </div>
+
+      {/* Tabla — Rendimiento por agente */}
+      {(esJefe||esDir)&&porAgente.length>0&&(
+        <div style={{background:"#fff",borderRadius:14,padding:16,margin:"0 16px 16px",border:`1px solid ${T.border}`}}>
+          <p style={{margin:"0 0 12px",fontSize:13,fontWeight:800,color:T.text}}>🏆 Rendimiento por vendedor</p>
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+              <thead>
+                <tr style={{borderBottom:`2px solid ${T.border}`}}>
+                  <th style={{textAlign:"left",padding:"8px 6px",color:T.muted,fontSize:10,fontWeight:700}}>Vendedor</th>
+                  <th style={{textAlign:"center",padding:"8px 4px",color:T.muted,fontSize:10}}>Total</th>
+                  <th style={{textAlign:"center",padding:"8px 4px",color:T.green,fontSize:10}}>✅</th>
+                  <th style={{textAlign:"center",padding:"8px 4px",color:T.red,fontSize:10}}>❌</th>
+                  <th style={{textAlign:"center",padding:"8px 4px",color:T.amber,fontSize:10}}>⏳</th>
+                  <th style={{textAlign:"center",padding:"8px 4px",color:T.muted,fontSize:10}}>Tasa</th>
+                </tr>
+              </thead>
+              <tbody>
+                {porAgente.map((a,i)=>(
+                  <tr key={i} style={{borderBottom:`1px solid ${T.border}`,background:i%2===0?"#F8FAFC":"#fff"}}>
+                    <td style={{padding:"8px 6px",fontWeight:700}}>{a.nombre}</td>
+                    <td style={{textAlign:"center",padding:"8px 4px",fontWeight:800}}>{a.total}</td>
+                    <td style={{textAlign:"center",padding:"8px 4px",color:T.green,fontWeight:700}}>{a.positivo}</td>
+                    <td style={{textAlign:"center",padding:"8px 4px",color:T.red}}>{a.ko}</td>
+                    <td style={{textAlign:"center",padding:"8px 4px",color:T.amber}}>{a.pendiente}</td>
+                    <td style={{textAlign:"center",padding:"8px 4px"}}>
+                      <span style={{background:a.tasa>=50?T.green+"18":a.tasa>=25?T.amber+"18":T.red+"18",
+                        color:a.tasa>=50?T.green:a.tasa>=25?T.amber:T.red,
+                        padding:"2px 8px",borderRadius:6,fontSize:11,fontWeight:800}}>{a.tasa}%</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Gráfico — Estado de muestras */}
+      <div style={{background:"#fff",borderRadius:14,padding:16,margin:"0 16px 16px",border:`1px solid ${T.border}`}}>
+        <p style={{margin:"0 0 12px",fontSize:13,fontWeight:800,color:T.text}}>📦 Distribución de muestras</p>
+        <div style={{display:"flex",gap:6,marginBottom:12}}>
+          {[
+            {label:"Pendientes",v:mPend,c:T.amber},{label:"Positivas",v:mPos,c:T.green},{label:"KO",v:mKo,c:T.red},
+          ].map(k=>(
+            <div key={k.label} style={{flex:1,textAlign:"center",padding:"10px 4px",borderRadius:10,
+              background:k.c+"10",border:`1px solid ${k.c}33`}}>
+              <p style={{margin:0,fontSize:20,fontWeight:900,color:k.c}}>{k.v}</p>
+              <p style={{margin:"2px 0 0",fontSize:9,color:T.muted}}>{k.label}</p>
+            </div>
+          ))}
+        </div>
+        {/* Barra proporcional */}
+        {misMuestras.length>0&&(
+          <div style={{display:"flex",height:12,borderRadius:99,overflow:"hidden",background:T.border}}>
+            <div style={{width:`${mPos/misMuestras.length*100}%`,background:T.green,transition:"width .3s"}}/>
+            <div style={{width:`${mPend/misMuestras.length*100}%`,background:T.amber,transition:"width .3s"}}/>
+            <div style={{width:`${mKo/misMuestras.length*100}%`,background:T.red,transition:"width .3s"}}/>
+          </div>
+        )}
+      </div>
+
+      {/* Botones exportar */}
+      <div style={{padding:"0 16px"}}>
+        <p style={{margin:"0 0 12px",fontSize:13,fontWeight:800,color:T.text}}>📥 Exportar a Excel</p>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+          {[
+            {label:"📦 Muestras",sub:`${misMuestras.length} registros`,fn:exportMuestras,c:T.purple},
+            {label:"💼 Oportunidades",sub:`${misOpos.length} registros`,fn:exportOpos,c:T.navy},
+            {label:"👤 Clientes",sub:`${clientes.length} registros`,fn:exportClientes,c:T.blue},
+            {label:"🚨 Incidencias",sub:`${misInc.length} registros`,fn:exportInc,c:T.red},
+          ].map(b=>(
+            <button key={b.label} onClick={b.fn}
+              style={{padding:"14px 12px",borderRadius:12,border:`1.5px solid ${b.c}33`,
+                background:b.c+"08",cursor:"pointer",textAlign:"left"}}>
+              <p style={{margin:0,fontSize:13,fontWeight:800,color:b.c}}>{b.label}</p>
+              <p style={{margin:"4px 0 0",fontSize:10,color:T.muted}}>{b.sub}</p>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function HistorialSemanal({ usuario }) {
   const esCeo      = usuario.rol === "ceo";
