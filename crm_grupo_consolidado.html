@@ -9358,7 +9358,8 @@ function App(props){
   const [adminOpen,setAdminOpen]=useState(false);
   const [busquedaGlobal,setBusquedaGlobal]=useState(false);
   const [busqTexto,setBusqTexto]=useState("");
-  const [clienteDirecto,setClienteDirecto]=useState(null); // {nombre:"X"} para abrir ficha 360° directamente
+  const [clienteDirecto,setClienteDirecto]=useState(null);
+  const [notifOpen,setNotifOpen]=useState(false);
 
   // ── Navegación cruzada entre módulos ──
   const onAbrirCliente=(nombre)=>{
@@ -9618,6 +9619,91 @@ function App(props){
   }).length;
 
   const urgCount=0; // badge dinámico — cargado en TareasWidget
+
+  // ── Sistema de notificaciones ──
+  const notificaciones=useMemo(()=>{
+    const notifs=[];
+    const hoy=new Date();
+    const semActual=Math.ceil(((hoy-new Date(hoy.getFullYear(),0,1))/86400000+new Date(hoy.getFullYear(),0,1).getDay()+1)/7);
+
+    // 1. Muestras pendientes >2 semanas sin comentarios
+    muestrasDB.filter(m=>{
+      if(m.estado!=="pendiente") return false;
+      if(esAgente&&!appMisIds.has((m.agente||"").toUpperCase())) return false;
+      if(esJefe){const ag=USUARIOS.find(u=>u.id===m.agente);if(!ag||ag.equipo!==miEquipo) return false;}
+      const sem=parseInt(m.semana)||0;
+      return sem>0&&(semActual-sem)>=2;
+    }).forEach(m=>{
+      const semanas=semActual-(parseInt(m.semana)||0);
+      notifs.push({
+        tipo:"muestra",icon:"📦",color:"#F59E0B",prioridad:semanas>4?3:2,
+        titulo:`${m.prod} — ${m.cliente}`,
+        sub:`⏳ ${semanas} semanas sin respuesta`,
+        accion:()=>{setNotifOpen(false);setSection("muestras");}
+      });
+    });
+
+    // 2. Incidencias abiertas >1 semana
+    incidenciasDB.filter(inc=>{
+      if(inc.estado==="cerrada"||inc.estado==="resuelta") return false;
+      if(esAgente&&inc.autor!==usuario.id) return false;
+      if(esJefe&&inc.equipo!==miEquipo) return false;
+      if(!inc.fecha) return true;
+      const parts=inc.fecha.split("/");
+      if(parts.length<3) return false;
+      const f=new Date(parts[2].length===2?"20"+parts[2]:parts[2],parts[1]-1,parts[0]);
+      return (hoy-f)/(1000*60*60*24)>7;
+    }).forEach(inc=>{
+      notifs.push({
+        tipo:"incidencia",icon:"🚨",color:"#EF4444",prioridad:3,
+        titulo:inc.titulo||inc.asunto||"Incidencia",
+        sub:`🔴 Abierta — ${inc.tipo||""}${inc.cliente?" · "+inc.cliente:""}`,
+        accion:()=>{setNotifOpen(false);setSection("incidencias");}
+      });
+    });
+
+    // 3. Estrategias activas sin avance reciente
+    estrategiasDB.filter(e=>{
+      if(e.estado==="completada"||e.estado==="cancelada"||e.eliminada) return false;
+      if(esAgente&&!appMisIds.has((e.agente||e.agenteId||"").toUpperCase())) return false;
+      if(esJefe){const ag=USUARIOS.find(u=>u.id===(e.agente||e.agenteId));if(!ag||ag.equipo!==miEquipo) return false;}
+      return true;
+    }).forEach(e=>{
+      notifs.push({
+        tipo:"estrategia",icon:"🎯",color:"#22C55E",prioridad:1,
+        titulo:e.titulo||e.nombre||"Estrategia",
+        sub:"En curso — requiere seguimiento",
+        accion:()=>{setNotifOpen(false);setSection("estrategias");}
+      });
+    });
+
+    // 4. Oportunidades activas sin notas recientes (>2 semanas)
+    oportunidadesDB.filter(o=>{
+      if(["ganada","perdida","cerrada_ganada","cerrada_perdida"].includes(o.estado||o.etapa)) return false;
+      if(esAgente&&!esDelUsuario(o.agente,appMisIds)&&!esDelUsuario(o.agenteId,appMisIds)) return false;
+      if(esJefe){const ag=USUARIOS.find(u=>u.id===(o.agenteId||o.agente));if(!ag||ag.equipo!==miEquipo) return false;}
+      const notas=o.actividad||o.notas||[];
+      if(Array.isArray(notas)&&notas.length>0){
+        const ult=notas[notas.length-1];
+        if(ult.fecha){
+          const p=ult.fecha.split("/");
+          if(p.length>=3){const f=new Date(p[2].length===2?"20"+p[2]:p[2],p[1]-1,p[0]);if((hoy-f)/(1000*60*60*24)<14)return false;}
+        }
+      }
+      return true;
+    }).slice(0,5).forEach(o=>{
+      notifs.push({
+        tipo:"oportunidad",icon:"💼",color:"#1E3A5F",prioridad:2,
+        titulo:o.nombre||o.cliente||"Oportunidad",
+        sub:"Sin actividad reciente",
+        accion:()=>{setNotifOpen(false);setSection("oportunidades");}
+      });
+    });
+
+    // Ordenar por prioridad (3=urgente, 1=info)
+    notifs.sort((a,b)=>b.prioridad-a.prioridad);
+    return notifs;
+  },[muestrasDB,incidenciasDB,estrategiasDB,oportunidadesDB,usuario.id]);
   const NAV_AGENTE=[
     {id:"dashboard",    icon:"🏠",label:"Inicio",      color:usuario.color},
     {id:"clientes",     icon:"📋",label:"Clientes",    color:T.blue},
@@ -9961,6 +10047,17 @@ function App(props){
           style={{background:"none",border:`1px solid ${T.border}`,borderRadius:8,padding:"7px 10px",color:T.muted,fontSize:14,cursor:"pointer"}}>
           🔍
         </button>
+        <button onClick={()=>setNotifOpen(v=>!v)}
+          style={{background:"none",border:`1px solid ${notificaciones.length>0?"#F59E0B33":T.border}`,
+            borderRadius:8,padding:"7px 10px",color:T.muted,fontSize:14,cursor:"pointer",position:"relative"}}>
+          🔔
+          {notificaciones.length>0&&(
+            <span style={{position:"absolute",top:-4,right:-4,background:"#EF4444",color:"#fff",
+              fontSize:9,fontWeight:800,padding:"1px 5px",borderRadius:99,minWidth:16,textAlign:"center"}}>
+              {notificaciones.length}
+            </span>
+          )}
+        </button>
         <button onClick={()=>{
             try{ window.parent.backToHub(); }catch(e){}
             setUsuario(null);
@@ -9969,6 +10066,54 @@ function App(props){
           Salir
         </button>
       </div>
+
+      {/* ═══ PANEL DE NOTIFICACIONES ═══ */}
+      {notifOpen&&(
+        <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,zIndex:998}}>
+          {/* Backdrop */}
+          <div onClick={()=>setNotifOpen(false)} style={{position:"absolute",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,.3)"}}/>
+          {/* Panel */}
+          <div style={{position:"absolute",top:60,right:8,left:8,maxHeight:"75vh",
+            background:"#fff",borderRadius:16,boxShadow:"0 8px 32px rgba(0,0,0,.18)",
+            display:"flex",flexDirection:"column",overflow:"hidden"}}>
+            {/* Header */}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+              padding:"14px 16px",borderBottom:`1px solid ${T.border}`}}>
+              <p style={{margin:0,fontSize:15,fontWeight:800,color:T.text}}>
+                🔔 Notificaciones {notificaciones.length>0&&<span style={{color:"#EF4444"}}>({notificaciones.length})</span>}
+              </p>
+              <button onClick={()=>setNotifOpen(false)}
+                style={{background:"none",border:"none",fontSize:18,color:T.muted,cursor:"pointer"}}>×</button>
+            </div>
+            {/* Lista */}
+            <div style={{flex:1,overflowY:"auto",padding:"8px 12px"}}>
+              {notificaciones.length===0?(
+                <div style={{textAlign:"center",padding:"32px 16px",color:T.muted}}>
+                  <span style={{fontSize:36,display:"block",marginBottom:8}}>✅</span>
+                  <p style={{margin:0,fontSize:13}}>Sin notificaciones pendientes</p>
+                  <p style={{margin:"6px 0 0",fontSize:11,color:"#94A3B8"}}>Todo al día</p>
+                </div>
+              ):(
+                notificaciones.map((n,i)=>(
+                  <div key={i} onClick={n.accion}
+                    style={{display:"flex",gap:10,alignItems:"flex-start",padding:"12px",
+                      background:i%2===0?"#F8FAFC":"#fff",borderRadius:10,marginBottom:4,
+                      cursor:"pointer",border:`1px solid ${n.prioridad>=3?n.color+"33":T.border}`,
+                      borderLeft:`3px solid ${n.color}`}}>
+                    <span style={{fontSize:18,flexShrink:0,marginTop:2}}>{n.icon}</span>
+                    <div style={{flex:1,overflow:"hidden"}}>
+                      <p style={{margin:0,fontSize:12,fontWeight:700,color:T.text,
+                        overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{n.titulo}</p>
+                      <p style={{margin:"2px 0 0",fontSize:11,color:n.color,fontWeight:600}}>{n.sub}</p>
+                    </div>
+                    <span style={{fontSize:11,color:T.muted,flexShrink:0}}>→</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ═══ BUSCADOR GLOBAL ═══ */}
       {busquedaGlobal&&(
