@@ -9734,6 +9734,7 @@ function App(props){
     {id:"estrategias",  icon:"🎯",label:"Estrategias", color:T.green,  badge:estEnCurso},
     {id:"incidencias",  icon:"🚨",label:"Incidencias", color:T.red,    badge:incAbiertas},
     {id:"historial",    icon:"📅",label:"Historial",    color:T.purple},
+    {id:"calendario",   icon:"🗓️",label:"Agenda",       color:T.blue},
     {id:"tareas",       icon:"📌",label:"Tareas",        color:T.red},
     {id:"reporting",    icon:"📈",label:"Reporting",     color:T.navy},
     {id:"ia",           icon:"🤖",label:"IA",             color:T.purple},
@@ -9743,6 +9744,7 @@ function App(props){
     {id:"dashboard",    icon:"📊",label:"Mi equipo",   color:usuario.color},
     {id:"informes_hub", icon:"📋",label:"Informes",    color:T.navy},
     {id:"historial",    icon:"📅",label:"Historial",   color:T.purple},
+    {id:"calendario",   icon:"🗓️",label:"Agenda",       color:T.blue},
     {id:"tareas",       icon:"📌",label:"Tareas",      color:T.red,   badge:urgCount},
     {id:"clientes_eq",  icon:"📋",label:"Clientes",    color:T.blue},
     {id:"muestras",     icon:"📦",label:"Muestras",    color:T.purple, badge:pend},
@@ -9758,6 +9760,7 @@ function App(props){
     {id:"dashboard",    icon:"📊",label:"Dashboard",    color:usuario.color},
     {id:"informes_hub", icon:"📋",label:"Informes",    color:T.navy},
     {id:"historial",    icon:"📅",label:"Historial",    color:T.purple},
+    {id:"calendario",   icon:"🗓️",label:"Agenda",        color:T.blue},
     {id:"tareas",       icon:"📌",label:"Tareas",       color:T.red,   badge:urgCount},
     {id:"clientes_eq",  icon:"📋",label:"Clientes",     color:T.blue},
     {id:"muestras",     icon:"📦",label:"Muestras",     color:T.purple, badge:pend},
@@ -10313,6 +10316,7 @@ function App(props){
                section==="usuarios"?"👥 Equipo":
                section==="historial"?"📅 Historial semanal":
                section==="tareas"?"📌 Tareas y acciones":
+               section==="calendario"?"🗓️ Agenda":
                section==="reporting"?"📈 Reporting":
                section==="ia"?"🤖 Asistente IA":
                section}
@@ -10384,6 +10388,7 @@ function App(props){
         {section==="historial"&& <HistorialSemanal usuario={usuario}/> }
         {section==="tareas"&&    <GestorTareas usuario={usuario} clientesFB={misClientesFB}/> }
         {section==="reporting"&& <Reporting usuario={usuario} muestrasDB={muestrasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} estrategiasDB={estrategiasDB} clientesDB={clientesDB} misClientesFB={misClientesFB}/>}
+        {section==="calendario"&& <Calendario usuario={usuario} clientesFB={misClientesFB} onAbrirCliente={onAbrirCliente}/>}
         {section==="ia"&&(
           <AsistenteIA
             usuario={usuario}
@@ -10863,6 +10868,313 @@ function Reporting({usuario,muestrasDB,oportunidadesDB,incidenciasDB,estrategias
         </div>
       </div>
       )}
+    </div>
+  );
+}
+
+// ─── CALENDARIO / AGENDA ─────────────────────────────────────────
+function Calendario({usuario, clientesFB, onAbrirCliente}){
+  const [eventos,setEventos]=useState([]);
+  const [cargando,setCargando]=useState(true);
+  const [semanaOffset,setSemanaOffset]=useState(0);
+  const [diaSel,setDiaSel]=useState(new Date().getDay()||1); // 1=lun...5=vie
+  const [showForm,setShowForm]=useState(false);
+  const [formDia,setFormDia]=useState(null);
+  const [form,setForm]=useState({hora:"09:00",cliente:"",tipo:"visita",nota:""});
+  const [editId,setEditId]=useState(null);
+
+  const esAgente=usuario.rol==="agente";
+  const esJefe=usuario.rol==="jefe";
+  const esDir=["director","ceo"].includes(usuario.rol);
+  const appMisIds=resolverMisIds(usuario);
+
+  // Calcular semana
+  const hoy=new Date();
+  const lunes=new Date(hoy);
+  lunes.setDate(hoy.getDate()-((hoy.getDay()+6)%7)+(semanaOffset*7));
+  const dias=[];
+  const DIAS_NOMBRE=["Lun","Mar","Mié","Jue","Vie"];
+  for(let i=0;i<5;i++){
+    const d=new Date(lunes);d.setDate(lunes.getDate()+i);
+    dias.push({idx:i+1,nombre:DIAS_NOMBRE[i],fecha:d,
+      str:d.toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit"}),
+      iso:d.toISOString().split("T")[0],
+      esHoy:d.toDateString()===hoy.toDateString()});
+  }
+
+  const semLabel=`${dias[0].str} — ${dias[4].str}`;
+  const semISO=(()=>{const d=lunes;const s=new Date(d.getFullYear(),0,1);return Math.ceil(((d-s)/86400000+s.getDay()+1)/7);})();
+
+  // Cargar eventos de Firebase
+  useEffect(()=>{
+    setCargando(true);
+    fbLeer("calendario").then(data=>{
+      const todos=data.filter(e=>!e.eliminado);
+      setEventos(todos);
+    }).catch(()=>{}).finally(()=>setCargando(false));
+  },[]);
+
+  // Filtrar eventos por semana y rol
+  const eventosSemana=useMemo(()=>{
+    const isoSet=new Set(dias.map(d=>d.iso));
+    return eventos.filter(e=>{
+      if(!isoSet.has(e.fecha)) return false;
+      if(esAgente) return appMisIds.has((e.agente||"").toUpperCase());
+      if(esJefe){const ag=USUARIOS.find(u=>u.id===e.agente);return ag?.equipo===usuario.equipo;}
+      return true;
+    });
+  },[eventos,dias,usuario.id]);
+
+  const eventosDia=(iso)=>eventosSemana.filter(e=>e.fecha===iso).sort((a,b)=>(a.hora||"").localeCompare(b.hora||""));
+
+  const TIPOS={
+    visita:{icon:"👋",label:"Visita",color:"#3B82F6"},
+    llamada:{icon:"📞",label:"Llamada",color:"#8B5CF6"},
+    reunion:{icon:"🤝",label:"Reunión",color:"#F59E0B"},
+    tarea:{icon:"📌",label:"Tarea",color:"#EF4444"},
+    demo:{icon:"📦",label:"Demo/Muestra",color:"#059669"},
+  };
+
+  const guardar=()=>{
+    if(!form.cliente.trim()&&form.tipo!=="tarea") return;
+    const dia=formDia||dias.find(d=>d.idx===diaSel);
+    if(!dia) return;
+    const id=editId||("cal_"+Date.now());
+    const evento={
+      id,fecha:dia.iso,hora:form.hora,
+      cliente:form.cliente.trim(),tipo:form.tipo,nota:form.nota,
+      agente:usuario.id,agenteNombre:usuario.nombre,
+      equipo:usuario.equipo||"",semana:semISO,
+      creadoEn:new Date().toLocaleDateString("es-ES"),
+    };
+    if(editId){
+      setEventos(ev=>ev.map(e=>e.id===editId?evento:e));
+    }else{
+      setEventos(ev=>[...ev,evento]);
+    }
+    fbEscribir("calendario",id,evento);
+    setShowForm(false);setEditId(null);
+    setForm({hora:"09:00",cliente:"",tipo:"visita",nota:""});
+  };
+
+  const eliminar=(id)=>{
+    if(!confirm("¿Eliminar este evento?")) return;
+    setEventos(ev=>ev.filter(e=>e.id!==id));
+    fbEscribir("calendario",id,{id,eliminado:true});
+  };
+
+  const editar=(ev)=>{
+    setEditId(ev.id);
+    setForm({hora:ev.hora||"09:00",cliente:ev.cliente||"",tipo:ev.tipo||"visita",nota:ev.nota||""});
+    setFormDia(dias.find(d=>d.iso===ev.fecha));
+    setShowForm(true);
+  };
+
+  const clientes=clientesFB||[];
+  const diaActual=dias.find(d=>d.idx===diaSel)||dias[0];
+  const eventosDiaActual=eventosDia(diaActual.iso);
+
+  // Contar eventos por día para badges
+  const contDia=(d)=>eventosDia(d.iso).length;
+
+  return(
+    <div style={{padding:"0 0 100px"}}>
+      {/* Navegación semana */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+        padding:"16px",background:"#fff",borderBottom:`1px solid ${T.border}`}}>
+        <button onClick={()=>setSemanaOffset(s=>s-1)}
+          style={{background:"none",border:`1px solid ${T.border}`,borderRadius:8,
+            padding:"8px 14px",fontSize:16,cursor:"pointer",color:T.text}}>←</button>
+        <div style={{textAlign:"center"}}>
+          <p style={{margin:0,fontSize:14,fontWeight:800,color:T.text}}>📅 Semana {semISO}</p>
+          <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{semLabel}</p>
+        </div>
+        <div style={{display:"flex",gap:6}}>
+          {semanaOffset!==0&&(
+            <button onClick={()=>setSemanaOffset(0)}
+              style={{background:T.navy,border:"none",borderRadius:8,
+                padding:"8px 12px",fontSize:11,fontWeight:700,cursor:"pointer",color:"#fff"}}>Hoy</button>
+          )}
+          <button onClick={()=>setSemanaOffset(s=>s+1)}
+            style={{background:"none",border:`1px solid ${T.border}`,borderRadius:8,
+              padding:"8px 14px",fontSize:16,cursor:"pointer",color:T.text}}>→</button>
+        </div>
+      </div>
+
+      {/* Selector de día */}
+      <div style={{display:"flex",background:"#fff",padding:"8px 12px",gap:4,
+        borderBottom:`1px solid ${T.border}`}}>
+        {dias.map(d=>(
+          <button key={d.idx} onClick={()=>setDiaSel(d.idx)}
+            style={{flex:1,padding:"10px 4px",borderRadius:10,border:"none",cursor:"pointer",
+              background:diaSel===d.idx?T.navy:d.esHoy?"#EFF6FF":"transparent",
+              color:diaSel===d.idx?"#fff":d.esHoy?T.navy:T.text,
+              display:"flex",flexDirection:"column",alignItems:"center",gap:2,position:"relative"}}>
+            <span style={{fontSize:10,fontWeight:700,opacity:.7}}>{d.nombre}</span>
+            <span style={{fontSize:15,fontWeight:900}}>{d.fecha.getDate()}</span>
+            {contDia(d)>0&&diaSel!==d.idx&&(
+              <span style={{position:"absolute",top:2,right:4,background:T.navy,color:"#fff",
+                fontSize:8,fontWeight:800,padding:"1px 4px",borderRadius:99,minWidth:14,textAlign:"center"}}>
+                {contDia(d)}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {/* Contenido del día */}
+      <div style={{padding:"16px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>
+            {diaActual.nombre} {diaActual.str} · {eventosDiaActual.length} evento{eventosDiaActual.length!==1?"s":""}
+          </p>
+          <button onClick={()=>{setShowForm(true);setFormDia(diaActual);setEditId(null);setForm({hora:"09:00",cliente:"",tipo:"visita",nota:""});}}
+            style={{padding:"7px 14px",borderRadius:8,border:"none",background:T.navy,
+              color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+            + Añadir
+          </button>
+        </div>
+
+        {/* Formulario */}
+        {showForm&&(
+          <div style={{background:"#fff",borderRadius:14,padding:16,marginBottom:16,
+            border:`2px solid ${T.navy}`,boxShadow:"0 4px 12px rgba(0,0,0,.08)"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <p style={{margin:0,fontSize:13,fontWeight:800,color:T.navy}}>
+                {editId?"✏️ Editar evento":"📅 Nuevo evento"} — {formDia?.nombre} {formDia?.str}
+              </p>
+              <button onClick={()=>{setShowForm(false);setEditId(null);}}
+                style={{background:"none",border:"none",fontSize:18,color:T.muted,cursor:"pointer"}}>×</button>
+            </div>
+
+            {/* Tipo */}
+            <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>
+              {Object.entries(TIPOS).map(([k,t])=>(
+                <button key={k} onClick={()=>setForm(f=>({...f,tipo:k}))}
+                  style={{padding:"6px 12px",borderRadius:8,border:`2px solid ${form.tipo===k?t.color:T.border}`,
+                    background:form.tipo===k?t.color+"12":"#fff",fontSize:11,fontWeight:700,
+                    color:form.tipo===k?t.color:T.muted,cursor:"pointer"}}>
+                  {t.icon} {t.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Hora */}
+            <div style={{display:"flex",gap:8,marginBottom:10}}>
+              <div style={{flex:1}}>
+                <p style={{margin:"0 0 4px",fontSize:10,fontWeight:700,color:T.muted}}>Hora</p>
+                <input type="time" value={form.hora} onChange={e=>setForm(f=>({...f,hora:e.target.value}))}
+                  style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${T.border}`,
+                    fontSize:14,outline:"none",boxSizing:"border-box",fontFamily:"inherit"}}/>
+              </div>
+            </div>
+
+            {/* Cliente */}
+            {form.tipo!=="tarea"&&(
+              <div style={{marginBottom:10}}>
+                <p style={{margin:"0 0 4px",fontSize:10,fontWeight:700,color:T.muted}}>Cliente</p>
+                <SearchInput
+                  value={form.cliente}
+                  onChange={v=>setForm(f=>({...f,cliente:v}))}
+                  placeholder="🔍 Buscar cliente..."
+                  suggestions={clientes
+                    .filter(c=>form.cliente.length>=2&&(c.nombre||c.NOMBRE||"").toLowerCase().includes(form.cliente.toLowerCase()))
+                    .slice(0,6).map(c=>({label:c.nombre||c.NOMBRE,sub:c.poblacion||c.ciudad||"",tipo:"cliente"}))}
+                  onSelect={s=>setForm(f=>({...f,cliente:s.label}))}
+                />
+              </div>
+            )}
+
+            {/* Nota */}
+            <div style={{marginBottom:12}}>
+              <p style={{margin:"0 0 4px",fontSize:10,fontWeight:700,color:T.muted}}>Nota (opcional)</p>
+              <input value={form.nota} onChange={e=>setForm(f=>({...f,nota:e.target.value}))}
+                placeholder="Objetivo de la visita, tema..."
+                style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${T.border}`,
+                  fontSize:13,outline:"none",boxSizing:"border-box",fontFamily:"inherit"}}/>
+            </div>
+
+            <button onClick={guardar}
+              style={{width:"100%",padding:"12px",borderRadius:10,border:"none",
+                background:T.navy,color:"#fff",fontSize:13,fontWeight:800,cursor:"pointer"}}>
+              {editId?"💾 Guardar cambios":"✅ Añadir al calendario"}
+            </button>
+          </div>
+        )}
+
+        {/* Lista de eventos */}
+        {cargando?(
+          <p style={{textAlign:"center",padding:32,color:T.muted}}>Cargando calendario...</p>
+        ):eventosDiaActual.length===0&&!showForm?(
+          <div style={{textAlign:"center",padding:"40px 20px",color:T.muted}}>
+            <span style={{fontSize:40,display:"block",marginBottom:8}}>📭</span>
+            <p style={{margin:0,fontSize:13}}>Sin eventos para {diaActual.nombre} {diaActual.str}</p>
+            <p style={{margin:"6px 0 0",fontSize:11,color:"#94A3B8"}}>Pulsa "+ Añadir" para programar una visita</p>
+          </div>
+        ):(
+          <div>
+            {eventosDiaActual.map(ev=>{
+              const tipo=TIPOS[ev.tipo]||TIPOS.visita;
+              const ag=USUARIOS.find(u=>u.id===ev.agente);
+              return(
+                <div key={ev.id} style={{display:"flex",gap:12,marginBottom:8,
+                  background:"#fff",borderRadius:12,padding:"12px 14px",
+                  border:`1.5px solid ${tipo.color}33`,borderLeft:`4px solid ${tipo.color}`}}>
+                  <div style={{display:"flex",flexDirection:"column",alignItems:"center",
+                    padding:"4px 0",minWidth:44}}>
+                    <span style={{fontSize:20}}>{tipo.icon}</span>
+                    <span style={{fontSize:12,fontWeight:900,color:tipo.color,marginTop:2}}>{ev.hora}</span>
+                  </div>
+                  <div style={{flex:1}}>
+                    <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>
+                      {ev.cliente&&onAbrirCliente?(
+                        <span onClick={()=>onAbrirCliente(ev.cliente)} style={{color:T.blue,cursor:"pointer",textDecoration:"underline"}}>{ev.cliente}</span>
+                      ):(ev.cliente||tipo.label)}
+                    </p>
+                    <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:3}}>
+                      <span style={{fontSize:10,fontWeight:700,color:tipo.color,background:tipo.color+"12",
+                        padding:"2px 6px",borderRadius:5}}>{tipo.label}</span>
+                      {(esJefe||esDir)&&ag&&<span style={{fontSize:10,color:T.muted}}>{ag.icon} {ag.nombre}</span>}
+                    </div>
+                    {ev.nota&&<p style={{margin:"4px 0 0",fontSize:11,color:T.muted,fontStyle:"italic"}}>{ev.nota}</p>}
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:4,flexShrink:0}}>
+                    <button onClick={()=>editar(ev)}
+                      style={{padding:"4px 8px",borderRadius:6,border:`1px solid ${T.border}`,
+                        background:"#fff",color:T.blue,fontSize:10,fontWeight:700,cursor:"pointer"}}>✏️</button>
+                    <button onClick={()=>eliminar(ev.id)}
+                      style={{padding:"4px 8px",borderRadius:6,border:`1px solid ${T.border}`,
+                        background:"#fff",color:T.red,fontSize:10,fontWeight:700,cursor:"pointer"}}>🗑️</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Resumen semanal */}
+        {eventosSemana.length>0&&(
+          <div style={{background:"#fff",borderRadius:12,padding:14,marginTop:16,border:`1px solid ${T.border}`}}>
+            <p style={{margin:"0 0 8px",fontSize:12,fontWeight:800,color:T.text}}>📊 Resumen de la semana</p>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+              {Object.entries(TIPOS).map(([k,t])=>{
+                const n=eventosSemana.filter(e=>e.tipo===k).length;
+                if(n===0) return null;
+                return(
+                  <span key={k} style={{fontSize:11,fontWeight:700,color:t.color,background:t.color+"12",
+                    padding:"4px 10px",borderRadius:8}}>
+                    {t.icon} {n} {t.label}{n>1?"s":""}
+                  </span>
+                );
+              })}
+              <span style={{fontSize:11,fontWeight:700,color:T.navy,background:T.navy+"12",
+                padding:"4px 10px",borderRadius:8}}>
+                📅 {eventosSemana.length} total
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
