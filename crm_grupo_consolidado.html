@@ -5139,20 +5139,101 @@ async function subirFotos(fotos=[], carpeta="general"){
 }
 
 // ── Firebase genérico ─────────────────────────────────────────────
+// ─── SISTEMA OFFLINE — Caché local + Cola de escrituras ─────────
+const CACHE_PREFIX="crm_cache_";
+const COLA_KEY="crm_cola_pendiente";
+const CACHE_TTL=1000*60*60*2; // 2 horas de validez de caché
+
+function cacheGuardar(coleccion,datos){
+  try{localStorage.setItem(CACHE_PREFIX+coleccion,JSON.stringify({ts:Date.now(),datos}));}catch(e){}
+}
+function cacheLeer(coleccion){
+  try{
+    const raw=localStorage.getItem(CACHE_PREFIX+coleccion);
+    if(!raw) return null;
+    const {ts,datos}=JSON.parse(raw);
+    if(Date.now()-ts>CACHE_TTL) return null; // caché expirada
+    return datos;
+  }catch(e){return null;}
+}
+function colaAñadir(coleccion,id,datos){
+  try{
+    const cola=JSON.parse(localStorage.getItem(COLA_KEY)||"[]");
+    // Reemplazar si ya existe el mismo doc
+    const idx=cola.findIndex(c=>c.coleccion===coleccion&&c.id===id);
+    const item={coleccion,id,datos,ts:Date.now()};
+    if(idx>=0) cola[idx]=item; else cola.push(item);
+    localStorage.setItem(COLA_KEY,JSON.stringify(cola));
+    console.log(`📴 Offline: ${coleccion}/${id} guardado en cola (${cola.length} pendientes)`);
+  }catch(e){}
+}
+function colaLeer(){
+  try{return JSON.parse(localStorage.getItem(COLA_KEY)||"[]");}catch(e){return[];}
+}
+function colaLimpiar(){
+  try{localStorage.setItem(COLA_KEY,"[]");}catch(e){}
+}
+// Indicador global de estado de conexión
+let _crmOnline=navigator.onLine;
+let _colaPendiente=colaLeer().length;
+window.addEventListener("online",()=>{_crmOnline=true;console.log("🟢 Online — sincronizando...");sincronizarCola();});
+window.addEventListener("offline",()=>{_crmOnline=false;console.log("🔴 Offline — escrituras se guardarán localmente");});
+
+async function sincronizarCola(){
+  const cola=colaLeer();
+  if(cola.length===0) return 0;
+  console.log(`🔄 Sincronizando ${cola.length} escrituras pendientes...`);
+  let ok=0,err=0;
+  for(const item of cola){
+    try{
+      const r=await fetch(`${FB_BASE}/${item.coleccion}/${item.id}`,{
+        method:"PATCH",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify(serializeToFirestore(item.datos))
+      });
+      if(r.ok){ok++;} else{err++;}
+    }catch(e){err++;}
+  }
+  if(err===0){
+    colaLimpiar();
+    _colaPendiente=0;
+    console.log(`✅ Sincronización completa: ${ok} documentos subidos`);
+  }else{
+    // Dejar en cola solo los que fallaron
+    const nuevaCola=colaLeer().slice(ok);
+    localStorage.setItem(COLA_KEY,JSON.stringify(nuevaCola));
+    _colaPendiente=nuevaCola.length;
+    console.log(`⚠️ Sincronización parcial: ${ok} ok, ${err} pendientes`);
+  }
+  return ok;
+}
+
 async function fbLeer(coleccion, pageSize=200){
   try{
     let docs=[], nextPage=null, intentos=0;
     do{
       const url=`${FB_BASE}/${coleccion}?pageSize=300${nextPage?"&pageToken="+nextPage:""}`;
       const r=await fetch(url);
-      if(!r.ok) return [];
+      if(!r.ok){
+        // Offline o error → intentar caché
+        const cached=cacheLeer(coleccion);
+        if(cached){console.log(`📴 ${coleccion}: usando caché local (${cached.length} docs)`);return cached;}
+        return [];
+      }
       const data=await r.json();
       if(data.documents) docs=[...docs,...data.documents.map(fromFirestore)];
       nextPage=data.nextPageToken||null;
       intentos++;
     }while(nextPage&&intentos<10);
+    // Guardar en caché para uso offline
+    if(docs.length>0) cacheGuardar(coleccion,docs);
     return docs;
-  }catch(e){console.warn("FB leer:",e.message);return [];}
+  }catch(e){
+    console.warn("📴 FB leer offline:",e.message);
+    const cached=cacheLeer(coleccion);
+    if(cached){console.log(`📴 ${coleccion}: usando caché local (${cached.length} docs)`);return cached;}
+    return [];
+  }
 }
 
 // Cargar TODOS los docs de una colección sin límite de páginas
@@ -5162,14 +5243,24 @@ async function fbLeerTodos(coleccion){
     do{
       const url=`${FB_BASE}/${coleccion}?pageSize=300${nextPage?"&pageToken="+nextPage:""}`;
       const r=await fetch(url);
-      if(!r.ok) break;
+      if(!r.ok){
+        const cached=cacheLeer(coleccion);
+        if(cached) return cached;
+        break;
+      }
       const data=await r.json();
       if(data.documents) docs=[...docs,...data.documents.map(fromFirestore)];
       nextPage=data.nextPageToken||null;
       intentos++;
     }while(nextPage&&intentos<50);
+    if(docs.length>0) cacheGuardar(coleccion,docs);
     return docs;
-  }catch(e){console.warn("FB leerTodos:",e.message);return [];}
+  }catch(e){
+    console.warn("📴 FB leerTodos offline:",e.message);
+    const cached=cacheLeer(coleccion);
+    if(cached) return cached;
+    return [];
+  }
 }
 
 // Query Firestore por grupoAgente — solo trae los clientes del vendedor
@@ -5216,6 +5307,16 @@ function serializeToFirestore(datos){
 
 // Escritura genérica — crea o sobreescribe documento
 async function fbEscribir(coleccion, id, datos){
+  // Actualizar caché local inmediatamente (para que la UI refleje el cambio)
+  try{
+    const cached=cacheLeer(coleccion);
+    if(cached){
+      const idx=cached.findIndex(d=>d.id===id);
+      if(idx>=0) cached[idx]={...cached[idx],...datos}; else cached.push({...datos,id});
+      cacheGuardar(coleccion,cached);
+    }
+  }catch(e){}
+
   try{
     const r=await fetch(`${FB_BASE}/${coleccion}/${id}`,{
       method:"PATCH",
@@ -5226,15 +5327,20 @@ async function fbEscribir(coleccion, id, datos){
       const e=await r.json().catch(()=>({}));
       const msg=e?.error?.message||e?.error?.status||r.status;
       console.warn(`🔴 Firebase [${coleccion}/${id}] error ${r.status}:`, msg);
-      // Mostrar en pantalla para diagnóstico
       if(r.status===403||r.status===401){
         console.warn("⚠️ REGLAS FIREBASE: La base de datos no permite escritura anónima.");
-        console.warn("Solución: Firebase Console → Firestore → Reglas → cambiar a allow read, write: if true;");
+      }
+      // Si es error de red/servidor, guardar en cola
+      if(r.status>=500||r.status===0){
+        colaAñadir(coleccion,id,datos);
+        _colaPendiente=colaLeer().length;
       }
     }
     return r.ok;
   }catch(e){
-    console.warn("🔴 Firebase red error:", e.message);
+    console.warn("📴 Offline — guardando en cola:", coleccion+"/"+id);
+    colaAñadir(coleccion,id,datos);
+    _colaPendiente=colaLeer().length;
     return false;
   }
 }
@@ -9544,6 +9650,8 @@ function App(props){
       }
 
       setFbStatus("ok");
+      // Sincronizar cola de escrituras pendientes (modo offline)
+      if(colaLeer().length>0) sincronizarCola();
     }).catch(e=>{console.warn("Firebase error:",e);setFbStatus("error");})
     .finally(()=>setFbCargando(false));
   },[usuario?.id]);
@@ -10065,8 +10173,10 @@ function App(props){
             {usuario.equipo?` · ${usuario.equipo}`:""}
             {" · "}
             {fbCargando&&<span style={{color:T.amber}}>⏳ Cargando nube…</span>}
-            {!fbCargando&&fbStatus==="ok"&&<span style={{color:T.green}}>🔵 Firebase OK</span>}
+            {!fbCargando&&fbStatus==="ok"&&!navigator.onLine&&<span style={{color:T.amber}}>📴 Offline (caché)</span>}
+            {!fbCargando&&fbStatus==="ok"&&navigator.onLine&&<span style={{color:T.green}}>🔵 Firebase OK</span>}
             {!fbCargando&&fbStatus==="error"&&<span style={{color:T.muted}}>⚪ Sin conexión</span>}
+            {colaLeer().length>0&&<span style={{color:T.amber,marginLeft:4}}>· 📤 {colaLeer().length} pendiente{colaLeer().length>1?"s":""}</span>}
           </p>
         </div>
         <button onClick={()=>{setBusquedaGlobal(true);setBusqTexto("");}}
