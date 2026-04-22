@@ -9526,44 +9526,56 @@ function App(props){
     }
   },[usuario?.grupoAgente]);
 
-  // ── Tracking de tiempo de uso ──────────────────────────────────
+  // ── Tracking de tiempo de uso (optimizado para móvil) ───────────
   useEffect(()=>{
-    if(!usuario) return;
+    if(!usuario||!usuario.id) return;
     const sesionId="ses_"+usuario.id+"_"+Date.now();
     const inicio=Date.now();
     const hoy=new Date().toLocaleDateString("es-ES");
     const semana=getSemanaISO();
+    let ultimoGuardado=0;
 
-    // Guardar sesión inicial
-    const guardarSesion=(fin)=>{
-      const durMin=Math.round((fin-inicio)/60000);
-      if(durMin<1) return; // ignorar sesiones <1 min
+    const guardarSesion=()=>{
+      const ahora=Date.now();
+      const durMin=Math.round((ahora-inicio)/60000);
+      // Evitar escrituras duplicadas en menos de 30 seg
+      if(ahora-ultimoGuardado<30000) return;
+      ultimoGuardado=ahora;
       fbEscribir("sesiones",sesionId,{
-        id:sesionId,agente:usuario.id,agenteNombre:usuario.nombre,
-        equipo:usuario.equipo||"",rol:usuario.rol,
-        fecha:hoy,semana,inicio:new Date(inicio).toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}),
-        fin:new Date(fin).toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}),
-        duracionMin:durMin,
+        id:sesionId,agente:usuario.id,agenteNombre:usuario.nombre||usuario.id,
+        equipo:usuario.equipo||"",rol:usuario.rol||"",
+        fecha:hoy,semana:semana,
+        inicio:new Date(inicio).toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}),
+        fin:new Date(ahora).toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}),
+        duracionMin:Math.max(durMin,1),
       });
     };
 
-    // Actualizar cada 2 minutos
-    const timer=setInterval(()=>guardarSesion(Date.now()),120000);
+    // Guardar inmediatamente al entrar (registra la sesión desde el primer momento)
+    guardarSesion();
 
-    // Al cerrar/salir
-    const onUnload=()=>guardarSesion(Date.now());
+    // Actualizar cada 60 segundos
+    const timer=setInterval(guardarSesion,60000);
+
+    // visibilitychange es más fiable en móvil que beforeunload
+    const onVisChange=()=>{if(document.visibilityState==="hidden") guardarSesion();};
+    document.addEventListener("visibilitychange",onVisChange);
+
+    // beforeunload como backup (funciona en desktop)
+    const onUnload=()=>guardarSesion();
     window.addEventListener("beforeunload",onUnload);
 
-    // Guardar sesión inicial (1 min)
-    const initTimer=setTimeout(()=>guardarSesion(Date.now()),60000);
+    // pagehide es el evento más fiable en iOS Safari
+    window.addEventListener("pagehide",onUnload);
 
     return()=>{
       clearInterval(timer);
-      clearTimeout(initTimer);
+      document.removeEventListener("visibilitychange",onVisChange);
       window.removeEventListener("beforeunload",onUnload);
-      guardarSesion(Date.now());
+      window.removeEventListener("pagehide",onUnload);
+      guardarSesion();
     };
-  },[usuario?.id]);
+  },[usuario?.id,usuario?.nombre]);
 
   // Actividad diaria compartida entre GestorClientes e Informe
   const [actividadSemana,setActividadSemana]=useState({});
