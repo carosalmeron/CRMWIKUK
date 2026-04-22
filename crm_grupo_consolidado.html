@@ -9526,6 +9526,45 @@ function App(props){
     }
   },[usuario?.grupoAgente]);
 
+  // ── Tracking de tiempo de uso ──────────────────────────────────
+  useEffect(()=>{
+    if(!usuario) return;
+    const sesionId="ses_"+usuario.id+"_"+Date.now();
+    const inicio=Date.now();
+    const hoy=new Date().toLocaleDateString("es-ES");
+    const semana=getSemanaISO();
+
+    // Guardar sesión inicial
+    const guardarSesion=(fin)=>{
+      const durMin=Math.round((fin-inicio)/60000);
+      if(durMin<1) return; // ignorar sesiones <1 min
+      fbEscribir("sesiones",sesionId,{
+        id:sesionId,agente:usuario.id,agenteNombre:usuario.nombre,
+        equipo:usuario.equipo||"",rol:usuario.rol,
+        fecha:hoy,semana,inicio:new Date(inicio).toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}),
+        fin:new Date(fin).toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}),
+        duracionMin:durMin,
+      });
+    };
+
+    // Actualizar cada 2 minutos
+    const timer=setInterval(()=>guardarSesion(Date.now()),120000);
+
+    // Al cerrar/salir
+    const onUnload=()=>guardarSesion(Date.now());
+    window.addEventListener("beforeunload",onUnload);
+
+    // Guardar sesión inicial (1 min)
+    const initTimer=setTimeout(()=>guardarSesion(Date.now()),60000);
+
+    return()=>{
+      clearInterval(timer);
+      clearTimeout(initTimer);
+      window.removeEventListener("beforeunload",onUnload);
+      guardarSesion(Date.now());
+    };
+  },[usuario?.id]);
+
   // Actividad diaria compartida entre GestorClientes e Informe
   const [actividadSemana,setActividadSemana]=useState({});
   const onActividad=(cid,data)=>setActividadSemana(a=>({...a,[cid]:data}));
@@ -10610,6 +10649,34 @@ function Reporting({usuario,muestrasDB,oportunidadesDB,incidenciasDB,estrategias
   const miEquipo=usuario.equipo;
   const appMisIds=resolverMisIds(usuario);
   const [printing,setPrinting]=useState(false);
+  const [sesiones,setSesiones]=useState([]);
+
+  // Cargar sesiones de uso
+  useEffect(()=>{
+    fbLeer("sesiones").then(data=>{
+      const filtradas=data.filter(s=>{
+        if(esDir) return true;
+        if(esJefe){const ag=USUARIOS.find(u=>u.id===s.agente);return ag?.equipo===miEquipo;}
+        return appMisIds.has((s.agente||"").toUpperCase());
+      });
+      setSesiones(filtradas);
+    }).catch(()=>{});
+  },[]);
+
+  // Calcular tiempo por agente (semana actual)
+  const semActualISO=getSemanaISO();
+  const tiempoPorAgente=useMemo(()=>{
+    const map={};
+    sesiones.filter(s=>s.semana===semActualISO).forEach(s=>{
+      if(!map[s.agente]) map[s.agente]={nombre:s.agenteNombre||s.agente,min:0,sesiones:0};
+      map[s.agente].min+=(parseInt(s.duracionMin)||0);
+      map[s.agente].sesiones++;
+    });
+    return Object.values(map).sort((a,b)=>b.min-a.min);
+  },[sesiones]);
+
+  const tiempoTotal=tiempoPorAgente.reduce((s,a)=>s+a.min,0);
+  const formatMin=(m)=>m>=60?`${Math.floor(m/60)}h ${m%60}m`:`${m}m`;
 
   // Filtrar datos según rol
   const misMuestras=useMemo(()=>{
@@ -10893,6 +10960,52 @@ function Reporting({usuario,muestrasDB,oportunidadesDB,incidenciasDB,estrategias
         </>);
       })()}
 
+      {/* ═══ TIEMPO DE USO ═══ */}
+      {tiempoPorAgente.length>0&&(
+        <div style={{background:"#fff",borderRadius:14,padding:16,margin:"0 16px 16px",border:`1px solid ${T.border}`}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+            <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>⏱️ Tiempo de uso · Semana {semActualISO}</p>
+            <span style={{fontSize:12,fontWeight:800,color:T.navy,background:T.navy+"12",
+              padding:"3px 10px",borderRadius:8}}>{formatMin(tiempoTotal)}</span>
+          </div>
+          {(esJefe||esDir)?(
+            <div>
+              {tiempoPorAgente.map((a,i)=>{
+                const pct=tiempoTotal>0?Math.round(a.min/tiempoTotal*100):0;
+                const ag=USUARIOS.find(u=>u.nombre===a.nombre||u.id===a.nombre);
+                return(
+                  <div key={i} style={{display:"flex",gap:10,alignItems:"center",padding:"10px 0",
+                    borderBottom:i<tiempoPorAgente.length-1?`1px solid ${T.border}`:"none"}}>
+                    <div style={{width:32,height:32,borderRadius:8,background:(ag?.color||T.navy)+"18",
+                      display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0}}>
+                      {ag?.icon||"👤"}
+                    </div>
+                    <div style={{flex:1}}>
+                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                        <span style={{fontSize:12,fontWeight:700,color:T.text}}>{a.nombre}</span>
+                        <span style={{fontSize:12,fontWeight:800,color:T.navy}}>{formatMin(a.min)}</span>
+                      </div>
+                      <div style={{height:6,borderRadius:99,background:"#E2E8F0"}}>
+                        <div style={{height:"100%",width:`${pct}%`,background:ag?.color||T.navy,
+                          borderRadius:99,transition:"width .3s"}}/>
+                      </div>
+                      <p style={{margin:"3px 0 0",fontSize:10,color:T.muted}}>{a.sesiones} sesión{a.sesiones>1?"es":""}</p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ):(
+            <div style={{textAlign:"center",padding:"8px 0"}}>
+              <p style={{margin:0,fontSize:28,fontWeight:900,color:T.navy}}>{formatMin(tiempoTotal)}</p>
+              <p style={{margin:"4px 0 0",fontSize:11,color:T.muted}}>
+                {tiempoPorAgente[0]?.sesiones||0} sesión{(tiempoPorAgente[0]?.sesiones||0)>1?"es":""} esta semana
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Gráfico — Muestras por semana */}
       <div style={{background:"#fff",borderRadius:14,padding:16,margin:"0 16px 16px",border:`1px solid ${T.border}`}}>
         <p style={{margin:"0 0 12px",fontSize:13,fontWeight:800,color:T.text}}>📊 Muestras por semana</p>
@@ -10985,6 +11098,12 @@ function Reporting({usuario,muestrasDB,oportunidadesDB,incidenciasDB,estrategias
             {label:"💼 Oportunidades",sub:`${misOpos.length} registros`,fn:exportOpos,c:T.navy},
             {label:"👤 Clientes",sub:`${clientes.length} registros`,fn:exportClientes,c:T.blue},
             {label:"🚨 Incidencias",sub:`${misInc.length} registros`,fn:exportInc,c:T.red},
+            {label:"⏱️ Sesiones",sub:`${sesiones.length} registros`,fn:()=>exportarExcel(sesiones,"Sesiones",[
+              {label:"Agente",key:"agenteNombre"},{label:"Fecha",key:"fecha"},
+              {label:"Inicio",key:"inicio"},{label:"Fin",key:"fin"},
+              {label:"Duración (min)",key:"duracionMin"},{label:"Semana",key:"semana"},
+              {label:"Equipo",key:"equipo"},{label:"Rol",key:"rol"},
+            ]),c:T.navy},
           ].map(b=>(
             <button key={b.label} onClick={b.fn}
               style={{padding:"14px 12px",borderRadius:12,border:`1.5px solid ${b.c}33`,
