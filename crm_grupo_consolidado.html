@@ -484,7 +484,7 @@ function SearchInput({value, onChange, placeholder, suggestions=[], onSelect, st
   );
 }
 
-function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, estrategiasDB, incidenciasDB}){
+function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, estrategiasDB, incidenciasDB, calendarioDB}){
   const {id,equipo,color}=usuario;
   const opsBD=oportunidadesDB||OPORTUNIDADES_SEED;
   const misClientes=clientesFB&&clientesFB.length>0 ? clientesFB : (CLIENTES_POR_AGENTE[id]||[]);
@@ -507,7 +507,60 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, es
   const misInc=(incidenciasDB||INCIDENCIAS_SEED).filter(i=>
     (i.estado==="abierta")&&(appMisIds.has((i.autor||"").toUpperCase())||appMisIds.has((i.agente||"").toUpperCase())));
 
-  const totalSem=misClientes.length,visitados=Math.min(totalSem,8),pendVisita=totalSem-visitados;
+  // Calendario — eventos de hoy y de la semana
+  const hoyISO=new Date().toISOString().split("T")[0];
+  const DIAS_NOMBRE=["Dom","Lun","Mar","Mié","Jue","Vie","Sáb"];
+  const hoyNombre=DIAS_NOMBRE[new Date().getDay()];
+  const eventosHoy=(calendarioDB||[]).filter(e=>e.fecha===hoyISO&&appMisIds.has((e.agente||"").toUpperCase()))
+    .sort((a,b)=>(a.hora||"").localeCompare(b.hora||""));
+
+  // ── Planificación de rutas semanal ──
+  const [rutasSemana,setRutasSemana]=useState([]);
+  const [rutasCargadas,setRutasCargadas]=useState(false);
+  const planId=`plan_${usuario.id}_sem${semana}`;
+
+  // Obtener rutas disponibles del agente
+  const getRouteNum=(c)=>{
+    if(c.semana&&Number(c.semana)>0) return Number(c.semana);
+    if(c.ruta&&Number(c.ruta)>0) return Number(c.ruta);
+    if(Array.isArray(c.semanas)&&c.semanas.length>0){const n=Number(c.semanas[0]);if(n>0)return n;}
+    if(c.semanaVisita&&Number(c.semanaVisita)>0) return Number(c.semanaVisita);
+    return 0;
+  };
+  const rutasDisponibles=[...new Set(misClientes.map(c=>getRouteNum(c)).filter(r=>r>0))].sort((a,b)=>a-b);
+  const clientesPorRuta=(ruta)=>misClientes.filter(c=>getRouteNum(c)===ruta);
+
+  // Cargar plan de semana desde Firebase
+  useEffect(()=>{
+    fbLeer("planificacion").then(data=>{
+      const plan=data.find(p=>p.id===planId);
+      if(plan&&plan.rutas) setRutasSemana(plan.rutas);
+      setRutasCargadas(true);
+    }).catch(()=>setRutasCargadas(true));
+  },[planId]);
+
+  const toggleRuta=(ruta)=>{
+    const nuevas=rutasSemana.includes(ruta)?rutasSemana.filter(r=>r!==ruta):[...rutasSemana,ruta].sort((a,b)=>a-b);
+    setRutasSemana(nuevas);
+    fbEscribir("planificacion",planId,{id:planId,agente:usuario.id,semana,rutas:nuevas,
+      fecha:new Date().toLocaleDateString("es-ES")});
+  };
+
+  // Clientes de las rutas seleccionadas
+  const clientesPlanificados=rutasSemana.length>0
+    ?misClientes.filter(c=>rutasSemana.includes(getRouteNum(c)))
+    :[];
+  // Clientes con visita en agenda esta semana
+  const lunesISO=(()=>{const d=new Date();d.setDate(d.getDate()-((d.getDay()+6)%7));return d.toISOString().split("T")[0];})();
+  const viernesISO=(()=>{const d=new Date();d.setDate(d.getDate()-((d.getDay()+6)%7)+4);return d.toISOString().split("T")[0];})();
+  const visitasSemana=(calendarioDB||[]).filter(e=>
+    e.fecha>=lunesISO&&e.fecha<=viernesISO&&e.tipo==="visita"&&
+    appMisIds.has((e.agente||"").toUpperCase())&&e.cliente);
+  const clientesConVisita=new Set(visitasSemana.map(e=>(e.cliente||"").toUpperCase()));
+
+  const totalSem=rutasSemana.length>0?clientesPlanificados.length:misClientes.length;
+  const visitados=clientesConVisita.size;
+  const pendVisita=totalSem-visitados;
   const semana=getSemanaISO();
 
   // Leer datos del agente desde AGENTES_DATA (poblado desde Firebase al arrancar)
@@ -680,10 +733,99 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, es
           </div>
         </div>
 
-        {/* ── Mi semana — acceso rápido ── */}
+        {/* ── Agenda de hoy ── */}
+        {eventosHoy.length>0&&(
+          <div style={{marginBottom:16}}>
+            <p style={{margin:"0 0 8px",fontSize:10,fontWeight:700,color:"#64748B",
+              textTransform:"uppercase",letterSpacing:".12em"}}>📅 Hoy · {hoyNombre} {new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit"})}</p>
+            <div style={{background:"#fff",borderRadius:14,overflow:"hidden",border:`1px solid ${T.border}`,
+              boxShadow:"0 1px 3px rgba(0,0,0,.04)"}}>
+              {eventosHoy.map((ev,i)=>{
+                const TIPOS={visita:{icon:"👋",color:"#3B82F6"},llamada:{icon:"📞",color:"#8B5CF6"},
+                  reunion:{icon:"🤝",color:"#F59E0B"},tarea:{icon:"📌",color:"#EF4444"},demo:{icon:"📦",color:"#059669"}};
+                const tipo=TIPOS[ev.tipo]||TIPOS.visita;
+                return(
+                  <div key={ev.id||i} onClick={()=>onNav("calendario")}
+                    style={{display:"flex",gap:12,alignItems:"center",padding:"12px 16px",
+                      borderBottom:i<eventosHoy.length-1?`1px solid #F1F5F9`:"none",cursor:"pointer"}}>
+                    <div style={{display:"flex",flexDirection:"column",alignItems:"center",minWidth:40}}>
+                      <span style={{fontSize:16}}>{tipo.icon}</span>
+                      <span style={{fontSize:11,fontWeight:800,color:tipo.color}}>{ev.hora}</span>
+                    </div>
+                    <div style={{flex:1}}>
+                      <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{ev.cliente||ev.nota||"Evento"}</p>
+                      {ev.nota&&ev.cliente&&<p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{ev.nota}</p>}
+                    </div>
+                    <span style={{color:T.muted,fontSize:14}}>›</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {eventosHoy.length===0&&(
+          <div onClick={()=>onNav("calendario")}
+            style={{background:"#FFFBEB",borderRadius:14,padding:"12px 16px",marginBottom:16,
+              border:`1px solid #F59E0B33`,cursor:"pointer",display:"flex",gap:12,alignItems:"center"}}>
+            <span style={{fontSize:20}}>📅</span>
+            <div style={{flex:1}}>
+              <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>Sin eventos para hoy</p>
+              <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>Pulsa para planificar tu agenda</p>
+            </div>
+            <span style={{color:T.muted,fontSize:14}}>›</span>
+          </div>
+        )}
+
+        {/* ── PASO 1: Planificar rutas de la semana ── */}
+        <div style={{marginBottom:16}}>
+          <p style={{margin:"0 0 8px",fontSize:10,fontWeight:700,color:"#64748B",
+            textTransform:"uppercase",letterSpacing:".12em"}}>🗺️ Mis rutas · Semana {semana}</p>
+          <div style={{background:"#fff",borderRadius:14,padding:"14px 16px",
+            border:`1px solid ${T.border}`,boxShadow:"0 1px 3px rgba(0,0,0,.04)"}}>
+            {rutasDisponibles.length===0?(
+              <p style={{margin:0,fontSize:12,color:T.muted}}>Sin rutas asignadas a tus clientes</p>
+            ):(
+              <>
+                <p style={{margin:"0 0 10px",fontSize:12,color:T.muted}}>
+                  Selecciona las rutas que trabajarás esta semana:
+                </p>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:rutasSemana.length>0?12:0}}>
+                  {rutasDisponibles.map(r=>{
+                    const sel=rutasSemana.includes(r);
+                    const n=clientesPorRuta(r).length;
+                    return(
+                      <button key={r} onClick={()=>toggleRuta(r)}
+                        style={{padding:"8px 14px",borderRadius:10,fontSize:12,fontWeight:700,
+                          border:`2px solid ${sel?T.navy:T.border}`,
+                          background:sel?T.navy:"#fff",color:sel?"#fff":T.text,
+                          cursor:"pointer",display:"flex",alignItems:"center",gap:6}}>
+                        {sel?"✅":"⬜"} Ruta {r}
+                        <span style={{fontSize:10,fontWeight:500,color:sel?"rgba(255,255,255,.7)":T.muted}}>
+                          ({n})
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                {rutasSemana.length>0&&(
+                  <div style={{padding:"10px 12px",background:"#F0FDF4",borderRadius:10,
+                    border:`1px solid ${T.green}33`}}>
+                    <p style={{margin:0,fontSize:12,fontWeight:700,color:T.green}}>
+                      ✅ {clientesPlanificados.length} clientes en {rutasSemana.length} ruta{rutasSemana.length>1?"s":""}
+                      {clientesConVisita.size>0&&<span style={{color:T.blue}}> · 📅 {clientesConVisita.size} con día asignado</span>}
+                    </p>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* ── Mis clientes — resumen con link ── */}
         <div onClick={()=>onNav("clientes")}
           style={{background:"#fff",borderRadius:16,padding:"14px 18px",
-            marginBottom:20,cursor:"pointer",
+            marginBottom:8,cursor:"pointer",
             border:`1px solid ${T.border}`,
             boxShadow:"0 2px 12px rgba(0,0,0,.06)",
             display:"flex",gap:14,alignItems:"center"}}>
@@ -693,10 +835,12 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, es
             fontSize:22,flexShrink:0}}>📋</div>
           <div style={{flex:1}}>
             <p style={{margin:"0 0 3px",fontSize:14,fontWeight:800,color:T.text}}>
-              Mis clientes · Semana {semana}
+              {rutasSemana.length>0?`Ruta${rutasSemana.length>1?"s":""} ${rutasSemana.join(", ")}`:"Mis clientes"} · Sem. {semana}
             </p>
             <p style={{margin:"0 0 6px",fontSize:11,color:T.muted}}>
-              {visitados} visitados · {pendVisita} por visitar · {totalSem} total
+              {totalSem} cliente{totalSem!==1?"s":""}
+              {visitados>0?` · 📅 ${visitados} con visita programada`:""}
+              {rutasSemana.length===0?" · Selecciona rutas arriba":""}
             </p>
             <div style={{height:3,borderRadius:99,background:T.border,overflow:"hidden"}}>
               <div style={{height:"100%",
@@ -706,6 +850,24 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, es
           </div>
           <span style={{color:T.muted,fontSize:20,flexShrink:0}}>›</span>
         </div>
+
+        {/* PASO 2 (opcional): Programar por día */}
+        {rutasSemana.length>0&&clientesConVisita.size<clientesPlanificados.length&&(
+          <div onClick={()=>onNav("calendario")}
+            style={{background:"#EFF6FF",borderRadius:10,padding:"10px 14px",marginBottom:16,
+              border:`1px solid #3B82F633`,cursor:"pointer",display:"flex",gap:10,alignItems:"center"}}>
+            <span style={{fontSize:16}}>📅</span>
+            <div style={{flex:1}}>
+              <p style={{margin:0,fontSize:12,fontWeight:700,color:T.blue}}>
+                Programar visitas por día (opcional)
+              </p>
+              <p style={{margin:"2px 0 0",fontSize:10,color:T.muted}}>
+                Asigna clientes a días concretos en la Agenda
+              </p>
+            </div>
+            <span style={{color:T.muted,fontSize:14}}>›</span>
+          </div>
+        )}
 
         {/* — Hitos de proyecto asignados — */}
         <HitosProyectoWidget usuario={usuario} onNav={onNav}/>
@@ -9626,6 +9788,7 @@ function App(props){
 
   // ── Datos desde Firebase ──────────────────────────────────────────
   const [muestrasDB,setMuestrasDB]=useState(MUESTRAS_SEED);
+  const [calendarioDB,setCalendarioDB]=useState([]);
   const [estrategiasDB,setEstrategiasDB]=useState(ESTRATEGIAS_SEED);
   const [incidenciasDB,setIncidenciasDB]=useState(INCIDENCIAS_SEED);
   const [fbCargando,setFbCargando]=useState(false);
@@ -9727,6 +9890,10 @@ function App(props){
       fbCargar(), // oportunidades
     ]).then(([muestras,estrategias,incidencias,visitas,opos])=>{
       if(muestras.length>0) setMuestrasDB(muestras.filter(m=>!m.eliminada));
+      // Cargar calendario
+      fbLeer("calendario").then(data=>{
+        setCalendarioDB(data.filter(e=>!e.eliminado));
+      }).catch(()=>{});
       if(estrategias.length>0) setEstrategiasDB(estrategias.filter(e=>!e.eliminada));
       if(incidencias.length>0) setIncidenciasDB(incidencias);
       if(opos.length>0){
@@ -10547,7 +10714,7 @@ function App(props){
         )}
 
         {/* AGENTE */}
-        {esAgente&&section==="dashboard"&&  <DashAgente key={"ag-"+objVer} usuario={usuario} onNav={setSection} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} incidenciasDB={incidenciasDB}/>}
+        {esAgente&&section==="dashboard"&&  <DashAgente key={"ag-"+objVer} usuario={usuario} onNav={setSection} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} incidenciasDB={incidenciasDB} calendarioDB={calendarioDB}/>}
         {esAgente&&section==="clientes"&&   <GestorClientes usuario={usuario} actividad={actividadSemana} onActividad={onActividad} onBack={()=>setSection("dashboard")} clientesFB={misClientesFB} muestrasDB={muestrasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} estrategiasDB={estrategiasDB} clienteDirecto={clienteDirecto} onClienteDirectoUsado={()=>setClienteDirecto(null)}/>}
         {section==="informe"&&esAgente&&    <Informe usuario={usuario} actividadSemana={actividadSemana} clientesFB={misClientesFB}/>}
         {section==="informe"&&!esAgente&&   <MiInformeJefe usuario={usuario} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB} onNav={setSection}/>}
@@ -10610,7 +10777,7 @@ function App(props){
         {section==="historial"&& <HistorialSemanal usuario={usuario}/> }
         {section==="tareas"&&    <GestorTareas usuario={usuario} clientesFB={misClientesFB}/> }
         {section==="reporting"&& <Reporting usuario={usuario} muestrasDB={muestrasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} estrategiasDB={estrategiasDB} clientesDB={clientesDB} misClientesFB={misClientesFB}/>}
-        {section==="calendario"&& <Calendario usuario={usuario} clientesFB={misClientesFB} onAbrirCliente={onAbrirCliente}/>}
+        {section==="calendario"&& <Calendario usuario={usuario} clientesFB={misClientesFB} onAbrirCliente={onAbrirCliente} onEventosChange={setCalendarioDB}/>}
         {section==="ia"&&(
           <AsistenteIA
             usuario={usuario}
@@ -11352,7 +11519,7 @@ function Reporting({usuario,muestrasDB,oportunidadesDB,incidenciasDB,estrategias
 }
 
 // ─── CALENDARIO / AGENDA ─────────────────────────────────────────
-function Calendario({usuario, clientesFB, onAbrirCliente}){
+function Calendario({usuario, clientesFB, onAbrirCliente, onEventosChange}){
   const [eventos,setEventos]=useState([]);
   const [cargando,setCargando]=useState(true);
   const [semanaOffset,setSemanaOffset]=useState(0);
@@ -11390,8 +11557,14 @@ function Calendario({usuario, clientesFB, onAbrirCliente}){
     fbLeer("calendario").then(data=>{
       const todos=data.filter(e=>!e.eliminado);
       setEventos(todos);
+      if(onEventosChange) onEventosChange(todos);
     }).catch(()=>{}).finally(()=>setCargando(false));
   },[]);
+
+  // Sync back to App when eventos change
+  useEffect(()=>{
+    if(onEventosChange&&eventos.length>0) onEventosChange(eventos);
+  },[eventos]);
 
   // Filtrar eventos por semana y rol
   const eventosSemana=useMemo(()=>{
