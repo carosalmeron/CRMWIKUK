@@ -5886,10 +5886,89 @@ function Wizard({usuario,datosEscaneados,opoEditar,onSave,onClose}){
   const [etapa,setEtapa]=useState(opoEditar?.etapa||"propuesta");
   const [fecha,setFecha]=useState(opoEditar?.fecha||"");
   const [grabando,setGrabando]=useState(false);
+  const [scanLoading,setScanLoading]=useState(false);
+  const [fotoTarjeta,setFotoTarjeta]=useState(null);
   const fotoRef=useRef();
-  const mediaRef=useRef(null);
+  const recogRef=useRef(null);
 
-  const TIPOS=[
+  // ── OCR: escanear tarjeta de visita con Claude API ──
+  const escanearTarjeta=async(e)=>{
+    const file=e.target.files?.[0];if(!file)return;
+    setScanLoading(true);
+    try{
+      const dataUrl=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsDataURL(file);});
+      setFotoTarjeta(dataUrl);
+      // Añadir foto a las fotos de la oportunidad
+      setFotos(p=>[...p,{data:dataUrl,nombre:"tarjeta_visita.jpg"}]);
+      const base64=dataUrl.split(",")[1];
+      const mediaType=file.type||"image/jpeg";
+      const resp=await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          model:"claude-sonnet-4-20250514",max_tokens:500,
+          messages:[{role:"user",content:[
+            {type:"image",source:{type:"base64",media_type:mediaType,data:base64}},
+            {type:"text",text:'Extrae los datos de esta tarjeta de visita. Responde SOLO con JSON sin markdown: {"nombre":"","contacto":"","cargo":"","telefono":"","email":"","ciudad":"","web":"","direccion":"","nif":""}. Si no encuentras un dato deja vacío.'}
+          ]}]
+        })
+      });
+      const data=await resp.json();
+      const text=(data.content?.[0]?.text||"{}").replace(/```json|```/g,"").trim();
+      const parsed=JSON.parse(text);
+      setCli(c=>({
+        ...c,
+        nombre:parsed.nombre||parsed.empresa||c.nombre,
+        contacto:parsed.contacto||c.contacto,
+        cargo:parsed.cargo||c.cargo,
+        telefono:parsed.telefono||c.telefono,
+        email:parsed.email||c.email,
+        ciudad:parsed.ciudad||c.ciudad,
+        web:parsed.web||c.web,
+        direccion:parsed.direccion||c.direccion,
+        nif:parsed.nif||c.nif,
+      }));
+    }catch(err){console.log("OCR error:",err);}
+    finally{setScanLoading(false);}
+  };
+
+  // ── Voz: transcripción con Web Speech API ──
+  const toggleGrabar=()=>{
+    if(grabando){
+      if(recogRef.current){recogRef.current.stop();recogRef.current=null;}
+      setGrabando(false);return;
+    }
+    const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+    if(!SR){alert("Tu navegador no soporta reconocimiento de voz. Usa Chrome o Safari.");return;}
+    const recognition=new SR();
+    recognition.lang="es-ES";
+    recognition.continuous=true;
+    recognition.interimResults=true;
+    let finalText="";
+    recognition.onresult=(e)=>{
+      let interim="";
+      for(let i=e.resultIndex;i<e.results.length;i++){
+        if(e.results[i].isFinal) finalText+=e.results[i][0].transcript+" ";
+        else interim+=e.results[i][0].transcript;
+      }
+      setDesc(d=>{
+        // Replace from last dictation marker
+        const base=d.replace(/\[dictando\.\.\.\].*$/,"").trim();
+        const newText=finalText+(interim?`[dictando...] ${interim}`:"");
+        return base+(base?" ":"")+newText;
+      });
+    };
+    recognition.onerror=(e)=>{console.log("Speech error:",e.error);setGrabando(false);};
+    recognition.onend=()=>{
+      setGrabando(false);
+      // Clean up interim markers
+      setDesc(d=>d.replace(/\[dictando\.\.\.\].*/,"").trim());
+      recogRef.current=null;
+    };
+    recognition.start();
+    recogRef.current=recognition;
+    setGrabando(true);
+  };
     {k:"nuevo",icon:"🆕",label:"Nuevo cliente",sub:"Sin relación previa"},
     {k:"recuperacion",icon:"🔄",label:"Recuperación",sub:"Ex-cliente a reconquistar"},
     {k:"expansion",icon:"📈",label:"Expansión",sub:"Ampliar con cliente actual"},
@@ -5907,27 +5986,6 @@ function Wizard({usuario,datosEscaneados,opoEditar,onSave,onClose}){
       r.onload=ev=>setFotos(p=>[...p,{data:ev.target.result,nombre:file.name}]);
       r.readAsDataURL(file);
     });
-  };
-
-  const toggleGrabar=async()=>{
-    if(grabando){
-      if(mediaRef.current){mediaRef.current.stop();mediaRef.current=null;}
-      setGrabando(false);return;
-    }
-    try{
-      const stream=await navigator.mediaDevices.getUserMedia({audio:true});
-      const mr=new MediaRecorder(stream);
-      const chunks=[];
-      mr.ondataavailable=e=>chunks.push(e.data);
-      mr.onstop=()=>{
-        stream.getTracks().forEach(t=>t.stop());
-        // Simple: just note that recording happened
-        setDesc(d=>d+(d?"\n":"")+"[Nota de voz grabada]");
-      };
-      mr.start();
-      mediaRef.current=mr;
-      setGrabando(true);
-    }catch(e){console.log("Mic error:",e);}
   };
 
   const guardar=()=>{
@@ -6025,14 +6083,31 @@ function Wizard({usuario,datosEscaneados,opoEditar,onSave,onClose}){
               <p style={{margin:"0 0 4px",fontSize:18,fontWeight:800}}>Datos del cliente</p>
               <p style={{margin:"0 0 16px",fontSize:13,color:T.muted}}>Rellena los que tengas disponibles</p>
 
-              {/* Tarjeta de visita upload */}
-              <div style={{background:"#F8FAFC",borderRadius:12,padding:"14px 16px",marginBottom:16,display:"flex",gap:12,alignItems:"center",border:`1px solid ${T.border}`}}>
-                <span style={{fontSize:28}}>🪪</span>
-                <div style={{flex:1}}>
-                  <p style={{margin:0,fontSize:13,fontWeight:700}}>Subir tarjeta de visita</p>
-                  <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>Foto o archivo — se guarda con los datos del cliente</p>
+              {/* Tarjeta de visita upload + OCR */}
+              {fotoTarjeta?(
+                <div style={{borderRadius:12,overflow:"hidden",border:`2px solid ${T.green}`,marginBottom:16,position:"relative"}}>
+                  <img src={fotoTarjeta} style={{width:"100%",maxHeight:180,objectFit:"cover",display:"block"}}/>
+                  <div style={{position:"absolute",bottom:8,right:8,display:"flex",gap:6}}>
+                    <label style={{padding:"6px 10px",borderRadius:8,background:"rgba(0,0,0,.6)",color:"#fff",fontWeight:700,fontSize:11,cursor:"pointer"}}>
+                      🔄 Cambiar
+                      <input type="file" accept="image/*" capture="environment" onChange={escanearTarjeta} style={{display:"none"}}/>
+                    </label>
+                    <button onClick={()=>setFotoTarjeta(null)} style={{padding:"6px 10px",borderRadius:8,background:"rgba(220,38,38,.8)",color:"#fff",fontWeight:700,fontSize:11,border:"none",cursor:"pointer"}}>✕</button>
+                  </div>
+                  {scanLoading&&<div style={{position:"absolute",inset:0,background:"rgba(0,0,0,.5)",display:"flex",alignItems:"center",justifyContent:"center"}}>
+                    <span style={{color:"#fff",fontSize:14,fontWeight:700}}>⏳ Leyendo tarjeta...</span>
+                  </div>}
                 </div>
-              </div>
+              ):(
+                <label style={{display:"flex",gap:12,alignItems:"center",padding:"16px",borderRadius:12,border:`2px dashed ${T.green}`,background:"#F0FDF4",cursor:"pointer",marginBottom:16}}>
+                  <span style={{fontSize:28}}>{scanLoading?"⏳":"📷"}</span>
+                  <div style={{flex:1}}>
+                    <p style={{margin:0,fontSize:13,fontWeight:700,color:T.green}}>{scanLoading?"Leyendo tarjeta...":"Escanear tarjeta de visita"}</p>
+                    <p style={{margin:"2px 0 0",fontSize:11,color:T.green+"99"}}>Haz foto · rellena los datos automáticamente con IA</p>
+                  </div>
+                  <input type="file" accept="image/*" capture="environment" onChange={escanearTarjeta} style={{display:"none"}} disabled={scanLoading}/>
+                </label>
+              )}
 
               {/* Tipología */}
               <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Tipología</p>
@@ -6151,8 +6226,9 @@ function Wizard({usuario,datosEscaneados,opoEditar,onSave,onClose}){
                 <button onClick={toggleGrabar}
                   style={{padding:"5px 12px",borderRadius:8,border:`1px solid ${grabando?T.red:T.border}`,
                     background:grabando?"#FEF2F2":"#fff",color:grabando?T.red:T.text,
-                    fontSize:12,fontWeight:600,cursor:"pointer",display:"flex",gap:4,alignItems:"center"}}>
-                  🎙 {grabando?"Parar":"Hablar"}
+                    fontSize:12,fontWeight:600,cursor:"pointer",display:"flex",gap:4,alignItems:"center",
+                    animation:grabando?"pulse 1.5s infinite":"none"}}>
+                  🎙 {grabando?"⏹ Parar":"Hablar"}
                 </button>
               </div>
               <textarea value={desc} onChange={e=>setDesc(e.target.value)} rows={8}
