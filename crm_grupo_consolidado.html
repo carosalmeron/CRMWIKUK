@@ -5863,48 +5863,450 @@ const ESTADOS={
 };
 
 function Wizard({usuario,datosEscaneados,opoEditar,onSave,onClose}){
-  const [form,setForm]=useState(opoEditar?
-    {cliente:opoEditar.cliente||"",valor:opoEditar.valor||"",etapa:opoEditar.etapa||"propuesta",prob:opoEditar.prob||50,prod:opoEditar.prod||"",notas:opoEditar.notas||"",fecha:opoEditar.fecha||""}:
-    {cliente:datosEscaneados?.empresa||"",valor:"",etapa:"propuesta",prob:50,prod:"",notas:"",fecha:""});
+  const [step,setStep]=useState(opoEditar?3:0);
+  const [tipo,setTipo]=useState(opoEditar?.tipoOpo||"nuevo");
+  const [cli,setCli]=useState({
+    nombre:opoEditar?.cliente||datosEscaneados?.empresa||"",
+    tipologia:opoEditar?.tipologia||"",
+    nif:opoEditar?.nif||datosEscaneados?.nif||"",
+    contacto:opoEditar?.contacto||datosEscaneados?.contacto||"",
+    cargo:opoEditar?.cargo||datosEscaneados?.cargo||"",
+    telefono:opoEditar?.telefono||datosEscaneados?.telefono||"",
+    email:opoEditar?.email||datosEscaneados?.email||"",
+    ciudad:opoEditar?.ciudad||datosEscaneados?.ciudad||"",
+    web:opoEditar?.web||"",
+    direccion:opoEditar?.direccion||datosEscaneados?.direccion||"",
+    descripcion:opoEditar?.descripcionCliente||"",
+  });
+  const [fotos,setFotos]=useState(opoEditar?.fotos||[]);
+  const [desc,setDesc]=useState(opoEditar?.notas||opoEditar?.descripcion||"");
+  const [asignado,setAsignado]=useState(opoEditar?.agenteId||opoEditar?.agente||"");
+  const [valor,setValor]=useState(opoEditar?.valor||0);
+  const [prob,setProb]=useState(opoEditar?.prob||50);
+  const [etapa,setEtapa]=useState(opoEditar?.etapa||"propuesta");
+  const [fecha,setFecha]=useState(opoEditar?.fecha||"");
+  const [grabando,setGrabando]=useState(false);
+  const fotoRef=useRef();
+  const mediaRef=useRef(null);
+
+  const TIPOS=[
+    {k:"nuevo",icon:"🆕",label:"Nuevo cliente",sub:"Sin relación previa"},
+    {k:"recuperacion",icon:"🔄",label:"Recuperación",sub:"Ex-cliente a reconquistar"},
+    {k:"expansion",icon:"📈",label:"Expansión",sub:"Ampliar con cliente actual"},
+    {k:"referencia",icon:"👥",label:"Referencia",sub:"Recomendado por otro cliente"},
+  ];
+  const TIPOLOGIAS=["Obrador artesanal","Industria cárnica","Carnicería","Hostelería","Retail","Mayorista","Exportador"];
+  const PASOS=["Tipo","Cliente","Imágenes","Oportunidad","Asignar","Confirmar"];
+
+  const agentes=USUARIOS.filter(u=>u.rol==="agente");
+
+  const addFoto=(e)=>{
+    const files=e.target.files;if(!files)return;
+    [...files].forEach(file=>{
+      const r=new FileReader();
+      r.onload=ev=>setFotos(p=>[...p,{data:ev.target.result,nombre:file.name}]);
+      r.readAsDataURL(file);
+    });
+  };
+
+  const toggleGrabar=async()=>{
+    if(grabando){
+      if(mediaRef.current){mediaRef.current.stop();mediaRef.current=null;}
+      setGrabando(false);return;
+    }
+    try{
+      const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+      const mr=new MediaRecorder(stream);
+      const chunks=[];
+      mr.ondataavailable=e=>chunks.push(e.data);
+      mr.onstop=()=>{
+        stream.getTracks().forEach(t=>t.stop());
+        // Simple: just note that recording happened
+        setDesc(d=>d+(d?"\n":"")+"[Nota de voz grabada]");
+      };
+      mr.start();
+      mediaRef.current=mr;
+      setGrabando(true);
+    }catch(e){console.log("Mic error:",e);}
+  };
+
+  const guardar=()=>{
+    const id=opoEditar?.id||`opo_${Date.now()}_${Math.random().toString(36).slice(2,6)}`;
+    onSave({
+      id,
+      tipoOpo:tipo,
+      cliente:cli.nombre,
+      tipologia:cli.tipologia,
+      nif:cli.nif,contacto:cli.contacto,cargo:cli.cargo,
+      telefono:cli.telefono,email:cli.email,ciudad:cli.ciudad,
+      web:cli.web,direccion:cli.direccion,descripcionCliente:cli.descripcion,
+      fotos:fotos.map(f=>f.data||f),
+      notas:desc,descripcion:desc,
+      valor:Number(valor)||0,prob:Number(prob)||50,
+      etapa,fecha,
+      agente:asignado||usuario.id,
+      agenteId:asignado||usuario.id,
+      agenteNombre:(USUARIOS.find(u=>u.id===(asignado||usuario.id))||{}).nombre||usuario.nombre,
+      equipo:usuario.equipo||(USUARIOS.find(u=>u.id===asignado)||{}).equipo||"",
+      estado:asignado?"asignada":"sin_asignar",
+      historial:[{accion:opoEditar?"✏️ Editada":"🆕 Creada",por:usuario.nombre,fecha:new Date().toLocaleDateString("es-ES")}],
+      creadoPor:usuario.id,
+      fechaCreacion:new Date().toISOString(),
+    });
+  };
+
+  const canNext=()=>{
+    if(step===0) return !!tipo;
+    if(step===1) return !!cli.nombre.trim();
+    if(step===3) return desc.trim().length>=10;
+    return true;
+  };
+
   return(
-    <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,.5)",zIndex:200,display:"flex",alignItems:"flex-end"}}>
-      <div style={{background:"#fff",borderRadius:"20px 20px 0 0",padding:20,width:"100%",maxHeight:"90vh",overflowY:"auto"}}>
-        <div style={{display:"flex",justifyContent:"space-between",marginBottom:16}}>
-          <p style={{margin:0,fontSize:16,fontWeight:800}}>{opoEditar?"✏️ Editar":"➕ Nueva oportunidad"}</p>
-          <button onClick={onClose} style={{background:"none",border:"none",fontSize:20,cursor:"pointer",color:T.muted}}>✕</button>
-        </div>
-        {[{label:"Cliente *",key:"cliente",ph:"Nombre del cliente"},{label:"Producto",key:"prod",ph:"Producto o referencia"},{label:"Notas",key:"notas",ph:"Observaciones..."}].map(f=>(
-          <div key={f.key} style={{marginBottom:10}}>
-            <p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>{f.label}</p>
-            <input value={form[f.key]} onChange={e=>setForm(x=>({...x,[f.key]:e.target.value}))} placeholder={f.ph}
-              style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${T.border}`,fontSize:13,outline:"none",boxSizing:"border-box"}}/>
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:8}}>
+      <div style={{background:"#fff",borderRadius:20,width:"min(640px,100%)",maxHeight:"92vh",display:"flex",flexDirection:"column",overflow:"hidden",boxShadow:"0 24px 64px rgba(0,0,0,.25)"}}>
+
+        {/* Header + Stepper */}
+        <div style={{background:T.navy,padding:"18px 22px 14px",flexShrink:0}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              <span style={{fontSize:18}}>🎯</span>
+              <p style={{margin:0,fontSize:16,fontWeight:800,color:"#fff"}}>{opoEditar?"Editar":"Nueva oportunidad"}</p>
+            </div>
+            <button onClick={onClose} style={{background:"rgba(255,255,255,.1)",border:"none",borderRadius:8,width:32,height:32,color:"#fff",fontSize:16,cursor:"pointer"}}>✕</button>
           </div>
-        ))}
-        <div style={{display:"flex",gap:8,marginBottom:10}}>
-          <div style={{flex:1}}><p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Valor €</p>
-            <input type="number" value={form.valor} onChange={e=>setForm(x=>({...x,valor:Number(e.target.value)}))} placeholder="0"
-              style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${T.border}`,fontSize:13,outline:"none",boxSizing:"border-box"}}/></div>
-          <div style={{flex:1}}><p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Probabilidad %</p>
-            <input type="number" value={form.prob} min="0" max="100" onChange={e=>setForm(x=>({...x,prob:Number(e.target.value)}))}
-              style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${T.border}`,fontSize:13,outline:"none",boxSizing:"border-box"}}/></div>
+          <div style={{display:"flex",gap:0,alignItems:"center"}}>
+            {PASOS.map((p,i)=>{
+              const done=i<step, active=i===step;
+              return(
+                <React.Fragment key={i}>
+                  {i>0&&<div style={{flex:1,height:2,background:done?"#4ADE80":"rgba(255,255,255,.15)",margin:"0 2px"}}/>}
+                  <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
+                    <div style={{width:28,height:28,borderRadius:"50%",
+                      background:done?"#4ADE80":active?"#fff":"rgba(255,255,255,.12)",
+                      color:done?"#fff":active?T.navy:"rgba(255,255,255,.4)",
+                      display:"flex",alignItems:"center",justifyContent:"center",
+                      fontSize:11,fontWeight:800}}>
+                      {done?"✓":i+1}
+                    </div>
+                    <span style={{fontSize:9,fontWeight:active?700:400,color:active?"#fff":"rgba(255,255,255,.4)"}}>{p}</span>
+                  </div>
+                </React.Fragment>
+              );
+            })}
+          </div>
         </div>
-        <div style={{marginBottom:10}}><p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Etapa</p>
-          <select value={form.etapa} onChange={e=>setForm(x=>({...x,etapa:e.target.value}))}
-            style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${T.border}`,fontSize:13,outline:"none",boxSizing:"border-box",background:"#fff"}}>
-            <option value="prospecto">🌱 Prospecto</option><option value="propuesta">📋 Propuesta</option>
-            <option value="negociacion">🤝 Negociación</option><option value="cerrada_ganada">✅ Ganada</option><option value="cerrada_perdida">❌ Perdida</option>
-          </select></div>
-        <div style={{marginBottom:16}}><p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Fecha estimada cierre</p>
-          <input type="date" value={form.fecha} onChange={e=>setForm(x=>({...x,fecha:e.target.value}))}
-            style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${T.border}`,fontSize:13,outline:"none",boxSizing:"border-box"}}/></div>
-        <div style={{display:"flex",gap:8}}>
-          <button onClick={onClose} style={{flex:1,padding:"12px",borderRadius:10,border:`1px solid ${T.border}`,background:"#fff",fontSize:13,cursor:"pointer",color:T.muted}}>Cancelar</button>
-          <button onClick={()=>{if(!form.cliente.trim())return;onSave({...form,agente:usuario.id,agenteId:usuario.id,agenteNombre:usuario.nombre,equipo:usuario.equipo});}}
-            disabled={!form.cliente.trim()}
-            style={{flex:2,padding:"12px",borderRadius:10,border:"none",fontSize:14,fontWeight:700,cursor:"pointer",
-              background:form.cliente.trim()?T.navy:"#E2E8F0",color:form.cliente.trim()?"#fff":"#94A3B8"}}>
-            {opoEditar?"Guardar cambios":"Crear oportunidad →"}
-          </button>
+
+        {/* Content */}
+        <div style={{flex:1,overflowY:"auto",padding:"20px 22px"}}>
+
+          {/* STEP 0: Tipo */}
+          {step===0&&(
+            <div>
+              <p style={{margin:"0 0 4px",fontSize:18,fontWeight:800}}>¿Qué tipo de oportunidad?</p>
+              <p style={{margin:"0 0 16px",fontSize:13,color:T.muted}}>Clasifica la oportunidad para un mejor seguimiento</p>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                {TIPOS.map(t=>(
+                  <button key={t.k} onClick={()=>setTipo(t.k)}
+                    style={{padding:"20px 16px",borderRadius:14,border:`2px solid ${tipo===t.k?T.navy:T.border}`,
+                      background:tipo===t.k?"#F1F5F9":"#fff",cursor:"pointer",textAlign:"left"}}>
+                    <span style={{fontSize:28,display:"block",marginBottom:8}}>{t.icon}</span>
+                    <p style={{margin:"0 0 3px",fontSize:14,fontWeight:700}}>{t.label}</p>
+                    <p style={{margin:0,fontSize:11,color:T.muted}}>{t.sub}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* STEP 1: Cliente */}
+          {step===1&&(
+            <div>
+              <p style={{margin:"0 0 4px",fontSize:18,fontWeight:800}}>Datos del cliente</p>
+              <p style={{margin:"0 0 16px",fontSize:13,color:T.muted}}>Rellena los que tengas disponibles</p>
+
+              {/* Tarjeta de visita upload */}
+              <div style={{background:"#F8FAFC",borderRadius:12,padding:"14px 16px",marginBottom:16,display:"flex",gap:12,alignItems:"center",border:`1px solid ${T.border}`}}>
+                <span style={{fontSize:28}}>🪪</span>
+                <div style={{flex:1}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:700}}>Subir tarjeta de visita</p>
+                  <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>Foto o archivo — se guarda con los datos del cliente</p>
+                </div>
+              </div>
+
+              {/* Tipología */}
+              <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Tipología</p>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:16}}>
+                {TIPOLOGIAS.map(t=>(
+                  <button key={t} onClick={()=>setCli(c=>({...c,tipologia:c.tipologia===t?"":t}))}
+                    style={{padding:"7px 12px",borderRadius:9,border:`1.5px solid ${cli.tipologia===t?T.navy:T.border}`,
+                      background:cli.tipologia===t?"#F1F5F9":"#fff",color:cli.tipologia===t?T.navy:T.text,
+                      fontSize:12,fontWeight:cli.tipologia===t?700:400,cursor:"pointer"}}>
+                    {t}
+                  </button>
+                ))}
+              </div>
+
+              {/* Campos */}
+              {[
+                {k:"nombre",l:"Nombre empresa *",ph:"CARNICAS MARTINEZ SL"},
+                {k:"nif",l:"NIF / CIF",ph:"B12345678",half:true},
+                {k:"contacto",l:"Persona contacto",ph:"Juan García",half:true},
+                {k:"cargo",l:"Cargo",ph:"Director de Compras",half:true},
+                {k:"telefono",l:"Teléfono",ph:"+34 600 000 000",half:true},
+                {k:"email",l:"Email",ph:"compras@empresa.com",half:true},
+                {k:"ciudad",l:"Ciudad",ph:"Granada",half:true},
+                {k:"web",l:"Web",ph:"www.empresa.com"},
+                {k:"direccion",l:"Dirección",ph:"Calle Mayor 1, Polígono Industrial..."},
+                {k:"descripcion",l:"Descripción del cliente",ph:"Tipo de negocio, empleados, productos que trabaja, situación actual...",multi:true},
+              ].map((f,i,arr)=>{
+                const prev=i>0?arr[i-1]:null;
+                const isSecondHalf=f.half&&prev?.half;
+                if(isSecondHalf) return null; // rendered in pair
+                const next=f.half&&arr[i+1]?.half?arr[i+1]:null;
+                if(f.half&&next){
+                  return(
+                    <div key={f.k} style={{display:"flex",gap:10,marginBottom:12}}>
+                      {[f,next].map(ff=>(
+                        <div key={ff.k} style={{flex:1}}>
+                          <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>{ff.l}</p>
+                          <input value={cli[ff.k]} onChange={e=>setCli(c=>({...c,[ff.k]:e.target.value}))}
+                            placeholder={ff.ph}
+                            style={{width:"100%",padding:"10px 12px",borderRadius:9,border:`1.5px solid ${T.border}`,fontSize:13,outline:"none",boxSizing:"border-box"}}/>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                }
+                return(
+                  <div key={f.k} style={{marginBottom:12}}>
+                    <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>{f.l}</p>
+                    {f.multi?(
+                      <textarea value={cli[f.k]} onChange={e=>setCli(c=>({...c,[f.k]:e.target.value}))}
+                        placeholder={f.ph} rows={3}
+                        style={{width:"100%",padding:"10px 12px",borderRadius:9,border:`1.5px solid ${T.border}`,fontSize:13,outline:"none",boxSizing:"border-box",resize:"vertical",fontFamily:"inherit"}}/>
+                    ):(
+                      <input value={cli[f.k]} onChange={e=>setCli(c=>({...c,[f.k]:e.target.value}))}
+                        placeholder={f.ph}
+                        style={{width:"100%",padding:"10px 12px",borderRadius:9,border:`1.5px solid ${T.border}`,fontSize:13,outline:"none",boxSizing:"border-box"}}/>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* STEP 2: Imágenes */}
+          {step===2&&(
+            <div>
+              <p style={{margin:"0 0 4px",fontSize:18,fontWeight:800}}>Fotos e imágenes</p>
+              <p style={{margin:"0 0 16px",fontSize:13,color:T.muted}}>Tarjeta de visita, local, catálogo, documentos... Escribe una descripción en cada imagen</p>
+
+              <div onClick={()=>fotoRef.current?.click()}
+                style={{border:`2px dashed ${T.border}`,borderRadius:14,padding:"32px 16px",textAlign:"center",cursor:"pointer",marginBottom:16,background:"#FAFAFA"}}>
+                <span style={{fontSize:36,display:"block",marginBottom:8}}>📷</span>
+                <p style={{margin:"0 0 4px",fontSize:14,fontWeight:700}}>Añadir imágenes</p>
+                <p style={{margin:0,fontSize:12,color:T.muted}}>Tarjeta de visita · Fotos del local · Catálogos · Documentos</p>
+                <p style={{margin:"6px 0 0",fontSize:11,color:T.blue}}>Haz clic para abrir el explorador de archivos</p>
+                <input ref={fotoRef} type="file" accept="image/*" multiple onChange={addFoto} style={{display:"none"}}/>
+              </div>
+
+              {fotos.length>0&&(
+                <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
+                  {fotos.map((f,i)=>(
+                    <div key={i} style={{position:"relative",width:80,height:80,borderRadius:10,overflow:"hidden",border:`1px solid ${T.border}`}}>
+                      <img src={f.data||f} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                      <button onClick={()=>setFotos(p=>p.filter((_,j)=>j!==i))}
+                        style={{position:"absolute",top:2,right:2,width:20,height:20,borderRadius:"50%",background:"rgba(0,0,0,.6)",color:"#fff",border:"none",fontSize:10,cursor:"pointer"}}>✕</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div style={{background:"#F8FAFC",borderRadius:10,padding:"10px 14px",fontSize:12,color:T.muted,border:`1px solid ${T.border}`}}>
+                Las imágenes son opcionales — se guardarán en Firebase junto con el resto de datos
+              </div>
+            </div>
+          )}
+
+          {/* STEP 3: Oportunidad */}
+          {step===3&&(
+            <div>
+              <p style={{margin:"0 0 4px",fontSize:18,fontWeight:800}}>¿Cuál es la oportunidad?</p>
+              <p style={{margin:"0 0 16px",fontSize:13,color:T.muted}}>Describe el objetivo, el producto y por qué tienes posibilidades</p>
+
+              <div style={{background:"#FFFBEB",borderRadius:10,padding:"12px 14px",marginBottom:16,border:`1px solid #F59E0B33`}}>
+                <p style={{margin:"0 0 6px",fontSize:12,fontWeight:700,color:T.amber}}>💡 Una buena descripción incluye:</p>
+                <p style={{margin:0,fontSize:12,color:T.text,lineHeight:1.6}}>
+                  · Producto o gama que quieres introducir<br/>
+                  · Volumen estimado mensual<br/>
+                  · Lo que usa actualmente el cliente<br/>
+                  · Tu ventaja sobre la competencia<br/>
+                  · Plazo estimado para cerrar
+                </p>
+              </div>
+
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                <p style={{margin:0,fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Descripción *</p>
+                <button onClick={toggleGrabar}
+                  style={{padding:"5px 12px",borderRadius:8,border:`1px solid ${grabando?T.red:T.border}`,
+                    background:grabando?"#FEF2F2":"#fff",color:grabando?T.red:T.text,
+                    fontSize:12,fontWeight:600,cursor:"pointer",display:"flex",gap:4,alignItems:"center"}}>
+                  🎙 {grabando?"Parar":"Hablar"}
+                </button>
+              </div>
+              <textarea value={desc} onChange={e=>setDesc(e.target.value)} rows={8}
+                placeholder={"Pulsa 🎙 Hablar o escribe aquí...\n\n· Producto que quieres introducir\n· Volumen estimado mensual\n· Lo que usa actualmente\n· Tu ventaja sobre la competencia"}
+                style={{width:"100%",padding:"12px 14px",borderRadius:10,border:`1.5px solid ${T.border}`,fontSize:14,
+                  outline:"none",boxSizing:"border-box",resize:"vertical",fontFamily:"inherit",lineHeight:1.6}}/>
+              <p style={{margin:"4px 0 0",fontSize:11,color:desc.length>=10?T.green:T.muted,textAlign:"right"}}>
+                {desc.length} caracteres {desc.length<10?"(mínimo 10)":"✓"}
+              </p>
+
+              {/* Valor y probabilidad */}
+              <div style={{display:"flex",gap:10,marginTop:14}}>
+                <div style={{flex:1}}>
+                  <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Valor estimado €</p>
+                  <input type="number" value={valor} onChange={e=>setValor(e.target.value)} placeholder="0"
+                    style={{width:"100%",padding:"10px 12px",borderRadius:9,border:`1.5px solid ${T.border}`,fontSize:14,outline:"none",boxSizing:"border-box"}}/>
+                </div>
+                <div style={{flex:1}}>
+                  <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Probabilidad %</p>
+                  <input type="number" value={prob} min="0" max="100" onChange={e=>setProb(e.target.value)}
+                    style={{width:"100%",padding:"10px 12px",borderRadius:9,border:`1.5px solid ${T.border}`,fontSize:14,outline:"none",boxSizing:"border-box"}}/>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* STEP 4: Asignar */}
+          {step===4&&(
+            <div>
+              <p style={{margin:"0 0 4px",fontSize:18,fontWeight:800}}>Asignar comercial</p>
+              <p style={{margin:"0 0 16px",fontSize:13,color:T.muted}}>Puedes asignarlo ahora o más tarde desde la lista</p>
+
+              <button onClick={()=>setAsignado("")}
+                style={{width:"100%",padding:"16px",borderRadius:14,border:`2px solid ${!asignado?T.green:T.border}`,
+                  background:!asignado?"#F0FDF4":"#fff",cursor:"pointer",textAlign:"left",marginBottom:10,
+                  display:"flex",gap:14,alignItems:"center"}}>
+                <div style={{width:40,height:40,borderRadius:"50%",background:"#E2E8F0",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>👤</div>
+                <div style={{flex:1}}>
+                  <p style={{margin:0,fontSize:14,fontWeight:700,color:!asignado?T.green:T.text}}>Sin asignar por ahora</p>
+                  <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>Quedará pendiente en la lista</p>
+                </div>
+                {!asignado&&<span style={{color:T.green,fontSize:20}}>✓</span>}
+              </button>
+
+              {agentes.map(ag=>{
+                const sel=asignado===ag.id;
+                const ini=ag.nombre.split(" ").slice(0,2).map(n=>n[0]).join("");
+                return(
+                  <button key={ag.id} onClick={()=>setAsignado(ag.id)}
+                    style={{width:"100%",padding:"14px 16px",borderRadius:14,border:`2px solid ${sel?T.navy:T.border}`,
+                      background:sel?"#F1F5F9":"#fff",cursor:"pointer",textAlign:"left",marginBottom:6,
+                      display:"flex",gap:14,alignItems:"center"}}>
+                    <div style={{width:40,height:40,borderRadius:"50%",background:(ag.color||T.blue)+"22",
+                      border:`2px solid ${(ag.color||T.blue)}55`,display:"flex",alignItems:"center",justifyContent:"center",
+                      fontSize:12,fontWeight:800,color:ag.color||T.blue}}>{ini}</div>
+                    <div style={{flex:1}}>
+                      <p style={{margin:0,fontSize:14,fontWeight:sel?700:500}}>{ag.nombre}</p>
+                      <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>Equipo {ag.equipo}</p>
+                    </div>
+                    {sel&&<span style={{color:T.navy,fontSize:20}}>✓</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {/* STEP 5: Confirmar */}
+          {step===5&&(
+            <div>
+              <p style={{margin:"0 0 16px",fontSize:18,fontWeight:800}}>Confirmar oportunidad</p>
+
+              <div style={{background:"#F8FAFC",borderRadius:14,padding:"16px 18px",marginBottom:12,border:`1px solid ${T.border}`}}>
+                <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>
+                  {TIPOS.find(t=>t.k===tipo)&&(
+                    <span style={{background:T.navy,color:"#fff",padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:700}}>
+                      {TIPOS.find(t=>t.k===tipo)?.icon} {TIPOS.find(t=>t.k===tipo)?.label}
+                    </span>
+                  )}
+                  {cli.tipologia&&<span style={{background:T.blue+"15",color:T.blue,padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:700}}>{cli.tipologia}</span>}
+                </div>
+                <p style={{margin:"0 0 4px",fontSize:16,fontWeight:800}}>{cli.nombre||"Sin nombre"}</p>
+                {cli.contacto&&<p style={{margin:"0 0 2px",fontSize:12,color:T.muted}}>👤 {cli.contacto}{cli.cargo?` · ${cli.cargo}`:""}</p>}
+                {cli.telefono&&<p style={{margin:"0 0 2px",fontSize:12,color:T.muted}}>📞 {cli.telefono}</p>}
+                {cli.email&&<p style={{margin:"0 0 2px",fontSize:12,color:T.muted}}>✉️ {cli.email}</p>}
+                {cli.ciudad&&<p style={{margin:0,fontSize:12,color:T.muted}}>📍 {cli.ciudad}{cli.direccion?` · ${cli.direccion}`:""}</p>}
+              </div>
+
+              {desc&&(
+                <div style={{background:"#fff",borderRadius:12,padding:"12px 14px",marginBottom:12,border:`1px solid ${T.border}`}}>
+                  <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Descripción</p>
+                  <p style={{margin:0,fontSize:13,color:T.text,lineHeight:1.5}}>{desc.slice(0,200)}{desc.length>200?"...":""}</p>
+                </div>
+              )}
+
+              <div style={{display:"flex",gap:8,marginBottom:12}}>
+                {valor>0&&(
+                  <div style={{flex:1,background:"#F0FDF4",borderRadius:10,padding:"10px 12px",border:`1px solid ${T.green}33`}}>
+                    <p style={{margin:0,fontSize:10,color:T.muted,fontWeight:700}}>VALOR</p>
+                    <p style={{margin:0,fontSize:16,fontWeight:800,color:T.green}}>{fmt(Number(valor))}€</p>
+                  </div>
+                )}
+                <div style={{flex:1,background:"#EFF6FF",borderRadius:10,padding:"10px 12px",border:`1px solid ${T.blue}33`}}>
+                  <p style={{margin:0,fontSize:10,color:T.muted,fontWeight:700}}>PROBABILIDAD</p>
+                  <p style={{margin:0,fontSize:16,fontWeight:800,color:T.blue}}>{prob}%</p>
+                </div>
+              </div>
+
+              {asignado&&(()=>{
+                const ag=USUARIOS.find(u=>u.id===asignado);
+                return ag?(
+                  <div style={{background:"#fff",borderRadius:10,padding:"10px 14px",marginBottom:12,border:`1px solid ${T.border}`,display:"flex",gap:10,alignItems:"center"}}>
+                    <span style={{fontSize:11,color:T.muted,fontWeight:700}}>Asignado a:</span>
+                    <span style={{fontSize:13,fontWeight:700}}>{ag.nombre}</span>
+                    <span style={{fontSize:11,color:T.muted}}>· {ag.equipo}</span>
+                  </div>
+                ):null;
+              })()}
+
+              {fotos.length>0&&(
+                <div style={{display:"flex",gap:6,marginBottom:12}}>
+                  {fotos.map((f,i)=>(
+                    <div key={i} style={{width:48,height:48,borderRadius:8,overflow:"hidden",border:`1px solid ${T.border}`}}>
+                      <img src={f.data||f} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Footer navigation */}
+        <div style={{padding:"14px 22px",borderTop:`1px solid ${T.border}`,display:"flex",gap:10,flexShrink:0}}>
+          {step>0&&(
+            <button onClick={()=>setStep(s=>s-1)}
+              style={{flex:1,padding:"13px",borderRadius:12,border:`1px solid ${T.border}`,background:"#fff",
+                color:T.text,fontSize:14,fontWeight:600,cursor:"pointer"}}>
+              ← Atrás
+            </button>
+          )}
+          {step<5?(
+            <button onClick={()=>setStep(s=>s+1)} disabled={!canNext()}
+              style={{flex:2,padding:"13px",borderRadius:12,border:"none",
+                background:canNext()?T.navy:"#E2E8F0",color:canNext()?"#fff":"#94A3B8",
+                fontSize:14,fontWeight:700,cursor:canNext()?"pointer":"default"}}>
+              {step===2?"Continuar sin imágenes →":"Siguiente →"}
+            </button>
+          ):(
+            <button onClick={guardar}
+              style={{flex:2,padding:"13px",borderRadius:12,border:"none",
+                background:T.green,color:"#fff",fontSize:14,fontWeight:700,cursor:"pointer"}}>
+              ✅ {opoEditar?"Guardar cambios":"Crear oportunidad"}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -5967,14 +6369,26 @@ function GestorOportunidades({usuario, onAbrirCliente}){
   const [editando,setEditando]=useState(null); // oportunidad que se está editando
   const [toastMsg,setToastMsg]=useState(null);
 
+  const esAgente=usuario?.rol==="agente";
+  const esJefe=usuario?.rol==="jefe";
+  const esDir=["director","ceo"].includes(usuario?.rol);
+  const appMisIds=resolverMisIds(usuario);
+  const miEquipo=usuario?.equipo;
+
   // Cargar desde Firebase al arrancar
   const cargarOpos=()=>{
     setCargando(true);
     fbCargar().then(data=>{
       if(data.length>0){
-        // Firebase gana — mezcla con OPORTUNIDADES_SEED (DEMO solo si no está en Firebase)
         const fbIds=new Set(data.map(d=>d.id));
-        const merged=[...data,...OPORTUNIDADES_SEED.filter(d=>!fbIds.has(d.id))];
+        let merged=[...data,...OPORTUNIDADES_SEED.filter(d=>!fbIds.has(d.id))];
+        // Filtrar por rol
+        if(esAgente){
+          merged=merged.filter(o=>esDelUsuario(o.agente,appMisIds)||esDelUsuario(o.agenteId,appMisIds));
+        } else if(esJefe){
+          const idsEq=new Set(USUARIOS.filter(u=>u.rol==="agente"&&u.equipo===miEquipo).map(u=>u.id));
+          merged=merged.filter(o=>idsEq.has(o.agente||o.agenteId));
+        }
         setOpos(merged);
       } else {
         setOpos(OPORTUNIDADES_SEED);
@@ -6206,11 +6620,32 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion}){
   const [notaCierre,setNotaCierre]=useState("");
   const [nuevaTarea,setNuevaTarea]=useState({depto:"",texto:"",resp:""});
   const esJefeOmas=["jefe","director","ceo"].includes(usuario?.rol);
+  const esAgente=usuario?.rol==="agente";
+  const esJefe=usuario?.rol==="jefe";
+  const miEquipo=usuario?.equipo;
+  const appMisIds=resolverMisIds(usuario);
 
-  // Cargar proyectos desde Firebase (incluye industriales)
+  // Cargar proyectos desde Firebase con filtro por rol
   React.useEffect(()=>{
     fbLeer("proyectos").then(data=>{
-      if(data.length>0) setProyectos([...data,...PROYECTOS_SEED.filter(s=>!data.find(d=>d.id===s.id))]);
+      if(data.length>0){
+        let todos=[...data,...PROYECTOS_SEED.filter(s=>!data.find(d=>d.id===s.id))];
+        // Filtrar según rol
+        if(esAgente){
+          todos=todos.filter(p=>{
+            const ag=(p.agente||p.agenteId||"").toUpperCase();
+            const eq=p.equipo||[];
+            return appMisIds.has(ag)||
+              (Array.isArray(eq)&&eq.some(e=>appMisIds.has(e.toUpperCase())))||
+              (typeof eq==="string"&&appMisIds.has(eq.toUpperCase()));
+          });
+        } else if(esJefe){
+          const idsEquipo=new Set(USUARIOS.filter(u=>u.rol==="agente"&&u.equipo===miEquipo).map(u=>u.id));
+          todos=todos.filter(p=>idsEquipo.has(p.agente||p.agenteId)||
+            (Array.isArray(p.equipo)&&p.equipo.some(e=>idsEquipo.has(e))));
+        }
+        setProyectos(todos);
+      }
     }).catch(()=>{});
   },[usuario?.id]);
 
