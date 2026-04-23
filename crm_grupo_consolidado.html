@@ -10517,6 +10517,71 @@ function App(props){
     if(u.rol==="admin") setAdminOpen(true);
   };
 
+  // ── Sistema de notificaciones (MUST be before any early return) ──
+  const _esAgente=usuario?.rol==="agente";
+  const _esJefe=usuario?.rol==="jefe";
+  const _miEquipo=usuario?.equipo;
+  const _appMisIds=usuario?resolverMisIds(usuario):new Set();
+  const notificaciones=useMemo(()=>{
+    if(!usuario) return [];
+    const notifs=[];
+    const hoy=new Date();
+    const semActual=Math.ceil(((hoy-new Date(hoy.getFullYear(),0,1))/86400000+new Date(hoy.getFullYear(),0,1).getDay()+1)/7);
+    muestrasDB.filter(m=>{
+      if(m.estado!=="pendiente") return false;
+      if(_esAgente&&!_appMisIds.has((m.agente||"").toUpperCase())) return false;
+      if(_esJefe){const ag=USUARIOS.find(u=>u.id===m.agente);if(!ag||ag.equipo!==_miEquipo) return false;}
+      const sem=parseInt(m.semana)||0;
+      return sem>0&&(semActual-sem)>=2;
+    }).forEach(m=>{
+      const semanas=semActual-(parseInt(m.semana)||0);
+      notifs.push({tipo:"muestra",icon:"📦",color:"#F59E0B",prioridad:semanas>4?3:2,
+        titulo:`${m.prod} — ${m.cliente}`,sub:`⏳ ${semanas} semanas sin respuesta`,
+        accion:()=>{setNotifOpen(false);setSection("muestras");}});
+    });
+    incidenciasDB.filter(inc=>{
+      if(inc.estado==="cerrada"||inc.estado==="resuelta") return false;
+      if(_esAgente&&inc.autor!==usuario.id) return false;
+      if(_esJefe&&inc.equipo!==_miEquipo) return false;
+      if(!inc.fecha) return true;
+      const parts=inc.fecha.split("/");if(parts.length<3) return false;
+      const f=new Date(parts[2].length===2?"20"+parts[2]:parts[2],parts[1]-1,parts[0]);
+      return (hoy-f)/(1000*60*60*24)>7;
+    }).forEach(inc=>{
+      notifs.push({tipo:"incidencia",icon:"🚨",color:"#EF4444",prioridad:3,
+        titulo:inc.titulo||inc.asunto||"Incidencia",
+        sub:`🔴 Abierta — ${inc.tipo||""}${inc.cliente?" · "+inc.cliente:""}`,
+        accion:()=>{setNotifOpen(false);setSection("incidencias");}});
+    });
+    estrategiasDB.filter(e=>{
+      if(e.estado==="completada"||e.estado==="cancelada"||e.eliminada) return false;
+      if(_esAgente&&!_appMisIds.has((e.agente||e.agenteId||"").toUpperCase())) return false;
+      if(_esJefe){const ag=USUARIOS.find(u=>u.id===(e.agente||e.agenteId));if(!ag||ag.equipo!==_miEquipo) return false;}
+      return true;
+    }).forEach(e=>{
+      notifs.push({tipo:"estrategia",icon:"🎯",color:"#22C55E",prioridad:1,
+        titulo:e.titulo||e.nombre||"Estrategia",sub:"En curso — requiere seguimiento",
+        accion:()=>{setNotifOpen(false);setSection("estrategias");}});
+    });
+    oportunidadesDB.filter(o=>{
+      if(["ganada","perdida","cerrada_ganada","cerrada_perdida"].includes(o.estado||o.etapa)) return false;
+      if(_esAgente&&!esDelUsuario(o.agente,_appMisIds)&&!esDelUsuario(o.agenteId,_appMisIds)) return false;
+      if(_esJefe){const ag=USUARIOS.find(u=>u.id===(o.agenteId||o.agente));if(!ag||ag.equipo!==_miEquipo) return false;}
+      const notas=o.actividad||o.notas||[];
+      if(Array.isArray(notas)&&notas.length>0){
+        const ult=notas[notas.length-1];
+        if(ult.fecha){const p=ult.fecha.split("/");if(p.length>=3){const f=new Date(p[2].length===2?"20"+p[2]:p[2],p[1]-1,p[0]);if((hoy-f)/(1000*60*60*24)<14)return false;}}
+      }
+      return true;
+    }).slice(0,5).forEach(o=>{
+      notifs.push({tipo:"oportunidad",icon:"💼",color:"#1E3A5F",prioridad:2,
+        titulo:o.nombre||o.cliente||"Oportunidad",sub:"Sin actividad reciente",
+        accion:()=>{setNotifOpen(false);setSection("oportunidades");}});
+    });
+    notifs.sort((a,b)=>b.prioridad-a.prioridad);
+    return notifs;
+  },[muestrasDB,incidenciasDB,estrategiasDB,oportunidadesDB,usuario?.id]);
+
   if(!usuario){
     // Si estamos dentro del iframe del portal, volver al Hub en vez de mostrar Login
     if(window.parent!==window){
@@ -10533,8 +10598,6 @@ function App(props){
   const esDir=["director","ceo"].includes(usuario.rol);
   const esJefeOmas=esJefe||esDir;
   const miEquipo=usuario.equipo;
-
-  // Helper: obtener clientes de un agente
   // Firebase usa grupoAgente (= catalogoVendedor del portal, ej: "CARLOSG", "DAVIDMAG")
   const getClientesPara=(agenteId)=>{
     if(clientesDB){
@@ -10603,90 +10666,6 @@ function App(props){
 
   const urgCount=0; // badge dinámico — cargado en TareasWidget
 
-  // ── Sistema de notificaciones ──
-  const notificaciones=useMemo(()=>{
-    const notifs=[];
-    const hoy=new Date();
-    const semActual=Math.ceil(((hoy-new Date(hoy.getFullYear(),0,1))/86400000+new Date(hoy.getFullYear(),0,1).getDay()+1)/7);
-
-    // 1. Muestras pendientes >2 semanas sin comentarios
-    muestrasDB.filter(m=>{
-      if(m.estado!=="pendiente") return false;
-      if(esAgente&&!appMisIds.has((m.agente||"").toUpperCase())) return false;
-      if(esJefe){const ag=USUARIOS.find(u=>u.id===m.agente);if(!ag||ag.equipo!==miEquipo) return false;}
-      const sem=parseInt(m.semana)||0;
-      return sem>0&&(semActual-sem)>=2;
-    }).forEach(m=>{
-      const semanas=semActual-(parseInt(m.semana)||0);
-      notifs.push({
-        tipo:"muestra",icon:"📦",color:"#F59E0B",prioridad:semanas>4?3:2,
-        titulo:`${m.prod} — ${m.cliente}`,
-        sub:`⏳ ${semanas} semanas sin respuesta`,
-        accion:()=>{setNotifOpen(false);setSection("muestras");}
-      });
-    });
-
-    // 2. Incidencias abiertas >1 semana
-    incidenciasDB.filter(inc=>{
-      if(inc.estado==="cerrada"||inc.estado==="resuelta") return false;
-      if(esAgente&&inc.autor!==usuario.id) return false;
-      if(esJefe&&inc.equipo!==miEquipo) return false;
-      if(!inc.fecha) return true;
-      const parts=inc.fecha.split("/");
-      if(parts.length<3) return false;
-      const f=new Date(parts[2].length===2?"20"+parts[2]:parts[2],parts[1]-1,parts[0]);
-      return (hoy-f)/(1000*60*60*24)>7;
-    }).forEach(inc=>{
-      notifs.push({
-        tipo:"incidencia",icon:"🚨",color:"#EF4444",prioridad:3,
-        titulo:inc.titulo||inc.asunto||"Incidencia",
-        sub:`🔴 Abierta — ${inc.tipo||""}${inc.cliente?" · "+inc.cliente:""}`,
-        accion:()=>{setNotifOpen(false);setSection("incidencias");}
-      });
-    });
-
-    // 3. Estrategias activas sin avance reciente
-    estrategiasDB.filter(e=>{
-      if(e.estado==="completada"||e.estado==="cancelada"||e.eliminada) return false;
-      if(esAgente&&!appMisIds.has((e.agente||e.agenteId||"").toUpperCase())) return false;
-      if(esJefe){const ag=USUARIOS.find(u=>u.id===(e.agente||e.agenteId));if(!ag||ag.equipo!==miEquipo) return false;}
-      return true;
-    }).forEach(e=>{
-      notifs.push({
-        tipo:"estrategia",icon:"🎯",color:"#22C55E",prioridad:1,
-        titulo:e.titulo||e.nombre||"Estrategia",
-        sub:"En curso — requiere seguimiento",
-        accion:()=>{setNotifOpen(false);setSection("estrategias");}
-      });
-    });
-
-    // 4. Oportunidades activas sin notas recientes (>2 semanas)
-    oportunidadesDB.filter(o=>{
-      if(["ganada","perdida","cerrada_ganada","cerrada_perdida"].includes(o.estado||o.etapa)) return false;
-      if(esAgente&&!esDelUsuario(o.agente,appMisIds)&&!esDelUsuario(o.agenteId,appMisIds)) return false;
-      if(esJefe){const ag=USUARIOS.find(u=>u.id===(o.agenteId||o.agente));if(!ag||ag.equipo!==miEquipo) return false;}
-      const notas=o.actividad||o.notas||[];
-      if(Array.isArray(notas)&&notas.length>0){
-        const ult=notas[notas.length-1];
-        if(ult.fecha){
-          const p=ult.fecha.split("/");
-          if(p.length>=3){const f=new Date(p[2].length===2?"20"+p[2]:p[2],p[1]-1,p[0]);if((hoy-f)/(1000*60*60*24)<14)return false;}
-        }
-      }
-      return true;
-    }).slice(0,5).forEach(o=>{
-      notifs.push({
-        tipo:"oportunidad",icon:"💼",color:"#1E3A5F",prioridad:2,
-        titulo:o.nombre||o.cliente||"Oportunidad",
-        sub:"Sin actividad reciente",
-        accion:()=>{setNotifOpen(false);setSection("oportunidades");}
-      });
-    });
-
-    // Ordenar por prioridad (3=urgente, 1=info)
-    notifs.sort((a,b)=>b.prioridad-a.prioridad);
-    return notifs;
-  },[muestrasDB,incidenciasDB,estrategiasDB,oportunidadesDB,usuario.id]);
   const NAV_AGENTE=[
     {id:"dashboard",    icon:"🏠",label:"Inicio",      color:usuario.color},
     {id:"clientes",     icon:"📋",label:"Clientes",    color:T.blue},
