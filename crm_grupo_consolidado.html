@@ -528,7 +528,8 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, es
 
   const misEstrat=(estrategiasDB||ESTRATEGIAS_SEED).filter(e=>
     !e.eliminada&&(e.estado==="en_curso"||e.estado==="pendiente_aprobacion")&&
-    (appMisIds.has((e.agente||"").toUpperCase())||appMisIds.has((e.agenteId||"").toUpperCase())));
+    (appMisIds.has((e.agente||"").toUpperCase())||appMisIds.has((e.agenteId||"").toUpperCase())||
+     e.equipo===usuario.equipo||!e.equipo));
   const ePend=misEstrat.length;
 
   const misOps=opsBD.filter(o=>(esDelUsuario(o.agente,appMisIds)||esDelUsuario(o.agenteId,appMisIds))&&
@@ -3020,13 +3021,14 @@ function MisEstrategias({usuario}){
   const recargar=()=>{
     setCargando(true);
     fbLeer("estrategias").then(data=>{
-      if(data.length>0){
-        const fbIds=new Set(data.map(d=>d.id));
-        const merged=[...data.filter(d=>!d.eliminada),...ESTRATEGIAS_SEED.filter(s=>!fbIds.has(s.id))];
-        GlobalStore.setEstrategias(merged);
-        setEstrategiasLocal([...merged]);
-      }
-    }).finally(()=>setCargando(false));
+      console.log("[EST] Firebase raw:",data.length,"items");
+      data.forEach(d=>console.log("[EST] raw →",d.id,"cli:",d.cliente,"estado:",d.estado,"agente:",d.agente,"equipo:'"+d.equipo+"'","eliminada:",d.eliminada));
+      const fbIds=new Set(data.map(d=>d.id));
+      const merged=[...data.filter(d=>!d.eliminada),...ESTRATEGIAS_SEED.filter(s=>!fbIds.has(s.id))];
+      console.log("[EST] Merged (no eliminadas):",merged.length);
+      GlobalStore.setEstrategias(merged);
+      setEstrategiasLocal([...merged]);
+    }).catch(e=>console.error("[EST] Error:",e)).finally(()=>setCargando(false));
   };
 
   // Auto-cargar desde Firebase al montar si GlobalStore está vacío
@@ -3097,7 +3099,7 @@ function MisEstrategias({usuario}){
 
   // Para agente: separadas por resolución
   const aprobadas=esAgente
-    ? estrategias.filter(e=>(e.agente===usuario.id||e.equipo===miEquipo)&&e.resolucion&&
+    ? estrategias.filter(e=>esDelEquipoOGlobal(e)&&e.resolucion&&
         (e.resolucion.tipo==="aprobada"||e.resolucion.tipo==="aprobada_parcial"))
     : esRolJefe
     ? estrategias.filter(e=>deEquipo(e)&&e.resolucion&&e.resolucion.por!==usuario.nombre&&
@@ -3106,14 +3108,27 @@ function MisEstrategias({usuario}){
         ((e.historialEscalado||[]).some(h=>h.por===usuario.nombre)||e.agente===usuario.id));
 
   const rechazadas=esAgente
-    ? estrategias.filter(e=>(e.agente===usuario.id||e.equipo===miEquipo)&&e.resolucion?.tipo==="rechazada")
+    ? estrategias.filter(e=>esDelEquipoOGlobal(e)&&e.resolucion?.tipo==="rechazada")
     : esRolJefe
     ? estrategias.filter(e=>deEquipo(e)&&e.resolucion?.tipo==="rechazada"&&e.resolucion.por!==usuario.nombre)
     : [];
 
-  const enRevisionAgente=esAgente?estrategias.filter(e=>(e.agente===usuario.id||e.equipo===miEquipo||(e.creadoPor&&!e.equipo))&&e.estado==="pendiente_aprobacion"):[];
-  const activasAgente=esAgente?estrategias.filter(e=>(e.agente===usuario.id||e.equipo===miEquipo||(e.creadoPor&&!e.equipo))&&e.estado==="en_curso"&&!e.resolucion):[];
+  const esDelEquipoOGlobal=(e)=>{
+    if(e.agente===usuario.id) return true;
+    if(e.equipo&&e.equipo===miEquipo) return true;
+    if(!e.equipo||e.equipo==="") return true; // estrategias sin equipo (del director) → visibles para todos
+    return false;
+  };
+  const enRevisionAgente=esAgente?estrategias.filter(e=>esDelEquipoOGlobal(e)&&e.estado==="pendiente_aprobacion"):[];
+  const activasAgente=esAgente?estrategias.filter(e=>esDelEquipoOGlobal(e)&&e.estado==="en_curso"&&!e.resolucion):[];
   const misMostrar=esJefe?estrategias.filter(e=>deEquipo(e)&&e.estado==="en_curso"&&!e.resolucion):[];
+
+  // Debug filters
+  if(estrategias.length>0){
+    console.log("[EST] Total estrategias:",estrategias.length,"esAgente:",esAgente,"esJefe:",esJefe,"usuario:",usuario.id,"miEquipo:",miEquipo);
+    estrategias.forEach(e=>console.log("[EST] check:",e.id,"cli:",e.cliente,"estado:",e.estado,"perteneceAMi:",esDelEquipoOGlobal(e)));
+    console.log("[EST] activasAgente:",activasAgente.length,"enRevision:",enRevisionAgente.length,"misMostrar:",misMostrar.length);
+  }
 
   // ── DETALLE ─────────────────────────────────────────────────────
   if(sel){
@@ -3276,6 +3291,7 @@ function MisEstrategias({usuario}){
           <p style={{margin:0,fontSize:22,fontWeight:900,color:T.text}}>🎯 Estrategias</p>
           <p style={{margin:"2px 0 0",fontSize:12,color:T.muted}}>
             {esAgente?"Mis recuperaciones":esRolJefe?`Equipo ${miEquipo}`:esRolDir?"Dirección":"CEO"}
+            <span style={{marginLeft:6,fontSize:10,color:T.blue}}>· {estrategias.length} total · {activasAgente.length+misMostrar.length} activas</span>
           </p>
         </div>
         <div style={{display:"flex",gap:8}}>
@@ -10573,6 +10589,7 @@ function App(props){
       }).catch(()=>{});
       if(estrategias.length>0){
         const filtered=estrategias.filter(e=>!e.eliminada);
+        console.log("[ESTRATEGIAS] Cargadas desde Firebase:",filtered.length,"estrategias",filtered.map(e=>({id:e.id,cliente:e.cliente,agente:e.agente,equipo:e.equipo,estado:e.estado})));
         setEstrategiasDB(filtered);
         GlobalStore.setEstrategias(filtered);
       }
@@ -10749,7 +10766,7 @@ function App(props){
   ).length;
 
   const estEnCurso=esAgente
-    ? estrategiasDB.filter(e=>(e.estado==="en_curso"||e.estado==="pendiente_aprobacion")&&(e.agente===usuario.id||e.equipo===miEquipo||(e.creadoPor&&!e.equipo))&&!e.eliminada).length
+    ? estrategiasDB.filter(e=>(e.estado==="en_curso"||e.estado==="pendiente_aprobacion")&&(e.agente===usuario.id||e.equipo===miEquipo||!e.equipo)&&!e.eliminada).length
     : esJefe
     ? estrategiasDB.filter(e=>e.estado==="pendiente_aprobacion"&&USUARIOS.find(u=>u.id===e.agente)?.equipo===miEquipo&&!e.escaladoA).length
     : estrategiasDB.filter(e=>e.estado==="pendiente_aprobacion"&&e.escaladoA===usuario.id).length;
