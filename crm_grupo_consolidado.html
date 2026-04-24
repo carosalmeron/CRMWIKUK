@@ -82,6 +82,207 @@ function comprimirImagen(dataUrl, maxSize=1024){
   });
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// SISTEMA DE NOTIFICACIONES + CONFIRMACIÓN DE LECTURA + CALENDARIO
+// ═══════════════════════════════════════════════════════════════════
+
+// ── 1. Confirmación de lectura ──
+// Marca un elemento como "visto" por el usuario actual en Firebase
+async function marcarComoVisto(coleccion, id, usuarioId) {
+  const visto = {
+    vistoPor: usuarioId,
+    fechaVisto: new Date().toISOString(),
+  };
+  try {
+    await fbEscribir(coleccion, id, { [`lecturas_${usuarioId}`]: visto });
+    console.log(`[LECTURA] ${coleccion}/${id} marcado como visto por ${usuarioId}`);
+    return true;
+  } catch (e) {
+    console.log("[LECTURA] Error:", e);
+    return false;
+  }
+}
+
+// Comprueba si un elemento ha sido visto por un usuario
+function fueVistoPor(elemento, usuarioId) {
+  if (!elemento || !usuarioId) return false;
+  const lectura = elemento[`lecturas_${usuarioId}`];
+  if (lectura && lectura.vistoPor === usuarioId) return true;
+  // Fallback: check vistoPor array
+  if (Array.isArray(elemento.vistoPor)) return elemento.vistoPor.includes(usuarioId);
+  return false;
+}
+
+// ── 2. Generador de archivos .ics (calendario) ──
+function generarICS({ titulo, descripcion, fechaInicio, fechaFin, ubicacion, url, recordatorioMin = 30 }) {
+  const fmtDate = (d) => {
+    const dt = d instanceof Date ? d : new Date(d);
+    return dt.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+  };
+  const inicio = fmtDate(fechaInicio);
+  const fin = fmtDate(fechaFin || new Date(new Date(fechaInicio).getTime() + 3600000)); // +1h si no hay fin
+  const uid = `crm-${Date.now()}-${Math.random().toString(36).slice(2)}@grupoconsolidado`;
+
+  const ics = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//CRM Grupo Consolidado//ES",
+    "CALSCALE:GREGORIAN",
+    "METHOD:PUBLISH",
+    "BEGIN:VEVENT",
+    `UID:${uid}`,
+    `DTSTART:${inicio}`,
+    `DTEND:${fin}`,
+    `SUMMARY:${(titulo || "").replace(/\n/g, "\\n")}`,
+    `DESCRIPTION:${(descripcion || "").replace(/\n/g, "\\n")}`,
+    ubicacion ? `LOCATION:${ubicacion}` : "",
+    url ? `URL:${url}` : "",
+    `BEGIN:VALARM`,
+    `TRIGGER:-PT${recordatorioMin}M`,
+    `ACTION:DISPLAY`,
+    `DESCRIPTION:Recordatorio: ${titulo}`,
+    `END:VALARM`,
+    "END:VEVENT",
+    "END:VCALENDAR",
+  ].filter(Boolean).join("\r\n");
+
+  return ics;
+}
+
+function descargarICS(icsContent, filename) {
+  const blob = new Blob([icsContent], { type: "text/calendar;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename || "evento.ics";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// ── 3. Despacho de notificaciones ──
+// Crea una notificación en Firebase y opcionalmente envía email
+async function despacharNotificacion({ tipo, titulo, mensaje, destinatarioId, destinatarioEmail, enlace, prioridad = "normal", creadoPor, datos = {}, fechaVencimiento }) {
+  const notif = {
+    id: `notif_${Date.now()}_${Math.random().toString(36).slice(2,6)}`,
+    tipo, titulo, mensaje, destinatarioId,
+    destinatarioEmail: destinatarioEmail || USUARIOS.find(u => u.id === destinatarioId)?.email || "",
+    enlace: enlace || "https://crmwikuk.vercel.app",
+    prioridad,
+    creadoPor,
+    creadoPorNombre: USUARIOS.find(u => u.id === creadoPor)?.nombre || creadoPor,
+    fecha: new Date().toISOString(),
+    leido: false, emailEnviado: false,
+    ...datos,
+  };
+
+  // Guardar en Firebase
+  try {
+    await fbEscribir("notificaciones_email", notif.id, notif);
+    console.log(`[NOTIF] Creada: ${tipo} → ${destinatarioId}: ${titulo}`);
+  } catch (e) { console.log("[NOTIF] Error guardando:", e); }
+
+  // Generar .ics para adjuntar al email
+  const fechaEvento = fechaVencimiento ? new Date(fechaVencimiento) : new Date(Date.now() + 86400000);
+  const icsContent = generarICS({
+    titulo: `CRM: ${titulo}`,
+    descripcion: mensaje,
+    fechaInicio: fechaEvento,
+    recordatorioMin: tipo === "incidencia" ? 15 : 60,
+    url: notif.enlace,
+  });
+
+  // Enviar email con .ics adjunto
+  if (notif.destinatarioEmail) {
+    try {
+      const resp = await fetch("/api/send-email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          to: notif.destinatarioEmail,
+          subject: `[CRM] ${prioridad === "urgente" ? "🚨 URGENTE: " : ""}${titulo}`,
+          html: `
+            <div style="font-family:sans-serif;max-width:500px;margin:0 auto;padding:20px">
+              <div style="background:#1E3A5F;color:#fff;padding:16px 20px;border-radius:12px 12px 0 0">
+                <h2 style="margin:0;font-size:16px">🏢 CRM Grupo Consolidado</h2>
+              </div>
+              <div style="padding:20px;border:1px solid #E2E8F0;border-top:none;border-radius:0 0 12px 12px">
+                <p style="margin:0 0 4px;font-size:11px;color:#64748B;text-transform:uppercase;font-weight:700">${tipo.toUpperCase()}</p>
+                <h3 style="margin:0 0 12px;font-size:18px;color:#1E293B">${titulo}</h3>
+                <p style="margin:0 0 16px;font-size:14px;color:#475569;line-height:1.5">${mensaje}</p>
+                <p style="margin:0 0 4px;font-size:11px;color:#94A3B8">📅 Fecha: ${fechaEvento.toLocaleDateString("es-ES",{weekday:"long",day:"numeric",month:"long"})}</p>
+                <p style="margin:0 0 16px;font-size:11px;color:#94A3B8">De: ${notif.creadoPorNombre} · ${new Date().toLocaleDateString("es-ES")}</p>
+                <p style="margin:0 0 8px;font-size:12px;color:#1E3A5F;font-weight:700">📅 El evento de calendario se ha adjuntado a este email — ábrelo para añadirlo a tu calendario</p>
+                <a href="${notif.enlace}" style="display:inline-block;padding:12px 24px;background:#1E3A5F;color:#fff;text-decoration:none;border-radius:8px;font-weight:700;font-size:14px">Abrir en CRM →</a>
+              </div>
+            </div>`,
+          icsAttachment: icsContent,
+          icsFilename: `crm_${tipo}_${Date.now()}.ics`,
+        }),
+      });
+      if (resp.ok) {
+        notif.emailEnviado = true;
+        await fbEscribir("notificaciones_email", notif.id, { emailEnviado: true, fechaEmailEnviado: new Date().toISOString() });
+        console.log(`[NOTIF] Email+ICS enviado a ${notif.destinatarioEmail}`);
+      }
+    } catch (e) {
+      console.log("[NOTIF] Email no enviado (API no configurado):", e.message);
+    }
+  }
+
+  return notif;
+}
+
+// ── 4. Helper: notificar al asignar tarea/incidencia/estrategia ──
+function notificarAsignacion(tipo, elemento, creadoPorId) {
+  const destinatario = USUARIOS.find(u => u.id === (elemento.agente || elemento.agenteId || elemento.asignadoA));
+  if (!destinatario) return;
+
+  const titulos = {
+    tarea: `Nueva tarea: ${elemento.titulo || elemento.texto || ""}`,
+    incidencia: `Incidencia: ${elemento.titulo || elemento.asunto || elemento.tipo || ""}`,
+    estrategia: `Estrategia: ${elemento.cliente || ""} — ${elemento.texto || elemento.objetivo || ""}`,
+    hito: `Hito de proyecto: ${elemento.nombre || elemento.titulo || ""}`,
+  };
+
+  const mensajes = {
+    tarea: `Se te ha asignado una tarea. ${elemento.descripcion || elemento.texto || ""}`,
+    incidencia: `Hay una incidencia que requiere tu atención. Cliente: ${elemento.clienteNombre || elemento.cliente || "N/A"}`,
+    estrategia: `Se ha creado una estrategia para ${elemento.cliente || "un cliente"}. Objetivo: ${elemento.objetivo || ""}`,
+    hito: `Tienes un hito pendiente en el proyecto ${elemento.proyecto || ""}`,
+  };
+
+  // Fecha para el evento de calendario
+  const fechaVenc = elemento.vence || elemento.fecha || elemento.fechaLimite || null;
+
+  despacharNotificacion({
+    tipo,
+    titulo: titulos[tipo] || `Nuevo ${tipo}`,
+    mensaje: mensajes[tipo] || "",
+    destinatarioId: destinatario.id,
+    destinatarioEmail: destinatario.email,
+    prioridad: elemento.prioridad === "urgente" || elemento.prioridad === "alta" ? "alta" : "normal",
+    creadoPor: creadoPorId,
+    fechaVencimiento: fechaVenc,
+  });
+}
+
+// ── 5. Badge "No leído" / "Visto" component ──
+function BadgeLectura({ elemento, usuarioId, style }) {
+  const visto = fueVistoPor(elemento, usuarioId);
+  return React.createElement("span", {
+    style: {
+      display: "inline-flex", alignItems: "center", gap: 3,
+      padding: "2px 8px", borderRadius: 6, fontSize: 10, fontWeight: 700,
+      background: visto ? "#F0FDF4" : "#FEF2F2",
+      color: visto ? "#16A34A" : "#DC2626",
+      border: `1px solid ${visto ? "#16A34A33" : "#DC262633"}`,
+      ...style,
+    }
+  }, visto ? "✅ Visto" : "⏳ No leído");
+}
+
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
@@ -101,18 +302,18 @@ const fmt = (n)=>new Intl.NumberFormat("es-ES",{minimumFractionDigits:0}).format
 
 // ─── DATOS DEMO ────────────────────────────────────────────────────
 let USUARIOS = [
-  {id:"ceo",     nombre:"CEO",              rol:"ceo",         equipo:null,       color:T.purple, icon:"👑"},
-  {id:"dir",     nombre:"Jefe de Ventas",   rol:"director",    equipo:null,       color:T.blue,   icon:"📊"},
-  {id:"rw1",     nombre:"Resp. WIKUK",      rol:"jefe",        equipo:"WIKUK",    color:T.green,  icon:"🏆"},
-  {id:"ri1",     nombre:"Resp. INTERKEY",   rol:"jefe",        equipo:"INTERKEY", color:T.amber,  icon:"🏆"},
-  {id:"wk1",     nombre:"David Mag",        rol:"agente",      equipo:"WIKUK",    color:T.green,  icon:"🧑‍💼", grupoAgente:"DAVIDMAG"},
-  {id:"wk2",     nombre:"Verónica",         rol:"agente",      equipo:"WIKUK",    color:"#10B981",icon:"🧑‍💼", grupoAgente:"VERONICA"},
-  {id:"wk3",     nombre:"Silvia",           rol:"agente",      equipo:"WIKUK",    color:"#059669",icon:"🧑‍💼", grupoAgente:"SILVIA"},
-  {id:"ik1",     nombre:"Carlos G.",        rol:"agente",      equipo:"INTERKEY", color:T.amber,  icon:"🧑‍💼", grupoAgente:"CARLOSG"},
-  {id:"ik2",     nombre:"Ricardo",          rol:"agente",      equipo:"INTERKEY", color:"#D97706",icon:"🧑‍💼", grupoAgente:"RICARDO"},
-  {id:"ik4",     nombre:"Azarco",           rol:"agente",      equipo:"INTERKEY", color:"#78350F",icon:"🧑‍💼", grupoAgente:"AZARCO"},
-  {id:"rpiedra", nombre:"Ramon",            rol:"agente",      equipo:"WIKUK",    color:"#E11D48",icon:"🧑‍💼", grupoAgente:"RPIEDRA"},
-  {id:"jl",      nombre:"Jose Luis",        rol:"agente",      equipo:"WIKUK",    color:"#6366F1",icon:"🧑‍💼", grupoAgente:"JLGARCIA"},
+  {id:"ceo",     nombre:"CEO",              rol:"ceo",         equipo:null,       color:T.purple, icon:"👑", email:""},
+  {id:"dir",     nombre:"Jefe de Ventas",   rol:"director",    equipo:null,       color:T.blue,   icon:"📊", email:""},
+  {id:"rw1",     nombre:"Resp. WIKUK",      rol:"jefe",        equipo:"WIKUK",    color:T.green,  icon:"🏆", email:""},
+  {id:"ri1",     nombre:"Resp. INTERKEY",   rol:"jefe",        equipo:"INTERKEY", color:T.amber,  icon:"🏆", email:""},
+  {id:"wk1",     nombre:"David Mag",        rol:"agente",      equipo:"WIKUK",    color:T.green,  icon:"🧑‍💼", grupoAgente:"DAVIDMAG", email:""},
+  {id:"wk2",     nombre:"Verónica",         rol:"agente",      equipo:"WIKUK",    color:"#10B981",icon:"🧑‍💼", grupoAgente:"VERONICA", email:""},
+  {id:"wk3",     nombre:"Silvia",           rol:"agente",      equipo:"WIKUK",    color:"#059669",icon:"🧑‍💼", grupoAgente:"SILVIA", email:""},
+  {id:"ik1",     nombre:"Carlos G.",        rol:"agente",      equipo:"INTERKEY", color:T.amber,  icon:"🧑‍💼", grupoAgente:"CARLOSG", email:""},
+  {id:"ik2",     nombre:"Ricardo",          rol:"agente",      equipo:"INTERKEY", color:"#D97706",icon:"🧑‍💼", grupoAgente:"RICARDO", email:""},
+  {id:"ik4",     nombre:"Azarco",           rol:"agente",      equipo:"INTERKEY", color:"#78350F",icon:"🧑‍💼", grupoAgente:"AZARCO", email:""},
+  {id:"rpiedra", nombre:"Ramon",            rol:"agente",      equipo:"WIKUK",    color:"#E11D48",icon:"🧑‍💼", grupoAgente:"RPIEDRA", email:""},
+  {id:"jl",      nombre:"Jose Luis",        rol:"agente",      equipo:"WIKUK",    color:"#6366F1",icon:"🧑‍💼", grupoAgente:"JLGARCIA", email:""},
   // Responsables por tipología
   {id:"resp_log", nombre:"Resp. Logística",      rol:"tipologia", tipologia:"logistica",      color:"#0EA5E9",icon:"🚚"},
   {id:"resp_cal", nombre:"Resp. Calidad",         rol:"tipologia", tipologia:"calidad",         color:"#F59E0B",icon:"⚠️"},
@@ -3007,6 +3208,11 @@ function MisEstrategias({usuario}){
   const [formEst,setFormEst]=useState({cliente:"",objetivo:"",texto:""});
   const [editEst,setEditEst]=useState(null);
 
+  // Marcar como leído al abrir detalle
+  useEffect(()=>{
+    if(sel && usuario?.id) marcarComoVisto("estrategias", sel.id, usuario.id);
+  },[sel?.id]);
+
   useEffect(()=>{
     const unsub=GlobalStore.subscribe(data=>setEstrategiasLocal([...data]));
     return unsub;
@@ -3143,12 +3349,26 @@ function MisEstrategias({usuario}){
       <div style={{paddingBottom:100}}>
         <BackBar label="Estrategias" onBack={()=>setSel(null)}/>
         <div style={{padding:"16px"}}>
-          {/* Botones editar / eliminar — prominentes */}
+          {/* Botones editar / eliminar / calendario */}
           <div style={{display:"flex",gap:8,marginBottom:16}}>
             <button onClick={()=>setEditEst(sel)}
               style={{flex:1,padding:"10px 16px",borderRadius:10,border:`1.5px solid ${T.navy}`,background:"#F1F5F9",
                 fontSize:13,fontWeight:700,color:T.navy,cursor:"pointer",display:"flex",gap:6,alignItems:"center",justifyContent:"center"}}>
-              ✏️ Editar estrategia
+              ✏️ Editar
+            </button>
+            <button onClick={()=>{
+              const ics=generarICS({
+                titulo:`CRM: ${sel.cliente||sel.clienteNombre} — ${sel.objetivo||sel.texto||"Estrategia"}`,
+                descripcion:`Estrategia: ${sel.texto||sel.estrategia||""}\nCliente: ${sel.cliente||""}\nObjetivo: ${sel.objetivo||""}`,
+                fechaInicio:new Date(Date.now()+86400000), // mañana
+                recordatorioMin:60,
+                url:"https://crmwikuk.vercel.app"
+              });
+              descargarICS(ics,`estrategia_${(sel.cliente||"").replace(/\s/g,"_")}.ics`);
+            }}
+              style={{padding:"10px 16px",borderRadius:10,border:`1.5px solid ${T.blue}`,background:"#EFF6FF",
+                color:T.blue,fontSize:13,fontWeight:700,cursor:"pointer"}}>
+              📅 Calendario
             </button>
             <button onClick={()=>{
               if(!confirm("¿Eliminar esta estrategia?")) return;
@@ -3158,7 +3378,7 @@ function MisEstrategias({usuario}){
             }}
               style={{padding:"10px 16px",borderRadius:10,border:`1.5px solid ${T.red}`,background:"#FEF2F2",
                 color:T.red,fontSize:13,fontWeight:700,cursor:"pointer"}}>
-              🗑️ Eliminar
+              🗑️
             </button>
           </div>
           {/* Estado visual grande */}
@@ -3448,6 +3668,10 @@ function MisEstrategias({usuario}){
             };
             setEstrategias([...estrategias,est]);
             fbEscribir("estrategias",est.id,est);
+            // Notificar al agente asignado
+            if(est.agente && est.agente !== usuario.id) {
+              notificarAsignacion("estrategia", est, usuario.id);
+            }
             setShowNuevaEst(false);
             setFormEst({cliente:"",objetivo:"",texto:"",tipo:"recuperacion",ofertas:[],ofActual:{nombre:"",codigo:"",precioBase:"",dto:""},agenteAsignado:""});
           }}
@@ -3715,6 +3939,11 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB}
   const [sel,setSel]=useState(null);
   const [filtroTipo,setFiltroTipo]=useState("todas");
   const [showForm,setShowForm]=useState(false);
+
+  // Marcar como leído al abrir detalle
+  useEffect(()=>{
+    if(sel && usuario?.id) marcarComoVisto("incidencias", sel.id, usuario.id);
+  },[sel?.id]);
   const [form,setForm]=useState({tipo:"",prioridad:"media",clienteNombre:"",clienteId:"",productoNombre:"",productoCodigo:"",descripcion:"",fotos:[]});
   const fotoRef=React.useRef();
 
@@ -3735,6 +3964,9 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB}
     };
     setIncidencias(p=>[nueva,...p]);
     fbEscribir("incidencias",nueva.id,nueva);
+    // Notificar al jefe del equipo
+    const jefe=USUARIOS.find(u=>(u.rol==="jefe"||u.rol==="director")&&(u.equipo===usuario.equipo||u.equipo===null));
+    if(jefe&&jefe.id!==usuario.id) notificarAsignacion("incidencia",{...nueva,agente:jefe.id},usuario.id);
     setForm({tipo:"",prioridad:"media",clienteNombre:"",clienteId:"",productoNombre:"",productoCodigo:"",descripcion:"",fotos:[]});
     setShowForm(false);
   };
@@ -3814,8 +4046,24 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
 
   return(
       <div style={{paddingBottom:100}}>
-        <BackBar label="Incidencias" onBack={()=>setSel(null)}/>
+        <BackBar label="Incidencias" onBack={onBack}/>
         <div style={{padding:"16px"}}>
+
+          {/* Botón calendario */}
+          <button onClick={()=>{
+            const ics=generarICS({
+              titulo:`CRM Incidencia: ${sel.titulo||sel.asunto||sel.tipo} — ${sel.clienteNombre||sel.cliente||""}`,
+              descripcion:`${sel.descripcion||""}\nCliente: ${sel.clienteNombre||""}\nPrioridad: ${sel.prioridad||"media"}`,
+              fechaInicio:new Date(Date.now()+3600000),
+              recordatorioMin:30,
+              url:"https://crmwikuk.vercel.app"
+            });
+            descargarICS(ics,`incidencia_${sel.id}.ics`);
+          }}
+            style={{width:"100%",padding:"10px",borderRadius:10,border:`1.5px solid ${T.blue}`,background:"#EFF6FF",
+              color:T.blue,fontSize:12,fontWeight:700,cursor:"pointer",marginBottom:12,textAlign:"center"}}>
+            📅 Añadir al calendario del teléfono
+          </button>
 
           {/* Ficha */}
           <div style={{background:"#fff",borderRadius:16,marginBottom:16,overflow:"hidden",
@@ -4271,7 +4519,7 @@ function PanelAdmin({onBack}){
   ]);
   const [tab,setTab]=useState("jerarquia");
   const [formOpen,setFormOpen]=useState(false);
-  const [form,setForm]=useState({nombre:"",rol:"agente",equipo:"WIKUK",user:"",pass:""});
+  const [form,setForm]=useState({nombre:"",rol:"agente",equipo:"WIKUK",user:"",pass:"",email:""});
   const [showPassId,setShowPassId]=useState(null);
 
   const genPass=()=>{
@@ -4280,10 +4528,19 @@ function PanelAdmin({onBack}){
   };
 
   const addUser=()=>{
-    if(!form.nombre||!form.user)return;
+    if(!form.nombre||!form.user||!form.email){alert("Nombre, usuario y email son obligatorios");return;}
     const pass=form.pass||genPass();
-    setUsuarios(uu=>[...uu,{id:Date.now(),...form,pass,activo:true}]);
-    setForm({nombre:"",rol:"agente",equipo:"WIKUK",user:"",pass:""});
+    const newUser={id:form.user,nombre:form.nombre,rol:form.rol,equipo:form.equipo||null,
+      user:form.user,email:form.email,activo:true,
+      color:form.rol==="agente"?T.amber:form.rol==="jefe"?T.green:T.blue,
+      icon:form.rol==="agente"?"🧑‍💼":form.rol==="jefe"?"🏆":form.rol==="director"?"📊":"👑",
+      grupoAgente:form.user.toUpperCase()};
+    setUsuarios(uu=>[...uu,{...newUser,id:Date.now(),pass}]);
+    // Guardar en Firebase
+    fbEscribir("usuarios",newUser.id,newUser).then(()=>console.log("[ADMIN] Usuario guardado en Firebase:",newUser.id));
+    // Actualizar USUARIOS global
+    USUARIOS=[...USUARIOS,newUser];
+    setForm({nombre:"",rol:"agente",equipo:"WIKUK",user:"",pass:"",email:""});
     setFormOpen(false);
   };
 
@@ -4411,9 +4668,17 @@ function PanelAdmin({onBack}){
                   style={{width:"100%",border:`1.5px solid ${T.border}`,borderRadius:9,padding:"10px 12px",fontSize:14,outline:"none",boxSizing:"border-box"}}/>
               </div>
 
+              <div style={{marginBottom:14}}>
+                <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.red,textTransform:"uppercase"}}>Email * (obligatorio)</p>
+                <input type="email" value={form.email} onChange={e=>setForm(f=>({...f,email:e.target.value}))}
+                  placeholder="ej: maria.lopez@grupoconsolidado.com"
+                  style={{width:"100%",border:`1.5px solid ${!form.email?T.red:T.border}`,borderRadius:9,padding:"10px 12px",fontSize:14,outline:"none",boxSizing:"border-box"}}/>
+                <p style={{margin:"4px 0 0",fontSize:10,color:T.muted}}>Se usará para notificaciones de tareas, incidencias y estrategias</p>
+              </div>
+
               <div style={{display:"flex",gap:8}}>
                 <Btn small outline color={T.muted} onClick={()=>setFormOpen(false)}>Cancelar</Btn>
-                <Btn small full color={T.blue} onClick={addUser} disabled={!form.nombre||!form.user}>
+                <Btn small full color={T.blue} onClick={addUser} disabled={!form.nombre||!form.user||!form.email}>
                   ✓ Crear usuario
                 </Btn>
               </div>
@@ -4438,6 +4703,21 @@ function PanelAdmin({onBack}){
                   </div>
                   <div style={{flex:1}}>
                     <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{u.nombre}</p>
+                    <div onClick={(e)=>{
+                      e.stopPropagation();
+                      const email=prompt("Email para "+u.nombre+":",u.email||"");
+                      if(email===null) return;
+                      setUsuarios(uu=>uu.map(x=>x.id===u.id?{...x,email}:x));
+                      // Guardar en Firebase
+                      const fbId=u.user||u.id;
+                      fbEscribir("usuarios",typeof fbId==="string"?fbId:String(fbId),{email}).then(()=>console.log("[ADMIN] Email actualizado:",fbId,email));
+                      // Actualizar USUARIOS global
+                      const idx=USUARIOS.findIndex(x=>x.id===u.id||x.id===u.user);
+                      if(idx>=0) USUARIOS[idx]={...USUARIOS[idx],email};
+                    }} style={{cursor:"pointer"}}>
+                      {u.email?<p style={{margin:"2px 0 0",fontSize:11,color:T.blue}}>✉️ {u.email}</p>
+                        :<p style={{margin:"2px 0 0",fontSize:10,color:T.red,fontWeight:600}}>⚠️ Sin email — pulsa para añadir</p>}
+                    </div>
                     <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:3}}>
                       <Badge label={info.label} color={info.color}/>
                       {u.equipo&&<Badge label={u.equipo} color={u.equipo==="WIKUK"?T.green:T.amber}/>}
@@ -4854,6 +5134,8 @@ function GestorTareas({ usuario, clientesFB }) {
       setTareas(prev => editTarea ? prev.map(x=>x.id===t.id?t:x) : [t,...prev]);
       setShowForm(false); setEditTarea(null);
       setForm({titulo:"",descripcion:"",cliente:"",prioridad:"normal",vence:"",tipo:"contacto",agenteId:""});
+      // Notificar al agente asignado
+      if(t.agente && t.agente !== usuario.id) notificarAsignacion("tarea", t, usuario.id);
     });
   };
 
@@ -6705,6 +6987,15 @@ function Detalle({opo,usuario,onClose,onUpdate,onEdit,onDel,onAbrirCliente}){
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
           <button onClick={onClose} style={{background:"none",border:"none",fontSize:16,cursor:"pointer",fontWeight:700}}>← Volver</button>
           <button onClick={onEdit} style={{padding:"7px 14px",borderRadius:8,border:`1px solid ${T.border}`,background:"#fff",fontSize:12,cursor:"pointer"}}>✏️ Editar</button>
+          <button onClick={()=>{
+            const ics=generarICS({
+              titulo:`CRM: ${opo.cliente||opo.nombre} — Oportunidad`,
+              descripcion:`${opo.notas||opo.descripcion||""}\nValor: ${opo.valor||0}€\nProbabilidad: ${opo.prob||0}%`,
+              fechaInicio:opo.fecha?new Date(opo.fecha):new Date(Date.now()+86400000),
+              recordatorioMin:60, url:"https://crmwikuk.vercel.app"
+            });
+            descargarICS(ics,`oportunidad_${(opo.cliente||"").replace(/\s/g,"_")}.ics`);
+          }} style={{padding:"7px 14px",borderRadius:8,border:`1px solid ${T.blue}`,background:"#EFF6FF",color:T.blue,fontSize:12,fontWeight:700,cursor:"pointer"}}>📅</button>
           <button onClick={()=>onDel&&onDel(opo.id)} style={{padding:"7px 14px",borderRadius:8,border:`1px solid ${T.red}`,background:"#FEF2F2",color:T.red,fontSize:12,fontWeight:700,cursor:"pointer"}}>🗑️ Eliminar</button>
         </div>
         <p style={{margin:"0 0 4px",fontSize:20,fontWeight:900,color:T.text}}>
@@ -6797,9 +7088,11 @@ function GestorOportunidades({usuario, onAbrirCliente}){
   };
   const addOpo=o=>{
     setOpos(p=>[o,...p]);
-    fbGuardar(o.id, o).then(ok=>
-      toast(ok?"✅ Guardado en Firebase":"📋 Guardado localmente",ok)
-    ).catch(()=>toast("📋 Guardado localmente",false));
+    fbGuardar(o.id, o).then(ok=>{
+      toast(ok?"✅ Guardado en Firebase":"📋 Guardado localmente",ok);
+      // Notificar al agente si fue asignada a otro
+      if(ok && o.agenteId && o.agenteId !== usuario.id) notificarAsignacion("tarea", {...o, titulo:`Oportunidad: ${o.cliente}`}, usuario.id);
+    }).catch(()=>toast("📋 Guardado localmente",false));
   };
 
   const delOpo=(id)=>{
