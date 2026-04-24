@@ -3029,6 +3029,9 @@ function MisEstrategias({usuario}){
     }).finally(()=>setCargando(false));
   };
 
+  // Auto-cargar desde Firebase al montar si GlobalStore está vacío
+  useEffect(()=>{recargar();},[]);
+
   const confirmarEstrategia=(e,ofertasAct,nota)=>{
     const elevadas=ofertasAct.filter(o=>o.elevadaA);
     const hayElevadas=elevadas.length>0;
@@ -3108,8 +3111,8 @@ function MisEstrategias({usuario}){
     ? estrategias.filter(e=>deEquipo(e)&&e.resolucion?.tipo==="rechazada"&&e.resolucion.por!==usuario.nombre)
     : [];
 
-  const enRevisionAgente=esAgente?estrategias.filter(e=>(e.agente===usuario.id||e.equipo===miEquipo)&&e.estado==="pendiente_aprobacion"):[];
-  const activasAgente=esAgente?estrategias.filter(e=>(e.agente===usuario.id||e.equipo===miEquipo)&&e.estado==="en_curso"&&!e.resolucion):[];
+  const enRevisionAgente=esAgente?estrategias.filter(e=>(e.agente===usuario.id||e.equipo===miEquipo||(e.creadoPor&&!e.equipo))&&e.estado==="pendiente_aprobacion"):[];
+  const activasAgente=esAgente?estrategias.filter(e=>(e.agente===usuario.id||e.equipo===miEquipo||(e.creadoPor&&!e.equipo))&&e.estado==="en_curso"&&!e.resolucion):[];
   const misMostrar=esJefe?estrategias.filter(e=>deEquipo(e)&&e.estado==="en_curso"&&!e.resolucion):[];
 
   // ── DETALLE ─────────────────────────────────────────────────────
@@ -3392,6 +3395,20 @@ function MisEstrategias({usuario}){
             </div>);
           })()}
 
+          {/* Selector de agente (para jefe/director) */}
+          {(esJefe||esRolDir||esRolCeo)&&(
+            <div style={{marginBottom:12}}>
+              <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Asignar a comercial</p>
+              <select value={formEst.agenteAsignado||""} onChange={e=>setFormEst(f=>({...f,agenteAsignado:e.target.value}))}
+                style={{width:"100%",padding:"10px 12px",borderRadius:9,border:`1.5px solid ${T.border}`,fontSize:13,outline:"none",background:"#fff"}}>
+                <option value="">— Yo mismo —</option>
+                {USUARIOS.filter(u=>u.rol==="agente"&&(esRolDir||esRolCeo||u.equipo===miEquipo)).map(u=>(
+                  <option key={u.id} value={u.id}>{u.nombre} · {u.equipo}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
           <button onClick={()=>{
             if(!formEst.cliente.trim()||!formEst.texto.trim()) return;
             const hoy=new Date().toLocaleDateString("es-ES");
@@ -3401,14 +3418,18 @@ function MisEstrategias({usuario}){
               cliente:formEst.cliente,clienteNombre:formEst.cliente,
               objetivo:formEst.objetivo,estrategia:formEst.texto,texto:formEst.texto,
               tipo:formEst.tipo||"recuperacion",ofertas:formEst.ofertas||[],
-              estado:"en_curso",agente:usuario.id,equipo:usuario.equipo||"",
+              estado:"en_curso",
+              agente:formEst.agenteAsignado||usuario.id,
+              agenteNombre:(USUARIOS.find(u=>u.id===(formEst.agenteAsignado||usuario.id))||{}).nombre||usuario.nombre,
+              equipo:(USUARIOS.find(u=>u.id===(formEst.agenteAsignado||usuario.id))||{}).equipo||usuario.equipo||"",
+              creadoPor:usuario.id,creadoPorNombre:usuario.nombre,
               semana:sem,fecha:hoy,seguimientos:[],
               historialEscalado:[{accion:"Estrategia creada",por:usuario.nombre,fecha:hoy,nota:formEst.texto}],
             };
             setEstrategias([...estrategias,est]);
             fbEscribir("estrategias",est.id,est);
             setShowNuevaEst(false);
-            setFormEst({cliente:"",objetivo:"",texto:"",tipo:"recuperacion",ofertas:[],ofActual:{nombre:"",codigo:"",precioBase:"",dto:""}});
+            setFormEst({cliente:"",objetivo:"",texto:"",tipo:"recuperacion",ofertas:[],ofActual:{nombre:"",codigo:"",precioBase:"",dto:""},agenteAsignado:""});
           }}
             disabled={!formEst.cliente.trim()||!formEst.texto.trim()}
             style={{width:"100%",padding:"13px",
@@ -10550,7 +10571,11 @@ function App(props){
       fbLeer("calendario").then(data=>{
         setCalendarioDB(data.filter(e=>!e.eliminado));
       }).catch(()=>{});
-      if(estrategias.length>0) setEstrategiasDB(estrategias.filter(e=>!e.eliminada));
+      if(estrategias.length>0){
+        const filtered=estrategias.filter(e=>!e.eliminada);
+        setEstrategiasDB(filtered);
+        GlobalStore.setEstrategias(filtered);
+      }
       if(incidencias.length>0) setIncidenciasDB(incidencias);
       if(opos.length>0){
         const norm=opos.map(o=>({...o,agente:o.agente||o.agenteId,agenteId:o.agenteId||o.agente}));
@@ -10724,7 +10749,7 @@ function App(props){
   ).length;
 
   const estEnCurso=esAgente
-    ? estrategiasDB.filter(e=>(e.estado==="en_curso"||e.estado==="pendiente_aprobacion")&&(e.agente===usuario.id||e.equipo===miEquipo)&&!e.eliminada).length
+    ? estrategiasDB.filter(e=>(e.estado==="en_curso"||e.estado==="pendiente_aprobacion")&&(e.agente===usuario.id||e.equipo===miEquipo||(e.creadoPor&&!e.equipo))&&!e.eliminada).length
     : esJefe
     ? estrategiasDB.filter(e=>e.estado==="pendiente_aprobacion"&&USUARIOS.find(u=>u.id===e.agente)?.equipo===miEquipo&&!e.escaladoA).length
     : estrategiasDB.filter(e=>e.estado==="pendiente_aprobacion"&&e.escaladoA===usuario.id).length;
