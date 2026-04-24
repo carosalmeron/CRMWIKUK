@@ -358,48 +358,61 @@ function esDelUsuario(agenteField, misIds){
 // - El seed actúa como fallback si Firebase falla
 async function cargarUsuariosFB(){
   try{
-    const fbUsers=await fbLeer("usuarios");
-    if(!fbUsers||fbUsers.length===0) return false;
-    // Debug: mostrar campos de cada usuario de Firebase
-    fbUsers.forEach(fb=>{
-      if(fb.catalogoVendedor==="AZARCO"||fb.username==="azarco"||fb.nombre?.includes("zarco")||fb.nombre?.includes("ZARCO")||fb.nombre?.includes("Azarco")){
-        console.log("[DEBUG AZARCO] Firebase raw:",JSON.stringify(fb));
+    // Leer usuarios CRM + portal_users (mismo proyecto Firebase)
+    const [fbUsers, portalUsers] = await Promise.all([
+      fbLeer("usuarios"),
+      fbLeer("portal_users"),
+    ]);
+    console.log(`[USUARIOS] CRM: ${(fbUsers||[]).length}, Portal: ${(portalUsers||[]).length}`);
+
+    // Mapa de emails del Portal por catalogoVendedor
+    const portalEmails={};
+    (portalUsers||[]).forEach(pu=>{
+      if(pu.email){
+        if(pu.catalogoVendedor) portalEmails[pu.catalogoVendedor.toUpperCase()]=pu.email;
+        if(pu.username) portalEmails[pu.username.toUpperCase()]=pu.email;
+        if(pu.nombre) portalEmails[pu.nombre.toUpperCase()]=pu.email;
       }
     });
-    console.log("[DEBUG] Todos los emails en FB:",fbUsers.filter(u=>u.email).map(u=>u.id+":"+u.email).join(", ")||"NINGUNO");
+    console.log("[USUARIOS] Emails Portal:",Object.entries(portalEmails).map(([k,v])=>k+":"+v).join(", ")||"ninguno");
+
     const merged=[...USUARIOS];
-    fbUsers.forEach(fb=>{
+    // Merge usuarios CRM
+    (fbUsers||[]).forEach(fb=>{
       if(!fb.id||!fb.rol) return;
-      // Buscar por ID directo
       let idx=merged.findIndex(u=>u.id===fb.id);
-      // Si no coincide por ID, buscar por grupoAgente/catalogoVendedor/username
-      if(idx<0 && fb.catalogoVendedor){
-        idx=merged.findIndex(u=>u.grupoAgente && u.grupoAgente.toUpperCase()===fb.catalogoVendedor.toUpperCase());
-      }
-      if(idx<0 && fb.username){
-        idx=merged.findIndex(u=>u.id===fb.username || u.grupoAgente===fb.username.toUpperCase());
-      }
-      if(idx<0 && fb.grupoAgente){
-        idx=merged.findIndex(u=>u.grupoAgente && u.grupoAgente.toUpperCase()===fb.grupoAgente.toUpperCase());
-      }
+      if(idx<0 && fb.catalogoVendedor) idx=merged.findIndex(u=>u.grupoAgente && u.grupoAgente.toUpperCase()===fb.catalogoVendedor.toUpperCase());
+      if(idx<0 && fb.username) idx=merged.findIndex(u=>u.id===fb.username || (u.grupoAgente && u.grupoAgente.toUpperCase()===fb.username.toUpperCase()));
       const defIcon=fb.rol==="agente"||fb.rol==="crm_agente"?"🧑‍💼":fb.rol==="jefe"||fb.rol==="crm_jefe"?"🏆":fb.rol==="director"||fb.rol==="crm_director"?"📊":fb.rol==="ceo"?"👑":"👤";
+      // Email: primero de CRM, luego del Portal
+      let email=fb.email||"";
+      if(!email && fb.grupoAgente) email=portalEmails[fb.grupoAgente.toUpperCase()]||"";
+      if(!email && fb.catalogoVendedor) email=portalEmails[fb.catalogoVendedor.toUpperCase()]||"";
+      if(!email && fb.nombre) email=portalEmails[fb.nombre.toUpperCase()]||"";
       if(idx>=0){
-        // Merge: Firebase fields override, but keep CRM-specific fields
-        merged[idx]={...merged[idx],...fb,id:merged[idx].id,icon:fb.icon||merged[idx].icon||defIcon,
-          email:fb.email||merged[idx].email||""};
-        if(fb.email) console.log(`[USUARIOS] Email cargado para ${merged[idx].nombre}: ${fb.email}`);
+        merged[idx]={...merged[idx],...fb,id:merged[idx].id,icon:fb.icon||merged[idx].icon||defIcon,email:email||merged[idx].email||""};
       }else{
-        merged.push({...fb,icon:fb.icon||defIcon});
+        merged.push({...fb,icon:fb.icon||defIcon,email});
       }
     });
+
+    // Merge emails del Portal para usuarios que aún no tienen
+    merged.forEach((u,i)=>{
+      if(!u.email){
+        const ga=(u.grupoAgente||"").toUpperCase();
+        const nm=(u.nombre||"").toUpperCase();
+        if(ga && portalEmails[ga]) merged[i].email=portalEmails[ga];
+        else if(nm && portalEmails[nm]) merged[i].email=portalEmails[nm];
+      }
+    });
+
     USUARIOS=merged;
-    console.log("✅ USUARIOS cargados desde Firebase:",USUARIOS.length,"("+fbUsers.length+" de FB)");
-    // Log emails encontrados
     const conEmail=USUARIOS.filter(u=>u.email);
-    console.log(`[USUARIOS] ${conEmail.length} con email:`,conEmail.map(u=>u.nombre+":"+u.email).join(", "));
+    console.log(`✅ USUARIOS: ${USUARIOS.length} total, ${conEmail.length} con email`);
+    if(conEmail.length>0) console.log(`[USUARIOS] Emails:`,conEmail.map(u=>`${u.nombre}:${u.email}`).join(", "));
     return true;
   }catch(e){
-    console.warn("⚠️ USUARIOS: usando seed local, Firebase falló:",e.message);
+    console.warn("⚠️ USUARIOS: usando seed local:",e.message);
     return false;
   }
 }
