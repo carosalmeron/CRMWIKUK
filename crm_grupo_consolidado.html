@@ -3490,6 +3490,194 @@ function MisEstrategias({usuario}){
       <div style={{paddingBottom:100}}>
         <BackBar label="Estrategias" onBack={()=>setSel(null)}/>
         <div style={{padding:"16px"}}>
+          {/* Panel de aprobación de descuento */}
+          {sel.estado==="pendiente_aprobacion"&&(sel.pendienteDe===usuario.id||(sel.cadenaAprobacion||[]).some(c=>c.id===usuario.id&&(c.estado==="pendiente"||c.estado==="pendiente_final")))&&(
+            <div style={{background:"#FFFBEB",borderRadius:14,padding:16,marginBottom:16,
+              border:`2px solid ${T.amber}`}}>
+              <p style={{margin:"0 0 4px",fontSize:14,fontWeight:800,color:T.amber}}>
+                {(sel.cadenaAprobacion||[]).some(c=>c.id===usuario.id&&c.estado==="pendiente_final")
+                  ?"✅ Descuento aprobado por superior — tu OK final"
+                  :"🔐 Aprobación pendiente de ti"}
+              </p>
+              <p style={{margin:"0 0 8px",fontSize:12,color:T.muted}}>
+                Dto. máximo: <b style={{color:sel.maxDescuento>15?T.red:sel.maxDescuento>10?T.amber:T.green}}>{sel.maxDescuento||0}%</b>
+                {" · "}Creada por: {sel.creadoPorNombre}
+              </p>
+              {(sel.ofertas||[]).length>0&&(
+                <div style={{marginBottom:10}}>
+                  {sel.ofertas.map((o,i)=>(
+                    <div key={i} style={{background:"#fff",borderRadius:8,padding:"6px 10px",marginBottom:4,
+                      borderLeft:`3px solid ${T.amber}`,fontSize:12}}>
+                      <b>{o.nombre}</b> {o.codigo&&<span style={{color:T.muted}}>({o.codigo})</span>}
+                      {o.precioBase&&<span> · Tarifa: {o.precioBase}€</span>}
+                      {o.dto&&<span style={{color:T.red}}> · -{o.dto}%</span>}
+                      {o.precioFinal&&<span style={{color:T.green,fontWeight:700}}> → {o.precioFinal}€</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Cadena de aprobación visual */}
+              {(sel.cadenaAprobacion||[]).length>0&&(
+                <div style={{marginBottom:10,padding:"8px 10px",background:"#F8FAFC",borderRadius:8}}>
+                  <p style={{margin:"0 0 4px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Cadena de aprobación</p>
+                  <p style={{margin:0,fontSize:11,color:T.text}}>
+                    {(sel.cadenaAprobacion||[]).map(c=>
+                      c.estado==="aprobado"?"✅ "+c.nombre
+                      :c.estado==="escalado"?"📤 "+c.nombre
+                      :c.estado==="pendiente_final"?"🔄 "+c.nombre+" (OK final)"
+                      :c.id===usuario.id?"👉 "+c.nombre
+                      :"⏳ "+c.nombre
+                    ).join(" → ")} → 🧑‍💼 {sel.agenteNombre}
+                  </p>
+                </div>
+              )}
+
+              {(()=>{
+                const dto=sel.maxDescuento||0;
+                const miLimite=usuario.rol==="ceo"?100:usuario.rol==="director"?15:usuario.rol==="jefe"?10:10;
+                // Si es pendiente_final (vuelve del superior), siempre puede aprobar
+                const esFinalOK=(sel.cadenaAprobacion||[]).some(c=>c.id===usuario.id&&c.estado==="pendiente_final");
+                const puedeAprobar=esFinalOK||dto<=miLimite;
+                const jefeVentas=USUARIOS.find(u=>u.rol==="director");
+                const ceoUser=USUARIOS.find(u=>u.rol==="ceo");
+                const superiorId=miLimite<=10?jefeVentas?.id:ceoUser?.id;
+                const superiorNombre=miLimite<=10?"Jefe de Ventas ("+jefeVentas?.nombre+")":"CEO ("+ceoUser?.nombre+")";
+
+                return(
+                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  {/* Aprobar (si tiene nivel suficiente) */}
+                  {puedeAprobar&&(
+                    <button onClick={()=>{
+                      const cadena=[...(sel.cadenaAprobacion||[])];
+                      const idx=cadena.findIndex(c=>c.id===usuario.id&&(c.estado==="pendiente"||c.estado==="pendiente_final"||c.estado==="escalado"));
+                      if(idx>=0) cadena[idx]={...cadena[idx],estado:"aprobado",fecha:new Date().toLocaleDateString("es-ES")};
+                      
+                      // Si soy superior (CEO/Jefe Ventas) y el Responsable había escalado,
+                      // el Responsable necesita dar último OK antes de que llegue al comercial
+                      const responsableEnCadena=cadena.find(c=>c.rol==="responsable");
+                      let siguiente;
+                      if(responsableEnCadena && responsableEnCadena.estado==="escalado" && usuario.rol!=="jefe"){
+                        // Volver al Responsable para último OK
+                        responsableEnCadena.estado="pendiente_final";
+                        siguiente=responsableEnCadena;
+                      } else {
+                        siguiente=cadena.find(c=>c.estado==="pendiente"||c.estado==="pendiente_final");
+                      }
+                      
+                      let nuevoEstado,nuevoPendienteDe,nuevoPendienteDeNombre;
+                      if(siguiente){
+                        nuevoEstado="pendiente_aprobacion";nuevoPendienteDe=siguiente.id;nuevoPendienteDeNombre=siguiente.nombre;
+                      } else {
+                        nuevoEstado="en_curso";nuevoPendienteDe=null;nuevoPendienteDeNombre=null;
+                      }
+                      const updated={...sel,estado:nuevoEstado,pendienteDe:nuevoPendienteDe,pendienteDeNombre:nuevoPendienteDeNombre,
+                        cadenaAprobacion:cadena,
+                        historialEscalado:[...(sel.historialEscalado||[]),{
+                          accion:`✅ Aprobado por ${usuario.nombre} (${usuario.rol}) — dto. ${dto}%`,
+                          por:usuario.nombre,fecha:new Date().toLocaleDateString("es-ES"),nota:`Descuento ${dto}% aprobado`
+                        }]};
+                      setEstrategias(prev=>prev.map(e=>e.id===sel.id?updated:e));
+                      fbEscribir("estrategias",sel.id,updated);
+                      setSel(updated);
+                      if(siguiente){
+                        despacharNotificacion({tipo:"estrategia",
+                          titulo:siguiente.estado==="pendiente_final"
+                            ?`✅ Dto. aprobado por ${usuario.nombre} — tu OK final: ${sel.cliente}`
+                            :`🔐 Tu aprobación: ${sel.cliente} (dto. ${dto}%)`,
+                          mensaje:siguiente.estado==="pendiente_final"
+                            ?`El descuento de ${dto}% ha sido aprobado por ${usuario.nombre}. Da tu OK final para que llegue al comercial.`
+                            :`${usuario.nombre} ha aprobado. Falta tu OK.\nCliente: ${sel.cliente}\nDescuento: ${dto}%`,
+                          destinatarioId:siguiente.id,prioridad:"alta",creadoPor:usuario.id});
+                      } else {
+                        if(sel.agente!==usuario.id) despacharNotificacion({tipo:"estrategia",titulo:`✅ Estrategia aprobada: ${sel.cliente}`,
+                          mensaje:`Aprobada. Dto: ${dto}%. Ya puedes ejecutarla.`,
+                          destinatarioId:sel.agente,prioridad:"alta",creadoPor:usuario.id});
+                        if(sel.creadoPor!==usuario.id && sel.creadoPor!==sel.agente) despacharNotificacion({tipo:"estrategia",titulo:`✅ Tu estrategia aprobada: ${sel.cliente}`,
+                          mensaje:`Cadena completada. ${sel.agenteNombre} puede ejecutar.`,
+                          destinatarioId:sel.creadoPor,prioridad:"normal",creadoPor:usuario.id});
+                      }
+                    }}
+                      style={{padding:"12px",borderRadius:10,border:"none",
+                        background:T.green,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>
+                      ✅ {esFinalOK?"Dar OK final":"Aprobar descuento"} ({dto}%)
+                    </button>
+                  )}
+
+                  {/* Escalar (si el descuento excede su nivel) */}
+                  {!puedeAprobar&&superiorId&&(
+                    <button onClick={()=>{
+                      const cadena=[...(sel.cadenaAprobacion||[])];
+                      // Marcar este nivel como "escalado"
+                      const idx=cadena.findIndex(c=>c.id===usuario.id&&c.estado==="pendiente");
+                      if(idx>=0) cadena[idx]={...cadena[idx],estado:"escalado",fecha:new Date().toLocaleDateString("es-ES")};
+                      const updated={...sel,pendienteDe:superiorId,pendienteDeNombre:superiorNombre,
+                        cadenaAprobacion:cadena,
+                        historialEscalado:[...(sel.historialEscalado||[]),{
+                          accion:`📤 Escalada a ${superiorNombre} por ${usuario.nombre} (dto. ${dto}% excede mi límite de ${miLimite}%)`,
+                          por:usuario.nombre,fecha:new Date().toLocaleDateString("es-ES"),nota:`Descuento ${dto}% requiere aprobación superior`
+                        }]};
+                      setEstrategias(prev=>prev.map(e=>e.id===sel.id?updated:e));
+                      fbEscribir("estrategias",sel.id,updated);
+                      setSel(updated);
+                      despacharNotificacion({tipo:"estrategia",
+                        titulo:`📤 Estrategia escalada: ${sel.cliente} (dto. ${dto}%)`,
+                        mensaje:`${usuario.nombre} te escala esta estrategia. Dto: ${dto}% (su límite: ${miLimite}%).\nCliente: ${sel.cliente}\nAcción: ${sel.texto}`,
+                        destinatarioId:superiorId,prioridad:"alta",creadoPor:usuario.id});
+                    }}
+                      style={{padding:"12px",borderRadius:10,border:`2px solid ${T.blue}`,
+                        background:"#EFF6FF",color:T.blue,fontWeight:700,fontSize:13,cursor:"pointer"}}>
+                      📤 Escalar a {superiorNombre} (dto. {dto}% excede mi límite {miLimite}%)
+                    </button>
+                  )}
+
+                  {/* Rechazar */}
+                  <button onClick={()=>{
+                    const motivo=prompt("Motivo del rechazo:");
+                    if(!motivo) return;
+                    const updated={...sel,estado:"rechazada",pendienteDe:null,
+                      resolucion:{tipo:"rechazada",por:usuario.nombre,rol:usuario.rol,
+                        fecha:new Date().toLocaleDateString("es-ES"),nota:motivo},
+                      historialEscalado:[...(sel.historialEscalado||[]),{
+                        accion:`❌ Rechazado por ${usuario.nombre}`,
+                        por:usuario.nombre,fecha:new Date().toLocaleDateString("es-ES"),nota:motivo
+                      }]};
+                    setEstrategias(prev=>prev.map(e=>e.id===sel.id?updated:e));
+                    fbEscribir("estrategias",sel.id,updated);
+                    setSel(updated);
+                    if(sel.creadoPor!==usuario.id) despacharNotificacion({tipo:"estrategia",
+                      titulo:`❌ Estrategia rechazada: ${sel.cliente}`,
+                      mensaje:`${usuario.nombre} ha rechazado. Motivo: ${motivo}`,
+                      destinatarioId:sel.creadoPor,prioridad:"normal",creadoPor:usuario.id});
+                  }}
+                    style={{padding:"12px",borderRadius:10,border:`2px solid ${T.red}`,
+                      background:"#FEF2F2",color:T.red,fontWeight:700,fontSize:13,cursor:"pointer"}}>
+                    ❌ Rechazar
+                  </button>
+                </div>);
+              })()}
+            </div>
+          )}
+
+          {/* Estado pendiente (para otros que no son el aprobador) */}
+          {sel.estado==="pendiente_aprobacion"&&sel.pendienteDe!==usuario.id&&(
+            <div style={{background:"#FEF3C7",borderRadius:14,padding:14,marginBottom:16,
+              border:`1.5px solid ${T.amber}`}}>
+              <p style={{margin:0,fontSize:13,fontWeight:700,color:T.amber}}>
+                ⏳ Pendiente de aprobación: {sel.pendienteDeNombre||"—"}
+              </p>
+              <p style={{margin:"4px 0 0",fontSize:11,color:T.muted}}>
+                Dto. máx: {sel.maxDescuento||0}% · Cadena: {(sel.cadenaAprobacion||[]).map(c=>
+                  c.estado==="aprobado"?"✅ "+c.nombre
+                  :c.estado==="escalado"?"📤 "+c.nombre
+                  :c.estado==="pendiente_final"?"🔄 "+c.nombre
+                  :c.estado==="pendiente"?"⏳ "+c.nombre
+                  :c.nombre
+                ).join(" → ")}
+              </p>
+            </div>
+          )}
+
           {/* Botones editar / eliminar / calendario */}
           <div style={{display:"flex",gap:8,marginBottom:16}}>
             <button onClick={()=>setEditEst(sel)}
@@ -3776,6 +3964,28 @@ function MisEstrategias({usuario}){
             </div>);
           })()}
 
+          {/* Indicador de nivel de aprobación por descuento */}
+          {(()=>{
+            const maxDto=(formEst.ofertas||[]).reduce((m,o)=>Math.max(m,parseFloat(o.dto)||0),0);
+            if(maxDto<=0) return null;
+            const nivel=maxDto>15?"CEO":maxDto>10?"Jefe de Ventas":"Responsable";
+            const color=maxDto>15?T.red:maxDto>10?T.amber:T.green;
+            return(
+              <div style={{background:color+"12",borderRadius:10,padding:"10px 14px",marginBottom:14,
+                border:`1.5px solid ${color}`,display:"flex",alignItems:"center",gap:8}}>
+                <span style={{fontSize:18}}>{maxDto>15?"🔴":maxDto>10?"🟡":"🟢"}</span>
+                <div>
+                  <p style={{margin:0,fontSize:12,fontWeight:700,color}}>Dto. máx: {maxDto}% → Aprobación: {nivel}</p>
+                  <p style={{margin:"2px 0 0",fontSize:10,color:T.muted}}>
+                    {maxDto>15?"CEO → Jefe Ventas → Responsable → Comercial"
+                      :maxDto>10?"Jefe Ventas → Responsable → Comercial"
+                      :"Responsable → Comercial"}
+                  </p>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Selector de agente (para jefe/director) */}
           {(esJefe||esRolDir||esRolCeo)&&(
             <div style={{marginBottom:12}}>
@@ -3795,24 +4005,91 @@ function MisEstrategias({usuario}){
             const hoy=new Date().toLocaleDateString("es-ES");
             const d=new Date();const s=new Date(d.getFullYear(),0,1);
             const sem=Math.ceil(((d-s)/86400000+s.getDay()+1)/7);
+
+            // Calcular descuento máximo de las ofertas
+            const maxDto=(formEst.ofertas||[]).reduce((m,o)=>Math.max(m,parseFloat(o.dto)||0),0);
+
+            // Determinar quién debe aprobar según descuento
+            // ≤10% → Responsable | 11-15% → Jefe Ventas | >15% → CEO
+            const agenteDestino=formEst.agenteAsignado||usuario.id;
+            const agenteUser=USUARIOS.find(u=>u.id===agenteDestino);
+            const equipoAgente=agenteUser?.equipo||usuario.equipo||"";
+            const responsable=USUARIOS.find(u=>u.rol==="jefe"&&u.equipo===equipoAgente);
+            const jefeVentas=USUARIOS.find(u=>u.rol==="director");
+            const ceoUser=USUARIOS.find(u=>u.rol==="ceo");
+
+            let estadoInicial, pendienteDeId, pendienteDeNombre, cadenaAprobacion=[];
+
+            if(usuario.rol==="ceo"||usuario.rol==="director"){
+              // CEO/Director crea → va al Responsable para último OK antes de llegar al comercial
+              estadoInicial="pendiente_aprobacion";
+              pendienteDeId=responsable?.id||agenteDestino;
+              pendienteDeNombre=responsable?.nombre||"Responsable";
+              cadenaAprobacion=[{rol:"responsable",id:responsable?.id,nombre:responsable?.nombre,estado:"pendiente"}];
+            } else if(usuario.rol==="jefe"){
+              // Jefe crea → va al Responsable del equipo del agente para OK
+              if(responsable&&responsable.id!==usuario.id){
+                estadoInicial="pendiente_aprobacion";
+                pendienteDeId=responsable.id;
+                pendienteDeNombre=responsable.nombre;
+                cadenaAprobacion=[{rol:"responsable",id:responsable.id,nombre:responsable.nombre,estado:"pendiente"}];
+              } else {
+                // El jefe ES el responsable → va directo al comercial
+                estadoInicial="en_curso";
+                pendienteDeId=null;
+                pendienteDeNombre=null;
+              }
+            } else {
+              // Comercial crea → SIEMPRE va al Responsable primero
+              // El Responsable decidirá si aprueba (≤10%) o escala a superior
+              estadoInicial="pendiente_aprobacion";
+              pendienteDeId=responsable?.id||jefeVentas?.id;
+              pendienteDeNombre=responsable?.nombre||jefeVentas?.nombre||"Superior";
+              cadenaAprobacion=[
+                {rol:"responsable",id:responsable?.id,nombre:responsable?.nombre,estado:"pendiente",limiteDto:10},
+              ];
+              if(maxDto>10){
+                cadenaAprobacion.push({rol:"jefe_ventas",id:jefeVentas?.id,nombre:jefeVentas?.nombre,estado:"pendiente",limiteDto:15});
+              }
+              if(maxDto>15){
+                cadenaAprobacion.push({rol:"ceo",id:ceoUser?.id,nombre:ceoUser?.nombre,estado:"pendiente",limiteDto:100});
+              }
+            }
+
             const est={id:"est_"+Date.now(),
               cliente:formEst.cliente,clienteNombre:formEst.cliente,
               objetivo:formEst.objetivo,estrategia:formEst.texto,texto:formEst.texto,
               tipo:formEst.tipo||"recuperacion",ofertas:formEst.ofertas||[],
-              estado:"en_curso",
-              agente:formEst.agenteAsignado||usuario.id,
-              agenteNombre:(USUARIOS.find(u=>u.id===(formEst.agenteAsignado||usuario.id))||{}).nombre||usuario.nombre,
-              equipo:(USUARIOS.find(u=>u.id===(formEst.agenteAsignado||usuario.id))||{}).equipo||usuario.equipo||"",
-              creadoPor:usuario.id,creadoPorNombre:usuario.nombre,
+              maxDescuento:maxDto,
+              estado:estadoInicial,
+              pendienteDe:pendienteDeId,pendienteDeNombre:pendienteDeNombre,
+              cadenaAprobacion:cadenaAprobacion,
+              agente:agenteDestino,
+              agenteNombre:(USUARIOS.find(u=>u.id===agenteDestino)||{}).nombre||usuario.nombre,
+              equipo:equipoAgente,
+              creadoPor:usuario.id,creadoPorNombre:usuario.nombre,rolCreador:usuario.rol,
               semana:sem,fecha:hoy,seguimientos:[],
-              historialEscalado:[{accion:"Estrategia creada",por:usuario.nombre,fecha:hoy,nota:formEst.texto}],
+              historialEscalado:[{
+                accion:"Estrategia creada"+(maxDto>0?" (dto. máx: "+maxDto+"%)":""),
+                por:usuario.nombre,fecha:hoy,nota:formEst.texto
+              }],
             };
             setEstrategias([...estrategias,est]);
             fbEscribir("estrategias",est.id,est);
-            // Notificar al agente asignado
-            if(est.agente && est.agente !== usuario.id) {
+
+            // Notificar
+            if(estadoInicial==="pendiente_aprobacion"&&pendienteDeId){
+              // Notificar al aprobador
+              despacharNotificacion({tipo:"estrategia",
+                titulo:`🔐 Aprobación requerida: ${est.cliente} (dto. ${maxDto}%)`,
+                mensaje:`${usuario.nombre} ha creado una estrategia que requiere tu aprobación.\nCliente: ${est.cliente}\nDescuento máx: ${maxDto}%\nAcción: ${est.texto}`,
+                destinatarioId:pendienteDeId,prioridad:maxDto>15?"alta":"normal",creadoPor:usuario.id});
+              console.log(`[EST] Pendiente aprobación de ${pendienteDeNombre} (dto: ${maxDto}%)`);
+            } else if(est.agente!==usuario.id){
+              // Sin aprobación necesaria → notificar al comercial directo
               notificarAsignacion("estrategia", est, usuario.id);
             }
+
             setShowNuevaEst(false);
             setFormEst({cliente:"",objetivo:"",texto:"",tipo:"recuperacion",ofertas:[],ofActual:{nombre:"",codigo:"",precioBase:"",dto:""},agenteAsignado:""});
           }}
