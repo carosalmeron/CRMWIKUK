@@ -867,6 +867,348 @@ function SearchInput({value, onChange, placeholder, suggestions=[], onSelect, st
   );
 }
 
+// ═══════════════════════════════════════════════════════════════
+// AVISO PLAN SEMANAL (se muestra en el dashboard)
+// ═══════════════════════════════════════════════════════════════
+function AvisoPlanSemanal({usuario,semana,onNav}){
+  var _s=React.useState(null);var plan=_s[0],setPlan=_s[1];
+  var _l=React.useState(true);var loading=_l[0],setLoading=_l[1];
+  React.useEffect(function(){
+    fbLeer("planes_semanales").then(function(planes){
+      var found=(planes||[]).find(function(p){return p.agente===usuario.id&&p.semana===semana&&p.anio===new Date().getFullYear();});
+      setPlan(found||null);
+      setLoading(false);
+    });
+  },[semana]);
+  if(loading) return null;
+  if(!plan||plan.estado==="borrador"){
+    return(
+      <div onClick={function(){onNav("plan_semanal");}}
+        style={{background:"#FFFBEB",borderRadius:12,padding:"12px 14px",marginBottom:14,
+          border:"1.5px solid #F59E0B",cursor:"pointer",display:"flex",alignItems:"center",gap:10}}>
+        <span style={{fontSize:22}}>📅</span>
+        <div>
+          <p style={{margin:0,fontSize:13,fontWeight:700,color:"#92400E"}}>
+            {!plan?"No tienes plan para la semana "+semana:"Tu plan de semana "+semana+" esta en borrador"}
+          </p>
+          <p style={{margin:"2px 0 0",fontSize:11,color:"#B45309"}}>Toca aqui para planificar tus visitas y objetivos</p>
+        </div>
+      </div>
+    );
+  }
+  if(plan.estado==="activo"){
+    var total=0,hecho=0;
+    ["lunes","martes","miercoles","jueves","viernes"].forEach(function(d){(plan.dias[d]||[]).forEach(function(v){total++;if(v.hecho)hecho++;});});
+    return(
+      <div onClick={function(){onNav("plan_semanal");}}
+        style={{background:"#EFF6FF",borderRadius:12,padding:"12px 14px",marginBottom:14,
+          border:"1.5px solid #3B82F6",cursor:"pointer",display:"flex",alignItems:"center",gap:10}}>
+        <span style={{fontSize:22}}>🟢</span>
+        <div style={{flex:1}}>
+          <p style={{margin:0,fontSize:13,fontWeight:700,color:"#1E40AF"}}>Semana {semana} en curso</p>
+          <p style={{margin:"2px 0 0",fontSize:11,color:"#3B82F6"}}>{hecho}/{total} visitas completadas</p>
+        </div>
+        <div style={{background:"#DBEAFE",borderRadius:99,padding:"4px 10px"}}>
+          <span style={{fontSize:13,fontWeight:800,color:"#1E40AF"}}>{total>0?Math.round(hecho/total*100):0}%</span>
+        </div>
+      </div>
+    );
+  }
+  return null;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PLANIFICADOR SEMANAL
+// ═══════════════════════════════════════════════════════════════
+function PlanificadorSemanal({usuario, clientesFB, onBack}){
+  const semActual=getSemanaISO();
+  const [semana,setSemana]=useState(semActual);
+  const [plan,setPlan]=useState(null);
+  const [cargando,setCargando]=useState(true);
+  const [editDia,setEditDia]=useState(null);
+  const [showCierre,setShowCierre]=useState(false);
+  const DIAS=["lunes","martes","miercoles","jueves","viernes"];
+  const DIAS_LABEL={lunes:"Lun",martes:"Mar",miercoles:"Mié",jueves:"Jue",viernes:"Vie"};
+
+  // Cargar plan de Firebase
+  useEffect(function(){
+    setCargando(true);
+    var planId="plan_"+usuario.id+"_"+new Date().getFullYear()+"_s"+semana;
+    fbLeer("planes_semanales").then(function(planes){
+      var found=(planes||[]).find(function(p){return p.agente===usuario.id&&p.semana===semana&&p.anio===new Date().getFullYear();});
+      if(found){setPlan(found);}
+      else{setPlan({id:planId,agente:usuario.id,semana:semana,anio:new Date().getFullYear(),estado:"borrador",
+        dias:{lunes:[],martes:[],miercoles:[],jueves:[],viernes:[]},
+        cierre:{ventas:0,margen:0,pedidos:0,clientesNuevos:0,notas:""}});}
+      setCargando(false);
+    });
+  },[semana]);
+
+  var guardar=function(updated){
+    setPlan(updated);
+    fbEscribir("planes_semanales",updated.id,updated);
+  };
+
+  // Añadir visita a un día
+  var addVisita=function(dia, clienteNombre, objetivo, tareas){
+    var updated=JSON.parse(JSON.stringify(plan));
+    if(!updated.dias[dia]) updated.dias[dia]=[];
+    updated.dias[dia].push({clienteNombre:clienteNombre,objetivo:objetivo,tareas:tareas||[],hecho:false});
+    guardar(updated);
+  };
+
+  var removeVisita=function(dia, idx){
+    var updated=JSON.parse(JSON.stringify(plan));
+    updated.dias[dia].splice(idx,1);
+    guardar(updated);
+  };
+
+  var toggleVisita=function(dia, idx){
+    var updated=JSON.parse(JSON.stringify(plan));
+    updated.dias[dia][idx].hecho=!updated.dias[dia][idx].hecho;
+    guardar(updated);
+  };
+
+  var activarPlan=function(){
+    var updated=JSON.parse(JSON.stringify(plan));
+    updated.estado="activo";
+    guardar(updated);
+  };
+
+  if(cargando) return React.createElement("div",{style:{padding:40,textAlign:"center",color:T.muted}},"Cargando plan...");
+
+  // Contar visitas planificadas y hechas
+  var totalPlan=0,totalHecho=0;
+  DIAS.forEach(function(d){(plan.dias[d]||[]).forEach(function(v){totalPlan++;if(v.hecho)totalHecho++;});});
+
+  // ── FORMULARIO AÑADIR VISITA ──
+  function FormVisita({dia,onAdd,onClose}){
+    var _c=React.useState("");var cli=_c[0],setCli=_c[1];
+    var _o=React.useState("");var obj=_o[0],setObj=_o[1];
+    var _t=React.useState("");var tar=_t[0],setTar=_t[1];
+    var _s=React.useState([]);var sugs=_s[0],setSugs=_s[1];
+    var buscarCli=function(q){
+      if(q.length<2){setSugs([]);return;}
+      var r=(clientesFB||[]).filter(function(c){return (c.nombre||c.NOMBRE||"").toUpperCase().indexOf(q.toUpperCase())>=0;}).slice(0,5);
+      setSugs(r);
+    };
+    return(
+      <div style={{background:"#FFFBEB",borderRadius:12,padding:14,marginTop:10,border:"1.5px solid "+T.amber}}>
+        <p style={{margin:"0 0 8px",fontSize:13,fontWeight:700,color:T.amber}}>Añadir visita — {DIAS_LABEL[dia]}</p>
+        <input value={cli} onChange={function(e){setCli(e.target.value);buscarCli(e.target.value);}}
+          placeholder="Buscar cliente..." style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:13,marginBottom:4,boxSizing:"border-box"}}/>
+        {sugs.length>0&&<div style={{background:"#fff",border:"1px solid "+T.border,borderRadius:8,marginBottom:6,maxHeight:120,overflow:"auto"}}>
+          {sugs.map(function(s,i){return <div key={i} onClick={function(){setCli(s.nombre||s.NOMBRE);setSugs([]);}}
+            style={{padding:"6px 10px",cursor:"pointer",fontSize:12,borderBottom:"1px solid #F1F5F9"}}>{s.nombre||s.NOMBRE}</div>;})}
+        </div>}
+        <input value={obj} onChange={function(e){setObj(e.target.value);}}
+          placeholder="Objetivo de la visita..." style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:13,marginBottom:4,boxSizing:"border-box"}}/>
+        <input value={tar} onChange={function(e){setTar(e.target.value);}}
+          placeholder="Tareas (separadas por coma)" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:13,marginBottom:8,boxSizing:"border-box"}}/>
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={function(){
+            if(!cli.trim())return;
+            onAdd(dia,cli.trim(),obj.trim(),tar?tar.split(",").map(function(t){return t.trim();}).filter(Boolean):[]);
+            onClose();
+          }} style={{flex:1,padding:"10px",borderRadius:8,border:"none",background:T.green,color:"#fff",fontWeight:700,fontSize:12,cursor:"pointer"}}>
+            Añadir
+          </button>
+          <button onClick={onClose} style={{padding:"10px 14px",borderRadius:8,border:"1.5px solid "+T.border,background:"#fff",color:T.muted,fontSize:12,cursor:"pointer"}}>
+            Cancelar
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── FORMULARIO CIERRE SEMANAL ──
+  function FormCierre({plan,onSave,onClose}){
+    var c=plan.cierre||{};
+    var _v=React.useState(c.ventas||0);var ventas=_v[0],setVentas=_v[1];
+    var _m=React.useState(c.margen||0);var margen=_m[0],setMargen=_m[1];
+    var _p=React.useState(c.pedidos||0);var pedidos=_p[0],setPedidos=_p[1];
+    var _cn=React.useState(c.clientesNuevos||0);var cliNuevos=_cn[0],setCliNuevos=_cn[1];
+    var _n=React.useState(c.notas||"");var notas=_n[0],setNotas=_n[1];
+    var field=function(label,val,set,type){
+      return <div style={{marginBottom:8}}>
+        <label style={{fontSize:11,fontWeight:700,color:T.muted,display:"block",marginBottom:2}}>{label}</label>
+        <input value={val} onChange={function(e){set(type==="number"?parseFloat(e.target.value)||0:e.target.value);}}
+          type={type||"text"} style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:13,boxSizing:"border-box"}}/>
+      </div>;
+    };
+    return(
+      <div style={{background:"#F0FDF4",borderRadius:14,padding:16,marginTop:14,border:"2px solid "+T.green}}>
+        <p style={{margin:"0 0 12px",fontSize:15,fontWeight:800,color:T.green}}>Cierre semanal — Semana {plan.semana}</p>
+        {field("Ventas semana (EUR)",ventas,setVentas,"number")}
+        {field("Margen bruto medio (%)",margen,setMargen,"number")}
+        {field("Pedidos cerrados",pedidos,setPedidos,"number")}
+        {field("Clientes nuevos contactados",cliNuevos,setCliNuevos,"number")}
+        <div style={{marginBottom:8}}>
+          <label style={{fontSize:11,fontWeight:700,color:T.muted,display:"block",marginBottom:2}}>Notas de la semana</label>
+          <textarea value={notas} onChange={function(e){setNotas(e.target.value);}} rows={4}
+            placeholder="Resumen, observaciones importantes, plan para la proxima semana..."
+            style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:13,boxSizing:"border-box",resize:"vertical"}}/>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={function(){
+            onSave({ventas:ventas,margen:margen,pedidos:pedidos,clientesNuevos:cliNuevos,notas:notas});
+          }} style={{flex:1,padding:"12px",borderRadius:10,border:"none",background:T.green,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>
+            Cerrar semana
+          </button>
+          <button onClick={onClose} style={{padding:"12px 18px",borderRadius:10,border:"1.5px solid "+T.border,background:"#fff",color:T.muted,fontSize:13,cursor:"pointer"}}>
+            Cancelar
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return(
+    <div style={{maxWidth:600,margin:"0 auto",padding:"16px 14px"}}>
+      <BackBar label="Volver" onBack={onBack}/>
+
+      {/* Selector semana */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:12,marginBottom:16}}>
+        <button onClick={function(){setSemana(semana-1);}} style={{background:"none",border:"none",fontSize:20,cursor:"pointer",color:T.navy}}>◀</button>
+        <div style={{textAlign:"center"}}>
+          <p style={{margin:0,fontSize:18,fontWeight:800,color:T.navy}}>Semana {semana}</p>
+          <p style={{margin:0,fontSize:11,color:T.muted}}>{semana===semActual?"Esta semana":semana===semActual+1?"Próxima semana":"Sem. "+semana}</p>
+        </div>
+        <button onClick={function(){setSemana(semana+1);}} style={{background:"none",border:"none",fontSize:20,cursor:"pointer",color:T.navy}}>▶</button>
+      </div>
+
+      {/* Estado del plan */}
+      <div style={{display:"flex",gap:6,justifyContent:"center",marginBottom:16}}>
+        <span style={{padding:"5px 12px",borderRadius:99,fontSize:11,fontWeight:700,
+          background:plan.estado==="cerrado"?"#F0FDF4":plan.estado==="activo"?"#DBEAFE":"#FEF3C7",
+          color:plan.estado==="cerrado"?T.green:plan.estado==="activo"?T.blue:T.amber}}>
+          {plan.estado==="cerrado"?"✅ Cerrada":plan.estado==="activo"?"🟢 En curso":"📝 Borrador"}
+        </span>
+        <span style={{padding:"5px 12px",borderRadius:99,fontSize:11,color:T.muted,background:"#F8FAFC"}}>
+          {totalHecho}/{totalPlan} visitas
+        </span>
+      </div>
+
+      {/* Días de la semana */}
+      {DIAS.map(function(dia){
+        var visitas=plan.dias[dia]||[];
+        var isOpen=editDia===dia;
+        return(
+          <div key={dia} style={{marginBottom:12,background:"#fff",borderRadius:12,border:"1.5px solid "+T.border,overflow:"hidden"}}>
+            {/* Cabecera del día */}
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 14px",
+              background:visitas.length>0?"#F8FAFC":"#fff",cursor:"pointer"}}
+              onClick={function(){setEditDia(isOpen?null:dia);}}>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <span style={{fontSize:14,fontWeight:800,color:T.navy,width:32}}>{DIAS_LABEL[dia]}</span>
+                <span style={{fontSize:12,color:T.muted}}>
+                  {visitas.length>0?visitas.length+" visita"+(visitas.length>1?"s":""):"Sin visitas"}
+                </span>
+                {visitas.length>0&&<span style={{fontSize:10,color:T.green,fontWeight:700}}>
+                  {visitas.filter(function(v){return v.hecho;}).length}/{visitas.length} hechas
+                </span>}
+              </div>
+              <span style={{fontSize:12,color:T.muted}}>{isOpen?"▲":"▼"}</span>
+            </div>
+
+            {/* Visitas del día (expandidas) */}
+            {isOpen&&<div style={{padding:"0 14px 12px"}}>
+              {visitas.map(function(v,i){
+                return(
+                  <div key={i} style={{display:"flex",alignItems:"flex-start",gap:8,padding:"8px 0",
+                    borderBottom:i<visitas.length-1?"1px solid #F1F5F9":"none"}}>
+                    {/* Checkbox */}
+                    {plan.estado!=="cerrado"&&<button onClick={function(){toggleVisita(dia,i);}}
+                      style={{background:"none",border:"none",fontSize:16,cursor:"pointer",padding:0,marginTop:2}}>
+                      {v.hecho?"☑️":"⬜"}
+                    </button>}
+                    <div style={{flex:1}}>
+                      <p style={{margin:0,fontSize:13,fontWeight:700,color:v.hecho?"#94A3B8":T.text,
+                        textDecoration:v.hecho?"line-through":"none"}}>{v.clienteNombre}</p>
+                      {v.objetivo&&<p style={{margin:"2px 0 0",fontSize:11,color:v.hecho?"#CBD5E1":T.muted}}>
+                        🎯 {v.objetivo}
+                      </p>}
+                      {v.tareas&&v.tareas.length>0&&v.tareas.map(function(t,j){
+                        return <p key={j} style={{margin:"1px 0 0",fontSize:10,color:v.hecho?"#CBD5E1":"#64748B"}}>• {t}</p>;
+                      })}
+                    </div>
+                    {/* Eliminar */}
+                    {plan.estado!=="cerrado"&&<button onClick={function(){if(confirm("Eliminar visita?"))removeVisita(dia,i);}}
+                      style={{background:"none",border:"none",color:T.red,fontSize:14,cursor:"pointer",padding:0}}>✕</button>}
+                  </div>
+                );
+              })}
+
+              {/* Botón añadir visita */}
+              {plan.estado!=="cerrado"&&editDia===dia&&!isOpen._adding&&(
+                <div>
+                  {React.createElement(FormVisita,{dia:dia,onAdd:addVisita,onClose:function(){setEditDia(null);}})}
+                </div>
+              )}
+              {plan.estado!=="cerrado"&&visitas.length>0&&(
+                <button onClick={function(){setEditDia(dia);}}
+                  style={{marginTop:8,padding:"7px 14px",borderRadius:8,border:"1.5px dashed "+T.border,
+                    background:"#fff",color:T.blue,fontSize:11,fontWeight:600,cursor:"pointer",width:"100%"}}>
+                  + Añadir otra visita
+                </button>
+              )}
+            </div>}
+
+            {/* Si el día está vacío y abierto, mostrar form directamente */}
+            {isOpen&&visitas.length===0&&plan.estado!=="cerrado"&&(
+              <div style={{padding:"0 14px 12px"}}>
+                {React.createElement(FormVisita,{dia:dia,onAdd:addVisita,onClose:function(){setEditDia(null);}})}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {/* Botones de acción */}
+      <div style={{marginTop:16,display:"flex",flexDirection:"column",gap:8}}>
+        {plan.estado==="borrador"&&totalPlan>0&&(
+          <button onClick={activarPlan}
+            style={{padding:"14px",borderRadius:12,border:"none",background:T.blue,color:"#fff",
+              fontWeight:700,fontSize:14,cursor:"pointer"}}>
+            🟢 Activar plan ({totalPlan} visitas planificadas)
+          </button>
+        )}
+        {plan.estado==="activo"&&(
+          <button onClick={function(){setShowCierre(true);}}
+            style={{padding:"14px",borderRadius:12,border:"none",background:T.green,color:"#fff",
+              fontWeight:700,fontSize:14,cursor:"pointer"}}>
+            📊 Cerrar semana — rellenar ventas y notas
+          </button>
+        )}
+        {plan.estado==="cerrado"&&plan.cierre&&(
+          <div style={{background:"#F0FDF4",borderRadius:12,padding:16,border:"2px solid "+T.green}}>
+            <p style={{margin:"0 0 10px",fontSize:15,fontWeight:800,color:T.green}}>✅ Semana {plan.semana} cerrada</p>
+            <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:10}}>
+              <div style={{textAlign:"center"}}><p style={{margin:0,fontSize:18,fontWeight:800,color:T.green}}>{plan.cierre.ventas}€</p><p style={{margin:0,fontSize:10,color:T.muted}}>Ventas</p></div>
+              <div style={{textAlign:"center"}}><p style={{margin:0,fontSize:18,fontWeight:800,color:T.blue}}>{plan.cierre.margen}%</p><p style={{margin:0,fontSize:10,color:T.muted}}>MB</p></div>
+              <div style={{textAlign:"center"}}><p style={{margin:0,fontSize:18,fontWeight:800,color:T.amber}}>{plan.cierre.pedidos}</p><p style={{margin:0,fontSize:10,color:T.muted}}>Pedidos</p></div>
+              <div style={{textAlign:"center"}}><p style={{margin:0,fontSize:18,fontWeight:800,color:T.purple}}>{plan.cierre.clientesNuevos}</p><p style={{margin:0,fontSize:10,color:T.muted}}>Cli. nuevos</p></div>
+            </div>
+            {plan.cierre.notas&&<p style={{margin:0,fontSize:12,color:T.text,fontStyle:"italic",borderTop:"1px solid #D1FAE5",paddingTop:8}}>"{plan.cierre.notas}"</p>}
+          </div>
+        )}
+      </div>
+
+      {/* Form cierre */}
+      {showCierre&&React.createElement(FormCierre,{plan:plan,
+        onSave:function(cierre){
+          var updated=JSON.parse(JSON.stringify(plan));
+          updated.cierre=cierre;
+          updated.estado="cerrado";
+          guardar(updated);
+          setShowCierre(false);
+        },
+        onClose:function(){setShowCierre(false);}
+      })}
+    </div>
+  );
+}
+
 function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, estrategiasDB, incidenciasDB, calendarioDB, actividad, _ver}){
   const {id,equipo,color}=usuario;
   const opsBD=oportunidadesDB||OPORTUNIDADES_SEED;
@@ -1023,6 +1365,9 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, es
           <span style={{background:"#EEF2FF",color:"#6366F1",fontSize:10,fontWeight:700,
             padding:"4px 12px",borderRadius:99}}>Sem. {semana}</span>
         </div>
+
+        {/* ── Aviso plan semanal ── */}
+        {React.createElement(AvisoPlanSemanal,{usuario:usuario,semana:semana,onNav:onNav})}
 
         {/* ── Selector período ── */}
         <div style={{display:"flex",gap:6,marginBottom:14}}>
@@ -11903,6 +12248,7 @@ function App(props){
 
   const NAV_AGENTE=[
     {id:"dashboard",    icon:"🏠",label:"Inicio",      color:usuario.color},
+    {id:"plan_semanal", icon:"📅",label:"Mi semana",   color:T.blue},
     {id:"clientes",     icon:"📋",label:"Clientes",    color:T.blue},
     {id:"informe",      icon:"📤",label:"Informe",     color:T.navy},
     {id:"oportunidades",icon:"💼",label:"Ops",         color:T.navy,  badge:opsAbiertas},
@@ -12498,6 +12844,7 @@ function App(props){
                section==="calendario"?"🗓️ Agenda":
                section==="reporting"?"📈 Reporting":
                section==="ia"?"🤖 Asistente IA":
+               section==="plan_semanal"?"📅 Mi semana":
                section}
             </p>
           </div>
@@ -12506,6 +12853,7 @@ function App(props){
         {/* AGENTE */}
         {esAgente&&section==="dashboard"&&  <DashAgente usuario={usuario} onNav={setSection} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} incidenciasDB={incidenciasDB} calendarioDB={calendarioDB} actividad={actividadSemana} _ver={objVer}/>}
         {esAgente&&section==="clientes"&&   <GestorClientes usuario={usuario} actividad={actividadSemana} onActividad={onActividad} onBack={()=>setSection("dashboard")} clientesFB={misClientesFB} muestrasDB={muestrasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} estrategiasDB={estrategiasDB} clienteDirecto={clienteDirecto} onClienteDirectoUsado={()=>setClienteDirecto(null)}/>}
+        {esAgente&&section==="plan_semanal"&& <PlanificadorSemanal usuario={usuario} clientesFB={misClientesFB} onBack={()=>setSection("dashboard")}/>}
         {section==="informe"&&esAgente&&    <Informe usuario={usuario} actividadSemana={actividadSemana} clientesFB={misClientesFB}/>}
         {section==="informe"&&!esAgente&&   <MiInformeJefe usuario={usuario} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB} onNav={setSection}/>}
         {section==="informe_jefe"&&         <InformeJefe usuario={usuario} oportunidadesDB={oportunidadesDB}/>}
