@@ -880,6 +880,7 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
   var _s1=React.useState(semActual);var semana=_s1[0],setSemana=_s1[1];
   var _s2=React.useState(null);var plan=_s2[0],setPlan=_s2[1];
   var _s3=React.useState(true);var cargando=_s3[0],setCargando=_s3[1];
+  var _s4=React.useState("360");var tab=_s4[0],setTab=_s4[1];
   var appMisIds=resolverMisIds(usuario);
 
   React.useEffect(function(){
@@ -898,196 +899,251 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
   (clientesFB||[]).forEach(function(c){var r=getR(c);if(r>0){if(!rutaMap[r])rutaMap[r]=[];rutaMap[r].push(c);if(rutas.indexOf(r)<0)rutas.push(r);}});
   rutas.sort(function(a,b){return a-b;});
 
+  // 360 data
   var misEst=(estrategiasDB||[]).filter(function(e){return !e.eliminada&&(e.estado==="en_curso"||e.estado==="pendiente_aprobacion")&&appMisIds.has((e.agente||"").toUpperCase());});
   var misOps=(oportunidadesDB||[]).filter(function(o){return !o.eliminada&&!["ganada","perdida","cerrada_ganada","cerrada_perdida"].includes(o.estado||o.etapa)&&appMisIds.has((o.agenteId||o.agente||"").toUpperCase());});
   var misInc=(incidenciasDB||[]).filter(function(i){return !i.eliminada&&i.estado!=="cerrada"&&i.estado!=="resuelta"&&appMisIds.has((i.agente||i.autor||"").toUpperCase());});
   var misMue=(muestrasDB||[]).filter(function(m){return !m.eliminada&&m.estado==="pendiente"&&appMisIds.has((m.agente||"").toUpperCase());});
-
-  var _s4=React.useState([]);var tareasDB=_s4[0],setTareasDB=_s4[1];
-  var _s5=React.useState([]);var proyectosDB=_s5[0],setProyectosDB=_s5[1];
-  React.useEffect(function(){
-    fbLeer("tareas").then(function(d){setTareasDB(d||[]);});
-    fbLeer("proyectos").then(function(d){setProyectosDB(d||[]);});
-  },[]);
+  var _s5=React.useState([]);var tareasDB=_s5[0],setTareasDB=_s5[1];
+  var _s6=React.useState([]);var proyectosDB=_s6[0],setProyectosDB=_s6[1];
+  React.useEffect(function(){fbLeer("tareas").then(function(d){setTareasDB(d||[]);});fbLeer("proyectos").then(function(d){setProyectosDB(d||[]);});},[]);
   var misTareas=tareasDB.filter(function(t){return !t.eliminada&&t.estado!=="hecha"&&appMisIds.has((t.agente||t.agenteId||"").toUpperCase());});
   var misHitos=[];
   proyectosDB.filter(function(p){return !p.eliminada&&p.estado==="activo";}).forEach(function(p){
     (p.hitos||[]).forEach(function(h){
-      if(!h.hecho){
-        var resp=h.responsable||"";
-        if(appMisIds.has(resp.toUpperCase())||!resp) misHitos.push({proyNombre:p.nombre||"",hitoNombre:h.nombre||"",fecha:h.fecha||"",responsable:resp});
-      }
+      if(!h.hecho){var resp=h.responsable||"";if(appMisIds.has(resp.toUpperCase())||!resp) misHitos.push({proyNombre:p.nombre||"",hitoNombre:h.nombre||"",fecha:h.fecha||"",responsable:resp});}
     });
   });
-
   var pipeVal=misOps.reduce(function(s,o){return s+(parseInt(o.valor)||0);},0);
+
+  // Clientes de la ruta
+  var clientesSemana=plan&&plan.rutaNum&&rutaMap[plan.rutaNum]?rutaMap[plan.rutaNum]:[];
+  // Visitados tracking (stored in plan.visitados = ["cli_id1","cli_id2"])
+  var visitados=plan&&plan.visitados?plan.visitados:[];
+  var cliVisitados=clientesSemana.filter(function(c){return visitados.indexOf(c.id||c.nombre||c.NOMBRE)>=0;});
+  var cliPendientes=clientesSemana.filter(function(c){return visitados.indexOf(c.id||c.nombre||c.NOMBRE)<0;});
+  var conAlerta=cliPendientes.filter(function(c){var n=(c.nombre||c.NOMBRE||"").toUpperCase();return misInc.some(function(i){return (i.clienteNombre||"").toUpperCase()===n;});});
+
+  // Info contextual por cliente
+  var getCliInfo=function(c){
+    var n=(c.nombre||c.NOMBRE||"").toUpperCase();
+    var info=[];
+    var op=misOps.find(function(o){return (o.nombre||o.cliente||"").toUpperCase()===n;});
+    if(op) info.push({text:(op.valor?parseInt(op.valor).toLocaleString("es-ES")+"E ":"")+(ESTADOS[op.etapa||op.estado]?ESTADOS[op.etapa||op.estado].label:""),color:"#22C55E"});
+    var inc=misInc.find(function(i){return (i.clienteNombre||"").toUpperCase()===n;});
+    if(inc) info.push({text:"Incidencia "+inc.tipo,color:"#D97706"});
+    var est=misEst.find(function(e){return (e.cliente||e.clienteNombre||"").toUpperCase()===n;});
+    if(est) info.push({text:"Estrategia"+(est.maxDescuento?" "+est.maxDescuento+"%":"")+(est.estado==="pendiente_aprobacion"?" pend.":""),color:"#7C3AED"});
+    var mue=misMue.find(function(m){return (m.cliente||"").toUpperCase()===n;});
+    if(mue) info.push({text:"Muestra pendiente feedback",color:"#F59E0B"});
+    var pry=proyectosDB.find(function(p){return !p.eliminada&&p.estado==="activo"&&(p.cliente||"").toUpperCase()===n;});
+    if(pry) info.push({text:"Proyecto "+(pry.progreso||0)+"%",color:"#3B82F6"});
+    return info;
+  };
+
+  var marcarVisitado=function(cliId){
+    if(!plan) return;
+    var u=JSON.parse(JSON.stringify(plan));
+    if(!u.visitados) u.visitados=[];
+    var idx=u.visitados.indexOf(cliId);
+    if(idx>=0) u.visitados.splice(idx,1); else u.visitados.push(cliId);
+    guardar(u);
+  };
 
   if(cargando) return React.createElement("div",{style:{padding:40,textAlign:"center",color:T.muted}},"Cargando...");
 
   return(
     <div style={{maxWidth:600,margin:"0 auto",padding:"16px 14px",paddingBottom:100}}>
       <BackBar label="Volver" onBack={onBack}/>
-
       <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:14,marginBottom:14}}>
-        <button onClick={function(){setSemana(semana-1);}} style={{background:"none",border:"none",fontSize:20,cursor:"pointer",color:T.navy}}>{"<"}</button>
+        <button onClick={function(){setSemana(semana-1);}} style={{background:"none",border:"none",fontSize:24,cursor:"pointer",color:T.navy}}>{"<"}</button>
         <div style={{textAlign:"center"}}>
-          <p style={{margin:0,fontSize:20,fontWeight:800,color:T.navy}}>Semana {semana}</p>
-          <p style={{margin:0,fontSize:11,color:T.muted}}>{semana===semActual?"Esta semana":semana===semActual+1?"Proxima semana":"Sem. "+semana}</p>
+          <p style={{margin:0,fontSize:24,fontWeight:800,color:T.navy}}>Semana {semana}</p>
+          <p style={{margin:0,fontSize:12,color:T.muted}}>
+            {semana===semActual?"Esta semana":semana===semActual+1?"Proxima semana":"Sem. "+semana}
+            {plan&&plan.modo==="ruta"?<span style={{color:T.blue,fontWeight:700}}>{" \u00B7 Ruta "+plan.rutaNum}</span>:null}
+            {plan&&plan.modo==="libre"?<span style={{color:T.purple,fontWeight:700}}>{" \u00B7 Libre"}</span>:null}
+            {plan?<span onClick={function(){setPlan(null);}} style={{color:T.muted,fontSize:10,cursor:"pointer",marginLeft:6}}>{"(cambiar)"}</span>:null}
+          </p>
         </div>
-        <button onClick={function(){setSemana(semana+1);}} style={{background:"none",border:"none",fontSize:20,cursor:"pointer",color:T.navy}}>{">"}</button>
+        <button onClick={function(){setSemana(semana+1);}} style={{background:"none",border:"none",fontSize:24,cursor:"pointer",color:T.navy}}>{">"}</button>
       </div>
 
       {!plan?(
-        <div style={{textAlign:"center",padding:"20px 0"}}>
-          <p style={{margin:"0 0 4px",fontSize:17,fontWeight:800,color:T.navy}}>Programa tu semana {semana}</p>
-          <p style={{margin:"0 0 20px",fontSize:12,color:T.muted}}>Selecciona la ruta que vas a trabajar</p>
+        <div style={{padding:"20px 0"}}>
+          <p style={{margin:"0 0 4px",fontSize:18,fontWeight:800,color:T.navy,textAlign:"center"}}>Programa tu semana</p>
+          <p style={{margin:"0 0 24px",fontSize:12,color:T.muted,textAlign:"center"}}>Se queda fijada hasta que la cambies</p>
           {rutas.length>0&&<div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:16}}>
-            {rutas.map(function(r){
-              var clis=rutaMap[r]||[];
-              return <button key={r} onClick={function(){
-                guardar({id:"plan_"+usuario.id+"_"+new Date().getFullYear()+"_s"+semana,agente:usuario.id,semana:semana,anio:new Date().getFullYear(),modo:"ruta",rutaNum:r,estado:"activo"});
-              }} style={{display:"flex",alignItems:"center",gap:14,padding:"16px",borderRadius:14,border:"2px solid "+T.blue,background:"#EFF6FF",cursor:"pointer",textAlign:"left"}}>
-                <div style={{width:44,height:44,borderRadius:12,background:T.blue,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                  <span style={{color:"#fff",fontSize:16,fontWeight:800}}>{r}</span>
-                </div>
-                <div style={{flex:1}}>
-                  <p style={{margin:0,fontSize:14,fontWeight:700,color:T.navy}}>Ruta {r}</p>
-                  <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{clis.length} clientes</p>
-                </div>
-              </button>;
-            })}
+            {rutas.map(function(r){var clis=rutaMap[r]||[];return <button key={r} onClick={function(){
+              guardar({id:"plan_"+usuario.id+"_"+new Date().getFullYear()+"_s"+semana,agente:usuario.id,semana:semana,anio:new Date().getFullYear(),modo:"ruta",rutaNum:r,estado:"activo",visitados:[]});
+            }} style={{display:"flex",alignItems:"center",gap:14,padding:18,borderRadius:16,border:"2px solid "+T.blue,background:"#EFF6FF",cursor:"pointer",textAlign:"left"}}>
+              <div style={{width:48,height:48,borderRadius:14,background:T.blue,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:18,fontWeight:800,flexShrink:0}}>{r}</div>
+              <div style={{flex:1}}>
+                <p style={{margin:0,fontSize:15,fontWeight:700,color:T.navy}}>Ruta {r}</p>
+                <p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>{clis.length} clientes{clis.length>0?" \u00B7 "+clis.slice(0,2).map(function(c){return c.nombre||c.NOMBRE||"";}).join(", ")+(clis.length>2?"...":""):""}</p>
+              </div>
+            </button>;})}
           </div>}
-          <button onClick={function(){
-            guardar({id:"plan_"+usuario.id+"_"+new Date().getFullYear()+"_s"+semana,agente:usuario.id,semana:semana,anio:new Date().getFullYear(),modo:"libre",rutaNum:null,estado:"activo"});
-          }} style={{width:"100%",padding:"16px",borderRadius:14,border:"2px solid "+T.purple,background:"#F5F3FF",cursor:"pointer"}}>
-            <p style={{margin:0,fontSize:14,fontWeight:700,color:T.purple}}>Semana libre / Prospeccion</p>
-            <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>Sin ruta fija</p>
+          <button onClick={function(){guardar({id:"plan_"+usuario.id+"_"+new Date().getFullYear()+"_s"+semana,agente:usuario.id,semana:semana,anio:new Date().getFullYear(),modo:"libre",rutaNum:null,estado:"activo",visitados:[]});}} style={{width:"100%",padding:18,borderRadius:16,border:"2px solid "+T.purple,background:"#F5F3FF",cursor:"pointer",textAlign:"center"}}>
+            <p style={{margin:0,fontSize:15,fontWeight:700,color:T.purple}}>Semana libre / Prospeccion</p>
+            <p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>Sin ruta fija</p>
           </button>
-          {rutas.length===0&&<p style={{margin:"20px 0",fontSize:12,color:T.muted}}>No hay rutas configuradas. Usa el modo libre.</p>}
         </div>
       ):(
         <div>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
-            <span style={{padding:"6px 16px",borderRadius:99,fontSize:12,fontWeight:700,
-              background:plan.modo==="ruta"?"#EFF6FF":"#F5F3FF",
-              color:plan.modo==="ruta"?T.blue:T.purple}}>
-              {plan.modo==="ruta"?"Ruta "+plan.rutaNum:"Libre"}
-            </span>
-            <button onClick={function(){setPlan(null);}} style={{background:"none",border:"1.5px solid "+T.border,borderRadius:8,padding:"5px 12px",fontSize:11,color:T.muted,cursor:"pointer"}}>Cambiar</button>
-          </div>
-
-          <div style={{display:"flex",gap:8,marginBottom:16}}>
-            {[
-              {n:misTareas.length,l:"Tareas",c:"#EF4444"},
-              {n:misHitos.length,l:"Hitos",c:"#3B82F6"},
-              {n:misEst.length,l:"Estrategias",c:"#7C3AED"},
-              {n:misOps.length,l:"Ops",c:"#1E3A5F"}
-            ].map(function(k,i){
-              return <div key={i} style={{flex:1,background:k.c+"0D",borderRadius:12,padding:"12px 6px",textAlign:"center",border:"1.5px solid "+k.c+"25"}}>
-                <p style={{margin:0,fontSize:20,fontWeight:800,color:k.c}}>{k.n}</p>
-                <p style={{margin:"2px 0 0",fontSize:9,color:T.muted,fontWeight:600}}>{k.l}</p>
-              </div>;
-            })}
-          </div>
-
-          {misTareas.length>0&&(
-            <div style={{background:"#fff",borderRadius:14,padding:16,marginBottom:14,border:"1.5px solid #FEE2E2",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
-                <div style={{width:36,height:36,borderRadius:10,background:"#FEE2E2",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>{"T"}</div>
-                <div><p style={{margin:0,fontSize:14,fontWeight:800,color:T.text}}>Tareas pendientes</p><p style={{margin:0,fontSize:11,color:T.muted}}>{misTareas.length} por hacer</p></div>
+          {/* Resumen ruta */}
+          {plan.modo==="ruta"&&clientesSemana.length>0&&(
+            <div style={{background:"#fff",borderRadius:16,padding:"16px 18px",marginBottom:14,border:"2px solid "+T.blue,boxShadow:"0 1px 4px rgba(0,0,0,.06)"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <p style={{margin:0,fontSize:15,fontWeight:800,color:T.navy}}>Mi ruta esta semana</p>
+                <span style={{fontSize:10,padding:"3px 10px",borderRadius:99,background:"#DBEAFE",color:"#1E40AF",fontWeight:700}}>{cliVisitados.length}/{clientesSemana.length} visitados</span>
               </div>
-              {misTareas.slice(0,5).map(function(t){
-                return <div key={t.id} onClick={function(){onNav("tareas");}} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderTop:"1px solid #F1F5F9",cursor:"pointer"}}>
-                  <div style={{width:8,height:8,borderRadius:99,background:t.prioridad==="alta"?"#EF4444":"#F59E0B",flexShrink:0}}></div>
-                  <div style={{flex:1}}>
-                    <p style={{margin:0,fontSize:13,fontWeight:600}}>{t.titulo||t.texto||""}</p>
-                    <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{t.vence?"Vence: "+t.vence:""}{t.clienteNombre?" · "+t.clienteNombre:""}</p>
-                  </div>
+              <div style={{height:8,background:"#E2E8F0",borderRadius:99,overflow:"hidden"}}>
+                <div style={{height:"100%",borderRadius:99,background:"linear-gradient(90deg,#22C55E,#3B82F6)",width:(clientesSemana.length>0?Math.round(cliVisitados.length/clientesSemana.length*100):0)+"%"}}></div>
+              </div>
+              <div style={{display:"flex",gap:14,marginTop:14}}>
+                <div style={{flex:1,textAlign:"center"}}><p style={{margin:0,fontSize:22,fontWeight:800,color:"#22C55E"}}>{cliVisitados.length}</p><p style={{margin:0,fontSize:10,color:T.muted}}>Visitados</p></div>
+                <div style={{flex:1,textAlign:"center"}}><p style={{margin:0,fontSize:22,fontWeight:800,color:T.blue}}>{cliPendientes.length}</p><p style={{margin:0,fontSize:10,color:T.muted}}>Pendientes</p></div>
+                <div style={{flex:1,textAlign:"center"}}><p style={{margin:0,fontSize:22,fontWeight:800,color:"#F59E0B"}}>{conAlerta.length}</p><p style={{margin:0,fontSize:10,color:T.muted}}>Con alerta</p></div>
+              </div>
+              {cliPendientes.length>0&&(
+                <div style={{marginTop:14,borderTop:"1px solid #E2E8F0",paddingTop:12}}>
+                  <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Proximos por visitar</p>
+                  {cliPendientes.slice(0,3).map(function(c,i){
+                    var n=c.nombre||c.NOMBRE||"";
+                    var info=getCliInfo(c);
+                    var hasInc=misInc.some(function(inc){return (inc.clienteNombre||"").toUpperCase()===n.toUpperCase();});
+                    return <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:i<2?"1px solid #F1F5F9":"none"}}>
+                      <div style={{width:28,height:28,borderRadius:8,background:hasInc?"#FEF3C7":"#EFF6FF",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12}}>{hasInc?"!!":"C"}</div>
+                      <div style={{flex:1}}><p style={{margin:0,fontSize:13,fontWeight:600}}>{n}</p></div>
+                      {info.length>0&&<span style={{fontSize:10,color:info[0].color,fontWeight:700}}>{info[0].text}</span>}
+                    </div>;
+                  })}
+                  {cliPendientes.length>3&&<p style={{margin:"6px 0 0",fontSize:12,color:T.muted}}>+{cliPendientes.length-3} clientes mas...</p>}
+                </div>
+              )}
+              <button onClick={function(){setTab("ruta");}} style={{width:"100%",padding:12,borderRadius:10,border:"none",background:T.blue,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer",marginTop:10}}>Ver ruta completa</button>
+            </div>
+          )}
+
+          {/* Tabs */}
+          <div style={{display:"flex",background:"#E2E8F0",borderRadius:12,padding:3,marginBottom:18}}>
+            <button onClick={function(){setTab("360");}} style={{flex:1,padding:"11px 0",borderRadius:10,border:"none",fontSize:13,cursor:"pointer",fontWeight:tab==="360"?700:400,color:tab==="360"?T.navy:T.muted,background:tab==="360"?"#fff":"transparent",boxShadow:tab==="360"?"0 1px 3px rgba(0,0,0,.1)":"none"}}>360</button>
+            <button onClick={function(){setTab("ruta");}} style={{flex:1,padding:"11px 0",borderRadius:10,border:"none",fontSize:13,cursor:"pointer",fontWeight:tab==="ruta"?700:400,color:tab==="ruta"?T.navy:T.muted,background:tab==="ruta"?"#fff":"transparent",boxShadow:tab==="ruta"?"0 1px 3px rgba(0,0,0,.1)":"none"}}>Ruta ({clientesSemana.length||"libre"})</button>
+          </div>
+
+          {/* TAB 360 */}
+          {tab==="360"&&(
+            <div>
+              <div style={{display:"flex",gap:8,marginBottom:16}}>
+                {[{n:misTareas.length,l:"Tareas",c:"#EF4444"},{n:misHitos.length,l:"Hitos",c:"#3B82F6"},{n:misEst.length,l:"Estrat.",c:"#7C3AED"},{n:misOps.length,l:"Ops",c:"#1E3A5F"}].map(function(k,i){
+                  return <div key={i} style={{flex:1,background:k.c+"0D",borderRadius:14,padding:"14px 6px",textAlign:"center",border:"1.5px solid "+k.c+"25"}}>
+                    <p style={{margin:0,fontSize:22,fontWeight:800,color:k.c}}>{k.n}</p>
+                    <p style={{margin:"2px 0 0",fontSize:10,color:T.muted,fontWeight:600}}>{k.l}</p>
+                  </div>;
+                })}
+              </div>
+
+              {misTareas.length>0&&(<div style={{background:"#fff",borderRadius:16,padding:18,marginBottom:14,borderLeft:"4px solid #EF4444",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}><div style={{width:40,height:40,borderRadius:12,background:"#FEE2E2",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>T</div><div><p style={{margin:0,fontSize:15,fontWeight:800}}>Tareas pendientes</p><p style={{margin:0,fontSize:11,color:T.muted}}>{misTareas.length} por hacer</p></div></div>
+                {misTareas.slice(0,5).map(function(t){return <div key={t.id} onClick={function(){onNav("tareas");}} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderTop:"1px solid #F1F5F9",cursor:"pointer"}}>
+                  <div style={{width:10,height:10,borderRadius:99,background:t.prioridad==="alta"?"#EF4444":"#F59E0B",flexShrink:0}}></div>
+                  <div style={{flex:1}}><p style={{margin:0,fontSize:13,fontWeight:600}}>{t.titulo||t.texto||""}</p><p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{t.vence?"Vence: "+t.vence:""}{t.clienteNombre?" \u00B7 "+t.clienteNombre:""}</p></div>
                   {t.prioridad==="alta"&&<span style={{fontSize:9,padding:"3px 8px",borderRadius:99,background:"#FEE2E2",color:"#DC2626",fontWeight:700}}>URGENTE</span>}
-                </div>;
-              })}
-            </div>
-          )}
+                </div>;})}
+              </div>)}
 
-          {misHitos.length>0&&(
-            <div style={{background:"#fff",borderRadius:14,padding:16,marginBottom:14,border:"1.5px solid #DBEAFE",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
-                <div style={{width:36,height:36,borderRadius:10,background:"#DBEAFE",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>{"H"}</div>
-                <div><p style={{margin:0,fontSize:14,fontWeight:800,color:T.text}}>Hitos de proyectos</p><p style={{margin:0,fontSize:11,color:T.muted}}>{misHitos.length} pendientes</p></div>
-              </div>
-              {misHitos.map(function(h,i){
-                var rU=USUARIOS.find(function(u){return u.id===h.responsable;});
-                return <div key={i} onClick={function(){onNav("proyectos");}} style={{padding:"12px",marginBottom:8,background:"#F8FAFC",borderRadius:10,borderLeft:"4px solid #3B82F6",cursor:"pointer"}}>
-                  <p style={{margin:0,fontSize:13,fontWeight:700}}>{h.hitoNombre}</p>
+              {misHitos.length>0&&(<div style={{background:"#fff",borderRadius:16,padding:18,marginBottom:14,borderLeft:"4px solid #3B82F6",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}><div style={{width:40,height:40,borderRadius:12,background:"#DBEAFE",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>H</div><div><p style={{margin:0,fontSize:15,fontWeight:800}}>Hitos de proyectos</p><p style={{margin:0,fontSize:11,color:T.muted}}>{misHitos.length} pendientes</p></div></div>
+                {misHitos.map(function(h,i){var rU=USUARIOS.find(function(u){return u.id===h.responsable;});return <div key={i} onClick={function(){onNav("proyectos");}} style={{padding:14,marginBottom:10,background:"#F8FAFC",borderRadius:12,borderLeft:"4px solid #3B82F6",cursor:"pointer"}}>
+                  <p style={{margin:0,fontSize:14,fontWeight:700}}>{h.hitoNombre}</p>
                   <p style={{margin:"4px 0 0",fontSize:12,color:T.navy}}>Proyecto: {h.proyNombre}</p>
-                  <div style={{display:"flex",gap:8,marginTop:6}}>
-                    {h.fecha&&<span style={{fontSize:10,padding:"3px 10px",borderRadius:99,background:"#FEF3C7",color:"#92400E",fontWeight:600}}>Fecha: {h.fecha}</span>}
-                    <span style={{fontSize:10,padding:"3px 10px",borderRadius:99,background:"#EFF6FF",color:"#1E40AF",fontWeight:600}}>Resp: {rU?rU.nombre:h.responsable}</span>
+                  <div style={{display:"flex",gap:8,marginTop:8}}>
+                    {h.fecha&&<span style={{fontSize:10,padding:"3px 10px",borderRadius:99,background:"#FEF3C7",color:"#92400E",fontWeight:600}}>{"Fecha: "+h.fecha}</span>}
+                    <span style={{fontSize:10,padding:"3px 10px",borderRadius:99,background:"#EFF6FF",color:"#1E40AF",fontWeight:600}}>{"Resp: "+(rU?rU.nombre:h.responsable)}</span>
                   </div>
-                </div>;
-              })}
-            </div>
-          )}
+                </div>;})}
+              </div>)}
 
-          {misEst.length>0&&(
-            <div style={{background:"#fff",borderRadius:14,padding:16,marginBottom:14,border:"1.5px solid #F5F3FF",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
-                <div style={{width:36,height:36,borderRadius:10,background:"#F5F3FF",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:800,color:T.purple}}>E</div>
-                <div><p style={{margin:0,fontSize:14,fontWeight:800,color:T.text}}>Estrategias</p><p style={{margin:0,fontSize:11,color:T.muted}}>{misEst.length} activas</p></div>
-              </div>
-              {misEst.map(function(e){
-                return <div key={e.id} onClick={function(){onNav("estrategias");}} style={{padding:"10px 12px",marginBottom:8,background:"#FAFAFE",borderRadius:10,border:"1px solid #E2E8F0",cursor:"pointer"}}>
-                  <div style={{display:"flex",justifyContent:"space-between"}}>
-                    <p style={{margin:0,fontSize:13,fontWeight:700}}>{e.cliente||e.clienteNombre}</p>
-                    {e.maxDescuento>0&&<span style={{fontSize:11,fontWeight:800,color:e.maxDescuento>15?"#DC2626":"#166534"}}>{e.maxDescuento}%</span>}
-                  </div>
+              {misEst.length>0&&(<div style={{background:"#fff",borderRadius:16,padding:18,marginBottom:14,borderLeft:"4px solid #7C3AED",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}><div style={{width:40,height:40,borderRadius:12,background:"#F5F3FF",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:800,color:T.purple}}>E</div><div><p style={{margin:0,fontSize:15,fontWeight:800}}>Estrategias</p><p style={{margin:0,fontSize:11,color:T.muted}}>{misEst.length} activas</p></div></div>
+                {misEst.map(function(e){return <div key={e.id} onClick={function(){onNav("estrategias");}} style={{padding:"10px 12px",marginBottom:8,background:"#FAFAFE",borderRadius:12,border:"1px solid #E2E8F0",cursor:"pointer"}}>
+                  <div style={{display:"flex",justifyContent:"space-between"}}><p style={{margin:0,fontSize:13,fontWeight:700}}>{e.cliente||e.clienteNombre}</p>{e.maxDescuento>0&&<span style={{fontSize:12,fontWeight:800,color:e.maxDescuento>15?"#DC2626":"#166534"}}>{e.maxDescuento}%</span>}</div>
                   <p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>{(e.texto||"").substring(0,60)}</p>
-                  {e.estado==="pendiente_aprobacion"&&<span style={{fontSize:10,padding:"3px 10px",borderRadius:99,background:"#FEF3C7",color:"#92400E",fontWeight:600}}>Pend. {e.pendienteDeNombre||""}</span>}
-                </div>;
-              })}
-              <button onClick={function(){onNav("estrategias");}} style={{width:"100%",padding:"10px",borderRadius:10,border:"2px dashed #E2E8F0",background:"#fff",color:T.purple,fontSize:12,fontWeight:700,cursor:"pointer"}}>+ Nueva estrategia</button>
-            </div>
-          )}
+                  {e.estado==="pendiente_aprobacion"&&<span style={{fontSize:10,padding:"3px 10px",borderRadius:99,background:"#FEF3C7",color:"#92400E",fontWeight:600,display:"inline-block",marginTop:4}}>{"Pend. "+(e.pendienteDeNombre||"")}</span>}
+                </div>;})}
+                <button onClick={function(){onNav("estrategias");}} style={{width:"100%",padding:10,borderRadius:10,border:"2px dashed #E2E8F0",background:"#fff",color:T.purple,fontSize:12,fontWeight:700,cursor:"pointer"}}>+ Nueva estrategia</button>
+              </div>)}
 
-          {misOps.length>0&&(
-            <div style={{background:"#fff",borderRadius:14,padding:16,marginBottom:14,border:"1.5px solid #E2E8F0",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
-                <div style={{width:36,height:36,borderRadius:10,background:"#EFF6FF",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:800,color:T.navy}}>O</div>
-                <div><p style={{margin:0,fontSize:14,fontWeight:800}}>Oportunidades</p><p style={{margin:0,fontSize:11,color:T.muted}}>{pipeVal>0?pipeVal.toLocaleString("es-ES")+"E pipeline":misOps.length+" abiertas"}</p></div>
-              </div>
-              {misOps.slice(0,5).map(function(o){
-                return <div key={o.id} onClick={function(){onNav("oportunidades");}} style={{display:"flex",justifyContent:"space-between",padding:"10px 0",borderTop:"1px solid #F1F5F9",cursor:"pointer"}}>
+              {misOps.length>0&&(<div style={{background:"#fff",borderRadius:16,padding:18,marginBottom:14,borderLeft:"4px solid #1E3A5F",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}><div style={{width:40,height:40,borderRadius:12,background:"#EFF6FF",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:800,color:T.navy}}>O</div><div><p style={{margin:0,fontSize:15,fontWeight:800}}>Oportunidades</p><p style={{margin:0,fontSize:11,color:T.muted}}>{pipeVal>0?pipeVal.toLocaleString("es-ES")+"E pipeline":misOps.length+" abiertas"}</p></div></div>
+                {misOps.slice(0,5).map(function(o){return <div key={o.id} onClick={function(){onNav("oportunidades");}} style={{display:"flex",justifyContent:"space-between",padding:"10px 0",borderTop:"1px solid #F1F5F9",cursor:"pointer"}}>
                   <div><p style={{margin:0,fontSize:13,fontWeight:600}}>{o.nombre||o.cliente}</p><p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{ESTADOS[o.etapa||o.estado]?ESTADOS[o.etapa||o.estado].label:""}</p></div>
-                  <span style={{fontSize:14,fontWeight:800,color:T.green}}>{o.valor?parseInt(o.valor).toLocaleString("es-ES")+"E":""}</span>
-                </div>;
-              })}
+                  <span style={{fontSize:15,fontWeight:800,color:T.green}}>{o.valor?parseInt(o.valor).toLocaleString("es-ES")+"E":""}</span>
+                </div>;})}
+              </div>)}
+
+              {(misInc.length>0||misMue.length>0)&&(<div style={{display:"flex",gap:10,marginBottom:14}}>
+                {misInc.length>0&&<div onClick={function(){onNav("incidencias");}} style={{flex:1,background:"#fff",borderRadius:16,padding:14,borderLeft:"4px solid #EF4444",cursor:"pointer",textAlign:"center",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}><p style={{margin:0,fontSize:28,fontWeight:800,color:"#EF4444"}}>{misInc.length}</p><p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>Incidencias</p></div>}
+                {misMue.length>0&&<div onClick={function(){onNav("muestras");}} style={{flex:1,background:"#fff",borderRadius:16,padding:14,borderLeft:"4px solid #7C3AED",cursor:"pointer",textAlign:"center",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}><p style={{margin:0,fontSize:28,fontWeight:800,color:T.purple}}>{misMue.length}</p><p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>Muestras pend.</p></div>}
+              </div>)}
+
+              {misTareas.length+misHitos.length+misEst.length+misOps.length+misInc.length+misMue.length===0&&(
+                <div style={{textAlign:"center",padding:"30px 20px",background:"#F0FDF4",borderRadius:16,border:"2px solid #22C55E"}}>
+                  <p style={{margin:"0 0 4px",fontSize:28}}>OK</p><p style={{margin:0,fontSize:16,fontWeight:800,color:"#166534"}}>Todo al dia</p>
+                </div>
+              )}
             </div>
           )}
 
-          {(misInc.length>0||misMue.length>0)&&(
-            <div style={{display:"flex",gap:10,marginBottom:14}}>
-              {misInc.length>0&&<div onClick={function(){onNav("incidencias");}} style={{flex:1,background:"#fff",borderRadius:14,padding:14,border:"1.5px solid #FEE2E2",cursor:"pointer",textAlign:"center"}}>
-                <p style={{margin:0,fontSize:24,fontWeight:800,color:"#EF4444"}}>{misInc.length}</p>
-                <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>Incidencias</p>
-              </div>}
-              {misMue.length>0&&<div onClick={function(){onNav("muestras");}} style={{flex:1,background:"#fff",borderRadius:14,padding:14,border:"1.5px solid #F5F3FF",cursor:"pointer",textAlign:"center"}}>
-                <p style={{margin:0,fontSize:24,fontWeight:800,color:T.purple}}>{misMue.length}</p>
-                <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>Muestras pend.</p>
-              </div>}
+          {/* TAB RUTA */}
+          {tab==="ruta"&&(
+            <div>
+              <p style={{margin:"0 0 14px",fontSize:16,fontWeight:800,color:T.navy}}>{plan.modo==="ruta"?"Ruta "+plan.rutaNum+" \u2014 "+clientesSemana.length+" clientes":"Clientes"}</p>
+
+              {cliVisitados.length>0&&(<div>
+                <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:"#22C55E",textTransform:"uppercase"}}>Visitados ({cliVisitados.length})</p>
+                <div style={{background:"#fff",borderRadius:16,overflow:"hidden",marginBottom:16,opacity:.7,boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
+                  {cliVisitados.map(function(c,i){var n=c.nombre||c.NOMBRE||"";return <div key={i} onClick={function(){marcarVisitado(c.id||n);}} style={{display:"flex",alignItems:"center",gap:12,padding:"14px 18px",borderBottom:i<cliVisitados.length-1?"1px solid #F1F5F9":"none",cursor:"pointer",background:"#F0FDF4"}}>
+                    <div style={{width:38,height:38,borderRadius:10,background:"#D1FAE5",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0}}>V</div>
+                    <div style={{flex:1}}><p style={{margin:0,fontSize:14,fontWeight:700,textDecoration:"line-through",color:"#94A3B8"}}>{n}</p></div>
+                  </div>;})}
+                </div>
+              </div>)}
+
+              {cliPendientes.length>0&&(<div>
+                <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.blue,textTransform:"uppercase"}}>Pendientes ({cliPendientes.length})</p>
+                <div style={{background:"#fff",borderRadius:16,overflow:"hidden",marginBottom:14,boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
+                  {cliPendientes.map(function(c,i){
+                    var n=c.nombre||c.NOMBRE||"";
+                    var poblacion=c.poblacion||c.POBLACION||c.localidad||"";
+                    var info=getCliInfo(c);
+                    var hasInc=misInc.some(function(inc){return (inc.clienteNombre||"").toUpperCase()===n.toUpperCase();});
+                    var isNew=!c.SEMANAVISITA&&!c.semanaVisita;
+                    return <div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"14px 18px",borderBottom:i<cliPendientes.length-1?"1px solid #F1F5F9":"none",cursor:"pointer"}} onClick={function(){onNav("clientes");}}>
+                      <div style={{width:38,height:38,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",fontSize:isNew?12:16,fontWeight:isNew?800:400,flexShrink:0,
+                        background:hasInc?"#FEF3C7":isNew?"#F5F3FF":"#EFF6FF",
+                        color:isNew?T.purple:"inherit"}}>{hasInc?"!!":isNew?"N":"C"}</div>
+                      <div style={{flex:1}}>
+                        <p style={{margin:0,fontSize:14,fontWeight:700,color:isNew?T.purple:T.text}}>{n}</p>
+                        {poblacion&&!hasInc&&<p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{poblacion}</p>}
+                        {info.map(function(inf,j){return <p key={j} style={{margin:"2px 0 0",fontSize:10,color:inf.color,fontWeight:600}}>{inf.text}</p>;})}
+                      </div>
+                      <button onClick={function(ev){ev.stopPropagation();marcarVisitado(c.id||n);}} style={{background:"none",border:"1.5px solid #D1FAE5",borderRadius:8,padding:"4px 8px",fontSize:10,color:"#22C55E",fontWeight:700,cursor:"pointer",flexShrink:0}}>Hecho</button>
+                    </div>;
+                  })}
+                </div>
+              </div>)}
+
+              {clientesSemana.length===0&&plan.modo==="libre"&&<p style={{textAlign:"center",color:T.muted,padding:20}}>Modo libre. Usa el Informe para trabajar con clientes.</p>}
+
+              <button onClick={function(){onNav("clientes");}} style={{width:"100%",padding:14,borderRadius:14,border:"2px dashed #E2E8F0",background:"#fff",color:T.blue,fontWeight:700,fontSize:13,cursor:"pointer",marginBottom:8}}>+ Agregar cliente</button>
+              <button onClick={function(){onNav("clientes");}} style={{width:"100%",padding:14,borderRadius:14,border:"2px dashed "+T.purple,background:"#F5F3FF",color:T.purple,fontWeight:700,fontSize:13,cursor:"pointer"}}>Crear cliente nuevo</button>
             </div>
           )}
 
-          {misTareas.length+misHitos.length+misEst.length+misOps.length+misInc.length+misMue.length===0&&(
-            <div style={{textAlign:"center",padding:"30px 20px",background:"#F0FDF4",borderRadius:14,border:"2px solid #22C55E"}}>
-              <p style={{margin:"0 0 4px",fontSize:28}}>OK</p>
-              <p style={{margin:0,fontSize:16,fontWeight:800,color:"#166534"}}>Todo al dia</p>
-              <p style={{margin:"6px 0 0",fontSize:12,color:"#64748B"}}>Sin pendientes esta semana</p>
-            </div>
-          )}
-
-          <div style={{marginTop:16,display:"flex",flexDirection:"column",gap:10}}>
-            <button onClick={function(){onNav("informe");}} style={{padding:"16px",borderRadius:14,border:"none",background:T.blue,color:"#fff",fontWeight:700,fontSize:14,cursor:"pointer",textAlign:"center"}}>Mis clientes - Seleccionar ruta y trabajar</button>
-            <button onClick={function(){onNav("informe");}} style={{padding:"14px",borderRadius:14,border:"2px solid "+T.navy,background:"#fff",color:T.navy,fontWeight:700,fontSize:13,cursor:"pointer",textAlign:"center"}}>Cerrar semana - Informe</button>
+          <div style={{marginTop:20}}>
+            <button onClick={function(){onNav("informe");}} style={{width:"100%",padding:16,borderRadius:14,border:"none",background:T.navy,color:"#fff",fontWeight:700,fontSize:14,cursor:"pointer",textAlign:"center"}}>Cerrar semana / Ir al Informe</button>
           </div>
         </div>
       )}
