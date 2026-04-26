@@ -167,21 +167,18 @@ async function despacharNotificacion({ tipo, titulo, mensaje, destinatarioId, de
   const notif = {
     id: `notif_${Date.now()}_${Math.random().toString(36).slice(2,6)}`,
     tipo, titulo, mensaje, destinatarioId,
-    destinatarioEmail: destinatarioEmail || (function(){var u=USUARIOS.find(function(x){return x.id===destinatarioId;});return u?u.email:"";})()||"",
+    destinatarioEmail: destinatarioEmail || USUARIOS.find(u => u.id === destinatarioId)?.email || "",
     enlace: enlace || "https://crmwikuk.vercel.app",
     prioridad,
     creadoPor,
-    creadoPorNombre: (function(){var u=USUARIOS.find(function(x){return x.id===creadoPor;});return u?u.nombre:creadoPor;})()||creadoPor,
+    creadoPorNombre: USUARIOS.find(u => u.id === creadoPor)?.nombre || creadoPor,
     fecha: new Date().toISOString(),
     leido: false, emailEnviado: false,
     ...datos,
   };
 
   console.log(`[NOTIF] Destinatario: ${destinatarioId}, email encontrado: "${notif.destinatarioEmail}"`);
-  if(!notif.destinatarioEmail){
-    console.log("[NOTIF] ⚠️ Sin email — revisa que el usuario tenga email en Firebase/Portal");
-    alert("⚠️ El usuario "+destinatarioId+" no tiene email configurado. La notificacion se guardo pero NO se envio email. Configura el email en Admin > Usuarios.");
-  }
+  if(!notif.destinatarioEmail) console.log("[NOTIF] ⚠️ Sin email — revisa que el usuario tenga email en Firebase/Portal");
 
   // Guardar en Firebase
   try {
@@ -873,12 +870,57 @@ function SearchInput({value, onChange, placeholder, suggestions=[], onSelect, st
 // ═══════════════════════════════════════════════════════════════
 // AVISO PLAN SEMANAL (se muestra en el dashboard)
 // ═══════════════════════════════════════════════════════════════
-function AvisoPlanSemanal(){return null;}
+function AvisoPlanSemanal({usuario,semana,onNav}){
+  var _s=React.useState(null);var plan=_s[0],setPlan=_s[1];
+  var _l=React.useState(true);var loading=_l[0],setLoading=_l[1];
+  React.useEffect(function(){
+    fbLeer("planes_semanales").then(function(planes){
+      var found=(planes||[]).find(function(p){return p.agente===usuario.id&&p.semana===semana&&p.anio===new Date().getFullYear();});
+      setPlan(found||null);
+      setLoading(false);
+    });
+  },[semana]);
+  if(loading) return null;
+  if(!plan||plan.estado==="borrador"){
+    return(
+      <div onClick={function(){onNav("plan_semanal");}}
+        style={{background:"#FFFBEB",borderRadius:12,padding:"12px 14px",marginBottom:14,
+          border:"1.5px solid #F59E0B",cursor:"pointer",display:"flex",alignItems:"center",gap:10}}>
+        <span style={{fontSize:22}}>📅</span>
+        <div>
+          <p style={{margin:0,fontSize:13,fontWeight:700,color:"#92400E"}}>
+            {!plan?"No tienes plan para la semana "+semana:"Tu plan de semana "+semana+" esta en borrador"}
+          </p>
+          <p style={{margin:"2px 0 0",fontSize:11,color:"#B45309"}}>Toca aqui para planificar tus visitas y objetivos</p>
+        </div>
+      </div>
+    );
+  }
+  if(plan.estado==="activo"){
+    var total=0,hecho=0;
+    ["lunes","martes","miercoles","jueves","viernes"].forEach(function(d){(plan.dias[d]||[]).forEach(function(v){total++;if(v.hecho)hecho++;});});
+    return(
+      <div onClick={function(){onNav("plan_semanal");}}
+        style={{background:"#EFF6FF",borderRadius:12,padding:"12px 14px",marginBottom:14,
+          border:"1.5px solid #3B82F6",cursor:"pointer",display:"flex",alignItems:"center",gap:10}}>
+        <span style={{fontSize:22}}>🟢</span>
+        <div style={{flex:1}}>
+          <p style={{margin:0,fontSize:13,fontWeight:700,color:"#1E40AF"}}>Semana {semana} en curso</p>
+          <p style={{margin:"2px 0 0",fontSize:11,color:"#3B82F6"}}>{hecho}/{total} visitas completadas</p>
+        </div>
+        <div style={{background:"#DBEAFE",borderRadius:99,padding:"4px 10px"}}>
+          <span style={{fontSize:13,fontWeight:800,color:"#1E40AF"}}>{total>0?Math.round(hecho/total*100):0}%</span>
+        </div>
+      </div>
+    );
+  }
+  return null;
+}
 
 // ═══════════════════════════════════════════════════════════════
 // MI SEMANA — 360° + Acceso a clientes
 // ═══════════════════════════════════════════════════════════════
-function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB,incidenciasDB,muestrasDB,actividad,onAbrirCliente}){
+function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB,incidenciasDB,muestrasDB}){
   var semActual=getSemanaISO();
   var _s1=React.useState(semActual);var semana=_s1[0],setSemana=_s1[1];
   var _s2=React.useState(null);var plan=_s2[0],setPlan=_s2[1];
@@ -921,39 +963,10 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
 
   // Clientes de la ruta
   var clientesSemana=plan&&plan.rutaNum&&rutaMap[plan.rutaNum]?rutaMap[plan.rutaNum]:[];
-  // Cargar visitas reales de Firebase para esta semana
-  var _s7=React.useState([]);var visitasDB=_s7[0],setVisitasDB=_s7[1];
-  React.useEffect(function(){
-    fbLeer("visitas").then(function(d){setVisitasDB(d||[]);});
-  },[]);
-  // Clientes visitados: manual (plan.visitados) + visitas reales de Firebase
-  var visitadosManual=plan&&plan.visitados?plan.visitados:[];
-  var visitadosReales=[];
-  (visitasDB||[]).forEach(function(v){
-    if(!v.agenteId&&!v.agente) return;
-    var agId=(v.agenteId||v.agente||"").toUpperCase();
-    if(!appMisIds.has(agId)) return;
-    var vSem=parseInt(v.semana||0);
-    if(vSem!==semana) return;
-    var cliN=(v.clienteNombre||v.cliente||"").toUpperCase();
-    var cliId=v.clienteId||"";
-    if(cliN&&visitadosReales.indexOf(cliN)<0) visitadosReales.push(cliN);
-    if(cliId&&visitadosReales.indexOf(cliId)<0) visitadosReales.push(cliId);
-  });
-  var esVisitado=function(c){
-    var id=c.id||"";
-    var nom=(c.nombre||c.NOMBRE||"").toUpperCase();
-    // Check manual "Hecho" button
-    if(visitadosManual.indexOf(id)>=0||visitadosManual.indexOf(nom)>=0||visitadosManual.indexOf(c.nombre||c.NOMBRE)>=0) return true;
-    // Check visits from Firebase
-    if(visitadosReales.indexOf(nom)>=0||visitadosReales.indexOf(id)>=0) return true;
-    // Check actividad (local session state - immediate)
-    var act=actividad||{};
-    if(id&&act[id]&&act[id].visitas&&act[id].visitas.length>0) return true;
-    return false;
-  };
-  var cliVisitados=clientesSemana.filter(function(c){return esVisitado(c);});
-  var cliPendientes=clientesSemana.filter(function(c){return !esVisitado(c);});
+  // Visitados tracking (stored in plan.visitados = ["cli_id1","cli_id2"])
+  var visitados=plan&&plan.visitados?plan.visitados:[];
+  var cliVisitados=clientesSemana.filter(function(c){return visitados.indexOf(c.id||c.nombre||c.NOMBRE)>=0;});
+  var cliPendientes=clientesSemana.filter(function(c){return visitados.indexOf(c.id||c.nombre||c.NOMBRE)<0;});
   var conAlerta=cliPendientes.filter(function(c){var n=(c.nombre||c.NOMBRE||"").toUpperCase();return misInc.some(function(i){return (i.clienteNombre||"").toUpperCase()===n;});});
 
   // Info contextual por cliente
@@ -1045,7 +1058,7 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                     var n=c.nombre||c.NOMBRE||"";
                     var info=getCliInfo(c);
                     var hasInc=misInc.some(function(inc){return (inc.clienteNombre||"").toUpperCase()===n.toUpperCase();});
-                    return <div key={i} onClick={function(){if(onAbrirCliente)onAbrirCliente(n);}} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:i<2?"1px solid #F1F5F9":"none",cursor:"pointer"}}>
+                    return <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:i<2?"1px solid #F1F5F9":"none"}}>
                       <div style={{width:28,height:28,borderRadius:8,background:hasInc?"#FEF3C7":"#EFF6FF",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12}}>{hasInc?"⚠️":"🏢"}</div>
                       <div style={{flex:1}}><p style={{margin:0,fontSize:13,fontWeight:600}}>{n}</p></div>
                       {info.length>0&&<span style={{fontSize:10,color:info[0].color,fontWeight:700}}>{info[0].text}</span>}
@@ -1136,12 +1149,9 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
               {cliVisitados.length>0&&(<div>
                 <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:"#22C55E",textTransform:"uppercase"}}>Visitados ({cliVisitados.length})</p>
                 <div style={{background:"#fff",borderRadius:16,overflow:"hidden",marginBottom:16,opacity:.7,boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
-                  {cliVisitados.map(function(c,i){var n=c.nombre||c.NOMBRE||"";var info=getCliInfo(c);return <div key={i} onClick={function(){if(onAbrirCliente)onAbrirCliente(n);}} style={{display:"flex",alignItems:"center",gap:12,padding:"14px 18px",borderBottom:i<cliVisitados.length-1?"1px solid #F1F5F9":"none",cursor:"pointer",background:"#F0FDF4"}}>
+                  {cliVisitados.map(function(c,i){var n=c.nombre||c.NOMBRE||"";return <div key={i} onClick={function(){marcarVisitado(c.id||n);}} style={{display:"flex",alignItems:"center",gap:12,padding:"14px 18px",borderBottom:i<cliVisitados.length-1?"1px solid #F1F5F9":"none",cursor:"pointer",background:"#F0FDF4"}}>
                     <div style={{width:38,height:38,borderRadius:10,background:"#D1FAE5",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0}}>{"✅"}</div>
-                    <div style={{flex:1}}><p style={{margin:0,fontSize:14,fontWeight:700,color:"#64748B"}}>{n}</p>
-                      {info.length>0&&<p style={{margin:"2px 0 0",fontSize:10,color:info[0].color}}>{info[0].text}</p>}
-                    </div>
-                    <span style={{fontSize:14,color:"#94A3B8"}}>{">"}</span>
+                    <div style={{flex:1}}><p style={{margin:0,fontSize:14,fontWeight:700,textDecoration:"line-through",color:"#94A3B8"}}>{n}</p></div>
                   </div>;})}
                 </div>
               </div>)}
@@ -1155,7 +1165,7 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                     var info=getCliInfo(c);
                     var hasInc=misInc.some(function(inc){return (inc.clienteNombre||"").toUpperCase()===n.toUpperCase();});
                     var isNew=!c.SEMANAVISITA&&!c.semanaVisita;
-                    return <div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"14px 18px",borderBottom:i<cliPendientes.length-1?"1px solid #F1F5F9":"none",cursor:"pointer"}} onClick={function(){if(onAbrirCliente){onAbrirCliente(c.nombre||c.NOMBRE||"");}else{onNav("clientes");}}}>
+                    return <div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"14px 18px",borderBottom:i<cliPendientes.length-1?"1px solid #F1F5F9":"none",cursor:"pointer"}} onClick={function(){onNav("clientes");}}>
                       <div style={{width:38,height:38,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",fontSize:isNew?12:16,fontWeight:isNew?800:400,flexShrink:0,
                         background:hasInc?"#FEF3C7":isNew?"#F5F3FF":"#EFF6FF",
                         color:isNew?T.purple:"inherit"}}>{hasInc?"⚠️":isNew?"N":"🏢"}</div>
@@ -2156,7 +2166,7 @@ function RecuperacionStep({estrategias,onBack,onNext,color,uid,todosClientes}){
             📌 Estrategias activas asignadas
           </p>
           {estrategias.map(e=>{
-            const ult=(e.seguimientos||[]).slice(-1)[0];
+            const ult=e.seguimientos?.slice(-1)[0];
             return(
               <Card key={e.id} style={{marginBottom:8,padding:"14px 16px",
                 borderLeft:`4px solid ${T.amber}`}}>
@@ -2196,7 +2206,7 @@ function RecuperacionStep({estrategias,onBack,onNext,color,uid,todosClientes}){
                     {a.nota&&<p style={{margin:"4px 0 0",fontSize:12,color:T.muted,fontStyle:"italic"}}>
                       "{a.nota.slice(0,60)}"
                     </p>}
-                    {(a.ofertas||[]).length>0&&<p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>
+                    {a.ofertas?.length>0&&<p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>
                       🏷️ {a.ofertas.length} oferta{a.ofertas.length>1?"s":""} de precio
                     </p>}
                   </div>
@@ -2314,11 +2324,11 @@ function NuevoClienteForm({ruta,onGuardar,onBack}){
 // Componente fila cliente con nota y histórico
 function ClienteRow({nombre,visita,ops,onSave}){
   const [open,setOpen]=useState(false);
-  const [nota,setNota]=useState((visita||{}).nota||"");
-  const [resultado,setResultado]=useState((visita||{}).resultado||"");
+  const [nota,setNota]=useState(visita?.nota||"");
+  const [resultado,setResultado]=useState(visita?.resultado||"");
 
   const op=ops.find(o=>o.k===resultado);
-  const hist=(visita||{}).historial||[];
+  const hist=visita?.historial||[];
 
   const guardar=()=>{
     if(!resultado) return;
@@ -2340,7 +2350,7 @@ function ClienteRow({nombre,visita,ops,onSave}){
           <div style={{display:"flex",gap:6,alignItems:"center",marginTop:2}}>
             {op?<Badge label={op.label} color={op.color}/>
             :<span style={{fontSize:11,color:T.muted}}>Sin marcar</span>}
-            {(visita||{}).nota&&<span style={{fontSize:10,color:T.muted,fontStyle:"italic",
+            {visita?.nota&&<span style={{fontSize:10,color:T.muted,fontStyle:"italic",
               overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:120}}>
               · {visita.nota}
             </span>}
@@ -2406,7 +2416,7 @@ function ClienteRow({nombre,visita,ops,onSave}){
                   <div key={i} style={{display:"flex",gap:10,marginBottom:8,alignItems:"flex-start"}}>
                     <div style={{width:28,height:28,borderRadius:8,background:hop?hop.color+"15":T.bg,
                       display:"flex",alignItems:"center",justifyContent:"center",
-                      fontSize:13,flexShrink:0}}>{((hop||{}).label||"").split(" ")[0]||"📌"}</div>
+                      fontSize:13,flexShrink:0}}>{hop?.label?.split(" ")[0]||"📌"}</div>
                     <div style={{flex:1}}>
                       {hop&&<Badge label={hop.label} color={hop.color}/>}
                       {h.nota&&<p style={{margin:"3px 0 0",fontSize:12,color:T.text,lineHeight:1.4}}>{h.nota}</p>}
@@ -2453,7 +2463,7 @@ function Informe({usuario, clientesFB}){
   const usarMicrofono=(onTexto)=>{
     const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
     if(!SR){alert("Micrófono no disponible. Usa Chrome o Edge.");return;}
-    if(micActivo){micRef.current&&micRef.current.stop();setMicActivo(false);return;}
+    if(micActivo){micRef.current?.stop();setMicActivo(false);return;}
     const r=new SR();
     r.lang="es-ES"; r.continuous=false; r.interimResults=false;
     micRef.current=r;
@@ -2643,7 +2653,7 @@ function Informe({usuario, clientesFB}){
         // Sub-pantalla: detalle de visita a cliente
         if(clienteSel){
           const vExist=visitas[clienteSel.id];
-          const hist=(vExist||{}).historial||[];
+          const hist=vExist?.historial||[];
           return(
             <div>
               <BackBar label={`Ruta ${rutaSel}`} onBack={()=>setClienteSel(null)}/>
@@ -2757,7 +2767,7 @@ function Informe({usuario, clientesFB}){
               {/* Clientes de la ruta */}
               {[...clientesRuta,...nuevosDeRuta].map(c=>{
                 const v=visitas[c.id];
-                const rOp=RESULTADOS.find(r=>r.k===(v||{}).resultado);
+                const rOp=RESULTADOS.find(r=>r.k===v?.resultado);
                 return(
                   <Card key={c.id} onClick={()=>{setClienteSel(c);setFormV({resultado:"pedido",notas:""}); }}
                     style={{marginBottom:8,padding:"13px 16px",cursor:"pointer",
@@ -2773,13 +2783,13 @@ function Informe({usuario, clientesFB}){
                         <div style={{display:"flex",gap:6,marginTop:3,alignItems:"center"}}>
                           {rOp?<Badge label={rOp.label} color={rOp.color}/>
                           :<span style={{fontSize:11,color:T.muted}}>Sin registrar</span>}
-                          {(v||{}).notas&&<span style={{fontSize:10,color:T.muted,fontStyle:"italic",
+                          {v?.notas&&<span style={{fontSize:10,color:T.muted,fontStyle:"italic",
                             overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:120}}>
                             · {v.notas}
                           </span>}
                         </div>
                       </div>
-                      {(((v||{}).historial||[]).length||0)>0&&(
+                      {(v?.historial?.length||0)>0&&(
                         <span style={{fontSize:10,fontWeight:700,color:T.blue,
                           background:T.blueL,borderRadius:99,padding:"2px 7px",flexShrink:0}}>
                           {v.historial.length} prev.
@@ -3275,7 +3285,7 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
               suggestions={(clientesFB||[])
                 .filter(c=>(c.nombre||c.NOMBRE||"").toLowerCase().includes(nuevaForm.clienteNombre.toLowerCase())&&nuevaForm.clienteNombre.length>=2)
                 .slice(0,8).map(c=>({label:c.nombre||c.NOMBRE,sub:c.id,tipo:"cliente",obj:c}))}
-              onSelect={s=>{setNuevaForm(f=>({...f,clienteNombre:s.label,clienteId:(s.obj||{}).id||""}));setShowNuevoCliente(false);}}
+              onSelect={s=>{setNuevaForm(f=>({...f,clienteNombre:s.label,clienteId:s.obj?.id||""}));setShowNuevoCliente(false);}}
             />
             {!showNuevoCliente?(
               <div style={{display:"flex",gap:8,alignItems:"center",margin:"-6px 0 0"}}>
@@ -3343,7 +3353,7 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
               suggestions={PRODUCTOS_LOCAL
                 .filter(p=>nuevaForm.prod.length>=2&&((p.nombre||"").toLowerCase().includes(nuevaForm.prod.toLowerCase())||(p.codigo||"").toLowerCase().includes(nuevaForm.prod.toLowerCase())))
                 .slice(0,8).map(p=>({label:p.nombre,sub:p.codigo+" · "+p.formato,tipo:"producto",obj:p}))}
-              onSelect={s=>setNuevaForm(f=>({...f,prod:s.label,tipo:(s.obj.cat||"").includes('CTH')?'CTH':(s.obj.cat||"").includes('Deshidrat')?'Deshidratada':'Ingredientes'}))}
+              onSelect={s=>setNuevaForm(f=>({...f,prod:s.label,tipo:s.obj.cat?.includes('CTH')?'CTH':s.obj.cat?.includes('Deshidrat')?'Deshidratada':'Ingredientes'}))}
             />
             <div style={{display:"flex",gap:8}}>
               <select value={nuevaForm.tipo} onChange={e=>setNuevaForm(f=>({...f,tipo:e.target.value}))}
@@ -3593,7 +3603,7 @@ function EstrategiaAprobacionCard({e,usuario,onConfirmar,onRechazar,onEscalar}){
                         {d==="si"?"✅ Aprobado al precio solicitado":
                          d==="precio"?"✏️ Aprobado con precio modificado":
                          d==="no"?"❌ Rechazado":
-                         `↑ Elevado a ${(USUARIOS.find(u=>u.id===destinos[oid])||{}).nombre||"Superior"}`}
+                         `↑ Elevado a ${USUARIOS.find(u=>u.id===destinos[oid])?.nombre||"Superior"}`}
                       </span>
                       <button onClick={()=>setDec(p=>{const n={...p};delete n[oid];return n;})}
                         style={{background:"none",border:"none",fontSize:11,color:T.muted,
@@ -3687,12 +3697,12 @@ function EstrategiaAprobacionCard({e,usuario,onConfirmar,onRechazar,onEscalar}){
 // ESTRATEGIAS — vista clara por rol
 // ═══════════════════════════════════════════════════════════════════
 function MisEstrategias({usuario}){
-  const esJefe  = (usuario||{}).rol==="jefe"||(usuario||{}).rol==="director"||(usuario||{}).rol==="ceo";
-  const esRolJefe = (usuario||{}).rol==="jefe";
-  const esRolDir  = (usuario||{}).rol==="director";
-  const esRolCeo  = (usuario||{}).rol==="ceo";
-  const esAgente  = (usuario||{}).rol==="agente";
-  const miEquipo  = (usuario||{}).equipo;
+  const esJefe  = usuario?.rol==="jefe"||usuario?.rol==="director"||usuario?.rol==="ceo";
+  const esRolJefe = usuario?.rol==="jefe";
+  const esRolDir  = usuario?.rol==="director";
+  const esRolCeo  = usuario?.rol==="ceo";
+  const esAgente  = usuario?.rol==="agente";
+  const miEquipo  = usuario?.equipo;
 
   const [estrategias,setEstrategiasLocal]=useState(()=>GlobalStore.getEstrategias());
   const [cargando,setCargando]=useState(false);
@@ -3717,7 +3727,7 @@ function MisEstrategias({usuario}){
 
   // Marcar como leído al abrir detalle
   useEffect(()=>{
-    if(sel && (usuario||{}).id) marcarComoVisto("estrategias", sel.id, usuario.id);
+    if(sel && usuario?.id) marcarComoVisto("estrategias", sel.id, usuario.id);
   },[sel&&sel.id]);
 
   useEffect(()=>{
@@ -3750,7 +3760,7 @@ function MisEstrategias({usuario}){
   const confirmarEstrategia=(e,ofertasAct,nota)=>{
     const elevadas=ofertasAct.filter(o=>o.elevadaA);
     const hayElevadas=elevadas.length>0;
-    const destElevacion=elevadas.find(o=>o.elevadaA==="ceo")||{}).elevadaA||(elevadas[0]||{}).elevadaA||null;
+    const destElevacion=elevadas.find(o=>o.elevadaA==="ceo")?.elevadaA||elevadas[0]?.elevadaA||null;
     const aprobadas=ofertasAct.filter(o=>o.aprobada===true);
     const rechazadas=ofertasAct.filter(o=>o.aprobada===false);
     const tipoRes=rechazadas.length===ofertasAct.length&&ofertasAct.length>0?"rechazada":
@@ -3782,7 +3792,7 @@ function MisEstrategias({usuario}){
 
   const escalarEstrategia=(e,destId,nota)=>{
     const dest=USUARIOS.find(u=>u.id===destId);
-    const entrada={accion:`↑ Elevada a ${(dest||{}).nombre}`,por:usuario.nombre,
+    const entrada={accion:`↑ Elevada a ${dest?.nombre}`,por:usuario.nombre,
       fecha:new Date().toLocaleDateString("es-ES"),nota};
     const updated=estrategias.map(x=>x.id===e.id?{
       ...x,estado:"pendiente_aprobacion",escaladoA:destId,
@@ -3818,7 +3828,7 @@ function MisEstrategias({usuario}){
 
   // Clasificación
   const deEquipo=(e)=>{
-    if(esRolJefe){const ag=USUARIOS.find(u=>u.id===e.agente);return (ag||{}).equipo===miEquipo||e.equipo===miEquipo;}
+    if(esRolJefe){const ag=USUARIOS.find(u=>u.id===e.agente);return ag?.equipo===miEquipo||e.equipo===miEquipo;}
     return true;
   };
 
@@ -3855,9 +3865,9 @@ function MisEstrategias({usuario}){
         ((e.historialEscalado||[]).some(h=>h.por===usuario.nombre)||e.agente===usuario.id));
 
   const rechazadas=esAgente
-    ? estrategias.filter(e=>esDelEquipoOGlobal(e)&&(e.resolucion||{}).tipo==="rechazada")
+    ? estrategias.filter(e=>esDelEquipoOGlobal(e)&&e.resolucion?.tipo==="rechazada")
     : esRolJefe
-    ? estrategias.filter(e=>deEquipo(e)&&(e.resolucion||{}).tipo==="rechazada"&&e.resolucion.por!==usuario.nombre)
+    ? estrategias.filter(e=>deEquipo(e)&&e.resolucion?.tipo==="rechazada"&&e.resolucion.por!==usuario.nombre)
     : [];
 
   const enRevisionAgente=esAgente?estrategias.filter(e=>esDelEquipoOGlobal(e)&&e.estado==="pendiente_aprobacion"):[];
@@ -3933,8 +3943,8 @@ function MisEstrategias({usuario}){
                 const puedeAprobar=esFinalOK||dto<=miLimite;
                 const jefeVentas=USUARIOS.find(u=>u.rol==="director");
                 const ceoUser=USUARIOS.find(u=>u.rol==="ceo");
-                const superiorId=miLimite<=10?(jefeVentas||{}).id:(ceoUser||{}).id;
-                const superiorNombre=miLimite<=10?"Jefe de Ventas ("+(jefeVentas||{}).nombre+")":"CEO ("+(ceoUser||{}).nombre+")";
+                const superiorId=miLimite<=10?jefeVentas?.id:ceoUser?.id;
+                const superiorNombre=miLimite<=10?"Jefe de Ventas ("+jefeVentas?.nombre+")":"CEO ("+ceoUser?.nombre+")";
 
                 return(
                 <div style={{display:"flex",flexDirection:"column",gap:8}}>
@@ -4405,7 +4415,7 @@ function MisEstrategias({usuario}){
             // ≤10% → Responsable | 11-15% → Jefe Ventas | >15% → CEO
             const agenteDestino=formEst.agenteAsignado||usuario.id;
             const agenteUser=USUARIOS.find(u=>u.id===agenteDestino);
-            const equipoAgente=(agenteUser||{}).equipo||usuario.equipo||"";
+            const equipoAgente=agenteUser?.equipo||usuario.equipo||"";
             const responsable=USUARIOS.find(u=>u.rol==="jefe"&&u.equipo===equipoAgente);
             const jefeVentas=USUARIOS.find(u=>u.rol==="director");
             const ceoUser=USUARIOS.find(u=>u.rol==="ceo");
@@ -4415,9 +4425,9 @@ function MisEstrategias({usuario}){
             if(usuario.rol==="ceo"||usuario.rol==="director"){
               // CEO/Director crea → va al Responsable para último OK antes de llegar al comercial
               estadoInicial="pendiente_aprobacion";
-              pendienteDeId=(responsable||{}).id||agenteDestino;
-              pendienteDeNombre=(responsable||{}).nombre||"Responsable";
-              cadenaAprobacion=[{rol:"responsable",id:(responsable||{}).id,nombre:(responsable||{}).nombre,estado:"pendiente"}];
+              pendienteDeId=responsable?.id||agenteDestino;
+              pendienteDeNombre=responsable?.nombre||"Responsable";
+              cadenaAprobacion=[{rol:"responsable",id:responsable?.id,nombre:responsable?.nombre,estado:"pendiente"}];
             } else if(usuario.rol==="jefe"){
               // Jefe crea → va al Responsable del equipo del agente para OK
               if(responsable&&responsable.id!==usuario.id){
@@ -4435,16 +4445,16 @@ function MisEstrategias({usuario}){
               // Comercial crea → SIEMPRE va al Responsable primero
               // El Responsable decidirá si aprueba (≤10%) o escala a superior
               estadoInicial="pendiente_aprobacion";
-              pendienteDeId=(responsable||{}).id||(jefeVentas||{}).id;
-              pendienteDeNombre=(responsable||{}).nombre||(jefeVentas||{}).nombre||"Superior";
+              pendienteDeId=responsable?.id||jefeVentas?.id;
+              pendienteDeNombre=responsable?.nombre||jefeVentas?.nombre||"Superior";
               cadenaAprobacion=[
-                {rol:"responsable",id:(responsable||{}).id,nombre:(responsable||{}).nombre,estado:"pendiente",limiteDto:10},
+                {rol:"responsable",id:responsable?.id,nombre:responsable?.nombre,estado:"pendiente",limiteDto:10},
               ];
               if(maxDto>10){
-                cadenaAprobacion.push({rol:"jefe_ventas",id:(jefeVentas||{}).id,nombre:(jefeVentas||{}).nombre,estado:"pendiente",limiteDto:15});
+                cadenaAprobacion.push({rol:"jefe_ventas",id:jefeVentas?.id,nombre:jefeVentas?.nombre,estado:"pendiente",limiteDto:15});
               }
               if(maxDto>15){
-                cadenaAprobacion.push({rol:"ceo",id:(ceoUser||{}).id,nombre:(ceoUser||{}).nombre,estado:"pendiente",limiteDto:100});
+                cadenaAprobacion.push({rol:"ceo",id:ceoUser?.id,nombre:ceoUser?.nombre,estado:"pendiente",limiteDto:100});
               }
             }
 
@@ -4551,7 +4561,7 @@ function MisEstrategias({usuario}){
         items:fEqEst(enRevisionAgente),
         renderItem:e=>(
           <CardEst key={e.id} e={e} onClick={()=>setSel(e)}>
-            <Badge label={`⏳ Pendiente de ${e.pendienteDeNombre||(USUARIOS.find(function(u){return u.id===e.pendienteDe;})||{}).nombre||"Responsable"}`} color={T.amber}/>
+            <Badge label={`⏳ Pendiente de ${e.pendienteDeNombre||USUARIOS.find(u=>u.id===e.pendienteDe)?.nombre||"Responsable"}`} color={T.amber}/>
             <span style={{fontSize:10,color:T.muted,marginLeft:"auto"}}>S{e.semana}</span>
           </CardEst>
         )
@@ -4570,8 +4580,8 @@ function MisEstrategias({usuario}){
               style={{background:"#fff",borderRadius:14,padding:"14px 16px",marginBottom:8,
                 cursor:"pointer",border:`2px solid ${T.green}44`,borderLeft:`4px solid ${T.green}`}}>
               <div style={{display:"flex",gap:8,marginBottom:6,flexWrap:"wrap",alignItems:"center"}}>
-                <Badge label={(res||{}).tipo==="aprobada_parcial"?"⚡ Aprobada parcialmente":"✅ Aprobada"} color={T.green}/>
-                <span style={{fontSize:11,color:T.muted}}>por {(res||{}).por} · {(res||{}).fecha}</span>
+                <Badge label={res?.tipo==="aprobada_parcial"?"⚡ Aprobada parcialmente":"✅ Aprobada"} color={T.green}/>
+                <span style={{fontSize:11,color:T.muted}}>por {res?.por} · {res?.fecha}</span>
               </div>
               <p style={{margin:"0 0 4px",fontSize:14,fontWeight:800}}>{e.cliente||e.clienteNombre}</p>
               <p style={{margin:"0 0 6px",fontSize:12,color:T.muted}}>{e.texto||e.estrategia}</p>
@@ -4599,10 +4609,10 @@ function MisEstrategias({usuario}){
                 cursor:"pointer",border:`1px solid ${T.border}`,borderLeft:`4px solid ${T.red}`,opacity:.8}}>
               <div style={{display:"flex",gap:8,marginBottom:6,alignItems:"center"}}>
                 <Badge label="❌ Rechazada" color={T.red}/>
-                <span style={{fontSize:11,color:T.muted}}>por {(res||{}).por} · {(res||{}).fecha}</span>
+                <span style={{fontSize:11,color:T.muted}}>por {res?.por} · {res?.fecha}</span>
               </div>
               <p style={{margin:"0 0 2px",fontSize:14,fontWeight:800}}>{e.cliente||e.clienteNombre}</p>
-              {(res||{}).nota&&<p style={{margin:0,fontSize:12,color:T.muted}}>Motivo: {res.nota}</p>}
+              {res?.nota&&<p style={{margin:0,fontSize:12,color:T.muted}}>Motivo: {res.nota}</p>}
             </div>
           );
         }
@@ -4614,7 +4624,7 @@ function MisEstrategias({usuario}){
         items:fEqEst(elevadasPorMi),
         renderItem:e=>(
           <CardEst key={e.id} e={e} onClick={()=>setSel(e)}>
-            <Badge label={`📤 Escalada a ${e.pendienteDeNombre||(USUARIOS.find(function(u){return u.id===e.pendienteDe;})||{}).nombre||"Superior"}`} color={T.purple}/>
+            <Badge label={`📤 Escalada a ${e.pendienteDeNombre||USUARIOS.find(u=>u.id===e.pendienteDe)?.nombre||"Superior"}`} color={T.purple}/>
           </CardEst>
         )
       })}
@@ -4649,8 +4659,8 @@ function MisEstrategias({usuario}){
         items:fEqEst(misResueltasDir),
         renderItem:e=>(
           <CardEst key={e.id} e={e} onClick={()=>setSel(e)}>
-            <Badge label={(e.resolucion||{}).tipo==="aprobada"?"✅ Aprobada":(e.resolucion||{}).tipo==="rechazada"?"❌ Rechazada":"📋 Resuelta"} 
-              color={(e.resolucion||{}).tipo==="aprobada"?T.green:(e.resolucion||{}).tipo==="rechazada"?T.red:T.muted}/>
+            <Badge label={e.resolucion?.tipo==="aprobada"?"✅ Aprobada":e.resolucion?.tipo==="rechazada"?"❌ Rechazada":"📋 Resuelta"} 
+              color={e.resolucion?.tipo==="aprobada"?T.green:e.resolucion?.tipo==="rechazada"?T.red:T.muted}/>
           </CardEst>
         )
       })}
@@ -4754,11 +4764,10 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB}
   const [filtroEquipoInc,setFiltroEquipoInc]=useState("todos");
   const [agenteSelInc,setAgenteSelInc]=useState(null);
   const [showForm,setShowForm]=useState(false);
-  const [editInc,setEditInc]=useState(null);
 
   // Marcar como leído al abrir detalle
   useEffect(()=>{
-    if(sel && (usuario||{}).id) marcarComoVisto("incidencias", sel.id, usuario.id);
+    if(sel && usuario?.id) marcarComoVisto("incidencias", sel.id, usuario.id);
   },[sel&&sel.id]);
   const [form,setForm]=useState({tipo:"",subtipo:"",prioridad:"media",clienteNombre:"",clienteId:"",productoNombre:"",productoCodigo:"",lote:"",descripcion:"",fotos:[]});
   const fotoRef=React.useRef();
@@ -4766,22 +4775,8 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB}
   const director=USUARIOS.find(u=>u.rol==="director");
   const ceo=USUARIOS.find(u=>u.rol==="ceo");
 
-  // Pre-populate form when editing
-  React.useEffect(function(){
-    if(editInc){
-      setForm({tipo:editInc.tipo||"",subtipo:editInc.subtipo||"",prioridad:editInc.prioridad||"media",clienteNombre:editInc.clienteNombre||"",clienteId:editInc.clienteId||"",productoNombre:editInc.productoNombre||"",productoCodigo:editInc.productoCodigo||"",lote:editInc.lote||"",descripcion:editInc.descripcion||"",fotos:editInc.fotos||[]});
-    }
-  },[editInc&&editInc.id]);
-
   const crearIncidencia=()=>{
     if(!form.tipo||!form.descripcion.trim()){alert("Tipo y descripción son obligatorios");return;}
-    if(editInc){
-      // Modo edicion
-      upd(editInc.id,{...form});
-      setForm({tipo:"",subtipo:"",prioridad:"media",clienteNombre:"",clienteId:"",productoNombre:"",productoCodigo:"",lote:"",descripcion:"",fotos:[]});
-      setShowForm(false);setEditInc(null);
-      return;
-    }
     const nueva={
       id:`inc${Date.now()}`,
       ...form,
@@ -4801,7 +4796,7 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB}
     const jefe=USUARIOS.find(u=>(u.rol==="jefe"||u.rol==="director")&&(u.equipo===usuario.equipo||u.equipo===null));
     if(jefe&&jefe.id!==usuario.id) notificarAsignacion("incidencia",{...nueva,agente:jefe.id},usuario.id);
     setForm({tipo:"",subtipo:"",prioridad:"media",clienteNombre:"",clienteId:"",productoNombre:"",productoCodigo:"",lote:"",descripcion:"",fotos:[]});
-    setShowForm(false);setEditInc(null);
+    setShowForm(false);
   };
 
   const addFoto=(e)=>{
@@ -4818,7 +4813,7 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB}
     setIncidencias(p=>p.map(i=>i.id===id?{...i,...changes}:i));
     const updated={...incidencias.find(i=>i.id===id),...changes};
     fbEscribir("incidencias",id,updated);
-    if((sel||{}).id===id) setSel(updated);
+    if(sel?.id===id) setSel(updated);
   };
 
   const addHistorial=(inc,accion,nota="",fotos=[])=>{
@@ -4828,7 +4823,7 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB}
 
   const escalar=(inc,destId,nota)=>{
     const dest=USUARIOS.find(u=>u.id===destId);
-    const h={accion:`↑ Escalada a ${(dest||{}).nombre}`,por:usuario.nombre,
+    const h={accion:`↑ Escalada a ${dest?.nombre}`,por:usuario.nombre,
       fecha:new Date().toLocaleDateString("es-ES"),nota,fotos:[]};
     upd(inc.id,{estado:"escalada",escaladoA:destId,
       historialEscalado:[...(inc.historialEscalado||[]),h]});
@@ -4843,7 +4838,7 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB}
   const informar=(inc,destId)=>{
     if((inc.informadoA||[]).includes(destId)) return;
     const dest=USUARIOS.find(u=>u.id===destId);
-    const h={accion:`ℹ️ Informado a ${(dest||{}).nombre}`,por:usuario.nombre,
+    const h={accion:`ℹ️ Informado a ${dest?.nombre}`,por:usuario.nombre,
       fecha:new Date().toLocaleDateString("es-ES"),nota:"",fotos:[]};
     upd(inc.id,{informadoA:[...(inc.informadoA||[]),destId],
       historialEscalado:[...(inc.historialEscalado||[]),h]});
@@ -4887,16 +4882,16 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB}
   const cerradas=misMostrar.filter(i=>i.estado==="cerrada"||i.estado==="resuelta");
 
   // ── DETALLE ────────────────────────────────────────────────────────
-function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscalar,onInformar,onNota,onCerrar,onEditar,onEliminar}){
+function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscalar,onInformar,onNota,onCerrar}){
   const tipo=INC_TIPOS[sel.tipo]||{label:sel.tipo,color:T.muted};
   const priColors={urgente:"#7F1D1D",alta:T.red,media:T.amber,baja:T.green};
   const priColor=priColors[sel.prioridad]||T.muted;
   const autorU=USUARIOS.find(u=>u.id===sel.autor);
   const puedoEscalar=esJefe&&sel.estado!=="cerrada";
   const respTipo=USUARIOS.find(u=>u.tipologia===sel.tipo);
-  const yaEscaladoRespTipo=sel.escaladoA===(respTipo||{}).id;
-  const yaInfDir=(sel.informadoA||[]).includes((director||{}).id);
-  const yaInfCeo=(sel.informadoA||[]).includes((ceo||{}).id);
+  const yaEscaladoRespTipo=sel.escaladoA===respTipo?.id;
+  const yaInfDir=(sel.informadoA||[]).includes(director?.id);
+  const yaInfCeo=(sel.informadoA||[]).includes(ceo?.id);
   const [nota,setNota]=useState("");
   const [notaCierre,setNotaCierre]=useState("");
   const [causaRaiz,setCausaRaiz]=useState("");
@@ -4935,7 +4930,7 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
                   background:tipo.color+"15",borderRadius:99,padding:"3px 10px"}}>{tipo.label}</span>
                 <span style={{fontSize:12,fontWeight:700,color:priColor,
                   background:priColor+"15",borderRadius:99,padding:"3px 10px"}}>
-                  {sel.prioridad==="urgente"?"🔴 Urgente":(sel.prioridad||"normal").charAt(0).toUpperCase()+(sel.prioridad||"normal").slice(1)}
+                  {sel.prioridad==="urgente"?"🔴 Urgente":sel.prioridad.charAt(0).toUpperCase()+sel.prioridad.slice(1)}
                 </span>
                 <span style={{fontSize:12,fontWeight:700,
                   color:sel.estado==="cerrada"?T.green:sel.estado==="escalada"?T.purple:T.amber,
@@ -4949,19 +4944,19 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
               </p>
               <p style={{margin:"0 0 10px",fontSize:13,color:T.text,lineHeight:1.6}}>{sel.descripcion||sel.desc}</p>
               <p style={{margin:0,fontSize:11,color:T.muted}}>
-                {(autorU||{}).nombre||sel.autor} · {sel.fecha}
+                {autorU?.nombre||sel.autor} · {sel.fecha}
               </p>
               {sel.escaladoA&&(
                 <div style={{marginTop:8,padding:"7px 10px",background:T.purpleL,borderRadius:8}}>
                   <p style={{margin:0,fontSize:11,color:T.purple,fontWeight:700}}>
-                    ↑ Escalada a: {(USUARIOS.find(u=>u.id===sel.escaladoA)||{}).nombre}
+                    ↑ Escalada a: {USUARIOS.find(u=>u.id===sel.escaladoA)?.nombre}
                   </p>
                 </div>
               )}
               {(sel.informadoA||[]).length>0&&(
                 <div style={{marginTop:6,padding:"7px 10px",background:T.blueL,borderRadius:8}}>
                   <p style={{margin:0,fontSize:11,color:T.blue,fontWeight:700}}>
-                    ℹ️ Informado a: {(sel.informadoA||[]).map(id=>(USUARIOS.find(u=>u.id===id)||{}).nombre||id).join(", ")}
+                    ℹ️ Informado a: {(sel.informadoA||[]).map(id=>USUARIOS.find(u=>u.id===id)?.nombre||id).join(", ")}
                   </p>
                 </div>
               )}
@@ -4993,7 +4988,7 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
                 {yaEscaladoRespTipo&&(
                   <div style={{padding:"10px 14px",background:T.greenL,borderRadius:10}}>
                     <p style={{margin:0,fontSize:12,fontWeight:700,color:T.green}}>
-                      ✅ Ya escalada a {(respTipo||{}).nombre}
+                      ✅ Ya escalada a {respTipo?.nombre}
                     </p>
                   </div>
                 )}
@@ -5163,29 +5158,12 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
               ))}
             </div>
           )}
-
-          {/* Editar / Eliminar */}
-          <div style={{display:"flex",gap:8,marginTop:14}}>
-            {onEditar&&<button onClick={()=>onEditar(sel)}
-              style={{flex:1,padding:"12px",borderRadius:10,border:"1.5px solid "+T.border,
-                background:"#fff",color:T.navy,fontWeight:600,fontSize:13,cursor:"pointer"}}>
-              Editar incidencia
-            </button>}
-            {onEliminar&&<button onClick={()=>{if(confirm("Eliminar esta incidencia? Esta accion no se puede deshacer."))onEliminar(sel);}}
-              style={{padding:"12px 16px",borderRadius:10,border:"1.5px solid #FEE2E2",
-                background:"#FEF2F2",color:T.red,fontWeight:600,fontSize:13,cursor:"pointer"}}>
-              Eliminar
-            </button>}
-          </div>
         </div>
       </div>
   );
 }
 
-  if(sel) return <DetIncidencia sel={sel} usuario={usuario} director={director} ceo={ceo} esJefe={esJefe} esRolJefe={esRolJefe} onBack={()=>setSel(null)} onEscalar={(destId,nota)=>{escalar(sel,destId,nota);setSel({...sel,escaladoA:destId,estado:"escalada"});}} onInformar={(destId)=>informar(sel,destId)} onNota={(nota)=>addHistorial(sel,"💬 Nota",nota)} onCerrar={(nota,extras)=>cerrar(sel,nota,extras)}
-    onEditar={(inc)=>{setSel(null);setEditInc(inc);setShowForm(true);}}
-    onEliminar={(inc)=>{upd(inc.id,{eliminada:true});setSel(null);}}
-  />;
+  if(sel) return <DetIncidencia sel={sel} usuario={usuario} director={director} ceo={ceo} esJefe={esJefe} esRolJefe={esRolJefe} onBack={()=>setSel(null)} onEscalar={(destId,nota)=>{escalar(sel,destId,nota);setSel({...sel,escaladoA:destId,estado:"escalada"});}} onInformar={(destId)=>informar(sel,destId)} onNota={(nota)=>addHistorial(sel,"💬 Nota",nota)} onCerrar={(nota,extras)=>cerrar(sel,nota,extras)}/>;
 
   // ── LISTA ─────────────────────────────────────────────────────────
   return(
@@ -5216,7 +5194,7 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
       {showForm&&(
         <div style={{background:"#fff",borderRadius:16,padding:"16px",marginBottom:16,
           border:`2px solid ${T.red}`}}>
-          <p style={{margin:"0 0 14px",fontSize:15,fontWeight:800,color:T.text}}>🚨 {editInc?"Editar incidencia":"Nueva incidencia"}</p>
+          <p style={{margin:"0 0 14px",fontSize:15,fontWeight:800,color:T.text}}>🚨 Nueva incidencia</p>
 
           {/* Cliente */}
           <div style={{marginBottom:12}}>
@@ -5350,7 +5328,7 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
                 background:form.tipo&&form.descripcion.trim()&&form.clienteNombre.trim()?T.red:"#CBD5E1",
                 color:"#fff",fontWeight:700,fontSize:14,
                 cursor:form.tipo&&form.descripcion.trim()&&form.clienteNombre.trim()?"pointer":"default"}}>
-              🚨 {editInc?"Guardar cambios":"Crear incidencia"}
+              🚨 Crear incidencia
             </button>
           </div>
         </div>
@@ -5394,11 +5372,11 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
                     background:tipo.color+"15",borderRadius:99,padding:"2px 8px"}}>{tipo.label}</span>
                   <span style={{fontSize:11,fontWeight:700,color:pColor,
                     background:pColor+"15",borderRadius:99,padding:"2px 8px"}}>
-                    {i.prioridad==="urgente"?"🔴 Urgente":(i.prioridad||"normal").charAt(0).toUpperCase()+(i.prioridad||"normal").slice(1)}
+                    {i.prioridad==="urgente"?"🔴 Urgente":i.prioridad.charAt(0).toUpperCase()+i.prioridad.slice(1)}
                   </span>
                   {i.escaladoA&&<span style={{fontSize:11,fontWeight:700,color:T.purple,
                     background:T.purpleL,borderRadius:99,padding:"2px 8px"}}>
-                    ↑ {(USUARIOS.find(function(u){return u.id===i.escaladoA;})||{}).nombre||""}
+                    ↑ {USUARIOS.find(u=>u.id===i.escaladoA)?.nombre}
                   </span>}
                   <span style={{fontSize:10,color:T.muted,marginLeft:"auto"}}>{i.fecha}</span>
                 </div>
@@ -5407,7 +5385,7 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
                   textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{i.descripcion||i.desc}</p>
                 {(i.informadoA||[]).length>0&&(
                   <p style={{margin:"4px 0 0",fontSize:10,color:T.blue,fontWeight:600}}>
-                    ℹ️ Informado a: {(i.informadoA||[]).map(id=>(USUARIOS.find(u=>u.id===id)||{}).nombre||id).join(", ")}
+                    ℹ️ Informado a: {(i.informadoA||[]).map(id=>USUARIOS.find(u=>u.id===id)?.nombre||id).join(", ")}
                   </p>
                 )}
               </div>
@@ -5715,7 +5693,7 @@ function PanelAdmin({onBack}){
                 {visible&&(
                   <div style={{background:T.navy,borderRadius:10,padding:"10px 14px",display:"flex",alignItems:"center",gap:10}}>
                     <p style={{margin:0,flex:1,fontSize:16,fontWeight:800,color:"#fff",fontFamily:"monospace",letterSpacing:1}}>{u.pass}</p>
-                    <button onClick={()=>{navigator.clipboard&&navigator.clipboard.writeText(u.pass);}}
+                    <button onClick={()=>{navigator.clipboard?.writeText(u.pass);}}
                       style={{background:"#ffffff22",border:"none",borderRadius:7,padding:"6px 10px",
                         color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer"}}>
                       Copiar
@@ -5856,14 +5834,14 @@ function TareasWidget({ onNav, usuario }) {
   const [tareas, setTareas] = useState([]);
   const [cargando, setCargando] = useState(true);
 
-  const esCeo      = (usuario||{}).rol === "ceo";
-  const esDir      = (usuario||{}).rol === "director";
-  const esJefe     = (usuario||{}).rol === "jefe";
-  const esAgente   = (usuario||{}).rol === "agente";
+  const esCeo      = usuario?.rol === "ceo";
+  const esDir      = usuario?.rol === "director";
+  const esJefe     = usuario?.rol === "jefe";
+  const esAgente   = usuario?.rol === "agente";
   const esJefeOmas = esCeo || esDir || esJefe;
 
   const agentesEquipo = USUARIOS.filter(u =>
-    u.rol === "agente" && (esJefe ? u.equipo === (usuario||{}).equipo : true)
+    u.rol === "agente" && (esJefe ? u.equipo === usuario?.equipo : true)
   );
 
   const misIds = resolverMisIds(usuario);
@@ -5900,7 +5878,7 @@ function TareasWidget({ onNav, usuario }) {
       setTareas(filtradas);
       if (data.length === 0) TAREAS_SEED.forEach(t => fbEscribir("tareas", t.id, t));
     }).catch(()=>{}).finally(()=>setCargando(false));
-  }, [(usuario||{}).id]);
+  }, [usuario?.id]);
 
   if (cargando || tareas.length === 0) return null;
 
@@ -5988,7 +5966,7 @@ function TareasWidget({ onNav, usuario }) {
                       if(!proy) return;
                       const nombreHito=(t.titulo||"").replace("📍 Hito: ","").trim();
                       const hitos=(proy.hitos||[]).map(h=>
-                        !h.hecho&&(h.nombre===nombreHito||(t.titulo||"").includes(h.nombre))
+                        !h.hecho&&(h.nombre===nombreHito||t.titulo?.includes(h.nombre))
                           ?{...h,hecho:true,fechaHecho:hoy}:h
                       );
                       const progreso=hitos.length>0?Math.round(hitos.filter(h=>h.hecho).length/hitos.length*100):0;
@@ -6020,17 +5998,17 @@ function TareasWidget({ onNav, usuario }) {
 
 // Sección completa de gestión de tareas
 function GestorTareas({ usuario, clientesFB }) {
-  const esCeo      = (usuario||{}).rol === "ceo";
-  const esDir      = (usuario||{}).rol === "director";
-  const esJefe     = (usuario||{}).rol === "jefe";
-  const esAgente   = (usuario||{}).rol === "agente";
+  const esCeo      = usuario?.rol === "ceo";
+  const esDir      = usuario?.rol === "director";
+  const esJefe     = usuario?.rol === "jefe";
+  const esAgente   = usuario?.rol === "agente";
   const esJefeOmas = esCeo || esDir || esJefe;
 
   const misIds = resolverMisIds(usuario);
 
   // Agentes disponibles para asignación
   const agentesAsig = USUARIOS.filter(u =>
-    (esJefe ? u.equipo === usuario.equipo : true)
+    u.rol === "agente" && (esJefe ? u.equipo === usuario.equipo : true)
   );
 
   const [tareas,     setTareas]     = useState([]);
@@ -6122,7 +6100,7 @@ function GestorTareas({ usuario, clientesFB }) {
         // Buscar el hito por nombre (ya que guardamos el nombre en el título de la tarea)
         const nombreHito=(tarea.titulo||"").replace("📍 Hito: ","").trim();
         const hitos=(proy.hitos||[]).map(h=>{
-          if(!h.hecho && (h.nombre===nombreHito||(tarea.titulo||"").includes(h.nombre))){
+          if(!h.hecho && (h.nombre===nombreHito||tarea.titulo?.includes(h.nombre))){
             return{...h,hecho:true,fechaHecho:hoy};
           }
           return h;
@@ -6159,10 +6137,10 @@ function GestorTareas({ usuario, clientesFB }) {
     if(agFiltro.startsWith("eq_")){
       const eq=agFiltro.replace("eq_","");
       const ag=USUARIOS.find(u=>u.id===(t.agente||""));
-      return (ag||{}).equipo===eq;
+      return ag?.equipo===eq;
     }
     return (t.agente||"").toUpperCase()===agFiltro.toUpperCase()||
-      (USUARIOS.find(u=>u.id===agFiltro)||{}).grupoAgente===(t.agente||"");
+      USUARIOS.find(u=>u.id===agFiltro)?.grupoAgente===(t.agente||"");
   });
   const pendCount  = tareasFiltroActual.filter(t=>t.estado==="pendiente").length;
   const urgCount   = tareasFiltroActual.filter(t=>t.estado==="pendiente"&&t.prioridad==="urgente").length;
@@ -6173,9 +6151,9 @@ function GestorTareas({ usuario, clientesFB }) {
     .filter(t => filtro==="todas" ? true : t.estado===filtro)
     .filter(t => agFiltro==="todos" ? true
       : agFiltro==="sin_asignar" ? !t.agente
-      : agFiltro.startsWith("eq_") ? (USUARIOS.find(function(u){return u.id===(t.agente||"");})||{}).equipo===agFiltro.replace("eq_","")
+      : agFiltro.startsWith("eq_") ? USUARIOS.find(u=>u.id===(t.agente||""))?.equipo===agFiltro.replace("eq_","")
       : (t.agente||"").toUpperCase()===(agFiltro||"").toUpperCase()
-        || (USUARIOS.find(u=>u.id===agFiltro)||{}).grupoAgente===(t.agente||""))
+        || USUARIOS.find(u=>u.id===agFiltro)?.grupoAgente===(t.agente||""))
     .sort((a,b) => ({urgente:0,alta:1,normal:2}[a.prioridad]||2) - ({urgente:0,alta:1,normal:2}[b.prioridad]||2));
 
   const inp = {width:"100%",border:`1.5px solid ${T.border}`,borderRadius:9,padding:"10px 12px",
@@ -6388,13 +6366,13 @@ function GestorTareas({ usuario, clientesFB }) {
                     if(ag) break;
                   }
                   const subStr=ag?`${c.id||""} · 👤 ${ag.nombre}`:(c.id?`${c.id} · ⚠️ sin agente asignado`:"⚠️ sin agente");
-                  return {label:c.nombre||c.NOMBRE||"(sin nombre)",sub:subStr,tipo:"cliente",obj:{...c,_agenteId:ag?ag.id:""}};
+                  return {label:c.nombre||c.NOMBRE||"(sin nombre)",sub:subStr,tipo:"cliente",obj:{...c,_agenteId:ag?.id||""}};
                 })}
               onSelect={s=>{
                 upd("cliente",s.label);
                 // Auto-asignar agente del cliente
                 if(esJefeOmas){
-                  if(s.obj&&s.obj._agenteId){
+                  if(s.obj?._agenteId){
                     upd("agenteId",s.obj._agenteId);
                     console.log("✅ Agente auto-asignado:",s.obj._agenteId,"para cliente",s.label);
                   } else {
@@ -6418,48 +6396,15 @@ function GestorTareas({ usuario, clientesFB }) {
                 <option value="otro">📌 Otro</option>
               </select>
             </div>
-            <input type="date" style={inp} value={form.vence} onChange={e=>upd("vence",e.target.value)}/>
+            <input style={inp} type="date" value={form.vence} onChange={e=>upd("vence",e.target.value)}/>
             {/* Asignación — solo managers */}
             {esJefeOmas && (
-              <div>
-                <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:T.muted}}>Asignar a:</p>
-                {form.agenteId&&(function(){
-                  var sel=USUARIOS.find(function(u){return u.id===form.agenteId;});
-                  return <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:"#F0FDF4",borderRadius:10,border:"1.5px solid #D1FAE5",marginBottom:8}}>
-                    <div style={{width:32,height:32,borderRadius:8,background:sel?sel.color||T.blue:T.blue,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:14}}>{sel?sel.icon||"?":"?"}</div>
-                    <div style={{flex:1}}>
-                      <p style={{margin:0,fontSize:13,fontWeight:700,color:"#166534"}}>{sel?sel.nombre:form.agenteId}</p>
-                      <p style={{margin:0,fontSize:10,color:T.muted}}>{sel?sel.equipo||sel.tipologia||"":""}</p>
-                    </div>
-                    <button onClick={function(){upd("agenteId","");}} style={{background:"none",border:"none",color:T.red,fontSize:16,cursor:"pointer",padding:4}}>x</button>
-                  </div>;
-                })()}
-                {!form.agenteId&&<div style={{maxHeight:220,overflow:"auto",border:"1.5px solid "+T.border,borderRadius:12,background:"#fff"}}>
-                  {[
-                    {label:"WIKUK",filter:function(u){return u.equipo==="WIKUK";}},
-                    {label:"INTERKEY",filter:function(u){return u.equipo==="INTERKEY";}},
-                    {label:"DIRECCION",filter:function(u){return u.rol==="ceo"||u.rol==="director";}},
-                    {label:"DEPARTAMENTOS",filter:function(u){return u.rol==="tipologia";}}
-                  ].map(function(grupo){
-                    var miembros=USUARIOS.filter(grupo.filter);
-                    if(miembros.length===0) return null;
-                    return <div key={grupo.label}>
-                      <div style={{padding:"7px 14px",background:"#F1F5F9",fontSize:10,fontWeight:800,color:T.navy,letterSpacing:".06em",borderBottom:"1px solid #E2E8F0"}}>{grupo.label}</div>
-                      {miembros.map(function(a){
-                        var rolTxt=a.rol==="agente"?"Comercial":a.rol==="jefe"?"Responsable":a.rol==="director"?"Jefe Ventas":a.rol==="ceo"?"CEO":a.tipologia?a.tipologia.charAt(0).toUpperCase()+a.tipologia.slice(1):a.rol;
-                        return <div key={a.id} onClick={function(){upd("agenteId",a.id);}}
-                          style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderBottom:"1px solid #F8FAFC",cursor:"pointer"}}>
-                          <div style={{width:34,height:34,borderRadius:9,background:a.color||T.blue,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:14,flexShrink:0}}>{a.icon||"?"}</div>
-                          <div style={{flex:1}}>
-                            <p style={{margin:0,fontSize:13,fontWeight:600}}>{a.nombre}</p>
-                            <p style={{margin:0,fontSize:10,color:T.muted}}>{rolTxt}</p>
-                          </div>
-                        </div>;
-                      })}
-                    </div>;
-                  })}
-                </div>}
-              </div>
+              <select style={inp} value={form.agenteId} onChange={e=>upd("agenteId",e.target.value)}>
+                <option value="">⚪ Sin asignar (pendiente de agente)</option>
+                {agentesAsig.map(a=>(
+                  <option key={a.id} value={a.id}>{a.icon} {a.nombre} · {a.equipo}</option>
+                ))}
+              </select>
             )}
             <div style={{display:"flex",gap:8}}>
               <button onClick={guardar}
@@ -6818,7 +6763,7 @@ async function fbEscribir(coleccion, id, datos){
     });
     if(!r.ok){
       const e=await r.json().catch(()=>({}));
-      const msg=(e&&e.error?e.error.message:"")||(e&&e.error?e.error.status:"")||r.status;
+      const msg=e?.error?.message||e?.error?.status||r.status;
       console.warn(`🔴 Firebase [${coleccion}/${id}] error ${r.status}:`, msg);
       if(r.status===403||r.status===401){
         console.warn("⚠️ REGLAS FIREBASE: La base de datos no permite escritura anónima.");
@@ -6863,8 +6808,8 @@ function parseFirestoreMap(fields) {
   return obj;
 }
 function fromFirestore(doc) {
-  if (!doc.fields) return {id: (doc.name||"").split("/").pop()};
-  const obj = {id: (doc.name||"").split("/").pop()};
+  if (!doc.fields) return {id: doc.name?.split("/").pop()};
+  const obj = {id: doc.name?.split("/").pop()};
   Object.entries(doc.fields).forEach(([k, v]) => {
     const val = parseFirestoreValue(v);
     if (val !== undefined) obj[k] = val;
@@ -7241,7 +7186,7 @@ function DashDirector({usuario, onNav, estrategiasDB}){
                 <span style={{fontSize:20}}>{ei}</span>
                 <div style={{flex:1,minWidth:0}}>
                   <p style={{margin:0,fontSize:13,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{op.cliente}</p>
-                  <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{(ag||{}).nombre||""} · {op.prod}</p>
+                  <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{ag?.nombre||""} · {op.prod}</p>
                 </div>
                 <div style={{textAlign:"right",flexShrink:0}}>
                   <p style={{margin:0,fontSize:14,fontWeight:900,color:T.text}}>{fmt(op.valor)}€</p>
@@ -7323,30 +7268,30 @@ const ESTADOS={
 
 function Wizard({usuario,datosEscaneados,opoEditar,onSave,onClose}){
   const [step,setStep]=useState(opoEditar?3:0);
-  const [tipo,setTipo]=useState((opoEditar||{}).tipoOpo||"nuevo");
+  const [tipo,setTipo]=useState(opoEditar?.tipoOpo||"nuevo");
   const [cli,setCli]=useState({
-    nombre:(opoEditar||{}).cliente||(datosEscaneados||{}).empresa||"",
-    tipologia:(opoEditar||{}).tipologia||"",
-    nif:(opoEditar||{}).nif||(datosEscaneados||{}).nif||"",
-    contacto:(opoEditar||{}).contacto||(datosEscaneados||{}).contacto||"",
-    cargo:(opoEditar||{}).cargo||(datosEscaneados||{}).cargo||"",
-    telefono:(opoEditar||{}).telefono||(datosEscaneados||{}).telefono||"",
-    email:(opoEditar||{}).email||(datosEscaneados||{}).email||"",
-    ciudad:(opoEditar||{}).ciudad||(datosEscaneados||{}).ciudad||"",
-    web:(opoEditar||{}).web||"",
-    direccion:(opoEditar||{}).direccion||(datosEscaneados||{}).direccion||"",
-    descripcion:(opoEditar||{}).descripcionCliente||"",
+    nombre:opoEditar?.cliente||datosEscaneados?.empresa||"",
+    tipologia:opoEditar?.tipologia||"",
+    nif:opoEditar?.nif||datosEscaneados?.nif||"",
+    contacto:opoEditar?.contacto||datosEscaneados?.contacto||"",
+    cargo:opoEditar?.cargo||datosEscaneados?.cargo||"",
+    telefono:opoEditar?.telefono||datosEscaneados?.telefono||"",
+    email:opoEditar?.email||datosEscaneados?.email||"",
+    ciudad:opoEditar?.ciudad||datosEscaneados?.ciudad||"",
+    web:opoEditar?.web||"",
+    direccion:opoEditar?.direccion||datosEscaneados?.direccion||"",
+    descripcion:opoEditar?.descripcionCliente||"",
   });
-  const [fotos,setFotos]=useState((opoEditar||{}).fotos||[]);
+  const [fotos,setFotos]=useState(opoEditar?.fotos||[]);
   const [desc,setDesc]=useState(()=>{
-    const n=(opoEditar||{}).descripcion||(opoEditar||{}).descripcionOportunidad||(opoEditar||{}).notas||"";
+    const n=opoEditar?.descripcion||opoEditar?.descripcionOportunidad||opoEditar?.notas||"";
     return typeof n==="string"?n:Array.isArray(n)?n.map(x=>typeof x==="string"?x:x.texto||x.nota||"").join("\n"):"";
   });
-  const [asignado,setAsignado]=useState((opoEditar||{}).agenteId||(opoEditar||{}).agente||"");
-  const [valor,setValor]=useState((opoEditar||{}).valor||0);
-  const [prob,setProb]=useState((opoEditar||{}).prob||50);
-  const [etapa,setEtapa]=useState((opoEditar||{}).etapa||"propuesta");
-  const [fecha,setFecha]=useState((opoEditar||{}).fecha||"");
+  const [asignado,setAsignado]=useState(opoEditar?.agenteId||opoEditar?.agente||"");
+  const [valor,setValor]=useState(opoEditar?.valor||0);
+  const [prob,setProb]=useState(opoEditar?.prob||50);
+  const [etapa,setEtapa]=useState(opoEditar?.etapa||"propuesta");
+  const [fecha,setFecha]=useState(opoEditar?.fecha||"");
   const [grabando,setGrabando]=useState(false);
   const [scanLoading,setScanLoading]=useState(false);
   const [fotoTarjeta,setFotoTarjeta]=useState(null);
@@ -7454,7 +7399,7 @@ function Wizard({usuario,datosEscaneados,opoEditar,onSave,onClose}){
   };
 
   const guardar=()=>{
-    const id=(opoEditar||{}).id||`opo_${Date.now()}_${Math.random().toString(36).slice(2,6)}`;
+    const id=opoEditar?.id||`opo_${Date.now()}_${Math.random().toString(36).slice(2,6)}`;
     onSave({
       id,
       tipoOpo:tipo,
@@ -7715,9 +7660,9 @@ function Wizard({usuario,datosEscaneados,opoEditar,onSave,onClose}){
                 {k:"descripcion",l:"Descripción del cliente",ph:"Tipo de negocio, empleados, productos que trabaja, situación actual...",multi:true},
               ].map((f,i,arr)=>{
                 const prev=i>0?arr[i-1]:null;
-                const isSecondHalf=f.half&&(prev||{}).half;
+                const isSecondHalf=f.half&&prev?.half;
                 if(isSecondHalf) return null; // rendered in pair
-                const next=f.half&&((arr[i+1])||{}).half?arr[i+1]:null;
+                const next=f.half&&arr[i+1]?.half?arr[i+1]:null;
                 if(f.half&&next){
                   return(
                     <div key={f.k} style={{display:"flex",gap:10,marginBottom:12}}>
@@ -7756,7 +7701,7 @@ function Wizard({usuario,datosEscaneados,opoEditar,onSave,onClose}){
               <p style={{margin:"0 0 4px",fontSize:18,fontWeight:800}}>Fotos e imágenes</p>
               <p style={{margin:"0 0 16px",fontSize:13,color:T.muted}}>Tarjeta de visita, local, catálogo, documentos... Escribe una descripción en cada imagen</p>
 
-              <div onClick={()=>fotoRef.current&&fotoRef.current.click()}
+              <div onClick={()=>fotoRef.current?.click()}
                 style={{border:`2px dashed ${T.border}`,borderRadius:14,padding:"32px 16px",textAlign:"center",cursor:"pointer",marginBottom:16,background:"#FAFAFA"}}>
                 <span style={{fontSize:36,display:"block",marginBottom:8}}>📷</span>
                 <p style={{margin:"0 0 4px",fontSize:14,fontWeight:700}}>Añadir imágenes</p>
@@ -7884,7 +7829,7 @@ function Wizard({usuario,datosEscaneados,opoEditar,onSave,onClose}){
                 <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>
                   {TIPOS.find(t=>t.k===tipo)&&(
                     <span style={{background:T.navy,color:"#fff",padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:700}}>
-                      {TIPOS.find(t=>t.k===tipo)||{}).icon} {TIPOS.find(t=>t.k===tipo)||{}).label}
+                      {TIPOS.find(t=>t.k===tipo)?.icon} {TIPOS.find(t=>t.k===tipo)?.label}
                     </span>
                   )}
                   {cli.tipologia&&<span style={{background:T.blue+"15",color:T.blue,padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:700}}>{cli.tipologia}</span>}
@@ -8098,11 +8043,11 @@ function GestorOportunidades({usuario, onAbrirCliente}){
   const [filtroEquipoOpo,setFiltroEquipoOpo]=useState("todos");
   const [agenteSelOpo,setAgenteSelOpo]=useState(null);
 
-  const esAgente=(usuario||{}).rol==="agente";
-  const esJefe=(usuario||{}).rol==="jefe";
-  const esDir=["director","ceo"].includes((usuario||{}).rol);
+  const esAgente=usuario?.rol==="agente";
+  const esJefe=usuario?.rol==="jefe";
+  const esDir=["director","ceo"].includes(usuario?.rol);
   const appMisIds=resolverMisIds(usuario);
-  const miEquipo=(usuario||{}).equipo;
+  const miEquipo=usuario?.equipo;
 
   // Cargar desde Firebase al arrancar
   const cargarOpos=()=>{
@@ -8180,10 +8125,10 @@ function GestorOportunidades({usuario, onAbrirCliente}){
     setDetalle(null);
   };
 
-  const esRolJefe=(usuario||{}).rol==="jefe";
-  const esRolAgente=(usuario||{}).rol==="agente";
-  const esRolDir=["director","ceo"].includes((usuario||{}).rol);
-  const miEquipoOpo=(usuario||{}).equipo;
+  const esRolJefe=usuario?.rol==="jefe";
+  const esRolAgente=usuario?.rol==="agente";
+  const esRolDir=["director","ceo"].includes(usuario?.rol);
+  const miEquipoOpo=usuario?.equipo;
 
   // Pre-filtro por rol — agente SOLO ve las suyas
   // Resolver ID CRM real desde grupoAgente (portal puede usar ID distinto)
@@ -8200,7 +8145,7 @@ function GestorOportunidades({usuario, onAbrirCliente}){
     if(esRolAgente) return misCrmIds.has(o.agenteId)||misCrmIds.has(o.agente);
     if(esRolJefe){
       const ag=USUARIOS.find(u=>u.id===(o.agenteId||o.agente));
-      return (ag||{}).equipo===miEquipoOpo||o.equipoId===miEquipoOpo;
+      return ag?.equipo===miEquipoOpo||o.equipoId===miEquipoOpo;
     }
     return true; // director/ceo ve todas
   }),[opos,misCrmIds,esRolAgente,esRolJefe,miEquipoOpo]);
@@ -8246,7 +8191,7 @@ function GestorOportunidades({usuario, onAbrirCliente}){
               <p style={{margin:0,fontSize:compact?13:14,fontWeight:800,color:T.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:compact?"nowrap":"normal"}}>{o.nombre}</p>
               {!compact&&<span style={{padding:"2px 8px",borderRadius:5,background:est.bg,color:est.color,fontSize:10,fontWeight:700,flexShrink:0}}>{est.dot} {est.label}</span>}
             </div>
-            {!compact&&<p style={{margin:"0 0 8px",fontSize:12,color:T.muted,lineHeight:1.5}}>{(o.descripcionOportunidad||"").slice(0,100)}{((o.descripcionOportunidad||"").length||0)>100?"…":""}</p>}
+            {!compact&&<p style={{margin:"0 0 8px",fontSize:12,color:T.muted,lineHeight:1.5}}>{o.descripcionOportunidad?.slice(0,100)}{(o.descripcionOportunidad?.length||0)>100?"…":""}</p>}
             <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
               {ag?<div style={{display:"flex",gap:4,alignItems:"center"}}><span style={{width:16,height:16,borderRadius:"50%",background:ag.color,display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"#fff",flexShrink:0}}>{ag.icon||ag.nombre[0]}</span><span style={{fontSize:11,color:T.muted}}>{ag.nombre}</span></div>
               :<span style={{fontSize:11,color:T.amber,fontWeight:600}}>⚠️ Sin asignar</span>}
@@ -8281,7 +8226,7 @@ function GestorOportunidades({usuario, onAbrirCliente}){
       {showScanner&&<Wizard usuario={usuario} datosEscaneados={null} onSave={addOpo} onClose={()=>{setShowScanner(false);}}/>}
       {!showScanner&&showForm&&<Wizard usuario={usuario} datosEscaneados={scanDatos} onSave={addOpo} onClose={()=>{setShowForm(false);setScanDatos(null);}}/>}
       {editando&&<Wizard usuario={usuario} opoEditar={editando} onSave={async o=>{
-        const updated={...editando,...o,id:editando.id,historial:[...(editando.historial||[]),{accion:"✏️ Oportunidad editada",por:(usuario||{}).nombre||"Usuario",fecha:new Date().toLocaleDateString("es-ES"),nota:""}]};
+        const updated={...editando,...o,id:editando.id,historial:[...(editando.historial||[]),{accion:"✏️ Oportunidad editada",por:usuario?.nombre||"Usuario",fecha:new Date().toLocaleDateString("es-ES"),nota:""}]};
         await updOpo(updated);
         setDetalle(updated);
         setEditando(null);
@@ -8385,10 +8330,10 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion}){
   const [notaCierre,setNotaCierre]=useState("");
   const [motivoCierreProy,setMotivoCierreProy]=useState("");
   const [nuevaTarea,setNuevaTarea]=useState({depto:"",texto:"",resp:""});
-  const esJefeOmas=["jefe","director","ceo"].includes((usuario||{}).rol);
-  const esAgente=(usuario||{}).rol==="agente";
-  const esJefe=(usuario||{}).rol==="jefe";
-  const miEquipo=(usuario||{}).equipo;
+  const esJefeOmas=["jefe","director","ceo"].includes(usuario?.rol);
+  const esAgente=usuario?.rol==="agente";
+  const esJefe=usuario?.rol==="jefe";
+  const miEquipo=usuario?.equipo;
   const appMisIds=resolverMisIds(usuario);
 
   // Cargar proyectos desde Firebase con filtro por rol
@@ -8413,7 +8358,7 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion}){
         setProyectos(todos);
       }
     }).catch(()=>{});
-  },[(usuario||{}).id]);
+  },[usuario?.id]);
 
   const DEPTOS_PROY=[
     {k:"calidad",   icon:"🔬",label:"Calidad",   color:"#7C3AED"},
@@ -8456,7 +8401,7 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion}){
       progreso:Math.round((p.hitos.filter((h,i)=>i===hitoIdx?!h.hecho:h.hecho).length)/p.hitos.length*100)
     });
     setProyectos(pp=>pp.map(p=>p.id===proyId?updProy(p):p));
-    if((sel||{}).id===proyId){
+    if(sel?.id===proyId){
       const updated=updProy(sel);
       setSel(updated);
       fbEscribir("proyectos",proyId,updated);
@@ -8479,7 +8424,7 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion}){
     const hito={nombre:nuevoHito.nombre.trim(),fecha:nuevoHito.fecha,responsable:nuevoHito.responsable,nota:nuevoHito.nota||"",hecho:false,fechaHecho:""};
     const updProy=p=>({...p,hitos:[...(p.hitos||[]),hito]});
     setProyectos(pp=>pp.map(p=>p.id===proyId?updProy(p):p));
-    if((sel||{}).id===proyId){const up=updProy(sel);setSel(up);fbEscribir("proyectos",proyId,up);}
+    if(sel?.id===proyId){const up=updProy(sel);setSel(up);fbEscribir("proyectos",proyId,up);}
 
     // Auto-crear tarea para el responsable asignado
     if(nuevoHito.responsable){
@@ -8490,7 +8435,7 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion}){
       const tarea={
         id:tareaId,
         titulo:"📍 Hito: "+nuevoHito.nombre.trim(),
-        descripcion:"Hito del proyecto: "+((sel||{}).nombre||proyId),
+        descripcion:"Hito del proyecto: "+(sel?.nombre||proyId),
         tipo:"proyecto",
         prioridad:"normal",
         estado:"pendiente",
@@ -8501,7 +8446,7 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion}){
         creadaEn:hoy,
         vence:nuevoHito.fecha||"",
         proyectoId:proyId,
-        proyectoNombre:(sel||{}).nombre||"",
+        proyectoNombre:sel?.nombre||"",
         esHito:true,
       };
       fbEscribir("tareas",tareaId,tarea);
@@ -8509,7 +8454,7 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion}){
       notificarAsignacion("hito", {
         ...tarea,
         nombre: nuevoHito.nombre.trim(),
-        proyecto: (sel||{}).nombre || proyId,
+        proyecto: sel?.nombre || proyId,
         agente: nuevoHito.responsable,
         fechaLimite: nuevoHito.fecha,
       }, usuario.id);
@@ -8525,7 +8470,7 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion}){
       return{...p,hitos:newHitos,progreso:newHitos.length>0?Math.round(hechos/newHitos.length*100):0};
     };
     setProyectos(pp=>pp.map(p=>p.id===proyId?updProy(p):p));
-    if((sel||{}).id===proyId){const up=updProy(sel);setSel(up);fbEscribir("proyectos",proyId,up);}
+    if(sel?.id===proyId){const up=updProy(sel);setSel(up);fbEscribir("proyectos",proyId,up);}
     setEditHitoIdx(null);
   };
 
@@ -8542,7 +8487,7 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion}){
       i===editHitoIdx?{...h,nombre:editHitoForm.nombre.trim(),fecha:editHitoForm.fecha,
         responsable:editHitoForm.responsable,nota:editHitoForm.nota}:h)});
     setProyectos(pp=>pp.map(p=>p.id===proyId?updProy(p):p));
-    if((sel||{}).id===proyId){const up=updProy(sel);setSel(up);fbEscribir("proyectos",proyId,up);}
+    if(sel?.id===proyId){const up=updProy(sel);setSel(up);fbEscribir("proyectos",proyId,up);}
     setEditHitoIdx(null);
   };
 
@@ -8553,7 +8498,7 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion}){
       resp:nuevaTarea.resp,estado:"pendiente",fecha:hoy,creadaPor:usuario.nombre};
     const updProy=p=>({...p,tareasDepto:[...(p.tareasDepto||[]),tarea]});
     setProyectos(pp=>pp.map(p=>p.id===proyId?updProy(p):p));
-    if((sel||{}).id===proyId){const up=updProy(sel);setSel(up);fbEscribir("proyectos",proyId,up);}
+    if(sel?.id===proyId){const up=updProy(sel);setSel(up);fbEscribir("proyectos",proyId,up);}
     setNuevaTarea({depto:"",texto:"",resp:""});
   };
 
@@ -8562,14 +8507,14 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion}){
       t.id===tareaId?{...t,estado:t.estado==="hecha"?"pendiente":"hecha",
         fechaHecha:t.estado==="hecha"?"":new Date().toLocaleDateString("es-ES")}:t)});
     setProyectos(pp=>pp.map(p=>p.id===proyId?updProy(p):p));
-    if((sel||{}).id===proyId){const up=updProy(sel);setSel(up);fbEscribir("proyectos",proyId,up);}
+    if(sel?.id===proyId){const up=updProy(sel);setSel(up);fbEscribir("proyectos",proyId,up);}
   };
 
   const cerrarProyecto=(proyId,exito)=>{
     const estado=exito?"cerrado_exito":"cerrado_perdido";
     const updProy=p=>({...p,estado,fin:new Date().toLocaleDateString("es-ES")});
     setProyectos(pp=>pp.map(p=>p.id===proyId?updProy(p):p));
-    if((sel||{}).id===proyId){const up=updProy(sel);setSel(up);fbEscribir("proyectos",proyId,up);}
+    if(sel?.id===proyId){const up=updProy(sel);setSel(up);fbEscribir("proyectos",proyId,up);}
   };
 
   const crearProyecto=()=>{
@@ -9079,7 +9024,7 @@ function HistorialClientes({usuario, actividad, muestrasDB, oportunidadesDB, inc
       return clientesFB.map(c=>{
         const grp=(c.grupoAgente||c.GRUPOAGENTE||c.agente||"").toUpperCase();
         const ag=agentes.find(a=>(a.grupoAgente||"").toUpperCase()===grp||a.id===c.agente||a.id===c.agenteId);
-        return{...c,agenteId:(ag||{}).id||c.agente||"",agenteNombre:(ag||{}).nombre||"",agenteColor:(ag||{}).color||T.muted};
+        return{...c,agenteId:ag?.id||c.agente||"",agenteNombre:ag?.nombre||"",agenteColor:ag?.color||T.muted};
       }).filter(c=>{
         // Filtrar por equipo si es jefe
         if(esDir) return true;
@@ -9255,7 +9200,7 @@ function HistorialClientes({usuario, actividad, muestrasDB, oportunidadesDB, inc
                         background:i%2===0?"#FAFAFE":"#fff",borderRadius:8,marginBottom:4,border:`1px solid ${T.border}`}}>
                         <div style={{flex:1}}>
                           <p style={{margin:0,fontSize:12,fontWeight:700,color:T.text}}>{m.prod}</p>
-                          <p style={{margin:"2px 0 0",fontSize:10,color:T.muted}}>S{m.semana} · {m.fecha||""}{(m.historial||[]).length>0?` · 💬 ${m.historial.length}`:""}</p>
+                          <p style={{margin:"2px 0 0",fontSize:10,color:T.muted}}>S{m.semana} · {m.fecha||""}{m.historial?.length>0?` · 💬 ${m.historial.length}`:""}</p>
                         </div>
                         <span style={{fontSize:11,fontWeight:700,color:estColor,background:estColor+"12",padding:"3px 8px",borderRadius:6}}>{est}</span>
                       </div>
@@ -9525,9 +9470,9 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
   const semanaActual=getSemanaISO();
   const semana=semanaActual;
 
-  const esJefeOmas=["jefe","director","ceo"].includes((usuario||{}).rol);
+  const esJefeOmas=["jefe","director","ceo"].includes(usuario?.rol);
   const agentesDisp=USUARIOS.filter(u=>u.rol==="agente"&&
-    ((usuario||{}).rol==="jefe"?u.equipo===usuario.equipo:true));
+    (usuario?.rol==="jefe"?u.equipo===usuario.equipo:true));
 
   const reasignarCliente=(cliente)=>{
     if(!nuevoAgente) return;
@@ -9738,7 +9683,7 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
             {ultimaVisita&&(
               <div style={{background:"rgba(255,255,255,.08)",borderRadius:8,
                 padding:"4px 10px",fontSize:11,color:"rgba(255,255,255,.7)"}}>
-                Última visita: {ultimaVisita.fecha} · {RESULTADOS_V.find(r=>r.k===ultimaVisita.resultado)||{}).label||ultimaVisita.resultado}
+                Última visita: {ultimaVisita.fecha} · {RESULTADOS_V.find(r=>r.k===ultimaVisita.resultado)?.label||ultimaVisita.resultado}
               </div>
             )}
             {act.muestras&&act.muestras.length>0&&(
@@ -9843,7 +9788,7 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
                         border:`1px solid ${T.border}`}}>
                         <div style={{flex:1}}>
                           <p style={{margin:0,fontSize:12,fontWeight:700,color:T.text}}>{m.prod}</p>
-                          <p style={{margin:"2px 0 0",fontSize:10,color:T.muted}}>S{m.semana} · {m.fecha||""}{(m.historial||[]).length>0?` · 💬 ${m.historial.length}`:""}</p>
+                          <p style={{margin:"2px 0 0",fontSize:10,color:T.muted}}>S{m.semana} · {m.fecha||""}{m.historial?.length>0?` · 💬 ${m.historial.length}`:""}</p>
                         </div>
                         <span style={{fontSize:11,fontWeight:700,color:estColor,background:estColor+"12",
                           padding:"3px 8px",borderRadius:6}}>{est}</span>
@@ -10366,7 +10311,7 @@ function VisitaTab({cliente,act,resultados,onGuardar}){
   const dictarNota=()=>{
     const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
     if(!SR){alert("Usa Chrome o Edge para el micrófono.");return;}
-    if(micOn){micRef.current&&micRef.current.stop();setMicOn(false);return;}
+    if(micOn){micRef.current?.stop();setMicOn(false);return;}
     const r=new SR();
     r.lang="es-ES"; r.continuous=false; r.interimResults=false;
     micRef.current=r;
@@ -10862,8 +10807,8 @@ function IncidenciaTab({incidencias,clienteNombre,usuario,onAdd,onCerrar,onEdit,
             const prio=PRIORIDADES.find(p=>p.k===i.prioridad);
             return(
               <div key={i.id} style={{background:"#fff",borderRadius:13,padding:"14px 16px",
-                marginBottom:8,border:`1.5px solid ${(tipo||{}).color||T.border}22`,
-                borderLeft:`4px solid ${(tipo||{}).color||T.red}`}}>
+                marginBottom:8,border:`1.5px solid ${tipo?.color||T.border}22`,
+                borderLeft:`4px solid ${tipo?.color||T.red}`}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
                   <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
                     {tipo&&<Badge label={tipo.label} color={tipo.color}/>}
@@ -11127,7 +11072,7 @@ function HistorialTab({visitas,muestras,estrategia,incidencias=[],resultados}){
             return(
               <div key={i} style={{background:"#fff",borderRadius:12,padding:"11px 14px",
                 marginBottom:6,border:`1px solid ${T.border}`,
-                borderLeft:`4px solid ${col}`,opacity:inc.estado==="cerrada"?0.6:1}}>
+                borderLeft:`4px solid ${col}`,opacity:inc.estado==="cerrada"?.6:1}}>
                 <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
                   <div style={{display:"flex",gap:6}}>
                     <Badge label={inc.tipo||"otro"} color={col}/>
@@ -11207,7 +11152,7 @@ function InformeJefe({usuario, oportunidadesDB}){
   const opsSem=(oportunidadesDB||OPORTUNIDADES_SEED).filter(o=>{
     const ag=USUARIOS.find(u=>u.id===(o.agente||o.agenteId));
     if(esDir) return true;
-    return (ag||{}).equipo===miEquipo;
+    return ag?.equipo===miEquipo;
   });
 
   // ── 1. VENTAS ──
@@ -11432,7 +11377,7 @@ function InformeJefe({usuario, oportunidadesDB}){
               <div style={{flex:1,minWidth:0}}>
                 <p style={{margin:0,fontSize:12,fontWeight:700,color:T.text,
                   overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{o.cliente}</p>
-                <p style={{margin:0,fontSize:10,color:T.muted}}>{(ag||{}).nombre||"—"} · {o.etapa}</p>
+                <p style={{margin:0,fontSize:10,color:T.muted}}>{ag?.nombre||"—"} · {o.etapa}</p>
               </div>
               <p style={{margin:0,fontSize:13,fontWeight:800,color:"#0EA5E9"}}>{fmt(o.valor||0)}€</p>
             </div>
@@ -11791,7 +11736,7 @@ async function cargarObjetivosFB(){
     for (const ag of AGENTES_DATA) {
       if (doc.crmId && doc.crmId === ag.id) return ag;
       const usr = USUARIOS.find(u => u.id === ag.id);
-      const grp = ((usr||{}).grupoAgente || '').toUpperCase();
+      const grp = (usr?.grupoAgente || '').toUpperCase();
       if (doc.agente && String(doc.agente).toUpperCase() === grp) return ag;
       if (doc.agente && String(doc.agente).toLowerCase() === ag.id) return ag;
       if (doc.nombre && String(doc.nombre).toLowerCase() === String(ag.nombre||'').toLowerCase()) return ag;
@@ -11841,7 +11786,7 @@ async function cargarObjetivosFB(){
 
     for (const ag of AGENTES_DATA) {
       const usr = USUARIOS.find(u => u.id === ag.id);
-      const grp = ((usr||{}).grupoAgente || '').toUpperCase();
+      const grp = (usr?.grupoAgente || '').toUpperCase();
 
       const docsAg = todosLosDocs.filter(d => {
         const a = num(d,'ano','AÑO','anio');
@@ -11896,7 +11841,8 @@ function App(props){
   const [section,setSection_]=useState("dashboard");
   const prevSectionRef=React.useRef("dashboard");
   const [hideNav,setHideNav]=useState(false);
-  const setSection=function(s){prevSectionRef.current=section;setSection_(s);setHideNav(s==="plan_semanal"||s==="clientes"&&prevSectionRef.current==="plan_semanal");};
+  const setSection=function(s){prevSectionRef.current=section;setSection_(s);setHideNav(s==="plan_semanal");};
+
   const [adminOpen,setAdminOpen]=useState(false);
   const [busquedaGlobal,setBusquedaGlobal]=useState(false);
   const [busqTexto,setBusqTexto]=useState("");
@@ -11922,7 +11868,7 @@ function App(props){
       console.log("[AUTH] Normalizando ID:",usuario.id,"→",match.id,"(via grupoAgente:",usuario.grupoAgente+")");
       setUsuario(prev=>({...prev,...match,catalogoVendedor:prev.catalogoVendedor||prev.grupoAgente}));
     }
-  },[(usuario||{}).grupoAgente]);
+  },[usuario?.grupoAgente]);
 
   // ── Tracking de tiempo de uso (optimizado para móvil) ───────────
   useEffect(()=>{
@@ -11973,7 +11919,7 @@ function App(props){
       window.removeEventListener("pagehide",onUnload);
       guardarSesion();
     };
-  },[(usuario||{}).id,(usuario||{}).nombre]);
+  },[usuario?.id,usuario?.nombre]);
 
   // Actividad diaria compartida entre GestorClientes e Informe
   const [actividadSemana,setActividadSemana]=useState({});
@@ -12070,7 +12016,7 @@ function App(props){
         setClientesDB({_porGrupo:porGrupo,_porAgente:porAgente,_todos:activos});
       }).catch(()=>{});
     }
-  },[(usuario||{}).id]);
+  },[usuario?.id]);
 
   useEffect(()=>{
     if(!usuario) return;
@@ -12101,7 +12047,7 @@ function App(props){
       }
 
       // Reconstruir actividadSemana desde Firebase para el agente actual
-      if((usuario||{}).rol==="agente"){
+      if(usuario?.rol==="agente"){
         const actRec={};
         // Visitas
         visitas.filter(v=>v.agente===usuario.id).forEach(v=>{
@@ -12131,7 +12077,7 @@ function App(props){
       if(colaLeer().length>0) sincronizarCola();
     }).catch(e=>{console.warn("Firebase error:",e);setFbStatus("error");})
     .finally(()=>setFbCargando(false));
-  },[(usuario||{}).id]);
+  },[usuario?.id]);
 
   const handleLogin=(u)=>{
     setUsuario(u);
@@ -12140,9 +12086,9 @@ function App(props){
   };
 
   // ── Sistema de notificaciones (MUST be before any early return) ──
-  const _esAgente=(usuario||{}).rol==="agente";
-  const _esJefe=(usuario||{}).rol==="jefe";
-  const _miEquipo=(usuario||{}).equipo;
+  const _esAgente=usuario?.rol==="agente";
+  const _esJefe=usuario?.rol==="jefe";
+  const _miEquipo=usuario?.equipo;
   const _appMisIds=usuario?resolverMisIds(usuario):new Set();
   const notificaciones=useMemo(()=>{
     if(!usuario) return [];
@@ -12202,7 +12148,7 @@ function App(props){
     });
     notifs.sort((a,b)=>b.prioridad-a.prioridad);
     return notifs;
-  },[muestrasDB,incidenciasDB,estrategiasDB,oportunidadesDB,(usuario||{}).id]);
+  },[muestrasDB,incidenciasDB,estrategiasDB,oportunidadesDB,usuario?.id]);
 
   if(!usuario){
     // Si estamos dentro del iframe del portal, volver al Hub en vez de mostrar Login
@@ -12262,13 +12208,13 @@ function App(props){
   // Filtros por rol usando datos de Firebase
   const pend=muestrasDB.filter(m=>
     m.estado==="pendiente"&&(esAgente?m.agente===usuario.id:
-    esJefe?(USUARIOS.find(u=>u.id===m.agente)||{}).equipo===miEquipo:true)
+    esJefe?USUARIOS.find(u=>u.id===m.agente)?.equipo===miEquipo:true)
   ).length;
 
   const estEnCurso=esAgente
     ? estrategiasDB.filter(e=>(e.estado==="en_curso"||e.estado==="pendiente_aprobacion")&&(e.agente===usuario.id||e.equipo===miEquipo||!e.equipo)&&!e.eliminada&&!e.resolucion).length
     : esJefe
-    ? estrategiasDB.filter(e=>(e.estado==="en_curso"||e.estado==="pendiente_aprobacion")&&(USUARIOS.find(u=>u.id===e.agente)||{}).equipo===miEquipo&&!e.eliminada&&!e.resolucion).length
+    ? estrategiasDB.filter(e=>(e.estado==="en_curso"||e.estado==="pendiente_aprobacion")&&USUARIOS.find(u=>u.id===e.agente)?.equipo===miEquipo&&!e.eliminada&&!e.resolucion).length
     : estrategiasDB.filter(e=>(e.estado==="en_curso"||e.estado==="pendiente_aprobacion")&&!e.eliminada&&!e.resolucion).length;
 
   // Badge oportunidades + incidencias — datos reales de Firebase
@@ -12286,13 +12232,14 @@ function App(props){
     const cerrada=["ganada","perdida","cerrada_ganada","cerrada_perdida"].some(e=>o.etapa===e||o.estado===e);
     if(cerrada) return false;
     if(esAgente) return esDelUsuario(o.agente,appMisIds)||esDelUsuario(o.agenteId,appMisIds);
-    if(esJefe){const ag=USUARIOS.find(u=>u.id===(o.agenteId||o.agente));return (ag||{}).equipo===miEquipo;}
+    if(esJefe){const ag=USUARIOS.find(u=>u.id===(o.agenteId||o.agente));return ag?.equipo===miEquipo;}
     return true;
   }).length;
 
   const urgCount=0; // badge dinámico — cargado en TareasWidget
 
   const NAV_AGENTE=[
+    {id:"dashboard",    icon:"🏠",label:"Inicio",      color:usuario.color},
     {id:"plan_semanal", icon:"📅",label:"Mi semana",   color:T.blue},
     {id:"informe",      icon:"📤",label:"Informe",     color:T.navy},
     {id:"clientes",     icon:"📋",label:"Clientes",    color:T.blue},
@@ -12746,7 +12693,7 @@ function App(props){
               const resultados=[];
 
               // Buscar en clientes
-              const cliTodos=(clientesDB||{})._todos||misClientesFB||[];
+              const cliTodos=clientesDB?._todos||misClientesFB||[];
               cliTodos.filter(c=>{
                 const n=(c.nombre||c.NOMBRE||"").toLowerCase();
                 const p=(c.poblacion||c.ciudad||"").toLowerCase();
@@ -12898,7 +12845,7 @@ function App(props){
         {/* AGENTE */}
         {esAgente&&section==="dashboard"&&  <DashAgente usuario={usuario} onNav={setSection} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} incidenciasDB={incidenciasDB} calendarioDB={calendarioDB} actividad={actividadSemana} _ver={objVer}/>}
         {esAgente&&section==="clientes"&&   <GestorClientes usuario={usuario} actividad={actividadSemana} onActividad={onActividad} onBack={()=>setSection(prevSectionRef.current||"dashboard")} clientesFB={misClientesFB} muestrasDB={muestrasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} estrategiasDB={estrategiasDB} clienteDirecto={clienteDirecto} onClienteDirectoUsado={()=>setClienteDirecto(null)}/>}
-        {esAgente&&section==="plan_semanal"&& <MiSemana usuario={usuario} clientesFB={misClientesFB} onBack={()=>setSection("dashboard")} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} muestrasDB={muestrasDB} actividad={actividadSemana} onAbrirCliente={(nombre)=>{setClienteDirecto({nombre:nombre,ts:Date.now()});setSection("clientes");}}/>}
+        {esAgente&&section==="plan_semanal"&& <MiSemana usuario={usuario} clientesFB={misClientesFB} onBack={()=>setSection("dashboard")} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} muestrasDB={muestrasDB} actividad={actividadSemana} onAbrirCliente={(nombre)=>{setClienteDirecto({nombre:nombre,ts:Date.now()});setHideNav(true);setSection("clientes");}}/>}
         {section==="informe"&&esAgente&&    <Informe usuario={usuario} actividadSemana={actividadSemana} clientesFB={misClientesFB}/>}
         {section==="informe"&&!esAgente&&   <MiInformeJefe usuario={usuario} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB} onNav={setSection}/>}
         {section==="informe_jefe"&&         <InformeJefe usuario={usuario} oportunidadesDB={oportunidadesDB}/>}
@@ -12945,7 +12892,7 @@ function App(props){
 
         {/* JEFE — dashboard filtrado a su equipo */}
         {esJefe&&section==="dashboard"&&    <DashJefe key={"jefe"}/>}
-        {esJefeOmas&&section==="clientes_eq"&& <HistorialClientes usuario={usuario} actividad={actividadSemana} muestrasDB={muestrasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} estrategiasDB={estrategiasDB} clienteDirecto={clienteDirecto} onClienteDirectoUsado={()=>setClienteDirecto(null)} clientesFB={(clientesDB||{})._todos||misClientesFB||[]}/>}
+        {esJefeOmas&&section==="clientes_eq"&& <HistorialClientes usuario={usuario} actividad={actividadSemana} muestrasDB={muestrasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} estrategiasDB={estrategiasDB} clienteDirecto={clienteDirecto} onClienteDirectoUsado={()=>setClienteDirecto(null)} clientesFB={clientesDB?._todos||misClientesFB||[]}/>}
 
         {/* DIRECTOR / CEO — dashboard global */}
         {esDir&&section==="dashboard"&&     <DashDirector usuario={usuario} onNav={setSection} estrategiasDB={estrategiasDB}/>}
@@ -12964,7 +12911,7 @@ function App(props){
         {section==="ia"&&(
           <AsistenteIA
             usuario={usuario}
-            clientesFB={(clientesDB||{})._todos||misClientesFB||[]}
+            clientesFB={clientesDB?._todos||misClientesFB||[]}
             oportunidadesDB={oportunidadesDB}
           />
         )}
@@ -12992,7 +12939,7 @@ function App(props){
                 <div style={{textAlign:"right"}}>
                   {(()=>{
                     const d=AGENTES_DATA.find(a=>a.id===u.id);
-                    const vMes=(d||{}).vMes||0, oMes=(d||{}).oMes||0;
+                    const vMes=d?.vMes||0, oMes=d?.oMes||0;
                     const pct=oMes>0?Math.round(vMes/oMes*100):0;
                     const c=pct>=100?T.green:pct>=80?T.amber:T.muted;
                     return(<>
@@ -13039,7 +12986,7 @@ function MiniBar({datos,color,height=80,labels}){
         <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
           <span style={{fontSize:9,fontWeight:700,color:v===max?color:"#94A3B8"}}>{v}</span>
           <div style={{width:"100%",height:Math.max(4,v/max*(height-20)),background:color,
-            borderRadius:"4px 4px 0 0",opacity:v===0?0.15:1,transition:"height .3s"}}/>
+            borderRadius:"4px 4px 0 0",opacity:v===0?.15:1,transition:"height .3s"}}/>
           {labels&&labels[i]&&<span style={{fontSize:8,color:"#94A3B8"}}>{labels[i]}</span>}
         </div>
       ))}
@@ -13068,7 +13015,7 @@ function Reporting({usuario,muestrasDB,oportunidadesDB,incidenciasDB,estrategias
     fbLeer("sesiones").then(data=>{
       const filtradas=data.filter(s=>{
         if(esDir) return true;
-        if(esJefe){const ag=USUARIOS.find(u=>u.id===s.agente);return (ag||{}).equipo===miEquipo;}
+        if(esJefe){const ag=USUARIOS.find(u=>u.id===s.agente);return ag?.equipo===miEquipo;}
         return appMisIds.has((s.agente||"").toUpperCase());
       });
       setSesiones(filtradas);
@@ -13138,7 +13085,7 @@ function Reporting({usuario,muestrasDB,oportunidadesDB,incidenciasDB,estrategias
     return filtrarPorAg(base,"autor");
   },[incidenciasDB,usuario.id,filtroAg]);
 
-  const clientes=(clientesDB||{})._todos||misClientesFB||[];
+  const clientes=clientesDB?._todos||misClientesFB||[];
 
   // KPIs
   const mPend=misMuestras.filter(m=>m.estado==="pendiente").length;
@@ -13442,7 +13389,7 @@ function Reporting({usuario,muestrasDB,oportunidadesDB,incidenciasDB,estrategias
               <MiniBar
                 datos={agentesVentas.sort((a,b)=>(b.vMes||0)-(a.vMes||0)).map(a=>Math.round((a.vMes||0)/1000))}
                 color={T.navy}
-                labels={agentesVentas.sort((a,b)=>(b.vMes||0)-(a.vMes||0)).map(a=>(a.nombre||"").slice(0,6))}
+                labels={agentesVentas.sort((a,b)=>(b.vMes||0)-(a.vMes||0)).map(a=>a.nombre?.slice(0,6))}
                 height={100}
               />
               <p style={{margin:"8px 0 0",fontSize:9,color:T.muted,textAlign:"center"}}>Valores en miles de € (mes actual)</p>
@@ -13477,9 +13424,9 @@ function Reporting({usuario,muestrasDB,oportunidadesDB,incidenciasDB,estrategias
                   return(
                     <div key={i} style={{display:"flex",gap:10,alignItems:"center",padding:"10px 0",
                       borderBottom:i<tiempoPorAgente.length-1?`1px solid ${T.border}`:"none"}}>
-                      <div style={{width:32,height:32,borderRadius:8,background:((ag||{}).color||T.navy)+"18",
+                      <div style={{width:32,height:32,borderRadius:8,background:(ag?.color||T.navy)+"18",
                         display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0}}>
-                        {(ag||{}).icon||"👤"}
+                        {ag?.icon||"👤"}
                       </div>
                       <div style={{flex:1}}>
                         <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
@@ -13487,7 +13434,7 @@ function Reporting({usuario,muestrasDB,oportunidadesDB,incidenciasDB,estrategias
                           <span style={{fontSize:12,fontWeight:800,color:T.navy}}>{formatMin(a.min)}</span>
                         </div>
                         <div style={{height:6,borderRadius:99,background:"#E2E8F0"}}>
-                          <div style={{height:"100%",width:`${pct}%`,background:(ag||{}).color||T.navy,
+                          <div style={{height:"100%",width:`${pct}%`,background:ag?.color||T.navy,
                             borderRadius:99,transition:"width .3s"}}/>
                         </div>
                         <p style={{margin:"3px 0 0",fontSize:10,color:T.muted}}>{a.sesiones} sesión{a.sesiones>1?"es":""}</p>
@@ -13503,7 +13450,7 @@ function Reporting({usuario,muestrasDB,oportunidadesDB,incidenciasDB,estrategias
               <div style={{textAlign:"center",padding:"8px 0",marginBottom:12}}>
                 <p style={{margin:0,fontSize:28,fontWeight:900,color:T.navy}}>{formatMin(tiempoTotal)}</p>
                 <p style={{margin:"4px 0 0",fontSize:11,color:T.muted}}>
-                  {(tiempoPorAgente[0]||{}).sesiones||0} sesión{((tiempoPorAgente[0]||{}).sesiones||0)>1?"es":""} esta semana
+                  {tiempoPorAgente[0]?.sesiones||0} sesión{(tiempoPorAgente[0]?.sesiones||0)>1?"es":""} esta semana
                 </p>
               </div>
             )}
@@ -13668,7 +13615,7 @@ function Reporting({usuario,muestrasDB,oportunidadesDB,incidenciasDB,estrategias
         <p style={{margin:"0 0 12px",fontSize:13,fontWeight:800,color:T.text}}>📥 Exportar a Excel</p>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
           {[
-            {label:"💰 Ventas",sub:`${AGENTES_DATA.filter(a=>(USUARIOS.find(u=>u.id===a.id)||{}).rol==="agente").length} agentes`,fn:()=>exportarExcel(
+            {label:"💰 Ventas",sub:`${AGENTES_DATA.filter(a=>USUARIOS.find(u=>u.id===a.id)?.rol==="agente").length} agentes`,fn:()=>exportarExcel(
               AGENTES_DATA.filter(a=>{const u=USUARIOS.find(u=>u.id===a.id);return u&&u.rol==="agente"&&(esDir||(esJefe&&u.equipo===miEquipo)||appMisIds.has(a.id.toUpperCase()));}),"Ventas",[
               {label:"Vendedor",key:"nombre"},{label:"Venta Semana €",key:"vSem"},{label:"Obj Semana €",key:"oSem"},
               {label:"Venta Mes €",key:"vMes"},{label:"Obj Mes €",key:"oMes"},
@@ -13766,7 +13713,7 @@ function Calendario({usuario, clientesFB, onAbrirCliente, onEventosChange}){
     return eventos.filter(e=>{
       if(!isoSet.has(e.fecha)) return false;
       if(esAgente) return appMisIds.has((e.agente||"").toUpperCase());
-      if(esJefe){const ag=USUARIOS.find(u=>u.id===e.agente);return (ag||{}).equipo===usuario.equipo;}
+      if(esJefe){const ag=USUARIOS.find(u=>u.id===e.agente);return ag?.equipo===usuario.equipo;}
       return true;
     });
   },[eventos,dias,usuario.id]);
@@ -13887,7 +13834,7 @@ function Calendario({usuario, clientesFB, onAbrirCliente, onEventosChange}){
             border:`2px solid ${T.navy}`,boxShadow:"0 4px 12px rgba(0,0,0,.08)"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
               <p style={{margin:0,fontSize:13,fontWeight:800,color:T.navy}}>
-                {editId?"✏️ Editar evento":"📅 Nuevo evento"} — {(formDia||{}).nombre} {(formDia||{}).str}
+                {editId?"✏️ Editar evento":"📅 Nuevo evento"} — {formDia?.nombre} {formDia?.str}
               </p>
               <button onClick={()=>{setShowForm(false);setEditId(null);}}
                 style={{background:"none",border:"none",fontSize:18,color:T.muted,cursor:"pointer"}}>×</button>
@@ -14166,7 +14113,7 @@ function HistorialSemanal({ usuario }) {
         (selObj&&selObj.grupoAgente&&selObj.grupoAgente===agV);
       if(!match) return false;
     }
-    if(equipoSel!=="todos"&&(agObj||{}).equipo!==equipoSel) return false;
+    if(equipoSel!=="todos"&&agObj?.equipo!==equipoSel) return false;
     return true;
   });
   const muesSemana = muestras.filter(m=>Number(m.semana)===semana);
@@ -14392,7 +14339,7 @@ function HistorialSemanal({ usuario }) {
               <p style={{margin:0,fontSize:12,fontWeight:600,color:estadoColor}}>{estadoLabel}</p>
               {esJefeOmas&&agentesConInforme.size>0&&(
                 <p style={{margin:"2px 0 0",fontSize:10,color:T.muted}}>
-                  {[...agentesConInforme].map(id=>(USUARIOS.find(u=>u.id===id)||{}).nombre||id).join(" · ")}
+                  {[...agentesConInforme].map(id=>USUARIOS.find(u=>u.id===id)?.nombre||id).join(" · ")}
                 </p>
               )}
               {esJefeOmas&&agentesConInforme.size<agentesTotales&&alguoEnvio&&(
@@ -14720,7 +14667,7 @@ function HistorialSemanal({ usuario }) {
                     onClick={()=>crearTareaRapida(
                       "Seguimiento — "+(v.clienteNombre||v.empresa||"cliente"),
                       v.clienteNombre||v.empresa||"",
-                      (ag||{}).id||""
+                      ag?.id||""
                     )}
                     style={{marginTop:8,width:"100%",padding:"6px",
                       border:"1px solid "+T.border,borderRadius:8,background:"#F8FAFC",
@@ -14780,7 +14727,7 @@ function HistorialSemanal({ usuario }) {
                   <button onClick={()=>crearTareaRapida(
                       "Seguimiento — "+(o.nombre||o.cliente||"oportunidad"),
                       o.nombre||o.cliente||"",
-                      (ag||{}).id||""
+                      ag?.id||""
                     )}
                     style={{flex:1,padding:"6px",border:"1px solid "+T.border,borderRadius:8,
                       background:"#F8FAFC",color:T.muted,fontSize:11,fontWeight:600,cursor:"pointer"}}>
@@ -14872,7 +14819,7 @@ function AsistenteIA({ usuario, clientesFB, oportunidadesDB }) {
   const endRef    = React.useRef(null);
   const reconRef  = React.useRef(null);
 
-  React.useEffect(()=>{ endRef.current&&endRef.current.scrollIntoView({behavior:"smooth"}); },[msgs]);
+  React.useEffect(()=>{ endRef.current?.scrollIntoView({behavior:"smooth"}); },[msgs]);
 
   const conectar = () => {
     if(!apiKey.trim().startsWith("sk-ant")) return alert("Clave inválida — debe empezar por sk-ant");
@@ -14910,7 +14857,7 @@ function AsistenteIA({ usuario, clientesFB, oportunidadesDB }) {
       return;
     }
     if(escuchando){
-      reconRef.current&&reconRef.current.stop();
+      reconRef.current?.stop();
       setEscuchando(false);
       return;
     }
@@ -15094,7 +15041,7 @@ function AsistenteIA({ usuario, clientesFB, oportunidadesDB }) {
           </button>
           <button onClick={()=>{
               setVozActiva(v=>!v);
-              if(vozActiva) window.speechSynthesis&&window.speechSynthesis.cancel();
+              if(vozActiva) window.speechSynthesis?.cancel();
             }}
             style={{display:"flex",alignItems:"center",gap:5,padding:"5px 12px",
               borderRadius:99,border:"1.5px solid "+(vozActiva?"#3B82F6":"#E2E8F0"),
