@@ -6756,11 +6756,17 @@ async function fbEscribir(coleccion, id, datos){
   }catch(e){}
 
   try{
-    const r=await fetch(`${FB_BASE}/${coleccion}/${id}`,{
+    const url=`${FB_BASE}/${coleccion}/${id}`;
+    console.log("[FB] PATCH", url);
+    console.log("[FB] Data keys:", Object.keys(datos).join(", "));
+    const body=JSON.stringify(serializeToFirestore(datos));
+    console.log("[FB] Body size:", body.length, "bytes");
+    const r=await fetch(url,{
       method:"PATCH",
       headers:{"Content-Type":"application/json"},
-      body:JSON.stringify(serializeToFirestore(datos))
+      body:body
     });
+    console.log("[FB] Response status:", r.status);
     if(!r.ok){
       const e=await r.json().catch(()=>({}));
       const msg=(e&&e.error&&e.error.message)||(e&&e.error&&e.error.status)||r.status;
@@ -7400,15 +7406,18 @@ function Wizard({usuario,datosEscaneados,opoEditar,onSave,onClose}){
 
   const guardar=()=>{
     const id=(opoEditar&&opoEditar.id)||`opo_${Date.now()}_${Math.random().toString(36).slice(2,6)}`;
+    // Limpiar fotos grandes para no superar 1MB de Firebase
+    const fotosClean=fotos.map(f=>{var d=f.data||f;return typeof d==="string"&&d.length>5000?"[imagen]":d;});
     onSave({
       id,
+      nombre:cli.nombre,
       tipoOpo:tipo,
       cliente:cli.nombre,
       tipologia:cli.tipologia,
       nif:cli.nif,contacto:cli.contacto,cargo:cli.cargo,
       telefono:cli.telefono,email:cli.email,ciudad:cli.ciudad,
       web:cli.web,direccion:cli.direccion,descripcionCliente:cli.descripcion,
-      fotos:fotos.map(f=>f.data||f),
+      fotos:fotosClean,
       notas:desc,descripcion:desc,
       valor:Number(valor)||0,prob:Number(prob)||50,
       etapa,fecha,
@@ -8108,12 +8117,17 @@ function GestorOportunidades({usuario, onAbrirCliente}){
     }
   };
   const addOpo=o=>{
+    console.log("[OPO] Guardando oportunidad:", o.id, o.nombre||o.cliente, "valor:", o.valor);
     setOpos(p=>[o,...p]);
-    fbGuardar(o.id, o).then(ok=>{
-      toast(ok?"✅ Guardado en Firebase":"📋 Guardado localmente",ok);
-      // Notificar al agente si fue asignada a otro
-      if(ok && o.agenteId && o.agenteId !== usuario.id) notificarAsignacion("tarea", {...o, titulo:`Oportunidad: ${o.cliente}`}, usuario.id);
-    }).catch(()=>toast("📋 Guardado localmente",false));
+    fbGuardar(o.id, o).then(function(ok){
+      console.log("[OPO] Firebase resultado:", ok?"OK":"FALLO");
+      if(!ok) alert("Error al guardar oportunidad en Firebase. Revisa consola (F12).");
+      toast(ok?"Guardado en Firebase":"Error Firebase",ok);
+      if(ok && o.agenteId && o.agenteId !== (usuario||{}).id) notificarAsignacion("tarea", Object.assign({},o,{titulo:"Oportunidad: "+o.cliente}), (usuario||{}).id);
+    }).catch(function(err){
+      console.error("[OPO] Error critico:", err);
+      alert("Error critico guardando: "+(err&&err.message||err));
+    });
   };
 
   const delOpo=(id)=>{
@@ -8160,7 +8174,7 @@ function GestorOportunidades({usuario, onAbrirCliente}){
     if(filtroEst==="ganadas"&&o.estado!=="ganada") return false;
     if(filtroEst==="perdidas"&&o.estado!=="perdida") return false;
     if(filtroAg!=="todos"&&o.agenteId!==filtroAg) return false;
-    if(q&&!o.nombre.toLowerCase().includes(q.toLowerCase())) return false;
+    if(q&&!(o.nombre||o.cliente||"").toLowerCase().includes(q.toLowerCase())) return false;
     // Filtro por equipo
     if(filtroEquipoOpo!=="todos"){
       const ag=USUARIOS.find(u=>u.id===(o.agenteId||o.agente));
@@ -8188,7 +8202,7 @@ function GestorOportunidades({usuario, onAbrirCliente}){
           <div style={{flex:1,minWidth:0}}>
             <div style={{display:"flex",gap:5,marginBottom:5,flexWrap:"wrap",alignItems:"center"}}>
               <span style={{fontSize:12}}>{TIPOS_MAP_L[o.tipo]}</span>
-              <p style={{margin:0,fontSize:compact?13:14,fontWeight:800,color:T.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:compact?"nowrap":"normal"}}>{o.nombre}</p>
+              <p style={{margin:0,fontSize:compact?13:14,fontWeight:800,color:T.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:compact?"nowrap":"normal"}}>{o.nombre||o.cliente}</p>
               {!compact&&<span style={{padding:"2px 8px",borderRadius:5,background:est.bg,color:est.color,fontSize:10,fontWeight:700,flexShrink:0}}>{est.dot} {est.label}</span>}
             </div>
             {!compact&&<p style={{margin:"0 0 8px",fontSize:12,color:T.muted,lineHeight:1.5}}>{o.descripcionOportunidad?.slice(0,100)}{(o.descripcionOportunidad?.length||0)>100?"…":""}</p>}
