@@ -9737,27 +9737,67 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
 
   const getAct2=(cid)=>actividad[cid]||{visitas:[],muestras:[],estrategia:null,incidencias:[]};
 
-  // Cargar visitas de Firebase para el cliente seleccionado
+  // Cargar actividad completa de Firebase para el cliente seleccionado
   React.useEffect(function(){
     if(!clienteSel||!clienteSel.id) return;
     var cid=clienteSel.id;
     var nombre=(clienteSel.nombre||clienteSel.NOMBRE||"").toUpperCase();
     // Solo cargar si no hay datos locales ya
     if(actividad[cid]&&actividad[cid].visitas&&actividad[cid].visitas.length>0) return;
+    
+    var actMerged={visitas:[],muestras:[],estrategia:null,incidencias:[]};
+    var actExist=actividad[cid]||actMerged;
+    var changed=false;
+    
+    // Visitas de Firebase
     fbLeer("visitas").then(function(todas){
       var delCliente=(todas||[]).filter(function(v){
-        return v.clienteId===cid||(v.clienteNombre||"").toUpperCase()===nombre;
+        return v.clienteId===cid||(v.clienteNombre||v.cliente||"").toUpperCase()===nombre;
       });
       if(delCliente.length>0){
-        var actExist=actividad[cid]||{visitas:[],muestras:[],estrategia:null,incidencias:[]};
-        var merged=actExist.visitas||[];
+        actExist.visitas=(actExist.visitas||[]).concat([]);
         delCliente.forEach(function(v){
-          if(!merged.find(function(m){return m.fecha===v.fecha&&m.resultado===v.resultado;})){
-            merged.push(v);
+          if(!actExist.visitas.find(function(m){return m.fecha===v.fecha&&m.resultado===v.resultado;})){
+            actExist.visitas.push(v);changed=true;
           }
         });
-        if(merged.length>0) onActividad(cid,Object.assign({},actExist,{visitas:merged}));
       }
+      
+      // Muestras del cliente (desde muestrasDB global)
+      var misMuestras=(muestrasDB||[]).filter(function(m){
+        return !m.eliminada&&((m.cliente||"").toUpperCase()===nombre||(m.clienteNombre||"").toUpperCase()===nombre);
+      });
+      if(misMuestras.length>0){
+        actExist.muestras=(actExist.muestras||[]).concat([]);
+        misMuestras.forEach(function(m){
+          if(!actExist.muestras.find(function(x){return x.id===m.id;})){
+            actExist.muestras.push(m);changed=true;
+          }
+        });
+      }
+      
+      // Estrategia del cliente (desde estrategiasDB global)
+      if(!actExist.estrategia){
+        var miEst=(estrategiasDB||[]).find(function(e){
+          return !e.eliminada&&((e.cliente||e.clienteNombre||"").toUpperCase()===nombre)&&(e.estado==="en_curso"||e.estado==="pendiente_aprobacion");
+        });
+        if(miEst){actExist.estrategia=miEst;changed=true;}
+      }
+      
+      // Incidencias del cliente (desde incidenciasDB global)
+      var misInc=(incidenciasDB||[]).filter(function(inc){
+        return !inc.eliminada&&((inc.clienteNombre||inc.cliente||"").toUpperCase()===nombre);
+      });
+      if(misInc.length>0){
+        actExist.incidencias=(actExist.incidencias||[]).concat([]);
+        misInc.forEach(function(inc){
+          if(!actExist.incidencias.find(function(x){return x.id===inc.id;})){
+            actExist.incidencias.push(inc);changed=true;
+          }
+        });
+      }
+      
+      if(changed) onActividad(cid,Object.assign({},actExist));
     });
   },[clienteSel&&clienteSel.id]);
 
@@ -12162,7 +12202,13 @@ function App(props){
   const [section,setSection_]=useState("dashboard");
   const prevSectionRef=React.useRef("dashboard");
   const [hideNav,setHideNav]=useState(false);
-  const setSection=function(s){prevSectionRef.current=section;setSection_(s);if(s==="dashboard")setHideNav(false);};
+  const refreshDBs=function(){
+    fbLeer("muestras").then(function(d){if(d.length>0)setMuestrasDB(d.filter(function(m){return !m.eliminada;}));});
+    fbLeer("estrategias").then(function(d){if(d.length>0){var f=d.filter(function(e){return !e.eliminada;});setEstrategiasDB(f);GlobalStore.setEstrategias(f);}});
+    fbLeer("incidencias").then(function(d){if(d.length>0)setIncidenciasDB(d.filter(function(i){return !i.eliminada;}));});
+  };
+
+  const setSection=function(s){prevSectionRef.current=section;setSection_(s);if(s==="dashboard")setHideNav(false);if(s==="plan_semanal")refreshDBs();};
   const [adminOpen,setAdminOpen]=useState(false);
   const [busquedaGlobal,setBusquedaGlobal]=useState(false);
   const [busqTexto,setBusqTexto]=useState("");
