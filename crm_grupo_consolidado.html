@@ -936,14 +936,13 @@ function AvisoPlanSemanal({usuario,semana,onNav}){
 // ═══════════════════════════════════════════════════════════════
 // MI SEMANA — 360° + Acceso a clientes
 // ═══════════════════════════════════════════════════════════════
-function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB,incidenciasDB,muestrasDB}){
+function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB,incidenciasDB,muestrasDB,actividad,onAbrirCliente}){
   var semActual=getSemanaISO();
   var _s1=React.useState(semActual);var semana=_s1[0],setSemana=_s1[1];
   var _s2=React.useState(null);var plan=_s2[0],setPlan=_s2[1];
   var _s3=React.useState(true);var cargando=_s3[0],setCargando=_s3[1];
   var _s4=React.useState("360");var tab=_s4[0],setTab=_s4[1];
   var _s8=React.useState("");var busqLibre=_s8[0],setBusqLibre=_s8[1];
-  var _s9=React.useState(false);var showNuevoFormMS=_s9[0],setShowNuevoFormMS=_s9[1];
   var appMisIds=resolverMisIds(usuario);
 
   React.useEffect(function(){
@@ -998,10 +997,47 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
 
   // Clientes de la ruta
   var clientesSemana=plan&&plan.rutaNum&&rutaMap[plan.rutaNum]?rutaMap[plan.rutaNum]:[];
-  // Visitados tracking (stored in plan.visitados = ["cli_id1","cli_id2"])
-  var visitados=plan&&plan.visitados?plan.visitados:[];
-  var cliVisitados=clientesSemana.filter(function(c){return visitados.indexOf(c.id||c.nombre||c.NOMBRE)>=0;});
-  var cliPendientes=clientesSemana.filter(function(c){return visitados.indexOf(c.id||c.nombre||c.NOMBRE)<0;});
+  
+  // Cargar visitas reales de Firebase para esta semana
+  var _s10=React.useState([]);var visitasDB=_s10[0],setVisitasDB=_s10[1];
+  React.useEffect(function(){
+    fbLeer("visitas").then(function(d){setVisitasDB(d||[]);});
+  },[]);
+  
+  // Clientes visitados esta semana (de Firebase + actividad + plan.visitados)
+  var visitadosManual=plan&&plan.visitados?plan.visitados:[];
+  var clientesVisitadosLibre=[];
+  (visitasDB||[]).forEach(function(v){
+    var agId=(v.agenteId||v.agente||"").toUpperCase();
+    if(!appMisIds.has(agId)) return;
+    var vSem=parseInt(v.semana||0);
+    if(vSem!==semana) return;
+    var cliN=(v.clienteNombre||v.cliente||"");
+    if(cliN&&clientesVisitadosLibre.indexOf(cliN)<0) clientesVisitadosLibre.push(cliN);
+  });
+  // Tambien de actividad local (sesion actual)
+  var act=actividad||{};
+  Object.keys(act).forEach(function(cid){
+    if(act[cid]&&act[cid].visitas&&act[cid].visitas.length>0){
+      var cli=(clientesFB||[]).find(function(c){return c.id===cid;});
+      if(cli){
+        var n=cli.nombre||cli.NOMBRE||"";
+        if(n&&clientesVisitadosLibre.indexOf(n)<0) clientesVisitadosLibre.push(n);
+      }
+    }
+  });
+  
+  // Para modo ruta: visitados = manual + Firebase + actividad
+  var esVisitado=function(c){
+    var id=c.id||"";
+    var nom=(c.nombre||c.NOMBRE||"").toUpperCase();
+    if(visitadosManual.indexOf(id)>=0||visitadosManual.indexOf(nom)>=0||visitadosManual.indexOf(c.nombre||c.NOMBRE)>=0) return true;
+    if(clientesVisitadosLibre.indexOf(c.nombre||c.NOMBRE)>=0||clientesVisitadosLibre.indexOf(nom)>=0) return true;
+    if(id&&act[id]&&act[id].visitas&&act[id].visitas.length>0) return true;
+    return false;
+  };
+  var cliVisitados=clientesSemana.filter(function(c){return esVisitado(c);});
+  var cliPendientes=clientesSemana.filter(function(c){return !esVisitado(c);});
   var conAlerta=cliPendientes.filter(function(c){var n=(c.nombre||c.NOMBRE||"").toUpperCase();return misInc.some(function(i){return (i.clienteNombre||"").toUpperCase()===n;});});
 
   // Info contextual por cliente
@@ -1031,22 +1067,6 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
   };
 
   if(cargando) return React.createElement("div",{style:{padding:40,textAlign:"center",color:T.muted}},"Cargando...");
-
-  if(showNuevoFormMS){
-    return <div style={{padding:"16px",background:"#F8FAFC",minHeight:"100vh"}}>
-      <NuevoClienteForm backLabel="Mi semana" onBack={function(){setShowNuevoFormMS(false);}}
-        onGuardar={function(form){
-          var id="cli_"+Date.now();
-          var nuevo={id:id,nombre:(form.nombre||"").toUpperCase(),NOMBRE:(form.nombre||"").toUpperCase(),
-            contacto:form.contacto,telefono:form.telefono,email:form.email,
-            poblacion:form.poblacion,empresa:form.empresa,tarjeta:form.tarjeta,
-            agente:usuario.id,GRUPOAGENTE:usuario.grupoAgente||usuario.id};
-          fbEscribir("clientes",id,nuevo);
-          setShowNuevoFormMS(false);
-          if(onAbrirCliente) onAbrirCliente((form.nombre||"").toUpperCase());
-        }}/>
-    </div>;
-  }
 
   return(
     <div style={{maxWidth:600,margin:"0 auto",padding:"16px 14px",paddingBottom:100}}>
@@ -1119,6 +1139,30 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                 </div>
               )}
               <button onClick={function(){setTab("ruta");}} style={{width:"100%",padding:12,borderRadius:10,border:"none",background:T.blue,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer",marginTop:10}}>Ver ruta completa</button>
+            </div>
+          )}
+
+          {/* Resumen libre */}
+          {plan.modo==="libre"&&(
+            <div style={{background:"#fff",borderRadius:16,padding:"16px 18px",marginBottom:14,border:"2px solid "+T.purple,boxShadow:"0 1px 4px rgba(0,0,0,.06)"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <p style={{margin:0,fontSize:15,fontWeight:800,color:T.navy}}>Semana libre</p>
+                <span style={{fontSize:10,padding:"3px 10px",borderRadius:99,background:"#F5F3FF",color:"#7C3AED",fontWeight:700}}>{clientesVisitadosLibre.length} visitados</span>
+              </div>
+              {clientesVisitadosLibre.length>0?(
+                <div>
+                  {clientesVisitadosLibre.slice(0,3).map(function(nombre,i){
+                    return <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:i<2?"1px solid #F1F5F9":"none"}}>
+                      <div style={{width:28,height:28,borderRadius:8,background:"#D1FAE5",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12}}>{"✅"}</div>
+                      <p style={{margin:0,fontSize:13,fontWeight:600}}>{nombre}</p>
+                    </div>;
+                  })}
+                  {clientesVisitadosLibre.length>3&&<p style={{margin:"6px 0 0",fontSize:12,color:T.muted}}>+{clientesVisitadosLibre.length-3} mas...</p>}
+                </div>
+              ):(
+                <p style={{margin:0,fontSize:12,color:T.muted}}>Busca clientes en la pestana Ruta para empezar</p>
+              )}
+              <button onClick={function(){setTab("ruta");}} style={{width:"100%",padding:12,borderRadius:10,border:"none",background:T.purple,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer",marginTop:10}}>Buscar clientes</button>
             </div>
           )}
 
@@ -1233,7 +1277,32 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
 
               {clientesSemana.length===0&&plan.modo==="libre"&&(
                 <div>
-                  <p style={{margin:"0 0 12px",fontSize:13,color:T.muted,textAlign:"center"}}>Semana libre — busca y añade clientes</p>
+                  {/* Clientes visitados esta semana */}
+                  {clientesVisitadosLibre.length>0&&(
+                    <div style={{marginBottom:16}}>
+                      <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:"#22C55E",textTransform:"uppercase"}}>Visitados esta semana ({clientesVisitadosLibre.length})</p>
+                      <div style={{background:"#fff",borderRadius:16,overflow:"hidden",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
+                        {clientesVisitadosLibre.map(function(nombre,i){
+                          var info=getCliInfo({nombre:nombre,NOMBRE:nombre});
+                          return <div key={i} onClick={function(){if(onAbrirCliente)onAbrirCliente(nombre);}}
+                            style={{display:"flex",alignItems:"center",gap:12,padding:"14px 18px",
+                              borderBottom:i<clientesVisitadosLibre.length-1?"1px solid #F1F5F9":"none",
+                              cursor:"pointer",background:"#F0FDF4"}}>
+                            <div style={{width:38,height:38,borderRadius:10,background:"#D1FAE5",
+                              display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>{"✅"}</div>
+                            <div style={{flex:1}}>
+                              <p style={{margin:0,fontSize:14,fontWeight:700,color:"#64748B"}}>{nombre}</p>
+                              {info.length>0&&<p style={{margin:"2px 0 0",fontSize:10,color:info[0].color}}>{info[0].text}</p>}
+                            </div>
+                            <span style={{fontSize:14,color:"#94A3B8"}}>{">"}</span>
+                          </div>;
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Buscador para añadir más */}
+                  <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.blue,textTransform:"uppercase"}}>Buscar y visitar cliente</p>
                   <div style={{position:"relative",marginBottom:12}}>
                     <input value={busqLibre} onChange={function(e){setBusqLibre(e.target.value);}}
                       placeholder="Buscar cliente por nombre..."
@@ -1259,7 +1328,7 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
               )}
 
               <button onClick={function(){onNav("clientes");}} style={{width:"100%",padding:14,borderRadius:14,border:"2px dashed #E2E8F0",background:"#fff",color:T.blue,fontWeight:700,fontSize:13,cursor:"pointer",marginBottom:8}}>+ Agregar cliente</button>
-              <button onClick={function(){setShowNuevoFormMS(true);}} style={{width:"100%",padding:14,borderRadius:14,border:"2px dashed "+T.purple,background:"#F5F3FF",color:T.purple,fontWeight:700,fontSize:13,cursor:"pointer"}}>Crear cliente nuevo</button>
+              <button onClick={function(){onNav("clientes");}} style={{width:"100%",padding:14,borderRadius:14,border:"2px dashed "+T.purple,background:"#F5F3FF",color:T.purple,fontWeight:700,fontSize:13,cursor:"pointer"}}>Crear cliente nuevo</button>
             </div>
           )}
 
