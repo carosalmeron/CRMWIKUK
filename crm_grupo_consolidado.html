@@ -2629,7 +2629,7 @@ function ClienteRow({nombre,visita,ops,onSave}){
   );
 }
 
-function Informe({usuario, clientesFB}){
+function Informe({usuario, clientesFB, actividadSemana}){
   // Wait for Firebase clients — show loading if empty
   const cargandoClientes = !clientesFB || clientesFB.length === 0;
   const clientes = clientesFB&&clientesFB.length>0 ? clientesFB : (CLIENTES_POR_AGENTE[usuario.id]||[]);
@@ -2645,6 +2645,42 @@ function Informe({usuario, clientesFB}){
   const [visitas,setVisitas]=useState({});
   const [muestras,setMuestras]=useState([]);
   const [enviado,setEnviado]=useState(false);
+  const [planSem,setPlanSem]=useState(null);
+  const [cargandoPlan,setCargandoPlan]=useState(true);
+
+  // Cargar plan semanal desde Firebase
+  React.useEffect(function(){
+    fbLeer("planes_semanales").then(function(planes){
+      var miPlan=(planes||[]).find(function(p){return p.agenteId===usuario.id&&parseInt(p.semana)===semana;});
+      if(miPlan) setPlanSem(miPlan);
+      setCargandoPlan(false);
+    }).catch(function(){setCargandoPlan(false);});
+  },[]);
+
+  // Cargar visitas de Firebase para esta semana
+  var _vdb=React.useState([]);var visitasDB=_vdb[0],setVisitasDB=_vdb[1];
+  React.useEffect(function(){
+    fbLeer("visitas").then(function(d){setVisitasDB(d||[]);});
+  },[]);
+
+  var appMisIds=resolverMisIds(usuario);
+  var clientesVisitados=[];
+  (visitasDB||[]).forEach(function(v){
+    var agId=(v.agenteId||v.agente||"").toUpperCase();
+    if(!appMisIds.has(agId)) return;
+    var vSem=parseInt(v.semana||0);
+    if(vSem!==semana) return;
+    var cliN=(v.clienteNombre||v.cliente||"");
+    if(cliN&&clientesVisitados.indexOf(cliN)<0) clientesVisitados.push(cliN);
+  });
+  // También de actividad local
+  Object.keys(actividadSemana||{}).forEach(function(cid){
+    var a=actividadSemana[cid];
+    if(a&&a.visitas&&a.visitas.length>0){
+      var cli=(clientesFB||[]).find(function(c){return c.id===cid;});
+      if(cli){var n=cli.nombre||cli.NOMBRE||"";if(n&&clientesVisitados.indexOf(n)<0) clientesVisitados.push(n);}
+    }
+  });
 
   // Ruta seleccionada y cliente seleccionado
   const [rutaSel,setRutaSel]=useState(null);
@@ -2655,6 +2691,15 @@ function Informe({usuario, clientesFB}){
   const [micActivo,setMicActivo]=useState(false);
   const micRef=React.useRef(null);
   const fotoRef=React.useRef();
+  const [busqInforme,setBusqInforme]=useState("");
+
+  // Auto-seleccionar ruta desde el plan semanal
+  React.useEffect(function(){
+    if(planSem&&rutaSel===null){
+      if(planSem.modo==="libre") setRutaSel("libre");
+      else if(planSem.rutaNum) setRutaSel(Number(planSem.rutaNum));
+    }
+  },[planSem]);
 
   const usarMicrofono=(onTexto)=>{
     const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
@@ -2928,9 +2973,64 @@ function Informe({usuario, clientesFB}){
         }
 
         // Sub-pantalla: lista de clientes de la ruta seleccionada
+        if(rutaSel==="libre"){
+          // Modo libre: mostrar visitados + buscador
+          return(
+            <div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+                <div>
+                  <p style={{margin:0,fontSize:17,fontWeight:800,color:T.text}}>Semana libre</p>
+                  <p style={{margin:"2px 0 0",fontSize:12,color:T.muted}}>{clientesVisitados.length} clientes visitados</p>
+                </div>
+                <button onClick={function(){setRutaSel(null);}} style={{padding:"6px 12px",borderRadius:8,border:"1px solid "+T.border,background:"#fff",color:T.muted,fontSize:11,cursor:"pointer"}}>Cambiar</button>
+              </div>
+
+              {clientesVisitados.length>0&&(
+                <div style={{marginBottom:16}}>
+                  <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:"#22C55E",textTransform:"uppercase"}}>Visitados ({clientesVisitados.length})</p>
+                  {clientesVisitados.map(function(nombre,i){
+                    var cli=clientes.find(function(c){return (c.nombre||c.NOMBRE||"").toUpperCase()===nombre.toUpperCase();});
+                    var v=cli?visitas[cli.id]:null;
+                    var rOp=v?RESULTADOS.find(function(r){return r.k===(v&&v.resultado);}):null;
+                    return <Card key={i} onClick={function(){if(cli){setClienteSel(cli);setFormV({resultado:"pedido",notas:""});}}}
+                      style={{marginBottom:8,padding:"13px 16px",cursor:"pointer",borderLeft:"4px solid "+(rOp?rOp.color:T.green)}}>
+                      <div style={{display:"flex",alignItems:"center",gap:10}}>
+                        <span>{"✅"}</span>
+                        <div style={{flex:1}}>
+                          <p style={{margin:0,fontSize:13,fontWeight:700}}>{nombre}</p>
+                          {rOp&&<span style={{fontSize:10,color:rOp.color,fontWeight:600}}>{rOp.label}</span>}
+                        </div>
+                      </div>
+                    </Card>;
+                  })}
+                </div>
+              )}
+
+              <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.blue,textTransform:"uppercase"}}>Añadir visita</p>
+              <input value={busqInforme} onChange={function(e){setBusqInforme(e.target.value);}}
+                placeholder="Buscar cliente..."
+                style={{width:"100%",padding:"11px 14px",borderRadius:10,border:"1.5px solid "+T.border,fontSize:13,outline:"none",boxSizing:"border-box",marginBottom:8}}/>
+              {busqInforme.length>=2&&(
+                <div style={{background:"#fff",borderRadius:12,border:"1px solid "+T.border,overflow:"hidden",marginBottom:12}}>
+                  {clientes.filter(function(c){return (c.nombre||c.NOMBRE||"").toUpperCase().includes(busqInforme.toUpperCase());}).slice(0,8).map(function(c,i){
+                    return <div key={i} onClick={function(){setClienteSel(c);setFormV({resultado:"pedido",notas:""});setBusqInforme("");}}
+                      style={{padding:"10px 14px",borderBottom:"1px solid #F1F5F9",cursor:"pointer"}}>
+                      <p style={{margin:0,fontSize:13,fontWeight:600}}>{c.nombre||c.NOMBRE}</p>
+                    </div>;
+                  })}
+                </div>
+              )}
+
+              <Btn full onClick={function(){setStep(2);}} color={usuario.color}>Siguiente → Recuperación</Btn>
+            </div>
+          );
+        }
         if(rutaSel!==null){
           const clientesRuta=clientes.filter(c=>getRouteNum2(c)===rutaSel);
           const nuevosDeRuta=nuevosCreados.filter(c=>c.ruta===rutaSel);
+          var todosRuta=[].concat(clientesRuta,nuevosDeRuta);
+          var visitadosRuta=todosRuta.filter(function(c){return visitas[c.id]||clientesVisitados.indexOf(c.nombre||c.NOMBRE)>=0;});
+          var pendientesRuta=todosRuta.filter(function(c){return !visitas[c.id]&&clientesVisitados.indexOf(c.nombre||c.NOMBRE)<0;});
 
           // ── Pantalla: nuevo cliente ──────────────────────────────
           if(showNuevo){
@@ -2945,76 +3045,191 @@ function Informe({usuario, clientesFB}){
 
           return(
             <div>
-              <BackBar label="Cambiar ruta" onBack={()=>setRutaSel(null)}/>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
                 <div>
                   <p style={{margin:0,fontSize:17,fontWeight:800,color:T.text}}>Ruta {rutaSel}</p>
                   <p style={{margin:"2px 0 0",fontSize:12,color:T.muted}}>
-                    {clientesRuta.length+nuevosDeRuta.length} clientes · {[...clientesRuta,...nuevosDeRuta].filter(c=>visitas[c.id]).length} visitados
+                    {visitadosRuta.length} visitados · {pendientesRuta.length} pendientes
                   </p>
                 </div>
-                <div style={{background:T.greenL,borderRadius:99,padding:"5px 14px"}}>
-                  <span style={{fontSize:13,fontWeight:700,color:T.green}}>
-                    {[...clientesRuta,...nuevosDeRuta].filter(c=>visitas[c.id]).length}/{clientesRuta.length+nuevosDeRuta.length}
-                  </span>
+                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                  <div style={{background:T.greenL,borderRadius:99,padding:"5px 14px"}}>
+                    <span style={{fontSize:13,fontWeight:700,color:T.green}}>
+                      {visitadosRuta.length}/{todosRuta.length}
+                    </span>
+                  </div>
+                  <button onClick={function(){setRutaSel(null);}} style={{padding:"6px 12px",borderRadius:8,border:"1px solid "+T.border,background:"#fff",color:T.muted,fontSize:11,cursor:"pointer"}}>Cambiar</button>
                 </div>
               </div>
 
-              {/* Clientes de la ruta */}
-              {[...clientesRuta,...nuevosDeRuta].map(c=>{
-                const v=visitas[c.id];
-                const rOp=RESULTADOS.find(r=>r.k===v?.resultado);
-                return(
-                  <Card key={c.id} onClick={()=>{setClienteSel(c);setFormV({resultado:"pedido",notas:""}); }}
-                    style={{marginBottom:8,padding:"13px 16px",cursor:"pointer",
-                      borderLeft:`4px solid ${rOp?rOp.color:T.border}`}}>
-                    <div style={{display:"flex",gap:10,alignItems:"center"}}>
-                      <div style={{flex:1,minWidth:0}}>
-                        <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:2}}>
-                          <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text,
-                            overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.nombre}</p>
-                          {c.esNuevo&&<span style={{fontSize:9,fontWeight:700,color:T.purple,
-                            background:T.purpleL,borderRadius:99,padding:"1px 7px",flexShrink:0}}>NUEVO</span>}
+              {/* Visitados */}
+              {visitadosRuta.length>0&&(
+                <div style={{marginBottom:16}}>
+                  <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:"#22C55E",textTransform:"uppercase"}}>Visitados ({visitadosRuta.length})</p>
+                  {visitadosRuta.map(c=>{
+                    const v=visitas[c.id];
+                    const rOp=v?RESULTADOS.find(r=>r.k===(v&&v.resultado)):null;
+                    return(
+                      <Card key={c.id} onClick={()=>{setClienteSel(c);setFormV({resultado:"pedido",notas:""});}}
+                        style={{marginBottom:8,padding:"13px 16px",cursor:"pointer",borderLeft:"4px solid "+(rOp?rOp.color:T.green)}}>
+                        <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                          <span>{"✅"}</span>
+                          <div style={{flex:1,minWidth:0}}>
+                            <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.nombre}</p>
+                            {rOp&&<span style={{fontSize:10,color:rOp.color,fontWeight:600}}>{rOp.label}</span>}
+                          </div>
                         </div>
-                        <div style={{display:"flex",gap:6,marginTop:3,alignItems:"center"}}>
-                          {rOp?<Badge label={rOp.label} color={rOp.color}/>
-                          :<span style={{fontSize:11,color:T.muted}}>Sin registrar</span>}
-                          {v?.notas&&<span style={{fontSize:10,color:T.muted,fontStyle:"italic",
-                            overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:120}}>
-                            · {v.notas}
-                          </span>}
+                      </Card>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Pendientes */}
+              {pendientesRuta.length>0&&(
+                <div style={{marginBottom:16}}>
+                  <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.amber,textTransform:"uppercase"}}>Pendientes ({pendientesRuta.length})</p>
+                  {pendientesRuta.map(c=>(
+                    <Card key={c.id} onClick={()=>{setClienteSel(c);setFormV({resultado:"pedido",notas:""});}}
+                      style={{marginBottom:8,padding:"13px 16px",cursor:"pointer",borderLeft:"4px solid "+T.border}}>
+                      <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                        <span style={{color:T.muted}}>{"⬜"}</span>
+                        <div style={{flex:1,minWidth:0}}>
+                          <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.nombre}</p>
+                          <p style={{margin:0,fontSize:10,color:T.muted}}>{c.poblacion||c.ciudad||c.dir||""}</p>
                         </div>
                       </div>
-                      {(v?.historial?.length||0)>0&&(
-                        <span style={{fontSize:10,fontWeight:700,color:T.blue,
-                          background:T.blueL,borderRadius:99,padding:"2px 7px",flexShrink:0}}>
-                          {v.historial.length} prev.
-                        </span>
-                      )}
-                      <span style={{color:T.muted,fontSize:18}}>›</span>
-                    </div>
-                  </Card>
-                );
-              })}
+                    </Card>
+                  ))}
+                </div>
+              )}
 
-              {/* Botón nuevo cliente */}
+              {/* Añadir visita extra */}
+              <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.blue,textTransform:"uppercase"}}>Añadir visita fuera de ruta</p>
+              <input value={busqInforme} onChange={function(e){setBusqInforme(e.target.value);}}
+                placeholder="Buscar cliente..."
+                style={{width:"100%",padding:"11px 14px",borderRadius:10,border:"1.5px solid "+T.border,fontSize:13,outline:"none",boxSizing:"border-box",marginBottom:8}}/>
+              {busqInforme.length>=2&&(
+                <div style={{background:"#fff",borderRadius:12,border:"1px solid "+T.border,overflow:"hidden",marginBottom:12}}>
+                  {clientes.filter(function(c){return (c.nombre||c.NOMBRE||"").toUpperCase().includes(busqInforme.toUpperCase());}).slice(0,8).map(function(c,i){
+                    return <div key={i} onClick={function(){setClienteSel(c);setFormV({resultado:"pedido",notas:""});setBusqInforme("");}}
+                      style={{padding:"10px 14px",borderBottom:"1px solid #F1F5F9",cursor:"pointer"}}>
+                      <p style={{margin:0,fontSize:13,fontWeight:600}}>{c.nombre||c.NOMBRE}</p>
+                    </div>;
+                  })}
+                </div>
+              )}
+
               <button onClick={()=>setShowNuevo(true)}
-                style={{width:"100%",padding:"13px",borderRadius:12,marginBottom:16,marginTop:4,
-                  border:`2px dashed ${T.purple}`,background:T.purpleL,
-                  color:T.purple,fontWeight:700,fontSize:13,cursor:"pointer",
-                  display:"flex",gap:8,alignItems:"center",justifyContent:"center"}}>
-                <span style={{fontSize:18}}>🆕</span> Añadir cliente nuevo
+                style={{width:"100%",padding:"12px",borderRadius:12,border:`2px dashed ${T.border}`,
+                  background:"transparent",color:T.muted,fontWeight:700,fontSize:12,
+                  cursor:"pointer",marginBottom:16}}>
+                + Crear cliente nuevo
               </button>
-
-              <div style={{display:"flex",gap:8}}>
-                <Btn onClick={()=>setRutaSel(null)} outline color={T.navy}>← Rutas</Btn>
-                <Btn full onClick={()=>setStep(2)} color={usuario.color}>Siguiente → Recuperación</Btn>
-              </div>
+              <Btn full onClick={()=>setStep(2)} color={usuario.color}>Siguiente → Recuperación</Btn>
             </div>
           );
         }
 
-        // Pantalla principal: selección de ruta
+        // Pantalla principal: mostrar visitados y pendientes según plan semanal
+        if(cargandoPlan) return <div style={{textAlign:"center",padding:40,color:T.muted}}>Cargando plan semanal...</div>;
+
+        var esLibre=planSem&&planSem.modo==="libre";
+        var rutaPlan=planSem&&planSem.rutaNum?parseInt(planSem.rutaNum):null;
+
+        // Auto-seleccionar ruta del plan si existe
+        if(rutaPlan&&!rutaSel){
+          return(
+            <div>
+              <p style={{margin:"0 0 4px",fontSize:17,fontWeight:800,color:T.text}}>👥 Ruta {rutaPlan} — Semana {semana}</p>
+              <p style={{margin:"0 0 14px",fontSize:12,color:T.muted}}>{clientes.filter(function(c){return getRouteNum2(c)===rutaPlan;}).length} clientes en ruta</p>
+
+              {/* Visitados */}
+              {clientesVisitados.length>0&&(
+                <div style={{marginBottom:16}}>
+                  <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:"#22C55E",textTransform:"uppercase"}}>Visitados ({clientesVisitados.length})</p>
+                  {clientesVisitados.map(function(nombre,i){
+                    var cli=clientes.find(function(c){return (c.nombre||c.NOMBRE||"")==nombre;});
+                    var vis=cli?visitas[cli.id]:null;
+                    return <div key={i} onClick={function(){if(cli){setClienteSel(cli);setFormV({resultado:vis?vis.resultado:"pedido",notas:vis?vis.notas:""});}}}
+                      style={{background:"#F0FDF4",borderRadius:12,padding:"12px 16px",marginBottom:6,
+                        display:"flex",alignItems:"center",gap:12,cursor:"pointer",border:"1px solid #D1FAE5"}}>
+                      <span style={{fontSize:16}}>✅</span>
+                      <div style={{flex:1}}><p style={{margin:0,fontSize:14,fontWeight:600}}>{nombre}</p></div>
+                      <span style={{color:"#94A3B8",fontSize:16}}>›</span>
+                    </div>;
+                  })}
+                </div>
+              )}
+
+              {/* Pendientes de la ruta */}
+              {(function(){
+                var pendientes=clientes.filter(function(c){return getRouteNum2(c)===rutaPlan&&clientesVisitados.indexOf(c.nombre||c.NOMBRE)<0;});
+                if(pendientes.length===0) return null;
+                return <div style={{marginBottom:16}}>
+                  <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.amber,textTransform:"uppercase"}}>Pendientes ({pendientes.length})</p>
+                  {pendientes.map(function(c,i){
+                    var vis=visitas[c.id];
+                    return <div key={i} onClick={function(){setClienteSel(c);setFormV({resultado:"pedido",notas:""});}}
+                      style={{background:"#fff",borderRadius:12,padding:"12px 16px",marginBottom:6,
+                        display:"flex",alignItems:"center",gap:12,cursor:"pointer",border:"1px solid "+T.border}}>
+                      <span style={{fontSize:16}}>⏳</span>
+                      <div style={{flex:1}}>
+                        <p style={{margin:0,fontSize:14,fontWeight:600}}>{c.nombre||c.NOMBRE}</p>
+                        <p style={{margin:"2px 0 0",fontSize:10,color:T.muted}}>{c.poblacion||c.ciudad||c.dir||""}</p>
+                      </div>
+                      {vis&&<span style={{fontSize:10,color:T.green,fontWeight:700}}>✓</span>}
+                      <span style={{color:"#94A3B8",fontSize:16}}>›</span>
+                    </div>;
+                  })}
+                </div>;
+              })()}
+
+              <button onClick={function(){setRutaSel(rutaPlan);setShowNuevo(true);}}
+                style={{width:"100%",padding:14,borderRadius:14,border:"2px dashed "+T.purple,
+                  background:"#F5F3FF",color:T.purple,fontWeight:700,fontSize:13,cursor:"pointer",marginBottom:12}}>
+                + Añadir visita nueva
+              </button>
+              <Btn full onClick={function(){setStep(2);}} color={usuario.color}>Siguiente → Recuperación</Btn>
+            </div>
+          );
+        }
+
+        // Modo libre — solo visitados + añadir
+        if(esLibre){
+          return(
+            <div>
+              <p style={{margin:"0 0 4px",fontSize:17,fontWeight:800,color:T.text}}>🔍 Semana libre — Semana {semana}</p>
+              <p style={{margin:"0 0 14px",fontSize:12,color:T.muted}}>Visitas realizadas esta semana</p>
+
+              {clientesVisitados.length>0?(
+                <div style={{marginBottom:16}}>
+                  {clientesVisitados.map(function(nombre,i){
+                    var cli=clientes.find(function(c){return (c.nombre||c.NOMBRE||"")==nombre;});
+                    return <div key={i} onClick={function(){if(cli){setClienteSel(cli);setFormV({resultado:"pedido",notas:""});}}}
+                      style={{background:"#F0FDF4",borderRadius:12,padding:"12px 16px",marginBottom:6,
+                        display:"flex",alignItems:"center",gap:12,cursor:"pointer",border:"1px solid #D1FAE5"}}>
+                      <span style={{fontSize:16}}>✅</span>
+                      <div style={{flex:1}}><p style={{margin:0,fontSize:14,fontWeight:600}}>{nombre}</p></div>
+                      <span style={{color:"#94A3B8",fontSize:16}}>›</span>
+                    </div>;
+                  })}
+                </div>
+              ):(
+                <p style={{textAlign:"center",padding:20,color:T.muted,fontSize:13}}>No hay visitas registradas esta semana</p>
+              )}
+
+              <button onClick={function(){setRutaSel(0);setShowNuevo(true);}}
+                style={{width:"100%",padding:14,borderRadius:14,border:"2px dashed "+T.purple,
+                  background:"#F5F3FF",color:T.purple,fontWeight:700,fontSize:13,cursor:"pointer",marginBottom:12}}>
+                + Añadir visita nueva
+              </button>
+              <Btn full onClick={function(){setStep(2);}} color={usuario.color}>Siguiente → Recuperación</Btn>
+            </div>
+          );
+        }
+
+        // Sin plan — fallback a selección de ruta clásica
         return(
           <div>
             <p style={{margin:"0 0 4px",fontSize:17,fontWeight:800,color:T.text}}>👥 ¿Qué ruta haces hoy?</p>
@@ -5078,7 +5293,7 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB}
   const cerradas=misMostrar.filter(i=>i.estado==="cerrada"||i.estado==="resuelta");
 
   // ── DETALLE ────────────────────────────────────────────────────────
-function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscalar,onInformar,onNota,onCerrar}){
+function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscalar,onInformar,onNota,onCerrar,onDel}){
   const tipo=INC_TIPOS[sel.tipo]||{label:sel.tipo,color:T.muted};
   const priColors={urgente:"#7F1D1D",alta:T.red,media:T.amber,baja:T.green};
   const priColor=priColors[sel.prioridad]||T.muted;
@@ -5101,9 +5316,10 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
         <BackBar label="Incidencias" onBack={onBack}/>
         <div style={{padding:"16px"}}>
 
-          {/* Botón calendario */}
-          <button onClick={()=>{
-            const ics=generarICS({
+          {/* Acciones superiores */}
+          <div style={{display:"flex",gap:8,marginBottom:12}}>
+            <button onClick={()=>{
+              const ics=generarICS({
               titulo:`CRM Incidencia: ${sel.titulo||sel.asunto||sel.tipo} — ${sel.clienteNombre||sel.cliente||""}`,
               descripcion:`${sel.descripcion||""}\nCliente: ${sel.clienteNombre||""}\nPrioridad: ${sel.prioridad||"media"}`,
               fechaInicio:new Date(Date.now()+3600000),
@@ -5114,8 +5330,14 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
           }}
             style={{width:"100%",padding:"10px",borderRadius:10,border:`1.5px solid ${T.blue}`,background:"#EFF6FF",
               color:T.blue,fontSize:12,fontWeight:700,cursor:"pointer",marginBottom:12,textAlign:"center"}}>
-            📅 Añadir al calendario del teléfono
+            📅 Calendario
           </button>
+          {onDel&&<button onClick={function(){if(confirm("¿Eliminar esta incidencia?"))onDel(sel.id);}}
+            style={{padding:"10px 14px",borderRadius:10,border:"1.5px solid "+T.red,background:"#FEF2F2",
+              color:T.red,fontSize:12,fontWeight:700,cursor:"pointer"}}>
+            🗑️ Eliminar
+          </button>}
+          </div>
 
           {/* Ficha */}
           <div style={{background:"#fff",borderRadius:16,marginBottom:16,overflow:"hidden",
@@ -5359,7 +5581,7 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
   );
 }
 
-  if(sel) return <DetIncidencia sel={sel} usuario={usuario} director={director} ceo={ceo} esJefe={esJefe} esRolJefe={esRolJefe} onBack={()=>setSel(null)} onEscalar={(destId,nota)=>{escalar(sel,destId,nota);setSel({...sel,escaladoA:destId,estado:"escalada"});}} onInformar={(destId)=>informar(sel,destId)} onNota={(nota)=>addHistorial(sel,"💬 Nota",nota)} onCerrar={(nota,extras)=>cerrar(sel,nota,extras)}/>;
+  if(sel) return <DetIncidencia sel={sel} usuario={usuario} director={director} ceo={ceo} esJefe={esJefe} esRolJefe={esRolJefe} onBack={()=>setSel(null)} onEscalar={(destId,nota)=>{escalar(sel,destId,nota);setSel({...sel,escaladoA:destId,estado:"escalada"});}} onInformar={(destId)=>informar(sel,destId)} onNota={(nota)=>addHistorial(sel,"💬 Nota",nota)} onCerrar={(nota,extras)=>cerrar(sel,nota,extras)} onDel={function(id){fbEscribir("incidencias",id,{id:id,eliminada:true,eliminadoPor:usuario.id,fechaEliminacion:new Date().toISOString()});setIncidencias(function(p){return p.filter(function(i){return i.id!==id;});});setSel(null);}}/>;
 
   // ── LISTA ─────────────────────────────────────────────────────────
   return(
