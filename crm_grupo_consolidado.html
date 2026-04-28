@@ -2629,7 +2629,7 @@ function ClienteRow({nombre,visita,ops,onSave}){
   );
 }
 
-function Informe({usuario, clientesFB, actividadSemana}){
+function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasDB, incidenciasDB}){
   // Wait for Firebase clients — show loading if empty
   const cargandoClientes = !clientesFB || clientesFB.length === 0;
   const clientes = clientesFB&&clientesFB.length>0 ? clientesFB : (CLIENTES_POR_AGENTE[usuario.id]||[]);
@@ -2664,6 +2664,25 @@ function Informe({usuario, clientesFB, actividadSemana}){
   },[]);
 
   var appMisIds=resolverMisIds(usuario);
+  
+  // Muestras, estrategias e incidencias de esta semana
+  var muestrasSemana=(muestrasDB||[]).filter(function(m){
+    if(m.eliminada) return false;
+    var agOk=appMisIds.has((m.agente||"").toUpperCase());
+    var sem=parseInt(m.semana||0);
+    return agOk&&(sem===semana||!m.semana);
+  });
+  var estrategiasSemana=(estrategiasDB||[]).filter(function(e){
+    if(e.eliminada) return false;
+    var agOk=appMisIds.has((e.agente||"").toUpperCase());
+    return agOk&&(e.estado==="en_curso"||e.estado==="pendiente_aprobacion");
+  });
+  var incidenciasSemana=(incidenciasDB||[]).filter(function(i){
+    if(i.eliminada) return false;
+    var agOk=appMisIds.has((i.agente||i.autor||"").toUpperCase());
+    return agOk&&i.estado!=="cerrada"&&i.estado!=="resuelta";
+  });
+
   var clientesVisitados=[];
   (visitasDB||[]).forEach(function(v){
     var agId=(v.agenteId||v.agente||"").toUpperCase();
@@ -2693,13 +2712,12 @@ function Informe({usuario, clientesFB, actividadSemana}){
   const fotoRef=React.useRef();
   const [busqInforme,setBusqInforme]=useState("");
 
-  // Auto-seleccionar ruta desde el plan semanal
+  // Auto-seleccionar ruta cuando el plan cargue
   React.useEffect(function(){
-    if(planSem&&rutaSel===null){
-      if(planSem.modo==="libre") setRutaSel("libre");
-      else if(planSem.rutaNum) setRutaSel(Number(planSem.rutaNum));
-    }
-  },[planSem]);
+    if(!planSem||rutaSel!==null) return;
+    if(planSem.modo==="libre") setRutaSel("libre");
+    else if(planSem.rutaNum) setRutaSel(Number(planSem.rutaNum));
+  },[planSem,rutaSel]);
 
   const usarMicrofono=(onTexto)=>{
     const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
@@ -2755,6 +2773,7 @@ function Informe({usuario, clientesFB, actividadSemana}){
     {id:"visitas",     icon:"👥",label:"Visitas"},
     {id:"recuperacion",icon:"🎯",label:"Estrategias"},
     {id:"muestras",    icon:"📦",label:"Muestras"},
+    {id:"incidencias", icon:"🚨",label:"Incidencias"},
     {id:"resumen",     icon:"📤",label:"Enviar"},
   ];
 
@@ -3131,171 +3150,162 @@ function Informe({usuario, clientesFB, actividadSemana}){
           );
         }
 
-        // Pantalla principal: mostrar visitados y pendientes según plan semanal
+        // Si el plan está cargando, mostrar spinner
         if(cargandoPlan) return <div style={{textAlign:"center",padding:40,color:T.muted}}>Cargando plan semanal...</div>;
 
-        var esLibre=planSem&&planSem.modo==="libre";
-        var rutaPlan=planSem&&planSem.rutaNum?parseInt(planSem.rutaNum):null;
+        // Si hay plan pero rutaSel aun no se ha seteado, esperar
+        if(planSem&&rutaSel===null) return <div style={{textAlign:"center",padding:40,color:T.muted}}>Cargando ruta...</div>;
 
-        // Auto-seleccionar ruta del plan si existe
-        if(rutaPlan&&!rutaSel){
-          return(
-            <div>
-              <p style={{margin:"0 0 4px",fontSize:17,fontWeight:800,color:T.text}}>👥 Ruta {rutaPlan} — Semana {semana}</p>
-              <p style={{margin:"0 0 14px",fontSize:12,color:T.muted}}>{clientes.filter(function(c){return getRouteNum2(c)===rutaPlan;}).length} clientes en ruta</p>
-
-              {/* Visitados */}
-              {clientesVisitados.length>0&&(
-                <div style={{marginBottom:16}}>
-                  <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:"#22C55E",textTransform:"uppercase"}}>Visitados ({clientesVisitados.length})</p>
-                  {clientesVisitados.map(function(nombre,i){
-                    var cli=clientes.find(function(c){return (c.nombre||c.NOMBRE||"")==nombre;});
-                    var vis=cli?visitas[cli.id]:null;
-                    return <div key={i} onClick={function(){if(cli){setClienteSel(cli);setFormV({resultado:vis?vis.resultado:"pedido",notas:vis?vis.notas:""});}}}
-                      style={{background:"#F0FDF4",borderRadius:12,padding:"12px 16px",marginBottom:6,
-                        display:"flex",alignItems:"center",gap:12,cursor:"pointer",border:"1px solid #D1FAE5"}}>
-                      <span style={{fontSize:16}}>✅</span>
-                      <div style={{flex:1}}><p style={{margin:0,fontSize:14,fontWeight:600}}>{nombre}</p></div>
-                      <span style={{color:"#94A3B8",fontSize:16}}>›</span>
-                    </div>;
-                  })}
-                </div>
-              )}
-
-              {/* Pendientes de la ruta */}
-              {(function(){
-                var pendientes=clientes.filter(function(c){return getRouteNum2(c)===rutaPlan&&clientesVisitados.indexOf(c.nombre||c.NOMBRE)<0;});
-                if(pendientes.length===0) return null;
-                return <div style={{marginBottom:16}}>
-                  <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.amber,textTransform:"uppercase"}}>Pendientes ({pendientes.length})</p>
-                  {pendientes.map(function(c,i){
-                    var vis=visitas[c.id];
-                    return <div key={i} onClick={function(){setClienteSel(c);setFormV({resultado:"pedido",notas:""});}}
-                      style={{background:"#fff",borderRadius:12,padding:"12px 16px",marginBottom:6,
-                        display:"flex",alignItems:"center",gap:12,cursor:"pointer",border:"1px solid "+T.border}}>
-                      <span style={{fontSize:16}}>⏳</span>
-                      <div style={{flex:1}}>
-                        <p style={{margin:0,fontSize:14,fontWeight:600}}>{c.nombre||c.NOMBRE}</p>
-                        <p style={{margin:"2px 0 0",fontSize:10,color:T.muted}}>{c.poblacion||c.ciudad||c.dir||""}</p>
-                      </div>
-                      {vis&&<span style={{fontSize:10,color:T.green,fontWeight:700}}>✓</span>}
-                      <span style={{color:"#94A3B8",fontSize:16}}>›</span>
-                    </div>;
-                  })}
-                </div>;
-              })()}
-
-              <button onClick={function(){setRutaSel(rutaPlan);setShowNuevo(true);}}
-                style={{width:"100%",padding:14,borderRadius:14,border:"2px dashed "+T.purple,
-                  background:"#F5F3FF",color:T.purple,fontWeight:700,fontSize:13,cursor:"pointer",marginBottom:12}}>
-                + Añadir visita nueva
-              </button>
-              <Btn full onClick={function(){setStep(2);}} color={usuario.color}>Siguiente → Recuperación</Btn>
-            </div>
-          );
-        }
-
-        // Modo libre — solo visitados + añadir
-        if(esLibre){
-          return(
-            <div>
-              <p style={{margin:"0 0 4px",fontSize:17,fontWeight:800,color:T.text}}>🔍 Semana libre — Semana {semana}</p>
-              <p style={{margin:"0 0 14px",fontSize:12,color:T.muted}}>Visitas realizadas esta semana</p>
-
-              {clientesVisitados.length>0?(
-                <div style={{marginBottom:16}}>
-                  {clientesVisitados.map(function(nombre,i){
-                    var cli=clientes.find(function(c){return (c.nombre||c.NOMBRE||"")==nombre;});
-                    return <div key={i} onClick={function(){if(cli){setClienteSel(cli);setFormV({resultado:"pedido",notas:""});}}}
-                      style={{background:"#F0FDF4",borderRadius:12,padding:"12px 16px",marginBottom:6,
-                        display:"flex",alignItems:"center",gap:12,cursor:"pointer",border:"1px solid #D1FAE5"}}>
-                      <span style={{fontSize:16}}>✅</span>
-                      <div style={{flex:1}}><p style={{margin:0,fontSize:14,fontWeight:600}}>{nombre}</p></div>
-                      <span style={{color:"#94A3B8",fontSize:16}}>›</span>
-                    </div>;
-                  })}
-                </div>
-              ):(
-                <p style={{textAlign:"center",padding:20,color:T.muted,fontSize:13}}>No hay visitas registradas esta semana</p>
-              )}
-
-              <button onClick={function(){setRutaSel(0);setShowNuevo(true);}}
-                style={{width:"100%",padding:14,borderRadius:14,border:"2px dashed "+T.purple,
-                  background:"#F5F3FF",color:T.purple,fontWeight:700,fontSize:13,cursor:"pointer",marginBottom:12}}>
-                + Añadir visita nueva
-              </button>
-              <Btn full onClick={function(){setStep(2);}} color={usuario.color}>Siguiente → Recuperación</Btn>
-            </div>
-          );
-        }
-
-        // Sin plan — fallback a selección de ruta clásica
+        // Sin plan — fallback a selección de ruta
         return(
           <div>
             <p style={{margin:"0 0 4px",fontSize:17,fontWeight:800,color:T.text}}>👥 ¿Qué ruta haces hoy?</p>
-            <p style={{margin:"0 0 18px",fontSize:12,color:T.muted}}>Selecciona la ruta para ver tus clientes</p>
-            {rutasDisp.map(r=>{
-              const cli=clientes.filter(c=>getRouteNum2(c)===r);
-              const visitados=cli.filter(c=>visitas[c.id]).length;
+            <p style={{margin:"0 0 18px",fontSize:12,color:T.muted}}>No hay plan semanal — selecciona ruta</p>
+            {rutasDisp.map(function(r){
+              var cli=clientes.filter(function(c){return getRouteNum2(c)===r;});
+              var visitados=cli.filter(function(c){return visitas[c.id];}).length;
               return(
-                <div key={r} onClick={()=>setRutaSel(r)}
-                  style={{background:T.white,borderRadius:14,border:`1px solid ${T.border}`,
+                <div key={r} onClick={function(){setRutaSel(r);}}
+                  style={{background:"#fff",borderRadius:14,border:"1px solid "+T.border,
                     padding:"18px 20px",marginBottom:10,cursor:"pointer",
-                    display:"flex",alignItems:"center",gap:16,
-                    boxShadow:"0 1px 4px #0001"}}>
+                    display:"flex",alignItems:"center",gap:16,boxShadow:"0 1px 4px #0001"}}>
                   <div style={{width:48,height:48,borderRadius:12,background:T.navy,
                     color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",
                     fontSize:22,fontWeight:900,flexShrink:0}}>{r}</div>
                   <div style={{flex:1}}>
                     <p style={{margin:"0 0 3px",fontSize:15,fontWeight:700,color:T.text}}>Ruta {r}</p>
                     <p style={{margin:0,fontSize:12,color:T.muted}}>
-                      {cli.length} clientes{visitados>0?` · ${visitados} visitados`:""}
+                      {cli.length} clientes{visitados>0?" · "+visitados+" visitados":""}
                     </p>
                   </div>
-                  {visitados>0&&(
-                    <div style={{textAlign:"right",flexShrink:0}}>
-                      <span style={{fontSize:13,fontWeight:700,
-                        color:visitados===cli.length?T.green:T.amber}}>
-                        {visitados}/{cli.length}
-                      </span>
-                    </div>
-                  )}
                   <span style={{color:T.muted,fontSize:20}}>›</span>
                 </div>
               );
             })}
+            <div onClick={function(){setRutaSel("libre");}}
+              style={{background:"#F5F3FF",borderRadius:14,border:"1.5px solid #C4B5FD",
+                padding:"18px 20px",marginBottom:10,cursor:"pointer",
+                display:"flex",alignItems:"center",gap:16}}>
+              <div style={{width:48,height:48,borderRadius:12,background:"#7C3AED",
+                color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",
+                fontSize:22,fontWeight:900,flexShrink:0}}>🔍</div>
+              <div style={{flex:1}}>
+                <p style={{margin:"0 0 3px",fontSize:15,fontWeight:700,color:"#6D28D9"}}>Semana libre</p>
+                <p style={{margin:0,fontSize:12,color:"#7C3AED"}}>Sin ruta fija — visitas abiertas</p>
+              </div>
+              <span style={{color:"#7C3AED",fontSize:20}}>›</span>
+            </div>
           </div>
         );
       })()}
 
-      {/* PASO 2 — Recuperación de clientes */}
+      {/* PASO 2 — Estrategias */}
       {step===2&&(
-        <RecuperacionStep
-          estrategias={misEstrategias}
-          onBack={()=>setStep(1)}
-          onNext={()=>setStep(3)}
-          color={usuario.color}
-          uid={usuario.id}
-          todosClientes={clientes}
-        />
+        <div>
+          {/* Estrategias activas */}
+          {estrategiasSemana.length>0&&(
+            <div style={{marginBottom:16}}>
+              <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.green,textTransform:"uppercase"}}>
+                🎯 Estrategias activas ({estrategiasSemana.length})
+              </p>
+              {estrategiasSemana.map(function(e,i){
+                var est=e.estado==="en_curso"?"🔄 En curso":e.estado==="pendiente_aprobacion"?"⏳ Pendiente":"📋 "+e.estado;
+                return <div key={e.id||i} style={{background:"#fff",borderRadius:12,padding:"12px 16px",marginBottom:6,
+                  border:"1px solid "+T.border,borderLeft:"4px solid "+T.green}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                    <span style={{fontSize:12,fontWeight:700,color:T.green}}>{e.tipo==="recuperacion"?"🔄 Recuperación":"🌱 Nuevo cliente"}</span>
+                    <span style={{fontSize:10,color:T.muted}}>{est}</span>
+                  </div>
+                  <p style={{margin:0,fontSize:13,fontWeight:600}}>{e.clienteNombre||e.cliente||""}</p>
+                  {e.texto&&<p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{(e.texto||"").slice(0,80)}</p>}
+                </div>;
+              })}
+            </div>
+          )}
+          <RecuperacionStep
+            estrategias={misEstrategias}
+            onBack={()=>setStep(1)}
+            onNext={()=>setStep(3)}
+            color={usuario.color}
+            uid={usuario.id}
+            todosClientes={clientes}
+          />
+        </div>
       )}
 
       {/* PASO 3 — Muestras con buscador */}
       {step===3&&(
-        <MuestrasStep
-          muestras={muestras}
-          onAdd={m=>setMuestras(mm=>[...mm,m])}
-          onDel={id=>setMuestras(mm=>mm.filter(m=>m.id!==id))}
-          onEdit={m=>setMuestras(mm=>mm.map(x=>x.id===m.id?m:x))}
-          clientes={clientes}
-          onBack={()=>setStep(2)}
-          onNext={()=>setStep(4)}
-          color={usuario.color}
-        />
+        <div>
+          {/* Muestras existentes de esta semana */}
+          {muestrasSemana.length>0&&(
+            <div style={{marginBottom:16}}>
+              <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.purple,textTransform:"uppercase"}}>
+                📦 Muestras esta semana ({muestrasSemana.length})
+              </p>
+              {muestrasSemana.map(function(m,i){
+                var est=m.estado==="pedido"?"🛒 Pedido":m.estado==="positivo"?"✅ Positivo":m.estado==="ko"?"❌ KO":"⏳ Pendiente";
+                return <div key={m.id||i} style={{background:"#fff",borderRadius:12,padding:"12px 16px",marginBottom:6,
+                  border:"1px solid "+T.border,borderLeft:"4px solid "+T.purple}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                    <p style={{margin:0,fontSize:13,fontWeight:700}}>{m.prod||m.prodNombre||m.producto||"Muestra"}</p>
+                    <span style={{fontSize:10,color:T.muted}}>{m.fecha||""}</span>
+                  </div>
+                  <p style={{margin:0,fontSize:11,color:T.muted}}>
+                    {m.cliente||m.clienteNombre||""} | {m.tipo||""} | {est}
+                  </p>
+                </div>;
+              })}
+            </div>
+          )}
+          <MuestrasStep
+            muestras={muestras}
+            onAdd={m=>setMuestras(mm=>[...mm,m])}
+            onDel={id=>setMuestras(mm=>mm.filter(m=>m.id!==id))}
+            onEdit={m=>setMuestras(mm=>mm.map(x=>x.id===m.id?m:x))}
+            clientes={clientes}
+            onBack={()=>setStep(2)}
+            onNext={()=>setStep(4)}
+            color={usuario.color}
+          />
+        </div>
       )}
 
-      {/* PASO 4 — Resumen */}
+      {/* PASO 4 — Incidencias de la semana */}
       {step===4&&(
+        <div>
+          <p style={{margin:"0 0 4px",fontSize:17,fontWeight:800,color:T.text}}>🚨 Incidencias</p>
+          <p style={{margin:"0 0 16px",fontSize:12,color:T.muted}}>Incidencias abiertas esta semana</p>
+
+          {incidenciasSemana.length>0?(
+            <div style={{marginBottom:16}}>
+              {incidenciasSemana.map(function(i,idx){
+                return <div key={i.id||idx} style={{background:"#fff",borderRadius:12,padding:"14px 16px",marginBottom:8,
+                  border:"1px solid "+T.border,borderLeft:"4px solid "+T.red}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                    <span style={{fontSize:12,fontWeight:700,color:T.red}}>{i.tipo||"General"}</span>
+                    <span style={{fontSize:10,color:T.muted}}>{i.fecha||""}</span>
+                  </div>
+                  <p style={{margin:0,fontSize:13,color:T.text,lineHeight:1.5}}>{i.descripcion||i.titulo||i.asunto||""}</p>
+                  <p style={{margin:"4px 0 0",fontSize:10,color:T.muted}}>Cliente: {i.clienteNombre||i.cliente||"—"} | {(i.prioridad||"media").charAt(0).toUpperCase()+(i.prioridad||"media").slice(1)}</p>
+                </div>;
+              })}
+            </div>
+          ):(
+            <div style={{textAlign:"center",padding:24,color:T.muted,background:"#F0FDF4",borderRadius:12,marginBottom:16}}>
+              <span style={{fontSize:28,display:"block",marginBottom:6}}>✅</span>
+              <p style={{margin:0,fontSize:13}}>Sin incidencias abiertas</p>
+            </div>
+          )}
+
+          <div style={{display:"flex",gap:8}}>
+            <Btn onClick={function(){setStep(3);}} outline color={T.navy}>← Muestras</Btn>
+            <Btn full onClick={function(){setStep(5);}} color={usuario.color}>Siguiente → Enviar</Btn>
+          </div>
+        </div>
+      )}
+
+      {/* PASO 5 — Resumen */}
+      {step===5&&(
         <div>
           <p style={{margin:"0 0 20px",fontSize:17,fontWeight:800,color:T.text}}>📤 Resumen semanal</p>
           {[
@@ -13734,7 +13744,7 @@ function App(props){
         {esAgente&&section==="dashboard"&&  <DashAgente usuario={usuario} onNav={setSection} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} incidenciasDB={incidenciasDB} calendarioDB={calendarioDB} actividad={actividadSemana} _ver={objVer}/>}
         {esAgente&&section==="clientes"&&   <GestorClientes usuario={usuario} actividad={actividadSemana} onActividad={onActividad} onBack={function(){setSection(prevSectionRef.current||"dashboard");}} clientesFB={misClientesFB} muestrasDB={muestrasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} estrategiasDB={estrategiasDB} clienteDirecto={clienteDirecto} onClienteDirectoUsado={()=>setClienteDirecto(null)} onNewIncidencia={function(inc){setIncidenciasDB(function(prev){return [inc].concat(prev);});}} onNewMuestra={function(m){setMuestrasDB(function(prev){return [m].concat(prev);});}} onNewEstrategia={function(e){setEstrategiasDB(function(prev){return [e].concat(prev);});}}/> }
         {esAgente&&section==="plan_semanal"&& <MiSemana usuario={usuario} clientesFB={misClientesFB} onBack={()=>setSection("dashboard")} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} muestrasDB={muestrasDB} actividad={actividadSemana} onAbrirCliente={function(data){var obj=typeof data==="string"?{nombre:data,ts:Date.now()}:Object.assign({},data,{ts:Date.now()});setClienteDirecto(obj);setHideNav(true);setSection("clientes");}} onAbrirProyecto={function(nombre){setProyectoDirecto({nombre:nombre,ts:Date.now()});setSection("proyectos");}} onNewCliente={function(nuevo){setClientesDB(function(prev){if(!prev||!prev._todos)return prev;return Object.assign({},prev,{_todos:[nuevo].concat(prev._todos)});});}}/>}
-        {section==="informe"&&esAgente&&    <Informe usuario={usuario} actividadSemana={actividadSemana} clientesFB={misClientesFB}/>}
+        {section==="informe"&&esAgente&&    <Informe usuario={usuario} actividadSemana={actividadSemana} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} incidenciasDB={incidenciasDB}/>}
         {section==="informe"&&!esAgente&&   <MiInformeJefe usuario={usuario} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB} onNav={setSection}/>}
         {section==="informe_jefe"&&         <InformeJefe usuario={usuario} oportunidadesDB={oportunidadesDB}/>}
         {section==="informes_hub"&&(
