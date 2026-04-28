@@ -2642,7 +2642,20 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
   const semana=getSemanaISO();
   const [step,setStep]=useState(0);
   const [ventas,setVentas]=useState({venta:"",mb:"",promo:"",liq:""});
-  const [visitas,setVisitas]=useState({});
+  const [visitas,setVisitas]=useState(function(){
+    // Pre-cargar visitas de la sesion actual
+    var init={};
+    if(actividadSemana){
+      Object.keys(actividadSemana).forEach(function(cid){
+        var a=actividadSemana[cid];
+        if(a&&a.visitas&&a.visitas.length>0){
+          var last=a.visitas[a.visitas.length-1];
+          init[cid]={clienteNombre:last.clienteNombre||"",resultado:last.resultado||"pedido",notas:last.notas||"",fecha:last.fecha||"",historial:a.visitas};
+        }
+      });
+    }
+    return init;
+  });
   const [muestras,setMuestras]=useState([]);
   const [enviado,setEnviado]=useState(false);
   const [planSem,setPlanSem]=useState(null);
@@ -2660,7 +2673,25 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
   // Cargar visitas de Firebase para esta semana
   var _vdb=React.useState([]);var visitasDB=_vdb[0],setVisitasDB=_vdb[1];
   React.useEffect(function(){
-    fbLeer("visitas").then(function(d){setVisitasDB(d||[]);});
+    fbLeer("visitas").then(function(d){
+      setVisitasDB(d||[]);
+      // Merge into visitas state for pre-populating forms
+      var misSem=(d||[]).filter(function(v){
+        return parseInt(v.semana||0)===semana&&appMisIds.has((v.agenteId||v.agente||"").toUpperCase());
+      });
+      if(misSem.length>0){
+        setVisitas(function(prev){
+          var merged=Object.assign({},prev);
+          misSem.forEach(function(v){
+            var cid=v.clienteId||"";
+            if(cid&&!merged[cid]){
+              merged[cid]={clienteNombre:v.clienteNombre||v.cliente||"",resultado:v.resultado||"pedido",notas:v.notas||"",fecha:v.fecha||""};
+            }
+          });
+          return merged;
+        });
+      }
+    });
   },[]);
 
   var appMisIds=resolverMisIds(usuario);
@@ -2705,6 +2736,11 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
   const [rutaSel,setRutaSel]=useState(null);
   const [clienteSel,setClienteSel]=useState(null);
   const [formV,setFormV]=useState({resultado:"pedido",notas:""});
+  var abrirCliente=function(c){
+    var v=visitas[c.id];
+    setClienteSel(c);
+    setFormV(v?{resultado:v.resultado||"pedido",notas:v.notas||""}:{resultado:"pedido",notas:""});
+  };
   const [showNuevo,setShowNuevo]=useState(false);
   const [nuevosCreados,setNuevosCreados]=useState([]);
   const [micActivo,setMicActivo]=useState(false);
@@ -2919,7 +2955,7 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
         // Sub-pantalla: detalle de visita a cliente
         if(clienteSel){
           const vExist=visitas[clienteSel.id];
-          const hist=vExist?.historial||[];
+          const hist=(vExist&&vExist.historial)||[];
           return(
             <div>
               <BackBar label={`Ruta ${rutaSel}`} onBack={()=>setClienteSel(null)}/>
@@ -3015,7 +3051,7 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
                   fbEscribir("clientes",id,nuevo);
                   setNuevosCreados(function(prev){return prev.concat([nuevo]);});
                   setShowNuevo(false);
-                  setClienteSel(nuevo);setFormV({resultado:"pedido",notas:""});
+                  abrirCliente(nuevo);
                 }}
               />
             );
@@ -3038,7 +3074,7 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
                     var cli=clientes.find(function(c){return (c.nombre||c.NOMBRE||"").toUpperCase()===nombre.toUpperCase();});
                     var v=cli?visitas[cli.id]:null;
                     var rOp=v?RESULTADOS.find(function(r){return r.k===(v&&v.resultado);}):null;
-                    return <Card key={i} onClick={function(){if(cli){setClienteSel(cli);setFormV({resultado:"pedido",notas:""});}}}
+                    return <Card key={i} onClick={function(){if(cli){abrirCliente(cli);}}}
                       style={{marginBottom:8,padding:"13px 16px",cursor:"pointer",borderLeft:"4px solid "+(rOp?rOp.color:T.green)}}>
                       <div style={{display:"flex",alignItems:"center",gap:10}}>
                         <span>{"✅"}</span>
@@ -3059,7 +3095,7 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
               {busqInforme.length>=2&&(
                 <div style={{background:"#fff",borderRadius:12,border:"1px solid "+T.border,overflow:"hidden",marginBottom:12}}>
                   {clientes.filter(function(c){return (c.nombre||c.NOMBRE||"").toUpperCase().includes(busqInforme.toUpperCase());}).slice(0,8).map(function(c,i){
-                    return <div key={i} onClick={function(){setClienteSel(c);setFormV({resultado:"pedido",notas:""});setBusqInforme("");}}
+                    return <div key={i} onClick={function(){abrirCliente(c);setBusqInforme("");}}
                       style={{padding:"10px 14px",borderBottom:"1px solid #F1F5F9",cursor:"pointer"}}>
                       <p style={{margin:0,fontSize:13,fontWeight:600}}>{c.nombre||c.NOMBRE}</p>
                     </div>;
@@ -3123,7 +3159,7 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
                     const v=visitas[c.id];
                     const rOp=v?RESULTADOS.find(r=>r.k===(v&&v.resultado)):null;
                     return(
-                      <Card key={c.id} onClick={()=>{setClienteSel(c);setFormV({resultado:"pedido",notas:""});}}
+                      <Card key={c.id} onClick={()=>{abrirCliente(c);}}
                         style={{marginBottom:8,padding:"13px 16px",cursor:"pointer",borderLeft:"4px solid "+(rOp?rOp.color:T.green)}}>
                         <div style={{display:"flex",gap:10,alignItems:"center"}}>
                           <span>{"✅"}</span>
@@ -3143,7 +3179,7 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
                 <div style={{marginBottom:16}}>
                   <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.amber,textTransform:"uppercase"}}>Pendientes ({pendientesRuta.length})</p>
                   {pendientesRuta.map(c=>(
-                    <Card key={c.id} onClick={()=>{setClienteSel(c);setFormV({resultado:"pedido",notas:""});}}
+                    <Card key={c.id} onClick={()=>{abrirCliente(c);}}
                       style={{marginBottom:8,padding:"13px 16px",cursor:"pointer",borderLeft:"4px solid "+T.border}}>
                       <div style={{display:"flex",gap:10,alignItems:"center"}}>
                         <span style={{color:T.muted}}>{"⬜"}</span>
@@ -3165,7 +3201,7 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
               {busqInforme.length>=2&&(
                 <div style={{background:"#fff",borderRadius:12,border:"1px solid "+T.border,overflow:"hidden",marginBottom:12}}>
                   {clientes.filter(function(c){return (c.nombre||c.NOMBRE||"").toUpperCase().includes(busqInforme.toUpperCase());}).slice(0,8).map(function(c,i){
-                    return <div key={i} onClick={function(){setClienteSel(c);setFormV({resultado:"pedido",notas:""});setBusqInforme("");}}
+                    return <div key={i} onClick={function(){abrirCliente(c);setBusqInforme("");}}
                       style={{padding:"10px 14px",borderBottom:"1px solid #F1F5F9",cursor:"pointer"}}>
                       <p style={{margin:0,fontSize:13,fontWeight:600}}>{c.nombre||c.NOMBRE}</p>
                     </div>;
