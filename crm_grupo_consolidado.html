@@ -6900,7 +6900,7 @@ function serializeToFirestore(datos){
     if(typeof v==="number") return {doubleValue:v};
     if(typeof v==="string"){
       // Truncar strings muy largos (base64 imágenes) para no superar 1MB
-      if(v.startsWith("data:image")&&v.length>5000) return {stringValue:"[imagen]"};
+      if(v.startsWith("data:image")&&v.length>900000) return {stringValue:""};
       return {stringValue:v};
     }
     if(Array.isArray(v)) return {arrayValue:{values:v.map(x=>serialize(x))}};
@@ -8093,20 +8093,43 @@ function Detalle({opo,usuario,onClose,onUpdate,onEdit,onDel,onAbrirCliente,onCon
   const [showCambioEtapa,setShowCambioEtapa]=useState(false);
   const [imgGrande,setImgGrande]=useState(null);
   const fotoDetRef=React.useRef();
+  var _sf=React.useState([]);var fotosLoaded=_sf[0],setFotosLoaded=_sf[1];
+  
+  // Cargar fotos desde coleccion separada
+  React.useEffect(function(){
+    if(!opo||!opo.id) return;
+    fbLeer("fotos_oportunidades").then(function(todas){
+      var del=(todas||[]).filter(function(f){return f.opoId===opo.id&&f.data&&f.data.length>10;});
+      if(del.length>0) setFotosLoaded(del.map(function(f){return f.data;}));
+    });
+  },[opo&&opo.id]);
+  
   const ag=USUARIOS.find(v=>v.id===opo.agenteId||v.id===opo.agente);
   const est=ESTADOS[opo.etapa]||ESTADOS[opo.estado]||ESTADOS.sin_asignar;
-  const fotos=(opo.fotos||[]).filter(function(f){return f&&f!=="[imagen]"&&f.length>10;});
+  // Combinar fotos locales (opo.fotos) + fotos de Firebase
+  var fotosInline=(opo.fotos||[]).filter(function(f){return f&&f!=="[imagen]"&&f!==""&&f.length>10;});
+  var fotos=[].concat(fotosLoaded,fotosInline).filter(function(f,i,arr){return arr.indexOf(f)===i;});
+  
   const subirFoto=function(e){
     var file=e.target.files&&e.target.files[0];
     if(!file) return;
-    var reader=new FileReader();
-    reader.onload=function(ev){
-      var data=ev.target.result;
-      var nuevasFotos=[].concat(opo.fotos||[],[data]);
-      onUpdate(Object.assign({},opo,{fotos:nuevasFotos,
-        actividad:[].concat(opo.actividad||[],[{tipo:"nota",texto:"Foto añadida",fecha:new Date().toLocaleDateString("es-ES"),autor:usuario.nombre}])}));
+    // Comprimir imagen para que quepa en Firebase
+    var img=new Image();
+    img.onload=function(){
+      var canvas=document.createElement("canvas");
+      var maxW=1200,maxH=1200;
+      var w=img.width,h=img.height;
+      if(w>maxW){h=h*(maxW/w);w=maxW;}
+      if(h>maxH){w=w*(maxH/h);h=maxH;}
+      canvas.width=w;canvas.height=h;
+      canvas.getContext("2d").drawImage(img,0,0,w,h);
+      var data=canvas.toDataURL("image/jpeg",0.7);
+      var fotoId="foto_"+opo.id+"_"+Date.now();
+      fbEscribir("fotos_oportunidades",fotoId,{id:fotoId,opoId:opo.id,data:data,fecha:new Date().toISOString(),autor:(usuario||{}).nombre||""});
+      setFotosLoaded(function(prev){return prev.concat([data]);});
     };
-    reader.readAsDataURL(file);
+    img.src=URL.createObjectURL(file);
+    e.target.value="";
   };
 
   const cambiarEtapa=()=>{
@@ -8128,8 +8151,10 @@ function Detalle({opo,usuario,onClose,onUpdate,onEdit,onDel,onAbrirCliente,onCon
     <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"#F1F5F9",zIndex:200,overflow:"auto"}}>
 
       {/* Visor imagen grande */}
-      {imgGrande&&<div onClick={function(){setImgGrande(null);}} style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,.85)",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
-        <img src={imgGrande} style={{maxWidth:"100%",maxHeight:"90vh",borderRadius:8}} alt=""/>
+      {imgGrande&&<div onClick={function(){setImgGrande(null);}} style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,.9)",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:16,flexDirection:"column"}}>
+        <button style={{position:"absolute",top:16,right:16,background:"rgba(255,255,255,.2)",border:"none",color:"#fff",fontSize:24,width:44,height:44,borderRadius:99,cursor:"pointer",zIndex:301}}>✕</button>
+        <img src={imgGrande} style={{maxWidth:"95%",maxHeight:"85vh",borderRadius:8,objectFit:"contain"}} alt=""/>
+        <p style={{margin:"10px 0 0",color:"rgba(255,255,255,.5)",fontSize:12}}>Pulsa para cerrar</p>
       </div>}
 
       {/* Header */}
@@ -8166,8 +8191,13 @@ function Detalle({opo,usuario,onClose,onUpdate,onEdit,onDel,onAbrirCliente,onCon
           </div>
           {fotos.length>0?(
             <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:4}}>
-              {fotos.map(function(f,i){return <img key={i} src={f.data||f} onClick={function(){setImgGrande(f.data||f);}}
-                style={{width:120,height:120,objectFit:"cover",borderRadius:12,border:"2px solid "+T.border,cursor:"pointer",flexShrink:0}} alt=""/>;})}
+              {fotos.map(function(f,i){var src=f.data||f;return <div key={i} style={{position:"relative",flexShrink:0}}>
+                <img src={src} onClick={function(){setImgGrande(src);}}
+                  style={{width:180,height:180,objectFit:"cover",borderRadius:12,border:"2px solid "+T.border,cursor:"pointer"}} alt=""/>
+                <div style={{position:"absolute",bottom:6,right:6,background:"rgba(0,0,0,.5)",borderRadius:6,padding:"3px 8px"}}>
+                  <span style={{color:"#fff",fontSize:10,fontWeight:700}}>🔍 Ampliar</span>
+                </div>
+              </div>;})}
             </div>
           ):(
             <div onClick={function(){fotoDetRef.current&&fotoDetRef.current.click();}}
@@ -8371,8 +8401,15 @@ function GestorOportunidades({usuario, onAbrirCliente}){
     setFiltroEst("todas");setFiltroAg("todos");setFiltroEquipoOpo("todos");setAgenteSelOpo(null);setQ("");
     setShowForm(false);setShowScanner(false);setScanDatos(null);
     setOpos(function(p){return [o].concat(p);});
-    console.log("[OPO] Guardando:", o.id, o.nombre||o.cliente);
-    fbEscribir("oportunidades", o.id, o).then(function(){
+    // Guardar fotos en coleccion separada
+    var fotosParaGuardar=(o.fotos||[]).filter(function(f){return f&&f!=="[imagen]"&&f!==""&&f.length>100;});
+    fotosParaGuardar.forEach(function(data,i){
+      var fotoId="foto_"+o.id+"_"+i+"_"+Date.now();
+      fbEscribir("fotos_oportunidades",fotoId,{id:fotoId,opoId:o.id,data:data,fecha:new Date().toISOString(),autor:(usuario||{}).nombre||""});
+    });
+    // Guardar oportunidad (sin fotos base64 grandes)
+    var oSinFotos=Object.assign({},o,{fotos:[]});
+    fbEscribir("oportunidades", o.id, oSinFotos).then(function(){
       toast("Oportunidad guardada",true);
       if(o.agenteId && o.agenteId !== (usuario||{}).id) notificarAsignacion("tarea", Object.assign({},o,{titulo:"Oportunidad: "+o.cliente}), (usuario||{}).id);
     });
