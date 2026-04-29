@@ -1015,61 +1015,92 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
     fbLeer("visitas").then(function(d){setVisitasDB(d||[]);});
   },[]);
   
-  // Clientes visitados esta semana (de Firebase + actividad + plan.visitados)
+  // Clientes con actividad esta semana (visitas + oportunidades + muestras + estrategias + incidencias)
   var visitadosManual=plan&&plan.visitados?plan.visitados:[];
   var clientesVisitadosLibre=[];
   var visitadosPorDia={};
   var DIAS_SEMANA=["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
+  function parseDiaKey(fecha){
+    if(!fecha) return "Sin fecha";
+    var partes=(fecha+"").split("/");
+    if(partes.length===3){var dd=parseInt(partes[0]),mm=parseInt(partes[1])-1,yy=parseInt(partes[2]);if(yy<100)yy+=2000;var d=new Date(yy,mm,dd);if(!isNaN(d.getTime()))return DIAS_SEMANA[d.getDay()]+" "+dd+"/"+(mm+1);}
+    return "Sin fecha";
+  }
+  function addActividad(diaKey,nombre,icon,texto,color){
+    if(!nombre) return;
+    if(clientesVisitadosLibre.indexOf(nombre)<0) clientesVisitadosLibre.push(nombre);
+    if(!visitadosPorDia[diaKey]) visitadosPorDia[diaKey]=[];
+    var existing=visitadosPorDia[diaKey].find(function(x){return x.nombre===nombre;});
+    if(existing){existing.acciones.push({icon:icon,texto:texto,color:color});}
+    else{visitadosPorDia[diaKey].push({nombre:nombre,acciones:[{icon:icon,texto:texto,color:color}]});}
+  }
+  // Visitas
   (visitasDB||[]).forEach(function(v){
     if(v.eliminada) return;
     var agId=(v.agenteId||v.agente||"").toUpperCase();
-    if(!appMisIds.has(agId)) return;
-    var vSem=parseInt(v.semana||0);
-    if(vSem!==semana) return;
-    var cliN=(v.clienteNombre||v.cliente||"");
-    if(!cliN) return;
-    if(clientesVisitadosLibre.indexOf(cliN)<0) clientesVisitadosLibre.push(cliN);
-    // Extraer dia de la fecha
-    var fecha=v.fecha||"";
-    var resultado=v.resultado||"";
-    var notas=v.notas||v.nota||"";
-    var diaKey="Sin fecha";
-    if(fecha){
-      // Intentar parsear dd/mm/yy o dd/mm/yyyy
-      var partes=fecha.split("/");
-      if(partes.length===3){
-        var dd=parseInt(partes[0]),mm=parseInt(partes[1])-1,yy=parseInt(partes[2]);
-        if(yy<100) yy+=2000;
-        var d=new Date(yy,mm,dd);
-        if(!isNaN(d.getTime())) diaKey=DIAS_SEMANA[d.getDay()]+" "+dd+"/"+(mm+1);
+    if(!appMisIds.has(agId)&&esAgenteRol) return;
+    if(parseInt(v.semana||0)!==semana) return;
+    var cliN=v.clienteNombre||v.cliente||"";
+    var ic=v.resultado==="pedido"?"✅":v.resultado==="llamada"?"📞":v.resultado==="no_contesta"?"📵":"👋";
+    var lb=v.resultado==="pedido"?"Pedido":v.resultado==="llamada"?"Llamada":v.resultado==="no_contesta"?"No contesta":"Visita";
+    addActividad(parseDiaKey(v.fecha),cliN,ic,lb+(v.notas||v.nota?" — "+(v.notas||v.nota):""),"#22C55E");
+  });
+  // Oportunidades — actividad + notas
+  var lunesD=new Date();lunesD.setDate(lunesD.getDate()-(lunesD.getDay()||7)+1);lunesD.setHours(0,0,0,0);
+  var domingoD=new Date(lunesD);domingoD.setDate(lunesD.getDate()+7);
+  (oportunidadesDB||[]).forEach(function(o){
+    if(o.eliminada) return;
+    if(!appMisIds.has((o.agente||o.agenteId||"").toUpperCase())&&esAgenteRol) return;
+    var etiq=o.etapa||o.estado||"";
+    var added=false;
+    // Actividad registrada (notas, cambios etapa)
+    (o.actividad||[]).forEach(function(a){
+      if(!a.fecha) return;
+      var p=a.fecha.split("/");if(p.length===3){var yy=parseInt(p[2]);if(yy<100)yy+=2000;var dt=new Date(yy,parseInt(p[1])-1,parseInt(p[0]));if(dt>=lunesD&&dt<domingoD){
+        addActividad(parseDiaKey(a.fecha),o.nombre||o.cliente||"","💼",(etiq?etiq+": ":"")+(a.texto||a.nota||"Sin texto"),"#1E3A5F");
+        added=true;
+      }}
+    });
+    // Si no tiene actividad pero es de esta semana (nueva o con notas)
+    if(!added){
+      var fC=o.fechaCreacion||o.fecha||"";
+      if(fC){
+        var p2=fC.split("/");if(p2.length===3){var yy2=parseInt(p2[2]);if(yy2<100)yy2+=2000;var dt2=new Date(yy2,parseInt(p2[1])-1,parseInt(p2[0]));if(dt2>=lunesD&&dt2<domingoD){
+          var txt=o.notas||o.descripcion||o.descripcionCliente||("Nueva oportunidad — "+(etiq||""));
+          addActividad(parseDiaKey(fC),o.nombre||o.cliente||"","💼",(etiq?etiq+": ":"")+txt,"#1E3A5F");
+        }}
       }
     }
-    if(!visitadosPorDia[diaKey]) visitadosPorDia[diaKey]=[];
-    // Evitar duplicados del mismo cliente en el mismo dia
-    if(!visitadosPorDia[diaKey].find(function(x){return x.nombre===cliN;})){
-      visitadosPorDia[diaKey].push({nombre:cliN,resultado:resultado,notas:notas});
-    }
   });
-  // Tambien de actividad local (sesion actual) — solo si NO existe ya en visitadosPorDia
+  // Muestras
+  (muestrasDB||[]).forEach(function(m){
+    if(m.eliminada) return;
+    if(!appMisIds.has((m.agente||"").toUpperCase())&&esAgenteRol) return;
+    if(parseInt(m.semana||0)!==semana) return;
+    var est=m.estado==="positivo"?"✅":m.estado==="ko"?"❌":m.estado==="pedido"?"🛒":"⏳";
+    addActividad(parseDiaKey(m.fecha),m.cliente||m.clienteNombre||"","📦",(m.prod||m.producto||"")+" "+est,"#7C3AED");
+  });
+  // Estrategias
+  (estrategiasDB||[]).forEach(function(e){
+    if(e.eliminada) return;
+    if(!appMisIds.has((e.agente||"").toUpperCase())&&esAgenteRol) return;
+    if(parseInt(e.semana||0)===semana){addActividad(parseDiaKey(e.fecha),e.cliente||e.clienteNombre||"","🎯",(e.texto||"Estrategia").substring(0,60),"#7C3AED");}
+  });
+  // Incidencias
+  (incidenciasDB||[]).forEach(function(inc){
+    if(inc.eliminada) return;
+    if(!appMisIds.has((inc.agente||inc.autor||"").toUpperCase())&&esAgenteRol) return;
+    if(parseInt(inc.semana||0)===semana){addActividad(parseDiaKey(inc.fecha),inc.clienteNombre||inc.cliente||"","🚨",(inc.tipo||"")+": "+(inc.descripcion||"").substring(0,50),"#EF4444");}
+  });
+  // Actividad local sesion
   var act=actividad||{};
   var hoyDia=DIAS_SEMANA[new Date().getDay()]+" "+new Date().getDate()+"/"+(new Date().getMonth()+1);
-  var yaEnDias={}; // nombres ya agregados desde Firebase
-  Object.keys(visitadosPorDia).forEach(function(dia){
-    visitadosPorDia[dia].forEach(function(item){yaEnDias[item.nombre.toUpperCase()]=true;});
-  });
+  var yaEnDias={};
+  Object.keys(visitadosPorDia).forEach(function(dia){visitadosPorDia[dia].forEach(function(item){yaEnDias[item.nombre.toUpperCase()]=true;});});
   Object.keys(act).forEach(function(cid){
     if(act[cid]&&act[cid].visitas&&act[cid].visitas.length>0){
       var cli=(clientesFB||[]).find(function(c){return c.id===cid;});
-      if(cli){
-        var n=cli.nombre||cli.NOMBRE||"";
-        if(n&&clientesVisitadosLibre.indexOf(n)<0) clientesVisitadosLibre.push(n);
-        // Solo agregar al dia si NO existe ya en otro dia
-        if(!yaEnDias[n.toUpperCase()]){
-          var lastV=act[cid].visitas[act[cid].visitas.length-1];
-          if(!visitadosPorDia[hoyDia]) visitadosPorDia[hoyDia]=[];
-          visitadosPorDia[hoyDia].push({nombre:n,resultado:lastV.resultado||"",notas:lastV.notas||lastV.nota||""});
-        }
-      }
+      if(cli){var n=cli.nombre||cli.NOMBRE||"";if(n&&!yaEnDias[n.toUpperCase()]){var lastV=act[cid].visitas[act[cid].visitas.length-1];var ic=lastV.resultado==="pedido"?"✅":"👋";addActividad(hoyDia,n,ic,lastV.notas||lastV.nota||"Visita","#22C55E");}}
     }
   });
   // Agregar clientes creados en esta sesion
@@ -1303,67 +1334,7 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                 </div>
               )}
 
-              {/* Actividad de la semana */}
-              {(function(){
-                var actSem=[];
-                // Visitas
-                clientesVisitadosLibre.forEach(function(n){
-                  var vDB=(visitasDB||[]).find(function(v){return !v.eliminada&&parseInt(v.semana||0)===semana&&(v.clienteNombre||v.cliente||"")===n;});
-                  var fecha=vDB?vDB.fecha:"hoy";
-                  var res=vDB?vDB.resultado:"visita";
-                  var ic=res==="pedido"?"✅":res==="llamada"?"📞":"👋";
-                  actSem.push({fecha:fecha,icon:ic,texto:"Visita: "+n,color:"#22C55E"});
-                });
-                // Oportunidades (creadas o modificadas esta semana)
-                (oportunidadesDB||[]).forEach(function(o){
-                  if(o.eliminada) return;
-                  if(!appMisIds.has((o.agente||o.agenteId||"").toUpperCase())&&esAgenteRol) return;
-                  var s=parseInt(o.semana||0);
-                  var esNueva=o.esNueva||s===semana;
-                  if(esNueva) actSem.push({fecha:o.fechaCreacion||"",icon:"💼",texto:"Oportunidad: "+(o.nombre||o.cliente||"")+" — "+(o.etapa||o.estado||""),color:"#1E3A5F"});
-                });
-                // Muestras creadas esta semana
-                (muestrasDB||[]).forEach(function(m){
-                  if(m.eliminada) return;
-                  if(!appMisIds.has((m.agente||"").toUpperCase())&&esAgenteRol) return;
-                  if(parseInt(m.semana||0)===semana){
-                    var est=m.estado==="positivo"?"✅ OK":m.estado==="ko"?"❌ KO":m.estado==="pedido"?"🛒 Pedido":"⏳";
-                    actSem.push({fecha:m.fecha||"",icon:"📦",texto:"Muestra: "+(m.prod||m.producto||"")+" — "+est,color:"#7C3AED"});
-                  }
-                });
-                // Estrategias creadas/completadas esta semana
-                (estrategiasDB||[]).forEach(function(e){
-                  if(e.eliminada) return;
-                  if(!appMisIds.has((e.agente||"").toUpperCase())&&esAgenteRol) return;
-                  if(e.estado==="completada"&&parseInt(e.semana||0)===semana){
-                    actSem.push({fecha:e.fecha||"",icon:"🎯",texto:"Estrategia completada: "+(e.cliente||e.clienteNombre||""),color:"#22C55E"});
-                  }
-                });
-                // Incidencias creadas esta semana
-                (incidenciasDB||[]).forEach(function(i){
-                  if(i.eliminada) return;
-                  if(!appMisIds.has((i.agente||i.autor||"").toUpperCase())&&esAgenteRol) return;
-                  if(parseInt(i.semana||0)===semana){
-                    actSem.push({fecha:i.fecha||"",icon:"🚨",texto:"Incidencia: "+(i.tipo||"")+" — "+(i.clienteNombre||i.cliente||""),color:"#EF4444"});
-                  }
-                });
-                if(actSem.length===0) return null;
-                return <div style={{background:"#fff",borderRadius:16,padding:18,marginBottom:14,borderLeft:"4px solid "+T.navy,boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
-                  <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
-                    <div style={{width:40,height:40,borderRadius:12,background:"#EFF6FF",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>{"📋"}</div>
-                    <div><p style={{margin:0,fontSize:15,fontWeight:800}}>Actividad esta semana</p><p style={{margin:0,fontSize:11,color:T.muted}}>{actSem.length} gestiones realizadas</p></div>
-                  </div>
-                  {actSem.map(function(a,i){
-                    return <div key={i} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"8px 0",borderTop:i>0?"1px solid #F1F5F9":"none"}}>
-                      <span style={{fontSize:14,flexShrink:0,marginTop:2}}>{a.icon}</span>
-                      <div style={{flex:1}}>
-                        <p style={{margin:0,fontSize:12,color:T.text,lineHeight:1.4}}>{a.texto}</p>
-                        {a.fecha&&<p style={{margin:"2px 0 0",fontSize:10,color:T.muted}}>{a.fecha}</p>}
-                      </div>
-                    </div>;
-                  })}
-                </div>;
-              })()}
+
             </div>
           )}
 
@@ -1454,35 +1425,24 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                           </div>
                           <div style={{background:"#fff",borderRadius:12,overflow:"hidden",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
                             {items.map(function(item,i){
-                              var ic=RI[item.resultado]||"👋";
                               return <div key={i} style={{display:"flex",alignItems:"flex-start",gap:12,padding:"12px 16px",
                                   borderBottom:i<items.length-1?"1px solid #F1F5F9":"none",
-                                  background:item.resultado==="pedido"?"#F0FDF4":"#FAFAFA"}}>
-                                <div onClick={function(){if(onAbrirCliente)onAbrirCliente(clientesNuevosMap[item.nombre]||item.nombre);}}
+                                  background:"#FAFAFA"}}>
+                                <div onClick={function(){if(onAbrirCliente){var cli=(clientesFB||[]).find(function(c){return(c.nombre||c.NOMBRE||"").toUpperCase()===item.nombre.toUpperCase();});if(cli)onAbrirCliente(cli);else onAbrirCliente(item.nombre);}}
                                   style={{display:"flex",alignItems:"flex-start",gap:12,flex:1,cursor:"pointer"}}>
-                                  <div style={{width:32,height:32,borderRadius:8,background:item.resultado==="pedido"?"#D1FAE5":"#F1F5F9",
-                                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0,marginTop:2}}>{ic}</div>
+                                  <div style={{display:"flex",flexDirection:"column",gap:2,flexShrink:0,marginTop:2}}>
+                                    {item.acciones.slice(0,4).map(function(a,j){return <span key={j} style={{fontSize:12,lineHeight:1}}>{a.icon}</span>;})}
+                                  </div>
                                   <div style={{flex:1,minWidth:0}}>
                                     <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{item.nombre}</p>
-                                    {item.notas&&<p style={{margin:"3px 0 0",fontSize:11,color:"#64748B",lineHeight:1.4}}>{item.notas}</p>}
+                                    {item.acciones.map(function(a,j){
+                                      return <p key={j} style={{margin:"3px 0 0",fontSize:11,color:a.color||"#64748B",lineHeight:1.4}}>{a.icon} {a.texto}</p>;
+                                    })}
                                   </div>
                                 </div>
-                                <button onClick={function(e){
-                                  e.stopPropagation();
-                                  if(!confirm("¿Eliminar visita de "+item.nombre+"?")) return;
-                                  var nomUp=item.nombre.toUpperCase();
-                                  // Buscar TODAS las visitas de este cliente en esta semana
-                                  var found=(visitasDB||[]).filter(function(v){
-                                    return !v.eliminada&&parseInt(v.semana||0)===semana&&(v.clienteNombre||v.cliente||"").toUpperCase()===nomUp;
-                                  });
-                                  // Marcar como eliminadas en Firebase
-                                  found.forEach(function(f){
-                                    if(f.id) fbEscribir("visitas",f.id,Object.assign({},f,{eliminada:true}));
-                                  });
-                                  // Quitar del estado local
-                                  var idsElim=found.map(function(f){return f.id;});
-                                  setVisitasDB(function(prev){return prev.filter(function(v){return idsElim.indexOf(v.id)<0;});});
-                                }} style={{padding:"6px 8px",borderRadius:8,border:"none",background:"transparent",color:"#94A3B8",fontSize:16,cursor:"pointer",flexShrink:0,marginTop:2}}>🗑️</button>
+                                <div style={{display:"flex",gap:4,flexShrink:0,marginTop:2}}>
+                                  <span onClick={function(){if(onAbrirCliente){var cli=(clientesFB||[]).find(function(c){return(c.nombre||c.NOMBRE||"").toUpperCase()===item.nombre.toUpperCase();});if(cli)onAbrirCliente(cli);else onAbrirCliente(item.nombre);}}} style={{fontSize:14,color:"#94A3B8",cursor:"pointer"}}>{">"}</span>
+                                </div>
                               </div>;
                             })}
                           </div>
@@ -1517,6 +1477,8 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                 </div>
               )}
 
+              </div>
+            )}
               <button onClick={function(){onNav("clientes");}} style={{width:"100%",padding:14,borderRadius:14,border:"2px dashed #E2E8F0",background:"#fff",color:T.blue,fontWeight:700,fontSize:13,cursor:"pointer",marginBottom:8}}>+ Agregar cliente</button>
               <button onClick={function(){setShowNuevoMS(true);}} style={{width:"100%",padding:14,borderRadius:14,border:"2px dashed "+T.purple,background:"#F5F3FF",color:T.purple,fontWeight:700,fontSize:13,cursor:"pointer"}}>Crear cliente nuevo</button>
             </div>
