@@ -947,10 +947,18 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
   var _s11=React.useState({});var clientesNuevosMap=_s11[0],setClientesNuevosMap=_s11[1];
   var appMisIds=resolverMisIds(usuario);
 
+  var esAgenteMS=usuario.rol==="crm_agente"||usuario.rol==="agente";
+
   React.useEffect(function(){
     setCargando(true);
     fbLeer("planes_semanales").then(function(planes){
       var found=(planes||[]).find(function(p){return p.agente===usuario.id&&p.semana===semana&&p.anio===new Date().getFullYear();});
+      if(!found&&!esAgenteMS){
+        // Director/jefe: auto-crear plan libre
+        var autoId="plan_"+usuario.id+"_"+new Date().getFullYear()+"_s"+semana;
+        found={id:autoId,agente:usuario.id,semana:semana,anio:new Date().getFullYear(),modo:"libre",rutaNum:null,estado:"activo",visitados:[]};
+        fbEscribir("planes_semanales",autoId,found);
+      }
       setPlan(found||null);
       setCargando(false);
     });
@@ -972,7 +980,7 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
   var _s5=React.useState([]);var tareasDB=_s5[0],setTareasDB=_s5[1];
   var _s6=React.useState([]);var proyectosDB=_s6[0],setProyectosDB=_s6[1];
   React.useEffect(function(){fbLeer("tareas").then(function(d){setTareasDB(d||[]);});fbLeer("proyectos").then(function(d){setProyectosDB(d||[]);});},[]);
-  var misTareas=tareasDB.filter(function(t){return !t.eliminada&&t.estado!=="hecha"&&appMisIds.has((t.agente||t.agenteId||"").toUpperCase());});
+  var misTareas=tareasDB.filter(function(t){return !t.eliminada&&t.estado!=="hecha"&&(esAgenteRol?appMisIds.has((t.agente||t.agenteId||"").toUpperCase()):true);});
   var misHitos=[];
   var hoy=new Date();
   var hoyStr=hoy.toISOString().split("T")[0];
@@ -2874,11 +2882,14 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
   const [editIncIdx,setEditIncIdx]=useState(null);
 
   // Auto-seleccionar ruta cuando el plan cargue
+  var esAgenteInf=usuario.rol==="crm_agente"||usuario.rol==="agente";
   React.useEffect(function(){
+    // Directores/jefes siempre en modo libre
+    if(!esAgenteInf&&!cargandoPlan){setRutaSel("libre");return;}
     if(!planSem||rutaSel!==null) return;
     if(planSem.modo==="libre") setRutaSel("libre");
     else if(planSem.rutaNum) setRutaSel(Number(planSem.rutaNum));
-  },[planSem,rutaSel]);
+  },[planSem,rutaSel,cargandoPlan]);
 
   const usarMicrofono=(onTexto)=>{
     const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
@@ -13329,6 +13340,7 @@ function App(props){
   const [calendarioDB,setCalendarioDB]=useState([]);
   const [estrategiasDB,setEstrategiasDB]=useState(ESTRATEGIAS_SEED);
   const [incidenciasDB,setIncidenciasDB]=useState(INCIDENCIAS_SEED);
+  const [portalUsersDB,setPortalUsersDB]=useState([]);
   const [fbCargando,setFbCargando]=useState(false);
   const [fbStatus,setFbStatus]=useState(""); // "ok" | "error" | ""
   const [oportunidadesDB,setOportunidadesDB]=useState(OPORTUNIDADES_SEED);
@@ -13426,7 +13438,9 @@ function App(props){
       fbLeer("incidencias"),
       fbLeer("visitas"),
       fbCargar(), // oportunidades
-    ]).then(([muestras,estrategias,incidencias,visitas,opos])=>{
+      fbLeer("portal_users"),
+    ]).then(([muestras,estrategias,incidencias,visitas,opos,pUsers])=>{
+      if(pUsers&&pUsers.length>0) setPortalUsersDB(pUsers);
       if(muestras.length>0) setMuestrasDB(muestras.filter(m=>!m.eliminada));
       // Cargar calendario
       fbLeer("calendario").then(data=>{
@@ -13569,15 +13583,19 @@ function App(props){
   // Firebase usa grupoAgente (= catalogoVendedor del portal, ej: "CARLOSG", "DAVIDMAG")
   const getClientesPara=(agenteId)=>{
     if(clientesDB){
-      // CEO/Director: todos los clientes (prioridad máxima)
+      // CEO/Director: todos los clientes
       if(["director","ceo"].includes(usuario.rol)&&clientesDB._todos){
         return clientesDB._todos;
       }
-      // Jefe: todos los clientes de su equipo
+      // Jefe: clientes de agentes de su equipo
       if(usuario.rol==="jefe"&&usuario.equipo&&clientesDB._todos){
-        const porEquipo=clientesDB._todos.filter(c=>c.equipo===usuario.equipo||(c.EQUIPO||"").toUpperCase()===usuario.equipo.toUpperCase());
-        if(porEquipo.length>0) return porEquipo;
-        return clientesDB._todos; // fallback: todos si no hay campo equipo
+        // Buscar agentes del equipo en portalUsersDB
+        var teamVendors=(portalUsersDB||[]).filter(function(p){return p.equipo===usuario.equipo&&(p.rol==="crm_agente"||p.rol==="agente");}).map(function(p){return(p.catalogoVendedor||"").toUpperCase();}).filter(Boolean);
+        if(teamVendors.length>0){
+          var porEquipo=clientesDB._todos.filter(function(c){return teamVendors.indexOf((c.GRUPOAGENTE||c.grupoAgente||"").toUpperCase())>=0;});
+          if(porEquipo.length>0) return porEquipo;
+        }
+        return clientesDB._todos;
       }
       // Agente: obtener catalogoVendedor
       let catalogoVendedor=null;
@@ -13657,6 +13675,7 @@ function App(props){
 
   const NAV_JEFE=[
     {id:"dashboard",    icon:"📊",label:"Mi equipo",   color:usuario.color},
+    {id:"plan_semanal", icon:"📅",label:"Mi semana",   color:T.blue},
     {id:"informes_hub", icon:"📋",label:"Informes",    color:T.navy},
     {id:"historial",    icon:"📅",label:"Historial",   color:T.purple},
     {id:"calendario",   icon:"🗓️",label:"Agenda",       color:T.blue},
@@ -13673,6 +13692,7 @@ function App(props){
 
   const NAV_DIR=[
     {id:"dashboard",    icon:"📊",label:"Dashboard",    color:usuario.color},
+    {id:"plan_semanal", icon:"📅",label:"Mi semana",    color:T.blue},
     {id:"informes_hub", icon:"📋",label:"Informes",    color:T.navy},
     {id:"historial",    icon:"📅",label:"Historial",    color:T.purple},
     {id:"calendario",   icon:"🗓️",label:"Agenda",        color:T.blue},
@@ -14262,8 +14282,9 @@ function App(props){
         {esAgente&&section==="dashboard"&&  <DashAgente usuario={usuario} onNav={setSection} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} incidenciasDB={incidenciasDB} calendarioDB={calendarioDB} actividad={actividadSemana} _ver={objVer}/>}
         {esAgente&&section==="clientes"&&   <GestorClientes usuario={usuario} actividad={actividadSemana} onActividad={onActividad} onBack={function(){setSection(prevSectionRef.current||"dashboard");}} clientesFB={misClientesFB} muestrasDB={muestrasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} estrategiasDB={estrategiasDB} clienteDirecto={clienteDirecto} onClienteDirectoUsado={()=>setClienteDirecto(null)} onNewIncidencia={function(inc){setIncidenciasDB(function(prev){return [inc].concat(prev);});}} onNewMuestra={function(m){setMuestrasDB(function(prev){return [m].concat(prev);});}} onNewEstrategia={function(e){setEstrategiasDB(function(prev){return [e].concat(prev);});}}/> }
         {esAgente&&section==="plan_semanal"&& <MiSemana usuario={usuario} clientesFB={misClientesFB} onBack={()=>setSection("dashboard")} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} muestrasDB={muestrasDB} actividad={actividadSemana} onAbrirCliente={function(data){var obj=typeof data==="string"?{nombre:data,ts:Date.now()}:Object.assign({},data,{ts:Date.now()});setClienteDirecto(obj);setHideNav(true);setSection("clientes");}} onAbrirProyecto={function(nombre){setProyectoDirecto({nombre:nombre,ts:Date.now()});setSection("proyectos");}} onNewCliente={function(nuevo){setClientesDB(function(prev){if(!prev||!prev._todos)return prev;return Object.assign({},prev,{_todos:[nuevo].concat(prev._todos)});});}}/>}
+        {!esAgente&&section==="plan_semanal"&& <MiSemana usuario={usuario} clientesFB={misClientesFB} onBack={()=>setSection("dashboard")} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} muestrasDB={muestrasDB} actividad={actividadSemana} onAbrirCliente={function(data){var obj=typeof data==="string"?{nombre:data,ts:Date.now()}:Object.assign({},data,{ts:Date.now()});setClienteDirecto(obj);setHideNav(true);setSection(esJefeOmas?"clientes_eq":"clientes");}} onAbrirProyecto={function(nombre){setProyectoDirecto({nombre:nombre,ts:Date.now()});setSection("proyectos");}} onNewCliente={function(nuevo){setClientesDB(function(prev){if(!prev||!prev._todos)return prev;return Object.assign({},prev,{_todos:[nuevo].concat(prev._todos)});});}}/>}
         {section==="informe"&&esAgente&&    <Informe usuario={usuario} actividadSemana={actividadSemana} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} incidenciasDB={incidenciasDB}/>}
-        {section==="informe"&&!esAgente&&   <MiInformeJefe usuario={usuario} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB} onNav={setSection}/>}
+        {section==="informe"&&!esAgente&&   <Informe usuario={usuario} actividadSemana={actividadSemana} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} incidenciasDB={incidenciasDB}/>}
         {section==="informe_jefe"&&         <InformeJefe usuario={usuario} oportunidadesDB={oportunidadesDB}/>}
         {section==="informes_hub"&&(
           <div style={{padding:"20px 16px"}}>
