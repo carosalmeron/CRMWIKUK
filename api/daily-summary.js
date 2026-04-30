@@ -107,7 +107,7 @@ var agT=tareas.filter(function(t){return !t.eliminada&&t.estado!==‘hecha’&&(
 var agI=inc.filter(function(x){return !x.eliminada&&x.estado!==‘cerrada’&&x.estado!==‘resuelta’&&(ism(x.agente,avd)||ism(x.autor,avd));});
 var agE=est.filter(function(x){return !x.eliminada&&(x.estado===‘en_curso’||x.estado===‘pendiente_aprobacion’)&&ism(x.agente,avd);});
 var agO=ops.filter(function(x){return !x.eliminada&&[‘ganada’,‘perdida’,‘cerrada_ganada’,‘cerrada_perdida’].indexOf(x.estado||x.etapa)===-1&&(ism(x.agente,avd)||ism(x.agenteId,avd));});
-var agM=mu.filter(function(x){return !x.eliminada&&x.estado===‘pendiente’&&ism(x.agente,vd)&&parseInt(x.semana||0)===sem;});
+var agM=mu.filter(function(x){return !x.eliminada&&x.estado===‘pendiente’&&ism(x.agente,avd)&&parseInt(x.semana||0)===sem;});
 var agPipe=agO.reduce(function(s,o){return s+(parseInt(o.valor)||0);},0);
 var agPed=agV.filter(function(v){return v.resultado===‘pedido’;}).length;
 if(agV.length+agT.length+agI.length+agE.length+agO.length+agM.length===0)continue;
