@@ -1,18 +1,5 @@
 var https = require(‘https’);
-var FB = ‘https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents’;
-function httpDel(u) {
-return new Promise(function(r) {
-var opts = require(‘url’).parse(u);
-opts.method = ‘DELETE’;
-var req = https.request(opts, function(s) {
-var d = ‘’;
-s.on(‘data’, function(c) { d += c; });
-s.on(‘end’, function() { r(s.statusCode); });
-});
-req.on(‘error’, function() { r(0); });
-req.end();
-});
-}
+
 module.exports = async function handler(req, res) {
 try {
 var borrar = [
@@ -25,7 +12,18 @@ var borrar = [
 ];
 var results = [];
 for (var i = 0; i < borrar.length; i++) {
-var code = await httpDel(FB + ‘/estrategias/’ + borrar[i]);
+var code = await new Promise(function(resolve) {
+var req2 = https.request({
+hostname: ‘firestore.googleapis.com’,
+path: ‘/v1/projects/grupo-consolidado-crm/databases/(default)/documents/estrategias/’ + borrar[i],
+method: ‘DELETE’
+}, function(resp) {
+resp.on(‘data’, function() {});
+resp.on(‘end’, function() { resolve(resp.statusCode); });
+});
+req2.on(‘error’, function() { resolve(0); });
+req2.end();
+});
 results.push({ id: borrar[i], status: code });
 }
 return res.status(200).json({ ok: true, deleted: results });
