@@ -4695,9 +4695,11 @@ function MisEstrategias({usuario}){
       };
       var fantasmas=data.filter(function(d){return !d.eliminada&&esFantasma(d);});
       if(fantasmas.length>0){
-        console.warn("[EST] "+fantasmas.length+" estrategias fantasma detectadas → marcando eliminada=true:",fantasmas.map(function(f){return f.id;}));
+        console.warn("[EST] "+fantasmas.length+" estrategias fantasma → marcando eliminada=true (con updateMask, no toca otros campos):",fantasmas.map(function(f){return f.id;}));
+        // Con updateMask en fbEscribir, este PATCH solo actualiza eliminada+metadata.
+        // Los demás campos (cliente, texto, agente, etc.) quedan intactos en Firebase.
         fantasmas.forEach(function(f){
-          fbEscribir("estrategias",f.id,Object.assign({},f,{eliminada:true,eliminadoPor:"auto_cleanup",fechaEliminacion:new Date().toISOString(),motivo_borrado:"fantasma_sin_datos"}));
+          fbEscribir("estrategias",f.id,{eliminada:true,eliminadoPor:"auto_cleanup",fechaEliminacion:new Date().toISOString(),motivo_borrado:"fantasma_sin_datos"});
         });
       }
       var fbIds=new Set(data.map(function(d){return d.id;}));
@@ -5337,6 +5339,38 @@ function MisEstrategias({usuario}){
               padding:"9px 14px",cursor:cargando?"default":"pointer",color:T.muted,fontSize:13}}>
             {cargando?"⏳":"🔄"}
           </button>
+          {(esCEO||esDir)&&(
+            <button onClick={async function(){
+              // Lista todas las estrategias en FB y borra físicamente las que estén
+              // eliminada=true o sean fantasma. Pide confirmación.
+              setCargando(true);
+              try{
+                var todas=await fbLeer("estrategias");
+                var esFant=function(d){
+                  if((d.cliente||"")==="BORRADO") return true;
+                  return !d.cliente&&!d.clienteNombre&&!d.clienteId&&!d.texto&&!d.estrategia&&!d.agente;
+                };
+                var basura=todas.filter(function(d){return d.eliminada===true||esFant(d);});
+                if(basura.length===0){alert("No hay estrategias basura en Firebase ✓");setCargando(false);return;}
+                if(!confirm("Vas a borrar PERMANENTEMENTE "+basura.length+" estrategia(s) eliminadas o vacías de Firebase. Esto NO se puede deshacer. ¿Continuar?")){setCargando(false);return;}
+                var ok=0,err=0;
+                for(var i=0;i<basura.length;i++){
+                  var r=await fbBorrarDoc("estrategias",basura[i].id);
+                  if(r) ok++; else err++;
+                }
+                alert("Purga completa: "+ok+" borradas, "+err+" errores. Refresco la lista.");
+                recargar();
+              }catch(e){
+                alert("Error en la purga: "+(e&&e.message||e));
+                setCargando(false);
+              }
+            }} disabled={cargando}
+              style={{background:"#fff",border:"1px solid "+T.red,borderRadius:9,
+                padding:"9px 12px",cursor:cargando?"default":"pointer",color:T.red,fontSize:11,fontWeight:700}}
+              title="Eliminar permanentemente de Firebase las estrategias ya marcadas como eliminadas o vacías. Solo CEO/Director.">
+              🗑 Purgar
+            </button>
+          )}
         </div>
       </div>
 
@@ -7536,7 +7570,12 @@ async function sincronizarCola(){
   let ok=0,err=0;
   for(const item of cola){
     try{
-      const r=await fetch(`${FB_BASE}/${item.coleccion}/${item.id}`,{
+      // CRÍTICO: usar updateMask igual que fbEscribir para no borrar campos
+      const definedKeys=Object.keys(item.datos||{}).filter(k=>item.datos[k]!==undefined);
+      const updateMaskQs=definedKeys.length
+        ? "?"+definedKeys.map(k=>"updateMask.fieldPaths="+encodeURIComponent(k)).join("&")
+        : "";
+      const r=await fetch(`${FB_BASE}/${item.coleccion}/${item.id}${updateMaskQs}`,{
         method:"PATCH",
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify(serializeToFirestore(item.datos))
@@ -7647,16 +7686,39 @@ function serializeToFirestore(datos){
     }
     if(Array.isArray(v)) return {arrayValue:{values:v.map(x=>serialize(x))}};
     if(typeof v==="object") return {mapValue:{fields:Object.fromEntries(
-      Object.entries(v).map(([k,val])=>[k,serialize(val)])
+      Object.entries(v).filter(([k,val])=>val!==undefined).map(([k,val])=>[k,serialize(val)])
     )}};
     return {stringValue:String(v)};
   };
-  Object.entries(datos).forEach(([k,v])=>{ fields[k]=serialize(v); });
+  // CRÍTICO: omitir campos con valor undefined. Si los enviamos como nullValue
+  // y luego usamos updateMask con esa clave, sobrescribiríamos a null campos
+  // que el usuario no pretendía tocar.
+  Object.entries(datos).forEach(([k,v])=>{
+    if(v===undefined) return;
+    fields[k]=serialize(v);
+  });
   return {fields};
 }
 
 // Escritura genérica — crea o sobreescribe documento
 async function fbEscribir(coleccion, id, datos){
+  // ────────────────────────────────────────────────────────────────────
+  // CRÍTICO — Firestore PATCH SIN updateMask = REEMPLAZA el documento entero
+  // (cualquier campo que falte en el body se BORRA de Firebase).
+  // Para preservar los campos no mencionados, listamos en updateMask
+  // SOLO las claves con valor definido. Esto hace que el PATCH actúe como MERGE.
+  // ────────────────────────────────────────────────────────────────────
+  const definedKeys=Object.keys(datos||{}).filter(k=>datos[k]!==undefined);
+  const updateMaskQs=definedKeys.length
+    ? "?"+definedKeys.map(k=>"updateMask.fieldPaths="+encodeURIComponent(k)).join("&")
+    : "";
+
+  // Diagnóstico: cualquier escritura a estrategias se loguea
+  if(coleccion==="estrategias"){
+    var resumen={id:id,keys:definedKeys,cliente:datos.cliente,texto:(datos.texto||"").substring(0,30),eliminada:datos.eliminada,agente:datos.agente};
+    console.log("[fbEscribir/estrategias]",JSON.stringify(resumen));
+    if(datos.eliminada===true) console.warn("[fbEscribir/estrategias] ⚠️ MARCANDO ELIMINADA",id," — stack:",new Error().stack);
+  }
   // Actualizar caché local inmediatamente (para que la UI refleje el cambio)
   try{
     const cached=cacheLeer(coleccion);
@@ -7668,7 +7730,7 @@ async function fbEscribir(coleccion, id, datos){
   }catch(e){}
 
   try{
-    const r=await fetch(`${FB_BASE}/${coleccion}/${id}`,{
+    const r=await fetch(`${FB_BASE}/${coleccion}/${id}${updateMaskQs}`,{
       method:"PATCH",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify(serializeToFirestore(datos))
@@ -7749,6 +7811,19 @@ async function fbEliminar(id) {
     await fetch(`${FB_BASE}/oportunidades/${id}`, {method: "DELETE"});
     return true;
   } catch(e) { return false; }
+}
+
+// Helper genérico: borrado FÍSICO de un documento en cualquier colección (no marca eliminada,
+// lo elimina realmente). Usar SOLO para limpieza de fantasmas/basura.
+async function fbBorrarDoc(coleccion, id){
+  try{
+    const r=await fetch(`${FB_BASE}/${coleccion}/${id}`, {method:"DELETE"});
+    // 200/204 ok, 404 ya no existe (también ok)
+    return r.ok||r.status===404;
+  }catch(e){
+    console.warn("[fbBorrarDoc] error",coleccion,id,e);
+    return false;
+  }
 }
 
 // Fallback de oportunidades_seed — VACÍO. Los datos vienen de Firebase.
