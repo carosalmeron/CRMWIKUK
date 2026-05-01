@@ -4682,17 +4682,34 @@ function MisEstrategias({usuario}){
     fbLeer("estrategias").then(function(data){
       console.log("[EST] Firebase raw:",data.length,"items");
       // Diagnóstico: detallar el contenido relevante de cada estrategia
-      console.table((data||[]).map(function(d){return {id:d.id,cliente:d.cliente,clienteNombre:d.clienteNombre,clienteId:d.clienteId,agente:d.agente,estado:d.estado,creadoPor:d.creadoPor};}));
+      console.table((data||[]).map(function(d){return {id:d.id,cliente:d.cliente,clienteNombre:d.clienteNombre,clienteId:d.clienteId,agente:d.agente,estado:d.estado,creadoPor:d.creadoPor,texto:(d.texto||"").substring(0,30),eliminada:d.eliminada};}));
+
+      // Identificar estrategias FANTASMA: sin cliente, sin texto, sin clienteId — son basura de pruebas antiguas
+      var esFantasma=function(d){
+        // Caso 1: cliente="BORRADO" (placeholder de soft-delete antiguo)
+        if((d.cliente||"")==="BORRADO") return true;
+        var sinCliente=!d.cliente&&!d.clienteNombre&&!d.clienteId;
+        var sinTexto=!d.texto&&!d.estrategia;
+        var sinAgente=!d.agente;
+        return sinCliente&&sinTexto&&sinAgente;
+      };
+      var fantasmas=data.filter(function(d){return !d.eliminada&&esFantasma(d);});
+      if(fantasmas.length>0){
+        console.warn("[EST] "+fantasmas.length+" estrategias fantasma detectadas → marcando eliminada=true:",fantasmas.map(function(f){return f.id;}));
+        fantasmas.forEach(function(f){
+          fbEscribir("estrategias",f.id,Object.assign({},f,{eliminada:true,eliminadoPor:"auto_cleanup",fechaEliminacion:new Date().toISOString(),motivo_borrado:"fantasma_sin_datos"}));
+        });
+      }
       var fbIds=new Set(data.map(function(d){return d.id;}));
       // Preservar estrategias locales (recién creadas) que aún no han llegado a Firebase
       var existentes=GlobalStore.getEstrategias()||[];
       var seedIds=new Set(ESTRATEGIAS_SEED.map(function(s){return s.id;}));
       var localOnly=existentes.filter(function(e){return !fbIds.has(e.id)&&!seedIds.has(e.id);});
       if(localOnly.length>0) console.log("[EST] Preservando "+localOnly.length+" locales no sincronizadas con FB:",localOnly.map(function(e){return e.id;}));
-      var merged=data.filter(function(d){return !d.eliminada;})
-        .concat(localOnly.filter(function(e){return !e.eliminada;}))
+      var merged=data.filter(function(d){return !d.eliminada&&!esFantasma(d);})
+        .concat(localOnly.filter(function(e){return !e.eliminada&&!esFantasma(e);}))
         .concat(ESTRATEGIAS_SEED.filter(function(s){return !fbIds.has(s.id);}));
-      console.log("[EST] Merged:",merged.length);
+      console.log("[EST] Merged:",merged.length,"(después de filtrar fantasmas)");
       GlobalStore.setEstrategias(merged);
       setEstrategiasLocal(merged.slice());
     }).catch(function(e){console.error("[EST] Error:",e);}).finally(function(){setCargando(false);});
