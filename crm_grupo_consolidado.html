@@ -1151,6 +1151,7 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
   var misEst=(estrategiasDB||[]).filter(function(e){
     var act=(e.estado==="en_curso"||e.estado==="pendiente_aprobacion"||e.estado==="pendiente_cierre");
     if(!act||e.eliminada) return false;
+    if(!perteneceASemana(e)) return false;
     if(esAgenteRol){
       var agU=(e.agente||"").toUpperCase();
       return appMisIds.has(agU)||e.pendienteDe===usuario.id||e.creadoPor===usuario.id;
@@ -1162,18 +1163,21 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
   });
   var misOps=(oportunidadesDB||[]).filter(function(o){
     if(o.eliminada||["ganada","perdida","cerrada_ganada","cerrada_perdida"].includes(o.estado||o.etapa)) return false;
+    if(!perteneceASemana(o)) return false;
     if(esAgenteRol) return appMisIds.has((o.agenteId||o.agente||"").toUpperCase());
     if(esManagerMS) return enScope(o.agenteId||o.agente,o.creadoPor);
     return true;
   });
   var misInc=(incidenciasDB||[]).filter(function(i){
     if(i.eliminada||i.estado==="cerrada"||i.estado==="resuelta") return false;
+    if(!perteneceASemana(i)) return false;
     if(esAgenteRol) return appMisIds.has((i.agente||i.autor||"").toUpperCase());
     if(esManagerMS) return enScope(i.agente||i.autor,i.creadoPor);
     return true;
   });
   var misMue=(muestrasDB||[]).filter(function(m){
     if(m.eliminada||m.estado!=="pendiente") return false;
+    if(!perteneceASemana(m)) return false;
     if(esAgenteRol) return appMisIds.has((m.agente||"").toUpperCase());
     if(esManagerMS) return enScope(m.agente,m.creadoPor);
     return true;
@@ -1183,6 +1187,7 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
   React.useEffect(function(){fbLeer("tareas").then(function(d){setTareasDB(d||[]);});fbLeer("proyectos").then(function(d){setProyectosDB(d||[]);});},[]);
   var misTareas=tareasDB.filter(function(t){
     if(t.eliminada||t.estado==="hecha") return false;
+    if(!perteneceASemana(t)) return false;
     if(esAgenteRol) return appMisIds.has((t.agente||t.agenteId||"").toUpperCase());
     if(esManagerMS) return enScope(t.agente||t.agenteId,t.creadoPor);
     return true;
@@ -1190,11 +1195,47 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
   var misHitos=[];
   var hoy=new Date();
   var hoyStr=hoy.toISOString().split("T")[0];
-  // Calcular fecha inicio y fin de la semana actual
-  var diaLunes=new Date(hoy);diaLunes.setDate(hoy.getDate()-(hoy.getDay()||7)+1);
+  // Calcular fecha inicio y fin de la SEMANA SELECCIONADA (no la actual)
+  // Offset desde la semana de hoy
+  var diferenciaSemanas=semana-getSemanaISO();
+  var diaLunes=new Date(hoy);
+  diaLunes.setDate(hoy.getDate()-(hoy.getDay()||7)+1+(diferenciaSemanas*7));
+  diaLunes.setHours(0,0,0,0);
   var diaDomingo=new Date(diaLunes);diaDomingo.setDate(diaLunes.getDate()+6);
+  diaDomingo.setHours(23,59,59,999);
   var lunesStr=diaLunes.toISOString().split("T")[0];
   var domingoStr=diaDomingo.toISOString().split("T")[0];
+
+  // Helper: ¿este item pertenece a la semana seleccionada?
+  // Reglas: si tiene semana explícita, debe coincidir.
+  // Si no, comprobamos fecha/fechaCreacion/vence en el rango.
+  // Si no tiene ningún indicador temporal, solo se muestra en la semana actual.
+  var perteneceASemana=function(item){
+    if(item.semana!==undefined&&item.semana!==null&&item.semana!==""){
+      var s=parseInt(item.semana);
+      if(!isNaN(s)&&s>0) return s===semana;
+    }
+    var candidatos=[item.fecha,item.fechaCreacion,item.creadoEn,item.vence,item.fechaVisita];
+    var tieneFecha=false;
+    for(var i=0;i<candidatos.length;i++){
+      var f=candidatos[i];if(!f) continue;
+      tieneFecha=true;
+      var d=null;
+      if(typeof f==="string"&&f.indexOf("/")>=0){
+        var p=f.split("/");if(p.length===3){var yy=parseInt(p[2]);if(yy<100)yy+=2000;d=new Date(yy,parseInt(p[1])-1,parseInt(p[0]));}
+      } else if(typeof f==="string"&&f.indexOf("-")>=0){
+        d=new Date(f);
+      } else if(typeof f==="number"){
+        d=new Date(f);
+      }
+      if(d&&!isNaN(d.getTime())){
+        if(d>=diaLunes&&d<=diaDomingo) return true;
+      }
+    }
+    // Sin info temporal: solo mostrar en la semana actual
+    return !tieneFecha&&semana===getSemanaISO();
+  };
+
   proyectosDB.filter(function(p){return !p.eliminada&&p.estado==="activo";}).forEach(function(p){
     (p.hitos||[]).forEach(function(h){
       if(!h.hecho){
@@ -1278,9 +1319,9 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
     var qui=foundU&&foundU.nombre?(" · "+foundU.nombre):"";
     addActividad(parseDiaKey(v.fecha),cliN,ic,lb+(v.notas||v.nota?" — "+(v.notas||v.nota):"")+qui,"#22C55E");
   });
-  // Oportunidades — actividad + notas
-  var lunesD=new Date();lunesD.setDate(lunesD.getDate()-(lunesD.getDay()||7)+1);lunesD.setHours(0,0,0,0);
-  var domingoD=new Date(lunesD);domingoD.setDate(lunesD.getDate()+7);
+  // Oportunidades — actividad + notas (rango: semana seleccionada)
+  var lunesD=new Date(diaLunes);
+  var domingoD=new Date(diaDomingo);domingoD.setDate(diaDomingo.getDate()+1); // exclusivo
   (oportunidadesDB||[]).forEach(function(o){
     if(o.eliminada) return;
     var oAgId=(o.agente||o.agenteId||"").toUpperCase();
