@@ -4740,11 +4740,26 @@ function MisEstrategias({usuario}){
     }
 
     // Determinar agente destino y equipo
-    var agenteFinal=datos.agenteAsignado||(esAgente?miId:miId);
+    // - Si el manager escogió comercial → usa ese
+    // - Si NO escogió y es manager (CEO/Dir/Jefe) → resuelve del cliente (GRUPOAGENTE)
+    // - Si nada → usa miId
+    var agenteFinal=datos.agenteAsignado||"";
+    if(!agenteFinal&&!esAgente&&idCli&&window._clientesFB){
+      var cliObj=(window._clientesFB||[]).find(function(x){return x.id===idCli;});
+      if(cliObj){
+        var grupoAg=cliObj.GRUPOAGENTE||cliObj.grupoAgente||cliObj.agente||"";
+        if(grupoAg){
+          var u3=USUARIOS.find(function(u){return u.id===grupoAg||(u.grupoAgente&&u.grupoAgente.toUpperCase()===grupoAg.toUpperCase());});
+          if(u3) agenteFinal=u3.id;
+        }
+      }
+    }
+    if(!agenteFinal) agenteFinal=miId;
     var agenteUser=USUARIOS.find(function(u){return u.id===agenteFinal;})||{};
     var equipoAg=agenteUser.equipo||miEquipo||"";
     var respEquipo=USUARIOS.find(function(u){return u.rol==="jefe"&&u.equipo===equipoAg;});
     var ceoUser=USUARIOS.find(function(u){return u.rol==="ceo";});
+    console.log("[EST] Agente resuelto:",agenteFinal,"(escogido:",datos.agenteAsignado||"-","| del cliente:",(idCli&&window._clientesFB?(((window._clientesFB||[]).find(function(x){return x.id===idCli;})||{}).GRUPOAGENTE):"-"),")");
 
     // Cadena simplificada
     var estado, pendienteDe=null, pendienteDeNombre=null;
@@ -5453,21 +5468,54 @@ function MisEstrategias({usuario}){
           })()}
 
           {/* Selector de agente para directivos */}
-          {(esJefe||esDir||esCEO)&&(
-            <div style={{marginBottom:12}}>
+          {(esJefe||esDir||esCEO)&&(function(){
+            // Inferir comercial del cliente seleccionado (si hay clienteId)
+            var inferido=null;
+            if(formEst.clienteId&&window._clientesFB){
+              var cliInf=(window._clientesFB||[]).find(function(x){return x.id===formEst.clienteId;});
+              if(cliInf){
+                var grupoInf=cliInf.GRUPOAGENTE||cliInf.grupoAgente||cliInf.agente||"";
+                if(grupoInf){
+                  var uInf=USUARIOS.find(function(u){return u.id===grupoInf||(u.grupoAgente&&u.grupoAgente.toUpperCase()===grupoInf.toUpperCase());});
+                  if(uInf) inferido=uInf;
+                }
+              }
+            }
+            return <div style={{marginBottom:12}}>
               <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Asignar a comercial</p>
               <select value={formEst.agenteAsignado||""} onChange={function(ev){setFormEst(function(f){return Object.assign({},f,{agenteAsignado:ev.target.value});});}}
                 style={{width:"100%",padding:"10px 12px",borderRadius:9,border:"1.5px solid "+T.border,fontSize:13,outline:"none",background:"#fff"}}>
-                <option value="">— Yo mismo —</option>
+                <option value="">{inferido?("— Automático: "+inferido.nombre+" (comercial del cliente) —"):"⚠️ Selecciona un comercial (obligatorio) —"}</option>
                 {USUARIOS.filter(function(u){return u.rol==="agente"&&(esCEO||esDir||u.equipo===miEquipo);}).map(function(u){
                   return <option key={u.id} value={u.id}>{u.nombre} · {u.equipo}</option>;
                 })}
               </select>
-            </div>
-          )}
+              {inferido&&!formEst.agenteAsignado&&<p style={{margin:"4px 0 0",fontSize:10,color:T.green}}>✓ Esta estrategia se asignará a <b>{inferido.nombre}</b> automáticamente. Puedes cambiar el destinatario arriba si lo prefieres.</p>}
+              {!inferido&&formEst.clienteId&&<p style={{margin:"4px 0 0",fontSize:10,color:T.red,fontWeight:600}}>⚠️ Este cliente no tiene comercial. Debes seleccionar uno arriba para continuar.</p>}
+            </div>;
+          })()}
 
           <button onClick={function(){
             if(!(formEst.cliente||"").trim()||!(formEst.texto||"").trim()){alert("Cliente y acción son obligatorios");return;}
+            // Si soy manager (CEO/Dir/Jefe) y no he elegido comercial explícitamente,
+            // intentar inferirlo del cliente. Si tampoco se infiere → bloquear.
+            if(!esAgente&&!formEst.agenteAsignado){
+              var inferidoOk=null;
+              if(formEst.clienteId&&window._clientesFB){
+                var cliVal=(window._clientesFB||[]).find(function(x){return x.id===formEst.clienteId;});
+                if(cliVal){
+                  var grupoVal=cliVal.GRUPOAGENTE||cliVal.grupoAgente||cliVal.agente||"";
+                  if(grupoVal){
+                    var uVal=USUARIOS.find(function(usr){return usr.id===grupoVal||(usr.grupoAgente&&usr.grupoAgente.toUpperCase()===grupoVal.toUpperCase());});
+                    if(uVal) inferidoOk=uVal;
+                  }
+                }
+              }
+              if(!inferidoOk){
+                alert("Este cliente no tiene comercial asignado. Selecciona uno en 'Asignar a comercial' antes de continuar.");
+                return;
+              }
+            }
             crearEstrategia(formEst);
             setShowNuevaEst(false);
             setFormEst({cliente:"",clienteId:"",objetivo:"",texto:"",tipo:"recuperacion",ofertas:[],ofActual:{nombre:"",codigo:"",precioBase:"",dto:""},agenteAsignado:""});
@@ -11188,10 +11236,16 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
 
                 var cliAgenteRaw=clienteSel.GRUPOAGENTE||clienteSel.grupoAgente||clienteSel.agente||"";
                 // Resolver al ID interno si es grupoAgente (ej: "DAVIDMAG" → "wk1")
-                var agenteResuelto=cliAgenteRaw;
+                var agenteResuelto="";
                 if(cliAgenteRaw){
                   var u2=USUARIOS.find(function(u){return u.id===cliAgenteRaw||(u.grupoAgente&&u.grupoAgente.toUpperCase()===cliAgenteRaw.toUpperCase());});
                   if(u2) agenteResuelto=u2.id;
+                  else agenteResuelto=cliAgenteRaw;
+                }
+                // Si soy manager (CEO/Dir/Jefe) y el cliente no tiene comercial → bloquear
+                if((esCEOU||esDirU||esJefeU)&&!agenteResuelto){
+                  alert("Este cliente no tiene comercial asignado. Edita la ficha del cliente para asignarle uno antes de crear la estrategia, o crea la estrategia desde el módulo Estrategias y selecciona allí el comercial.");
+                  return;
                 }
                 var agenteAsignado=agenteResuelto||usuario.id;
                 var agenteUser=USUARIOS.find(function(u){return u.id===agenteAsignado;})||{};
