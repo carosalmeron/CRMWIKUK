@@ -748,7 +748,7 @@ function Login({onLogin}){
         <div style={{width:64,height:64,borderRadius:16,background:T.navy,display:"inline-flex",
           alignItems:"center",justifyContent:"center",fontSize:28,marginBottom:12}}>🥩</div>
         <p style={{margin:0,fontSize:24,fontWeight:900,color:T.navy,letterSpacing:-0.5}}>Grupo Consolidado</p>
-        <p style={{margin:0,fontSize:10,color:T.muted}}>v2.8.2 — 30/04/2026</p>
+        <p style={{margin:0,fontSize:10,color:T.muted}}>v2.9.0 — 01/05/2026</p>
         <p style={{margin:"4px 0 0",fontSize:13,color:T.muted}}>CRM Comercial · ¿Quién eres?</p>
       </div>
 
@@ -974,7 +974,7 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
 
   // 360 data
   var esAgenteRol=(usuario?.rol||"").toLowerCase().indexOf("agente")>=0;
-  var misEst=(estrategiasDB||[]).filter(function(e){return !e.eliminada&&(e.estado==="en_curso"||e.estado==="pendiente_aprobacion")&&(esAgenteRol?appMisIds.has((e.agente||"").toUpperCase())||e.pendienteDe===usuario.id||e.creadoPor===usuario.id:true);});
+  var misEst=(estrategiasDB||[]).filter(function(e){var act=(e.estado==="en_curso"||e.estado==="pendiente_aprobacion"||e.estado==="pendiente_cierre");if(!act||e.eliminada) return false;if(!esAgenteRol) return true;var agU=(e.agente||"").toUpperCase();return appMisIds.has(agU)||e.pendienteDe===usuario.id||e.creadoPor===usuario.id;});
   var misOps=(oportunidadesDB||[]).filter(function(o){return !o.eliminada&&!["ganada","perdida","cerrada_ganada","cerrada_perdida"].includes(o.estado||o.etapa)&&(esAgenteRol?appMisIds.has((o.agenteId||o.agente||"").toUpperCase()):true);});
   var misInc=(incidenciasDB||[]).filter(function(i){return !i.eliminada&&i.estado!=="cerrada"&&i.estado!=="resuelta"&&(esAgenteRol?appMisIds.has((i.agente||i.autor||"").toUpperCase()):true);});
   var misMue=(muestrasDB||[]).filter(function(m){return !m.eliminada&&m.estado==="pendiente"&&(esAgenteRol?appMisIds.has((m.agente||"").toUpperCase()):true);});
@@ -4600,566 +4600,614 @@ function EstrategiaAprobacionCard({e,usuario,onConfirmar,onRechazar,onEscalar}){
 // ESTRATEGIAS — vista clara por rol
 // ═══════════════════════════════════════════════════════════════════
 function MisEstrategias({usuario}){
-  const esJefe  = usuario?.rol==="jefe"||usuario?.rol==="director"||usuario?.rol==="ceo";
-  const esRolJefe = usuario?.rol==="jefe";
-  const esRolDir  = usuario?.rol==="director";
-  const esRolCeo  = usuario?.rol==="ceo";
-  const esAgente  = usuario?.rol==="agente";
-  const miEquipo  = usuario?.equipo;
+  // Detección flexible de roles (soporta crm_director, director, ceo, etc.)
+  var rol=((usuario&&usuario.rol)||"").toLowerCase();
+  var esCEO=rol.indexOf("ceo")>=0;
+  var esDir=rol.indexOf("director")>=0;
+  var esJefe=rol.indexOf("jefe")>=0||rol.indexOf("responsable")>=0;
+  var esAgente=rol.indexOf("agente")>=0||rol.indexOf("comercial")>=0;
+  var esManager=esCEO||esDir||esJefe;
+  var miEquipo=(usuario&&usuario.equipo)||"";
+  var miId=(usuario&&usuario.id)||"";
 
-  const [estrategias,setEstrategiasLocal]=useState(()=>GlobalStore.getEstrategias());
+  const [estrategias,setEstrategiasLocal]=useState(function(){return GlobalStore.getEstrategias();});
   const [cargando,setCargando]=useState(false);
   const [sel,setSel]=useState(null);
-  const [filtroSec,setFiltroSec]=useState("curso");
+  const [showNuevaEst,setShowNuevaEst]=useState(false);
+  const [verCerradas,setVerCerradas]=useState(false);
   const [filtroEquipoEst,setFiltroEquipoEst]=useState("todos");
   const [agenteSelEst,setAgenteSelEst]=useState(null);
-  const [showNuevaEst,setShowNuevaEst]=useState(false);
-
-  // Función de filtro por equipo + agente
-  const fEqEst=(items)=>{
-    let r=items;
-    if(filtroEquipoEst!=="todos") r=r.filter(e=>{
-      const eq=e.equipo||USUARIOS.find(u=>u.id===e.agente)?.equipo||"";
-      return eq.toUpperCase()===filtroEquipoEst.toUpperCase();
-    });
-    if(agenteSelEst) r=r.filter(e=>e.agente===agenteSelEst||USUARIOS.find(u=>u.id===e.agente)?.id===agenteSelEst);
-    return r;
-  };
-  const [formEst,setFormEst]=useState({cliente:"",objetivo:"",texto:""});
+  const [formEst,setFormEst]=useState({cliente:"",clienteId:"",objetivo:"",texto:"",tipo:"recuperacion",ofertas:[],ofActual:{nombre:"",codigo:"",precioBase:"",dto:""},agenteAsignado:""});
   const [editEst,setEditEst]=useState(null);
+  // Modal de acción (responder / aprobar / cerrar / pedir más)
+  const [modalAccion,setModalAccion]=useState(null); // {tipo:"aprobar"|"rechazar"|"responder"|"cerrar"|"pedir_otra", subtipo:"pedido"|"exito"|...}
+  const [modalTexto,setModalTexto]=useState("");
 
-  // Marcar como leído al abrir detalle
-  useEffect(()=>{
-    if(sel && usuario?.id) marcarComoVisto("estrategias", sel.id, usuario.id);
+  useEffect(function(){
+    if(sel && usuario && usuario.id) marcarComoVisto("estrategias", sel.id, usuario.id);
   },[sel&&sel.id]);
 
-  useEffect(()=>{
-    const unsub=GlobalStore.subscribe(data=>setEstrategiasLocal([...data]));
+  useEffect(function(){
+    var unsub=GlobalStore.subscribe(function(data){setEstrategiasLocal(data.slice());});
     return unsub;
   },[]);
 
-  const setEstrategias=(updater)=>{
-    const next=typeof updater==="function"?updater(GlobalStore.getEstrategias()):updater;
+  var setEstrategias=function(updater){
+    var next=typeof updater==="function"?updater(GlobalStore.getEstrategias()):updater;
     GlobalStore.setEstrategias(next);
-    setEstrategiasLocal([...next]);
+    setEstrategiasLocal(next.slice());
   };
 
-  const recargar=()=>{
+  var recargar=function(){
     setCargando(true);
-    fbLeer("estrategias").then(data=>{
+    fbLeer("estrategias").then(function(data){
       console.log("[EST] Firebase raw:",data.length,"items");
-      data.forEach(d=>console.log("[EST] raw →",d.id,"cli:",d.cliente,"estado:",d.estado,"agente:",d.agente,"equipo:'"+d.equipo+"'","eliminada:",d.eliminada));
-      const fbIds=new Set(data.map(d=>d.id));
-      const merged=[...data.filter(d=>!d.eliminada),...ESTRATEGIAS_SEED.filter(s=>!fbIds.has(s.id))];
-      console.log("[EST] Merged (no eliminadas):",merged.length);
+      var fbIds=new Set(data.map(function(d){return d.id;}));
+      var merged=data.filter(function(d){return !d.eliminada;}).concat(ESTRATEGIAS_SEED.filter(function(s){return !fbIds.has(s.id);}));
+      console.log("[EST] Merged:",merged.length);
       GlobalStore.setEstrategias(merged);
-      setEstrategiasLocal([...merged]);
-    }).catch(e=>console.error("[EST] Error:",e)).finally(()=>setCargando(false));
+      setEstrategiasLocal(merged.slice());
+    }).catch(function(e){console.error("[EST] Error:",e);}).finally(function(){setCargando(false);});
   };
 
-  // Auto-cargar desde Firebase al montar si GlobalStore está vacío
-  useEffect(()=>{recargar();},[]);
+  useEffect(function(){recargar();},[]);
 
-  const confirmarEstrategia=(e,ofertasAct,nota)=>{
-    const elevadas=ofertasAct.filter(o=>o.elevadaA);
-    const hayElevadas=elevadas.length>0;
-    const destElevacion=elevadas.find(o=>o.elevadaA==="ceo")?.elevadaA||elevadas[0]?.elevadaA||null;
-    const aprobadas=ofertasAct.filter(o=>o.aprobada===true);
-    const rechazadas=ofertasAct.filter(o=>o.aprobada===false);
-    const tipoRes=rechazadas.length===ofertasAct.length&&ofertasAct.length>0?"rechazada":
-      aprobadas.length===ofertasAct.length&&ofertasAct.length>0?"aprobada":"aprobada_parcial";
-    const entrada={
-      accion:hayElevadas?`⚡ Parcial — ${elevadas.length} elevado${elevadas.length>1?"s":""}`:`✅ Resuelto por ${usuario.nombre}`,
-      por:usuario.nombre,fecha:new Date().toLocaleDateString("es-ES"),nota};
-    const updated=estrategias.map(x=>x.id===e.id?{
-      ...x,
-      estado:hayElevadas?"pendiente_aprobacion":"en_curso",
-      escaladoA:hayElevadas?destElevacion:null,
-      resolucion:hayElevadas?null:{tipo:tipoRes,por:usuario.nombre,rol:usuario.rol,
-        fecha:new Date().toLocaleDateString("es-ES"),nota},
-      aprobadoPor:usuario.nombre,ofertas:ofertasAct,
-      seguimientos:[...(x.seguimientos||[]),{semana:14,resultado:hayElevadas?"elevada":tipoRes,nota}],
-      historialEscalado:[...(x.historialEscalado||[]),entrada],
-    }:x);
-    setEstrategias(updated);
-    fbEscribir("estrategias",e.id,updated.find(x=>x.id===e.id));
-    // Notificar al agente que propuso la estrategia
-    if(e.agente && e.agente !== usuario.id && !hayElevadas){
-      const tipoLabel=tipoRes==="aprobada"?"✅ Aprobada":tipoRes==="rechazada"?"❌ Rechazada":"⚡ Aprobada parcialmente";
+  // ── Guardar nueva estrategia ───────────────────────────
+  var crearEstrategia=function(datos){
+    var hoy=new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
+    var fechaISO=new Date().toISOString();
+    var sem=getSemanaISO();
+    var maxDto=(datos.ofertas||[]).reduce(function(m,o){return Math.max(m,parseFloat(o.dto)||0);},0);
+
+    // Determinar agente destino y equipo
+    var agenteFinal=datos.agenteAsignado||(esAgente?miId:miId);
+    var agenteUser=USUARIOS.find(function(u){return u.id===agenteFinal;})||{};
+    var equipoAg=agenteUser.equipo||miEquipo||"";
+    var respEquipo=USUARIOS.find(function(u){return u.rol==="jefe"&&u.equipo===equipoAg;});
+    var ceoUser=USUARIOS.find(function(u){return u.rol==="ceo";});
+
+    // Cadena simplificada
+    var estado, pendienteDe=null, pendienteDeNombre=null;
+    if(esCEO||esDir){
+      estado="en_curso";
+    } else if(esJefe){
+      if(maxDto>10){
+        estado="pendiente_aprobacion";
+        pendienteDe=ceoUser?ceoUser.id:null;
+        pendienteDeNombre=ceoUser?ceoUser.nombre:"CEO";
+      } else {
+        estado="en_curso";
+      }
+    } else {
+      estado="pendiente_aprobacion";
+      pendienteDe=respEquipo?respEquipo.id:(ceoUser?ceoUser.id:null);
+      pendienteDeNombre=respEquipo?respEquipo.nombre:(ceoUser?ceoUser.nombre:"Superior");
+    }
+
+    var est={
+      id:"est_"+Date.now(),
+      cliente:(datos.cliente||"").trim(),
+      clienteNombre:(datos.cliente||"").trim(),
+      clienteId:datos.clienteId||"",
+      agente:agenteFinal||"",
+      agenteNombre:agenteUser.nombre||"",
+      equipo:equipoAg,
+      creadoPor:miId,
+      creadoPorNombre:(usuario&&usuario.nombre)||"",
+      rolCreador:(usuario&&usuario.rol)||"",
+      tipo:datos.tipo||"recuperacion",
+      texto:(datos.texto||"").trim(),
+      objetivo:(datos.objetivo||"").trim(),
+      ofertas:(datos.ofertas||[]).map(function(o){return Object.assign({},o);}),
+      maxDescuento:maxDto,
+      estado:estado,
+      pendienteDe:pendienteDe,
+      pendienteDeNombre:pendienteDeNombre,
+      fecha:hoy,
+      fechaISO:fechaISO,
+      semana:sem,
+      eliminada:false,
+      seguimientos:[{
+        accion:"📝 Estrategia creada",
+        por:(usuario&&usuario.nombre)||"",
+        porId:miId,
+        fecha:hoy,
+        nota:(datos.texto||"").trim()
+      }]
+    };
+
+    setEstrategias(function(prev){return prev.concat([est]);});
+    fbEscribir("estrategias",est.id,est);
+
+    // Notificación
+    if(pendienteDe&&pendienteDe!==miId){
       despacharNotificacion({tipo:"estrategia",
-        titulo:`${tipoLabel}: ${e.cliente||e.clienteNombre||"Estrategia"}`,
-        mensaje:`${usuario.nombre} ha resuelto tu estrategia para ${e.cliente||""}. ${nota||""}`,
-        destinatarioId:e.agente,prioridad:"normal",creadoPor:usuario.id});
+        titulo:"🔐 Aprobación requerida: "+est.cliente+(maxDto>0?" (dto. "+maxDto+"%)":""),
+        mensaje:(usuario&&usuario.nombre)+" ha creado una estrategia que requiere tu aprobación.\nCliente: "+est.cliente+"\nAcción: "+est.texto,
+        destinatarioId:pendienteDe,prioridad:maxDto>10?"alta":"normal",creadoPor:miId});
+    } else if(estado==="en_curso"&&agenteFinal&&agenteFinal!==miId){
+      despacharNotificacion({tipo:"estrategia",
+        titulo:"🎯 Nueva estrategia: "+est.cliente,
+        mensaje:(usuario&&usuario.nombre)+" te ha asignado una estrategia.\nCliente: "+est.cliente+"\nAcción: "+est.texto,
+        destinatarioId:agenteFinal,prioridad:"normal",creadoPor:miId});
+    }
+
+    return est;
+  };
+
+  // ── Aprobar (jefe o CEO) ───────────────────────────────
+  var aprobarEstrategia=function(est, nota){
+    var hoy=new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
+    var maxDto=est.maxDescuento||0;
+    var ceoUser=USUARIOS.find(function(u){return u.rol==="ceo";});
+
+    var nuevoEstado="en_curso", nuevoPendienteDe=null, nuevoPendienteDeNombre=null;
+
+    // Si soy jefe (no CEO) y dto>10% → escalar al CEO
+    if(esJefe && !esCEO && !esDir && maxDto>10){
+      nuevoEstado="pendiente_aprobacion";
+      nuevoPendienteDe=ceoUser?ceoUser.id:null;
+      nuevoPendienteDeNombre=ceoUser?ceoUser.nombre:"CEO";
+    }
+
+    var seguimiento={
+      accion:nuevoEstado==="en_curso"?"✅ Aprobada por "+(usuario.nombre||""):"📤 Escalada al CEO por "+(usuario.nombre||""),
+      nota:(nota||"").trim(),
+      por:usuario.nombre||"",porId:miId,fecha:hoy
+    };
+
+    var updated=Object.assign({},est,{
+      estado:nuevoEstado,
+      pendienteDe:nuevoPendienteDe,
+      pendienteDeNombre:nuevoPendienteDeNombre,
+      seguimientos:(est.seguimientos||[]).concat([seguimiento])
+    });
+
+    setEstrategias(function(prev){return prev.map(function(e){return e.id===est.id?updated:e;});});
+    fbEscribir("estrategias",est.id,updated);
+    setSel(updated);
+
+    if(nuevoEstado==="en_curso"&&est.agente&&est.agente!==miId){
+      despacharNotificacion({tipo:"estrategia",
+        titulo:"✅ Estrategia aprobada: "+(est.cliente||""),
+        mensaje:"Tu estrategia ha sido aprobada"+(nota?": "+nota:".")+" Ya puedes ejecutarla.",
+        destinatarioId:est.agente,prioridad:"normal",creadoPor:miId});
+    } else if(nuevoEstado==="pendiente_aprobacion"&&nuevoPendienteDe){
+      despacharNotificacion({tipo:"estrategia",
+        titulo:"🔐 Aprobación requerida: "+(est.cliente||"")+" (dto. "+maxDto+"%)",
+        mensaje:(usuario.nombre||"")+" escala esta estrategia. Dto: "+maxDto+"%.\nCliente: "+(est.cliente||"")+"\nAcción: "+(est.texto||""),
+        destinatarioId:nuevoPendienteDe,prioridad:"alta",creadoPor:miId});
     }
   };
 
-  const escalarEstrategia=(e,destId,nota)=>{
-    const dest=USUARIOS.find(u=>u.id===destId);
-    const entrada={accion:`↑ Elevada a ${dest?.nombre}`,por:usuario.nombre,
-      fecha:new Date().toLocaleDateString("es-ES"),nota};
-    const updated=estrategias.map(x=>x.id===e.id?{
-      ...x,estado:"pendiente_aprobacion",escaladoA:destId,
-      historialEscalado:[...(x.historialEscalado||[]),entrada],
-    }:x);
-    setEstrategias(updated);
-    fbEscribir("estrategias",e.id,updated.find(x=>x.id===e.id));
-    // Notificar al destinatario de la elevación
-    if(dest) despacharNotificacion({tipo:"estrategia",
-      titulo:`📤 Estrategia elevada: ${e.cliente||e.clienteNombre||""}`,
-      mensaje:`${usuario.nombre} te ha elevado una estrategia para revisión. Cliente: ${e.cliente||""}. ${nota||""}`,
-      destinatarioId:destId,prioridad:"alta",creadoPor:usuario.id});
+  // ── Rechazar ──────────────────────────────────────────
+  var rechazarEstrategia=function(est, motivo){
+    if(!motivo||!motivo.trim()){alert("Indica el motivo del rechazo");return;}
+    var hoy=new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
+    var seguimiento={
+      accion:"❌ Rechazada por "+(usuario.nombre||""),
+      nota:motivo.trim(),
+      por:usuario.nombre||"",porId:miId,fecha:hoy
+    };
+    var updated=Object.assign({},est,{
+      estado:"sin_exito",
+      pendienteDe:null,pendienteDeNombre:null,
+      resolucion:{tipo:"rechazada",por:usuario.nombre||"",fecha:hoy,nota:motivo.trim()},
+      seguimientos:(est.seguimientos||[]).concat([seguimiento])
+    });
+    setEstrategias(function(prev){return prev.map(function(e){return e.id===est.id?updated:e;});});
+    fbEscribir("estrategias",est.id,updated);
+    setSel(updated);
+    var destinos=[est.creadoPor,est.agente].filter(function(v,i,a){return v&&v!==miId&&a.indexOf(v)===i;});
+    destinos.forEach(function(uid){
+      despacharNotificacion({tipo:"estrategia",
+        titulo:"❌ Estrategia rechazada: "+(est.cliente||""),
+        mensaje:(usuario.nombre||"")+" ha rechazado.\nMotivo: "+motivo,
+        destinatarioId:uid,prioridad:"normal",creadoPor:miId});
+    });
   };
 
-  const rechazar=(e,motivo)=>{
-    const entrada={accion:`❌ Rechazada por ${usuario.nombre}`,por:usuario.nombre,
-      fecha:new Date().toLocaleDateString("es-ES"),nota:motivo};
-    const updated=estrategias.map(x=>x.id===e.id?{...x,estado:"sin_exito",
-      resolucion:{tipo:"rechazada",por:usuario.nombre,rol:usuario.rol,
-        fecha:new Date().toLocaleDateString("es-ES"),nota:motivo},
-      seguimientos:[...(x.seguimientos||[]),{semana:14,resultado:"rechazada",nota:motivo}],
-      historialEscalado:[...(x.historialEscalado||[]),entrada]}:x);
-    setEstrategias(updated);
-    fbEscribir("estrategias",e.id,updated.find(x=>x.id===e.id));
-    // Notificar al agente
-    if(e.agente && e.agente !== usuario.id){
+  // ── Comercial responde ────────────────────────────────
+  var responderEstrategia=function(est, tipoResp, nota){
+    if(!nota||!nota.trim()){alert("Escribe un comentario obligatorio");return;}
+    var hoy=new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
+    var TIPOS={
+      pedido:{icon:"✅",label:"Pedido conseguido",estado:"pendiente_cierre",resultado:"pedido"},
+      exito:{icon:"👍",label:"Éxito",estado:"pendiente_cierre",resultado:"exito"},
+      ko:{icon:"❌",label:"KO / Sin éxito",estado:"pendiente_cierre",resultado:"ko"},
+      mas_dto:{icon:"💬",label:"Pide más descuento",estado:"pendiente_aprobacion",resultado:"mas_dto"},
+      seguimiento:{icon:"📝",label:"Seguimiento",estado:"en_curso",resultado:"seguimiento"}
+    };
+    var t=TIPOS[tipoResp];
+    if(!t) return;
+
+    var pendienteDe=null, pendienteDeNombre=null;
+    if(t.estado==="pendiente_cierre"){
+      pendienteDe=est.creadoPor||null;
+      pendienteDeNombre=est.creadoPorNombre||"Creador";
+    } else if(t.estado==="pendiente_aprobacion"){
+      var eq=est.equipo||(USUARIOS.find(function(u){return u.id===est.agente;})||{}).equipo||"";
+      var resp=USUARIOS.find(function(u){return u.rol==="jefe"&&u.equipo===eq;});
+      pendienteDe=resp?resp.id:(est.creadoPor||null);
+      pendienteDeNombre=resp?resp.nombre:(est.creadoPorNombre||"Superior");
+    }
+
+    var seguimiento={
+      accion:t.icon+" "+t.label,
+      nota:nota.trim(),
+      por:usuario.nombre||"",porId:miId,fecha:hoy,tipo:tipoResp
+    };
+
+    var updated=Object.assign({},est,{
+      estado:t.estado,
+      resultado:t.resultado,
+      pendienteDe:pendienteDe,
+      pendienteDeNombre:pendienteDeNombre,
+      seguimientos:(est.seguimientos||[]).concat([seguimiento])
+    });
+
+    setEstrategias(function(prev){return prev.map(function(e){return e.id===est.id?updated:e;});});
+    fbEscribir("estrategias",est.id,updated);
+    setSel(updated);
+
+    if(pendienteDe&&pendienteDe!==miId){
+      var titulos={
+        pendiente_cierre:t.icon+" Tu estrategia: "+(est.cliente||"")+" — "+t.label,
+        pendiente_aprobacion:"🔐 Re-aprobación: "+(est.cliente||""),
+        en_curso:"📝 Seguimiento: "+(est.cliente||"")
+      };
       despacharNotificacion({tipo:"estrategia",
-        titulo:`❌ Estrategia rechazada: ${e.cliente||e.clienteNombre||""}`,
-        mensaje:`${usuario.nombre} ha rechazado la estrategia. Motivo: ${motivo||"Sin especificar"}`,
-        destinatarioId:e.agente,prioridad:"normal",creadoPor:usuario.id});
+        titulo:titulos[t.estado]||t.label,
+        mensaje:(usuario.nombre||"")+" responde con: "+t.label+"\nNota: "+nota,
+        destinatarioId:pendienteDe,
+        prioridad:tipoResp==="ko"||tipoResp==="mas_dto"?"alta":"normal",
+        creadoPor:miId});
     }
   };
 
-  // Clasificación
-  const deEquipo=(e)=>{
-    if(esRolJefe){const ag=USUARIOS.find(u=>u.id===e.agente);return ag?.equipo===miEquipo||e.equipo===miEquipo;}
-    return true;
+  // ── Creador cierra ────────────────────────────────────
+  var cerrarEstrategia=function(est, comoExito, nota){
+    if(!nota||!nota.trim()){alert("Escribe el comentario de cierre");return;}
+    var hoy=new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
+    var seguimiento={
+      accion:comoExito?"✅ Cerrada con éxito por "+(usuario.nombre||""):"❌ Cerrada sin éxito por "+(usuario.nombre||""),
+      nota:nota.trim(),por:usuario.nombre||"",porId:miId,fecha:hoy
+    };
+    var updated=Object.assign({},est,{
+      estado:comoExito?"completada":"sin_exito",
+      pendienteDe:null,pendienteDeNombre:null,
+      resolucion:{tipo:comoExito?"completada":"sin_exito",por:usuario.nombre||"",fecha:hoy,nota:nota.trim()},
+      seguimientos:(est.seguimientos||[]).concat([seguimiento])
+    });
+    setEstrategias(function(prev){return prev.map(function(e){return e.id===est.id?updated:e;});});
+    fbEscribir("estrategias",est.id,updated);
+    setSel(updated);
+    if(est.agente&&est.agente!==miId){
+      despacharNotificacion({tipo:"estrategia",
+        titulo:(comoExito?"✅ Estrategia cerrada: ":"❌ Estrategia cerrada sin éxito: ")+(est.cliente||""),
+        mensaje:(usuario.nombre||"")+" ha cerrado la estrategia.\nNota: "+nota,
+        destinatarioId:est.agente,prioridad:"normal",creadoPor:miId});
+    }
   };
 
-  // Pendientes de MI aprobación (usa el nuevo campo pendienteDe)
-  const pendAprobMia=estrategias.filter(e=>
-    e.estado==="pendiente_aprobacion"&&!e.eliminada&&
-    (e.pendienteDe===usuario.id || 
-     // Fallback legacy: si no tiene pendienteDe, usar lógica antigua
-     (!e.pendienteDe && esRolJefe && !e.escaladoA && deEquipo(e)) ||
-     (!e.pendienteDe && e.escaladoA===usuario.id))
-  );
-
-  const elevadasPorMi=estrategias.filter(e=>
-    e.estado==="pendiente_aprobacion"&&!e.eliminada&&
-    (e.cadenaAprobacion||[]).some(c=>c.id===usuario.id&&c.estado==="escalado")
-  );
-
-  // Helper: ¿la estrategia pertenece al usuario o es global?
-  const esDelEquipoOGlobal=(e)=>{
-    if(e.agente===usuario.id) return true;
-    if(e.equipo&&e.equipo===miEquipo) return true;
-    if(!e.equipo||e.equipo==="") return true;
-    return false;
+  // ── Creador pide otra acción ──────────────────────────
+  var pedirOtraAccion=function(est, instruccion){
+    if(!instruccion||!instruccion.trim()){alert("Escribe la nueva instrucción");return;}
+    var hoy=new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
+    var seguimiento={
+      accion:"🔄 Nueva instrucción de "+(usuario.nombre||""),
+      nota:instruccion.trim(),por:usuario.nombre||"",porId:miId,fecha:hoy
+    };
+    var updated=Object.assign({},est,{
+      estado:"en_curso",
+      pendienteDe:null,pendienteDeNombre:null,
+      resultado:null,
+      texto:instruccion.trim(),
+      seguimientos:(est.seguimientos||[]).concat([seguimiento])
+    });
+    setEstrategias(function(prev){return prev.map(function(e){return e.id===est.id?updated:e;});});
+    fbEscribir("estrategias",est.id,updated);
+    setSel(updated);
+    if(est.agente&&est.agente!==miId){
+      despacharNotificacion({tipo:"estrategia",
+        titulo:"🔄 Nueva instrucción: "+(est.cliente||""),
+        mensaje:(usuario.nombre||"")+" pide una nueva acción.\nInstrucción: "+instruccion,
+        destinatarioId:est.agente,prioridad:"alta",creadoPor:miId});
+    }
   };
 
-  // Para agente: separadas por resolución
-  const aprobadas=esAgente
-    ? estrategias.filter(e=>esDelEquipoOGlobal(e)&&e.resolucion&&
-        (e.resolucion.tipo==="aprobada"||e.resolucion.tipo==="aprobada_parcial"))
-    : esRolJefe
-    ? estrategias.filter(e=>deEquipo(e)&&e.resolucion&&e.resolucion.por!==usuario.nombre&&
-        (e.resolucion.tipo==="aprobada"||e.resolucion.tipo==="aprobada_parcial"))
-    : estrategias.filter(e=>e.resolucion&&(e.resolucion.tipo==="aprobada"||e.resolucion.tipo==="aprobada_parcial")&&
-        ((e.historialEscalado||[]).some(h=>h.por===usuario.nombre)||e.agente===usuario.id));
+  // ── Filtrado por equipo (para directivos) ─────────────
+  var aplicarFiltroEquipo=function(items){
+    var r=items;
+    if(filtroEquipoEst!=="todos") r=r.filter(function(e){
+      var eq=e.equipo||(USUARIOS.find(function(u){return u.id===e.agente;})||{}).equipo||"";
+      return eq.toUpperCase()===filtroEquipoEst.toUpperCase();
+    });
+    if(agenteSelEst) r=r.filter(function(e){return e.agente===agenteSelEst;});
+    return r;
+  };
 
-  const rechazadas=esAgente
-    ? estrategias.filter(e=>esDelEquipoOGlobal(e)&&(e.resolucion||{}).tipo==="rechazada")
-    : esRolJefe
-    ? estrategias.filter(e=>deEquipo(e)&&(e.resolucion||{}).tipo==="rechazada"&&e.resolucion.por!==usuario.nombre)
-    : [];
+  // ── Visibles para mí ──────────────────────────────────
+  var visiblesParaMi=(estrategias||[]).filter(function(e){
+    if(e.eliminada) return false;
+    if(esCEO||esDir) return true;
+    if(esJefe){
+      var eq=e.equipo||(USUARIOS.find(function(u){return u.id===e.agente;})||{}).equipo||"";
+      return eq===miEquipo||e.creadoPor===miId||e.pendienteDe===miId;
+    }
+    // agente
+    return e.agente===miId||e.creadoPor===miId||e.pendienteDe===miId;
+  });
+  var visibles=aplicarFiltroEquipo(visiblesParaMi);
 
-  const enRevisionAgente=esAgente?estrategias.filter(e=>esDelEquipoOGlobal(e)&&e.estado==="pendiente_aprobacion"):[];
-  const activasAgente=esAgente?estrategias.filter(e=>esDelEquipoOGlobal(e)&&e.estado==="en_curso"&&!e.resolucion):[];
-  const misMostrar=(esJefe||esRolDir||esRolCeo)?estrategias.filter(e=>deEquipo(e)&&e.estado==="en_curso"&&!e.resolucion&&!e.eliminada):[];
-  const misPendAprobDir=(esRolDir||esRolCeo)?estrategias.filter(e=>e.estado==="pendiente_aprobacion"&&!e.eliminada):[];
-  const misResueltasDir=(esRolDir||esRolCeo)?estrategias.filter(e=>e.resolucion&&!e.eliminada):[];
+  // ── Buckets ──────────────────────────────────────────
+  var paraAprobar=visibles.filter(function(e){return e.estado==="pendiente_aprobacion"&&e.pendienteDe===miId;});
+  var paraCerrar =visibles.filter(function(e){return e.estado==="pendiente_cierre"&&e.creadoPor===miId;});
+  var enRevision =visibles.filter(function(e){return e.estado==="pendiente_aprobacion"&&e.pendienteDe!==miId;});
+  var enCurso    =visibles.filter(function(e){return e.estado==="en_curso";});
+  var pendCierre =visibles.filter(function(e){return e.estado==="pendiente_cierre"&&e.creadoPor!==miId;});
+  var cerradas   =visibles.filter(function(e){return e.estado==="completada"||e.estado==="sin_exito"||e.estado==="rechazada";});
 
-  // Debug filters
-  if(estrategias.length>0){
-    console.log("[EST] Total estrategias:",estrategias.length,"esAgente:",esAgente,"esJefe:",esJefe,"usuario:",usuario.id,"miEquipo:",miEquipo);
-    estrategias.forEach(e=>console.log("[EST] check:",e.id,"cli:",e.cliente,"estado:",e.estado,"perteneceAMi:",esDelEquipoOGlobal(e)));
-    console.log("[EST] activasAgente:",activasAgente.length,"enRevision:",enRevisionAgente.length,"misMostrar:",misMostrar.length);
-  }
-
-  // ── DETALLE ─────────────────────────────────────────────────────
+  // ── DETALLE ──────────────────────────────────────────
   if(sel){
-    const esSuya=sel.agente===usuario.id;
-    const res=sel.resolucion;
-    const escaladoAMi=sel.escaladoA===usuario.id;
+    var puedeAprobar=sel.estado==="pendiente_aprobacion"&&sel.pendienteDe===miId;
+    var esCreador=sel.creadoPor===miId;
+    var esAg=sel.agente===miId;
+    var puedeResponder=sel.estado==="en_curso"&&esAg;
+    var puedeCerrar=sel.estado==="pendiente_cierre"&&esCreador;
+    var maxDto=sel.maxDescuento||0;
+    var miLimite=esCEO?100:esDir?100:esJefe?10:0;
+    var dtoEsAlto=maxDto>miLimite;
+
     return(
       <div style={{paddingBottom:100}}>
-        <BackBar label="Estrategias" onBack={()=>setSel(null)}/>
+        <BackBar label="Estrategias" onBack={function(){setSel(null);}}/>
         <div style={{padding:"16px"}}>
-          {/* Panel de aprobación de descuento */}
-          {sel.estado==="pendiente_aprobacion"&&(sel.pendienteDe===usuario.id||(sel.cadenaAprobacion||[]).some(c=>c.id===usuario.id&&(c.estado==="pendiente"||c.estado==="pendiente_final")))&&(
-            <div style={{background:"#FFFBEB",borderRadius:14,padding:16,marginBottom:16,
-              border:`2px solid ${T.amber}`}}>
-              <p style={{margin:"0 0 4px",fontSize:14,fontWeight:800,color:T.amber}}>
-                {(sel.cadenaAprobacion||[]).some(c=>c.id===usuario.id&&c.estado==="pendiente_final")
-                  ?"✅ Descuento aprobado por superior — tu OK final"
-                  :"🔐 Aprobación pendiente de ti"}
-              </p>
-              <p style={{margin:"0 0 8px",fontSize:12,color:T.muted}}>
-                Dto. máximo: <b style={{color:sel.maxDescuento>15?T.red:sel.maxDescuento>10?T.amber:T.green}}>{sel.maxDescuento||0}%</b>
-                {" · "}Creada por: {sel.creadoPorNombre}
-              </p>
-              {(sel.ofertas||[]).length>0&&(
-                <div style={{marginBottom:10}}>
-                  {sel.ofertas.map((o,i)=>(
-                    <div key={i} style={{background:"#fff",borderRadius:8,padding:"6px 10px",marginBottom:4,
-                      borderLeft:`3px solid ${T.amber}`,fontSize:12}}>
-                      <b>{o.nombre}</b> {o.codigo&&<span style={{color:T.muted}}>({o.codigo})</span>}
-                      {o.precioBase&&<span> · Tarifa: {o.precioBase}€</span>}
-                      {o.dto&&<span style={{color:T.red}}> · -{o.dto}%</span>}
-                      {o.precioFinal&&<span style={{color:T.green,fontWeight:700}}> → {o.precioFinal}€</span>}
-                    </div>
-                  ))}
-                </div>
-              )}
 
-              {/* Cadena de aprobación visual */}
-              {(sel.cadenaAprobacion||[]).length>0&&(
-                <div style={{marginBottom:10,padding:"8px 10px",background:"#F8FAFC",borderRadius:8}}>
-                  <p style={{margin:"0 0 4px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Cadena de aprobación</p>
-                  <p style={{margin:0,fontSize:11,color:T.text}}>
-                    {(sel.cadenaAprobacion||[]).map(c=>
-                      c.estado==="aprobado"?"✅ "+c.nombre
-                      :c.estado==="escalado"?"📤 "+c.nombre
-                      :c.estado==="pendiente_final"?"🔄 "+c.nombre+" (OK final)"
-                      :c.id===usuario.id?"👉 "+c.nombre
-                      :"⏳ "+c.nombre
-                    ).join(" → ")} → 🧑‍💼 {sel.agenteNombre}
-                  </p>
-                </div>
-              )}
+          {/* Cabecera info */}
+          <div style={{background:"#fff",borderRadius:14,padding:"16px",marginBottom:12,
+            border:"1px solid "+T.border,borderLeft:"4px solid "+T.amber}}>
+            <div style={{display:"flex",gap:6,marginBottom:8,flexWrap:"wrap"}}>
+              <Badge label={sel.tipo==="recuperacion"?"🔄 Recuperación":"🌱 Cliente nuevo"} color={T.amber}/>
+              {sel.estado==="en_curso"&&<Badge label="🔵 En curso" color={T.blue}/>}
+              {sel.estado==="pendiente_aprobacion"&&<Badge label={"⏳ Pend. "+(sel.pendienteDeNombre||"aprobación")} color={T.amber}/>}
+              {sel.estado==="pendiente_cierre"&&<Badge label={"📋 Pend. cierre por "+(sel.creadoPorNombre||"creador")} color={T.purple}/>}
+              {sel.estado==="completada"&&<Badge label="✅ Completada" color={T.green}/>}
+              {sel.estado==="sin_exito"&&<Badge label="❌ Sin éxito" color={T.red}/>}
+              {maxDto>0&&<Badge label={"💸 Dto. máx "+maxDto+"%"} color={maxDto>15?T.red:maxDto>10?T.amber:T.green}/>}
+            </div>
+            <p style={{margin:"0 0 4px",fontSize:17,fontWeight:800,color:T.text}}>{sel.cliente||sel.clienteNombre||"(sin cliente)"}</p>
+            <p style={{margin:"0 0 6px",fontSize:13,color:T.text,lineHeight:1.5}}>{sel.texto||sel.estrategia||""}</p>
+            {sel.objetivo&&<p style={{margin:"0 0 6px",fontSize:12,color:T.muted}}>🎯 {sel.objetivo}</p>}
+            <p style={{margin:"6px 0 0",fontSize:11,color:T.muted}}>
+              Creada por <b>{sel.creadoPorNombre||"—"}</b>{sel.fecha?" · "+sel.fecha:""}{sel.semana?" · S"+sel.semana:""}{sel.agenteNombre?" · 🧑‍💼 "+sel.agenteNombre:""}
+            </p>
+          </div>
 
-              {(()=>{
-                const dto=sel.maxDescuento||0;
-                const miLimite=usuario.rol==="ceo"?100:usuario.rol==="director"?15:usuario.rol==="jefe"?10:10;
-                // Si es pendiente_final (vuelve del superior), siempre puede aprobar
-                const esFinalOK=(sel.cadenaAprobacion||[]).some(c=>c.id===usuario.id&&c.estado==="pendiente_final");
-                const puedeAprobar=esFinalOK||dto<=miLimite;
-                const jefeVentas=USUARIOS.find(u=>u.rol==="director");
-                const ceoUser=USUARIOS.find(u=>u.rol==="ceo");
-                const superiorId=miLimite<=10?jefeVentas?.id:ceoUser?.id;
-                const superiorNombre=miLimite<=10?"Jefe de Ventas ("+jefeVentas?.nombre+")":"CEO ("+ceoUser?.nombre+")";
-
-                return(
-                <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                  {/* Aprobar (si tiene nivel suficiente) */}
-                  {puedeAprobar&&(
-                    <button onClick={()=>{
-                      const cadena=[...(sel.cadenaAprobacion||[])];
-                      const idx=cadena.findIndex(c=>c.id===usuario.id&&(c.estado==="pendiente"||c.estado==="pendiente_final"||c.estado==="escalado"));
-                      if(idx>=0) cadena[idx]={...cadena[idx],estado:"aprobado",fecha:new Date().toLocaleDateString("es-ES")};
-                      
-                      // Si soy superior (CEO/Jefe Ventas) y el Responsable había escalado,
-                      // el Responsable necesita dar último OK antes de que llegue al comercial
-                      const responsableEnCadena=cadena.find(c=>c.rol==="responsable");
-                      let siguiente;
-                      if(responsableEnCadena && responsableEnCadena.estado==="escalado" && usuario.rol!=="jefe"){
-                        // Volver al Responsable para último OK
-                        responsableEnCadena.estado="pendiente_final";
-                        siguiente=responsableEnCadena;
-                      } else {
-                        siguiente=cadena.find(c=>c.estado==="pendiente"||c.estado==="pendiente_final");
-                      }
-                      
-                      let nuevoEstado,nuevoPendienteDe,nuevoPendienteDeNombre;
-                      if(siguiente){
-                        nuevoEstado="pendiente_aprobacion";nuevoPendienteDe=siguiente.id;nuevoPendienteDeNombre=siguiente.nombre;
-                      } else {
-                        nuevoEstado="en_curso";nuevoPendienteDe=null;nuevoPendienteDeNombre=null;
-                      }
-                      const updated={...sel,estado:nuevoEstado,pendienteDe:nuevoPendienteDe,pendienteDeNombre:nuevoPendienteDeNombre,
-                        cadenaAprobacion:cadena,
-                        historialEscalado:[...(sel.historialEscalado||[]),{
-                          accion:`✅ Aprobado por ${usuario.nombre} (${usuario.rol}) — dto. ${dto}%`,
-                          por:usuario.nombre,fecha:new Date().toLocaleDateString("es-ES"),nota:`Descuento ${dto}% aprobado`
-                        }]};
-                      setEstrategias(prev=>prev.map(e=>e.id===sel.id?updated:e));
-                      fbEscribir("estrategias",sel.id,updated);
-                      setSel(updated);
-                      if(siguiente){
-                        despacharNotificacion({tipo:"estrategia",
-                          titulo:siguiente.estado==="pendiente_final"
-                            ?`✅ Dto. aprobado por ${usuario.nombre} — tu OK final: ${sel.cliente}`
-                            :`🔐 Tu aprobación: ${sel.cliente} (dto. ${dto}%)`,
-                          mensaje:siguiente.estado==="pendiente_final"
-                            ?`El descuento de ${dto}% ha sido aprobado por ${usuario.nombre}. Da tu OK final para que llegue al comercial.`
-                            :`${usuario.nombre} ha aprobado. Falta tu OK.\nCliente: ${sel.cliente}\nDescuento: ${dto}%`,
-                          destinatarioId:siguiente.id,prioridad:"alta",creadoPor:usuario.id});
-                      } else {
-                        if(sel.agente!==usuario.id) despacharNotificacion({tipo:"estrategia",titulo:`✅ Estrategia aprobada: ${sel.cliente}`,
-                          mensaje:`Aprobada. Dto: ${dto}%. Ya puedes ejecutarla.`,
-                          destinatarioId:sel.agente,prioridad:"alta",creadoPor:usuario.id});
-                        if(sel.creadoPor!==usuario.id && sel.creadoPor!==sel.agente) despacharNotificacion({tipo:"estrategia",titulo:`✅ Tu estrategia aprobada: ${sel.cliente}`,
-                          mensaje:`Cadena completada. ${sel.agenteNombre} puede ejecutar.`,
-                          destinatarioId:sel.creadoPor,prioridad:"normal",creadoPor:usuario.id});
-                      }
-                    }}
-                      style={{padding:"12px",borderRadius:10,border:"none",
-                        background:T.green,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>
-                      ✅ {esFinalOK?"Dar OK final":"Aprobar descuento"} ({dto}%)
-                    </button>
-                  )}
-
-                  {/* Escalar (si el descuento excede su nivel) */}
-                  {!puedeAprobar&&superiorId&&(
-                    <button onClick={()=>{
-                      const cadena=[...(sel.cadenaAprobacion||[])];
-                      // Marcar este nivel como "escalado"
-                      const idx=cadena.findIndex(c=>c.id===usuario.id&&c.estado==="pendiente");
-                      if(idx>=0) cadena[idx]={...cadena[idx],estado:"escalado",fecha:new Date().toLocaleDateString("es-ES")};
-                      const updated={...sel,pendienteDe:superiorId,pendienteDeNombre:superiorNombre,
-                        cadenaAprobacion:cadena,
-                        historialEscalado:[...(sel.historialEscalado||[]),{
-                          accion:`📤 Escalada a ${superiorNombre} por ${usuario.nombre} (dto. ${dto}% excede mi límite de ${miLimite}%)`,
-                          por:usuario.nombre,fecha:new Date().toLocaleDateString("es-ES"),nota:`Descuento ${dto}% requiere aprobación superior`
-                        }]};
-                      setEstrategias(prev=>prev.map(e=>e.id===sel.id?updated:e));
-                      fbEscribir("estrategias",sel.id,updated);
-                      setSel(updated);
-                      despacharNotificacion({tipo:"estrategia",
-                        titulo:`📤 Estrategia escalada: ${sel.cliente} (dto. ${dto}%)`,
-                        mensaje:`${usuario.nombre} te escala esta estrategia. Dto: ${dto}% (su límite: ${miLimite}%).\nCliente: ${sel.cliente}\nAcción: ${sel.texto}`,
-                        destinatarioId:superiorId,prioridad:"alta",creadoPor:usuario.id});
-                    }}
-                      style={{padding:"12px",borderRadius:10,border:`2px solid ${T.blue}`,
-                        background:"#EFF6FF",color:T.blue,fontWeight:700,fontSize:13,cursor:"pointer"}}>
-                      📤 Escalar a {superiorNombre} (dto. {dto}% excede mi límite {miLimite}%)
-                    </button>
-                  )}
-
-                  {/* Rechazar */}
-                  <button onClick={()=>{
-                    const motivo=prompt("Motivo del rechazo:");
-                    if(!motivo) return;
-                    const updated={...sel,estado:"rechazada",pendienteDe:null,
-                      resolucion:{tipo:"rechazada",por:usuario.nombre,rol:usuario.rol,
-                        fecha:new Date().toLocaleDateString("es-ES"),nota:motivo},
-                      historialEscalado:[...(sel.historialEscalado||[]),{
-                        accion:`❌ Rechazado por ${usuario.nombre}`,
-                        por:usuario.nombre,fecha:new Date().toLocaleDateString("es-ES"),nota:motivo
-                      }]};
-                    setEstrategias(prev=>prev.map(e=>e.id===sel.id?updated:e));
-                    fbEscribir("estrategias",sel.id,updated);
-                    setSel(updated);
-                    if(sel.creadoPor!==usuario.id) despacharNotificacion({tipo:"estrategia",
-                      titulo:`❌ Estrategia rechazada: ${sel.cliente}`,
-                      mensaje:`${usuario.nombre} ha rechazado. Motivo: ${motivo}`,
-                      destinatarioId:sel.creadoPor,prioridad:"normal",creadoPor:usuario.id});
-                  }}
-                    style={{padding:"12px",borderRadius:10,border:`2px solid ${T.red}`,
-                      background:"#FEF2F2",color:T.red,fontWeight:700,fontSize:13,cursor:"pointer"}}>
-                    ❌ Rechazar
-                  </button>
-                </div>);
-              })()}
+          {/* Productos / ofertas */}
+          {(sel.ofertas||[]).length>0&&(
+            <div style={{background:"#fff",borderRadius:14,padding:"14px 16px",marginBottom:12,border:"1px solid "+T.border}}>
+              <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>🏷️ Productos con oferta</p>
+              {sel.ofertas.map(function(o,i){
+                return <div key={i} style={{display:"flex",gap:8,alignItems:"center",padding:"6px 0",
+                  borderBottom:i<sel.ofertas.length-1?"1px solid "+T.border:"none"}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    {o.codigo&&<span style={{fontSize:10,fontFamily:"monospace",color:T.blue,fontWeight:700}}>{o.codigo} · </span>}
+                    <span style={{fontSize:13,fontWeight:600}}>{o.nombre}</span>
+                  </div>
+                  <div style={{textAlign:"right",flexShrink:0}}>
+                    {o.precioBase&&<span style={{fontSize:11,color:T.muted,textDecoration:o.dto?"line-through":"none"}}>{o.precioBase}€</span>}
+                    {o.dto&&<span style={{fontSize:11,color:T.red,fontWeight:700,marginLeft:6}}>-{o.dto}%</span>}
+                    {o.precioFinal&&o.dto&&<span style={{fontSize:13,fontWeight:800,color:T.green,marginLeft:6}}>{o.precioFinal}€/kg</span>}
+                  </div>
+                </div>;
+              })}
             </div>
           )}
 
-          {/* Estado pendiente (para otros que no son el aprobador) */}
-          {sel.estado==="pendiente_aprobacion"&&sel.pendienteDe!==usuario.id&&(
-            <div style={{background:"#FEF3C7",borderRadius:14,padding:14,marginBottom:16,
-              border:`1.5px solid ${T.amber}`}}>
-              <p style={{margin:0,fontSize:13,fontWeight:700,color:T.amber}}>
-                ⏳ Pendiente de aprobación: {sel.pendienteDeNombre||"—"}
-              </p>
-              <p style={{margin:"4px 0 0",fontSize:11,color:T.muted}}>
-                Dto. máx: {sel.maxDescuento||0}% · Cadena: {(sel.cadenaAprobacion||[]).map(c=>
-                  c.estado==="aprobado"?"✅ "+c.nombre
-                  :c.estado==="escalado"?"📤 "+c.nombre
-                  :c.estado==="pendiente_final"?"🔄 "+c.nombre
-                  :c.estado==="pendiente"?"⏳ "+c.nombre
-                  :c.nombre
-                ).join(" → ")}
-              </p>
+          {/* Seguimientos / historial completo */}
+          {(sel.seguimientos||[]).length>0&&(
+            <div style={{background:"#fff",borderRadius:14,padding:"14px 16px",marginBottom:12,border:"1px solid "+T.border}}>
+              <p style={{margin:"0 0 10px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>🕐 Historial / seguimientos ({sel.seguimientos.length})</p>
+              {sel.seguimientos.slice().reverse().map(function(s,i){
+                return <div key={i} style={{padding:"8px 0",
+                  borderBottom:i<sel.seguimientos.length-1?"1px solid "+T.border:"none"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:2,gap:6}}>
+                    <span style={{fontSize:12,fontWeight:700,color:T.text}}>{s.accion||"Nota"}</span>
+                    <span style={{fontSize:10,color:T.muted,flexShrink:0}}>{s.fecha||""}{s.por?" · "+s.por:""}</span>
+                  </div>
+                  {s.nota&&<p style={{margin:0,fontSize:12,color:"#475569",lineHeight:1.5}}>{s.nota}</p>}
+                </div>;
+              })}
             </div>
           )}
 
-          {/* Botones editar / eliminar / calendario */}
-          <div style={{display:"flex",gap:8,marginBottom:16}}>
-            <button onClick={()=>setEditEst(sel)}
-              style={{flex:1,padding:"10px 16px",borderRadius:10,border:`1.5px solid ${T.navy}`,background:"#F1F5F9",
-                fontSize:13,fontWeight:700,color:T.navy,cursor:"pointer",display:"flex",gap:6,alignItems:"center",justifyContent:"center"}}>
-              ✏️ Editar
-            </button>
-            <button onClick={()=>{
-              const ics=generarICS({
-                titulo:`CRM: ${sel.cliente||sel.clienteNombre} — ${sel.objetivo||sel.texto||"Estrategia"}`,
-                descripcion:`Estrategia: ${sel.texto||sel.estrategia||""}\nCliente: ${sel.cliente||""}\nObjetivo: ${sel.objetivo||""}`,
-                fechaInicio:new Date(Date.now()+86400000), // mañana
-                recordatorioMin:60,
-                url:"https://crmwikuk.vercel.app"
-              });
-              descargarICS(ics,`estrategia_${(sel.cliente||"").replace(/\s/g,"_")}.ics`);
-            }}
-              style={{padding:"10px 16px",borderRadius:10,border:`1.5px solid ${T.blue}`,background:"#EFF6FF",
-                color:T.blue,fontSize:13,fontWeight:700,cursor:"pointer"}}>
-              📅 Calendario
-            </button>
-            <button onClick={()=>{
+          {/* Acciones — Aprobador */}
+          {puedeAprobar&&(
+            <div style={{background:"#FFFBEB",borderRadius:14,padding:14,marginBottom:12,border:"2px solid "+T.amber}}>
+              <p style={{margin:"0 0 6px",fontSize:14,fontWeight:800,color:T.amber}}>🔐 Tu aprobación</p>
+              <p style={{margin:"0 0 12px",fontSize:11,color:T.muted}}>
+                Mi límite: {miLimite}% · Dto solicitado: <b style={{color:dtoEsAlto?T.red:T.green}}>{maxDto}%</b>
+                {esJefe&&!esCEO&&!esDir&&maxDto>10&&" — Se escalará al CEO al aprobar."}
+              </p>
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                <button onClick={function(){setModalAccion({tipo:"aprobar"});setModalTexto("");}}
+                  style={{padding:"12px",borderRadius:10,border:"none",background:T.green,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>
+                  ✅ Aprobar
+                </button>
+                <button onClick={function(){setModalAccion({tipo:"rechazar"});setModalTexto("");}}
+                  style={{padding:"12px",borderRadius:10,border:"2px solid "+T.red,background:"#FEF2F2",color:T.red,fontWeight:700,fontSize:13,cursor:"pointer"}}>
+                  ❌ Rechazar
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Acciones — Comercial responde */}
+          {puedeResponder&&(
+            <div style={{background:"#fff",borderRadius:14,padding:14,marginBottom:12,border:"1.5px solid "+T.blue}}>
+              <p style={{margin:"0 0 4px",fontSize:14,fontWeight:800,color:T.text}}>💬 Tu respuesta</p>
+              <p style={{margin:"0 0 10px",fontSize:11,color:T.muted}}>Selecciona el resultado y escribe la nota (obligatoria).</p>
+              <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                {[
+                  {k:"pedido",icon:"✅",label:"Pedido",color:"#22C55E"},
+                  {k:"exito",icon:"👍",label:"Éxito",color:"#22C55E"},
+                  {k:"ko",icon:"❌",label:"KO",color:"#EF4444"},
+                  {k:"mas_dto",icon:"💬",label:"Pide más dto.",color:"#F59E0B"},
+                  {k:"seguimiento",icon:"📝",label:"Seguimiento",color:"#3B82F6"}
+                ].map(function(b){
+                  return <button key={b.k} onClick={function(){setModalAccion({tipo:"responder",subtipo:b.k});setModalTexto("");}}
+                    style={{padding:"10px 14px",borderRadius:10,border:"1.5px solid "+b.color+"55",
+                      background:b.color+"12",color:b.color,fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                    {b.icon} {b.label}
+                  </button>;
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Acciones — Creador cierra */}
+          {puedeCerrar&&(
+            <div style={{background:"#F5F3FF",borderRadius:14,padding:14,marginBottom:12,border:"2px solid "+T.purple}}>
+              <p style={{margin:"0 0 4px",fontSize:14,fontWeight:800,color:T.purple}}>📋 Tu cierre</p>
+              <p style={{margin:"0 0 12px",fontSize:11,color:T.muted}}>
+                El comercial respondió: <b>{sel.resultado||"—"}</b>. Ahora tú decides.
+              </p>
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                <button onClick={function(){setModalAccion({tipo:"cerrar",exito:true});setModalTexto("");}}
+                  style={{padding:"12px",borderRadius:10,border:"none",background:T.green,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>
+                  ✅ Cerrar como completada
+                </button>
+                <button onClick={function(){setModalAccion({tipo:"cerrar",exito:false});setModalTexto("");}}
+                  style={{padding:"12px",borderRadius:10,border:"2px solid "+T.red,background:"#FEF2F2",color:T.red,fontWeight:700,fontSize:13,cursor:"pointer"}}>
+                  ❌ Cerrar sin éxito
+                </button>
+                <button onClick={function(){setModalAccion({tipo:"pedir_otra"});setModalTexto("");}}
+                  style={{padding:"12px",borderRadius:10,border:"2px solid "+T.amber,background:"#FFFBEB",color:T.amber,fontWeight:700,fontSize:13,cursor:"pointer"}}>
+                  🔄 Pedir otra acción al comercial
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Estado cerrado */}
+          {(sel.estado==="completada"||sel.estado==="sin_exito"||sel.estado==="rechazada")&&(
+            <div style={{padding:14,borderRadius:14,marginBottom:12,
+              background:sel.estado==="completada"?"#F0FDF4":"#FEF2F2",
+              border:"2px solid "+(sel.estado==="completada"?T.green:T.red)}}>
+              <p style={{margin:"0 0 4px",fontSize:15,fontWeight:800,
+                color:sel.estado==="completada"?T.green:T.red}}>
+                {sel.estado==="completada"?"✅ Estrategia completada":sel.estado==="rechazada"?"❌ Estrategia rechazada":"❌ Sin éxito"}
+              </p>
+              {sel.resolucion&&sel.resolucion.nota&&<p style={{margin:0,fontSize:12,color:T.muted}}>{sel.resolucion.nota}</p>}
+              {sel.resolucion&&<p style={{margin:"4px 0 0",fontSize:11,color:T.muted}}>Por {sel.resolucion.por||"—"} · {sel.resolucion.fecha||""}</p>}
+            </div>
+          )}
+
+          {/* Acciones administrativas */}
+          <div style={{display:"flex",gap:8,marginBottom:12}}>
+            <button onClick={function(){setEditEst(sel);}}
+              style={{flex:1,padding:"10px 14px",borderRadius:10,border:"1.5px solid "+T.navy,background:"#F1F5F9",
+                fontSize:13,fontWeight:700,color:T.navy,cursor:"pointer"}}>✏️ Editar</button>
+            <button onClick={function(){
               if(!confirm("¿Eliminar esta estrategia?")) return;
-              setEstrategias(prev=>prev.filter(e=>e.id!==sel.id));
-              fbEscribir("estrategias",sel.id,{...sel,eliminada:true,eliminadoPor:usuario.id,fechaEliminacion:new Date().toISOString()});
+              setEstrategias(function(prev){return prev.filter(function(e){return e.id!==sel.id;});});
+              fbEscribir("estrategias",sel.id,Object.assign({},sel,{eliminada:true,eliminadoPor:miId,fechaEliminacion:new Date().toISOString()}));
               setSel(null);
             }}
-              style={{padding:"10px 16px",borderRadius:10,border:`1.5px solid ${T.red}`,background:"#FEF2F2",
-                color:T.red,fontSize:13,fontWeight:700,cursor:"pointer"}}>
-              🗑️
-            </button>
+              style={{padding:"10px 14px",borderRadius:10,border:"1.5px solid "+T.red,background:"#FEF2F2",
+                color:T.red,fontSize:13,fontWeight:700,cursor:"pointer"}}>🗑️</button>
           </div>
-          {/* Estado visual grande */}
-          {res&&(
-            <div style={{borderRadius:16,padding:"16px",marginBottom:16,
-              background:res.tipo==="aprobada"?T.greenL:res.tipo==="rechazada"?"#FEF2F2":T.amberL,
-              border:`2px solid ${res.tipo==="aprobada"?T.green:res.tipo==="rechazada"?T.red:T.amber}`}}>
-              <p style={{margin:"0 0 4px",fontSize:20,fontWeight:900,
-                color:res.tipo==="aprobada"?T.green:res.tipo==="rechazada"?T.red:T.amber}}>
-                {res.tipo==="aprobada"?"✅ Aprobada":res.tipo==="rechazada"?"❌ Rechazada":"⚡ Aprobada parcialmente"}
-              </p>
-              <p style={{margin:"0 0 8px",fontSize:13,color:T.text}}>
-                Por <strong>{res.por}</strong> · {res.fecha}
-                {res.nota&&<span> — "{res.nota}"</span>}
-              </p>
-              {/* Resolución por producto */}
-              {(sel.ofertas||[]).length>0&&(
-                <div style={{borderTop:`1px solid ${res.tipo==="aprobada"?T.green+"44":T.amber+"44"}`,paddingTop:10,marginTop:8}}>
-                  {sel.ofertas.map((o,i)=>(
-                    <div key={i} style={{display:"flex",gap:10,alignItems:"center",
-                      padding:"8px 0",borderBottom:i<sel.ofertas.length-1?`1px solid ${T.border}`:"none"}}>
-                      <span style={{fontSize:18,flexShrink:0}}>
-                        {o.aprobada===true?"✅":o.aprobada===false?"❌":o.elevadaA?"⏳":"—"}
-                      </span>
-                      <div style={{flex:1,minWidth:0}}>
-                        <p style={{margin:0,fontSize:13,fontWeight:600,
-                          overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{o.nombre}</p>
-                        {o.aprobada===true&&(
-                          <p style={{margin:0,fontSize:12,color:T.green,fontWeight:700}}>
-                            {o.modificada?"Precio modificado: ":"Precio aprobado: "}
-                            <strong>{o.precioFinal}€/kg</strong>
-                            {o.modificada&&o.precioOriginal&&
-                              <span style={{color:T.muted,textDecoration:"line-through",marginLeft:6}}>{o.precioOriginal}€</span>}
-                          </p>
-                        )}
-                        {o.aprobada===false&&<p style={{margin:0,fontSize:12,color:T.red}}>No autorizado</p>}
-                        {o.elevadaA&&<p style={{margin:0,fontSize:12,color:T.purple}}>Pendiente decisión superior</p>}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Tarjeta de aprobación si me toca decidir */}
-          {esJefe&&escaladoAMi&&sel.estado==="pendiente_aprobacion"&&(
-            <EstrategiaAprobacionCard e={sel} usuario={usuario}
-              onConfirmar={(e,of,n)=>{confirmarEstrategia(e,of,n);setSel(null);}}
-              onRechazar={(e,m)=>{rechazar(e,m);setSel(null);}}
-              onEscalar={(e,d,n)=>{escalarEstrategia(e,d,n);setSel(null);}}/>
-          )}
-
-          {/* Info básica */}
-          {!res&&!(esJefe&&escaladoAMi&&sel.estado==="pendiente_aprobacion")&&(
-            <Card style={{marginBottom:12}}>
-              <p style={{margin:"0 0 6px",fontSize:17,fontWeight:800}}>{sel.cliente||sel.clienteNombre}</p>
-              <p style={{margin:"0 0 6px",fontSize:13,color:T.muted}}>{sel.texto||sel.estrategia}</p>
-              {sel.objetivo&&<p style={{margin:0,fontSize:12,color:T.text}}>🎯 {sel.objetivo}</p>}
-              {(sel.ofertas||[]).length>0&&(
-                <div style={{marginTop:10,borderTop:`1px solid ${T.border}`,paddingTop:10}}>
-                  <p style={{margin:"0 0 6px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Productos solicitados</p>
-                  {sel.ofertas.map((o,i)=>(
-                    <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",
-                      borderBottom:i<sel.ofertas.length-1?`1px solid ${T.border}`:"none"}}>
-                      <span style={{fontSize:12}}>{o.nombre}</span>
-                      <span style={{fontSize:12,fontWeight:700,color:T.green}}>
-                        {o.precioFinal}€/kg <span style={{color:T.red,fontWeight:600}}>-{o.dto}%</span>
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </Card>
-          )}
-
-          {/* Historial de escalado */}
-          {(sel.historialEscalado||[]).length>0&&(
-            <Card>
-              <p style={{margin:"0 0 10px",fontSize:12,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>🕐 Historial</p>
-              {[...(sel.historialEscalado||[])].reverse().map((h,i)=>(
-                <div key={i} style={{display:"flex",gap:10,paddingBottom:8,marginBottom:8,
-                  borderBottom:i<sel.historialEscalado.length-1?`1px solid ${T.border}`:"none"}}>
-                  <div style={{width:8,height:8,borderRadius:"50%",background:T.navy,flexShrink:0,marginTop:4}}/>
-                  <div>
-                    <p style={{margin:"0 0 1px",fontSize:12,fontWeight:700}}>{h.accion}</p>
-                    {h.nota&&<p style={{margin:"0 0 2px",fontSize:11,color:T.text}}>{h.nota}</p>}
-                    <p style={{margin:0,fontSize:10,color:T.muted}}>{h.por} · {h.fecha}</p>
-                  </div>
-                </div>
-              ))}
-            </Card>
-          )}
         </div>
+
+        {/* MODAL acción con texto obligatorio */}
+        {modalAccion&&(
+          <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <div style={{background:"#fff",borderRadius:16,width:"min(500px,100%)",padding:"22px",boxShadow:"0 16px 48px rgba(0,0,0,.25)"}}>
+              <p style={{margin:"0 0 4px",fontSize:16,fontWeight:800,color:T.text}}>
+                {modalAccion.tipo==="aprobar"&&"✅ Aprobar estrategia"}
+                {modalAccion.tipo==="rechazar"&&"❌ Rechazar estrategia"}
+                {modalAccion.tipo==="responder"&&("Responder: "+modalAccion.subtipo)}
+                {modalAccion.tipo==="cerrar"&&(modalAccion.exito?"✅ Cerrar como completada":"❌ Cerrar sin éxito")}
+                {modalAccion.tipo==="pedir_otra"&&"🔄 Pedir otra acción"}
+              </p>
+              <p style={{margin:"0 0 12px",fontSize:11,color:T.muted}}>
+                {modalAccion.tipo==="aprobar"&&"Comentario opcional para el comercial"}
+                {modalAccion.tipo==="rechazar"&&"Motivo del rechazo (obligatorio)"}
+                {modalAccion.tipo==="responder"&&"Comentario obligatorio"}
+                {modalAccion.tipo==="cerrar"&&"Comentario de cierre (obligatorio)"}
+                {modalAccion.tipo==="pedir_otra"&&"Nueva instrucción para el comercial"}
+              </p>
+              <textarea value={modalTexto} onChange={function(ev){setModalTexto(ev.target.value);}}
+                rows="4" placeholder="Escribe aquí…"
+                style={{width:"100%",border:"1.5px solid "+T.border,borderRadius:10,padding:"10px 12px",fontSize:13,outline:"none",boxSizing:"border-box",resize:"vertical",fontFamily:"inherit",marginBottom:14}}/>
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={function(){setModalAccion(null);setModalTexto("");}}
+                  style={{flex:1,padding:"11px",borderRadius:10,border:"1px solid "+T.border,background:"#fff",color:T.muted,fontSize:13,cursor:"pointer"}}>Cancelar</button>
+                <button onClick={function(){
+                  var t=modalAccion.tipo;
+                  if(t==="aprobar"){aprobarEstrategia(sel,modalTexto);}
+                  else if(t==="rechazar"){if(!modalTexto.trim()){alert("Indica el motivo");return;}rechazarEstrategia(sel,modalTexto);}
+                  else if(t==="responder"){if(!modalTexto.trim()){alert("Comentario obligatorio");return;}responderEstrategia(sel,modalAccion.subtipo,modalTexto);}
+                  else if(t==="cerrar"){if(!modalTexto.trim()){alert("Comentario obligatorio");return;}cerrarEstrategia(sel,modalAccion.exito,modalTexto);}
+                  else if(t==="pedir_otra"){if(!modalTexto.trim()){alert("Instrucción obligatoria");return;}pedirOtraAccion(sel,modalTexto);}
+                  setModalAccion(null);setModalTexto("");
+                }}
+                  style={{flex:2,padding:"11px",borderRadius:10,border:"none",background:T.navy,color:"#fff",fontSize:14,fontWeight:700,cursor:"pointer"}}>
+                  Confirmar
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
       </div>
     );
   }
 
-  // ── LISTA PRINCIPAL ───────────────────────────────────────────────
-  const Bloque=({titulo,items,colorTitulo=T.muted,renderItem})=>(
-    items.length===0?null:(
-      <div style={{marginBottom:24}}>
-        <p style={{margin:"0 0 10px",fontSize:11,fontWeight:700,color:colorTitulo,textTransform:"uppercase",letterSpacing:".06em"}}>
-          {titulo} ({items.length})
-        </p>
-        {items.map(renderItem)}
-      </div>
-    )
-  );
+  // ── LISTA PRINCIPAL ───────────────────────────────────
+  var Card=function(props){
+    return <div onClick={props.onClick} style={Object.assign({background:"#fff",borderRadius:14,padding:"13px 16px",
+      marginBottom:8,cursor:"pointer",border:"1px solid "+T.border,boxShadow:"0 1px 3px rgba(0,0,0,.04)"},props.style||{})}>
+      {props.children}
+    </div>;
+  };
 
-  const CardEst=({e,onClick,children})=>{
-    const ag=USUARIOS.find(u=>u.id===e.agente);
-    return(
-      <div onClick={onClick} style={{background:"#fff",borderRadius:14,padding:"14px 16px",
-        marginBottom:8,cursor:"pointer",border:`1px solid ${T.border}`,
-        boxShadow:"0 1px 3px rgba(0,0,0,.04)"}}>
-        <div style={{display:"flex",gap:8,marginBottom:6,flexWrap:"wrap"}}>
-          {esJefe&&ag&&<Badge label={ag.nombre} color={ag.color}/>}
-          {children}
-        </div>
-        <p style={{margin:"0 0 2px",fontSize:14,fontWeight:800}}>{e.cliente||e.clienteNombre}</p>
-        <p style={{margin:0,fontSize:12,color:T.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-          {e.texto||e.estrategia}
-        </p>
+  var renderItem=function(e, badgeColor, badgeLabel){
+    var ag=USUARIOS.find(function(u){return u.id===e.agente;});
+    var maxDto=e.maxDescuento||0;
+    return <Card key={e.id} onClick={function(){setSel(e);}}>
+      <div style={{display:"flex",gap:6,marginBottom:6,flexWrap:"wrap",alignItems:"center"}}>
+        {badgeLabel&&<Badge label={badgeLabel} color={badgeColor}/>}
+        {ag&&esManager&&<Badge label={"👤 "+ag.nombre} color={ag.color||T.muted}/>}
+        {maxDto>0&&<Badge label={"💸 "+maxDto+"%"} color={maxDto>15?T.red:maxDto>10?T.amber:T.green}/>}
+        <span style={{marginLeft:"auto",fontSize:10,color:T.muted}}>{e.fecha||""}{e.semana?" · S"+e.semana:""}</span>
       </div>
-    );
+      <p style={{margin:"0 0 2px",fontSize:14,fontWeight:800,color:T.text}}>{e.cliente||e.clienteNombre||"(sin cliente)"}</p>
+      <p style={{margin:0,fontSize:12,color:T.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.texto||e.estrategia||""}</p>
+      {e.estado==="pendiente_aprobacion"&&e.pendienteDeNombre&&<p style={{margin:"4px 0 0",fontSize:11,color:T.amber,fontWeight:600}}>⏳ Pendiente: {e.pendienteDeNombre}</p>}
+    </Card>;
   };
 
   return(
     <div style={{padding:"16px 16px 100px"}}>
       {/* Header */}
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16,gap:8}}>
         <div>
           <p style={{margin:0,fontSize:22,fontWeight:900,color:T.text}}>🎯 Estrategias</p>
           <p style={{margin:"2px 0 0",fontSize:12,color:T.muted}}>
-            {esAgente?"Mis recuperaciones":esRolJefe?`Equipo ${miEquipo}`:esRolDir?"Dirección":"CEO"}
-            <span style={{marginLeft:6,fontSize:10,color:T.blue}}>· {estrategias.length} total · {activasAgente.length+misMostrar.length} activas</span>
+            {esAgente?"Mis estrategias":esJefe&&!esCEO&&!esDir?("Equipo "+miEquipo):esCEO?"CEO":"Dirección"}
+            <span style={{marginLeft:6,fontSize:10,color:T.blue}}>· {visibles.length} visibles</span>
           </p>
         </div>
-        <div style={{display:"flex",gap:8}}>
-          <button onClick={()=>setShowNuevaEst(v=>!v)}
+        <div style={{display:"flex",gap:6}}>
+          <button onClick={function(){setShowNuevaEst(function(v){return !v;});}}
             style={{background:showNuevaEst?"#E2E8F0":T.navy,color:showNuevaEst?T.muted:"#fff",
               border:"none",borderRadius:9,padding:"9px 14px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
             {showNuevaEst?"× Cancelar":"+ Nueva"}
           </button>
           <button onClick={recargar} disabled={cargando}
-            style={{background:"#fff",border:`1px solid ${T.border}`,borderRadius:9,
+            style={{background:"#fff",border:"1px solid "+T.border,borderRadius:9,
               padding:"9px 14px",cursor:cargando?"default":"pointer",color:T.muted,fontSize:13}}>
             {cargando?"⏳":"🔄"}
           </button>
@@ -5173,44 +5221,44 @@ function MisEstrategias({usuario}){
 
           <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Cliente *</p>
           <SearchInput value={formEst.cliente}
-            onChange={v=>setFormEst(f=>({...f,cliente:v}))}
+            onChange={function(v){setFormEst(function(f){return Object.assign({},f,{cliente:v});});}}
             placeholder="🔍 Buscar cliente..."
             suggestions={(window._clientesFB||[])
-              .filter(c=>(c.nombre||c.NOMBRE||"").toLowerCase().includes(formEst.cliente.toLowerCase())&&formEst.cliente.length>=2)
-              .slice(0,8).map(c=>({label:c.nombre||c.NOMBRE,sub:c.id,tipo:"cliente"}))}
-            onSelect={s=>setFormEst(f=>({...f,cliente:s.label}))}
+              .filter(function(c){return (c.nombre||c.NOMBRE||"").toLowerCase().indexOf((formEst.cliente||"").toLowerCase())>=0&&(formEst.cliente||"").length>=2;})
+              .slice(0,8).map(function(c){return {label:c.nombre||c.NOMBRE,sub:c.id,tipo:"cliente",obj:c};})}
+            onSelect={function(s){setFormEst(function(f){return Object.assign({},f,{cliente:s.label,clienteId:(s.obj||{}).id||""});});}}
             style={{marginBottom:10}}/>
 
           <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Tipo</p>
           <div style={{display:"flex",gap:8,marginBottom:10}}>
-            {[{k:"recuperacion",icon:"🔄",label:"Recuperar cliente"},{k:"nuevo",icon:"🌱",label:"Cliente nuevo"}].map(t=>(
-              <button key={t.k} onClick={()=>setFormEst(f=>({...f,tipo:t.k}))}
+            {[{k:"recuperacion",icon:"🔄",label:"Recuperar"},{k:"nuevo",icon:"🌱",label:"Cliente nuevo"}].map(function(t){
+              return <button key={t.k} onClick={function(){setFormEst(function(f){return Object.assign({},f,{tipo:t.k});});}}
                 style={{flex:1,padding:"10px",borderRadius:10,cursor:"pointer",fontSize:12,
-                  border:`2px solid ${(formEst.tipo||"recuperacion")===t.k?T.amber:T.border}`,
+                  border:"2px solid "+((formEst.tipo||"recuperacion")===t.k?T.amber:T.border),
                   background:(formEst.tipo||"recuperacion")===t.k?T.amberL:"#fff",
                   color:(formEst.tipo||"recuperacion")===t.k?T.amber:T.muted,
                   fontWeight:(formEst.tipo||"recuperacion")===t.k?700:400}}>
                 {t.icon} {t.label}
-              </button>
-            ))}
+              </button>;
+            })}
           </div>
 
           <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Acción propuesta *</p>
-          <textarea value={formEst.texto} onChange={e=>setFormEst(f=>({...f,texto:e.target.value}))} rows={2}
+          <textarea value={formEst.texto} onChange={function(ev){setFormEst(function(f){return Object.assign({},f,{texto:ev.target.value});});}} rows={2}
             placeholder="Muestra + visita personalizada, descuento especial…"
-            style={{width:"100%",border:`1.5px solid ${T.border}`,borderRadius:9,padding:"10px 12px",
+            style={{width:"100%",border:"1.5px solid "+T.border,borderRadius:9,padding:"10px 12px",
               fontSize:13,outline:"none",boxSizing:"border-box",resize:"none",fontFamily:"inherit",marginBottom:10}}/>
 
           <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Objetivo</p>
-          <input value={formEst.objetivo||""} onChange={e=>setFormEst(f=>({...f,objetivo:e.target.value}))}
+          <input value={formEst.objetivo||""} onChange={function(ev){setFormEst(function(f){return Object.assign({},f,{objetivo:ev.target.value});});}}
             placeholder="Recuperar pedido mensual, reactivar cuenta…"
-            style={{width:"100%",border:`1.5px solid ${T.border}`,borderRadius:9,padding:"10px 12px",
+            style={{width:"100%",border:"1.5px solid "+T.border,borderRadius:9,padding:"10px 12px",
               fontSize:13,outline:"none",boxSizing:"border-box",fontFamily:"inherit",marginBottom:14}}/>
 
           <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>🏷️ Productos con precio oferta</p>
-          {(formEst.ofertas||[]).map((o,i)=>(
-            <div key={i} style={{background:"#FFFBEB",borderRadius:10,padding:"10px 12px",marginBottom:6,
-              border:`1px solid ${T.border}`,borderLeft:`3px solid ${T.amber}`,display:"flex",gap:10,alignItems:"center"}}>
+          {(formEst.ofertas||[]).map(function(o,i){
+            return <div key={i} style={{background:"#FFFBEB",borderRadius:10,padding:"10px 12px",marginBottom:6,
+              border:"1px solid "+T.border,borderLeft:"3px solid "+T.amber,display:"flex",gap:10,alignItems:"center"}}>
               <div style={{flex:1,minWidth:0}}>
                 {o.codigo&&<p style={{margin:0,fontSize:10,fontFamily:"monospace",color:T.amber,fontWeight:700}}>{o.codigo}</p>}
                 <p style={{margin:0,fontSize:13,fontWeight:700}}>{o.nombre}</p>
@@ -5220,183 +5268,98 @@ function MisEstrategias({usuario}){
                   {o.precioFinal&&<span style={{fontSize:12,fontWeight:800,color:T.green}}>{o.precioFinal}€/kg</span>}
                 </div>
               </div>
-              <button onClick={()=>setFormEst(f=>({...f,ofertas:(f.ofertas||[]).filter((_,j)=>j!==i)}))}
+              <button onClick={function(){setFormEst(function(f){return Object.assign({},f,{ofertas:(f.ofertas||[]).filter(function(_,j){return j!==i;})});});}}
                 style={{background:"none",border:"none",cursor:"pointer",color:T.red,fontSize:18}}>🗑</button>
-            </div>
-          ))}
+            </div>;
+          })}
 
-          {(()=>{
-            const of=formEst.ofActual||{nombre:"",codigo:"",precioBase:"",dto:""};
-            const base=parseFloat((of.precioBase||"").replace(",","."));
-            const dto=parseFloat(of.dto||"0");
-            const pFinal=(!isNaN(base)&&base>0)?(base*(1-dto/100)).toFixed(2):"";
+          {(function(){
+            var of=formEst.ofActual||{nombre:"",codigo:"",precioBase:"",dto:""};
+            var base=parseFloat((of.precioBase||"").replace(",","."));
+            var dto=parseFloat(of.dto||"0");
+            var pFinal=(!isNaN(base)&&base>0)?(base*(1-dto/100)).toFixed(2):"";
             return(
-            <div style={{background:T.bg,borderRadius:10,padding:12,border:`1.5px dashed ${T.amber}66`,marginBottom:14}}>
-              <SearchInput value={of.nombre}
-                onChange={v=>setFormEst(f=>({...f,ofActual:{...(f.ofActual||{}),nombre:v,codigo:"",precioBase:""}}))}
-                placeholder="🔍 Buscar producto..."
-                suggestions={PRODUCTOS_LOCAL
-                  .filter(p=>of.nombre.length>=2&&((p.nombre||"").toLowerCase().includes(of.nombre.toLowerCase())||(p.codigo||"").toLowerCase().includes(of.nombre.toLowerCase())))
-                  .slice(0,8).map(p=>({label:p.nombre,sub:p.codigo+" · "+p.precio+"€/kg",tipo:"producto",obj:p}))}
-                onSelect={s=>setFormEst(f=>({...f,ofActual:{...(f.ofActual||{}),nombre:s.label,codigo:s.obj.codigo,precioBase:s.obj.precio}}))}
-                style={{marginBottom:8}}/>
-              {of.codigo&&<p style={{margin:"0 0 6px",fontSize:10,color:T.amber,fontWeight:700,fontFamily:"monospace"}}>{of.codigo}</p>}
-              <div style={{display:"flex",gap:8,marginBottom:8}}>
-                <div style={{flex:1}}>
-                  <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Precio tarifa €/kg</p>
-                  <input value={of.precioBase||""} onChange={e=>setFormEst(f=>({...f,ofActual:{...(f.ofActual||{}),precioBase:e.target.value}}))}
-                    placeholder="0,00" style={{width:"100%",border:`1.5px solid ${T.border}`,borderRadius:8,padding:"8px 10px",fontSize:13,outline:"none",boxSizing:"border-box"}}/>
+              <div style={{background:T.bg,borderRadius:10,padding:12,border:"1.5px dashed "+T.amber+"66",marginBottom:14}}>
+                <SearchInput value={of.nombre}
+                  onChange={function(v){setFormEst(function(f){return Object.assign({},f,{ofActual:Object.assign({},f.ofActual||{},{nombre:v,codigo:"",precioBase:""})});});}}
+                  placeholder="🔍 Buscar producto..."
+                  suggestions={PRODUCTOS_LOCAL
+                    .filter(function(p){return of.nombre.length>=2&&((p.nombre||"").toLowerCase().indexOf(of.nombre.toLowerCase())>=0||(p.codigo||"").toLowerCase().indexOf(of.nombre.toLowerCase())>=0);})
+                    .slice(0,8).map(function(p){return {label:p.nombre,sub:p.codigo+" · "+p.precio+"€/kg",tipo:"producto",obj:p};})}
+                  onSelect={function(s){setFormEst(function(f){return Object.assign({},f,{ofActual:Object.assign({},f.ofActual||{},{nombre:s.label,codigo:s.obj.codigo,precioBase:s.obj.precio})});});}}
+                  style={{marginBottom:8}}/>
+                {of.codigo&&<p style={{margin:"0 0 6px",fontSize:10,color:T.amber,fontWeight:700,fontFamily:"monospace"}}>{of.codigo}</p>}
+                <div style={{display:"flex",gap:8,marginBottom:8}}>
+                  <div style={{flex:1}}>
+                    <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Precio tarifa €/kg</p>
+                    <input value={of.precioBase||""} onChange={function(ev){setFormEst(function(f){return Object.assign({},f,{ofActual:Object.assign({},f.ofActual||{},{precioBase:ev.target.value})});});}}
+                      placeholder="0,00" style={{width:"100%",border:"1.5px solid "+T.border,borderRadius:8,padding:"8px 10px",fontSize:13,outline:"none",boxSizing:"border-box"}}/>
+                  </div>
+                  <div style={{flex:1}}>
+                    <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Dto. %</p>
+                    <input type="number" value={of.dto||""} onChange={function(ev){setFormEst(function(f){return Object.assign({},f,{ofActual:Object.assign({},f.ofActual||{},{dto:ev.target.value})});});}}
+                      placeholder="0" style={{width:"100%",border:"1.5px solid "+T.border,borderRadius:8,padding:"8px 10px",fontSize:13,outline:"none",boxSizing:"border-box"}}/>
+                  </div>
                 </div>
-                <div style={{flex:1}}>
-                  <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Dto. %</p>
-                  <input type="number" value={of.dto||""} onChange={e=>setFormEst(f=>({...f,ofActual:{...(f.ofActual||{}),dto:e.target.value}}))}
-                    placeholder="0" style={{width:"100%",border:`1.5px solid ${T.border}`,borderRadius:8,padding:"8px 10px",fontSize:13,outline:"none",boxSizing:"border-box"}}/>
-                </div>
-              </div>
-              {pFinal&&<div style={{background:T.greenL,borderRadius:8,padding:"8px 12px",marginBottom:8}}>
-                <p style={{margin:0,fontSize:13,fontWeight:800,color:T.green}}>Precio oferta: {pFinal}€/kg</p>
-              </div>}
-              <button onClick={()=>{
-                if(!of.nombre.trim()) return;
-                setFormEst(f=>({...f,
-                  ofertas:[...(f.ofertas||[]),{...of,precioFinal:pFinal,id:"of"+Date.now()}],
-                  ofActual:{nombre:"",codigo:"",precioBase:"",dto:""}}));
-              }}
-                style={{width:"100%",padding:"9px",borderRadius:8,border:"none",
-                  background:of.nombre.trim()?T.amber:"#CBD5E1",color:"#fff",fontWeight:700,fontSize:12,cursor:"pointer"}}>
-                + Añadir producto con oferta
-              </button>
-            </div>);
-          })()}
-
-          {/* Indicador de nivel de aprobación por descuento */}
-          {(()=>{
-            const maxDto=(formEst.ofertas||[]).reduce((m,o)=>Math.max(m,parseFloat(o.dto)||0),0);
-            if(maxDto<=0) return null;
-            const nivel=maxDto>15?"CEO":maxDto>10?"Jefe de Ventas":"Responsable";
-            const color=maxDto>15?T.red:maxDto>10?T.amber:T.green;
-            return(
-              <div style={{background:color+"12",borderRadius:10,padding:"10px 14px",marginBottom:14,
-                border:`1.5px solid ${color}`,display:"flex",alignItems:"center",gap:8}}>
-                <span style={{fontSize:18}}>{maxDto>15?"🔴":maxDto>10?"🟡":"🟢"}</span>
-                <div>
-                  <p style={{margin:0,fontSize:12,fontWeight:700,color}}>Dto. máx: {maxDto}% → Aprobación: {nivel}</p>
-                  <p style={{margin:"2px 0 0",fontSize:10,color:T.muted}}>
-                    {maxDto>15?"CEO → Jefe Ventas → Responsable → Comercial"
-                      :maxDto>10?"Jefe Ventas → Responsable → Comercial"
-                      :"Responsable → Comercial"}
-                  </p>
-                </div>
+                {pFinal&&<div style={{background:T.greenL,borderRadius:8,padding:"8px 12px",marginBottom:8}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:800,color:T.green}}>Precio oferta: {pFinal}€/kg</p>
+                </div>}
+                <button onClick={function(){
+                  if(!of.nombre.trim()) return;
+                  setFormEst(function(f){return Object.assign({},f,{
+                    ofertas:(f.ofertas||[]).concat([Object.assign({},of,{precioFinal:pFinal,id:"of"+Date.now()})]),
+                    ofActual:{nombre:"",codigo:"",precioBase:"",dto:""}
+                  });});
+                }}
+                  style={{width:"100%",padding:"9px",borderRadius:8,border:"none",
+                    background:of.nombre.trim()?T.amber:"#CBD5E1",color:"#fff",fontWeight:700,fontSize:12,cursor:"pointer"}}>
+                  + Añadir producto con oferta
+                </button>
               </div>
             );
           })()}
 
-          {/* Selector de agente (para jefe/director) */}
-          {(esJefe||esRolDir||esRolCeo)&&(
+          {/* Indicador de aprobación */}
+          {(function(){
+            var maxDto=(formEst.ofertas||[]).reduce(function(m,o){return Math.max(m,parseFloat(o.dto)||0);},0);
+            if(maxDto<=0&&!esAgente) return null;
+            var nivel, color;
+            if(esCEO||esDir){
+              nivel="Va directo al comercial"; color=T.green;
+            } else if(esJefe){
+              if(maxDto>10){nivel="Se enviará al CEO para aprobar"; color=T.red;}
+              else {nivel="Va directo al comercial"; color=T.green;}
+            } else {
+              nivel="Se enviará al Responsable de tu equipo"; color=T.amber;
+            }
+            return <div style={{background:color+"12",borderRadius:10,padding:"10px 14px",marginBottom:12,
+              border:"1.5px solid "+color,display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontSize:18}}>{color===T.red?"🔴":color===T.amber?"🟡":"🟢"}</span>
+              <p style={{margin:0,fontSize:12,fontWeight:700,color:color}}>
+                {maxDto>0?"Dto. máx: "+maxDto+"% — ":""}{nivel}
+              </p>
+            </div>;
+          })()}
+
+          {/* Selector de agente para directivos */}
+          {(esJefe||esDir||esCEO)&&(
             <div style={{marginBottom:12}}>
               <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Asignar a comercial</p>
-              <select value={formEst.agenteAsignado||""} onChange={e=>setFormEst(f=>({...f,agenteAsignado:e.target.value}))}
-                style={{width:"100%",padding:"10px 12px",borderRadius:9,border:`1.5px solid ${T.border}`,fontSize:13,outline:"none",background:"#fff"}}>
+              <select value={formEst.agenteAsignado||""} onChange={function(ev){setFormEst(function(f){return Object.assign({},f,{agenteAsignado:ev.target.value});});}}
+                style={{width:"100%",padding:"10px 12px",borderRadius:9,border:"1.5px solid "+T.border,fontSize:13,outline:"none",background:"#fff"}}>
                 <option value="">— Yo mismo —</option>
-                {USUARIOS.filter(u=>u.rol==="agente"&&(esRolDir||esRolCeo||u.equipo===miEquipo)).map(u=>(
-                  <option key={u.id} value={u.id}>{u.nombre} · {u.equipo}</option>
-                ))}
+                {USUARIOS.filter(function(u){return u.rol==="agente"&&(esCEO||esDir||u.equipo===miEquipo);}).map(function(u){
+                  return <option key={u.id} value={u.id}>{u.nombre} · {u.equipo}</option>;
+                })}
               </select>
             </div>
           )}
 
-          <button onClick={()=>{
-            if(!formEst.cliente.trim()||!formEst.texto.trim()) return;
-            const hoy=new Date().toLocaleDateString("es-ES");
-            const d=new Date();const s=new Date(d.getFullYear(),0,1);
-            const sem=Math.ceil(((d-s)/86400000+s.getDay()+1)/7);
-
-            // Calcular descuento máximo de las ofertas
-            const maxDto=(formEst.ofertas||[]).reduce((m,o)=>Math.max(m,parseFloat(o.dto)||0),0);
-
-            // Determinar quién debe aprobar según descuento
-            // ≤10% → Responsable | 11-15% → Jefe Ventas | >15% → CEO
-            const agenteDestino=formEst.agenteAsignado||usuario.id;
-            const agenteUser=USUARIOS.find(u=>u.id===agenteDestino);
-            const equipoAgente=agenteUser?.equipo||usuario.equipo||"";
-            const responsable=USUARIOS.find(u=>u.rol==="jefe"&&u.equipo===equipoAgente);
-            const jefeVentas=USUARIOS.find(u=>u.rol==="director");
-            const ceoUser=USUARIOS.find(u=>u.rol==="ceo");
-
-            let estadoInicial, pendienteDeId, pendienteDeNombre, cadenaAprobacion=[];
-
-            if(usuario.rol==="ceo"||usuario.rol==="director"){
-              // CEO/Director crea → va al Responsable para último OK antes de llegar al comercial
-              estadoInicial="pendiente_aprobacion";
-              pendienteDeId=responsable?.id||agenteDestino;
-              pendienteDeNombre=responsable?.nombre||"Responsable";
-              cadenaAprobacion=[{rol:"responsable",id:responsable?.id,nombre:responsable?.nombre,estado:"pendiente"}];
-            } else if(usuario.rol==="jefe"){
-              // Jefe crea → va al Responsable del equipo del agente para OK
-              if(responsable&&responsable.id!==usuario.id){
-                estadoInicial="pendiente_aprobacion";
-                pendienteDeId=responsable.id;
-                pendienteDeNombre=responsable.nombre;
-                cadenaAprobacion=[{rol:"responsable",id:responsable.id,nombre:responsable.nombre,estado:"pendiente"}];
-              } else {
-                // El jefe ES el responsable → va directo al comercial
-                estadoInicial="en_curso";
-                pendienteDeId=null;
-                pendienteDeNombre=null;
-              }
-            } else {
-              // Comercial crea → SIEMPRE va al Responsable primero
-              // El Responsable decidirá si aprueba (≤10%) o escala a superior
-              estadoInicial="pendiente_aprobacion";
-              pendienteDeId=responsable?.id||jefeVentas?.id;
-              pendienteDeNombre=responsable?.nombre||jefeVentas?.nombre||"Superior";
-              cadenaAprobacion=[
-                {rol:"responsable",id:responsable?.id,nombre:responsable?.nombre,estado:"pendiente",limiteDto:10},
-              ];
-              if(maxDto>10){
-                cadenaAprobacion.push({rol:"jefe_ventas",id:jefeVentas?.id,nombre:jefeVentas?.nombre,estado:"pendiente",limiteDto:15});
-              }
-              if(maxDto>15){
-                cadenaAprobacion.push({rol:"ceo",id:ceoUser?.id,nombre:ceoUser?.nombre,estado:"pendiente",limiteDto:100});
-              }
-            }
-
-            const est={id:"est_"+Date.now(),
-              cliente:formEst.cliente,clienteNombre:formEst.cliente,
-              objetivo:formEst.objetivo,estrategia:formEst.texto,texto:formEst.texto,
-              tipo:formEst.tipo||"recuperacion",ofertas:formEst.ofertas||[],
-              maxDescuento:maxDto,
-              estado:estadoInicial,
-              pendienteDe:pendienteDeId,pendienteDeNombre:pendienteDeNombre,
-              cadenaAprobacion:cadenaAprobacion,
-              agente:agenteDestino,
-              agenteNombre:USUARIOS.find(u=>u.id===agenteDestino)?.nombre||usuario.nombre,
-              equipo:equipoAgente,
-              creadoPor:usuario.id,creadoPorNombre:usuario.nombre,rolCreador:usuario.rol,
-              semana:sem,fecha:hoy,seguimientos:[],
-              historialEscalado:[{
-                accion:"Estrategia creada"+(maxDto>0?" (dto. máx: "+maxDto+"%)":""),
-                por:usuario.nombre,fecha:hoy,nota:formEst.texto
-              }],
-            };
-            setEstrategias([...estrategias,est]);
-            fbEscribir("estrategias",est.id,est);
-
-            // Notificar
-            if(estadoInicial==="pendiente_aprobacion"&&pendienteDeId){
-              // Notificar al aprobador
-              despacharNotificacion({tipo:"estrategia",
-                titulo:`🔐 Aprobación requerida: ${est.cliente} (dto. ${maxDto}%)`,
-                mensaje:`${usuario.nombre} ha creado una estrategia que requiere tu aprobación.\nCliente: ${est.cliente}\nDescuento máx: ${maxDto}%\nAcción: ${est.texto}`,
-                destinatarioId:pendienteDeId,prioridad:maxDto>15?"alta":"normal",creadoPor:usuario.id});
-              console.log(`[EST] Pendiente aprobación de ${pendienteDeNombre} (dto: ${maxDto}%)`);
-            } else if(est.agente!==usuario.id){
-              // Sin aprobación necesaria → notificar al comercial directo
-              notificarAsignacion("estrategia", est, usuario.id);
-            }
-
+          <button onClick={function(){
+            if(!formEst.cliente.trim()||!formEst.texto.trim()){alert("Cliente y acción son obligatorios");return;}
+            crearEstrategia(formEst);
             setShowNuevaEst(false);
-            setFormEst({cliente:"",objetivo:"",texto:"",tipo:"recuperacion",ofertas:[],ofActual:{nombre:"",codigo:"",precioBase:"",dto:""},agenteAsignado:""});
+            setFormEst({cliente:"",clienteId:"",objetivo:"",texto:"",tipo:"recuperacion",ofertas:[],ofActual:{nombre:"",codigo:"",precioBase:"",dto:""},agenteAsignado:""});
           }}
             disabled={!formEst.cliente.trim()||!formEst.texto.trim()}
             style={{width:"100%",padding:"13px",
@@ -5407,235 +5370,114 @@ function MisEstrategias({usuario}){
         </div>
       )}
 
-      {/* Filtro de equipo */}
-      {esJefe&&<FiltroEquipo value={filtroEquipoEst} onChange={setFiltroEquipoEst} agenteSel={agenteSelEst} onAgenteSel={setAgenteSelEst} items={estrategias.filter(e=>!e.eliminada)} getAgente={e=>e.agente}/>}
+      {/* Filtro de equipo (managers) */}
+      {esManager&&<FiltroEquipo value={filtroEquipoEst} onChange={setFiltroEquipoEst} agenteSel={agenteSelEst} onAgenteSel={setAgenteSelEst} items={visiblesParaMi} getAgente={function(e){return e.agente;}}/>}
 
-      {/* Filtros rápidos */}
-      {(()=>{
-        const tabs=[
-          ...(fEqEst(pendAprobMia).length>0?[{k:"aprobar",l:`🔐 Para aprobar`,n:fEqEst(pendAprobMia).length,c:T.amber}]:[]),
-          ...(fEqEst(enRevisionAgente).length>0?[{k:"revision",l:"⏳ En revisión",n:fEqEst(enRevisionAgente).length,c:T.amber}]:[]),
-          ...([...fEqEst(activasAgente),...fEqEst(misMostrar)].length>0?[{k:"curso",l:"🔵 En curso",n:[...fEqEst(activasAgente),...fEqEst(misMostrar)].filter((e,i,a)=>a.findIndex(x=>x.id===e.id)===i).length,c:T.blue}]:[]),
-          ...(fEqEst(misPendAprobDir).length>0?[{k:"pend_dir",l:"⏳ Pend. aprobación",n:fEqEst(misPendAprobDir).length,c:T.amber}]:[]),
-          ...(fEqEst(elevadasPorMi).length>0?[{k:"elevadas",l:"📤 Escaladas",n:fEqEst(elevadasPorMi).length,c:T.purple}]:[]),
-          ...(fEqEst(aprobadas).length>0?[{k:"aprobadas",l:"✅ Aprobadas",n:fEqEst(aprobadas).length,c:T.green}]:[]),
-          ...(fEqEst(rechazadas).length>0?[{k:"rechazadas",l:"❌ Rechazadas",n:fEqEst(rechazadas).length,c:T.red}]:[]),
-          ...(fEqEst(misResueltasDir).length>0?[{k:"resueltas_dir",l:"📋 Resueltas",n:fEqEst(misResueltasDir).length,c:T.green}]:[]),
-          {k:"todas",l:"Todas",n:fEqEst(estrategias.filter(e=>!e.eliminada)).length,c:T.navy},
-        ];
-        if(tabs.length<=1) return null;
-        return(
-          <div style={{display:"flex",gap:6,marginBottom:20,overflowX:"auto",paddingBottom:4}}>
-            {tabs.map(t=>(
-              <button key={t.k} onClick={()=>setFiltroSec(f=>f===t.k?"todas":t.k)}
-                style={{display:"flex",gap:5,alignItems:"center",padding:"8px 13px",
-                  borderRadius:99,flexShrink:0,cursor:"pointer",
-                  border:`1.5px solid ${filtroSec===t.k?t.c:T.border}`,
-                  background:filtroSec===t.k?t.c+"18":"#fff",
-                  color:filtroSec===t.k?t.c:T.muted,
-                  fontWeight:filtroSec===t.k?700:400,fontSize:12}}>
-                {t.l}
-                {t.n!==null&&<span style={{background:filtroSec===t.k?t.c:"#E2E8F0",color:filtroSec===t.k?"#fff":T.muted,
-                  borderRadius:99,fontSize:10,fontWeight:800,padding:"1px 7px"}}>{t.n}</span>}
-              </button>
-            ))}
-          </div>
-        );
-      })()}
-
-      {/* 1. PARA APROBAR — lo más urgente */}
-      {(filtroSec==="todas"||filtroSec==="aprobar")&&fEqEst(pendAprobMia).length>0&&(
+      {/* SECCIÓN 1: Para aprobar (urgente) */}
+      {paraAprobar.length>0&&(
         <div style={{marginBottom:24}}>
-          <p style={{margin:"0 0 10px",fontSize:13,fontWeight:800,color:T.amber}}>
-            🔔 Para aprobar ({pendAprobMia.length})
-          </p>
-          {fEqEst(pendAprobMia).map(e=>(
-            <EstrategiaAprobacionCard key={e.id} e={e} usuario={usuario}
-              onConfirmar={confirmarEstrategia}
-              onRechazar={rechazar}
-              onEscalar={escalarEstrategia}/>
-          ))}
+          <p style={{margin:"0 0 10px",fontSize:13,fontWeight:800,color:T.amber}}>🔐 PARA APROBAR ({paraAprobar.length})</p>
+          {paraAprobar.map(function(e){return renderItem(e,T.amber,"🔐 Aprobar");})}
         </div>
       )}
 
-      {/* 2. AGENTE: en revisión */}
-      {(filtroSec==="todas"||filtroSec==="revision")&&Bloque({
-        titulo:"⏳ En revisión",colorTitulo:T.amber,
-        items:fEqEst(enRevisionAgente),
-        renderItem:e=>(
-          <CardEst key={e.id} e={e} onClick={()=>setSel(e)}>
-            <Badge label={`⏳ Pendiente de ${e.pendienteDeNombre||USUARIOS.find(u=>u.id===e.pendienteDe)?.nombre||"Responsable"}`} color={T.amber}/>
-            <span style={{fontSize:10,color:T.muted,marginLeft:"auto"}}>S{e.semana}</span>
-          </CardEst>
-        )
-      })}
+      {/* SECCIÓN 2: Para cerrar (creador) */}
+      {paraCerrar.length>0&&(
+        <div style={{marginBottom:24}}>
+          <p style={{margin:"0 0 10px",fontSize:13,fontWeight:800,color:T.purple}}>📋 PARA CERRAR ({paraCerrar.length})</p>
+          {paraCerrar.map(function(e){return renderItem(e,T.purple,"📋 Cerrar — "+(e.resultado||"resp."));})}
+        </div>
+      )}
 
-      {/* 3. APROBADAS — con precios definitivos */}
-      {(filtroSec==="todas"||filtroSec==="aprobadas")&&Bloque({
-        titulo:"✅ Aprobadas",colorTitulo:T.green,
-        items:fEqEst(aprobadas),
-        renderItem:e=>{
-          const res=e.resolucion;
-          const aP=(e.ofertas||[]).filter(o=>o.aprobada===true).length;
-          const rP=(e.ofertas||[]).filter(o=>o.aprobada===false).length;
-          return(
-            <div key={e.id} onClick={()=>setSel(e)}
-              style={{background:"#fff",borderRadius:14,padding:"14px 16px",marginBottom:8,
-                cursor:"pointer",border:`2px solid ${T.green}44`,borderLeft:`4px solid ${T.green}`}}>
-              <div style={{display:"flex",gap:8,marginBottom:6,flexWrap:"wrap",alignItems:"center"}}>
-                <Badge label={res?.tipo==="aprobada_parcial"?"⚡ Aprobada parcialmente":"✅ Aprobada"} color={T.green}/>
-                <span style={{fontSize:11,color:T.muted}}>por {res?.por} · {res?.fecha}</span>
-              </div>
-              <p style={{margin:"0 0 4px",fontSize:14,fontWeight:800}}>{e.cliente||e.clienteNombre}</p>
-              <p style={{margin:"0 0 6px",fontSize:12,color:T.muted}}>{e.texto||e.estrategia}</p>
-              {(e.ofertas||[]).length>0&&(
-                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                  {aP>0&&<span style={{fontSize:10,color:T.green,fontWeight:700,background:T.greenL,borderRadius:99,padding:"2px 8px"}}>✅ {aP} producto{aP>1?"s":""} aprobado{aP>1?"s":""}</span>}
-                  {rP>0&&<span style={{fontSize:10,color:T.red,fontWeight:700,background:T.redL,borderRadius:99,padding:"2px 8px"}}>❌ {rP} rechazado{rP>1?"s":""}</span>}
-                </div>
-              )}
-              <p style={{margin:"6px 0 0",fontSize:11,color:T.green,fontWeight:600}}>Ver precios aprobados →</p>
-            </div>
-          );
-        }
-      })}
+      {/* SECCIÓN 3: En curso */}
+      {enCurso.length>0&&(
+        <div style={{marginBottom:24}}>
+          <p style={{margin:"0 0 10px",fontSize:13,fontWeight:800,color:T.blue}}>🔵 EN CURSO ({enCurso.length})</p>
+          {enCurso.map(function(e){return renderItem(e,T.blue,"🔵 En curso");})}
+        </div>
+      )}
 
-      {/* 4. RECHAZADAS */}
-      {(filtroSec==="todas"||filtroSec==="rechazadas")&&Bloque({
-        titulo:"❌ Rechazadas",colorTitulo:T.red,
-        items:fEqEst(rechazadas),
-        renderItem:e=>{
-          const res=e.resolucion;
-          return(
-            <div key={e.id} onClick={()=>setSel(e)}
-              style={{background:"#fff",borderRadius:14,padding:"14px 16px",marginBottom:8,
-                cursor:"pointer",border:`1px solid ${T.border}`,borderLeft:`4px solid ${T.red}`,opacity:.8}}>
-              <div style={{display:"flex",gap:8,marginBottom:6,alignItems:"center"}}>
-                <Badge label="❌ Rechazada" color={T.red}/>
-                <span style={{fontSize:11,color:T.muted}}>por {res?.por} · {res?.fecha}</span>
-              </div>
-              <p style={{margin:"0 0 2px",fontSize:14,fontWeight:800}}>{e.cliente||e.clienteNombre}</p>
-              {res?.nota&&<p style={{margin:0,fontSize:12,color:T.muted}}>Motivo: {res.nota}</p>}
-            </div>
-          );
-        }
-      })}
+      {/* SECCIÓN 4: En revisión (ya enviada, esperando) */}
+      {enRevision.length>0&&(
+        <div style={{marginBottom:24}}>
+          <p style={{margin:"0 0 10px",fontSize:13,fontWeight:800,color:T.muted}}>⏳ EN REVISIÓN ({enRevision.length})</p>
+          {enRevision.map(function(e){return renderItem(e,T.amber,"⏳ "+(e.pendienteDeNombre||"pendiente"));})}
+        </div>
+      )}
 
-      {/* 4. ELEVADAS — esperando respuesta del superior */}
-      {(filtroSec==="todas"||filtroSec==="elevadas")&&Bloque({
-        titulo:"📤 Elevadas — esperando respuesta",colorTitulo:T.purple,
-        items:fEqEst(elevadasPorMi),
-        renderItem:e=>(
-          <CardEst key={e.id} e={e} onClick={()=>setSel(e)}>
-            <Badge label={`📤 Escalada a ${e.pendienteDeNombre||USUARIOS.find(u=>u.id===e.pendienteDe)?.nombre||"Superior"}`} color={T.purple}/>
-          </CardEst>
-        )
-      })}
+      {/* SECCIÓN 5: Pendiente cierre por otro */}
+      {pendCierre.length>0&&(
+        <div style={{marginBottom:24}}>
+          <p style={{margin:"0 0 10px",fontSize:13,fontWeight:800,color:T.muted}}>📋 PENDIENTE DE CIERRE ({pendCierre.length})</p>
+          {pendCierre.map(function(e){return renderItem(e,T.purple,"Resp.: "+(e.resultado||""));})}
+        </div>
+      )}
 
-      {/* 5. EN CURSO / ACTIVAS */}
-      {(filtroSec==="todas"||filtroSec==="curso")&&Bloque({
-        titulo:"🔵 En curso",colorTitulo:T.blue,
-        items:[...fEqEst(activasAgente),...fEqEst(misMostrar)].filter((e,i,a)=>a.findIndex(x=>x.id===e.id)===i),
-        renderItem:e=>(
-          <CardEst key={e.id} e={e} onClick={()=>setSel(e)}>
-            <Badge label="🔵 En curso" color={T.blue}/>
-            <span style={{fontSize:10,color:T.muted}}>S{e.semana}</span>
-          </CardEst>
-        )
-      })}
-
-      {/* 6. PENDIENTES APROBACIÓN (director) */}
-      {(filtroSec==="todas"||filtroSec==="pend_dir")&&fEqEst(misPendAprobDir).length>0&&Bloque({
-        titulo:"⏳ Pendientes de aprobación",colorTitulo:T.amber,
-        items:fEqEst(misPendAprobDir),
-        renderItem:e=>(
-          <CardEst key={e.id} e={e} onClick={()=>setSel(e)}>
-            <Badge label="⏳ Pendiente" color={T.amber}/>
-            {e.agenteNombre&&<span style={{fontSize:10,color:T.muted}}>👤 {e.agenteNombre}</span>}
-          </CardEst>
-        )
-      })}
-
-      {/* 7. RESUELTAS (director) */}
-      {(filtroSec==="todas"||filtroSec==="resueltas_dir")&&fEqEst(misResueltasDir).length>0&&Bloque({
-        titulo:"📋 Resueltas",colorTitulo:T.green,
-        items:fEqEst(misResueltasDir),
-        renderItem:e=>(
-          <CardEst key={e.id} e={e} onClick={()=>setSel(e)}>
-            <Badge label={(e.resolucion||{}).tipo==="aprobada"?"✅ Aprobada":(e.resolucion||{}).tipo==="rechazada"?"❌ Rechazada":"📋 Resuelta"} 
-              color={(e.resolucion||{}).tipo==="aprobada"?T.green:(e.resolucion||{}).tipo==="rechazada"?T.red:T.muted}/>
-          </CardEst>
-        )
-      })}
+      {/* SECCIÓN 6: Cerradas (collapsible — completadas + sin éxito) */}
+      {cerradas.length>0&&(
+        <div style={{marginBottom:24}}>
+          <button onClick={function(){setVerCerradas(function(v){return !v;});}}
+            style={{width:"100%",display:"flex",justifyContent:"space-between",alignItems:"center",
+              padding:"10px 14px",background:"#F8FAFC",border:"1px solid "+T.border,borderRadius:10,
+              cursor:"pointer",fontSize:13,fontWeight:700,color:T.muted,marginBottom:verCerradas?12:0}}>
+            <span>📁 CERRADAS ({cerradas.length}) — completadas + sin éxito</span>
+            <span>{verCerradas?"▾":"▸"}</span>
+          </button>
+          {verCerradas&&cerradas.map(function(e){
+            var col=e.estado==="completada"?T.green:T.red;
+            var lab=e.estado==="completada"?"✅ Completada":e.estado==="rechazada"?"❌ Rechazada":"❌ Sin éxito";
+            return renderItem(e,col,lab);
+          })}
+        </div>
+      )}
 
       {/* Estado vacío */}
-      {pendAprobMia.length===0&&enRevisionAgente.length===0&&aprobadas.length===0&&rechazadas.length===0&&elevadasPorMi.length===0&&activasAgente.length===0&&misMostrar.length===0&&misPendAprobDir.length===0&&misResueltasDir.length===0&&(
+      {visibles.length===0&&(
         <div style={{textAlign:"center",padding:"48px 16px",color:T.muted}}>
           <p style={{fontSize:36,margin:"0 0 8px"}}>🎯</p>
-          <p style={{margin:0,fontSize:14,fontWeight:600}}>Sin estrategias activas</p>
+          <p style={{margin:0,fontSize:14,fontWeight:600}}>Sin estrategias</p>
+          <p style={{margin:"4px 0 0",fontSize:12}}>Usa el botón "+ Nueva" para crear una.</p>
         </div>
       )}
 
-      {/* Modal editar estrategia */}
+      {/* Modal editar */}
       {editEst&&(
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
-          <div style={{background:"#fff",borderRadius:16,width:"min(500px,100%)",padding:"24px",boxShadow:"0 16px 48px rgba(0,0,0,.25)"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <div style={{background:"#fff",borderRadius:16,width:"min(500px,100%)",padding:"22px",boxShadow:"0 16px 48px rgba(0,0,0,.25)"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
               <p style={{margin:0,fontSize:16,fontWeight:800}}>✏️ Editar estrategia</p>
-              <button onClick={()=>setEditEst(null)} style={{background:"none",border:"none",fontSize:18,cursor:"pointer",color:T.muted}}>✕</button>
+              <button onClick={function(){setEditEst(null);}} style={{background:"none",border:"none",fontSize:18,cursor:"pointer",color:T.muted}}>✕</button>
             </div>
             <div style={{marginBottom:12}}>
               <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Cliente</p>
-              <input value={editEst.cliente||editEst.clienteNombre||""} onChange={e=>setEditEst(p=>({...p,cliente:e.target.value,clienteNombre:e.target.value}))}
-                style={{width:"100%",padding:"10px 12px",borderRadius:9,border:`1.5px solid ${T.border}`,fontSize:13,outline:"none",boxSizing:"border-box"}}/>
+              <input value={editEst.cliente||editEst.clienteNombre||""} onChange={function(ev){var v=ev.target.value;setEditEst(function(p){return Object.assign({},p,{cliente:v,clienteNombre:v});});}}
+                style={{width:"100%",padding:"10px 12px",borderRadius:9,border:"1.5px solid "+T.border,fontSize:13,outline:"none",boxSizing:"border-box"}}/>
             </div>
             <div style={{marginBottom:12}}>
               <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Objetivo</p>
-              <input value={editEst.objetivo||""} onChange={e=>setEditEst(p=>({...p,objetivo:e.target.value}))}
-                style={{width:"100%",padding:"10px 12px",borderRadius:9,border:`1.5px solid ${T.border}`,fontSize:13,outline:"none",boxSizing:"border-box"}}/>
+              <input value={editEst.objetivo||""} onChange={function(ev){var v=ev.target.value;setEditEst(function(p){return Object.assign({},p,{objetivo:v});});}}
+                style={{width:"100%",padding:"10px 12px",borderRadius:9,border:"1.5px solid "+T.border,fontSize:13,outline:"none",boxSizing:"border-box"}}/>
             </div>
-            <div style={{marginBottom:12}}>
-              <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Descripción</p>
-              <textarea value={editEst.texto||editEst.estrategia||""} onChange={e=>setEditEst(p=>({...p,texto:e.target.value,estrategia:e.target.value}))} rows={4}
-                style={{width:"100%",padding:"10px 12px",borderRadius:9,border:`1.5px solid ${T.border}`,fontSize:13,outline:"none",boxSizing:"border-box",resize:"vertical",fontFamily:"inherit"}}/>
+            <div style={{marginBottom:14}}>
+              <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Acción</p>
+              <textarea value={editEst.texto||editEst.estrategia||""} onChange={function(ev){var v=ev.target.value;setEditEst(function(p){return Object.assign({},p,{texto:v,estrategia:v});});}} rows={4}
+                style={{width:"100%",padding:"10px 12px",borderRadius:9,border:"1.5px solid "+T.border,fontSize:13,outline:"none",boxSizing:"border-box",resize:"vertical",fontFamily:"inherit"}}/>
             </div>
-            {(editEst.ofertas||[]).length>0&&(
-              <div style={{marginBottom:12}}>
-                <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Productos / Precios</p>
-                {editEst.ofertas.map((o,i)=>(
-                  <div key={i} style={{display:"flex",gap:8,alignItems:"center",marginBottom:6}}>
-                    <input value={o.nombre||""} onChange={e=>{
-                      const newOfertas=[...editEst.ofertas];newOfertas[i]={...o,nombre:e.target.value};
-                      setEditEst(p=>({...p,ofertas:newOfertas}));
-                    }} placeholder="Producto"
-                      style={{flex:2,padding:"8px 10px",borderRadius:8,border:`1px solid ${T.border}`,fontSize:12,outline:"none"}}/>
-                    <input type="number" value={o.precioFinal||o.precio||""} onChange={e=>{
-                      const newOfertas=[...editEst.ofertas];newOfertas[i]={...o,precioFinal:e.target.value};
-                      setEditEst(p=>({...p,ofertas:newOfertas}));
-                    }} placeholder="€/kg"
-                      style={{flex:1,padding:"8px 10px",borderRadius:8,border:`1px solid ${T.border}`,fontSize:12,outline:"none"}}/>
-                    <input type="number" value={o.dto||""} onChange={e=>{
-                      const newOfertas=[...editEst.ofertas];newOfertas[i]={...o,dto:e.target.value};
-                      setEditEst(p=>({...p,ofertas:newOfertas}));
-                    }} placeholder="Dto %"
-                      style={{width:60,padding:"8px 10px",borderRadius:8,border:`1px solid ${T.border}`,fontSize:12,outline:"none"}}/>
-                  </div>
-                ))}
-              </div>
-            )}
             <div style={{display:"flex",gap:8}}>
-              <button onClick={()=>setEditEst(null)}
-                style={{flex:1,padding:"12px",borderRadius:10,border:`1px solid ${T.border}`,background:"#fff",fontSize:13,cursor:"pointer",color:T.muted}}>Cancelar</button>
-              <button onClick={()=>{
-                const updated={...editEst,
-                  historialEscalado:[...(editEst.historialEscalado||[]),{accion:"✏️ Editada",por:usuario.nombre,fecha:new Date().toLocaleDateString("es-ES"),nota:editEst.texto||editEst.estrategia}]};
-                setEstrategias(prev=>prev.map(e=>e.id===updated.id?updated:e));
-                setSel(updated);
+              <button onClick={function(){setEditEst(null);}}
+                style={{flex:1,padding:"11px",borderRadius:10,border:"1px solid "+T.border,background:"#fff",fontSize:13,cursor:"pointer",color:T.muted}}>Cancelar</button>
+              <button onClick={function(){
+                var hoy=new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
+                var updated=Object.assign({},editEst,{
+                  seguimientos:(editEst.seguimientos||[]).concat([{accion:"✏️ Editada",por:usuario.nombre||"",porId:miId,fecha:hoy,nota:editEst.texto||editEst.estrategia||""}])
+                });
+                setEstrategias(function(prev){return prev.map(function(e){return e.id===updated.id?updated:e;});});
+                if(sel&&sel.id===updated.id) setSel(updated);
                 fbEscribir("estrategias",updated.id,updated);
                 setEditEst(null);
               }}
-                style={{flex:2,padding:"12px",borderRadius:10,border:"none",background:T.navy,color:"#fff",fontSize:14,fontWeight:700,cursor:"pointer"}}>
-                Guardar cambios
+                style={{flex:2,padding:"11px",borderRadius:10,border:"none",background:T.navy,color:"#fff",fontSize:14,fontWeight:700,cursor:"pointer"}}>
+                Guardar
               </button>
             </div>
           </div>
@@ -11207,67 +11049,115 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
                 fbEscribir("estrategias",updated.id,updated);
                 onActividad(clienteSel.id,{...act,estrategia:updated});
                 if(onNewEstrategia) onNewEstrategia(updated);
+                // Notificar al destinatario del nuevo estado
+                try{
+                  if(updated.pendienteDe&&updated.pendienteDe!==usuario.id){
+                    var ultimoSeg=(updated.seguimientos||[])[updated.seguimientos.length-1]||{};
+                    var titulo, mensaje;
+                    if(updated.estado==="pendiente_cierre"){
+                      titulo="📋 Estrategia para cerrar: "+(updated.cliente||updated.clienteNombre||"");
+                      mensaje=(usuario.nombre||"")+" ha respondido la estrategia.\nResultado: "+(ultimoSeg.accion||"")+"\nNota: "+(ultimoSeg.nota||"");
+                    } else if(updated.estado==="pendiente_aprobacion"){
+                      titulo="🔐 Aprobación: más descuento — "+(updated.cliente||updated.clienteNombre||"");
+                      mensaje=(usuario.nombre||"")+" pide más descuento en la estrategia.\nNota: "+(ultimoSeg.nota||"");
+                    }
+                    if(titulo){
+                      despacharNotificacion({tipo:"estrategia",titulo:titulo,mensaje:mensaje,destinatarioId:updated.pendienteDe,prioridad:"normal",creadoPor:usuario.id});
+                    }
+                  }
+                }catch(err){console.log("[EST] Notif error",err);}
               }}
-              onGuardar={(e)=>{
-                var cliAgente=clienteSel.GRUPOAGENTE||clienteSel.grupoAgente||clienteSel.agente||"";
+              onGuardar={function(e){
+                // Cadena simplificada: CEO/Dir → en_curso, Jefe → CEO si dto>10%, Comercial → su jefe
                 var rolU=(usuario.rol||"").toLowerCase();
-                var esDir=rolU.indexOf("director")>=0||rolU.indexOf("ceo")>=0||rolU==="admin";
-                var esJefe=rolU.indexOf("jefe")>=0||rolU.indexOf("responsable")>=0;
-                var esAg=rolU.indexOf("agente")>=0||rolU.indexOf("comercial")>=0;
-                var agenteAsignado=cliAgente||usuario.id;
-                var semActual=getSemanaISO();
-                var maxDto=Math.max.apply(null,(e.ofertas||[]).map(function(o){return parseFloat(o.dto)||0;}).concat([0]));
-                var estadoInicial="en_curso";
-                var pendienteDeId=null;
-                var pendienteDeNombre=null;
+                var esCEOU=rolU.indexOf("ceo")>=0;
+                var esDirU=rolU.indexOf("director")>=0;
+                var esJefeU=rolU.indexOf("jefe")>=0||rolU.indexOf("responsable")>=0;
+                var esAgU=rolU.indexOf("agente")>=0||rolU.indexOf("comercial")>=0;
 
-                if(esAg){
-                  // Comercial → siempre va al jefe
-                  estadoInicial="pendiente_aprobacion";
-                  var jefe=USUARIOS.find(function(u){return u.rol==="jefe"&&u.equipo===usuario.equipo;});
-                  pendienteDeId=jefe?jefe.id:null;
-                  pendienteDeNombre=jefe?jefe.nombre:"Superior";
-                } else if(esJefe){
-                  // Jefe → si dto > su límite (10%), escala a CEO
+                var cliAgenteRaw=clienteSel.GRUPOAGENTE||clienteSel.grupoAgente||clienteSel.agente||"";
+                // Resolver al ID interno si es grupoAgente (ej: "DAVIDMAG" → "wk1")
+                var agenteResuelto=cliAgenteRaw;
+                if(cliAgenteRaw){
+                  var u2=USUARIOS.find(function(u){return u.id===cliAgenteRaw||(u.grupoAgente&&u.grupoAgente.toUpperCase()===cliAgenteRaw.toUpperCase());});
+                  if(u2) agenteResuelto=u2.id;
+                }
+                var agenteAsignado=agenteResuelto||usuario.id;
+                var agenteUser=USUARIOS.find(function(u){return u.id===agenteAsignado;})||{};
+                var equipoAg=agenteUser.equipo||usuario.equipo||"";
+
+                var maxDto=Math.max.apply(null,(e.ofertas||[]).map(function(o){return parseFloat(o.dto)||0;}).concat([0]));
+                var ceoUser=USUARIOS.find(function(u){return u.rol==="ceo";});
+                var respEquipo=USUARIOS.find(function(u){return u.rol==="jefe"&&u.equipo===equipoAg;});
+
+                var estadoInicial, pendienteDeId=null, pendienteDeNombre=null;
+                if(esCEOU||esDirU){
+                  estadoInicial="en_curso";
+                } else if(esJefeU){
                   if(maxDto>10){
                     estadoInicial="pendiente_aprobacion";
-                    var ceo=USUARIOS.find(function(u){return u.rol==="director"||u.rol==="ceo";});
-                    pendienteDeId=ceo?ceo.id:null;
-                    pendienteDeNombre=ceo?ceo.nombre:"Director";
+                    pendienteDeId=ceoUser?ceoUser.id:null;
+                    pendienteDeNombre=ceoUser?ceoUser.nombre:"CEO";
                   } else {
                     estadoInicial="en_curso";
                   }
+                } else {
+                  // Comercial
+                  estadoInicial="pendiente_aprobacion";
+                  pendienteDeId=respEquipo?respEquipo.id:(ceoUser?ceoUser.id:null);
+                  pendienteDeNombre=respEquipo?respEquipo.nombre:(ceoUser?ceoUser.nombre:"Superior");
                 }
-                // CEO/Director → siempre en_curso directo
 
-                const estDoc={...e,
+                var hoy=new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
+                var fechaISO=new Date().toISOString();
+                var sem=getSemanaISO();
+                var nombreCli=(clienteSel.nombre||clienteSel.NOMBRE||"").trim();
+
+                var estDoc=Object.assign({},e,{
                   id:"est_"+Date.now(),
-                  clienteId:clienteSel.id,
-                  cliente:clienteSel.nombre||clienteSel.NOMBRE||"",
-                  clienteNombre:clienteSel.nombre||clienteSel.NOMBRE||"",
-                  agente:agenteAsignado,
-                  agenteNombre:(USUARIOS.find(function(u){return u.id===agenteAsignado;})||{}).nombre||agenteAsignado,
-                  equipo:usuario.equipo||"",
-                  creadoPor:usuario.id,
-                  creadoPorNombre:usuario.nombre,
-                  rolCreador:usuario.rol,
+                  clienteId:clienteSel.id||"",
+                  cliente:nombreCli,
+                  clienteNombre:nombreCli,
+                  agente:agenteAsignado||"",
+                  agenteNombre:agenteUser.nombre||"",
+                  equipo:equipoAg,
+                  creadoPor:usuario.id||"",
+                  creadoPorNombre:usuario.nombre||"",
+                  rolCreador:usuario.rol||"",
                   estado:estadoInicial,
                   pendienteDe:pendienteDeId,
                   pendienteDeNombre:pendienteDeNombre,
                   maxDescuento:maxDto,
-                  semana:semActual,
-                  fecha:new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"}),
-                  ofertas:(e.ofertas||[]).map(o=>({...o})),
+                  semana:sem,
+                  fecha:hoy,
+                  fechaISO:fechaISO,
+                  eliminada:false,
+                  ofertas:(e.ofertas||[]).map(function(o){return Object.assign({},o);}),
                   seguimientos:[{
-                    accion:"Estrategia creada",
-                    por:usuario.nombre,
-                    fecha:new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"}),
+                    accion:"📝 Estrategia creada",
+                    por:usuario.nombre||"",
+                    porId:usuario.id||"",
+                    fecha:hoy,
                     nota:e.texto||""
-                  }],
-                };
-                onActividad(clienteSel.id,{...act,estrategia:e});
+                  }]
+                });
+                console.log("[EST] Crear estrategia:",estDoc.id,"cli:",estDoc.cliente,"agente:",estDoc.agente,"estado:",estDoc.estado);
+                onActividad(clienteSel.id,Object.assign({},act,{estrategia:estDoc}));
                 fbEscribir("estrategias",estDoc.id,estDoc);
                 if(onNewEstrategia) onNewEstrategia(estDoc);
+
+                // Notificar
+                if(pendienteDeId&&pendienteDeId!==usuario.id){
+                  despacharNotificacion({tipo:"estrategia",
+                    titulo:"🔐 Aprobación requerida: "+nombreCli+(maxDto>0?" (dto. "+maxDto+"%)":""),
+                    mensaje:(usuario.nombre||"")+" ha creado una estrategia que requiere tu aprobación.\nCliente: "+nombreCli+"\nAcción: "+(e.texto||""),
+                    destinatarioId:pendienteDeId,prioridad:maxDto>10?"alta":"normal",creadoPor:usuario.id});
+                } else if(estadoInicial==="en_curso"&&agenteAsignado&&agenteAsignado!==usuario.id){
+                  despacharNotificacion({tipo:"estrategia",
+                    titulo:"🎯 Nueva estrategia: "+nombreCli,
+                    mensaje:(usuario.nombre||"")+" te ha asignado una estrategia.\nCliente: "+nombreCli+"\nAcción: "+(e.texto||""),
+                    destinatarioId:agenteAsignado,prioridad:"normal",creadoPor:usuario.id});
+                }
               }}
               onBorrar={()=>{
                 onActividad(clienteSel.id,{...act,estrategia:null});
@@ -12112,37 +12002,64 @@ function EstrategiaTab({estrategia,clienteNombre,onGuardar,onBorrar,usuario,onRe
           </div>
         )}
 
-        {/* Responder a la estrategia */}
+        {/* Responder a la estrategia (texto OBLIGATORIO en todas las opciones) */}
         {estrategia.estado==="en_curso"&&(
           <div style={{background:"#fff",borderRadius:14,padding:16,border:"1.5px solid "+T.border,marginBottom:12}}>
-            <p style={{margin:"0 0 10px",fontSize:13,fontWeight:800,color:T.text}}>Responder</p>
+            <p style={{margin:"0 0 4px",fontSize:13,fontWeight:800,color:T.text}}>💬 Responder</p>
+            <p style={{margin:"0 0 10px",fontSize:11,color:T.muted}}>Comentario obligatorio</p>
             <textarea value={respTexto} onChange={function(ev){setRespTexto(ev.target.value);}}
-              placeholder="Describe el resultado, acción realizada..."
+              placeholder="Describe el resultado, acción realizada, nota..."
               rows="3" style={{width:"100%",padding:10,borderRadius:10,border:"1.5px solid "+T.border,fontSize:13,resize:"none",boxSizing:"border-box",fontFamily:"inherit",marginBottom:10}}/>
             <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
               {[
-                {k:"pedido",icon:"✅",label:"Pedido",color:"#22C55E",estado:"completada"},
-                {k:"ok",icon:"👍",label:"Éxito",color:"#22C55E",estado:"completada"},
-                {k:"ko",icon:"❌",label:"KO / Sin éxito",color:"#EF4444",estado:"sin_exito"},
-                {k:"mas_dto",icon:"💬",label:"Pide más dto.",color:"#F59E0B",estado:"en_curso"},
-                {k:"seguimiento",icon:"📝",label:"Seguimiento",color:"#3B82F6",estado:"en_curso"},
+                {k:"pedido",icon:"✅",label:"Pedido",color:"#22C55E"},
+                {k:"exito",icon:"👍",label:"Éxito",color:"#22C55E"},
+                {k:"ko",icon:"❌",label:"KO",color:"#EF4444"},
+                {k:"mas_dto",icon:"💬",label:"Pide más dto.",color:"#F59E0B"},
+                {k:"seguimiento",icon:"📝",label:"Seguimiento",color:"#3B82F6"}
               ].map(function(btn){
                 return <button key={btn.k} onClick={function(){
-                  if(!respTexto.trim()&&btn.k!=="seguimiento"){alert("Escribe un comentario");return;}
+                  if(!respTexto.trim()){alert("Comentario obligatorio");return;}
+                  // Cadena: pedido/exito/ko → pendiente_cierre (vuelve al creador)
+                  //         mas_dto → pendiente_aprobacion (al jefe del equipo)
+                  //         seguimiento → en_curso
+                  var TIPOS={
+                    pedido:{icon:"✅",label:"Pedido conseguido",estado:"pendiente_cierre",resultado:"pedido"},
+                    exito:{icon:"👍",label:"Éxito",estado:"pendiente_cierre",resultado:"exito"},
+                    ko:{icon:"❌",label:"KO / Sin éxito",estado:"pendiente_cierre",resultado:"ko"},
+                    mas_dto:{icon:"💬",label:"Pide más descuento",estado:"pendiente_aprobacion",resultado:"mas_dto"},
+                    seguimiento:{icon:"📝",label:"Seguimiento",estado:"en_curso",resultado:"seguimiento"}
+                  };
+                  var t=TIPOS[btn.k];
+                  var hoy=new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
+                  var pendienteDe=null, pendienteDeNombre=null;
+                  if(t.estado==="pendiente_cierre"){
+                    pendienteDe=estrategia.creadoPor||null;
+                    pendienteDeNombre=estrategia.creadoPorNombre||"Creador";
+                  } else if(t.estado==="pendiente_aprobacion"){
+                    var eq=estrategia.equipo||(USUARIOS.find(function(u){return u.id===estrategia.agente;})||{}).equipo||"";
+                    var resp=USUARIOS.find(function(u){return u.rol==="jefe"&&u.equipo===eq;});
+                    pendienteDe=resp?resp.id:(estrategia.creadoPor||null);
+                    pendienteDeNombre=resp?resp.nombre:(estrategia.creadoPorNombre||"Superior");
+                  }
                   var seguimiento={
-                    accion:btn.icon+" "+btn.label,
+                    accion:t.icon+" "+t.label,
                     nota:respTexto.trim(),
-                    por:(usuario||{}).nombre||(usuario||{}).id||"",
-                    fecha:new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"})
+                    por:(usuario||{}).nombre||"",
+                    porId:(usuario||{}).id||"",
+                    fecha:hoy,
+                    tipo:btn.k
                   };
                   var updated=Object.assign({},estrategia,{
-                    estado:btn.estado,
-                    resultado:btn.k==="pedido"||btn.k==="ok"?"exito":btn.k==="ko"?"sin_exito":btn.k==="mas_dto"?"pide_mas_dto":"en_seguimiento",
+                    estado:t.estado,
+                    resultado:t.resultado,
+                    pendienteDe:pendienteDe,
+                    pendienteDeNombre:pendienteDeNombre,
                     seguimientos:(estrategia.seguimientos||[]).concat([seguimiento])
                   });
                   if(onResponder) onResponder(updated);
                   setRespTexto("");
-                }} style={{padding:"8px 14px",borderRadius:10,border:"1.5px solid "+btn.color+"33",background:btn.color+"10",fontSize:12,fontWeight:700,cursor:"pointer",color:btn.color}}>
+                }} style={{padding:"9px 14px",borderRadius:10,border:"1.5px solid "+btn.color+"55",background:btn.color+"12",fontSize:12,fontWeight:700,cursor:"pointer",color:btn.color}}>
                   {btn.icon} {btn.label}
                 </button>;
               })}
