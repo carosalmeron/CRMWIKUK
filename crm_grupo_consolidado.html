@@ -1057,6 +1057,44 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
 
   var esAgenteMS=usuario.rol==="crm_agente"||usuario.rol==="agente";
 
+  // ── Filtro por equipo/vendedor para Jefe/Director/CEO ────────────────────
+  // Esta lógica replica la del Dashboard (DashDirector).
+  // - Jefe (esJefe): equipoFiltro queda bloqueado a su equipo. Solo puede filtrar entre sus vendedores.
+  // - Director/CEO: pueden ver Todos los equipos o filtrar.
+  var miRol=(usuario.rol||"").toLowerCase();
+  var esJefeMS=miRol.indexOf("jefe")>=0||miRol.indexOf("responsable")>=0;
+  var esDirMS=miRol.indexOf("director")>=0;
+  var esCEOMS=miRol.indexOf("ceo")>=0;
+  var esManagerMS=esJefeMS||esDirMS||esCEOMS;
+  var equipoLockMS=esJefeMS?(usuario.equipo||""):null;
+  var _sf1=React.useState(equipoLockMS||"todos");var equipoFiltro=_sf1[0],setEquipoFiltro=_sf1[1];
+  var _sf2=React.useState(null);var agenteFiltro=_sf2[0],setAgenteFiltro=_sf2[1];
+  var _sf3=React.useState(false);var treeRootOpen=_sf3[0],setTreeRootOpen=_sf3[1];
+  var _sf4=React.useState(equipoLockMS||null);var treeEqOpen=_sf4[0],setTreeEqOpen=_sf4[1];
+
+  // Computa el conjunto de IDs (mayúsculas) cuyos items debe mostrar al manager.
+  // Siempre incluye el propio id del manager (sus items personales).
+  var idsEnScopeMS=React.useMemo(function(){
+    var set=new Set();
+    if(!esManagerMS) return set;
+    (USUARIOS||[]).filter(function(u){return u.rol==="agente";}).forEach(function(u){
+      var inc=false;
+      if(esJefeMS){ inc=u.equipo===usuario.equipo; }
+      else {
+        if(agenteFiltro) inc=u.nombre===agenteFiltro;
+        else if(equipoFiltro!=="todos") inc=u.equipo===equipoFiltro;
+        else inc=true;
+      }
+      if(inc){
+        if(u.id) set.add(String(u.id).toUpperCase());
+        if(u.grupoAgente) set.add(String(u.grupoAgente).toUpperCase());
+      }
+    });
+    if(usuario.id) set.add(String(usuario.id).toUpperCase());
+    if(usuario.grupoAgente) set.add(String(usuario.grupoAgente).toUpperCase());
+    return set;
+  },[equipoFiltro,agenteFiltro]);
+
   React.useEffect(function(){
     setCargando(true);
     fbLeer("planes_semanales").then(function(planes){
@@ -1081,14 +1119,57 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
 
   // 360 data
   var esAgenteRol=(usuario?.rol||"").toLowerCase().indexOf("agente")>=0;
-  var misEst=(estrategiasDB||[]).filter(function(e){var act=(e.estado==="en_curso"||e.estado==="pendiente_aprobacion"||e.estado==="pendiente_cierre");if(!act||e.eliminada) return false;if(!esAgenteRol) return true;var agU=(e.agente||"").toUpperCase();return appMisIds.has(agU)||e.pendienteDe===usuario.id||e.creadoPor===usuario.id;});
-  var misOps=(oportunidadesDB||[]).filter(function(o){return !o.eliminada&&!["ganada","perdida","cerrada_ganada","cerrada_perdida"].includes(o.estado||o.etapa)&&(esAgenteRol?appMisIds.has((o.agenteId||o.agente||"").toUpperCase()):true);});
-  var misInc=(incidenciasDB||[]).filter(function(i){return !i.eliminada&&i.estado!=="cerrada"&&i.estado!=="resuelta"&&(esAgenteRol?appMisIds.has((i.agente||i.autor||"").toUpperCase()):true);});
-  var misMue=(muestrasDB||[]).filter(function(m){return !m.eliminada&&m.estado==="pendiente"&&(esAgenteRol?appMisIds.has((m.agente||"").toUpperCase()):true);});
+  // Helper unificado: para agentes usa appMisIds; para managers usa idsEnScopeMS
+  var enScope=function(agenteField,creadoPorField){
+    var agU=String(agenteField||"").toUpperCase();
+    var creU=String(creadoPorField||"").toUpperCase();
+    if(esAgenteRol){
+      return appMisIds.has(agU)||appMisIds.has(creU);
+    }
+    if(esManagerMS){
+      return idsEnScopeMS.has(agU)||idsEnScopeMS.has(creU);
+    }
+    return true;
+  };
+  var misEst=(estrategiasDB||[]).filter(function(e){
+    var act=(e.estado==="en_curso"||e.estado==="pendiente_aprobacion"||e.estado==="pendiente_cierre");
+    if(!act||e.eliminada) return false;
+    if(esAgenteRol){
+      var agU=(e.agente||"").toUpperCase();
+      return appMisIds.has(agU)||e.pendienteDe===usuario.id||e.creadoPor===usuario.id;
+    }
+    if(esManagerMS){
+      return enScope(e.agente,e.creadoPor)||e.pendienteDe===usuario.id;
+    }
+    return true;
+  });
+  var misOps=(oportunidadesDB||[]).filter(function(o){
+    if(o.eliminada||["ganada","perdida","cerrada_ganada","cerrada_perdida"].includes(o.estado||o.etapa)) return false;
+    if(esAgenteRol) return appMisIds.has((o.agenteId||o.agente||"").toUpperCase());
+    if(esManagerMS) return enScope(o.agenteId||o.agente,o.creadoPor);
+    return true;
+  });
+  var misInc=(incidenciasDB||[]).filter(function(i){
+    if(i.eliminada||i.estado==="cerrada"||i.estado==="resuelta") return false;
+    if(esAgenteRol) return appMisIds.has((i.agente||i.autor||"").toUpperCase());
+    if(esManagerMS) return enScope(i.agente||i.autor,i.creadoPor);
+    return true;
+  });
+  var misMue=(muestrasDB||[]).filter(function(m){
+    if(m.eliminada||m.estado!=="pendiente") return false;
+    if(esAgenteRol) return appMisIds.has((m.agente||"").toUpperCase());
+    if(esManagerMS) return enScope(m.agente,m.creadoPor);
+    return true;
+  });
   var _s5=React.useState([]);var tareasDB=_s5[0],setTareasDB=_s5[1];
   var _s6=React.useState([]);var proyectosDB=_s6[0],setProyectosDB=_s6[1];
   React.useEffect(function(){fbLeer("tareas").then(function(d){setTareasDB(d||[]);});fbLeer("proyectos").then(function(d){setProyectosDB(d||[]);});},[]);
-  var misTareas=tareasDB.filter(function(t){return !t.eliminada&&t.estado!=="hecha"&&(esAgenteRol?appMisIds.has((t.agente||t.agenteId||"").toUpperCase()):true);});
+  var misTareas=tareasDB.filter(function(t){
+    if(t.eliminada||t.estado==="hecha") return false;
+    if(esAgenteRol) return appMisIds.has((t.agente||t.agenteId||"").toUpperCase());
+    if(esManagerMS) return enScope(t.agente||t.agenteId,t.creadoPor);
+    return true;
+  });
   var misHitos=[];
   var hoy=new Date();
   var hoyStr=hoy.toISOString().split("T")[0];
@@ -1101,7 +1182,16 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
     (p.hitos||[]).forEach(function(h){
       if(!h.hecho){
         var resp=h.responsable||"";
-        if(appMisIds.has(resp.toUpperCase())||!resp){
+        var respU=String(resp).toUpperCase();
+        var visible=false;
+        if(esAgenteRol){
+          visible=appMisIds.has(respU)||!resp;
+        } else if(esManagerMS){
+          visible=idsEnScopeMS.has(respU)||!resp;
+        } else {
+          visible=true;
+        }
+        if(visible){
           // Solo mostrar si fecha es esta semana o vencida (o sin fecha)
           var f=h.fecha||"";
           var fISO=f.includes("/")?(f.split("/").reverse().join("-")):f;
@@ -1294,6 +1384,97 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
   return(
     <div style={{maxWidth:600,margin:"0 auto",padding:"16px 14px",paddingBottom:100}}>
       <BackBar label="Volver" onBack={onBack}/>
+
+      {/* ── Filtro de equipo/vendedor — solo Jefe/Director/CEO ──
+          Mismo patrón que el árbol del Dashboard:
+          - Director/CEO ven Todos > [WIKUK,INTERKEY] > vendedores
+          - Jefe (lock): solo su equipo > vendedores ─────────────────────── */}
+      {esManagerMS&&(()=>{
+        var EQ_LIST=esJefeMS?[equipoLockMS]:["WIKUK","INTERKEY"];
+        var ALL_AGENTS=(USUARIOS||[]).filter(function(u){return u.rol==="agente";});
+        var resumenSel=agenteFiltro?("👤 "+agenteFiltro):(equipoFiltro==="todos"?"🌐 Todos los equipos":("📁 "+equipoFiltro));
+        return(
+          <div style={{marginBottom:14}}>
+            {/* Nivel 1: "Todos" — solo Director/CEO */}
+            {!esJefeMS&&(
+              <div onClick={function(){
+                  var wasSel=equipoFiltro==="todos"&&!agenteFiltro;
+                  if(wasSel){ setTreeRootOpen(function(o){return !o;}); }
+                  else { setEquipoFiltro("todos");setAgenteFiltro(null);setTreeEqOpen(null);setTreeRootOpen(true); }
+                }}
+                style={{background:equipoFiltro==="todos"&&!agenteFiltro?T.navy:"#fff",
+                  borderRadius:11,padding:"10px 14px",cursor:"pointer",
+                  border:"2px solid "+(equipoFiltro==="todos"&&!agenteFiltro?T.navy:T.border),
+                  marginBottom:6,display:"flex",alignItems:"center",gap:10}}>
+                <span style={{fontSize:18}}>🌐</span>
+                <div style={{flex:1}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:700,color:equipoFiltro==="todos"&&!agenteFiltro?"#fff":T.text}}>Todos los equipos</p>
+                  <p style={{margin:0,fontSize:10,color:equipoFiltro==="todos"&&!agenteFiltro?"rgba(255,255,255,.65)":T.muted}}>
+                    {ALL_AGENTS.length} vendedores
+                  </p>
+                </div>
+                {equipoFiltro==="todos"&&!agenteFiltro&&<span style={{color:"#fff",fontWeight:800,marginRight:4}}>✓</span>}
+                <span style={{color:equipoFiltro==="todos"&&!agenteFiltro?"rgba(255,255,255,.8)":T.muted,fontSize:18,
+                  transform:treeRootOpen?"rotate(90deg)":"rotate(0deg)",display:"inline-block",transition:"transform .2s"}}>›</span>
+              </div>
+            )}
+
+            {/* Nivel 2: Equipos. Para Jefe siempre visible (lock). Para Director/CEO solo si treeRootOpen */}
+            {(esJefeMS||treeRootOpen)&&EQ_LIST.map(function(eq){
+              var eqColor=eq==="WIKUK"?T.green:T.amber;
+              var agEq=ALL_AGENTS.filter(function(v){return v.equipo===eq;});
+              var isOpen=treeEqOpen===eq;
+              var isSel=equipoFiltro===eq&&!agenteFiltro;
+              return(
+                <div key={eq} style={{marginBottom:6}}>
+                  <div onClick={function(){
+                      if(isSel){ setTreeEqOpen(isOpen?null:eq); }
+                      else { setEquipoFiltro(eq);setAgenteFiltro(null);setTreeEqOpen(eq); }
+                    }}
+                    style={{background:isSel?eqColor+"15":"#fff",borderRadius:11,padding:"10px 14px",cursor:"pointer",
+                      border:"2px solid "+(isSel?eqColor:T.border),display:"flex",alignItems:"center",gap:10}}>
+                    <div style={{width:30,height:30,borderRadius:8,background:eqColor+"20",
+                      display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,
+                      color:eqColor,fontWeight:800,flexShrink:0}}>{eq[0]}</div>
+                    <div style={{flex:1}}>
+                      <p style={{margin:0,fontSize:13,fontWeight:700,color:isSel?eqColor:T.text}}>{eq}</p>
+                      <p style={{margin:0,fontSize:10,color:T.muted}}>{agEq.length} vendedores</p>
+                    </div>
+                    {isSel&&<span style={{color:eqColor,fontWeight:800}}>✓</span>}
+                    <span style={{color:isOpen?eqColor:T.muted,fontSize:16,
+                      transform:isOpen?"rotate(90deg)":"rotate(0deg)",display:"inline-block",transition:"transform .2s"}}>›</span>
+                  </div>
+
+                  {/* Nivel 3: Vendedores del equipo */}
+                  {isOpen&&(
+                    <div style={{marginLeft:12,borderLeft:"2px solid "+eqColor+"22",paddingLeft:10,marginTop:6}}>
+                      {agEq.map(function(v){
+                        var sel=agenteFiltro===v.nombre;
+                        return(
+                          <div key={v.id} onClick={function(){setAgenteFiltro(sel?null:v.nombre);setEquipoFiltro(eq);}}
+                            style={{background:sel?(v.color||T.navy)+"12":"#fff",borderRadius:10,
+                              padding:"9px 12px",marginBottom:5,cursor:"pointer",
+                              border:"1.5px solid "+(sel?(v.color||T.navy):T.border),
+                              display:"flex",alignItems:"center",gap:10}}>
+                            <div style={{width:28,height:28,borderRadius:7,background:(v.color||T.navy)+"20",
+                              display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,flexShrink:0}}>🧑‍💼</div>
+                            <div style={{flex:1}}>
+                              <p style={{margin:0,fontSize:12,fontWeight:700,color:T.text}}>{v.nombre}</p>
+                              <p style={{margin:0,fontSize:10,color:T.muted}}>{v.equipo}</p>
+                            </div>
+                            {sel&&<span style={{color:v.color||T.navy,fontWeight:800}}>✓</span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            <p style={{margin:"6px 0 0",fontSize:11,color:T.muted,textAlign:"center"}}>Filtro activo: <b>{resumenSel}</b></p>
+          </div>
+        );
+      })()}
       <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:14,marginBottom:14}}>
         <button onClick={function(){setSemana(semana-1);}} style={{background:"none",border:"none",fontSize:28,cursor:"pointer",color:T.navy,padding:"8px 12px"}}>{"<"}</button>
         <div style={{textAlign:"center"}}>
@@ -1337,8 +1518,8 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
         </div>
       ):(
         <div>
-          {/* Resumen ruta */}
-          {plan.modo==="ruta"&&clientesSemana.length>0&&(
+          {/* Resumen ruta — solo agentes */}
+          {!esManagerMS&&plan.modo==="ruta"&&clientesSemana.length>0&&(
             <div style={{background:"#fff",borderRadius:16,padding:"16px 18px",marginBottom:14,border:"2px solid "+T.blue,boxShadow:"0 1px 4px rgba(0,0,0,.06)"}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
                 <p style={{margin:0,fontSize:15,fontWeight:800,color:T.navy}}>Mi ruta esta semana</p>
@@ -1372,8 +1553,8 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
             </div>
           )}
 
-          {/* Resumen libre */}
-          {plan.modo==="libre"&&(
+          {/* Resumen libre — solo agentes (los managers no visitan clientes) */}
+          {!esManagerMS&&plan.modo==="libre"&&(
             <div style={{background:"#fff",borderRadius:16,padding:"16px 18px",marginBottom:14,border:"2px solid "+T.purple,boxShadow:"0 1px 4px rgba(0,0,0,.06)"}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
                 <p style={{margin:0,fontSize:15,fontWeight:800,color:T.navy}}>Semana libre</p>
@@ -1396,11 +1577,13 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
             </div>
           )}
 
-          {/* Tabs */}
-          <div style={{display:"flex",background:"#E2E8F0",borderRadius:14,padding:4,marginBottom:18}}>
-            <button onClick={function(){setTab("360");}} style={{flex:1,padding:"14px 0",borderRadius:12,border:"none",fontSize:15,cursor:"pointer",fontWeight:tab==="360"?800:500,color:tab==="360"?T.navy:T.muted,background:tab==="360"?"#fff":"transparent",boxShadow:tab==="360"?"0 2px 6px rgba(0,0,0,.12)":"none"}}>📊 360°</button>
-            <button onClick={function(){setTab("ruta");}} style={{flex:1,padding:"14px 0",borderRadius:12,border:"none",fontSize:15,cursor:"pointer",fontWeight:tab==="ruta"?800:500,color:tab==="ruta"?T.navy:T.muted,background:tab==="ruta"?"#fff":"transparent",boxShadow:tab==="ruta"?"0 2px 6px rgba(0,0,0,.12)":"none"}}>📍 Ruta ({clientesSemana.length||"libre"})</button>
-          </div>
+          {/* Tabs — solo agentes (los managers no tienen ruta) */}
+          {!esManagerMS&&(
+            <div style={{display:"flex",background:"#E2E8F0",borderRadius:14,padding:4,marginBottom:18}}>
+              <button onClick={function(){setTab("360");}} style={{flex:1,padding:"14px 0",borderRadius:12,border:"none",fontSize:15,cursor:"pointer",fontWeight:tab==="360"?800:500,color:tab==="360"?T.navy:T.muted,background:tab==="360"?"#fff":"transparent",boxShadow:tab==="360"?"0 2px 6px rgba(0,0,0,.12)":"none"}}>📊 360°</button>
+              <button onClick={function(){setTab("ruta");}} style={{flex:1,padding:"14px 0",borderRadius:12,border:"none",fontSize:15,cursor:"pointer",fontWeight:tab==="ruta"?800:500,color:tab==="ruta"?T.navy:T.muted,background:tab==="ruta"?"#fff":"transparent",boxShadow:tab==="ruta"?"0 2px 6px rgba(0,0,0,.12)":"none"}}>📍 Ruta ({clientesSemana.length||"libre"})</button>
+            </div>
+          )}
 
           {/* TAB 360 */}
           {tab==="360"&&(
@@ -1888,7 +2071,7 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, es
         )}
 
         {/* ── Mis clientes ── */}
-        <div onClick={()=>onNav("clientes")}
+        <div onClick={()=>onNav("plan_semanal")}
           style={{background:"#fff",borderRadius:16,padding:"14px 18px",
             marginBottom:16,cursor:"pointer",
             border:`1px solid ${T.border}`,
@@ -1897,12 +2080,12 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, es
           <div style={{width:46,height:46,borderRadius:13,
             background:"linear-gradient(135deg,#0F172A,#334155)",
             display:"flex",alignItems:"center",justifyContent:"center",
-            fontSize:22,flexShrink:0}}>📋</div>
+            fontSize:22,flexShrink:0}}>📅</div>
           <div style={{flex:1}}>
             <p style={{margin:"0 0 3px",fontSize:14,fontWeight:800,color:T.text}}>
-              Mis clientes · Semana {semana}
+              Mi semana · Sem. {semana}
             </p>
-            <p style={{margin:0,fontSize:11,color:T.muted}}>{totalSem} clientes</p>
+            <p style={{margin:0,fontSize:11,color:T.muted}}>{totalSem} clientes · {visitados} visitados · {pendVisita} pendientes</p>
           </div>
           <span style={{color:T.muted,fontSize:20,flexShrink:0}}>›</span>
         </div>
@@ -7937,23 +8120,29 @@ const PROYECTOS_SEED = [];
 
 // ─── ESCÁNER DE TARJETA DE VISITA ────────────────────────────────
 
-function DashDirector({usuario, onNav, estrategiasDB}){
+function DashDirector({usuario, onNav, estrategiasDB, oportunidadesDB, proyectosDB, incidenciasDB, muestrasDB, equipoLock}){
+  // equipoLock: si está presente (uso por Responsable), bloquea el filtro de equipo
+  // y oculta el primer nivel del árbol (no muestra "Todos los equipos" / "WIKUK / INTERKEY").
   // Legacy EQUIPO_DATA eliminado — se usa AGENTES_DATA top-level
-  const opsActivas=OPORTUNIDADES_SEED.filter(o=>!o.etapa.includes("cerrada"));
-  const valPipeline=opsActivas.reduce((s,o)=>s+o.valor,0);
-  const proyActivos=PROYECTOS_SEED.filter(p=>p.estado==="activo");
+  const opsBD=oportunidadesDB||OPORTUNIDADES_SEED;
+  const proyBD=proyectosDB||PROYECTOS_SEED;
+  const incBD=incidenciasDB||INCIDENCIAS_SEED;
+  const muestBD=muestrasDB||MUESTRAS_SEED;
+  const opsActivas=opsBD.filter(o=>!String(o.etapa||o.estado||"").includes("cerrada"));
+  const valPipeline=opsActivas.reduce((s,o)=>s+(o.valor||0),0);
+  const proyActivos=proyBD.filter(p=>p.estado==="activo");
   const estActivas=(estrategiasDB||[]).filter(e=>(e.estado==="en_curso"||e.estado==="pendiente_aprobacion")&&!e.eliminada&&!e.resolucion);
 
   const [periodo,setPeriodo]=useState("semana");
-  const [equipoFiltro,setEquipoFiltro]=useState("todos");
+  const [equipoFiltro,setEquipoFiltro]=useState(equipoLock||"todos");
   const [agenteFiltro,setAgenteFiltro]=useState(null); // null = todos del equipo
   const [showVendedores,setShowVendedores]=useState(true); // árbol siempre visible
-  const [treeRootOpen,setTreeRootOpen]=useState(false); // desplegar equipos bajo "Todos"
-  const [treeEqOpen,setTreeEqOpen]=useState(null); // null | "WIKUK" | "INTERKEY"
+  const [treeRootOpen,setTreeRootOpen]=useState(!!equipoLock); // si hay lock, abrir directamente la lista
+  const [treeEqOpen,setTreeEqOpen]=useState(equipoLock||null); // null | "WIKUK" | "INTERKEY"
 
-  // Datos por agente — semana/mes/año
   // Datos por agente — lectura de AGENTES_DATA top-level
-  const EQUIPO_DATA_EXT=AGENTES_DATA;
+  // Si hay equipoLock (uso por Responsable), filtramos a su equipo desde la fuente
+  const EQUIPO_DATA_EXT=equipoLock?AGENTES_DATA.filter(a=>a.equipo===equipoLock):AGENTES_DATA;
 
   const ETAPA_COLOR={prospecto:T.muted,propuesta:T.blue,negociacion:T.amber,cerrada_ganada:T.green,cerrada_perdida:T.red};
   const ETAPA_ICON={prospecto:"🔍",propuesta:"📄",negociacion:"🤝",cerrada_ganada:"✅",cerrada_perdida:"❌"};
@@ -7967,7 +8156,7 @@ function DashDirector({usuario, onNav, estrategiasDB}){
   return(
     <div style={{padding:"20px 16px 100px"}}>
       <p style={{margin:"0 0 4px",fontSize:22,fontWeight:900,color:T.text}}>{usuario.icon} {usuario.nombre}</p>
-      <p style={{margin:"0 0 16px",fontSize:13,color:T.muted}}>Sem. {semanaActual} · Consolidado</p>
+      <p style={{margin:"0 0 16px",fontSize:13,color:T.muted}}>Sem. {semanaActual} · {equipoLock?("Equipo "+equipoLock):"Consolidado"}</p>
 
       {/* ══ 1. VENTAS — selector período + tarjeta consolidada ══ */}
       <div style={{display:"flex",gap:6,marginBottom:12}}>
@@ -8067,11 +8256,13 @@ function DashDirector({usuario, onNav, estrategiasDB}){
       })()}
 
       {/* ══ 2. DETALLE POR VENDEDOR — expandible ══ */}
-      {/* ── Árbol jerárquico: Todos → Equipo → Vendedor ── */}
+      {/* ── Árbol jerárquico: Todos → Equipo → Vendedor ──
+           Si hay equipoLock (Responsable), saltamos el nodo "Todos los equipos"
+           y mostramos directamente la lista de vendedores de su equipo. ── */}
       {(
         <div style={{marginBottom:12}}>
-          {/* Nivel 1: Todos — 1er click filtra, 2º click despliega equipos */}
-          <div onClick={()=>{
+          {/* Nivel 1: Todos — solo Director/CEO */}
+          {!equipoLock&&(<div onClick={()=>{
               const wasSel=equipoFiltro==="todos"&&!agenteFiltro;
               if(wasSel){
                 // Ya está seleccionado → toggle expand
@@ -8099,10 +8290,12 @@ function DashDirector({usuario, onNav, estrategiasDB}){
             <span style={{color:equipoFiltro==="todos"&&!agenteFiltro?"rgba(255,255,255,.8)":T.muted,
               fontSize:18,transform:treeRootOpen?"rotate(90deg)":"rotate(0deg)",
               display:"inline-block",transition:"transform .2s"}}>›</span>
-          </div>
+          </div>)}
 
-          {/* Nivel 2: Equipos desplegables (solo visible si treeRootOpen) */}
-          {treeRootOpen&&["WIKUK","INTERKEY"].map(eq=>{
+          {/* Nivel 2: Equipos desplegables.
+              - Director/CEO: ambos equipos cuando treeRootOpen
+              - Responsable (equipoLock): SOLO su equipo, siempre visible */}
+          {(equipoLock||treeRootOpen)&&(equipoLock?[equipoLock]:["WIKUK","INTERKEY"]).map(eq=>{
             const eqColor=eq==="WIKUK"?T.green:T.amber;
             const agEq=EQUIPO_DATA_EXT.filter(v=>v.equipo===eq);
             const vMesEq=agEq.reduce((s,v)=>s+v.vMes,0);
@@ -14872,11 +15065,12 @@ function App(props){
         {esJefeOmas&&section==="muestras"&&  <MisMuestras usuario={usuario} clientesFB={misClientesFB} onAbrirCliente={onAbrirCliente} onIrASeccion={onIrASeccion}/>}
 
         {/* JEFE — dashboard filtrado a su equipo */}
-        {esJefe&&section==="dashboard"&&    <DashJefe key={"jefe"}/>}
+        {/* JEFE — usa DashDirector con equipoLock para tener mismo formato que CEO/Director */}
+        {esJefe&&section==="dashboard"&&    <DashDirector usuario={usuario} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} muestrasDB={muestrasDB} equipoLock={miEquipo}/>}
         {esJefeOmas&&section==="clientes_eq"&& <GestorClientes usuario={usuario} actividad={actividadSemana} onActividad={onActividad} onBack={function(){setSection(prevSectionRef.current||"dashboard");}} clientesFB={misClientesFB} muestrasDB={muestrasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} estrategiasDB={estrategiasDB} clienteDirecto={clienteDirecto} onClienteDirectoUsado={()=>setClienteDirecto(null)} onNewIncidencia={function(inc){setIncidenciasDB(function(prev){return [inc].concat(prev);});}} onNewMuestra={function(m){setMuestrasDB(function(prev){return [m].concat(prev);});}} onNewEstrategia={upsertEstrategia}/>}
 
         {/* DIRECTOR / CEO — dashboard global */}
-        {esDir&&section==="dashboard"&&     <DashDirector usuario={usuario} onNav={setSection} estrategiasDB={estrategiasDB}/>}
+        {esDir&&section==="dashboard"&&     <DashDirector usuario={usuario} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} muestrasDB={muestrasDB}/>}
 
         {/* Compartidas — con filtrado por rol dentro de cada componente */}
         {section==="estrategias"&&          <MisEstrategias usuario={usuario}/>}
