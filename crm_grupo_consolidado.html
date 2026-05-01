@@ -4659,6 +4659,21 @@ function MisEstrategias({usuario}){
     var sem=getSemanaISO();
     var maxDto=(datos.ofertas||[]).reduce(function(m,o){return Math.max(m,parseFloat(o.dto)||0);},0);
 
+    // Resolver nombre del cliente: usa el campo cliente si existe; si no, busca por clienteId
+    var nombreCli=(datos.cliente||"").trim();
+    var idCli=datos.clienteId||"";
+    if(!nombreCli&&idCli&&window._clientesFB){
+      var cFb=(window._clientesFB||[]).find(function(x){return x.id===idCli;});
+      if(cFb) nombreCli=cFb.nombre||cFb.NOMBRE||"";
+    }
+    // Si el nombre escrito coincide con un cliente existente y no tenemos clienteId, lo resolvemos
+    if(nombreCli&&!idCli&&window._clientesFB){
+      var cMatch=(window._clientesFB||[]).find(function(x){
+        return ((x.nombre||x.NOMBRE||"").toUpperCase()===nombreCli.toUpperCase());
+      });
+      if(cMatch) idCli=cMatch.id;
+    }
+
     // Determinar agente destino y equipo
     var agenteFinal=datos.agenteAsignado||(esAgente?miId:miId);
     var agenteUser=USUARIOS.find(function(u){return u.id===agenteFinal;})||{};
@@ -4686,9 +4701,9 @@ function MisEstrategias({usuario}){
 
     var est={
       id:"est_"+Date.now(),
-      cliente:(datos.cliente||"").trim(),
-      clienteNombre:(datos.cliente||"").trim(),
-      clienteId:datos.clienteId||"",
+      cliente:nombreCli,
+      clienteNombre:nombreCli,
+      clienteId:idCli,
       agente:agenteFinal||"",
       agenteNombre:agenteUser.nombre||"",
       equipo:equipoAg,
@@ -4715,6 +4730,8 @@ function MisEstrategias({usuario}){
         nota:(datos.texto||"").trim()
       }]
     };
+
+    console.log("[EST] Crear desde MisEstrategias:",est.id,"cli:",JSON.stringify(est.cliente),"cliId:",est.clienteId,"agente:",est.agente,"estado:",est.estado);
 
     setEstrategias(function(prev){return prev.concat([est]);});
     fbEscribir("estrategias",est.id,est);
@@ -4991,7 +5008,7 @@ function MisEstrategias({usuario}){
               {sel.estado==="sin_exito"&&<Badge label="❌ Sin éxito" color={T.red}/>}
               {maxDto>0&&<Badge label={"💸 Dto. máx "+maxDto+"%"} color={maxDto>15?T.red:maxDto>10?T.amber:T.green}/>}
             </div>
-            <p style={{margin:"0 0 4px",fontSize:17,fontWeight:800,color:T.text}}>{sel.cliente||sel.clienteNombre||"(sin cliente)"}</p>
+            <p style={{margin:"0 0 4px",fontSize:17,fontWeight:800,color:T.text}}>{getCliNom(sel)||"(sin cliente)"}</p>
             <p style={{margin:"0 0 6px",fontSize:13,color:T.text,lineHeight:1.5}}>{sel.texto||sel.estrategia||""}</p>
             {sel.objetivo&&<p style={{margin:"0 0 6px",fontSize:12,color:T.muted}}>🎯 {sel.objetivo}</p>}
             <p style={{margin:"6px 0 0",fontSize:11,color:T.muted}}>
@@ -5188,9 +5205,22 @@ function MisEstrategias({usuario}){
     </div>;
   };
 
+  // Fallback: si la estrategia tiene clienteId pero el nombre se perdió,
+  // lo resolvemos desde la lista global de clientes
+  var getCliNom=function(e){
+    if(e.cliente) return e.cliente;
+    if(e.clienteNombre) return e.clienteNombre;
+    if(e.clienteId&&window._clientesFB){
+      var c=(window._clientesFB||[]).find(function(x){return x.id===e.clienteId;});
+      if(c) return c.nombre||c.NOMBRE||"";
+    }
+    return "";
+  };
+
   var renderItem=function(e, badgeColor, badgeLabel){
     var ag=USUARIOS.find(function(u){return u.id===e.agente;});
     var maxDto=e.maxDescuento||0;
+    var cliNom=getCliNom(e);
     return <Card key={e.id} onClick={function(){setSel(e);}}>
       <div style={{display:"flex",gap:6,marginBottom:6,flexWrap:"wrap",alignItems:"center"}}>
         {badgeLabel&&<Badge label={badgeLabel} color={badgeColor}/>}
@@ -5198,7 +5228,7 @@ function MisEstrategias({usuario}){
         {maxDto>0&&<Badge label={"💸 "+maxDto+"%"} color={maxDto>15?T.red:maxDto>10?T.amber:T.green}/>}
         <span style={{marginLeft:"auto",fontSize:10,color:T.muted}}>{e.fecha||""}{e.semana?" · S"+e.semana:""}</span>
       </div>
-      <p style={{margin:"0 0 2px",fontSize:14,fontWeight:800,color:T.text}}>{e.cliente||e.clienteNombre||"(sin cliente)"}</p>
+      <p style={{margin:"0 0 2px",fontSize:14,fontWeight:800,color:T.text}}>{cliNom||"(sin cliente)"}</p>
       <p style={{margin:0,fontSize:12,color:T.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.texto||e.estrategia||""}</p>
       {e.estado==="pendiente_aprobacion"&&e.pendienteDeNombre&&<p style={{margin:"4px 0 0",fontSize:11,color:T.amber,fontWeight:600}}>⏳ Pendiente: {e.pendienteDeNombre}</p>}
     </Card>;
@@ -5371,14 +5401,14 @@ function MisEstrategias({usuario}){
           )}
 
           <button onClick={function(){
-            if(!formEst.cliente.trim()||!formEst.texto.trim()){alert("Cliente y acción son obligatorios");return;}
+            if(!(formEst.cliente||"").trim()||!(formEst.texto||"").trim()){alert("Cliente y acción son obligatorios");return;}
             crearEstrategia(formEst);
             setShowNuevaEst(false);
             setFormEst({cliente:"",clienteId:"",objetivo:"",texto:"",tipo:"recuperacion",ofertas:[],ofActual:{nombre:"",codigo:"",precioBase:"",dto:""},agenteAsignado:""});
           }}
-            disabled={!formEst.cliente.trim()||!formEst.texto.trim()}
+            disabled={!(formEst.cliente||"").trim()||!(formEst.texto||"").trim()}
             style={{width:"100%",padding:"13px",
-              background:formEst.cliente.trim()&&formEst.texto.trim()?T.amber:"#CBD5E1",
+              background:(formEst.cliente||"").trim()&&(formEst.texto||"").trim()?T.amber:"#CBD5E1",
               color:"#fff",border:"none",borderRadius:10,fontSize:14,fontWeight:700,cursor:"pointer"}}>
             ✅ Crear estrategia
           </button>
