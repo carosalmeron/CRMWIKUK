@@ -8349,10 +8349,9 @@ function DashDirector({usuario, onNav, estrategiasDB, oportunidadesDB, proyectos
   const proyBD=proyectosDB||PROYECTOS_SEED;
   const incBD=incidenciasDB||INCIDENCIAS_SEED;
   const muestBD=muestrasDB||MUESTRAS_SEED;
-  const opsActivas=opsBD.filter(o=>!String(o.etapa||o.estado||"").includes("cerrada"));
-  const valPipeline=opsActivas.reduce((s,o)=>s+(o.valor||0),0);
-  const proyActivos=proyBD.filter(p=>p.estado==="activo");
-  const estActivas=(estrategiasDB||[]).filter(e=>(e.estado==="en_curso"||e.estado==="pendiente_aprobacion")&&!e.eliminada&&!e.resolucion);
+  const opsActivasRaw=opsBD.filter(o=>!String(o.etapa||o.estado||"").includes("cerrada"));
+  const proyActivosRaw=proyBD.filter(p=>p.estado==="activo");
+  const estActivasRaw=(estrategiasDB||[]).filter(e=>(e.estado==="en_curso"||e.estado==="pendiente_aprobacion")&&!e.eliminada&&!e.resolucion);
 
   const [periodo,setPeriodo]=useState("semana");
   const [equipoFiltro,setEquipoFiltro]=useState(equipoLock||"todos");
@@ -8361,6 +8360,57 @@ function DashDirector({usuario, onNav, estrategiasDB, oportunidadesDB, proyectos
   const [treeRootOpen,setTreeRootOpen]=useState(!!equipoLock); // si hay lock, abrir directamente la lista
   const [treeEqOpen,setTreeEqOpen]=useState(equipoLock||null); // null | "WIKUK" | "INTERKEY"
   const [treeAbierto,setTreeAbierto]=useState(true); // árbol abierto al inicio; se colapsa al seleccionar
+
+  // ── Filtro por equipo/vendedor aplicado a items con campo agente ──────
+  // Coincide cuando: agente es de ese equipo, agente coincide con el seleccionado,
+  // o el item tiene campo equipo coincidente.
+  const matchScopeItem = React.useCallback((item)=>{
+    if (!equipoFiltro || equipoFiltro === "todos") {
+      if (!agenteFiltro) return true;
+    }
+    // Buscar usuario asociado al campo agente del item
+    const ag = String(item.agente||item.agenteId||item.creadoPor||"").toUpperCase();
+    const u = USUARIOS.find(usu =>
+      (usu.id||"").toUpperCase() === ag ||
+      (usu.grupoAgente||"").toUpperCase() === ag ||
+      (usu.nombre||"").toUpperCase() === ag
+    );
+    if (agenteFiltro) {
+      if (u && u.nombre === agenteFiltro) return true;
+      return false;
+    }
+    if (equipoFiltro && equipoFiltro !== "todos") {
+      // Match por usuario o por campo equipo del propio item
+      if (u && u.equipo === equipoFiltro) return true;
+      if (item.equipo && item.equipo === equipoFiltro) return true;
+      return false;
+    }
+    return true;
+  }, [equipoFiltro, agenteFiltro]);
+
+  const opsActivas = React.useMemo(()=>opsActivasRaw.filter(matchScopeItem), [opsActivasRaw, matchScopeItem]);
+  const estActivas = React.useMemo(()=>estActivasRaw.filter(matchScopeItem), [estActivasRaw, matchScopeItem]);
+  const proyActivos = React.useMemo(()=>{
+    if (!equipoFiltro || equipoFiltro === "todos") {
+      if (!agenteFiltro) return proyActivosRaw;
+    }
+    return proyActivosRaw.filter(p => {
+      // Proyecto está en scope si tiene al menos un hito cuyo responsable
+      // es agente del equipo / vendedor, o si el cliente del proyecto pertenece a ese equipo
+      if (p.equipo && equipoFiltro !== "todos" && p.equipo !== equipoFiltro && !agenteFiltro) return false;
+      const hitos = p.hitos || [];
+      if (hitos.length === 0) return false;
+      return hitos.some(h => {
+        if (!h.responsable) return false;
+        const u = USUARIOS.find(usu => (usu.id||"").toLowerCase() === String(h.responsable).toLowerCase());
+        if (agenteFiltro) return u && u.nombre === agenteFiltro;
+        if (equipoFiltro !== "todos") return u && u.equipo === equipoFiltro;
+        return true;
+      });
+    });
+  }, [proyActivosRaw, equipoFiltro, agenteFiltro]);
+
+  const valPipeline=opsActivas.reduce((s,o)=>s+(o.valor||0),0);
 
   // Datos por agente — lectura de AGENTES_DATA top-level
   // Si hay equipoLock (uso por Responsable), filtramos a su equipo desde la fuente
