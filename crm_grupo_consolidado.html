@@ -601,6 +601,84 @@ const MUESTRAS_SEED = [];
 // Fallback de estrategias_seed — VACÍO. Los datos vienen de Firebase.
 const ESTRATEGIAS_SEED = [];
 
+// ─── LÍMITES DE DESCUENTO POR ROL (configurables desde Panel Admin) ───────
+// Cada rol puede aprobar/crear estrategias hasta su límite. Si excede, escala
+// al siguiente nivel en la cadena: agente → jefe → director → ceo.
+const LIMITES_DTO_DEFAULT = {agente:4, jefe:10, director:15};
+window._configDto = Object.assign({},LIMITES_DTO_DEFAULT);
+
+function getLimitesDto(){
+  return Object.assign({},LIMITES_DTO_DEFAULT,window._configDto||{});
+}
+
+// Resuelve la cadena de escalado para una estrategia.
+// Devuelve {estado, pendienteDe, pendienteDeNombre} dado el rol del solicitante,
+// el equipo (para encontrar al jefe correspondiente), y el % de descuento.
+//
+// Reglas:
+//   agente (vendedor) → si dto > limites.agente, sube a jefe del equipo
+//   jefe (responsable) → si dto > limites.jefe, sube al director (jefe de ventas)
+//   director (jefe ventas) → si dto > limites.director, sube al CEO
+//   ceo → ningún escalado
+// Si el rol está dentro de su límite → estado "en_curso" (sin aprobación pendiente).
+function resolverEscaladoEstrategia(usuarioSolicitante, dto){
+  var limites=getLimitesDto();
+  var dtoNum=parseFloat(dto)||0;
+  var rol=((usuarioSolicitante&&usuarioSolicitante.rol)||"").toLowerCase();
+  var equipo=(usuarioSolicitante&&usuarioSolicitante.equipo)||"";
+  var miId=(usuarioSolicitante&&usuarioSolicitante.id)||"";
+
+  var ceoUser=USUARIOS.find(function(u){return u.rol==="ceo";});
+  var dirUser=USUARIOS.find(function(u){return u.rol==="director";});
+  var jefeEquipo=equipo?USUARIOS.find(function(u){return u.rol==="jefe"&&u.equipo===equipo;}):null;
+
+  var esCEO=rol.indexOf("ceo")>=0;
+  var esDir=rol.indexOf("director")>=0;
+  var esJefe=rol.indexOf("jefe")>=0||rol.indexOf("responsable")>=0;
+  var esAgente=rol.indexOf("agente")>=0||rol.indexOf("comercial")>=0;
+
+  // CEO: nunca escala
+  if(esCEO) return {estado:"en_curso",pendienteDe:null,pendienteDeNombre:null};
+
+  // Director (Jefe de Ventas): hasta limites.director va él, más sube a CEO
+  if(esDir){
+    if(dtoNum<=limites.director) return {estado:"en_curso",pendienteDe:null,pendienteDeNombre:null};
+    return {estado:"pendiente_aprobacion",pendienteDe:ceoUser?ceoUser.id:null,pendienteDeNombre:ceoUser?ceoUser.nombre:"CEO"};
+  }
+
+  // Jefe (Responsable): hasta limites.jefe va él, más sube a director (o CEO si no hay)
+  if(esJefe){
+    if(dtoNum<=limites.jefe) return {estado:"en_curso",pendienteDe:null,pendienteDeNombre:null};
+    var sigJ=dirUser||ceoUser;
+    return {estado:"pendiente_aprobacion",pendienteDe:sigJ?sigJ.id:null,pendienteDeNombre:sigJ?sigJ.nombre:"Superior"};
+  }
+
+  // Agente (Vendedor): hasta limites.agente va él, más sube por la cadena hasta el primer rol que cubra el dto
+  if(esAgente){
+    if(dtoNum<=limites.agente) return {estado:"en_curso",pendienteDe:null,pendienteDeNombre:null};
+    if(dtoNum<=limites.jefe&&jefeEquipo) return {estado:"pendiente_aprobacion",pendienteDe:jefeEquipo.id,pendienteDeNombre:jefeEquipo.nombre};
+    if(dtoNum<=limites.director&&dirUser) return {estado:"pendiente_aprobacion",pendienteDe:dirUser.id,pendienteDeNombre:dirUser.nombre};
+    return {estado:"pendiente_aprobacion",pendienteDe:ceoUser?ceoUser.id:null,pendienteDeNombre:ceoUser?ceoUser.nombre:"CEO"};
+  }
+
+  // Por defecto: queda en_curso
+  return {estado:"en_curso",pendienteDe:null,pendienteDeNombre:null};
+}
+
+// Carga los límites de descuento desde Firebase y los almacena en window._configDto.
+async function cargarConfigDto(){
+  try{
+    var docs=await fbLeer("configuracion");
+    var general=(docs||[]).find(function(d){return d.id==="general";});
+    if(general&&general.limites_dto&&typeof general.limites_dto==="object"){
+      window._configDto=Object.assign({},LIMITES_DTO_DEFAULT,general.limites_dto);
+      console.log("[CONFIG] Límites de dto cargados:",window._configDto);
+    } else {
+      console.log("[CONFIG] Sin límites guardados, usando defaults:",LIMITES_DTO_DEFAULT);
+    }
+  }catch(e){console.warn("[CONFIG] Error cargando config:",e);}
+}
+
 // ─── ESTADO GLOBAL COMPARTIDO (persiste entre logins en la misma sesión) ──────
 // Todos los componentes leen/escriben aquí → los cambios de CEO llegan al jefe
 // sin necesidad de Firebase
@@ -4661,6 +4739,7 @@ function MisEstrategias({usuario}){
   // Modal de acción (responder / aprobar / cerrar / pedir más)
   const [modalAccion,setModalAccion]=useState(null); // {tipo:"aprobar"|"rechazar"|"responder"|"cerrar"|"pedir_otra", subtipo:"pedido"|"exito"|...}
   const [modalTexto,setModalTexto]=useState("");
+  const [modalDto,setModalDto]=useState(""); // % solicitado al "pedir más descuento"
 
   useEffect(function(){
     if(sel && usuario && usuario.id) marcarComoVisto("estrategias", sel.id, usuario.id);
@@ -4763,23 +4842,13 @@ function MisEstrategias({usuario}){
     var ceoUser=USUARIOS.find(function(u){return u.rol==="ceo";});
     console.log("[EST] Agente resuelto:",agenteFinal,"(escogido:",datos.agenteAsignado||"-","| del cliente:",(idCli&&window._clientesFB?(((window._clientesFB||[]).find(function(x){return x.id===idCli;})||{}).GRUPOAGENTE):"-"),")");
 
-    // Cadena simplificada
-    var estado, pendienteDe=null, pendienteDeNombre=null;
-    if(esCEO||esDir){
-      estado="en_curso";
-    } else if(esJefe){
-      if(maxDto>10){
-        estado="pendiente_aprobacion";
-        pendienteDe=ceoUser?ceoUser.id:null;
-        pendienteDeNombre=ceoUser?ceoUser.nombre:"CEO";
-      } else {
-        estado="en_curso";
-      }
-    } else {
-      estado="pendiente_aprobacion";
-      pendienteDe=respEquipo?respEquipo.id:(ceoUser?ceoUser.id:null);
-      pendienteDeNombre=respEquipo?respEquipo.nombre:(ceoUser?ceoUser.nombre:"Superior");
-    }
+    // Cadena de aprobación según límites configurables por rol
+    // (los límites están en window._configDto, ver getLimitesDto)
+    var escal=resolverEscaladoEstrategia(usuario,maxDto);
+    var estado=escal.estado;
+    var pendienteDe=escal.pendienteDe;
+    var pendienteDeNombre=escal.pendienteDeNombre;
+    console.log("[EST] Cadena resuelta para",rol,"con dto",maxDto,"% →",estado,pendienteDe?"→ "+pendienteDeNombre:"(sin aprobador)");
 
     var est={
       id:"est_"+Date.now(),
@@ -4838,19 +4907,15 @@ function MisEstrategias({usuario}){
   var aprobarEstrategia=function(est, nota){
     var hoy=new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
     var maxDto=est.maxDescuento||0;
-    var ceoUser=USUARIOS.find(function(u){return u.rol==="ceo";});
 
-    var nuevoEstado="en_curso", nuevoPendienteDe=null, nuevoPendienteDeNombre=null;
-
-    // Si soy jefe (no CEO) y dto>10% → escalar al CEO
-    if(esJefe && !esCEO && !esDir && maxDto>10){
-      nuevoEstado="pendiente_aprobacion";
-      nuevoPendienteDe=ceoUser?ceoUser.id:null;
-      nuevoPendienteDeNombre=ceoUser?ceoUser.nombre:"CEO";
-    }
+    // Resolver si la aprobación me deja con autoridad o tengo que escalar
+    var escal=resolverEscaladoEstrategia(usuario,maxDto);
+    var nuevoEstado=escal.estado;
+    var nuevoPendienteDe=escal.pendienteDe;
+    var nuevoPendienteDeNombre=escal.pendienteDeNombre;
 
     var seguimiento={
-      accion:nuevoEstado==="en_curso"?"✅ Aprobada por "+(usuario.nombre||""):"📤 Escalada al CEO por "+(usuario.nombre||""),
+      accion:nuevoEstado==="en_curso"?"✅ Aprobada por "+(usuario.nombre||""):"📤 Escalada a "+(nuevoPendienteDeNombre||"superior")+" por "+(usuario.nombre||""),
       nota:(nota||"").trim(),
       por:usuario.nombre||"",porId:miId,fecha:hoy
     };
@@ -4907,7 +4972,7 @@ function MisEstrategias({usuario}){
   };
 
   // ── Comercial responde ────────────────────────────────
-  var responderEstrategia=function(est, tipoResp, nota){
+  var responderEstrategia=function(est, tipoResp, nota, nuevoDto){
     if(!nota||!nota.trim()){alert("Escribe un comentario obligatorio");return;}
     var hoy=new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
     var TIPOS={
@@ -4920,30 +4985,55 @@ function MisEstrategias({usuario}){
     var t=TIPOS[tipoResp];
     if(!t) return;
 
+    var ceoUser=USUARIOS.find(function(u){return u.rol==="ceo";});
+
     var pendienteDe=null, pendienteDeNombre=null;
     if(t.estado==="pendiente_cierre"){
       pendienteDe=est.creadoPor||null;
       pendienteDeNombre=est.creadoPorNombre||"Creador";
     } else if(t.estado==="pendiente_aprobacion"){
-      var eq=est.equipo||(USUARIOS.find(function(u){return u.id===est.agente;})||{}).equipo||"";
-      var resp=USUARIOS.find(function(u){return u.rol==="jefe"&&u.equipo===eq;});
-      pendienteDe=resp?resp.id:(est.creadoPor||null);
-      pendienteDeNombre=resp?resp.nombre:(est.creadoPorNombre||"Superior");
+      // Caso "pide más descuento": rutar según el nuevo % solicitado y los límites
+      // configurables por rol del solicitante (window._configDto).
+      if(tipoResp==="mas_dto"){
+        var dtoNum=parseFloat(nuevoDto)||0;
+        var escalRD=resolverEscaladoEstrategia(usuario,dtoNum);
+        if(escalRD.estado==="en_curso"){
+          // El propio comercial tiene autoridad — pero sigue necesitando confirmación del creador
+          pendienteDe=est.creadoPor||null;
+          pendienteDeNombre=est.creadoPorNombre||"Creador";
+        } else {
+          pendienteDe=escalRD.pendienteDe;
+          pendienteDeNombre=escalRD.pendienteDeNombre;
+        }
+      } else {
+        // Otros casos pendiente_aprobacion (no usados actualmente)
+        var ceoUserOld=USUARIOS.find(function(u){return u.rol==="ceo";});
+        var eq=est.equipo||(USUARIOS.find(function(u){return u.id===est.agente;})||{}).equipo||"";
+        var resp=USUARIOS.find(function(u){return u.rol==="jefe"&&u.equipo===eq;});
+        pendienteDe=resp?resp.id:(est.creadoPor||null);
+        pendienteDeNombre=resp?resp.nombre:(est.creadoPorNombre||"Superior");
+      }
     }
 
     var seguimiento={
-      accion:t.icon+" "+t.label,
+      accion:t.icon+" "+t.label+(tipoResp==="mas_dto"&&nuevoDto?" ("+nuevoDto+"%)":""),
       nota:nota.trim(),
       por:usuario.nombre||"",porId:miId,fecha:hoy,tipo:tipoResp
     };
+    if(tipoResp==="mas_dto") seguimiento.dtoSolicitado=parseFloat(nuevoDto)||0;
 
-    var updated=Object.assign({},est,{
+    var changes={
       estado:t.estado,
       resultado:t.resultado,
       pendienteDe:pendienteDe,
       pendienteDeNombre:pendienteDeNombre,
       seguimientos:(est.seguimientos||[]).concat([seguimiento])
-    });
+    };
+    // Si se pide más descuento, actualizamos también maxDescuento
+    if(tipoResp==="mas_dto"&&nuevoDto){
+      changes.maxDescuento=parseFloat(nuevoDto)||0;
+    }
+    var updated=Object.assign({},est,changes);
 
     setEstrategias(function(prev){return prev.map(function(e){return e.id===est.id?updated:e;});});
     fbEscribir("estrategias",est.id,updated);
@@ -4952,12 +5042,14 @@ function MisEstrategias({usuario}){
     if(pendienteDe&&pendienteDe!==miId){
       var titulos={
         pendiente_cierre:t.icon+" Tu estrategia: "+(est.cliente||"")+" — "+t.label,
-        pendiente_aprobacion:"🔐 Re-aprobación: "+(est.cliente||""),
+        pendiente_aprobacion:tipoResp==="mas_dto"
+          ?("🔐 Solicitud de descuento "+(nuevoDto||"")+"%: "+(est.cliente||""))
+          :("🔐 Re-aprobación: "+(est.cliente||"")),
         en_curso:"📝 Seguimiento: "+(est.cliente||"")
       };
       despacharNotificacion({tipo:"estrategia",
         titulo:titulos[t.estado]||t.label,
-        mensaje:(usuario.nombre||"")+" responde con: "+t.label+"\nNota: "+nota,
+        mensaje:(usuario.nombre||"")+" responde con: "+t.label+(tipoResp==="mas_dto"&&nuevoDto?(" ("+nuevoDto+"%)"):"")+"\nNota: "+nota,
         destinatarioId:pendienteDe,
         prioridad:tipoResp==="ko"||tipoResp==="mas_dto"?"alta":"normal",
         creadoPor:miId});
@@ -5261,24 +5353,44 @@ function MisEstrategias({usuario}){
               <p style={{margin:"0 0 12px",fontSize:11,color:T.muted}}>
                 {modalAccion.tipo==="aprobar"&&"Comentario opcional para el comercial"}
                 {modalAccion.tipo==="rechazar"&&"Motivo del rechazo (obligatorio)"}
-                {modalAccion.tipo==="responder"&&"Comentario obligatorio"}
+                {modalAccion.tipo==="responder"&&(modalAccion.subtipo==="mas_dto"?"Indica el descuento solicitado y justifícalo":"Comentario obligatorio")}
                 {modalAccion.tipo==="cerrar"&&"Comentario de cierre (obligatorio)"}
                 {modalAccion.tipo==="pedir_otra"&&"Nueva instrucción para el comercial"}
               </p>
+              {modalAccion.tipo==="responder"&&modalAccion.subtipo==="mas_dto"&&(
+                <div style={{marginBottom:10}}>
+                  <p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Descuento solicitado (%)</p>
+                  <input type="number" inputMode="decimal" step="0.5" min="0" max="100"
+                    value={modalDto} onChange={function(ev){setModalDto(ev.target.value);}}
+                    placeholder="Ej: 12.5"
+                    style={{width:"100%",border:"1.5px solid "+T.border,borderRadius:10,padding:"10px 12px",fontSize:14,outline:"none",boxSizing:"border-box",fontWeight:700}}/>
+                  {modalDto&&parseFloat(modalDto)>10&&<p style={{margin:"4px 0 0",fontSize:10,color:T.amber,fontWeight:600}}>⚠️ Más del 10%: la solicitud irá directamente al CEO.</p>}
+                  {modalDto&&parseFloat(modalDto)<=10&&parseFloat(modalDto)>0&&<p style={{margin:"4px 0 0",fontSize:10,color:T.green}}>✓ La solicitud irá al creador de la estrategia.</p>}
+                </div>
+              )}
               <textarea value={modalTexto} onChange={function(ev){setModalTexto(ev.target.value);}}
                 rows="4" placeholder="Escribe aquí…"
                 style={{width:"100%",border:"1.5px solid "+T.border,borderRadius:10,padding:"10px 12px",fontSize:13,outline:"none",boxSizing:"border-box",resize:"vertical",fontFamily:"inherit",marginBottom:14}}/>
               <div style={{display:"flex",gap:8}}>
-                <button onClick={function(){setModalAccion(null);setModalTexto("");}}
+                <button onClick={function(){setModalAccion(null);setModalTexto("");setModalDto("");}}
                   style={{flex:1,padding:"11px",borderRadius:10,border:"1px solid "+T.border,background:"#fff",color:T.muted,fontSize:13,cursor:"pointer"}}>Cancelar</button>
                 <button onClick={function(){
                   var t=modalAccion.tipo;
                   if(t==="aprobar"){aprobarEstrategia(sel,modalTexto);}
                   else if(t==="rechazar"){if(!modalTexto.trim()){alert("Indica el motivo");return;}rechazarEstrategia(sel,modalTexto);}
-                  else if(t==="responder"){if(!modalTexto.trim()){alert("Comentario obligatorio");return;}responderEstrategia(sel,modalAccion.subtipo,modalTexto);}
+                  else if(t==="responder"){
+                    if(!modalTexto.trim()){alert("Comentario obligatorio");return;}
+                    if(modalAccion.subtipo==="mas_dto"){
+                      var dtoNum=parseFloat(modalDto);
+                      if(!modalDto||isNaN(dtoNum)||dtoNum<=0){alert("Indica el % de descuento solicitado (mayor que 0)");return;}
+                      responderEstrategia(sel,modalAccion.subtipo,modalTexto,dtoNum);
+                    } else {
+                      responderEstrategia(sel,modalAccion.subtipo,modalTexto);
+                    }
+                  }
                   else if(t==="cerrar"){if(!modalTexto.trim()){alert("Comentario obligatorio");return;}cerrarEstrategia(sel,modalAccion.exito,modalTexto);}
                   else if(t==="pedir_otra"){if(!modalTexto.trim()){alert("Instrucción obligatoria");return;}pedirOtraAccion(sel,modalTexto);}
-                  setModalAccion(null);setModalTexto("");
+                  setModalAccion(null);setModalTexto("");setModalDto("");
                 }}
                   style={{flex:2,padding:"11px",borderRadius:10,border:"none",background:T.navy,color:"#fff",fontSize:14,fontWeight:700,cursor:"pointer"}}>
                   Confirmar
@@ -6442,7 +6554,7 @@ function PanelAdmin({onBack}){
 
       {/* Tabs */}
       <div style={{display:"flex",gap:6,marginBottom:24,background:T.bg,borderRadius:12,padding:4}}>
-        {[["jerarquia","🏗 Jerarquía"],["usuarios","👥 Usuarios"],["claves","🔑 Claves"]].map(([k,l])=>(
+        {[["jerarquia","🏗 Jerarquía"],["usuarios","👥 Usuarios"],["claves","🔑 Claves"],["descuentos","💸 Descuentos"]].map(([k,l])=>(
           <button key={k} onClick={()=>setTab(k)}
             style={{flex:1,padding:"9px",borderRadius:9,border:"none",
               background:tab===k?T.white:"transparent",
@@ -6651,6 +6763,120 @@ function PanelAdmin({onBack}){
           })}
         </div>
       )}
+
+      {/* TAB: DESCUENTOS — límites de aprobación por rol */}
+      {tab==="descuentos"&&(()=>{
+        // Estado local para el formulario (cargado desde window._configDto)
+        var [valAg,setValAg]=useState((window._configDto||LIMITES_DTO_DEFAULT).agente);
+        var [valJf,setValJf]=useState((window._configDto||LIMITES_DTO_DEFAULT).jefe);
+        var [valDr,setValDr]=useState((window._configDto||LIMITES_DTO_DEFAULT).director);
+        var [guardando,setGuardando]=useState(false);
+        var [msg,setMsg]=useState("");
+
+        var guardar=async function(){
+          var ag=parseFloat(valAg), jf=parseFloat(valJf), dr=parseFloat(valDr);
+          if(isNaN(ag)||isNaN(jf)||isNaN(dr)||ag<0||jf<0||dr<0){
+            setMsg("⚠️ Valores no válidos. Deben ser números mayores o iguales a 0.");
+            return;
+          }
+          if(!(ag<=jf&&jf<=dr)){
+            setMsg("⚠️ Los límites deben ser crecientes: vendedor ≤ responsable ≤ jefe ventas.");
+            return;
+          }
+          setGuardando(true);
+          setMsg("");
+          var nuevo={agente:ag,jefe:jf,director:dr};
+          var ok=await fbEscribir("configuracion","general",{limites_dto:nuevo,actualizadoEn:new Date().toISOString(),actualizadoPor:"admin"});
+          if(ok){
+            window._configDto=nuevo;
+            setMsg("✅ Guardado. Los nuevos límites se aplicarán a futuras estrategias.");
+          } else {
+            setMsg("❌ Error guardando en Firebase. Reintenta.");
+          }
+          setGuardando(false);
+        };
+
+        return(
+          <div>
+            <p style={{margin:"0 0 8px",fontSize:13,color:T.muted,lineHeight:1.5}}>
+              Cada rol puede crear/aprobar estrategias hasta su límite de descuento.
+              Si excede, la estrategia escala automáticamente al siguiente nivel:
+              <br/><b>Vendedor → Responsable → Jefe de Ventas → CEO</b>.
+            </p>
+
+            {/* Vendedor */}
+            <div style={{background:"#fff",borderRadius:12,padding:14,border:"1px solid "+T.border,marginBottom:10}}>
+              <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:8}}>
+                <div style={{width:36,height:36,borderRadius:10,background:T.muted+"22",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>🧑‍💼</div>
+                <div style={{flex:1}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>Vendedor (Comercial)</p>
+                  <p style={{margin:0,fontSize:11,color:T.muted}}>Hasta este % la estrategia es directa al creador. Si excede → Responsable.</p>
+                </div>
+              </div>
+              <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                <input type="number" inputMode="decimal" step="0.5" min="0" max="100"
+                  value={valAg} onChange={function(ev){setValAg(ev.target.value);}}
+                  style={{flex:1,padding:"10px 12px",borderRadius:10,border:"1.5px solid "+T.border,fontSize:14,fontWeight:700,outline:"none"}}/>
+                <span style={{fontSize:14,fontWeight:700,color:T.muted}}>%</span>
+              </div>
+            </div>
+
+            {/* Responsable */}
+            <div style={{background:"#fff",borderRadius:12,padding:14,border:"1px solid "+T.border,marginBottom:10}}>
+              <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:8}}>
+                <div style={{width:36,height:36,borderRadius:10,background:T.green+"22",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>🏆</div>
+                <div style={{flex:1}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>Responsable de Equipo</p>
+                  <p style={{margin:0,fontSize:11,color:T.muted}}>Aprueba hasta este %. Si excede → Jefe de Ventas.</p>
+                </div>
+              </div>
+              <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                <input type="number" inputMode="decimal" step="0.5" min="0" max="100"
+                  value={valJf} onChange={function(ev){setValJf(ev.target.value);}}
+                  style={{flex:1,padding:"10px 12px",borderRadius:10,border:"1.5px solid "+T.border,fontSize:14,fontWeight:700,outline:"none"}}/>
+                <span style={{fontSize:14,fontWeight:700,color:T.muted}}>%</span>
+              </div>
+            </div>
+
+            {/* Jefe de Ventas */}
+            <div style={{background:"#fff",borderRadius:12,padding:14,border:"1px solid "+T.border,marginBottom:10}}>
+              <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:8}}>
+                <div style={{width:36,height:36,borderRadius:10,background:T.blue+"22",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>📊</div>
+                <div style={{flex:1}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>Jefe de Ventas (Director)</p>
+                  <p style={{margin:0,fontSize:11,color:T.muted}}>Aprueba hasta este %. Si excede → CEO.</p>
+                </div>
+              </div>
+              <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                <input type="number" inputMode="decimal" step="0.5" min="0" max="100"
+                  value={valDr} onChange={function(ev){setValDr(ev.target.value);}}
+                  style={{flex:1,padding:"10px 12px",borderRadius:10,border:"1.5px solid "+T.border,fontSize:14,fontWeight:700,outline:"none"}}/>
+                <span style={{fontSize:14,fontWeight:700,color:T.muted}}>%</span>
+              </div>
+            </div>
+
+            {/* CEO */}
+            <div style={{background:T.purple+"08",borderRadius:12,padding:14,border:"1px dashed "+T.purple+"55",marginBottom:14}}>
+              <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                <div style={{width:36,height:36,borderRadius:10,background:T.purple+"22",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>👑</div>
+                <div>
+                  <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>CEO</p>
+                  <p style={{margin:0,fontSize:11,color:T.muted}}>Sin límite. Aprueba todo lo que llega de niveles superiores.</p>
+                </div>
+              </div>
+            </div>
+
+            {msg&&<p style={{margin:"0 0 10px",fontSize:12,fontWeight:700,color:msg.indexOf("✅")===0?T.green:msg.indexOf("⚠️")===0?T.amber:T.red}}>{msg}</p>}
+
+            <button onClick={guardar} disabled={guardando}
+              style={{width:"100%",padding:"13px",borderRadius:10,border:"none",
+                background:guardando?"#CBD5E1":T.navy,color:"#fff",fontSize:14,fontWeight:700,
+                cursor:guardando?"default":"pointer"}}>
+              {guardando?"Guardando…":"💾 Guardar límites"}
+            </button>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -11327,26 +11553,12 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
                 var equipoAg=agenteUser.equipo||usuario.equipo||"";
 
                 var maxDto=Math.max.apply(null,(e.ofertas||[]).map(function(o){return parseFloat(o.dto)||0;}).concat([0]));
-                var ceoUser=USUARIOS.find(function(u){return u.rol==="ceo";});
-                var respEquipo=USUARIOS.find(function(u){return u.rol==="jefe"&&u.equipo===equipoAg;});
 
-                var estadoInicial, pendienteDeId=null, pendienteDeNombre=null;
-                if(esCEOU||esDirU){
-                  estadoInicial="en_curso";
-                } else if(esJefeU){
-                  if(maxDto>10){
-                    estadoInicial="pendiente_aprobacion";
-                    pendienteDeId=ceoUser?ceoUser.id:null;
-                    pendienteDeNombre=ceoUser?ceoUser.nombre:"CEO";
-                  } else {
-                    estadoInicial="en_curso";
-                  }
-                } else {
-                  // Comercial
-                  estadoInicial="pendiente_aprobacion";
-                  pendienteDeId=respEquipo?respEquipo.id:(ceoUser?ceoUser.id:null);
-                  pendienteDeNombre=respEquipo?respEquipo.nombre:(ceoUser?ceoUser.nombre:"Superior");
-                }
+                // Cadena de aprobación según límites configurables por rol
+                var escalCG=resolverEscaladoEstrategia(usuario,maxDto);
+                var estadoInicial=escalCG.estado;
+                var pendienteDeId=escalCG.pendienteDe;
+                var pendienteDeNombre=escalCG.pendienteDeNombre;
 
                 var hoy=new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
                 var fechaISO=new Date().toISOString();
@@ -12260,8 +12472,17 @@ function EstrategiaTab({estrategia,clienteNombre,onGuardar,onBorrar,usuario,onRe
               ].map(function(btn){
                 return <button key={btn.k} onClick={function(){
                   if(!respTexto.trim()){alert("Comentario obligatorio");return;}
+                  // Si se pide más descuento, pedir el % concreto
+                  var nuevoDto=null;
+                  if(btn.k==="mas_dto"){
+                    var dtoIn=window.prompt("Indica el % de descuento solicitado:","");
+                    if(dtoIn===null) return; // cancelado
+                    var dtoNumIn=parseFloat(dtoIn);
+                    if(isNaN(dtoNumIn)||dtoNumIn<=0){alert("Indica un número válido mayor que 0");return;}
+                    nuevoDto=dtoNumIn;
+                  }
                   // Cadena: pedido/exito/ko → pendiente_cierre (vuelve al creador)
-                  //         mas_dto → pendiente_aprobacion (al jefe del equipo)
+                  //         mas_dto → pendiente_aprobacion (>10% al CEO, <=10% al creador)
                   //         seguimiento → en_curso
                   var TIPOS={
                     pedido:{icon:"✅",label:"Pedido conseguido",estado:"pendiente_cierre",resultado:"pedido"},
@@ -12272,31 +12493,48 @@ function EstrategiaTab({estrategia,clienteNombre,onGuardar,onBorrar,usuario,onRe
                   };
                   var t=TIPOS[btn.k];
                   var hoy=new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
+                  var ceoUserCli=USUARIOS.find(function(u){return u.rol==="ceo";});
                   var pendienteDe=null, pendienteDeNombre=null;
                   if(t.estado==="pendiente_cierre"){
                     pendienteDe=estrategia.creadoPor||null;
                     pendienteDeNombre=estrategia.creadoPorNombre||"Creador";
                   } else if(t.estado==="pendiente_aprobacion"){
-                    var eq=estrategia.equipo||(USUARIOS.find(function(u){return u.id===estrategia.agente;})||{}).equipo||"";
-                    var resp=USUARIOS.find(function(u){return u.rol==="jefe"&&u.equipo===eq;});
-                    pendienteDe=resp?resp.id:(estrategia.creadoPor||null);
-                    pendienteDeNombre=resp?resp.nombre:(estrategia.creadoPorNombre||"Superior");
+                    if(btn.k==="mas_dto"){
+                      // Usar helper centralizado con límites configurables por rol
+                      var escalCli=resolverEscaladoEstrategia(usuario,nuevoDto);
+                      if(escalCli.estado==="en_curso"){
+                        // El usuario tiene autoridad — pero queda al creador para confirmar
+                        pendienteDe=estrategia.creadoPor||null;
+                        pendienteDeNombre=estrategia.creadoPorNombre||"Creador";
+                      } else {
+                        pendienteDe=escalCli.pendienteDe;
+                        pendienteDeNombre=escalCli.pendienteDeNombre;
+                      }
+                    } else {
+                      var eq=estrategia.equipo||(USUARIOS.find(function(u){return u.id===estrategia.agente;})||{}).equipo||"";
+                      var resp=USUARIOS.find(function(u){return u.rol==="jefe"&&u.equipo===eq;});
+                      pendienteDe=resp?resp.id:(estrategia.creadoPor||null);
+                      pendienteDeNombre=resp?resp.nombre:(estrategia.creadoPorNombre||"Superior");
+                    }
                   }
                   var seguimiento={
-                    accion:t.icon+" "+t.label,
+                    accion:t.icon+" "+t.label+(btn.k==="mas_dto"&&nuevoDto?" ("+nuevoDto+"%)":""),
                     nota:respTexto.trim(),
                     por:(usuario||{}).nombre||"",
                     porId:(usuario||{}).id||"",
                     fecha:hoy,
                     tipo:btn.k
                   };
-                  var updated=Object.assign({},estrategia,{
+                  if(btn.k==="mas_dto"&&nuevoDto) seguimiento.dtoSolicitado=nuevoDto;
+                  var changes={
                     estado:t.estado,
                     resultado:t.resultado,
                     pendienteDe:pendienteDe,
                     pendienteDeNombre:pendienteDeNombre,
                     seguimientos:(estrategia.seguimientos||[]).concat([seguimiento])
-                  });
+                  };
+                  if(btn.k==="mas_dto"&&nuevoDto) changes.maxDescuento=nuevoDto;
+                  var updated=Object.assign({},estrategia,changes);
                   if(onResponder) onResponder(updated);
                   setRespTexto("");
                 }} style={{padding:"9px 14px",borderRadius:10,border:"1.5px solid "+btn.color+"55",background:btn.color+"12",fontSize:12,fontWeight:700,cursor:"pointer",color:btn.color}}>
@@ -13777,6 +14015,11 @@ function App(props){
     cargarUsuariosFB().then(ok=>{
       if(ok) setUsrVer(v=>v+1);
     });
+  },[]);
+
+  // Cargar límites de descuento desde Firebase (configurables desde Panel Admin)
+  useEffect(()=>{
+    cargarConfigDto();
   },[]);
 
   // Cargar objetivos/presupuesto/monetización al arrancar — una vez por sesión
