@@ -404,7 +404,7 @@ export default async function handler(req, res) {
       agentesScope.forEach(u => idsAg(u).forEach(id => allIds.add(id)));
       const sf = arr => arr.filter(x => pertA(x, allIds));
 
-      let tV=0,tP=0,tL=0,sMb=0,cMb=0,tOV=0,tOP=0,tOL=0,sOMb=0;
+      let tV=0,tP=0,tL=0,sMb=0,cMb=0,tOV=0,tOP=0,tOL=0,sOMb=0,cOMb=0;
 
       const porVendedor = agentesScope.map(ag => {
         const ids = idsAg(ag);
@@ -415,7 +415,7 @@ export default async function handler(req, res) {
         const p = inf?(Number(inf.promo)||0):0;
         const l = inf?(Number(inf.liq)||0):0;
         tV+=v; tP+=p; tL+=l; if(m>0){sMb+=m;cMb++;}
-        tOV+=obj.oV; tOP+=obj.oPromo; tOL+=obj.oLiq; if(obj.oMb>0) sOMb+=obj.oMb;
+        tOV+=obj.oV; tOP+=obj.oPromo; tOL+=obj.oLiq; if(obj.oMb>0){sOMb+=obj.oMb;cOMb++;}
         const visR = calcVisRuta(ids);
         return {
           nombre:ag.nombre||ag.id, equipo:ag.equipo||"SIN EQUIPO",
@@ -432,9 +432,9 @@ export default async function handler(req, res) {
       if (!esJefe) {
         porEquipo = ["WIKUK","INTERKEY"].map(eq => {
           const idsEq = new Set();
-          usuarios.filter(u=>(u.rol==="agente"||u.rol==="crm_agente")&&u.equipo===eq).forEach(u=>idsAg(u).forEach(id=>idsEq.add(id)));
+          usuarios.filter(u=>u.equipo===eq).forEach(u=>idsAg(u).forEach(id=>idsEq.add(id)));
           const agEq = agentesScope.filter(a => a.equipo === eq);
-          let eqV=0,eqP=0,eqL=0,eqMb=0,eqCMb=0,eqOV=0,eqOP=0,eqOL=0,eqOMb=0;
+          let eqV=0,eqP=0,eqL=0,eqMb=0,eqCMb=0,eqOV=0,eqOP=0,eqOL=0,eqOMb=0,eqCOMb=0;
           agEq.forEach(ag => {
             const inf = infSem.find(i=>i.agente===ag.id||i.agenteId===ag.id);
             const obj = getObj(ag.id,ag.grupoAgente||"");
@@ -442,11 +442,11 @@ export default async function handler(req, res) {
             const m=inf?(Number(inf.mb)||0):0;
             eqV+=v; eqP+=inf?(Number(inf.promo)||0):0; eqL+=inf?(Number(inf.liq)||0):0;
             if(m>0){eqMb+=m;eqCMb++;}
-            eqOV+=obj.oV; eqOP+=obj.oPromo; eqOL+=obj.oLiq; if(obj.oMb>0) eqOMb+=obj.oMb;
+            eqOV+=obj.oV; eqOP+=obj.oPromo; eqOL+=obj.oLiq; if(obj.oMb>0){eqOMb+=obj.oMb;eqCOMb++;}
           });
           return {
             equipo: eq, v:eqV, mb:eqCMb>0?Math.round(eqMb/eqCMb*10)/10:0, promo:eqP, liq:eqL,
-            oV:eqOV, oMb:eqCMb>0?Math.round(eqOMb/eqCMb*10)/10:0, oPromo:eqOP, oLiq:eqOL,
+            oV:eqOV, oMb:eqCOMb>0?Math.round(eqOMb/eqCOMb*10)/10:0, oPromo:eqOP, oLiq:eqOL,
             vis:sf(visSem).filter(x=>pertA(x,idsEq)).length, visR:calcVisRuta(idsEq),
             ops:sf(opsSemana).filter(x=>pertA(x,idsEq)).length,
             est:sf(estSem).filter(x=>pertA(x,idsEq)).length,
@@ -460,7 +460,7 @@ export default async function handler(req, res) {
       return {
         titulo, nombre: mgNombre, semana, lu, vi, nombreMap,
         totales: {
-          ventas:tV, oVentas:tOV, mb:cMb>0?Math.round(sMb/cMb*10)/10:0, oMb:cMb>0?Math.round(sOMb/cMb*10)/10:0,
+          ventas:tV, oVentas:tOV, mb:cMb>0?Math.round(sMb/cMb*10)/10:0, oMb:cOMb>0?Math.round(sOMb/cOMb*10)/10:0,
           promo:tP, oPromo:tOP, liq:tL, oLiq:tOL,
           visitasReal:sf(visSem).length, visitasRuta:totalVisR,
           clientesNuevos:cliNuevos.filter(c=>pertA(c,allIds)||!esJefe).length,
@@ -487,7 +487,13 @@ export default async function handler(req, res) {
     const managers = usuarios.filter(u=>["jefe","director","ceo"].includes(u.rol)&&u.email);
     for (const mg of managers) {
       const esJefe = mg.rol === "jefe";
-      const scope = usuarios.filter(u=>(u.rol==="agente"||u.rol==="crm_agente")&&(esJefe?u.equipo===mg.equipo:true));
+      // Include agents + jefes + directors + ceo (anyone who can have activity)
+      const rolesActivos = ["agente","crm_agente","jefe","director","ceo"];
+      const scope = usuarios.filter(u=>{
+        if (!rolesActivos.includes(u.rol)) return false;
+        if (esJefe) return u.equipo === mg.equipo || u.id === mg.id;
+        return true;
+      });
       const ctx = buildCtx(
         esJefe ? `Equipo ${mg.equipo} · Semana ${semana}` : `Informe consolidado · Semana ${semana}`,
         mg.nombre, scope, esJefe
