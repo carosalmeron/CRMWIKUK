@@ -81,7 +81,7 @@ const DEPS = {
 const PRIORIDAD_COLOR = { alta: "#EF4444", urgente: "#EF4444", media: "#F59E0B", baja: "#22C55E", normal: "#64748B" };
 const ESTADO_ICON = { abierta: "🔴", en_proceso: "🟡", escalada: "🟠", resuelta: "✅", cerrada: "⬜" };
 
-function buildEmailDept({ depKey, depConfig, nombre, incAyer, incNuevasAyer, incResueltasAyer, incPendientes, incEscaladas, tareasHoy, tareasVencidas, muestrasID }) {
+function buildEmailDept({ depKey, depConfig, nombre, incAyer, incNuevasAyer, incResueltasAyer, incPendientes, incEscaladas, tareasHoy, tareasVencidas, muestrasID, muestrasKOAyer, hitosAbiertos, proyectosActivos }) {
   const fD = d => d.toLocaleDateString("es-ES", { weekday: "long", day: "2-digit", month: "short" });
   const hoy = new Date();
   const ayer = new Date(); ayer.setDate(ayer.getDate() - 1);
@@ -164,11 +164,49 @@ function buildEmailDept({ depKey, depConfig, nombre, incAyer, incNuevasAyer, inc
     }
   }
 
-  // Muestras (solo I+D)
+  // Muestras pendientes feedback (I+D)
   if (muestrasID && muestrasID.length > 0) {
-    html += `<p style="margin:18px 0 8px;font-size:14px;font-weight:800;color:#7C3AED;border-bottom:2px solid #E2E8F0;padding-bottom:6px">🔬 Muestras con feedback pendiente (${muestrasID.length})</p>`;
+    html += `<p style="margin:18px 0 8px;font-size:14px;font-weight:800;color:#7C3AED;border-bottom:2px solid #E2E8F0;padding-bottom:6px">🔬 Muestras pendientes feedback (${muestrasID.length})</p>`;
     muestrasID.slice(0, 10).forEach(m => {
-      html += `<div style="padding:4px 0 4px 10px;margin-bottom:4px;border-left:3px solid #7C3AED"><p style="margin:0;font-size:12px"><b>${m.cliente || "—"}</b> — ${m.prod || m.tipo || "?"} <span style="color:#64748B">(${m.agente || ""})</span></p></div>`;
+      html += `<div style="padding:4px 0 4px 10px;margin-bottom:4px;border-left:3px solid #7C3AED"><p style="margin:0;font-size:12px"><b>${m.cliente || "—"}</b> — ${m.prod || m.tipo || "?"} · ${m.estadoMuestra||"?"} <span style="color:#64748B">(${m.agente || ""})</span></p></div>`;
+    });
+    if (muestrasID.length > 10) html += `<p style="font-size:11px;color:#94A3B8">... y ${muestrasID.length-10} más</p>`;
+  }
+
+  // Muestras KO de ayer (I+D)
+  if (muestrasKOAyer && muestrasKOAyer.length > 0) {
+    html += `<p style="margin:18px 0 8px;font-size:14px;font-weight:800;color:#EF4444;border-bottom:2px solid #E2E8F0;padding-bottom:6px">❌ Muestras KO ayer (${muestrasKOAyer.length})</p>`;
+    muestrasKOAyer.forEach(m => {
+      html += `<div style="border-left:3px solid #EF4444;padding:6px 0 6px 10px;margin-bottom:6px;background:#FEF2F2;border-radius:0 6px 6px 0">
+        <p style="margin:0;font-size:12px;font-weight:600;color:#991B1B">${m.cliente||"—"} — ${m.prod||m.tipo||"?"}</p>
+        ${m.motivo?`<p style="margin:2px 0 0;font-size:11px;color:#DC2626">Motivo: ${m.motivo}</p>`:""}
+        ${m.nota?`<p style="margin:2px 0 0;font-size:11px;color:#475569;font-style:italic">"${m.nota.substring(0,200)}"</p>`:""}
+        <p style="margin:2px 0 0;font-size:10px;color:#94A3B8">${m.agente||""} · ${m.equipo||""}</p>
+      </div>`;
+    });
+  }
+
+  // Proyectos activos (I+D)
+  if (proyectosActivos && proyectosActivos.length > 0) {
+    html += `<p style="margin:18px 0 8px;font-size:14px;font-weight:800;color:#3B82F6;border-bottom:2px solid #E2E8F0;padding-bottom:6px">🚀 Proyectos activos (${proyectosActivos.length})</p>`;
+    proyectosActivos.forEach(p => {
+      const pc = p.progreso >= 75 ? "#22C55E" : p.progreso >= 40 ? "#F59E0B" : "#3B82F6";
+      html += `<div style="background:#F8FAFC;border-radius:8px;padding:8px 12px;margin-bottom:6px;border-left:3px solid ${pc}">
+        <div style="display:flex;justify-content:space-between"><b style="font-size:12px;color:#1E3A5F">${p.nombre}</b><span style="font-size:12px;font-weight:800;color:${pc}">${p.progreso}%</span></div>
+        <p style="margin:2px 0 0;font-size:10px;color:#64748B">${p.hitosHechos}/${p.totalHitos} hitos</p>
+        <div style="background:#E2E8F0;border-radius:3px;height:4px;margin-top:4px"><div style="background:${pc};height:100%;width:${p.progreso}%;border-radius:3px"></div></div>
+      </div>`;
+    });
+  }
+
+  // Hitos pendientes (I+D)
+  if (hitosAbiertos && hitosAbiertos.length > 0) {
+    html += `<p style="margin:18px 0 8px;font-size:14px;font-weight:800;color:#F59E0B;border-bottom:2px solid #E2E8F0;padding-bottom:6px">🏗️ Hitos pendientes (${hitosAbiertos.length})</p>`;
+    hitosAbiertos.slice(0,15).forEach(h => {
+      const hoyISO = new Date().toISOString().split("T")[0];
+      const fISO = h.fecha.includes("/") ? h.fecha.split("/").reverse().join("-") : h.fecha;
+      const venc = fISO && fISO < hoyISO;
+      html += `<div style="padding:3px 0 3px 10px;margin-bottom:3px;border-left:3px solid ${venc?"#EF4444":"#F59E0B"}"><p style="margin:0;font-size:11px">${venc?"🔴":"🟡"} <b>${h.nombre}</b> · ${h.proyecto} · ${h.fecha||"sin fecha"}</p></div>`;
     });
   }
 
@@ -192,14 +230,15 @@ export default async function handler(req, res) {
   if (!isManual && !isCron) return res.status(401).json({ ok: false, error: "Solo via cron o ?manual=1" });
 
   try {
-    const [usuarios, incidencias, tareas, muestras] = await Promise.all([
-      fbList("usuarios"), fbList("incidencias"), fbList("tareas"), fbList("muestras"),
+    const [usuarios, incidencias, tareas, muestras, proyectos] = await Promise.all([
+      fbList("usuarios"), fbList("incidencias"), fbList("tareas"), fbList("muestras"), fbList("proyectos"),
     ]);
 
     const noElim = arr => arr.filter(x => !x.eliminada);
     const allInc = noElim(incidencias);
     const allTareas = noElim(tareas);
     const allMuestras = noElim(muestras);
+    const allProyectos = noElim(proyectos).filter(p => p.estado === "activo");
     const hoy = new Date();
 
     const nodemailer = (await import("nodemailer")).default;
@@ -252,10 +291,23 @@ export default async function handler(req, res) {
         return v && v < hoy && !(v.getDate() === hoy.getDate() && v.getMonth() === hoy.getMonth());
       });
 
-      // Muestras pendientes de feedback (solo I+D)
-      let muestrasID = null;
+      // Muestras (solo I+D)
+      let muestrasID = null, muestrasKOAyer = null, hitosAbiertos = null, proyectosActivos = null;
       if (depKey === "id") {
         muestrasID = allMuestras.filter(m => !m.fechaFeedback && (m.estadoMuestra === "ENTREGADO" || m.estadoMuestra === "ENVIADO"));
+        muestrasKOAyer = allMuestras.filter(m => m.estado === "ko" && esAyer(m));
+        hitosAbiertos = [];
+        allProyectos.forEach(p => {
+          (p.hitos || []).forEach(h => {
+            if (typeof h !== "object" || !h || h.hecho) return;
+            hitosAbiertos.push({ nombre: h.nombre || "Sin nombre", proyecto: p.nombre || "", fecha: h.fecha || "", responsable: h.responsable || "" });
+          });
+        });
+        proyectosActivos = allProyectos.map(p => {
+          const hitos = (p.hitos || []).filter(h => typeof h === "object" && h);
+          const hechos = hitos.filter(h => h.hecho).length;
+          return { nombre: p.nombre || "", progreso: hitos.length > 0 ? Math.round(hechos / hitos.length * 100) : 0, totalHitos: hitos.length, hitosHechos: hechos };
+        });
       }
 
       const html = buildEmailDept({
@@ -268,7 +320,7 @@ export default async function handler(req, res) {
         incEscaladas,
         tareasHoy,
         tareasVencidas,
-        muestrasID,
+        muestrasID, muestrasKOAyer, hitosAbiertos, proyectosActivos,
       });
 
       try {

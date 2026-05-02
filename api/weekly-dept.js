@@ -101,7 +101,7 @@ function renderInc(i, dc) {
 }
 
 // ── Email departamento semanal ──
-function buildWeeklyDept({ depConfig, nombre, semana, lu, vi, nuevas, resueltas, pendientes, escaladas, tareasCompletadas, tareasPendientes, muestrasID }) {
+function buildWeeklyDept({ depConfig, nombre, semana, lu, vi, nuevas, resueltas, pendientes, escaladas, tareasCompletadas, tareasPendientes, muestrasID, muestrasKO, hitosAbiertos, proyectosActivos }) {
   const fD = d => d.toLocaleDateString("es-ES", { day:"2-digit", month:"short" });
   let html = `<!doctype html><html><body style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#F0F4F8;padding:16px;color:#0F172A">
   <div style="max-width:640px;margin:0 auto;background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08)">
@@ -143,12 +143,55 @@ function buildWeeklyDept({ depConfig, nombre, semana, lu, vi, nuevas, resueltas,
     if (sorted.length > 20) html += `<p style="font-size:11px;color:#94A3B8;margin:6px 0">... y ${sorted.length-20} más</p>`;
   }
 
-  // Muestras I+D
+  // Muestras I+D — pendientes feedback
   if (muestrasID && muestrasID.length > 0) {
     html += `<p style="margin:18px 0 8px;font-size:14px;font-weight:800;color:#7C3AED">🔬 Muestras pendientes feedback (${muestrasID.length})</p>`;
     muestrasID.slice(0,10).forEach(m => {
-      html += `<div style="padding:3px 0 3px 10px;margin-bottom:3px;border-left:3px solid #7C3AED"><p style="margin:0;font-size:12px"><b>${m.cliente||"—"}</b> — ${m.prod||m.tipo||"?"} (${m.agente||""})</p></div>`;
+      html += `<div style="padding:3px 0 3px 10px;margin-bottom:3px;border-left:3px solid #7C3AED"><p style="margin:0;font-size:12px"><b>${m.cliente||"—"}</b> — ${m.prod||m.tipo||"?"} · ${m.estadoMuestra||"?"} <span style="color:#64748B">(${m.agente||""})</span></p></div>`;
     });
+  }
+
+  // Muestras KO de la semana con comentarios
+  if (muestrasKO && muestrasKO.length > 0) {
+    html += `<p style="margin:18px 0 8px;font-size:14px;font-weight:800;color:#EF4444">❌ Muestras KO esta semana (${muestrasKO.length})</p>`;
+    muestrasKO.forEach(m => {
+      html += `<div style="border-left:3px solid #EF4444;padding:8px 0 8px 12px;margin-bottom:8px;background:#FEF2F2;border-radius:0 8px 8px 0">
+        <p style="margin:0;font-size:13px;font-weight:600;color:#991B1B">${m.cliente||"—"} — ${m.prod||m.tipo||"?"}</p>
+        <p style="margin:2px 0 0;font-size:11px;color:#64748B">${m.agente||""} · ${m.fecha||""} · ${m.equipo||""}</p>
+        ${m.motivo?`<p style="margin:4px 0 0;font-size:12px;color:#DC2626;font-weight:600">Motivo: ${m.motivo}</p>`:""}
+        ${m.nota?`<p style="margin:3px 0 0;font-size:11px;color:#475569;font-style:italic;line-height:1.4">"${m.nota.substring(0,250)}${m.nota.length>250?"...":""}"</p>`:""}
+      </div>`;
+    });
+  }
+
+  // Proyectos activos
+  if (proyectosActivos && proyectosActivos.length > 0) {
+    html += `<p style="margin:18px 0 8px;font-size:14px;font-weight:800;color:#3B82F6">🚀 Proyectos activos (${proyectosActivos.length})</p>`;
+    proyectosActivos.forEach(p => {
+      const pctColor = p.progreso >= 75 ? "#22C55E" : p.progreso >= 40 ? "#F59E0B" : "#3B82F6";
+      html += `<div style="background:#F8FAFC;border-radius:8px;padding:10px 14px;margin-bottom:8px;border-left:3px solid ${pctColor}">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <p style="margin:0;font-size:13px;font-weight:700;color:#1E3A5F">${p.nombre}</p>
+          <span style="font-size:13px;font-weight:800;color:${pctColor}">${p.progreso}%</span>
+        </div>
+        <p style="margin:3px 0 0;font-size:11px;color:#64748B">${p.tipo||""} · ${p.hitosHechos}/${p.totalHitos} hitos · ${p.responsable}</p>
+        <div style="background:#E2E8F0;border-radius:4px;height:6px;margin-top:6px;overflow:hidden"><div style="background:${pctColor};height:100%;width:${p.progreso}%;border-radius:4px"></div></div>
+      </div>`;
+    });
+  }
+
+  // Hitos abiertos pendientes
+  if (hitosAbiertos && hitosAbiertos.length > 0) {
+    html += `<p style="margin:18px 0 8px;font-size:14px;font-weight:800;color:#F59E0B">🏗️ Hitos pendientes (${hitosAbiertos.length})</p>`;
+    hitosAbiertos.slice(0,20).forEach(h => {
+      const hoy = new Date().toISOString().split("T")[0];
+      const fISO = h.fecha.includes("/") ? h.fecha.split("/").reverse().join("-") : h.fecha;
+      const vencido = fISO && fISO < hoy;
+      html += `<div style="padding:4px 0 4px 10px;margin-bottom:4px;border-left:3px solid ${vencido?"#EF4444":"#F59E0B"}">
+        <p style="margin:0;font-size:12px">${vencido?"🔴":"🟡"} <b>${h.nombre}</b> <span style="color:#64748B">· ${h.proyecto} · ${h.fecha||"sin fecha"} · ${h.responsable||""}</span></p>
+      </div>`;
+    });
+    if (hitosAbiertos.length > 20) html += `<p style="font-size:11px;color:#94A3B8;margin:6px 0">... y ${hitosAbiertos.length-20} más</p>`;
   }
 
   if (nuevas.length===0 && resueltas.length===0 && pendientes.length===0) {
@@ -233,14 +276,15 @@ export default async function handler(req, res) {
     const semana = getSemanaISO();
     const { lu, vi } = rangeWeek();
 
-    const [usuarios, incidencias, tareas, muestras] = await Promise.all([
-      fbList("usuarios"), fbList("incidencias"), fbList("tareas"), fbList("muestras"),
+    const [usuarios, incidencias, tareas, muestras, proyectos] = await Promise.all([
+      fbList("usuarios"), fbList("incidencias"), fbList("tareas"), fbList("muestras"), fbList("proyectos"),
     ]);
 
     const noElim = arr => arr.filter(x => !x.eliminada);
     const allInc = noElim(incidencias);
     const allTareas = noElim(tareas);
     const allMuestras = noElim(muestras);
+    const allProyectos = noElim(proyectos).filter(p => p.estado === "activo");
 
     const nodemailer = (await import("nodemailer")).default;
     const transporter = nodemailer.createTransport({
@@ -271,12 +315,30 @@ export default async function handler(req, res) {
       const tareasCompletadas = misTareas.filter(t => (t.estado === "completada" || t.estado === "cerrada") && enSemana(t, semana, lu, vi));
       const tareasPendientes = misTareas.filter(t => t.estado !== "completada" && t.estado !== "cerrada");
 
-      let muestrasID = null;
-      if (depKey === "id") muestrasID = allMuestras.filter(m => !m.fechaFeedback && (m.estadoMuestra === "ENTREGADO" || m.estadoMuestra === "ENVIADO"));
+      let muestrasID = null, muestrasKO = null, hitosAbiertos = null, proyectosActivos = null;
+      if (depKey === "id") {
+        muestrasID = allMuestras.filter(m => !m.fechaFeedback && (m.estadoMuestra === "ENTREGADO" || m.estadoMuestra === "ENVIADO"));
+        // Muestras KO de la semana con comentarios
+        muestrasKO = allMuestras.filter(m => m.estado === "ko" && enSemana(m, semana, lu, vi));
+        // Hitos abiertos de proyectos activos
+        hitosAbiertos = [];
+        allProyectos.forEach(p => {
+          (p.hitos || []).forEach(h => {
+            if (typeof h !== "object" || !h || h.hecho) return;
+            hitosAbiertos.push({ nombre: h.nombre || "Sin nombre", proyecto: p.nombre || "", fecha: h.fecha || "", responsable: h.responsable || "" });
+          });
+        });
+        // Proyectos activos con progreso
+        proyectosActivos = allProyectos.map(p => {
+          const hitos = (p.hitos || []).filter(h => typeof h === "object" && h);
+          const hechos = hitos.filter(h => h.hecho).length;
+          return { nombre: p.nombre || "Sin nombre", tipo: p.tipo || "", progreso: hitos.length > 0 ? Math.round(hechos / hitos.length * 100) : 0, totalHitos: hitos.length, hitosHechos: hechos, responsable: p.responsableNombre || p.responsable || "" };
+        });
+      }
 
       depDataAll.push({ key: depKey, nuevas: nuevas.length, resueltas: resueltas.length, pendientes: pendientes.length, escaladas: escaladas.length, urgentes: urgentes.length, urgList: urgentes.slice(0, 5) });
 
-      const html = buildWeeklyDept({ depConfig, nombre: resp.nombre, semana, lu, vi, nuevas, resueltas, pendientes, escaladas, tareasCompletadas, tareasPendientes, muestrasID });
+      const html = buildWeeklyDept({ depConfig, nombre: resp.nombre, semana, lu, vi, nuevas, resueltas, pendientes, escaladas, tareasCompletadas, tareasPendientes, muestrasID, muestrasKO, hitosAbiertos, proyectosActivos });
 
       try {
         await transporter.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to: resp.email,
