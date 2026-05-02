@@ -6,20 +6,6 @@
 <title>Grupo Consolidado · Portal</title>
 <meta name="theme-color" content="#1A1816"/>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
-<!-- Eruda: consola debug para móvil. Se activa con ?debug=1 o ?eruda=1 -->
-<script>
-(function(){
-  try{
-    var url=(window.location.search||"")+(window.location.hash||"");
-    var on=url.indexOf("debug=1")>=0||url.indexOf("eruda=1")>=0||localStorage.getItem("eruda")==="1";
-    if(!on) return;
-    var s=document.createElement("script");
-    s.src="https://cdn.jsdelivr.net/npm/eruda";
-    s.onload=function(){try{eruda.init();localStorage.setItem("eruda","1");console.log("🛠 Eruda activo en portal.");}catch(e){}};
-    document.head.appendChild(s);
-  }catch(e){}
-})();
-</script>
 <style>
 *,*::before,*::after{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
 html,body{margin:0;padding:0;font-family:'Inter',sans-serif;background:#F7F5F2;color:#1A1816;height:100%;overflow:hidden;}
@@ -146,7 +132,7 @@ input,button,select{font-family:inherit;}
 <!-- ENTRY -->
 <div id="entry" class="screen active">
   <div class="entry-logo">GRUPO <span>CONSOLIDADO</span></div>
-  <div class="entry-tag">PORTAL DE GESTIÓN · v3.4.2</div>
+  <div class="entry-tag">PORTAL DE GESTIÓN · v3.4.6</div>
   <div class="entry-cards">
     <div class="entry-card" onclick="showLogin()">
       <div class="entry-card-icon" style="background:#EDF4F0">🔐</div>
@@ -183,7 +169,7 @@ input,button,select{font-family:inherit;}
 <!-- HUB -->
 <div id="hub" class="screen">
   <div class="hub-header">
-    <div class="hub-logo">GRUPO <span>CONSOLIDADO</span> <span style="font-size:0.65rem;color:#8A8078;font-weight:400;margin-left:8px;letter-spacing:.04em">v3.4.2</span></div>
+    <div class="hub-logo">GRUPO <span>CONSOLIDADO</span> <span style="font-size:0.4em;color:#8A8078;font-weight:400;margin-left:8px">v2.8.2</span></div>
     <div style="display:flex;align-items:center;gap:10px">
       <span class="hub-user" id="hub-user-name"></span>
       <button class="hub-logout" onclick="doLogout()">Salir</button>
@@ -220,7 +206,6 @@ input,button,select{font-family:inherit;}
   <div class="admin-tabs">
     <button class="admin-tab active" onclick="setAdminTab('usuarios',this)">Usuarios</button>
     <button class="admin-tab" onclick="setAdminTab('accesos',this)">Accesos</button>
-    <button class="admin-tab" onclick="setAdminTab('descuentos',this)">Descuentos</button>
     <button class="admin-tab" onclick="setAdminTab('config',this)">Config</button>
   </div>
   <div class="admin-body" id="admin-body"></div>
@@ -229,12 +214,6 @@ input,button,select{font-family:inherit;}
 </div><!-- /app -->
 
 <script>
-// ══════════════════════════════════════════════════════════════════
-// VERSIÓN — Cambiar al desplegar para forzar refetch del CRM/catálogo
-// (evita que el navegador sirva la versión cacheada antigua)
-// ══════════════════════════════════════════════════════════════════
-const APP_VERSION="3.4.2";
-
 // ══════════════════════════════════════════════════════════════════
 // DATOS
 // ══════════════════════════════════════════════════════════════════
@@ -468,16 +447,13 @@ function openModule(id){
     try{localStorage.setItem('gc_portal_user',JSON.stringify(portalUserData));}catch(e){}
     // Pasar crmId Y vendedor en el hash: #crmId|vendedor
     var hashData=encodeURIComponent(crmId+(vendedor?'|'+vendedor:''));
-    var dbg=(window.location.search.indexOf('debug=1')>=0||window.location.search.indexOf('eruda=1')>=0||localStorage.getItem('eruda')==='1')?'&debug=1':'';
-    url='crm_grupo_consolidado.html?v='+APP_VERSION+dbg+'#'+hashData;
+    url='crm_grupo_consolidado.html#'+hashData;
   } else if(id==='catalogo'){
     var esCeoDir=currentUser.id==='ceo'||currentUser.id==='dir'||currentUser.rol==='admin';
     var secs=(!esCeoDir&&currentUser.catalogoSecciones)?(currentUser.catalogoSecciones||[]).join(','):'';
-    var dbg2=(window.location.search.indexOf('debug=1')>=0||localStorage.getItem('eruda')==='1')?'&debug=1':'';
-    url='catalogo_firebase.html?v='+APP_VERSION+dbg2+(secs?'&secciones='+encodeURIComponent(secs):'');
+    url='catalogo_firebase.html'+(secs?'?secciones='+encodeURIComponent(secs):'');
   } else if(id==='rrhh'){
-    var dbg3=(window.location.search.indexOf('debug=1')>=0||localStorage.getItem('eruda')==='1')?'&debug=1':'';
-    url='rrhh.html?v='+APP_VERSION+dbg3;
+    url='rrhh.html';
   }
   var iframe=document.getElementById('module-iframe');
   iframe.src=url;
@@ -514,7 +490,6 @@ function renderAdminBody(){
   var body=document.getElementById('admin-body');
   if(adminTab==='usuarios') body.innerHTML=renderUsuarios();
   else if(adminTab==='accesos') body.innerHTML=renderAccesos();
-  else if(adminTab==='descuentos') body.innerHTML=renderDescuentos();
   else body.innerHTML=renderConfig();
   attachAdminEvents();
 }
@@ -822,97 +797,6 @@ function renderAccesos(){
   return html;
 }
 
-// ── DESCUENTOS — límites de aprobación por rol ───────────────────────
-// Reglas: cada rol crea/aprueba estrategias hasta su límite. Si excede,
-// la estrategia escala automáticamente: vendedor → responsable → jefe ventas → CEO.
-var LIMITES_DTO_DEFAULT_PORTAL={agente:4,jefe:10,director:15};
-var _configDtoPortal=null; // cargado de Firebase al abrir el tab
-
-async function loadConfigDtoPortal(){
-  try{
-    var r=await fetch(PORTAL_FB+"/configuracion/general");
-    if(r.ok){
-      var d=await r.json();
-      var f=(d&&d.fields)||{};
-      var lim=f.limites_dto&&f.limites_dto.mapValue&&f.limites_dto.mapValue.fields;
-      if(lim){
-        _configDtoPortal={
-          agente:_dv(lim.agente||{doubleValue:LIMITES_DTO_DEFAULT_PORTAL.agente}),
-          jefe:_dv(lim.jefe||{doubleValue:LIMITES_DTO_DEFAULT_PORTAL.jefe}),
-          director:_dv(lim.director||{doubleValue:LIMITES_DTO_DEFAULT_PORTAL.director})
-        };
-        return _configDtoPortal;
-      }
-    }
-  }catch(e){console.warn("[CONFIG_DTO] error cargando",e);}
-  _configDtoPortal=Object.assign({},LIMITES_DTO_DEFAULT_PORTAL);
-  return _configDtoPortal;
-}
-
-async function saveConfigDtoPortal(ag,jf,dr){
-  // PATCH con updateMask: solo actualiza limites_dto sin tocar otros campos
-  var datos={
-    limites_dto:{agente:ag,jefe:jf,director:dr},
-    actualizadoEn:new Date().toISOString(),
-    actualizadoPor:"portal_admin"
-  };
-  var fields={};
-  Object.keys(datos).forEach(function(k){fields[k]=_sv(datos[k]);});
-  var qs="?"+Object.keys(datos).map(function(k){return "updateMask.fieldPaths="+encodeURIComponent(k);}).join("&");
-  try{
-    var r=await fetch(PORTAL_FB+"/configuracion/general"+qs,{
-      method:"PATCH",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({fields:fields})
-    });
-    if(r.ok){
-      _configDtoPortal={agente:ag,jefe:jf,director:dr};
-      return true;
-    }
-    console.warn("[CONFIG_DTO] save error",r.status);
-    return false;
-  }catch(e){console.warn("[CONFIG_DTO] save exception",e);return false;}
-}
-
-function renderDescuentos(){
-  var lim=_configDtoPortal||LIMITES_DTO_DEFAULT_PORTAL;
-  // Si nunca cargamos de FB, dispara la carga y re-renderiza
-  if(!_configDtoPortal){
-    loadConfigDtoPortal().then(function(){renderAdminBody();});
-  }
-  var card=function(icon,iconBg,titulo,desc,id,val){
-    return '<div style="background:white;border:1.5px solid #E8E3DC;border-radius:12px;padding:14px;margin-bottom:10px">'
-      +'<div style="display:flex;gap:10px;align-items:center;margin-bottom:10px">'
-        +'<div style="width:36px;height:36px;border-radius:10px;background:'+iconBg+';display:flex;align-items:center;justify-content:center;font-size:1.1rem">'+icon+'</div>'
-        +'<div style="flex:1">'
-          +'<div style="font-size:.86rem;font-weight:700;color:#3A2F26">'+titulo+'</div>'
-          +'<div style="font-size:.72rem;color:#8A8078;margin-top:2px">'+desc+'</div>'
-        +'</div>'
-      +'</div>'
-      +'<div style="display:flex;gap:8px;align-items:center">'
-        +'<input type="number" inputmode="decimal" step="0.5" min="0" max="100" id="'+id+'" value="'+val+'" '
-          +'style="flex:1;padding:11px 13px;border-radius:10px;border:1.5px solid #E8E3DC;font-size:.95rem;font-weight:700;outline:none;-webkit-appearance:none">'
-        +'<span style="font-size:.95rem;font-weight:700;color:#8A8078">%</span>'
-      +'</div>'
-    +'</div>';
-  };
-  return ''
-    +'<div style="font-size:.78rem;color:#5C4D40;margin-bottom:12px;line-height:1.5">'
-      +'Cada rol puede crear o aprobar estrategias hasta su límite de descuento. Si excede, escala automáticamente al siguiente: '
-      +'<b>Vendedor → Responsable → Jefe de Ventas → CEO</b>.'
-    +'</div>'
-    +card('🧑‍💼','#EEEAE3','Vendedor (Comercial)','Hasta este % la estrategia es directa. Si excede → Responsable.','dto-ag',lim.agente)
-    +card('🏆','#E5F2EA','Responsable de Equipo','Aprueba hasta este %. Si excede → Jefe de Ventas.','dto-jf',lim.jefe)
-    +card('📊','#E5EDF7','Jefe de Ventas (Director)','Aprueba hasta este %. Si excede → CEO.','dto-dr',lim.director)
-    +'<div style="background:#F2EEF8;border:1px dashed #5C3E8A55;border-radius:12px;padding:12px;margin-bottom:14px;display:flex;gap:10px;align-items:center">'
-      +'<div style="width:36px;height:36px;border-radius:10px;background:#5C3E8A22;display:flex;align-items:center;justify-content:center;font-size:1.1rem">👑</div>'
-      +'<div><div style="font-size:.86rem;font-weight:700;color:#3A2F26">CEO</div>'
-      +'<div style="font-size:.72rem;color:#8A8078">Sin límite. Aprueba todo lo que llega.</div></div>'
-    +'</div>'
-    +'<div id="dto-msg" style="font-size:.78rem;font-weight:700;margin-bottom:10px"></div>'
-    +'<button id="dto-save" style="width:100%;padding:13px;border-radius:10px;border:none;background:#1E2A38;color:#fff;font-size:.92rem;font-weight:700;cursor:pointer">💾 Guardar límites</button>';
-}
-
 function renderConfig(){
   return '<div style="background:white;border:1.5px solid #E8E3DC;border-radius:12px;overflow:hidden">'
     +[{l:"Firebase",v:"grupo-consolidado-crm"},{l:"Portal",v:"v1.0.0"},{l:"Usuarios",v:adminUsers.length+" configurados"}]
@@ -926,29 +810,7 @@ function renderConfig(){
 }
 
 // ── Eventos admin ─────────────────────────────────────────────────
-function attachAdminEvents(){
-  // Guardar límites de descuento
-  var btn=document.getElementById('dto-save');
-  if(btn){
-    btn.onclick=async function(){
-      var msg=document.getElementById('dto-msg');
-      var ag=parseFloat((document.getElementById('dto-ag')||{}).value);
-      var jf=parseFloat((document.getElementById('dto-jf')||{}).value);
-      var dr=parseFloat((document.getElementById('dto-dr')||{}).value);
-      if(isNaN(ag)||isNaN(jf)||isNaN(dr)||ag<0||jf<0||dr<0){
-        msg.style.color='#B45309';msg.textContent='⚠️ Valores no válidos. Deben ser números ≥ 0.';return;
-      }
-      if(!(ag<=jf&&jf<=dr)){
-        msg.style.color='#B45309';msg.textContent='⚠️ Los límites deben ser crecientes: vendedor ≤ responsable ≤ jefe ventas.';return;
-      }
-      btn.disabled=true;btn.textContent='Guardando…';msg.textContent='';
-      var ok=await saveConfigDtoPortal(ag,jf,dr);
-      btn.disabled=false;btn.textContent='💾 Guardar límites';
-      if(ok){msg.style.color='#2E6B42';msg.textContent='✅ Guardado. Los nuevos límites se aplican a futuras estrategias.';}
-      else{msg.style.color='#A23B3B';msg.textContent='❌ Error guardando en Firebase. Reintenta.';}
-    };
-  }
-}
+function attachAdminEvents(){}
 
 function toggleCard(id){
   openCards[id]=!openCards[id];
