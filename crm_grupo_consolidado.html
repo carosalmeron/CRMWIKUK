@@ -293,7 +293,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.5.2";
+const CRM_VERSION = "3.5.3";
 const CRM_BUILD = "02/05/2026";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -1039,6 +1039,153 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
   React.useEffect(function(){
     fbLeer("visitas").then(function(d){setVisitasDB(d||[]);});
   },[]);
+
+  // ════════════════════════════════════════════════════════════════════
+  // REVISIÓN JERÁRQUICA — v3.5.3
+  // Responsables y Directores filtran qué visitas/ops suben al siguiente nivel
+  // ════════════════════════════════════════════════════════════════════
+  var esResp = usuario.rol === "jefe";
+  var esDir  = usuario.rol === "director";
+  var esRevisor = esResp || esDir;
+
+  var _scv = React.useState({});var checkVisitas = _scv[0], setCheckVisitas = _scv[1];
+  var _sco = React.useState({});var checkOps = _sco[0], setCheckOps = _sco[1];
+  var _sen = React.useState(false);var enviandoRev = _sen[0], setEnviandoRev = _sen[1];
+
+  // Nivel inferior a revisar:
+  //  - Resp → agentes de su mismo equipo
+  //  - Dir  → todos los responsables (rol "jefe")
+  var nivelInferior = [];
+  if(esResp){
+    nivelInferior = USUARIOS.filter(function(u){return u.rol==="agente" && u.equipo===usuario.equipo;});
+  } else if(esDir){
+    nivelInferior = USUARIOS.filter(function(u){return u.rol==="jefe";});
+  }
+
+  // ¿Todos del nivel inferior están listos?
+  //  - Para resp: cada agente tiene plan con estado "cerrado"
+  //  - Para dir : cada responsable tiene plan con revisionEnviadaResp=true
+  var todosListos = false;
+  var faltanCerrar = [];
+  if(esRevisor && nivelInferior.length > 0){
+    var anioCheck = new Date().getFullYear();
+    todosListos = true;
+    nivelInferior.forEach(function(u){
+      var planU = todosPlanes.find(function(p){
+        return p.agente === u.id
+          && parseInt(p.semana) === semana
+          && parseInt(p.anio) === anioCheck;
+      });
+      var ok = false;
+      if(planU){
+        if(esResp) ok = planU.estado === "cerrado";
+        else if(esDir) ok = planU.revisionEnviadaResp === true;
+      }
+      if(!ok){
+        todosListos = false;
+        faltanCerrar.push(u);
+      }
+    });
+  }
+
+  // ¿Ya envié yo mi revisión?
+  var revisionYaEnviada = false;
+  if(plan){
+    if(esResp) revisionYaEnviada = plan.revisionEnviadaResp === true;
+    else if(esDir) revisionYaEnviada = plan.revisionEnviadaDir === true;
+  }
+
+  // Visitas y oportunidades a revisar
+  var visitasARevisar = [];
+  var opsARevisar = [];
+  if(esResp){
+    var _idsAg = new Set(nivelInferior.map(function(u){return (u.id||"").toUpperCase();}));
+    visitasARevisar = (visitasDB||[]).filter(function(v){
+      if(v.eliminada) return false;
+      if(parseInt(v.semana||0) !== semana) return false;
+      return _idsAg.has(((v.agente||v.agenteId||"")+"").toUpperCase());
+    });
+    opsARevisar = (oportunidadesDB||[]).filter(function(o){
+      if(o.eliminada) return false;
+      if(parseInt(o.semana||0) !== semana) return false;
+      return _idsAg.has(((o.agente||o.agenteId||"")+"").toUpperCase());
+    });
+  } else if(esDir){
+    visitasARevisar = (visitasDB||[]).filter(function(v){
+      if(v.eliminada) return false;
+      if(parseInt(v.semana||0) !== semana) return false;
+      return v.aprobadoResp !== false;
+    });
+    opsARevisar = (oportunidadesDB||[]).filter(function(o){
+      if(o.eliminada) return false;
+      if(parseInt(o.semana||0) !== semana) return false;
+      return o.aprobadoResp !== false;
+    });
+  }
+
+  // Pre-marcar checkboxes según estado actual en Firebase
+  var _visitasKey = visitasARevisar.map(function(v){return v.id;}).join(",");
+  var _opsKey = opsARevisar.map(function(o){return o.id;}).join(",");
+  React.useEffect(function(){
+    if(!esRevisor) return;
+    var cv = {}, co = {};
+    var campoCheck = esResp ? "aprobadoResp" : "aprobadoJefe";
+    visitasARevisar.forEach(function(v){ cv[v.id] = v[campoCheck] !== false; });
+    opsARevisar.forEach(function(o){ co[o.id] = o[campoCheck] !== false; });
+    setCheckVisitas(cv);
+    setCheckOps(co);
+  },[_visitasKey, _opsKey, esResp, esDir, semana]);
+
+  // Función de envío de la revisión
+  var enviarRevision = function(){
+    if(enviandoRev) return;
+    if(!plan) return;
+    if(!confirm("¿Enviar revisión al "+(esResp?"Jefe de Ventas":"CEO")+"?\n\nEsta acción es definitiva para la semana "+semana+".")) return;
+    setEnviandoRev(true);
+    var fecha = new Date().toISOString();
+    var campoAprob = esResp ? "aprobadoResp" : "aprobadoJefe";
+    var campoFecha = esResp ? "fechaAprobResp" : "fechaAprobJefe";
+
+    var promesas = [];
+    visitasARevisar.forEach(function(v){
+      var update = {};
+      update[campoAprob] = checkVisitas[v.id] !== false;
+      update[campoFecha] = fecha;
+      promesas.push(fbEscribir("visitas", v.id, update));
+    });
+    opsARevisar.forEach(function(o){
+      var update = {};
+      update[campoAprob] = checkOps[o.id] !== false;
+      update[campoFecha] = fecha;
+      promesas.push(fbEscribir("oportunidades", o.id, update));
+    });
+
+    Promise.all(promesas).then(function(){
+      var campoEnv = esResp ? "revisionEnviadaResp" : "revisionEnviadaDir";
+      var campoFR  = esResp ? "fechaRevisionResp"  : "fechaRevisionDir";
+      var planUpdate = {};
+      planUpdate[campoEnv] = true;
+      planUpdate[campoFR] = fecha;
+      return fbEscribir("planes_semanales", plan.id, planUpdate).then(function(){
+        var nuevoPlan = Object.assign({}, plan, planUpdate);
+        setPlan(nuevoPlan);
+        // Actualizar también todosPlanes para que el director vea los cambios sin recargar
+        setTodosPlanes(function(prev){
+          var arr = (prev||[]).slice();
+          var idx = arr.findIndex(function(p){return p.id===plan.id;});
+          if(idx>=0) arr[idx] = nuevoPlan; else arr.push(nuevoPlan);
+          return arr;
+        });
+        setEnviandoRev(false);
+        alert("✅ Revisión enviada al "+(esResp?"Jefe de Ventas":"CEO")+" correctamente.");
+      });
+    }).catch(function(e){
+      console.error("Error enviando revisión:", e);
+      setEnviandoRev(false);
+      alert("❌ Error al enviar la revisión. Intenta de nuevo.");
+    });
+  };
+  // ════════════════════════════════════════════════════════════════════
   
   // Clientes con actividad esta semana (visitas + oportunidades + muestras + estrategias + incidencias)
   var visitadosManual=plan&&plan.visitados?plan.visitados:[];
@@ -1357,9 +1504,10 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
           )}
 
           {/* Tabs */}
-          <div style={{display:"flex",background:"#E2E8F0",borderRadius:14,padding:4,marginBottom:18}}>
-            <button onClick={function(){setTab("360");}} style={{flex:1,padding:"14px 0",borderRadius:12,border:"none",fontSize:15,cursor:"pointer",fontWeight:tab==="360"?800:500,color:tab==="360"?T.navy:T.muted,background:tab==="360"?"#fff":"transparent",boxShadow:tab==="360"?"0 2px 6px rgba(0,0,0,.12)":"none"}}>📊 360°</button>
-            <button onClick={function(){setTab("ruta");}} style={{flex:1,padding:"14px 0",borderRadius:12,border:"none",fontSize:15,cursor:"pointer",fontWeight:tab==="ruta"?800:500,color:tab==="ruta"?T.navy:T.muted,background:tab==="ruta"?"#fff":"transparent",boxShadow:tab==="ruta"?"0 2px 6px rgba(0,0,0,.12)":"none"}}>📍 Ruta ({clientesSemana.length||"libre"})</button>
+          <div style={{display:"flex",background:"#E2E8F0",borderRadius:14,padding:4,marginBottom:18,gap:2}}>
+            <button onClick={function(){setTab("360");}} style={{flex:1,padding:"14px 0",borderRadius:12,border:"none",fontSize:14,cursor:"pointer",fontWeight:tab==="360"?800:500,color:tab==="360"?T.navy:T.muted,background:tab==="360"?"#fff":"transparent",boxShadow:tab==="360"?"0 2px 6px rgba(0,0,0,.12)":"none"}}>📊 360°</button>
+            <button onClick={function(){setTab("ruta");}} style={{flex:1,padding:"14px 0",borderRadius:12,border:"none",fontSize:14,cursor:"pointer",fontWeight:tab==="ruta"?800:500,color:tab==="ruta"?T.navy:T.muted,background:tab==="ruta"?"#fff":"transparent",boxShadow:tab==="ruta"?"0 2px 6px rgba(0,0,0,.12)":"none"}}>📍 Ruta ({clientesSemana.length||"libre"})</button>
+            {esRevisor&&(<button onClick={function(){setTab("revisar");}} style={{flex:1,padding:"14px 0",borderRadius:12,border:"none",fontSize:14,cursor:"pointer",fontWeight:tab==="revisar"?800:500,color:tab==="revisar"?T.navy:T.muted,background:tab==="revisar"?"#fff":"transparent",boxShadow:tab==="revisar"?"0 2px 6px rgba(0,0,0,.12)":"none",position:"relative"}}>📋 Revisar{!revisionYaEnviada&&todosListos&&(visitasARevisar.length+opsARevisar.length)>0&&(<span style={{position:"absolute",top:6,right:6,width:8,height:8,borderRadius:99,background:"#EF4444"}}></span>)}</button>)}
           </div>
 
           {/* TAB 360 */}
@@ -1579,6 +1727,199 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
 
               <button onClick={function(){onNav("clientes");}} style={{width:"100%",padding:14,borderRadius:14,border:"2px dashed #E2E8F0",background:"#fff",color:T.blue,fontWeight:700,fontSize:13,cursor:"pointer",marginBottom:8}}>+ Agregar cliente</button>
               <button onClick={function(){setShowNuevoMS(true);}} style={{width:"100%",padding:14,borderRadius:14,border:"2px dashed "+T.purple,background:"#F5F3FF",color:T.purple,fontWeight:700,fontSize:13,cursor:"pointer"}}>Crear cliente nuevo</button>
+            </div>
+          )}
+
+          {/* ═══ TAB REVISAR (v3.5.3) ═══ */}
+          {tab==="revisar"&&esRevisor&&(
+            <div>
+              {revisionYaEnviada?(
+                <div style={{background:"#DCFCE7",border:"2px solid #86EFAC",borderRadius:14,padding:18,marginBottom:14,display:"flex",alignItems:"center",gap:14}}>
+                  <span style={{fontSize:34}}>✅</span>
+                  <div>
+                    <p style={{margin:0,fontSize:15,fontWeight:800,color:"#166534"}}>Revisión enviada</p>
+                    <p style={{margin:"4px 0 0",fontSize:12,color:"#15803D"}}>Tu revisión de la semana {semana} ya está en manos del {esResp?"Jefe de Ventas":"CEO"}.</p>
+                    {plan&&(esResp?plan.fechaRevisionResp:plan.fechaRevisionDir)&&(
+                      <p style={{margin:"3px 0 0",fontSize:11,color:"#15803D",opacity:.8}}>Enviada el {new Date(esResp?plan.fechaRevisionResp:plan.fechaRevisionDir).toLocaleString("es-ES")}</p>
+                    )}
+                  </div>
+                </div>
+              ):!todosListos?(
+                <div style={{background:"#FEF3C7",border:"2px solid #FCD34D",borderRadius:14,padding:18,marginBottom:14}}>
+                  <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:faltanCerrar.length>0?14:0}}>
+                    <span style={{fontSize:34}}>⏳</span>
+                    <div>
+                      <p style={{margin:0,fontSize:15,fontWeight:800,color:"#92400E"}}>Esperando cierre de semana</p>
+                      <p style={{margin:"4px 0 0",fontSize:12,color:"#78350F"}}>{esResp?"Aún no todos los agentes de tu equipo han cerrado la semana "+semana+".":"Aún no todos los responsables han enviado su revisión de la semana "+semana+"."}</p>
+                    </div>
+                  </div>
+                  {faltanCerrar.length>0&&(
+                    <div style={{borderTop:"1.5px solid #FCD34D",paddingTop:12}}>
+                      <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:"#92400E",textTransform:"uppercase",letterSpacing:.4}}>Pendientes ({faltanCerrar.length})</p>
+                      {faltanCerrar.map(function(u){
+                        return (
+                          <div key={u.id} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 10px",fontSize:13,color:"#78350F",background:"#FFFBEB",borderRadius:8,marginBottom:4}}>
+                            <span style={{fontSize:18}}>{u.icon}</span>
+                            <span style={{flex:1,fontWeight:600}}>{u.nombre}</span>
+                            <span style={{fontSize:10,padding:"2px 8px",borderRadius:99,background:"#FEF3C7",color:"#92400E",fontWeight:700,border:"1px solid #FCD34D"}}>{esResp?"Sin cerrar":"Sin revisar"}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {nivelInferior.length===0&&(
+                    <p style={{margin:"10px 0 0",fontSize:12,color:"#78350F",fontStyle:"italic"}}>{esResp?"No tienes agentes asignados a tu equipo.":"No hay responsables registrados."}</p>
+                  )}
+                </div>
+              ):(
+                <div>
+                  <div style={{background:"#EFF6FF",border:"2px solid "+T.blue,borderRadius:14,padding:16,marginBottom:14}}>
+                    <p style={{margin:0,fontSize:15,fontWeight:800,color:T.navy}}>📋 Revisar semana {semana}</p>
+                    <p style={{margin:"6px 0 0",fontSize:12,color:T.muted,lineHeight:1.5}}>{esResp?"Marca qué visitas y oportunidades quieres que suban al Jefe de Ventas. Las desmarcadas quedarán solo en tu nivel.":"Marca qué visitas y oportunidades verá el CEO. Las desmarcadas quedarán solo a nivel comercial."}</p>
+                  </div>
+
+                  {/* Visitas */}
+                  {visitasARevisar.length>0&&(function(){
+                    var grupos={};
+                    visitasARevisar.forEach(function(v){
+                      var agId=((v.agente||v.agenteId||"")+"").toUpperCase();
+                      if(!grupos[agId])grupos[agId]=[];
+                      grupos[agId].push(v);
+                    });
+                    var keys=Object.keys(grupos).sort();
+                    return (
+                      <div style={{background:"#fff",borderRadius:16,padding:18,marginBottom:14,boxShadow:"0 1px 4px rgba(0,0,0,.06)",borderLeft:"4px solid "+T.green}}>
+                        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
+                          <div style={{width:40,height:40,borderRadius:12,background:"#DCFCE7",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>👋</div>
+                          <div>
+                            <p style={{margin:0,fontSize:15,fontWeight:800,color:T.navy}}>Visitas</p>
+                            <p style={{margin:0,fontSize:11,color:T.muted}}>{visitasARevisar.length} en total</p>
+                          </div>
+                        </div>
+                        {keys.map(function(agId){
+                          var ag=USUARIOS.find(function(u){return (u.id||"").toUpperCase()===agId;});
+                          var nom=ag?ag.nombre:agId;
+                          var ic=ag?ag.icon:"🧑‍💼";
+                          var lista=grupos[agId];
+                          return (
+                            <div key={agId} style={{marginBottom:12}}>
+                              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,paddingBottom:6,borderBottom:"1px solid #F1F5F9"}}>
+                                <span style={{fontSize:14}}>{ic}</span>
+                                <span style={{fontSize:12,fontWeight:700,color:T.navy}}>{nom}</span>
+                                <span style={{fontSize:10,padding:"2px 8px",borderRadius:99,background:"#F1F5F9",color:T.muted,fontWeight:700}}>{lista.length}</span>
+                              </div>
+                              {lista.map(function(v){
+                                var checked=checkVisitas[v.id]!==false;
+                                var ic2=v.resultado==="pedido"?"✅":v.resultado==="llamada"?"📞":v.resultado==="no_contesta"?"📵":"👋";
+                                var lb=v.resultado==="pedido"?"Pedido":v.resultado==="llamada"?"Llamada":v.resultado==="no_contesta"?"No contesta":"Visita";
+                                return (
+                                  <div key={v.id} onClick={function(){
+                                    setCheckVisitas(function(prev){var n=Object.assign({},prev);n[v.id]=!checked;return n;});
+                                  }} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"10px 12px",borderRadius:10,marginBottom:6,cursor:"pointer",background:checked?"#F0FDF4":"#FAFAFA",border:"1.5px solid "+(checked?"#86EFAC":"#E2E8F0"),transition:"all .15s"}}>
+                                    <div style={{width:22,height:22,borderRadius:6,border:"2px solid "+(checked?"#22C55E":"#94A3B8"),background:checked?"#22C55E":"#fff",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,marginTop:1}}>
+                                      {checked&&<span style={{color:"#fff",fontSize:13,fontWeight:800,lineHeight:1}}>✓</span>}
+                                    </div>
+                                    <div style={{flex:1,minWidth:0}}>
+                                      <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{v.clienteNombre||v.cliente||"—"}</p>
+                                      <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{v.fecha||""} · {ic2} {lb}{v.notas?" · "+v.notas.substring(0,40)+(v.notas.length>40?"...":""):""}</p>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+
+                  {/* Oportunidades */}
+                  {opsARevisar.length>0&&(function(){
+                    var grupos={};
+                    opsARevisar.forEach(function(o){
+                      var agId=((o.agente||o.agenteId||"")+"").toUpperCase();
+                      if(!grupos[agId])grupos[agId]=[];
+                      grupos[agId].push(o);
+                    });
+                    var keys=Object.keys(grupos).sort();
+                    return (
+                      <div style={{background:"#fff",borderRadius:16,padding:18,marginBottom:14,boxShadow:"0 1px 4px rgba(0,0,0,.06)",borderLeft:"4px solid "+T.navy}}>
+                        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
+                          <div style={{width:40,height:40,borderRadius:12,background:"#EFF6FF",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>💼</div>
+                          <div>
+                            <p style={{margin:0,fontSize:15,fontWeight:800,color:T.navy}}>Oportunidades</p>
+                            <p style={{margin:0,fontSize:11,color:T.muted}}>{opsARevisar.length} en total</p>
+                          </div>
+                        </div>
+                        {keys.map(function(agId){
+                          var ag=USUARIOS.find(function(u){return (u.id||"").toUpperCase()===agId;});
+                          var nom=ag?ag.nombre:agId;
+                          var ic=ag?ag.icon:"🧑‍💼";
+                          var lista=grupos[agId];
+                          return (
+                            <div key={agId} style={{marginBottom:12}}>
+                              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,paddingBottom:6,borderBottom:"1px solid #F1F5F9"}}>
+                                <span style={{fontSize:14}}>{ic}</span>
+                                <span style={{fontSize:12,fontWeight:700,color:T.navy}}>{nom}</span>
+                                <span style={{fontSize:10,padding:"2px 8px",borderRadius:99,background:"#F1F5F9",color:T.muted,fontWeight:700}}>{lista.length}</span>
+                              </div>
+                              {lista.map(function(o){
+                                var checked=checkOps[o.id]!==false;
+                                var et=ESTADOS&&ESTADOS[o.etapa||o.estado];
+                                return (
+                                  <div key={o.id} onClick={function(){
+                                    setCheckOps(function(prev){var n=Object.assign({},prev);n[o.id]=!checked;return n;});
+                                  }} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"10px 12px",borderRadius:10,marginBottom:6,cursor:"pointer",background:checked?"#F0FDF4":"#FAFAFA",border:"1.5px solid "+(checked?"#86EFAC":"#E2E8F0"),transition:"all .15s"}}>
+                                    <div style={{width:22,height:22,borderRadius:6,border:"2px solid "+(checked?"#22C55E":"#94A3B8"),background:checked?"#22C55E":"#fff",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,marginTop:1}}>
+                                      {checked&&<span style={{color:"#fff",fontSize:13,fontWeight:800,lineHeight:1}}>✓</span>}
+                                    </div>
+                                    <div style={{flex:1,minWidth:0}}>
+                                      <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
+                                        <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{o.nombre||o.cliente||"—"}</p>
+                                        {o.valor&&<span style={{fontSize:13,fontWeight:800,color:T.green,flexShrink:0}}>{parseInt(o.valor).toLocaleString("es-ES")}€</span>}
+                                      </div>
+                                      <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{et?et.label:(o.estado||o.etapa||"—")}{o.cliente&&o.nombre&&o.cliente!==o.nombre?" · "+o.cliente:""}</p>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+
+                  {/* Mensaje vacío */}
+                  {visitasARevisar.length===0&&opsARevisar.length===0&&(
+                    <div style={{textAlign:"center",padding:"36px 20px",background:"#F8FAFC",borderRadius:16,border:"1.5px dashed #CBD5E1",marginBottom:14}}>
+                      <p style={{margin:0,fontSize:36}}>📭</p>
+                      <p style={{margin:"10px 0 0",fontSize:14,fontWeight:700,color:T.navy}}>Nada que revisar</p>
+                      <p style={{margin:"4px 0 0",fontSize:12,color:T.muted}}>{esResp?"No hay visitas ni oportunidades del equipo en la semana "+semana+".":"Los responsables no han pasado contenido en la semana "+semana+"."}</p>
+                    </div>
+                  )}
+
+                  {/* Resumen + botón enviar */}
+                  {(visitasARevisar.length+opsARevisar.length)>0&&(
+                    <div style={{background:"#fff",borderRadius:14,padding:16,boxShadow:"0 1px 4px rgba(0,0,0,.06)",border:"1.5px solid "+T.border,position:"sticky",bottom:14}}>
+                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:14,gap:14}}>
+                        <div style={{flex:1,textAlign:"center",padding:10,background:"#F0FDF4",borderRadius:10,border:"1.5px solid #86EFAC"}}>
+                          <p style={{margin:0,fontSize:11,color:"#166534",fontWeight:700,textTransform:"uppercase",letterSpacing:.4}}>Pasarán</p>
+                          <p style={{margin:"4px 0 0",fontSize:22,fontWeight:800,color:"#22C55E"}}>{visitasARevisar.filter(function(v){return checkVisitas[v.id]!==false;}).length+opsARevisar.filter(function(o){return checkOps[o.id]!==false;}).length}<span style={{fontSize:13,color:T.muted,fontWeight:600}}> / {visitasARevisar.length+opsARevisar.length}</span></p>
+                        </div>
+                        <div style={{flex:1,textAlign:"center",padding:10,background:"#FEF2F2",borderRadius:10,border:"1.5px solid #FECACA"}}>
+                          <p style={{margin:0,fontSize:11,color:"#991B1B",fontWeight:700,textTransform:"uppercase",letterSpacing:.4}}>Excluidas</p>
+                          <p style={{margin:"4px 0 0",fontSize:22,fontWeight:800,color:"#EF4444"}}>{visitasARevisar.filter(function(v){return checkVisitas[v.id]===false;}).length+opsARevisar.filter(function(o){return checkOps[o.id]===false;}).length}</p>
+                        </div>
+                      </div>
+                      <button onClick={enviarRevision} disabled={enviandoRev} style={{width:"100%",padding:14,borderRadius:12,border:"none",background:enviandoRev?"#94A3B8":T.green,color:"#fff",fontWeight:800,fontSize:14,cursor:enviandoRev?"wait":"pointer",boxShadow:enviandoRev?"none":"0 2px 8px rgba(34,197,94,.3)"}}>
+                        {enviandoRev?"Enviando...":"🚀 Enviar al "+(esResp?"Jefe de Ventas":"CEO")}
+                      </button>
+                      <p style={{margin:"10px 0 0",fontSize:10,color:T.muted,textAlign:"center"}}>Acción definitiva. No podrás modificar la revisión después.</p>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
