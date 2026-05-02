@@ -280,11 +280,11 @@ export default async function handler(req, res) {
     const { lu, vi } = rangeWeek();
     const hoy = new Date(), hoyStr = hoy.toISOString().split("T")[0];
 
-    const [usuarios, visitas, oportunidades, estrategias, incidencias, muestras, informes, presupuesto, monetizacion, proyectos, clientes, planes] = await Promise.all([
+    const [usuarios, visitas, oportunidades, estrategias, incidencias, muestras, informes, presupuesto, monetizacion, proyectos, clientes, planes, agentesKpi] = await Promise.all([
       fbList("usuarios"), fbList("visitas"), fbList("oportunidades"),
       fbList("estrategias"), fbList("incidencias"), fbList("muestras"),
       fbList("informes"), fbList("presupuesto"), fbList("monetizacion"),
-      fbList("proyectos"), fbList("clientes"), fbList("planes_semanales"),
+      fbList("proyectos"), fbList("clientes"), fbList("planes_semanales"), fbList("agentes_kpi"),
     ]);
 
     // FIX 5: Build nombre lookup map (ID → nombre)
@@ -326,7 +326,17 @@ export default async function handler(req, res) {
       };
       const pD = presupuesto.find(match), mD = monetizacion.find(match);
       const n = (d,...ks) => { if (!d) return 0; for (const k of ks) { const v = d[k]; if (v!==undefined&&v!==null&&v!=="") { const x = typeof v==="number"?v:parseFloat(String(v).replace(/[^0-9.\-]/g,"")); if (!isNaN(x)) return x; } } return 0; };
-      const oMbRaw = n(pD,"mgPpto","MG PPTO");
+      // MB objetivo: primero presupuesto semanal, luego agentes_kpi
+      let oMbRaw = n(pD,"mgPpto","MG PPTO","MG PPTO.","mgObjetivo","margenPpto");
+      if (oMbRaw === 0) {
+        // Fallback: agentes_kpi (objetivo anual de margen)
+        const kpi = agentesKpi.find(k => {
+          if (k.crmId && k.crmId === agId) return true;
+          const ka = String(k.agente||k.nombre||"").toUpperCase();
+          return ka === agId.toUpperCase() || ka === grp;
+        });
+        if (kpi) oMbRaw = n(kpi,"mgObjetivo","mgPpto","MG PPTO");
+      }
       return {
         oV: n(pD,"ventasPpto","VENTAS PPTO.","VENTAS PPTO"),
         oMb: oMbRaw > 0 && oMbRaw < 1 ? +(oMbRaw*100).toFixed(1) : oMbRaw,
