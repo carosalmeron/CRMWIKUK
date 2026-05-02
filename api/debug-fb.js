@@ -5,7 +5,7 @@
 //   - Primer documento de cada colección (sample)
 //   - Configuración leída del entorno
 
-const FB_BASE = "https://firestore.googleapis.com/v1/projects/crmwikuk/databases/(default)/documents";
+const FB_BASE = "https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
 
 function fsToObj(doc) {
   if (!doc || !doc.fields) return null;
