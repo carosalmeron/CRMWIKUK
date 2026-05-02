@@ -949,13 +949,21 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
   var appMisIds=resolverMisIds(usuario);
 
   var esAgenteMS=usuario.rol==="crm_agente"||usuario.rol==="agente";
+  var _sinf=React.useState([]);var informesMiSem=_sinf[0],setInformesMiSem=_sinf[1];
+  var _splns=React.useState([]);var todosPlanes=_splns[0],setTodosPlanes=_splns[1];
 
   React.useEffect(function(){
     setCargando(true);
-    fbLeer("planes_semanales").then(function(planes){
-      var found=(planes||[]).find(function(p){return p.agente===usuario.id&&p.semana===semana&&p.anio===new Date().getFullYear();});
+    Promise.all([
+      fbLeer("planes_semanales"),
+      fbLeer("informes")
+    ]).then(function(res){
+      var planes=res[0]||[];
+      var infs=res[1]||[];
+      setTodosPlanes(planes);
+      setInformesMiSem(infs);
+      var found=planes.find(function(p){return p.agente===usuario.id&&p.semana===semana&&p.anio===new Date().getFullYear();});
       if(!found&&!esAgenteMS){
-        // Director/jefe: auto-crear plan libre
         var autoId="plan_"+usuario.id+"_"+new Date().getFullYear()+"_s"+semana;
         found={id:autoId,agente:usuario.id,semana:semana,anio:new Date().getFullYear(),modo:"libre",rutaNum:null,estado:"activo",visitados:[]};
         fbEscribir("planes_semanales",autoId,found);
@@ -1210,6 +1218,25 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
 
       {!plan?(
         <div style={{padding:"20px 0"}}>
+          {(function(){
+            if(!esAgenteMS) return false;
+            var anio=new Date().getFullYear();
+            for(var s=semana-1;s>=Math.max(semana-4,1);s--){
+              var tienePlan=todosPlanes.some(function(p){return p.agente===usuario.id&&parseInt(p.semana)===s&&parseInt(p.anio)===anio;});
+              if(!tienePlan) continue;
+              var tieneInforme=informesMiSem.some(function(i){return (i.agente===usuario.id||i.agenteId===usuario.id)&&parseInt(i.semana)===s;});
+              if(!tieneInforme) return s;
+            }
+            return false;
+          }())?(
+            <div style={{background:"#FEF2F2",border:"2px solid #FECACA",borderRadius:16,padding:24,textAlign:"center"}}>
+              <p style={{margin:0,fontSize:40}}>🔒</p>
+              <p style={{margin:"12px 0 6px",fontSize:16,fontWeight:800,color:"#991B1B"}}>Tienes una semana sin cerrar</p>
+              <p style={{margin:"0 0 16px",fontSize:13,color:"#DC2626"}}>Debes enviar el informe de la semana anterior antes de abrir una nueva.</p>
+              <button onClick={function(){for(var s=semana-1;s>=Math.max(semana-4,1);s--){var tp=todosPlanes.some(function(p){return p.agente===usuario.id&&parseInt(p.semana)===s;});if(!tp)continue;var ti=informesMiSem.some(function(i){return(i.agente===usuario.id)&&parseInt(i.semana)===s;});if(!ti){setSemana(s);return;}}}} style={{padding:"12px 24px",borderRadius:12,border:"none",background:"#DC2626",color:"#fff",fontWeight:700,fontSize:14,cursor:"pointer"}}>← Ir a cerrarla</button>
+            </div>
+          ):(
+            <div>
           <p style={{margin:"0 0 4px",fontSize:18,fontWeight:800,color:T.navy,textAlign:"center"}}>Programa tu semana</p>
           <p style={{margin:"0 0 24px",fontSize:12,color:T.muted,textAlign:"center"}}>Se queda fijada hasta que la cambies</p>
           {rutas.length>0&&<div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:16}}>
@@ -1227,6 +1254,8 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
             <p style={{margin:0,fontSize:15,fontWeight:700,color:T.purple}}>Semana libre / Prospeccion</p>
             <p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>Sin ruta fija</p>
           </button>
+            </div>
+          )}
         </div>
       ):(
         <div>
@@ -15789,11 +15818,9 @@ function HistorialSemanal({ usuario }) {
     return d.toLocaleDateString("es-ES",{month:"short",day:"numeric"});
   };
 
-  // Determinar semana SOLO por fecha real (ignora campo semana guardado)
-  // + deduplicar por agente+cliente+fecha
+  // Filtrar por semana almacenada + deduplicar
   const visSemanaRaw = visitas.filter(v=>{
-    const semReal = v.fecha ? semanaDeDate(v.fecha) : Number(v.semana);
-    if(semReal !== semana) return false;
+    if(Number(v.semana) !== semana) return false;
     const agV=v.agente||v.agenteId||"";
     const agObj=USUARIOS.find(u=>u.id===agV||u.grupoAgente===agV);
     if(agenteSel){
@@ -15816,12 +15843,8 @@ function HistorialSemanal({ usuario }) {
   const opsSemana  = oportunidades.filter(o=>Number(o.semana)===semana||((!o.semana&&o.semana!==0)&&semanaDeDate(o.fechaCreacion||o.creadaEn)===semana));
 
   // Todas las visitas de la semana sin filtro agente/equipo (para cards de agente)
-  // Todas las visitas — mismo criterio: fecha real + dedup
   const visSemanaTodas = (() => {
-    const raw = visitas.filter(v => {
-      const semReal = v.fecha ? semanaDeDate(v.fecha) : Number(v.semana);
-      return semReal === semana;
-    });
+    const raw = visitas.filter(v => Number(v.semana) === semana);
     const out = [], ks = new Set();
     raw.forEach(v => {
       const k = (v.agente||v.agenteId||"")+"_"+(v.clienteNombre||v.clienteId||v.cliente||"")+"_"+(v.fecha||"");
