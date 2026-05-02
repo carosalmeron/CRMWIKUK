@@ -4,7 +4,7 @@
 //   1) Resumen del viernes (actividad del día en curso)
 //   2) Resumen semanal completo (lunes a viernes)
 
-const FB_BASE = "https://firestore.googleapis.com/v1/projects/crmwikuk/databases/(default)/documents";
+const FB_BASE = "https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
 
 function fsToObj(doc) {
   if (!doc || !doc.fields) return null;
