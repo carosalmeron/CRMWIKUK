@@ -279,7 +279,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.22.1";
+const CRM_VERSION = "3.22.2";
 const CRM_BUILD = "03/05/2026";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -6911,6 +6911,8 @@ function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirClie
 
   // (v3.20.2) Mapa clienteCodigo → ruta (cargado una vez al montar)
   var _mr = React.useState({}); var mapaRutas = _mr[0], setMapaRutas = _mr[1];
+  // (v3.22.1) Mapa agenteId → rutaNum de ESTA semana (para jefes/dir/ceo)
+  var _rpa = React.useState({}); var rutasPorAgente = _rpa[0], setRutasPorAgente = _rpa[1];
   React.useEffect(function(){
     fbLeerTodos("clientes").then(function(arr){
       if(!arr) return;
@@ -6931,6 +6933,7 @@ function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirClie
     setSemanaRuta(s); // Por defecto, semana actual
     fbLeer("planes_semanales").then(function(planes){
       if(!planes) return;
+      // Plan del usuario actual (para agentes y para semana inicial)
       var found = planes.find(function(p){
         return p.agente===usuario.id && parseInt(p.semana)===s && parseInt(p.anio)===new Date().getFullYear();
       });
@@ -6939,6 +6942,16 @@ function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirClie
       if(found && found.modo==="ruta" && found.rutaNum){
         setSemanaRuta(parseInt(found.rutaNum));
       }
+      // (v3.22.1) Para jefes/dir/ceo: mapa agenteId → rutaNum de cada vendedor en la semana ISO actual
+      var rpa = {};
+      var anioActual = new Date().getFullYear();
+      planes.forEach(function(p){
+        if(parseInt(p.semana)===s && parseInt(p.anio)===anioActual && p.modo==="ruta" && p.rutaNum){
+          var agId = String(p.agente||"").toUpperCase().trim();
+          if(agId) rpa[agId] = parseInt(p.rutaNum);
+        }
+      });
+      setRutasPorAgente(rpa);
     }).catch(function(){});
   },[]);
 
@@ -7071,20 +7084,41 @@ function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirClie
     return esMio(c) && pasaFiltro(c);
   });
 
-  // (v3.20.2) Filtro por ruta — disponible para todos los roles
-  if(soloRuta && semanaRuta > 0){
-    clientesFiltrados = clientesFiltrados.filter(function(c){
-      var cod = ((c.codigo||"")+"").toUpperCase();
-      var r = mapaRutas[cod];
-      if(r) return r === semanaRuta;
-      // Fallback: buscar en clientesFB local
-      var cli = (clientesFB||[]).find(function(x){
-        return ((x.codigo||x.id||"")+"").toUpperCase() === cod;
+  // (v3.20.2 / v3.22.1) Filtro por ruta — disponible para todos los roles
+  // Para AGENTE: filtra por su propia rutaNum (semanaRuta es número de ruta)
+  // Para JEFE/DIRECTOR/CEO: filtra por la ruta activa de cada vendedor en la semana ISO actual
+  if(soloRuta){
+    if(esAgente && semanaRuta > 0){
+      // Modo agente: clientes con SEMANAVISITA === su rutaNum del plan
+      clientesFiltrados = clientesFiltrados.filter(function(c){
+        var cod = ((c.codigo||"")+"").toUpperCase();
+        var r = mapaRutas[cod];
+        if(r) return r === semanaRuta;
+        // Fallback: buscar en clientesFB local
+        var cli = (clientesFB||[]).find(function(x){
+          return ((x.codigo||x.id||"")+"").toUpperCase() === cod;
+        });
+        if(!cli) return false;
+        var ruta = parseInt(cli.SEMANAVISITA||cli.semanaVisita||cli.ruta||cli.semana||0);
+        return ruta === semanaRuta;
       });
-      if(!cli) return false;
-      var ruta = parseInt(cli.SEMANAVISITA||cli.semanaVisita||cli.ruta||cli.semana||0);
-      return ruta === semanaRuta;
-    });
+    } else if(!esAgente){
+      // Modo jefe/dir/ceo: cada vendedor su propia ruta de esta semana
+      clientesFiltrados = clientesFiltrados.filter(function(c){
+        var ag = (c.agente||"").toUpperCase().trim();
+        var rutaDelAgente = rutasPorAgente[ag];
+        if(!rutaDelAgente) return false; // ese vendedor no tiene plan de ruta esta semana
+        var cod = ((c.codigo||"")+"").toUpperCase();
+        var r = mapaRutas[cod];
+        if(r) return r === rutaDelAgente;
+        var cli = (clientesFB||[]).find(function(x){
+          return ((x.codigo||x.id||"")+"").toUpperCase() === cod;
+        });
+        if(!cli) return false;
+        var ruta = parseInt(cli.SEMANAVISITA||cli.semanaVisita||cli.ruta||cli.semana||0);
+        return ruta === rutaDelAgente;
+      });
+    }
   }
 
   // (v3.20.0) Filtro adicional por artículo (drill-down)
@@ -7343,7 +7377,7 @@ function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirClie
         </div>
       )}
 
-      {/* (v3.20.2) Filtro por semana de ruta — visible para todos los roles */}
+      {/* (v3.20.2 / v3.22.1) Filtro por semana de ruta — visible para todos los roles */}
       <div style={{background:soloRuta?T.blue:"#fff", color:soloRuta?"#fff":T.text,
           borderRadius:11, padding:"10px 14px", marginBottom:10,
           border:"1.5px solid "+(soloRuta?T.blue:T.border)}}>
@@ -7355,13 +7389,21 @@ function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirClie
             display:"flex",alignItems:"center",justifyContent:"center",
             color:T.blue, fontWeight:800, fontSize:14}}>{soloRuta?"✓":""}</span>
           <div style={{flex:1}}>
-            <p style={{margin:0, fontSize:13, fontWeight:700}}>📍 Filtrar por ruta de visita</p>
+            <p style={{margin:0, fontSize:13, fontWeight:700}}>
+              {esAgente ? "📍 Filtrar por ruta de visita" : "📅 Solo rutas de esta semana"}
+            </p>
             <p style={{margin:0, fontSize:10.5, opacity:.75}}>
-              {soloRuta ? "Solo clientes con SEMANAVISITA = "+semanaRuta : (esAgente?"Activa para ver solo los clientes de tu ruta":"Activa para ver clientes por ruta de visita")}
+              {soloRuta
+                ? (esAgente
+                    ? "Solo clientes con SEMANAVISITA = "+semanaRuta
+                    : "Cada vendedor con su propia ruta de la semana ISO "+semIso+" ("+(Object.keys(rutasPorAgente).length)+" planes activos)")
+                : (esAgente
+                    ? "Activa para ver solo los clientes de tu ruta"
+                    : "Activa para ver lo que cada vendedor tiene programado esta semana")}
             </p>
           </div>
         </div>
-        {soloRuta && (
+        {soloRuta && esAgente && (
           <div style={{marginTop:10, paddingTop:10, borderTop:"1px solid "+(soloRuta?"#ffffff33":T.border),
               display:"flex", alignItems:"center", gap:8}}>
             <span style={{fontSize:11, opacity:.85, fontWeight:700}}>Ruta:</span>
@@ -7388,6 +7430,12 @@ function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirClie
                 📍 Mi ruta
               </button>
             )}
+          </div>
+        )}
+        {soloRuta && !esAgente && Object.keys(rutasPorAgente).length===0 && (
+          <div style={{marginTop:10, paddingTop:10, borderTop:"1px solid #ffffff33",
+              fontSize:11, opacity:.9, lineHeight:1.5}}>
+            ⚠️ Ningún vendedor tiene ruta planificada para la semana ISO {semIso}. Cuando los comerciales fijen sus rutas en "Mi semana", aparecerán aquí.
           </div>
         )}
       </div>
