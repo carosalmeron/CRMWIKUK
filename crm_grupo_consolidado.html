@@ -293,7 +293,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.13.1";
+const CRM_VERSION = "3.15.0";
 const CRM_BUILD = "02/05/2026";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -1040,7 +1040,50 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
     return eq === equipoFiltroMS;
   }
   var misEst=(estrategiasDB||[]).filter(function(e){return !e.eliminada&&(e.estado==="en_curso"||e.estado==="pendiente_aprobacion")&&(esAgenteRol?appMisIds.has((e.agente||"").toUpperCase())||e.pendienteDe===usuario.id||e.creadoPor===usuario.id:true);});
-  var misOps=(oportunidadesDB||[]).filter(function(o){return !o.eliminada&&!["ganada","perdida","cerrada_ganada","cerrada_perdida"].includes(o.estado||o.etapa)&&(esAgenteRol?appMisIds.has((o.agenteId||o.agente||"").toUpperCase()):true);});
+  var misOps=(oportunidadesDB||[]).filter(function(o){
+    if(o.eliminada) return false;
+    if(["ganada","perdida","cerrada_ganada","cerrada_perdida"].indexOf(o.estado||o.etapa)>=0) return false;
+    if(esAgenteRol && !appMisIds.has((o.agenteId||o.agente||"").toUpperCase())) return false;
+    if(!pasaFiltroEq(o)) return false;
+    return true;
+  });
+  // (v3.15.0) Oportunidades separadas: nuevas (esta semana, activas) / en curso (anteriores, activas) / resueltas (cerradas esta semana)
+  function _semISO_dt(d){
+    var t = new Date(d.valueOf()), dn = (d.getUTCDay()+6)%7;
+    t.setUTCDate(t.getUTCDate()-dn+3);
+    var ft = t.valueOf(); t.setUTCMonth(0,1);
+    if(t.getUTCDay()!==4) t.setUTCMonth(0, 1+((4-t.getUTCDay())+7)%7);
+    return 1 + Math.ceil((ft - t)/604800000);
+  }
+  function _semDeFecha(fechaStr){
+    if(!fechaStr) return 0;
+    var p=(fechaStr+"").split("/");
+    if(p.length!==3) return 0;
+    var dd=parseInt(p[0]),mm=parseInt(p[1])-1,yy=parseInt(p[2]);
+    if(yy<100) yy+=2000;
+    var d=new Date(yy,mm,dd);
+    if(isNaN(d.getTime())) return 0;
+    return _semISO_dt(d);
+  }
+  var opsNuevasSem360 = misOps.filter(function(o){
+    var s = parseInt(o.semana||0);
+    if(s) return s === semana;
+    if(o.fechaCreacion) return _semDeFecha(o.fechaCreacion) === semana;
+    return false;
+  });
+  var opsEnCursoSem360 = misOps.filter(function(o){
+    return opsNuevasSem360.indexOf(o) < 0;
+  });
+  var opsResueltasSem360 = (oportunidadesDB||[]).filter(function(o){
+    if(o.eliminada) return false;
+    if(["ganada","perdida","cerrada_ganada","cerrada_perdida"].indexOf(o.estado||o.etapa) < 0) return false;
+    if(esAgenteRol && !appMisIds.has((o.agenteId||o.agente||"").toUpperCase())) return false;
+    if(!pasaFiltroEq(o)) return false;
+    if(o.fechaCierre){
+      return _semDeFecha(o.fechaCierre) === semana;
+    }
+    return false;
+  });
   var misInc=(incidenciasDB||[]).filter(function(i){return !i.eliminada&&i.estado!=="cerrada"&&i.estado!=="resuelta"&&(esAgenteRol?appMisIds.has((i.agente||i.autor||"").toUpperCase()):true);});
   var misMue=(muestrasDB||[]).filter(function(m){return !m.eliminada&&m.estado==="pendiente"&&(esAgenteRol?appMisIds.has((m.agente||"").toUpperCase()):true);});
   var _s5=React.useState([]);var tareasDB=_s5[0],setTareasDB=_s5[1];
@@ -1841,6 +1884,35 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
           {/* Filtro jerárquico (v3.9.0) — mismo patrón que el Dashboard */}
           {puedeFiltrarEquipo&&(
             <div style={{marginBottom:14}}>
+              {/* (v3.14.0) Nodo "Mi actividad" — filtra a la actividad personal del usuario */}
+              <div onClick={function(){
+                  var sel = agenteFiltroMS===usuario.nombre;
+                  if(sel){
+                    setAgenteFiltroMS(null);
+                    setEquipoFiltroMS("todos");
+                  } else {
+                    setAgenteFiltroMS(usuario.nombre);
+                    setEquipoFiltroMS("todos");
+                    setTreeRootOpenMS(false);
+                    setTreeEqOpenMS(null);
+                  }
+                }}
+                style={{background:agenteFiltroMS===usuario.nombre?T.purple:"#fff",
+                  borderRadius:11,padding:"10px 14px",cursor:"pointer",
+                  border:"2px solid "+(agenteFiltroMS===usuario.nombre?T.purple:T.border),
+                  marginBottom:6,display:"flex",alignItems:"center",gap:10}}>
+                <span style={{fontSize:18}}>🧑</span>
+                <div style={{flex:1}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:700,
+                    color:agenteFiltroMS===usuario.nombre?"#fff":T.text}}>Mi actividad</p>
+                  <p style={{margin:0,fontSize:10,
+                    color:agenteFiltroMS===usuario.nombre?"rgba(255,255,255,.65)":T.muted}}>
+                    Solo lo que has registrado tú
+                  </p>
+                </div>
+                {agenteFiltroMS===usuario.nombre&&<span style={{color:"#fff",fontWeight:800,marginRight:4}}>✓</span>}
+              </div>
+
               {/* Nivel 1: Todos los equipos */}
               <div onClick={function(){
                   var wasSel = equipoFiltroMS==="todos" && !agenteFiltroMS;
@@ -1954,7 +2026,7 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                   {k:"clientes",n:clientesNuevosSemana.length,l:"Cl. nuevos",c:"#3B82F6"},
                   {k:"muestras",n:_mueSem.length,l:"Muestras",c:"#F59E0B"},
                   {k:"estr",n:misEst.length,l:"Estrat.",c:"#7C3AED"},
-                  {k:"ops",n:misOps.length,l:"Ops",c:"#1E3A5F"},
+                  {k:"ops",n:opsNuevasSem360.length+opsEnCursoSem360.length+opsResueltasSem360.length,l:"Ops",c:"#1E3A5F"},
                   {k:"hitos",n:misHitos.length,l:"Hitos",c:"#14B8A6"},
                   {k:"tareas",n:misTareas.length,l:"Tareas",c:"#EF4444"},
                   {k:"inc",n:misInc.length,l:"Incid.",c:"#DC2626"}
@@ -2096,11 +2168,18 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
               {/* ═══ Tareas pendientes (existente) ═══ */}
               {(!tipoFiltroMS||tipoFiltroMS==="tareas")&&misTareas.length>0&&(<div style={{background:"#fff",borderRadius:16,padding:18,marginBottom:14,borderLeft:"4px solid #EF4444",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
                 <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}><div style={{width:40,height:40,borderRadius:12,background:"#FEE2E2",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>{"📌"}</div><div><p style={{margin:0,fontSize:15,fontWeight:800}}>Tareas pendientes</p><p style={{margin:0,fontSize:11,color:T.muted}}>{misTareas.length} por hacer</p></div></div>
-                {misTareas.slice(0,5).map(function(t){return <div key={t.id} onClick={function(){onNav("tareas");}} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderTop:"1px solid #F1F5F9",cursor:"pointer"}}>
-                  <div style={{width:10,height:10,borderRadius:99,background:t.prioridad==="alta"?"#EF4444":"#F59E0B",flexShrink:0}}></div>
-                  <div style={{flex:1}}><p style={{margin:0,fontSize:13,fontWeight:600}}>{t.titulo||t.texto||""}</p><p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{t.vence?"Vence: "+t.vence:""}{t.clienteNombre?" \u00B7 "+t.clienteNombre:""}</p></div>
-                  {t.prioridad==="alta"&&<span style={{fontSize:9,padding:"3px 8px",borderRadius:99,background:"#FEE2E2",color:"#DC2626",fontWeight:700}}>URGENTE</span>}
-                </div>;})}
+                {misTareas.map(function(t){
+                  var agT = nombreResponsableHito(t.agente||t.agenteId||t.asignadoA||t.responsable||t.creadoPor);
+                  return <div key={t.id} onClick={function(){onNav("tareas");}} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"10px 0",borderTop:"1px solid #F1F5F9",cursor:"pointer"}}>
+                    <div style={{width:10,height:10,borderRadius:99,background:t.prioridad==="alta"?"#EF4444":"#F59E0B",flexShrink:0,marginTop:5}}></div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <p style={{margin:0,fontSize:13,fontWeight:600}}>{t.titulo||t.texto||""}</p>
+                      <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{t.vence?"📅 Vence: "+t.vence:""}{t.clienteNombre?" · "+t.clienteNombre:""}</p>
+                      {agT&&agT!=="Sin asignar"&&<p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>{"👤 "+agT}</p>}
+                    </div>
+                    {t.prioridad==="alta"&&<span style={{fontSize:9,padding:"3px 8px",borderRadius:99,background:"#FEE2E2",color:"#DC2626",fontWeight:700,flexShrink:0,marginTop:3}}>URGENTE</span>}
+                  </div>;
+                })}
               </div>)}
 
               {(!tipoFiltroMS||tipoFiltroMS==="hitos")&&misHitos.length>0&&(<div style={{background:"#fff",borderRadius:16,padding:18,marginBottom:14,borderLeft:"4px solid #3B82F6",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
@@ -2134,19 +2213,62 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                 <button onClick={function(){onNav("estrategias");}} style={{width:"100%",padding:10,borderRadius:10,border:"2px dashed #E2E8F0",background:"#fff",color:T.purple,fontSize:12,fontWeight:700,cursor:"pointer"}}>+ Nueva estrategia</button>
               </div>)}
 
-              {(!tipoFiltroMS||tipoFiltroMS==="ops")&&misOps.length>0&&(<div style={{background:"#fff",borderRadius:16,padding:18,marginBottom:14,borderLeft:"4px solid #1E3A5F",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
-                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}><div style={{width:40,height:40,borderRadius:12,background:"#EFF6FF",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:800,color:T.navy}}>{"💼"}</div><div><p style={{margin:0,fontSize:15,fontWeight:800}}>Oportunidades</p><p style={{margin:0,fontSize:11,color:T.muted}}>{pipeVal>0?pipeVal.toLocaleString("es-ES")+"E pipeline":misOps.length+" abiertas"}</p></div></div>
-                {misOps.slice(0,5).map(function(o){
-                  var agO = nombreAgenteId(o.agenteId||o.agente);
-                  return <div key={o.id} onClick={function(){onNav("oportunidades");}} style={{display:"flex",justifyContent:"space-between",padding:"10px 0",borderTop:"1px solid #F1F5F9",cursor:"pointer",alignItems:"flex-start",gap:8}}>
-                    <div style={{flex:1,minWidth:0}}>
-                      <p style={{margin:0,fontSize:13,fontWeight:600}}>{o.nombre||o.cliente}{agO?<span style={{color:T.muted,fontWeight:500,fontSize:11}}> ({agO})</span>:null}</p>
-                      <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{ESTADOS[o.etapa||o.estado]?ESTADOS[o.etapa||o.estado].label:""}</p>
+              {(!tipoFiltroMS||tipoFiltroMS==="ops")&&(opsNuevasSem360.length+opsEnCursoSem360.length+opsResueltasSem360.length)>0&&(
+                <div style={{background:"#fff",borderRadius:16,padding:18,marginBottom:14,borderLeft:"4px solid #1E3A5F",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+                    <div style={{width:40,height:40,borderRadius:12,background:"#EFF6FF",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,color:T.navy}}>💼</div>
+                    <div>
+                      <p style={{margin:0,fontSize:15,fontWeight:800,color:T.navy}}>Oportunidades</p>
+                      <p style={{margin:0,fontSize:11,color:T.muted}}>{opsNuevasSem360.length} nuevas · {opsEnCursoSem360.length} en curso · {opsResueltasSem360.length} resueltas{pipeVal>0?" · "+pipeVal.toLocaleString("es-ES")+"€ pipeline":""}</p>
                     </div>
-                    <span style={{fontSize:15,fontWeight:800,color:T.green,whiteSpace:"nowrap"}}>{o.valor?parseInt(o.valor).toLocaleString("es-ES")+"E":""}</span>
-                  </div>;
-                })}
-              </div>)}
+                  </div>
+
+                  {opsNuevasSem360.length>0&&<div>
+                    <p style={{margin:"4px 0 6px",fontSize:11,fontWeight:700,color:"#1E3A5F",textTransform:"uppercase",letterSpacing:.4}}>🆕 Nuevas esta semana ({opsNuevasSem360.length})</p>
+                    {opsNuevasSem360.map(function(o){
+                      var agO = nombreAgenteId(o.agenteId||o.agente);
+                      return <div key={o.id} onClick={function(){onNav("oportunidades");}} style={{padding:"8px 12px",marginBottom:6,borderRadius:10,background:"#FAFAFA",borderLeft:"3px solid #1E3A5F",cursor:"pointer"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                          <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{o.nombre||o.cliente}{agO?<span style={{color:T.muted,fontWeight:500,fontSize:11}}> ({agO})</span>:null}</p>
+                          <span style={{fontSize:13,fontWeight:800,color:T.green,whiteSpace:"nowrap"}}>{o.valor?parseInt(o.valor).toLocaleString("es-ES")+"€":""}</span>
+                        </div>
+                        <p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>{ESTADOS[o.etapa||o.estado]?ESTADOS[o.etapa||o.estado].label:(o.estado||o.etapa||"")}</p>
+                      </div>;
+                    })}
+                  </div>}
+
+                  {opsEnCursoSem360.length>0&&<div style={{marginTop:opsNuevasSem360.length>0?12:0}}>
+                    <p style={{margin:"4px 0 6px",fontSize:11,fontWeight:700,color:"#F59E0B",textTransform:"uppercase",letterSpacing:.4}}>🔄 En curso ({opsEnCursoSem360.length})</p>
+                    {opsEnCursoSem360.map(function(o){
+                      var agO = nombreAgenteId(o.agenteId||o.agente);
+                      return <div key={o.id} onClick={function(){onNav("oportunidades");}} style={{padding:"8px 12px",marginBottom:6,borderRadius:10,background:"#FAFAFA",borderLeft:"3px solid #F59E0B",cursor:"pointer"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                          <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{o.nombre||o.cliente}{agO?<span style={{color:T.muted,fontWeight:500,fontSize:11}}> ({agO})</span>:null}</p>
+                          <span style={{fontSize:13,fontWeight:800,color:T.green,whiteSpace:"nowrap"}}>{o.valor?parseInt(o.valor).toLocaleString("es-ES")+"€":""}</span>
+                        </div>
+                        <p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>{ESTADOS[o.etapa||o.estado]?ESTADOS[o.etapa||o.estado].label:(o.estado||o.etapa||"")}</p>
+                      </div>;
+                    })}
+                  </div>}
+
+                  {opsResueltasSem360.length>0&&<div style={{marginTop:(opsNuevasSem360.length+opsEnCursoSem360.length)>0?12:0}}>
+                    <p style={{margin:"4px 0 6px",fontSize:11,fontWeight:700,color:"#22C55E",textTransform:"uppercase",letterSpacing:.4}}>✅ Resueltas esta semana ({opsResueltasSem360.length})</p>
+                    {opsResueltasSem360.map(function(o){
+                      var agO = nombreAgenteId(o.agenteId||o.agente);
+                      var est = o.estado||o.etapa;
+                      var icCol = (est==="ganada"||est==="cerrada_ganada")?"#22C55E":(est==="perdida"||est==="cerrada_perdida")?"#EF4444":"#1E3A5F";
+                      var lbl = (est==="ganada"||est==="cerrada_ganada")?"🏆 Ganada":(est==="perdida"||est==="cerrada_perdida")?"💔 Perdida":"🔚 Cerrada";
+                      return <div key={o.id} onClick={function(){onNav("oportunidades");}} style={{padding:"8px 12px",marginBottom:6,borderRadius:10,background:"#FAFAFA",borderLeft:"3px solid "+icCol,cursor:"pointer"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                          <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{o.nombre||o.cliente}{agO?<span style={{color:T.muted,fontWeight:500,fontSize:11}}> ({agO})</span>:null}</p>
+                          <span style={{fontSize:13,fontWeight:800,color:icCol,whiteSpace:"nowrap"}}>{o.valor?parseInt(o.valor).toLocaleString("es-ES")+"€":""}</span>
+                        </div>
+                        <p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>{lbl}{o.fechaCierre?" · "+o.fechaCierre:""}</p>
+                      </div>;
+                    })}
+                  </div>}
+                </div>
+              )}
 
               {/* ═══ Sección Incidencias (v3.10.0) ═══ */}
               {(!tipoFiltroMS||tipoFiltroMS==="inc")&&misInc.length>0&&(
