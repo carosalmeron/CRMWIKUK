@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🔄 Reasignar vendedores en ventas — Grupo Consolidado</title>
+<style>
+body{font-family:Arial,sans-serif;max-width:760px;margin:40px auto;padding:20px;background:#f5f5f5;color:#1A1816}
+h1{font-size:1.4rem;margin:0 0 8px}
+h2{font-size:1rem;margin:18px 0 8px}
+.card{background:#fff;border-radius:12px;padding:24px;box-shadow:0 2px 8px rgba(0,0,0,.08);margin-bottom:16px}
+.note{background:#FFFBEB;border-left:4px solid #F59E0B;padding:12px 14px;border-radius:8px;font-size:.85rem;color:#92400E;margin-bottom:16px}
+.btn{width:100%;padding:14px;font-size:1rem;font-weight:700;border:none;border-radius:10px;cursor:pointer;margin-bottom:8px}
+.btn-main{background:#7C3AED;color:#fff}
+.btn-main:hover{background:#5B21B6}
+.btn-main:disabled{background:#ccc;cursor:not-allowed}
+.bar-wrap{background:#eee;border-radius:99px;height:14px;overflow:hidden;margin:8px 0}
+.bar{height:100%;background:#7C3AED;border-radius:99px;width:0%;transition:width .3s}
+.log{background:#1A1816;color:#4ADE80;font-family:monospace;font-size:.78rem;padding:14px;border-radius:8px;max-height:280px;overflow-y:auto;margin-top:10px;white-space:pre-wrap}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:12px}
+.stat{text-align:center;background:#f9f9f9;border-radius:8px;padding:10px 4px}
+.stat-n{font-size:1.4rem;font-weight:900;line-height:1}
+.stat-l{font-size:.68rem;color:#888;margin-top:3px}
+.ok{color:#22C55E} .skip{color:#3B82F6} .err{color:#EF4444} .warn{color:#F59E0B} .info{color:#1E40AF}
+</style>
+</head>
+<body>
+
+<h1>🔄 Reasignar vendedores en ventas</h1>
+<p style="color:#666;font-size:.9rem;margin:0 0 16px">
+  Lee los clientes de Firebase y, para cada registro de <code>ventas_anuales</code>, añade su <code>grupoAgente</code> y <code>equipo</code> actuales.
+  No toca los importes — solo reasigna el vendedor responsable.
+</p>
+
+<div class="note">
+  <strong>📋 Cuándo usar esto:</strong> Si has importado ventas pero no se asignaron correctamente al vendedor de cada cliente, esta utilidad lo arregla en unos minutos. Si tras esto siguen sin asignar, revisa que tus clientes en Firebase tengan el campo <code>grupoAgente</code> correctamente.
+</div>
+
+<div class="card">
+  <h2>1. Diagnóstico inicial</h2>
+  <button class="btn btn-main" id="btnDiag" onclick="diagnostico()">🔍 Analizar estado actual</button>
+  <div id="diagOut"></div>
+</div>
+
+<div class="card">
+  <h2>2. Reasignar vendedores</h2>
+  <button class="btn btn-main" id="btnReasig" onclick="reasignar()" disabled>🔄 Aplicar reasignación masiva</button>
+  <div id="progress" style="display:none">
+    <div class="bar-wrap"><div class="bar" id="bar"></div></div>
+    <div style="display:flex;justify-content:space-between;font-size:.8rem;color:#555">
+      <span id="pPos">0 / 0</span>
+      <span id="pPct">0%</span>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="stat-n ok" id="cAsig">0</div><div class="stat-l">✅ Asignados</div></div>
+      <div class="stat"><div class="stat-n skip" id="cYa">0</div><div class="stat-l">⏭ Ya tenía</div></div>
+      <div class="stat"><div class="stat-n warn" id="cHuer">0</div><div class="stat-l">🚫 Huérfanos</div></div>
+      <div class="stat"><div class="stat-n err" id="cErr">0</div><div class="stat-l">❌ Errores</div></div>
+    </div>
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script>
+const FB = "https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const $ = id => document.getElementById(id);
+const log = (msg, cls="") => { const l=$("log"); l.innerHTML += `<span class="${cls}">${msg}</span>\n`; l.scrollTop=l.scrollHeight; };
+
+let MAPA_CLI = null; // codigo -> {grupoAgente, equipo}
+let VENTAS = null;   // [{id, clienteCodigo, grupoAgente?, ...}]
+
+function decode(v){
+  if(!v) return null;
+  if("stringValue" in v) return v.stringValue;
+  if("integerValue" in v) return parseInt(v.integerValue);
+  if("doubleValue" in v) return parseFloat(v.doubleValue);
+  if("booleanValue" in v) return v.booleanValue;
+  if("nullValue" in v) return null;
+  return null;
+}
+
+async function diagnostico(){
+  $("btnDiag").disabled = true;
+  $("diagOut").innerHTML = '<p style="color:#888">Cargando datos...</p>';
+  
+  // 1) Leer clientes
+  log("📋 Leyendo clientes de Firebase...");
+  MAPA_CLI = new Map();
+  let nextC = null;
+  do{
+    const r = await fetch(`${FB}/clientes?pageSize=300${nextC?"&pageToken="+nextC:""}`);
+    const d = await r.json();
+    for(const doc of (d.documents||[])){
+      const id = doc.name.split("/").pop();
+      const f = doc.fields || {};
+      // Tolerante a variantes
+      const ag = (decode(f.grupoAgente) || decode(f.GRUPOAGENTE) || decode(f.grupo_agente) || decode(f.agente) || "").toUpperCase().trim();
+      const eq = decode(f.equipo) || decode(f.EQUIPO) || "";
+      MAPA_CLI.set(id, {grupoAgente: ag, equipo: eq, nombre: decode(f.nombre)||decode(f.NOMBRE)||""});
+    }
+    nextC = d.nextPageToken || null;
+  } while(nextC);
+  
+  const clisConAg = Array.from(MAPA_CLI.values()).filter(c=>c.grupoAgente).length;
+  log(`✓ ${MAPA_CLI.size} clientes leídos · ${clisConAg} con grupoAgente`, "ok");
+
+  // 2) Leer ventas
+  log("📊 Leyendo ventas_anuales de Firebase...");
+  VENTAS = [];
+  let nextV = null;
+  do{
+    const r = await fetch(`${FB}/ventas_anuales?pageSize=300${nextV?"&pageToken="+nextV:""}`);
+    const d = await r.json();
+    for(const doc of (d.documents||[])){
+      const id = doc.name.split("/").pop();
+      const f = doc.fields || {};
+      VENTAS.push({
+        id: id,
+        clienteCodigo: decode(f.clienteCodigo) || decode(f.cliente_codigo) || decode(f.codigo) || "",
+        grupoAgente: decode(f.grupoAgente) || "",
+        equipo: decode(f.equipo) || ""
+      });
+    }
+    nextV = d.nextPageToken || null;
+  } while(nextV);
+
+  log(`✓ ${VENTAS.length} ventas leídas`, "ok");
+
+  // Estadísticas
+  let conAg = 0, sinAg = 0, huer = 0, podemosAsig = 0, sinCambio = 0;
+  for(const v of VENTAS){
+    if(v.grupoAgente) conAg++;
+    else {
+      sinAg++;
+      const cli = MAPA_CLI.get(v.clienteCodigo);
+      if(cli && cli.grupoAgente) podemosAsig++;
+      else huer++;
+    }
+  }
+
+  $("diagOut").innerHTML = `
+    <div class="stats">
+      <div class="stat"><div class="stat-n">${VENTAS.length}</div><div class="stat-l">Ventas total</div></div>
+      <div class="stat"><div class="stat-n ok">${conAg}</div><div class="stat-l">Con agente</div></div>
+      <div class="stat"><div class="stat-n warn">${sinAg}</div><div class="stat-l">Sin agente</div></div>
+      <div class="stat"><div class="stat-n info">${podemosAsig}</div><div class="stat-l">Podemos asignar</div></div>
+    </div>
+    <p style="margin-top:14px;font-size:.85rem;color:#555">
+      <strong>${podemosAsig}</strong> registros se pueden reasignar al cruzar con la BD de clientes.
+      <strong>${huer}</strong> son huérfanos (su cliente no existe en la BD o no tiene vendedor).
+    </p>
+  `;
+  
+  $("btnReasig").disabled = (podemosAsig === 0);
+  if(podemosAsig === 0){
+    log("⚠️ No hay registros que reasignar. Verifica que tus clientes en Firebase tengan grupoAgente.", "warn");
+  } else {
+    log(`👉 Pulsa "Aplicar reasignación masiva" para asignar ${podemosAsig} registros.`, "info");
+  }
+}
+
+async function reasignar(){
+  if(!VENTAS || !MAPA_CLI) return;
+  if(!confirm(`Se actualizarán los registros de ventas con su grupoAgente correspondiente. ¿Continuar?`)) return;
+
+  $("btnReasig").disabled = true;
+  $("progress").style.display = "block";
+  $("log").textContent = "";
+
+  let asig=0, ya=0, huer=0, err=0;
+  const t0 = Date.now();
+  const total = VENTAS.length;
+
+  // Procesar en paralelo limitado
+  const CONCURRENCIA = 8;
+  let idx = 0;
+
+  async function worker(){
+    while(idx < VENTAS.length){
+      const i = idx++;
+      const v = VENTAS[i];
+      
+      // Si ya tiene agente, saltar
+      if(v.grupoAgente){ ya++; continue; }
+      
+      const cli = MAPA_CLI.get(v.clienteCodigo);
+      if(!cli || !cli.grupoAgente){ huer++; continue; }
+      
+      // Aplicar PATCH solo a grupoAgente y equipo
+      try{
+        const body = {
+          fields: {
+            grupoAgente: {stringValue: cli.grupoAgente},
+            equipo: {stringValue: cli.equipo || ""}
+          }
+        };
+        const url = `${FB}/ventas_anuales/${encodeURIComponent(v.id)}?updateMask.fieldPaths=grupoAgente&updateMask.fieldPaths=equipo`;
+        const r = await fetch(url, {method:"PATCH", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+        if(r.ok) asig++;
+        else { err++; if(err<5) log(`❌ ${v.id}: ${r.status}`, "err"); }
+      } catch(e){
+        err++; if(err<5) log(`❌ ${v.id}: ${e.message}`, "err");
+      }
+
+      if((asig+ya+huer+err) % 50 === 0 || (asig+ya+huer+err) === total) updateProgress(asig, ya, huer, err, total, t0);
+    }
+  }
+
+  await Promise.all(Array.from({length:CONCURRENCIA}, worker));
+
+  const dur = Math.round((Date.now()-t0)/1000);
+  log(`\n✅ Terminado en ${dur}s`, "ok");
+  log(`   ${asig} asignados, ${ya} ya tenían, ${huer} huérfanos, ${err} errores`, "ok");
+  log("\n🔄 Recarga el CRM para ver los cambios reflejados en Recuperación.", "info");
+  $("btnReasig").disabled = false;
+}
+
+function updateProgress(asig, ya, huer, err, total, t0){
+  const done = asig + ya + huer + err;
+  const pct = Math.round((done/total)*100);
+  $("bar").style.width = pct+"%";
+  $("pPos").textContent = `${done} / ${total}`;
+  $("pPct").textContent = pct+"%";
+  $("cAsig").textContent = asig;
+  $("cYa").textContent = ya;
+  $("cHuer").textContent = huer;
+  $("cErr").textContent = err;
+}
+</script>
+</body>
+</html>
