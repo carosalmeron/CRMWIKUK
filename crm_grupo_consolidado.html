@@ -279,7 +279,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.22.3";
+const CRM_VERSION = "3.22.4";
 const CRM_BUILD = "03/05/2026";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -6911,8 +6911,12 @@ function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirClie
 
   // (v3.20.2) Mapa clienteCodigo → ruta (cargado una vez al montar)
   var _mr = React.useState({}); var mapaRutas = _mr[0], setMapaRutas = _mr[1];
-  // (v3.22.1) Mapa agenteId → rutaNum de ESTA semana (para jefes/dir/ceo)
+  // (v3.22.1) Mapa agenteId → rutaNum de la semana seleccionada (para jefes/dir/ceo)
   var _rpa = React.useState({}); var rutasPorAgente = _rpa[0], setRutasPorAgente = _rpa[1];
+  // (v3.22.4) Todos los planes cargados de Firebase (para refiltrado al cambiar semana)
+  var _tp = React.useState([]); var todosPlanes = _tp[0], setTodosPlanes = _tp[1];
+  // (v3.22.4) Semana ISO seleccionada por el jefe (default = actual)
+  var _sj = React.useState(0); var semanaJefe = _sj[0], setSemanaJefe = _sj[1];
   React.useEffect(function(){
     fbLeerTodos("clientes").then(function(arr){
       if(!arr) return;
@@ -6931,8 +6935,10 @@ function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirClie
     var s = (typeof getSemanaISO==="function") ? getSemanaISO() : 0;
     setSemIso(s);
     setSemanaRuta(s); // Por defecto, semana actual
+    setSemanaJefe(s); // (v3.22.4) Default semana ISO actual para jefes
     fbLeer("planes_semanales").then(function(planes){
       if(!planes) return;
+      setTodosPlanes(planes); // (v3.22.4) Guardar TODOS para refiltrado
       // Plan del usuario actual (para agentes y para semana inicial)
       var found = planes.find(function(p){
         return p.agente===usuario.id && parseInt(p.semana)===s && parseInt(p.anio)===new Date().getFullYear();
@@ -6942,18 +6948,22 @@ function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirClie
       if(found && found.modo==="ruta" && found.rutaNum){
         setSemanaRuta(parseInt(found.rutaNum));
       }
-      // (v3.22.1) Para jefes/dir/ceo: mapa agenteId → rutaNum de cada vendedor en la semana ISO actual
-      var rpa = {};
-      var anioActual = new Date().getFullYear();
-      planes.forEach(function(p){
-        if(parseInt(p.semana)===s && parseInt(p.anio)===anioActual && p.modo==="ruta" && p.rutaNum){
-          var agId = String(p.agente||"").toUpperCase().trim();
-          if(agId) rpa[agId] = parseInt(p.rutaNum);
-        }
-      });
-      setRutasPorAgente(rpa);
     }).catch(function(){});
   },[]);
+
+  // (v3.22.4) Recalcular rutasPorAgente cuando cambia la semana seleccionada o se cargan planes
+  React.useEffect(function(){
+    if(!todosPlanes || todosPlanes.length===0 || !semanaJefe) return;
+    var rpa = {};
+    var anioActual = new Date().getFullYear();
+    todosPlanes.forEach(function(p){
+      if(parseInt(p.semana)===semanaJefe && parseInt(p.anio)===anioActual && p.modo==="ruta" && p.rutaNum){
+        var agId = String(p.agente||"").toUpperCase().trim();
+        if(agId) rpa[agId] = parseInt(p.rutaNum);
+      }
+    });
+    setRutasPorAgente(rpa);
+  },[semanaJefe, todosPlanes]);
 
   // ── Procesar ventasDB → agrupar por cliente y clasificar ──
   var datosCalc = React.useMemo(function(){
@@ -7396,7 +7406,7 @@ function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirClie
               {soloRuta
                 ? (esAgente
                     ? "Solo clientes con SEMANAVISITA = "+semanaRuta
-                    : "Cada vendedor con su propia ruta de la semana ISO "+semIso+" ("+(Object.keys(rutasPorAgente).length)+" planes activos)")
+                    : "Cada vendedor con su ruta de la semana ISO "+semanaJefe+" ("+(Object.keys(rutasPorAgente).length)+" planes activos)")
                 : (esAgente
                     ? "Activa para ver solo los clientes de tu ruta"
                     : "Activa para ver lo que cada vendedor tiene programado esta semana")}
@@ -7432,10 +7442,38 @@ function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirClie
             )}
           </div>
         )}
-        {soloRuta && !esAgente && Object.keys(rutasPorAgente).length===0 && (
+        {soloRuta && !esAgente && (
           <div style={{marginTop:10, paddingTop:10, borderTop:"1px solid #ffffff33",
-              fontSize:11, opacity:.9, lineHeight:1.5}}>
-            ⚠️ Ningún vendedor tiene ruta planificada para la semana ISO {semIso}. Cuando los comerciales fijen sus rutas en "Mi semana", aparecerán aquí.
+              display:"flex", alignItems:"center", gap:8, flexWrap:"wrap"}}>
+            <span style={{fontSize:11, opacity:.85, fontWeight:700}}>Semana ISO:</span>
+            <button onClick={function(){setSemanaJefe(Math.max(1, semanaJefe-1));}}
+              style={{background:"#ffffff22", border:"none", color:"inherit", padding:"4px 10px",
+                borderRadius:7, fontWeight:800, fontSize:14, cursor:"pointer"}}>‹</button>
+            <select value={semanaJefe} onChange={function(e){setSemanaJefe(parseInt(e.target.value));}}
+              style={{padding:"5px 8px", borderRadius:7, border:"none", background:"#ffffff",
+                color:T.text, fontWeight:800, fontSize:12, cursor:"pointer"}}>
+              {Array.from({length:52},function(_,i){return i+1;}).map(function(n){
+                var esActual = n===semIso;
+                var sufijo = esActual ? " (sem. actual)" : "";
+                return <option key={n} value={n}>Semana {n}{sufijo}</option>;
+              })}
+            </select>
+            <button onClick={function(){setSemanaJefe(Math.min(52, semanaJefe+1));}}
+              style={{background:"#ffffff22", border:"none", color:"inherit", padding:"4px 10px",
+                borderRadius:7, fontWeight:800, fontSize:14, cursor:"pointer"}}>›</button>
+            {semanaJefe !== semIso && (
+              <button onClick={function(){setSemanaJefe(semIso);}}
+                style={{marginLeft:"auto", background:"#ffffff", color:T.blue, border:"none",
+                  padding:"4px 10px", borderRadius:7, fontWeight:800, fontSize:10.5, cursor:"pointer"}}>
+                📅 Hoy
+              </button>
+            )}
+            {Object.keys(rutasPorAgente).length===0 && (
+              <div style={{flex:"1 1 100%", marginTop:8, fontSize:11, opacity:.9, lineHeight:1.5}}>
+                ⚠️ Ningún vendedor tiene ruta planificada para la semana ISO {semanaJefe}.
+                Cuando los comerciales fijen sus rutas en "Mi semana", aparecerán aquí.
+              </div>
+            )}
           </div>
         )}
       </div>
