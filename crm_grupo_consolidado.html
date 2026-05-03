@@ -279,8 +279,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.22.11";
-const CRM_BUILD = "03/05/2026";
+const CRM_VERSION = "3.22.12";
+const CRM_BUILD = "03/05/2026-fix-aprobadas-activas";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -6037,10 +6037,11 @@ function MisEstrategias({usuario}){
     : [];
 
   const enRevisionAgente=esAgente?estrategias.filter(e=>esDelEquipoOGlobal(e)&&e.estado==="pendiente_aprobacion"):[];
-  const activasAgente=esAgente?estrategias.filter(e=>esDelEquipoOGlobal(e)&&e.estado==="en_curso"&&!e.resolucion):[];
-  const misMostrar=(esJefe||esRolDir||esRolCeo)?estrategias.filter(e=>deEquipo(e)&&e.estado==="en_curso"&&!e.resolucion&&!e.eliminada):[];
+  // (v3.22.12) Activas = en curso aunque tengan resolución (aprobada). Solo desaparecen al cierre final
+  const activasAgente=esAgente?estrategias.filter(e=>esDelEquipoOGlobal(e)&&e.estado==="en_curso"&&!e.cierreFinal):[];
+  const misMostrar=(esJefe||esRolDir||esRolCeo)?estrategias.filter(e=>deEquipo(e)&&e.estado==="en_curso"&&!e.cierreFinal&&!e.eliminada):[];
   const misPendAprobDir=(esRolDir||esRolCeo)?estrategias.filter(e=>e.estado==="pendiente_aprobacion"&&!e.eliminada):[];
-  const misResueltasDir=(esRolDir||esRolCeo)?estrategias.filter(e=>e.resolucion&&!e.eliminada):[];
+  const misResueltasDir=(esRolDir||esRolCeo)?estrategias.filter(e=>e.cierreFinal&&!e.eliminada):[];
 
   // Debug filters
   if(estrategias.length>0){
@@ -6353,7 +6354,7 @@ function MisEstrategias({usuario}){
           )}
 
           {/* (v3.22.11) Botones de cierre para estrategia EN CURSO (ya aprobada) */}
-          {sel.estado==="en_curso"&&!res&&(sel.agente===usuario.id||sel.creadoPor===usuario.id||esJefe||esRolDir||esRolCeo)&&(
+          {sel.estado==="en_curso"&&!sel.cierreFinal&&(sel.agente===usuario.id||sel.creadoPor===usuario.id||esJefe||esRolDir||esRolCeo)&&(
             <Card style={{marginBottom:12}}>
               <p style={{margin:"0 0 12px",fontSize:12,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>
                 ⚡ Resultado de la estrategia
@@ -6366,6 +6367,7 @@ function MisEstrategias({usuario}){
                   const hoy=new Date().toLocaleDateString("es-ES");
                   const updated={...sel,
                     estado:"completada",resultado:"exito",
+                    cierreFinal:{por:usuario.nombre,fecha:hoy,resultado:"pedido",nota:nota||""},
                     resolucion:{tipo:"pedido",fecha:hoy,por:usuario.nombre,nota:nota||""},
                     seguimientos:[...(sel.seguimientos||[]),{
                       accion:"✅ PEDIDO confirmado",fecha:hoy,por:usuario.nombre,nota:nota||""
@@ -6389,6 +6391,7 @@ function MisEstrategias({usuario}){
                   const hoy=new Date().toLocaleDateString("es-ES");
                   const updated={...sel,
                     estado:"sin_exito",resultado:"sin_exito",
+                    cierreFinal:{por:usuario.nombre,fecha:hoy,resultado:"ko",nota:motivo||""},
                     resolucion:{tipo:"ko",fecha:hoy,por:usuario.nombre,nota:motivo||""},
                     seguimientos:[...(sel.seguimientos||[]),{
                       accion:"❌ KO — sin éxito",fecha:hoy,por:usuario.nombre,nota:motivo||""
@@ -6425,7 +6428,13 @@ function MisEstrategias({usuario}){
                   const ceoUser=USUARIOS.find(u=>u.rol==="ceo");
 
                   let pendienteDeId,pendienteDeNombre;
-                  if(nuevoDto<=cfg.jefe){
+                  // (v3.22.11) Si ya fue aprobada por CEO antes, va directa al CEO siempre
+                  const yaAproboCEO=(sel.cadenaAprobacion||[]).some(c=>c.rol==="ceo"&&c.estado==="aprobado")
+                    ||sel.aprobadoPor==="CEO"||(sel.resolucion&&sel.resolucion.rol==="ceo");
+                  if(yaAproboCEO){
+                    pendienteDeId=ceoUser?.id;
+                    pendienteDeNombre=ceoUser?.nombre||"CEO";
+                  } else if(nuevoDto<=cfg.jefe){
                     pendienteDeId=responsable?.id;
                     pendienteDeNombre=responsable?.nombre||"Responsable";
                   } else if(nuevoDto<=cfg.director){
@@ -6760,6 +6769,7 @@ function MisEstrategias({usuario}){
 
             const est={id:"est_"+Date.now(),
               cliente:formEst.cliente,clienteNombre:formEst.cliente,
+              clienteCodigo:formEst.clienteCodigo||"",
               objetivo:formEst.objetivo,estrategia:formEst.texto,texto:formEst.texto,
               tipo:formEst.tipo||"recuperacion",ofertas:formEst.ofertas||[],
               maxDescuento:maxDto,
@@ -12717,11 +12727,14 @@ function HistorialClientes({usuario, actividad, muestrasDB, oportunidadesDB, inc
       if(fN.length>4&&cliNomN.length>4){return fN.startsWith(cliNomN)||cliNomN.startsWith(fN);}
       return false;
     };
+    // (v3.22.11) Match también por código de cliente
+    const _cliCod=(sel.codigo||sel.CODIGO||sel.COD||"").toString().trim().toUpperCase();
+    const _matchCod=(c)=>!!(c&&_cliCod&&c.toString().trim().toUpperCase()===_cliCod);
     const cli360={
-      muestras:(muestrasDB||[]).filter(m=>matchCli(m.cliente)||m.clienteId===cliId),
-      oportunidades:(oportunidadesDB||[]).filter(o=>matchCli(o.cliente)||matchCli(o.nombre)||o.clienteId===cliId),
-      incidencias:(incidenciasDB||[]).filter(inc=>matchCli(inc.cliente)||inc.clienteId===cliId),
-      estrategias:(estrategiasDB||[]).filter(e=>matchCli(e.clienteNombre)||matchCli(e.cliente)||e.clienteId===cliId),
+      muestras:(muestrasDB||[]).filter(m=>matchCli(m.cliente)||m.clienteId===cliId||_matchCod(m.clienteCodigo)),
+      oportunidades:(oportunidadesDB||[]).filter(o=>matchCli(o.cliente)||matchCli(o.nombre)||o.clienteId===cliId||_matchCod(o.clienteCodigo)),
+      incidencias:(incidenciasDB||[]).filter(inc=>matchCli(inc.cliente)||inc.clienteId===cliId||_matchCod(inc.clienteCodigo)),
+      estrategias:(estrategiasDB||[]).filter(e=>matchCli(e.clienteNombre)||matchCli(e.cliente)||e.clienteId===cliId||_matchCod(e.clienteCodigo)),
     };
 
     return(
