@@ -280,7 +280,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.22.25";
+const CRM_VERSION = "3.22.27";
 const CRM_BUILD = "03/05/2026";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -6621,6 +6621,141 @@ function MisEstrategias({usuario}){
     )
   );
 
+  // (v3.22.26) Funciones de acción reutilizables (usadas en detalle Y en tarjeta expandida)
+  const accionPedido=(e)=>{
+    const nota=prompt("¿El cliente ha pedido?\nDescribe brevemente (cantidad, observaciones):","");
+    if(nota===null) return;
+    const hoy=new Date().toLocaleDateString("es-ES");
+    const updated={...e,
+      estado:"completada",resultado:"exito",
+      cierreFinal:{por:usuario.nombre,fecha:hoy,resultado:"pedido",nota:nota||""},
+      resolucion:{tipo:"pedido",fecha:hoy,por:usuario.nombre,nota:nota||""},
+      seguimientos:[...(e.seguimientos||[]),{accion:"✅ PEDIDO confirmado",fecha:hoy,por:usuario.nombre,nota:nota||""}],
+      historialEscalado:[...(e.historialEscalado||[]),{accion:"✅ PEDIDO confirmado",por:usuario.nombre,fecha:hoy,nota:nota||""}]};
+    setEstrategias(prev=>prev.map(x=>x.id===e.id?updated:x));
+    fbEscribir("estrategias",e.id,updated);
+    if(sel&&sel.id===e.id) setSel(updated);
+    alert("✅ Estrategia completada con PEDIDO");
+  };
+  const accionKO=(e)=>{
+    const motivo=prompt("¿Por qué KO?\nIndica el motivo del rechazo:","");
+    if(motivo===null) return;
+    const hoy=new Date().toLocaleDateString("es-ES");
+    const updated={...e,
+      estado:"sin_exito",resultado:"sin_exito",
+      cierreFinal:{por:usuario.nombre,fecha:hoy,resultado:"ko",nota:motivo||""},
+      resolucion:{tipo:"ko",fecha:hoy,por:usuario.nombre,nota:motivo||""},
+      seguimientos:[...(e.seguimientos||[]),{accion:"❌ KO — sin éxito",fecha:hoy,por:usuario.nombre,nota:motivo||""}],
+      historialEscalado:[...(e.historialEscalado||[]),{accion:"❌ KO — sin éxito",por:usuario.nombre,fecha:hoy,nota:motivo||""}]};
+    setEstrategias(prev=>prev.map(x=>x.id===e.id?updated:x));
+    fbEscribir("estrategias",e.id,updated);
+    if(sel&&sel.id===e.id) setSel(updated);
+    alert("❌ Estrategia cerrada como KO");
+  };
+  const accionMasDto=(e)=>{
+    const dtoActual=e.maxDescuento||0;
+    const nuevoStr=prompt(`Solicitar más descuento (actual: ${dtoActual}%)\nIntroduce el nuevo % (ej: 15):`,String(dtoActual+5));
+    if(nuevoStr===null) return;
+    const nuevoDto=parseFloat((nuevoStr+"").replace(",","."));
+    if(isNaN(nuevoDto)||nuevoDto<=0){alert("Introduce un número válido");return;}
+    if(nuevoDto<=dtoActual){alert("El nuevo descuento debe ser mayor al actual ("+dtoActual+"%)");return;}
+    const motivo=prompt("Motivo de la solicitud:","Cliente pide más margen");
+    if(motivo===null) return;
+    const hoy=new Date().toLocaleDateString("es-ES");
+    const cfg=(window._configDto)||{agente:4,jefe:10,director:15};
+    const responsable=USUARIOS.find(u=>u.rol==="jefe"&&u.equipo===(e.equipo||usuario.equipo));
+    const jefeVentas=USUARIOS.find(u=>u.rol==="director");
+    const ceoUser=USUARIOS.find(u=>u.rol==="ceo");
+    let pendienteDeId,pendienteDeNombre;
+    const yaAproboCEO=(e.cadenaAprobacion||[]).some(c=>c.rol==="ceo"&&c.estado==="aprobado")
+      ||e.aprobadoPor==="CEO"||(e.resolucion&&e.resolucion.rol==="ceo");
+    if(yaAproboCEO){
+      pendienteDeId=ceoUser&&ceoUser.id;pendienteDeNombre=(ceoUser&&ceoUser.nombre)||"CEO";
+    } else if(nuevoDto<=cfg.jefe){
+      pendienteDeId=responsable&&responsable.id;pendienteDeNombre=(responsable&&responsable.nombre)||"Responsable";
+    } else if(nuevoDto<=cfg.director){
+      pendienteDeId=jefeVentas&&jefeVentas.id;pendienteDeNombre=(jefeVentas&&jefeVentas.nombre)||"Jefe de Ventas";
+    } else {
+      pendienteDeId=ceoUser&&ceoUser.id;pendienteDeNombre=(ceoUser&&ceoUser.nombre)||"CEO";
+    }
+    const updated={...e,estado:"pendiente_aprobacion",maxDescuento:nuevoDto,dtoSolicitado:nuevoDto,
+      pendienteDe:pendienteDeId,pendienteDeNombre:pendienteDeNombre,
+      seguimientos:[...(e.seguimientos||[]),{accion:`💬 Solicita más dto: ${dtoActual}% → ${nuevoDto}%`,fecha:hoy,por:usuario.nombre,nota:motivo}],
+      historialEscalado:[...(e.historialEscalado||[]),{accion:`💬 Solicita más dto: ${dtoActual}% → ${nuevoDto}% (a ${pendienteDeNombre})`,por:usuario.nombre,fecha:hoy,nota:motivo}]};
+    setEstrategias(prev=>prev.map(x=>x.id===e.id?updated:x));
+    fbEscribir("estrategias",e.id,updated);
+    if(sel&&sel.id===e.id) setSel(updated);
+    if(pendienteDeId){
+      despacharNotificacion({tipo:"estrategia",
+        titulo:`💬 Solicita más dto: ${e.cliente} (${dtoActual}% → ${nuevoDto}%)`,
+        mensaje:`${usuario.nombre} pide aumentar el dto.\nCliente: ${e.cliente}\nMotivo: ${motivo}`,
+        destinatarioId:pendienteDeId,prioridad:"alta",creadoPor:usuario.id});
+    }
+    alert(`💬 Solicitud enviada a ${pendienteDeNombre}`);
+  };
+  const accionNota=(e)=>{
+    const nota=prompt("Añadir nota de seguimiento:","");
+    if(!nota||!nota.trim()) return;
+    const hoy=new Date().toLocaleDateString("es-ES");
+    const updated={...e,
+      seguimientos:[...(e.seguimientos||[]),{accion:"📝 Nota",fecha:hoy,por:usuario.nombre,nota:nota}],
+      historialEscalado:[...(e.historialEscalado||[]),{accion:"📝 Nota de seguimiento",por:usuario.nombre,fecha:hoy,nota:nota}]};
+    setEstrategias(prev=>prev.map(x=>x.id===e.id?updated:x));
+    fbEscribir("estrategias",e.id,updated);
+    if(sel&&sel.id===e.id) setSel(updated);
+  };
+
+  // (v3.22.26) Helper: comprueba si el usuario actual puede ejecutar la estrategia
+  const _puedeEjecutar=(e)=>{
+    const cli=(window._clientesFB||[]).find(c=>(e.clienteCodigo&&((c.codigo||c.CODIGO)===e.clienteCodigo))||(e.clienteId&&c.id===e.clienteId));
+    const esAgenteCli=!!(cli&&(cli.agente===usuario.id||cli.GRUPOAGENTE===usuario.id||cli.grupoAgente===usuario.id));
+    return e.agente===usuario.id||e.creadoPor===usuario.id||esJefe||esRolDir||esRolCeo||esAgenteCli;
+  };
+  const _enMarchaNoCerrada=(e)=>{
+    const yaApr=e.resolucion&&(e.resolucion.tipo==="aprobada"||e.resolucion.tipo==="aprobada_parcial");
+    const enCurso=e.estado==="en_curso"||yaApr;
+    const cerrada=e.cierreFinal||e.estado==="completada"||e.estado==="sin_exito";
+    return enCurso&&!cerrada;
+  };
+
+  // (v3.22.27) Tarjeta EXPANDIDA — muestra producto y banner aprobada, pero los botones siguen en el detalle
+  const CardEstExpandida=({e})=>{
+    const ag=USUARIOS.find(u=>u.id===e.agente);
+    const sinCliente=!e.cliente&&!e.clienteNombre;
+    const productos=e.ofertas||[];
+    const yaApr=e.resolucion&&(e.resolucion.tipo==="aprobada"||e.resolucion.tipo==="aprobada_parcial");
+    return(
+      <div onClick={()=>setSel(e)} style={{background:"#fff",borderRadius:14,padding:"14px 16px",
+        marginBottom:10,cursor:"pointer",border:`1px solid ${sinCliente?T.amber:T.border}`,
+        boxShadow:"0 1px 3px rgba(0,0,0,.04)"}}>
+        {/* Cabecera con badges */}
+        <div style={{display:"flex",gap:6,marginBottom:8,flexWrap:"wrap",alignItems:"center"}}>
+          {esJefe&&ag&&<Badge label={ag.nombre} color={ag.color}/>}
+          {sinCliente&&<Badge label="⚠️ SIN CLIENTE" color={T.amber}/>}
+          {yaApr?<Badge label={`✅ Aprobada${e.resolucion.por?" · "+e.resolucion.por:""}`} color={T.green}/>:
+            <Badge label="🔵 En curso" color={T.blue}/>}
+          {e.semana&&<span style={{fontSize:10,color:T.muted}}>S{e.semana}</span>}
+        </div>
+        {/* Cliente y texto */}
+        <p style={{margin:"0 0 2px",fontSize:15,fontWeight:800,color:sinCliente?T.amber:T.text}}>
+          {e.cliente||e.clienteNombre||(productos[0]?"⚠️ "+(productos[0].nombre||"Producto sin cliente"):"⚠️ Estrategia sin cliente")}
+        </p>
+        {e.texto&&<p style={{margin:"0 0 6px",fontSize:12,color:T.muted}}>{e.texto}</p>}
+        {/* Productos con descuento */}
+        {productos.length>0&&(
+          <div style={{marginTop:6,paddingTop:6,borderTop:`1px solid ${T.border}`}}>
+            {productos.slice(0,3).map((o,i)=>(
+              <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12,padding:"2px 0"}}>
+                <span style={{color:T.text,fontWeight:600}}>— {o.nombre||o.codigo||"Producto"}</span>
+                {o.precioFinal&&<span style={{color:T.green,fontWeight:700}}>{o.precioFinal}€/kg{o.dto?" (-"+o.dto+"%)":""}</span>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const CardEst=({e,onClick,children})=>{
     const ag=USUARIOS.find(u=>u.id===e.agente);
     const sinCliente=!e.cliente&&!e.clienteNombre;
@@ -7069,16 +7204,11 @@ function MisEstrategias({usuario}){
         )
       })}
 
-      {/* 5. EN CURSO / ACTIVAS */}
+      {/* 5. EN CURSO / ACTIVAS — (v3.22.26) tarjetas expandidas con botones de acción inline */}
       {(filtroSec==="todas"||filtroSec==="curso")&&Bloque({
         titulo:"🔵 En curso",colorTitulo:T.blue,
         items:[...fEqEst(activasAgente),...fEqEst(misMostrar)].filter((e,i,a)=>a.findIndex(x=>x.id===e.id)===i),
-        renderItem:e=>(
-          <CardEst key={e.id} e={e} onClick={()=>setSel(e)}>
-            <Badge label="🔵 En curso" color={T.blue}/>
-            <span style={{fontSize:10,color:T.muted}}>S{e.semana}</span>
-          </CardEst>
-        )
+        renderItem:e=>(<CardEstExpandida key={e.id} e={e}/>)
       })}
 
       {/* 6. PENDIENTES APROBACIÓN (director) */}
