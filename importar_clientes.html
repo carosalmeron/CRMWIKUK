@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>👥 Importar Clientes — Grupo Consolidado</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+body{font-family:Arial,sans-serif;max-width:760px;margin:40px auto;padding:20px;background:#f5f5f5;color:#1A1816}
+h1{font-size:1.4rem;margin:0 0 8px}
+h2{font-size:1rem;margin:18px 0 8px}
+.card{background:#fff;border-radius:12px;padding:24px;box-shadow:0 2px 8px rgba(0,0,0,.08);margin-bottom:16px}
+.note{background:#FFFBEB;border-left:4px solid #F59E0B;padding:12px 14px;border-radius:8px;font-size:.85rem;color:#92400E;margin-bottom:16px}
+.btn{width:100%;padding:14px;font-size:1rem;font-weight:700;border:none;border-radius:10px;cursor:pointer;margin-bottom:8px}
+.btn-main{background:#C4501A;color:#fff}
+.btn-main:hover{background:#A8431A}
+.btn-main:disabled{background:#ccc;cursor:not-allowed}
+.btn-sec{background:#fff;color:#1A1816;border:1.5px solid #ccc}
+.btn-danger{background:#DC2626;color:#fff}
+.bar-wrap{background:#eee;border-radius:99px;height:14px;overflow:hidden;margin:8px 0}
+.bar{height:100%;background:#C4501A;border-radius:99px;width:0%;transition:width .3s}
+.log{background:#1A1816;color:#4ADE80;font-family:monospace;font-size:.78rem;padding:14px;border-radius:8px;max-height:240px;overflow-y:auto;margin-top:10px;white-space:pre-wrap}
+.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-top:12px}
+.stat{text-align:center;background:#f9f9f9;border-radius:8px;padding:10px 4px}
+.stat-n{font-size:1.4rem;font-weight:900;line-height:1}
+.stat-l{font-size:.68rem;color:#888;margin-top:3px}
+.ok{color:#22C55E} .skip{color:#3B82F6} .err{color:#EF4444} .warn{color:#F59E0B} .info{color:#1E40AF}
+table{width:100%;font-size:.78rem;border-collapse:collapse;margin-top:10px}
+th,td{padding:5px 7px;border-bottom:1px solid #eee;text-align:left}
+th{background:#f5f5f5}
+input[type=file]{margin:8px 0 16px}
+.cambios{max-height:280px;overflow-y:auto;border:1px solid #eee;border-radius:8px}
+.cambio-row{padding:8px 12px;border-bottom:1px solid #f0f0f0;font-size:.82rem}
+.cambio-row:last-child{border-bottom:none}
+.tag{display:inline-block;padding:1px 8px;border-radius:99px;font-size:.7rem;font-weight:700;margin-right:6px}
+.tag-new{background:#DCFCE7;color:#166534}
+.tag-upd{background:#DBEAFE;color:#1E40AF}
+.tag-blk{background:#FEE2E2;color:#991B1B}
+.tag-rea{background:#FEF3C7;color:#92400E}
+</style>
+</head>
+<body>
+
+<h1>👥 Importar Clientes (UPSERT)</h1>
+<p style="color:#666;font-size:.9rem;margin:0 0 16px">Carga el Excel mensual de clientes. Detecta y aplica: clientes nuevos, cambios de vendedor (<code>GRUPOAGENTE</code>) y bloqueos. <strong>NO borra clientes</strong>; los que desaparecen del Excel se marcan como <code>fuera_cartera</code>.</p>
+
+<div class="note">
+  <strong>Columnas esperadas:</strong> CODIGO, NOMBRE, GRUPOAGENTE, Empresa, DESCUENTO TARIFA, CODCONTA, SEMANAVISITA. Si tu Excel incluye <code>BLQ</code>, la columna se respeta (BLQ=SI/YES → bloqueado).
+</div>
+
+<div class="card">
+  <h2>1. Selecciona el Excel de clientes</h2>
+  <input type="file" id="archivo" accept=".xlsx,.xls">
+  <div id="resumen" style="display:none">
+    <div class="stats">
+      <div class="stat"><div class="stat-n" id="rTotal">0</div><div class="stat-l">Filas leídas</div></div>
+      <div class="stat"><div class="stat-n ok" id="rNuevos">0</div><div class="stat-l">🆕 Nuevos</div></div>
+      <div class="stat"><div class="stat-n info" id="rReasig">0</div><div class="stat-l">🔄 Reasignados</div></div>
+      <div class="stat"><div class="stat-n err" id="rBloq">0</div><div class="stat-l">🚫 Bloqueados</div></div>
+      <div class="stat"><div class="stat-n skip" id="rIguales">0</div><div class="stat-l">✅ Sin cambios</div></div>
+    </div>
+    <p id="rFueraCart" style="margin-top:10px;font-size:.85rem;color:#666"></p>
+
+    <h2 style="margin-top:18px">Vista previa de cambios</h2>
+    <div class="cambios" id="listaCambios"></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>2. Aplicar cambios</h2>
+  <button class="btn btn-main" id="btnImportar" disabled>📤 Aplicar cambios a Firebase</button>
+
+  <div id="progress" style="display:none">
+    <div class="bar-wrap"><div class="bar" id="bar"></div></div>
+    <div style="display:flex;justify-content:space-between;font-size:.8rem;color:#555">
+      <span id="pPos">0 / 0</span>
+      <span id="pPct">0%</span>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="stat-n ok" id="cOk">0</div><div class="stat-l">✅ Aplicados</div></div>
+      <div class="stat"><div class="stat-n skip" id="cSkip">0</div><div class="stat-l">⏭ Sin cambios</div></div>
+      <div class="stat"><div class="stat-n err" id="cErr">0</div><div class="stat-l">❌ Errores</div></div>
+      <div class="stat"><div class="stat-n" id="cTime">0s</div><div class="stat-l">⏱ Tiempo</div></div>
+      <div class="stat"></div>
+    </div>
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script>
+const FB = "https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+
+// Mapeo agente -> equipo (puede ampliarse según tu organización)
+const EQUIPO_POR_AGENTE = {
+  // WIKUK (ejemplos — el real vendrá de tu BD; este mapping es solo fallback)
+  "CARLOSG":"WIKUK", "RPIEDRA":"WIKUK", "DAVIDMAG":"WIKUK", "JOSEPMARIA":"WIKUK",
+  "DVEGA":"WIKUK", "VERONICA":"WIKUK", "JBOSCH":"WIKUK"
+};
+
+const $ = id => document.getElementById(id);
+const log = (msg, cls="") => { const l=$("log"); l.innerHTML += `<span class="${cls}">${msg}</span>\n`; l.scrollTop=l.scrollHeight; };
+const tagHtml = (lbl, c) => `<span class="tag tag-${c}">${lbl}</span>`;
+
+let CAMBIOS = []; // {id, accion, antes, despues, cli}
+
+// ── Helpers Firestore ──
+function fv(v){
+  if(v===null||v===undefined||v==="") return {nullValue:null};
+  if(typeof v==="boolean") return {booleanValue:v};
+  if(typeof v==="number") return {doubleValue:v};
+  if(typeof v==="string") return {stringValue:v};
+  if(Array.isArray(v)) return {arrayValue:{values:v.map(fv)}};
+  return {stringValue:String(v)};
+}
+function toDoc(o){ const f={}; for(const k in o) f[k]=fv(o[k]); return {fields:f}; }
+function decode(v){
+  if(!v) return null;
+  if("stringValue" in v) return v.stringValue;
+  if("integerValue" in v) return parseInt(v.integerValue);
+  if("doubleValue" in v) return v.doubleValue;
+  if("booleanValue" in v) return v.booleanValue;
+  if("nullValue" in v) return null;
+  return null;
+}
+
+// ── Leer todos los clientes Firebase ──
+async function leerExistentes(){
+  log("📋 Leyendo clientes existentes en Firebase...");
+  const map = new Map();
+  let next=null;
+  do{
+    const r = await fetch(`${FB}/clientes?pageSize=300${next?"&pageToken="+next:""}`);
+    const d = await r.json();
+    for(const doc of (d.documents||[])){
+      const id = doc.name.split("/").pop();
+      const f = doc.fields || {};
+      map.set(id, {
+        id,
+        nombre: decode(f.nombre) || decode(f.NOMBRE) || "",
+        grupoAgente: (decode(f.grupoAgente) || decode(f.GRUPOAGENTE) || "").toUpperCase(),
+        equipo: decode(f.equipo) || "",
+        bloqueado: decode(f.bloqueado) === true,
+        empresa: decode(f.empresa) || "",
+        codconta: decode(f.codconta) || ""
+      });
+    }
+    next = d.nextPageToken || null;
+  } while(next);
+  log(`✓ ${map.size} clientes en Firebase`, "ok");
+  return map;
+}
+
+function detectarEquipo(grupoAgente){
+  const ag = (grupoAgente||"").toUpperCase();
+  if(EQUIPO_POR_AGENTE[ag]) return EQUIPO_POR_AGENTE[ag];
+  return "WIKUK"; // fallback por defecto
+}
+
+// ── 1. Leer Excel ──
+$("archivo").addEventListener("change", async (ev) => {
+  const file = ev.target.files[0];
+  if(!file) return;
+
+  $("listaCambios").innerHTML = '<p style="padding:20px;color:#888;text-align:center">Procesando...</p>';
+  $("resumen").style.display = "block";
+
+  const data = await file.arrayBuffer();
+  const wb = XLSX.read(data, {type:"array"});
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, {defval:null});
+
+  if(!rows.length){ alert("Excel vacío"); return; }
+
+  // Leer existentes
+  const existentes = await leerExistentes();
+  const codigosExcel = new Set();
+
+  // Comparar
+  CAMBIOS = [];
+  let nuevos=0, reasig=0, bloq=0, iguales=0;
+
+  for(const r of rows){
+    const codigo = String(r.CODIGO || r.codigo || "").trim();
+    if(!codigo) continue;
+    codigosExcel.add(codigo);
+
+    const grupoAgenteNuevo = String(r.GRUPOAGENTE || r.grupoAgente || "").toUpperCase().trim();
+    const blqRaw = String(r.BLQ || r.blq || "").toUpperCase().trim();
+    const bloqueadoNuevo = blqRaw === "SI" || blqRaw === "YES" || blqRaw === "TRUE" || blqRaw === "1";
+
+    const cliExcel = {
+      id: codigo,
+      codigo: codigo,
+      nombre: String(r.NOMBRE || r.nombre || "").trim(),
+      grupoAgente: grupoAgenteNuevo,
+      equipo: detectarEquipo(grupoAgenteNuevo),
+      empresa: String(r.Empresa || r.empresa || "").trim(),
+      descuentoTarifa: r["DESCUENTO TARIFA"] != null ? Number(r["DESCUENTO TARIFA"]) : null,
+      codconta: String(r.CODCONTA || r.codconta || "").trim(),
+      semanaVisita: r.SEMANAVISITA != null ? String(r.SEMANAVISITA) : "",
+      bloqueado: bloqueadoNuevo,
+      fechaActualizacion: new Date().toISOString().substring(0,10)
+    };
+
+    const existente = existentes.get(codigo);
+    if(!existente){
+      CAMBIOS.push({id:codigo, accion:"nuevo", cli:cliExcel, antes:null, despues:cliExcel});
+      nuevos++;
+      continue;
+    }
+
+    // Comparar campos relevantes
+    const cambioAgente = existente.grupoAgente !== grupoAgenteNuevo && grupoAgenteNuevo;
+    const cambioBloqueo = existente.bloqueado !== bloqueadoNuevo;
+    if(!cambioAgente && !cambioBloqueo){ iguales++; continue; }
+
+    let accion = "actualizar";
+    if(cambioBloqueo && bloqueadoNuevo){ accion = "bloquear"; bloq++; }
+    if(cambioAgente){ accion = cambioBloqueo && bloqueadoNuevo ? "bloquear" : "reasignar"; if(!cambioBloqueo || !bloqueadoNuevo) reasig++; }
+
+    CAMBIOS.push({
+      id: codigo, accion,
+      cli: cliExcel,
+      antes: { grupoAgente: existente.grupoAgente, bloqueado: existente.bloqueado },
+      despues: { grupoAgente: grupoAgenteNuevo, bloqueado: bloqueadoNuevo }
+    });
+  }
+
+  // Detectar fuera de cartera (en Firebase pero ya no en Excel)
+  const fueraCart = [];
+  for(const [codigo, exist] of existentes){
+    if(!codigosExcel.has(codigo) && !exist.bloqueado){
+      fueraCart.push(codigo);
+    }
+  }
+
+  // Render resumen
+  $("rTotal").textContent = rows.length;
+  $("rNuevos").textContent = nuevos;
+  $("rReasig").textContent = reasig;
+  $("rBloq").textContent = bloq;
+  $("rIguales").textContent = iguales;
+  $("rFueraCart").innerHTML = fueraCart.length ? `📤 <strong>${fueraCart.length}</strong> clientes en Firebase no aparecen en este Excel — se marcarán como <code>fuera_cartera</code>` : "";
+
+  // Render lista de cambios (max 50 para no saturar)
+  let html = "";
+  if(CAMBIOS.length === 0){
+    html = '<p style="padding:20px;color:#888;text-align:center">Sin cambios — todo coincide con Firebase</p>';
+  } else {
+    for(const ch of CAMBIOS.slice(0, 50)){
+      let tag, det;
+      if(ch.accion === "nuevo"){
+        tag = tagHtml("🆕 NUEVO", "new");
+        det = `Vendedor: ${ch.cli.grupoAgente || "—"} · ${ch.cli.equipo}`;
+      } else if(ch.accion === "reasignar"){
+        tag = tagHtml("🔄 REASIGNAR", "rea");
+        det = `${ch.antes.grupoAgente || "—"} → <strong>${ch.despues.grupoAgente}</strong>`;
+      } else if(ch.accion === "bloquear"){
+        tag = tagHtml("🚫 BLOQUEAR", "blk");
+        det = `Marcar como bloqueado`;
+      } else {
+        tag = tagHtml("📝 ACTUALIZAR", "upd");
+        det = "";
+      }
+      html += `<div class="cambio-row">${tag}<strong>${ch.id}</strong> — ${ch.cli.nombre} <div style="color:#666;margin-top:2px">${det}</div></div>`;
+    }
+    if(CAMBIOS.length > 50) html += `<div class="cambio-row" style="text-align:center;color:#888">... y ${CAMBIOS.length-50} más</div>`;
+  }
+  $("listaCambios").innerHTML = html;
+
+  // Guardar fuera_cartera para luego
+  CAMBIOS.fueraCart = fueraCart;
+  CAMBIOS.existentesMap = existentes;
+
+  $("btnImportar").disabled = (CAMBIOS.length === 0 && fueraCart.length === 0);
+  log(`✓ ${nuevos} nuevos, ${reasig} reasignados, ${bloq} bloqueados, ${iguales} sin cambios, ${fueraCart.length} fuera de cartera`, "ok");
+});
+
+// ── 2. Aplicar cambios ──
+$("btnImportar").addEventListener("click", async () => {
+  const fueraCart = CAMBIOS.fueraCart || [];
+  const existentes = CAMBIOS.existentesMap;
+  if(!confirm(`¿Aplicar ${CAMBIOS.length} cambios + ${fueraCart.length} fuera-cartera a Firebase?`)) return;
+
+  $("btnImportar").disabled = true;
+  $("progress").style.display = "block";
+  $("log").textContent = "";
+
+  const t0 = Date.now();
+  let ok=0, skip=0, err=0;
+  const total = CAMBIOS.length + fueraCart.length;
+
+  // 2a) UPSERT cambios
+  for(let i=0; i<CAMBIOS.length; i++){
+    const ch = CAMBIOS[i];
+    try{
+      let updateMask;
+      if(ch.accion === "nuevo"){
+        // Crear con todos los campos
+        updateMask = "";
+      } else {
+        // Actualizar SOLO los campos que cambian para preservar el resto del cliente
+        const masks = ["grupoAgente","equipo","bloqueado","fechaActualizacion"];
+        if(ch.accion === "reasignar") masks.push("equipo");
+        updateMask = masks.map(m=>`updateMask.fieldPaths=${m}`).join("&");
+      }
+
+      const url = `${FB}/clientes/${encodeURIComponent(ch.id)}${updateMask?"?"+updateMask:""}`;
+      const body = ch.accion === "nuevo" ? toDoc(ch.cli) : toDoc({
+        grupoAgente: ch.despues.grupoAgente,
+        equipo: detectarEquipo(ch.despues.grupoAgente),
+        bloqueado: ch.despues.bloqueado,
+        fechaActualizacion: new Date().toISOString().substring(0,10)
+      });
+
+      const r = await fetch(url, { method:"PATCH", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+      if(r.ok) ok++;
+      else { err++; if(err<5) log(`  ❌ ${ch.id}: ${r.status}`, "err"); }
+    } catch(e){ err++; if(err<5) log(`  ❌ ${ch.id}: ${e.message}`, "err"); }
+
+    if((i+1) % 30 === 0 || i+1 === CAMBIOS.length) updateProgress(i+1, total, ok, skip, err, t0);
+    if(i % 30 === 29) await new Promise(r=>setTimeout(r,200));
+  }
+
+  // 2b) Marcar fuera de cartera
+  for(let j=0; j<fueraCart.length; j++){
+    const id = fueraCart[j];
+    try{
+      const r = await fetch(`${FB}/clientes/${encodeURIComponent(id)}?updateMask.fieldPaths=fuera_cartera&updateMask.fieldPaths=fechaActualizacion`, {
+        method:"PATCH", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify(toDoc({fuera_cartera:true, fechaActualizacion:new Date().toISOString().substring(0,10)}))
+      });
+      if(r.ok) ok++; else err++;
+    } catch(e){ err++; }
+    if((j+1) % 30 === 0 || j+1 === fueraCart.length) updateProgress(CAMBIOS.length+j+1, total, ok, skip, err, t0);
+    if(j % 30 === 29) await new Promise(r=>setTimeout(r,200));
+  }
+
+  const dur = Math.round((Date.now()-t0)/1000);
+  log(`\n✅ Terminado en ${dur}s`, "ok");
+  log(`   ${ok} aplicados, ${err} errores`, "ok");
+  $("btnImportar").disabled = false;
+});
+
+function updateProgress(pos, total, ok, skip, err, t0){
+  const pct = Math.round((pos/total)*100);
+  $("bar").style.width = pct+"%";
+  $("pPos").textContent = `${pos} / ${total}`;
+  $("pPct").textContent = pct+"%";
+  $("cOk").textContent = ok;
+  $("cSkip").textContent = skip;
+  $("cErr").textContent = err;
+  $("cTime").textContent = Math.round((Date.now()-t0)/1000)+"s";
+}
+</script>
+</body>
+</html>

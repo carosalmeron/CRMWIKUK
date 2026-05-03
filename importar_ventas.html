@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>📈 Importar Ventas Anuales — Grupo Consolidado</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+body{font-family:Arial,sans-serif;max-width:700px;margin:40px auto;padding:20px;background:#f5f5f5;color:#1A1816}
+h1{color:#1A1816;font-size:1.4rem;margin:0 0 8px}
+h2{font-size:1rem;margin:18px 0 8px;color:#1A1816}
+.card{background:white;border-radius:12px;padding:24px;box-shadow:0 2px 8px rgba(0,0,0,.08);margin-bottom:16px}
+.note{background:#FFFBEB;border-left:4px solid #F59E0B;padding:12px 14px;border-radius:8px;font-size:.85rem;color:#92400E;margin-bottom:16px}
+.btn{width:100%;padding:16px;font-size:1.05rem;font-weight:700;border:none;border-radius:10px;cursor:pointer;margin-bottom:8px}
+.btn-main{background:#C4501A;color:white}
+.btn-main:hover{background:#A8431A}
+.btn-main:disabled{background:#ccc;cursor:not-allowed}
+.btn-sm{background:#1A1816;color:white;font-size:.9rem;padding:10px}
+.btn-sec{background:white;color:#1A1816;border:1.5px solid #ccc}
+.progress{margin-top:16px;display:none}
+.bar-wrap{background:#eee;border-radius:99px;height:14px;overflow:hidden;margin:8px 0}
+.bar{height:100%;background:#C4501A;border-radius:99px;width:0%;transition:width .3s}
+.log{background:#1A1816;color:#4ADE80;font-family:monospace;font-size:.8rem;padding:14px;border-radius:8px;max-height:240px;overflow-y:auto;margin-top:10px;white-space:pre-wrap}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px}
+.stat{text-align:center;background:#f9f9f9;border-radius:8px;padding:10px 6px}
+.stat-n{font-size:1.4rem;font-weight:900;line-height:1}
+.stat-l{font-size:.7rem;color:#888;margin-top:3px}
+.ok{color:#22C55E} .skip{color:#3B82F6} .err{color:#EF4444} .warn{color:#F59E0B}
+table{width:100%;font-size:.8rem;border-collapse:collapse;margin-top:12px}
+th,td{padding:6px 8px;border-bottom:1px solid #eee;text-align:left}
+th{background:#f5f5f5;font-weight:700}
+input[type=file]{margin:8px 0 16px}
+input[type=number]{padding:8px;border:1px solid #ccc;border-radius:6px;width:100px;font-size:.95rem}
+label{font-size:.9rem;display:block;margin-bottom:4px;font-weight:700}
+.row{display:flex;gap:12px;align-items:flex-end;margin-bottom:12px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+
+<h1>📈 Importar Ventas Anuales a Firebase</h1>
+<p style="color:#666;font-size:.9rem;margin:0 0 18px">Carga el Excel de ventas (cliente × artículo × año). Se guardarán en la colección <code>ventas_anuales</code> de Firebase.</p>
+
+<div class="note">
+  <strong>📋 Importante:</strong> Sube primero el <strong>Excel de clientes</strong> para que las ventas se asignen al vendedor correcto. El sistema lee la colección <code>clientes</code> de Firebase y asigna a cada fila de venta el vendedor actual del cliente (así, si has reasignado vendedores, las ventas viejas siguen al vendedor nuevo). Al re-importar, los registros con mismo <code>clienteCodigo_articuloCodigo</code> se actualizan.
+</div>
+
+<div class="card">
+  <h2>1. Configuración</h2>
+  <div class="row">
+    <div>
+      <label>Año actual del Excel</label>
+      <input type="number" id="anioActual" value="2026" min="2020" max="2099">
+    </div>
+    <div style="flex:1;min-width:220px">
+      <label>Importe mínimo a considerar (€)</label>
+      <input type="number" id="importeMin" value="100" min="0" step="50">
+      <small style="color:#888;font-size:.75rem">Filas con TODAS las ventas por debajo de este importe se ignoran</small>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>2. Selecciona el Excel</h2>
+  <input type="file" id="archivo" accept=".xlsx,.xls">
+  <div id="resumen" style="display:none">
+    <div class="stats">
+      <div class="stat"><div class="stat-n" id="rTotal">0</div><div class="stat-l">Filas leídas</div></div>
+      <div class="stat"><div class="stat-n" id="rValidas">0</div><div class="stat-l">Válidas</div></div>
+      <div class="stat"><div class="stat-n ok" id="rPerdidos">0</div><div class="stat-l">🔴 Perdidos</div></div>
+      <div class="stat"><div class="stat-n warn" id="rRiesgo">0</div><div class="stat-l">🟠 Riesgo</div></div>
+    </div>
+    <p style="font-size:.8rem;color:#666;margin-top:10px"><strong>Lógica:</strong> 🔴 perdido = vendía año anterior, 0 en año actual · 🟠 riesgo = baja &gt;30% vs año anterior.</p>
+  </div>
+</div>
+
+<div class="card">
+  <h2>3. Importar a Firebase</h2>
+  <button class="btn btn-main" id="btnImportar" disabled>📤 Importar a Firebase</button>
+  <button class="btn btn-sm btn-sec" id="btnLimpiar" style="display:none">🗑 Borrar todas las ventas anteriores antes de importar</button>
+
+  <div class="progress" id="progress">
+    <div class="bar-wrap"><div class="bar" id="bar"></div></div>
+    <div style="display:flex;justify-content:space-between;font-size:.8rem;color:#555">
+      <span id="pPos">0 / 0</span>
+      <span id="pPct">0%</span>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="stat-n ok" id="cOk">0</div><div class="stat-l">✅ OK</div></div>
+      <div class="stat"><div class="stat-n skip" id="cSkip">0</div><div class="stat-l">⏭ Saltados</div></div>
+      <div class="stat"><div class="stat-n err" id="cErr">0</div><div class="stat-l">❌ Errores</div></div>
+      <div class="stat"><div class="stat-n" id="cTime">0s</div><div class="stat-l">⏱ Tiempo</div></div>
+    </div>
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script>
+const FB = "https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+let DATOS = [];
+let BORRAR_ANTES = false;
+
+const $ = id => document.getElementById(id);
+const log = (msg, cls="") => { const l=$("log"); l.innerHTML += `<span class="${cls}">${msg}</span>\n`; l.scrollTop=l.scrollHeight; };
+
+// ── Cargar mapa cliente→agente desde Firebase (para heredar vendedor actual) ──
+let MAPA_CLI_AGENTE = new Map(); // codigo -> {grupoAgente, equipo, bloqueado, fueraCart}
+
+async function cargarMapaClientes(){
+  log("📋 Leyendo clientes de Firebase para resolver vendedores...", "info");
+  let next=null, total=0;
+  const decode = v => v ? (v.stringValue ?? v.integerValue ?? v.doubleValue ?? v.booleanValue ?? null) : null;
+  do{
+    const r = await fetch(`${FB}/clientes?pageSize=300${next?"&pageToken="+next:""}`);
+    const d = await r.json();
+    for(const doc of (d.documents||[])){
+      const id = doc.name.split("/").pop();
+      const f = doc.fields || {};
+      MAPA_CLI_AGENTE.set(id, {
+        grupoAgente: (decode(f.grupoAgente) || decode(f.GRUPOAGENTE) || "").toUpperCase(),
+        equipo: decode(f.equipo) || "",
+        bloqueado: decode(f.bloqueado) === true,
+        fueraCart: decode(f.fuera_cartera) === true,
+        nombre: decode(f.nombre) || decode(f.NOMBRE) || ""
+      });
+      total++;
+    }
+    next = d.nextPageToken || null;
+  } while(next);
+  log(`✓ ${total} clientes cargados`, "ok");
+}
+
+// ── Helpers ──
+function safeId(s){ return String(s||"").replace(/[^A-Za-z0-9_-]/g,"_").substring(0,1500); }
+function num(v){ if(v===null||v===undefined||v==="") return 0; const n=Number(v); return isNaN(n)?0:n; }
+
+function clasificar(fila){
+  const v1 = fila.ventas1Ant; // año anterior (más reciente histórico)
+  const vA = fila.ventasActual; // año actual
+  if(v1 > 0 && vA === 0) return "perdido";
+  if(v1 > 0 && vA > 0){
+    const desv = (vA - v1) / v1; // negativo = bajada
+    if(desv <= -0.30) return "riesgo";
+    if(desv <= -0.10) return "atencion";
+  }
+  return "ok";
+}
+
+function toDoc(o){
+  // Convertir a formato Firestore document
+  const f = (v) => {
+    if(v===null||v===undefined) return {nullValue:null};
+    if(typeof v === "number") return {doubleValue:v};
+    if(typeof v === "boolean") return {booleanValue:v};
+    return {stringValue:String(v)};
+  };
+  const fields = {};
+  for(const k in o) fields[k] = f(o[k]);
+  return {fields};
+}
+
+// ── 1. Leer Excel ──
+$("archivo").addEventListener("change", async (ev) => {
+  const file = ev.target.files[0];
+  if(!file) return;
+
+  log(`📄 Leyendo ${file.name}...`);
+
+  // Cargar mapa de clientes ANTES de procesar el Excel
+  if(MAPA_CLI_AGENTE.size === 0){
+    await cargarMapaClientes();
+  }
+
+  const data = await file.arrayBuffer();
+  const wb = XLSX.read(data, {type:"array"});
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:null});
+
+  // Detectar fila de cabeceras (donde aparece "NOMBRE")
+  let hdrIdx = -1;
+  for(let i=0;i<Math.min(rows.length, 20);i++){
+    if(rows[i] && String(rows[i][0]||"").toUpperCase().includes("NOMBRE")){
+      hdrIdx = i;
+      break;
+    }
+  }
+  if(hdrIdx < 0){ alert("No encuentro la cabecera con NOMBRE en las primeras 20 filas."); return; }
+
+  log(`✓ Cabecera en fila ${hdrIdx+1}`);
+  const hdr = rows[hdrIdx];
+  log(`✓ Columnas detectadas: ${hdr.filter(x=>x).length}`);
+
+  // Procesar filas
+  const anioActual = parseInt($("anioActual").value);
+  const importeMin = parseFloat($("importeMin").value) || 0;
+  const datos = [];
+  let perdidos=0, riesgo=0, validas=0, totales=0;
+
+  for(let i=hdrIdx+1; i<rows.length; i++){
+    const r = rows[i];
+    if(!r || !r[0]) continue;
+    totales++;
+
+    const fila = {
+      clienteNombre: String(r[0]||"").trim(),
+      clienteCodigo: String(r[1]||"").trim(),
+      calibre: r[2]!=null ? String(r[2]).trim() : "",
+      productoPadre: String(r[3]||"").trim(),
+      articuloCodigo: String(r[4]||"").trim(),
+      ventas4Ant: num(r[5]),
+      ventas3Ant: num(r[6]),
+      ventas2Ant: num(r[7]),
+      ventas1Ant: num(r[8]),
+      ventasAnioSeleccionado: num(r[9]),
+      ventasActual: num(r[10]),
+      desviacion: num(r[11]),
+      diferencia: num(r[12]),
+      anioActual,
+      fechaCarga: new Date().toISOString().substring(0,10)
+    };
+
+    if(!fila.clienteCodigo || !fila.articuloCodigo) continue;
+
+    // (v2) Heredar vendedor actual del cliente desde Firebase
+    const cliFB = MAPA_CLI_AGENTE.get(fila.clienteCodigo);
+    if(cliFB){
+      fila.grupoAgente = cliFB.grupoAgente || "";
+      fila.equipo = cliFB.equipo || "";
+      fila.clienteBloqueado = cliFB.bloqueado || false;
+      fila.clienteFueraCart = cliFB.fueraCart || false;
+      // Si el cliente está fuera de cartera, marcar la venta como histórica
+      if(cliFB.fueraCart) fila.solo_historico = true;
+    } else {
+      // Cliente no está en el CRM: lo marcamos como huérfano (no rompemos)
+      fila.huerfano = true;
+      fila.grupoAgente = "";
+      fila.equipo = "";
+    }
+
+    // Filtrar filas insignificantes
+    const maxVenta = Math.max(fila.ventas4Ant, fila.ventas3Ant, fila.ventas2Ant, fila.ventas1Ant, fila.ventasActual);
+    if(maxVenta < importeMin) continue;
+
+    // Clasificar
+    const cls = clasificar(fila);
+    fila.clasificacion = cls;
+    if(cls === "perdido") perdidos++;
+    else if(cls === "riesgo") riesgo++;
+
+    datos.push(fila);
+    validas++;
+  }
+
+  DATOS = datos;
+  const huerfanos = datos.filter(f=>f.huerfano).length;
+  $("rTotal").textContent = totales;
+  $("rValidas").textContent = validas;
+  $("rPerdidos").textContent = perdidos;
+  $("rRiesgo").textContent = riesgo;
+  $("resumen").style.display = "block";
+  $("btnImportar").disabled = false;
+  $("btnLimpiar").style.display = "block";
+
+  log(`✓ ${validas} filas válidas (de ${totales} totales)`, "ok");
+  log(`  🔴 Perdidos: ${perdidos}`, "err");
+  log(`  🟠 En riesgo (>30% bajada): ${riesgo}`, "warn");
+  if(huerfanos>0) log(`  ⚠️ ${huerfanos} filas con cliente NO en CRM (se importan pero sin vendedor — sube primero el importador de clientes)`, "warn");
+});
+
+$("btnLimpiar").addEventListener("click", () => {
+  BORRAR_ANTES = !BORRAR_ANTES;
+  $("btnLimpiar").textContent = BORRAR_ANTES
+    ? "✅ Se borrarán las ventas anteriores antes (click para desactivar)"
+    : "🗑 Borrar todas las ventas anteriores antes de importar";
+  $("btnLimpiar").style.background = BORRAR_ANTES ? "#DC2626" : "#1A1816";
+});
+
+// ── Borrar colección entera (paginado) ──
+async function borrarColeccionVentas(){
+  log("🗑 Borrando colección ventas_anuales...", "warn");
+  let total = 0, pageToken = null;
+  while(true){
+    const url = `${FB}/ventas_anuales?pageSize=300${pageToken?`&pageToken=${pageToken}`:""}`;
+    const res = await fetch(url);
+    if(!res.ok){ log(`  ❌ Error listando: ${res.status}`, "err"); break; }
+    const j = await res.json();
+    const docs = j.documents || [];
+    if(!docs.length && !pageToken) break;
+    for(const d of docs){
+      const path = d.name.split("/documents/")[1];
+      await fetch(`${FB}/${path}`, {method:"DELETE"}).catch(()=>{});
+      total++;
+    }
+    log(`  · Borrados ${total}...`, "skip");
+    if(!j.nextPageToken) break;
+    pageToken = j.nextPageToken;
+  }
+  log(`✓ Borrados ${total} registros previos`, "ok");
+}
+
+// ── 2. Importar a Firebase ──
+$("btnImportar").addEventListener("click", async () => {
+  if(!DATOS.length){ alert("Carga primero un Excel"); return; }
+  if(!confirm(`¿Importar ${DATOS.length} registros a Firebase?\n\n${BORRAR_ANTES?"⚠️ Se BORRARÁN todos los registros anteriores primero.":""}`)) return;
+
+  $("btnImportar").disabled = true;
+  $("progress").style.display = "block";
+  $("log").textContent = "";
+
+  const t0 = Date.now();
+  let ok=0, skip=0, err=0;
+
+  if(BORRAR_ANTES){
+    await borrarColeccionVentas();
+  }
+
+  log(`🚀 Importando ${DATOS.length} registros...`);
+
+  // Concurrencia limitada
+  const CONCURRENCIA = 8;
+  let idx = 0;
+
+  async function worker(){
+    while(idx < DATOS.length){
+      const i = idx++;
+      const fila = DATOS[i];
+      const docId = safeId(`${fila.clienteCodigo}_${fila.articuloCodigo}`);
+      try{
+        const r = await fetch(`${FB}/ventas_anuales/${docId}`, {
+          method: "PATCH",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify(toDoc(fila))
+        });
+        if(r.ok) ok++;
+        else { err++; if(err<5) log(`  ❌ ${docId}: ${r.status}`, "err"); }
+      } catch(e){ err++; if(err<5) log(`  ❌ ${docId}: ${e.message}`, "err"); }
+
+      if((i+1) % 50 === 0 || i+1 === DATOS.length){
+        const pct = Math.round(((i+1)/DATOS.length)*100);
+        $("bar").style.width = pct+"%";
+        $("pPos").textContent = `${i+1} / ${DATOS.length}`;
+        $("pPct").textContent = pct+"%";
+        $("cOk").textContent = ok;
+        $("cSkip").textContent = skip;
+        $("cErr").textContent = err;
+        $("cTime").textContent = Math.round((Date.now()-t0)/1000)+"s";
+      }
+    }
+  }
+
+  await Promise.all(Array.from({length:CONCURRENCIA}, worker));
+
+  const dur = Math.round((Date.now()-t0)/1000);
+  log(`\n✅ Terminado en ${dur}s`, "ok");
+  log(`   ${ok} importados, ${err} errores`, "ok");
+  $("btnImportar").disabled = false;
+});
+</script>
+</body>
+</html>
