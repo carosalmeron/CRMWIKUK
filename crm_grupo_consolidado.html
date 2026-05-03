@@ -279,8 +279,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.22.13";
-const CRM_BUILD = "03/05/2026-debug-estrategias";
+const CRM_VERSION = "3.22.14";
+const CRM_BUILD = "03/05/2026-limpia-huerfanas";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -6580,17 +6580,35 @@ function MisEstrategias({usuario}){
           <p style={{margin:"0 0 6px",fontWeight:800,color:"#9A3412"}}>🔬 DEBUG v{CRM_VERSION} · {CRM_BUILD}</p>
           <p style={{margin:"0 0 4px",color:"#7C2D12"}}>Total en BD: {estrategias.length} · usuario.id: <b>{usuario.id}</b> · rol: <b>{usuario.rol}</b> · equipo: <b>{miEquipo||"—"}</b></p>
           <p style={{margin:"0 0 4px",color:"#7C2D12"}}>Computadas: activasAgente={activasAgente.length} · misMostrar={misMostrar.length} · enRevision={enRevisionAgente.length} · aprobadas={aprobadas.length} · rechazadas={rechazadas.length}</p>
-          <div style={{maxHeight:200,overflowY:"auto",borderTop:"1px solid #F97316",paddingTop:6,marginTop:6}}>
-            {estrategias.map((e,i)=>(
-              <div key={i} style={{padding:"3px 0",borderBottom:"1px dotted #F97316",color:"#7C2D12"}}>
-                <b>{(e.cliente||e.clienteNombre||"?").substring(0,20)}</b> · estado:<b style={{color:"#9A3412"}}>{e.estado||"—"}</b>
-                {e.resolucion&&<span> · resol:{e.resolucion.tipo}</span>}
-                {e.cierreFinal&&<span> · 🔒CERRADA</span>}
-                {e.eliminada&&<span style={{color:"red"}}> · 🗑️</span>}
-                {" · agente:"+(e.agente||"?")} · equipo:{e.equipo||"—"} · pertenece:{esDelEquipoOGlobal(e)?"✅":"❌"}
-              </div>
-            ))}
+          <div style={{maxHeight:280,overflowY:"auto",borderTop:"1px solid #F97316",paddingTop:6,marginTop:6}}>
+            {estrategias.map((e,i)=>{
+              const huerfana=!e.cliente&&!e.clienteNombre&&!(e.ofertas||[]).length;
+              return (
+                <div key={i} style={{padding:"4px 0",borderBottom:"1px dotted #F97316",color:huerfana?"#DC2626":"#7C2D12",background:huerfana?"#FEE2E2":"transparent"}}>
+                  <div><b>id:</b> {e.id||"?"} {huerfana&&<span style={{background:"#DC2626",color:"#fff",padding:"1px 6px",borderRadius:4,fontSize:9,fontWeight:800}}>HUÉRFANA</span>}</div>
+                  <div><b>cliente:</b> {e.cliente||e.clienteNombre||"VACÍO"} · <b>cod:</b> {e.clienteCodigo||"—"}</div>
+                  <div><b>estado:</b> {e.estado||"VACÍO"} · <b>agente:</b> {e.agente||"VACÍO"} · <b>equipo:</b> {e.equipo||"VACÍO"}</div>
+                  <div><b>ofertas:</b> {(e.ofertas||[]).length>0?(e.ofertas||[]).map(o=>o.nombre||o.codigo||"?").join(", "):"ninguna"}</div>
+                  <div><b>creadoPor:</b> {e.creadoPor||e.creadoPorNombre||"?"} · <b>origen:</b> {e.origen||"manual"}</div>
+                </div>
+              );
+            })}
           </div>
+          {/* BOTÓN LIMPIAR HUÉRFANAS */}
+          {estrategias.some(e=>!e.cliente&&!e.clienteNombre&&!(e.ofertas||[]).length)&&(
+            <button onClick={()=>{
+              const huerfanas=estrategias.filter(e=>!e.cliente&&!e.clienteNombre&&!(e.ofertas||[]).length);
+              if(!confirm("¿Borrar "+huerfanas.length+" estrategia(s) huérfana(s) de Firebase? Esta acción no se puede deshacer.")) return;
+              Promise.all(huerfanas.map(h=>fbEscribir("estrategias",h.id,{...h,eliminada:true,fechaEliminacion:new Date().toISOString(),eliminadoPor:usuario.id})))
+                .then(()=>{
+                  alert("✅ Borradas "+huerfanas.length+" estrategias huérfanas");
+                  recargar();
+                })
+                .catch(err=>alert("❌ Error: "+err.message));
+            }} style={{marginTop:8,background:"#DC2626",color:"#fff",border:"none",borderRadius:8,padding:"8px 14px",fontSize:12,fontWeight:700,cursor:"pointer",width:"100%"}}>
+              🧹 Limpiar {estrategias.filter(e=>!e.cliente&&!e.clienteNombre&&!(e.ofertas||[]).length).length} estrategia(s) huérfana(s)
+            </button>
+          )}
         </div>
       )}
       {showNuevaEst&&(
@@ -7439,19 +7457,25 @@ function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirClie
   function crearEstrategiasMasivas(){
     var seleccionados = selectedClientesArr();
     if(seleccionados.length === 0) return;
+    // (v3.22.13) Validar que cada cliente tenga datos antes de escribir
+    var validos = seleccionados.filter(function(c){return c&&(c.nombre||c.codigo);});
+    if(validos.length === 0){alert("Los clientes seleccionados no tienen datos válidos. Cancelado.");return;}
+    if(validos.length < seleccionados.length){
+      if(!confirm("Solo "+validos.length+" de "+seleccionados.length+" clientes tienen datos válidos. ¿Continuar?")) return;
+    }
     var hoy = new Date();
     var fechaStr = hoy.toLocaleDateString("es-ES");
-    var promesas = seleccionados.map(function(c){
+    var promesas = validos.map(function(c){
       var topArts = (c.arts||[]).map(function(a){return a.p+(a.cal?" ("+a.cal+")":"");}).slice(0,3).join(", ");
       var texto = "Estrategia recuperación: cliente "+(c.cls==="lost"?"PERDIDO":c.cls==="risk"?"EN RIESGO":"con bajada")+" ("+c.pct+"%, "+fmt(c.perdida)+"). " +
                   (topArts?"Artículos a recuperar: "+topArts+".":"");
       var est = {
-        id: "est_recup_"+c.codigo+"_"+Date.now(),
-        cliente: c.nombre,
-        clienteNombre: c.nombre,
-        clienteCodigo: c.codigo,
-        agente: c.agente,
-        equipo: c.equipo,
+        id: "est_recup_"+(c.codigo||"sin")+"_"+Date.now(),
+        cliente: c.nombre||"(sin nombre)",
+        clienteNombre: c.nombre||"(sin nombre)",
+        clienteCodigo: c.codigo||"",
+        agente: c.agente||usuario.id,
+        equipo: c.equipo||usuario.equipo||"",
         creadoPor: usuario.id,
         creadoPorNombre: usuario.nombre,
         texto: texto,
@@ -7460,13 +7484,14 @@ function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirClie
         maxDescuento: 0,
         seguimientos: [],
         fechaCreacion: fechaStr,
+        fecha: fechaStr,
         semana: getSemanaISO(),
         origen: "recuperacion_masiva"
       };
       return fbEscribir("estrategias", est.id, est);
     });
     Promise.all(promesas).then(function(){
-      alert("✅ Creadas "+seleccionados.length+" estrategias de recuperación");
+      alert("✅ Creadas "+validos.length+" estrategias de recuperación");
       setSels(new Set());
       setModalAccion(null);
       if(onNav) onNav("estrategias");
