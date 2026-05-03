@@ -279,8 +279,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.22.18";
-const CRM_BUILD = "03/05/2026";
+const CRM_VERSION = "3.22.19";
+const CRM_BUILD = "03/05/2026-reparar-huerfanas";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -5855,6 +5855,7 @@ function MisEstrategias({usuario}){
   };
   const [formEst,setFormEst]=useState({cliente:"",objetivo:"",texto:""});
   const [editEst,setEditEst]=useState(null);
+  const [reparEst,setReparEst]=useState(null);
 
   // Marcar como leído al abrir detalle
   useEffect(()=>{
@@ -6249,6 +6250,72 @@ function MisEstrategias({usuario}){
             </div>
           )}
 
+          {/* (v3.22.19) PANEL REPARAR — Solo aparece si la estrategia es huérfana y el usuario tiene permisos */}
+          {(!sel.cliente&&!sel.clienteNombre||!sel.agente||!sel.equipo)&&(esRolCeo||esRolDir||esRolJefe)&&(
+            <div style={{background:"#FEF3C7",border:`2px solid ${T.amber}`,borderRadius:12,padding:14,marginBottom:14}}>
+              <p style={{margin:"0 0 10px",fontSize:13,fontWeight:800,color:"#92400E"}}>
+                ⚠️ Estrategia incompleta — Repara los campos vacíos
+              </p>
+              {(!sel.cliente&&!sel.clienteNombre)&&(
+                <div style={{marginBottom:8}}>
+                  <p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:"#92400E",textTransform:"uppercase"}}>Cliente (vacío)</p>
+                  <SearchInput value={reparEst?.cliente||""}
+                    onChange={v=>setReparEst(r=>({...(r||{}),cliente:v,clienteCodigo:""}))}
+                    placeholder="🔍 Buscar cliente..."
+                    suggestions={(window._clientesFB||[])
+                      .filter(c=>(c.nombre||c.NOMBRE||"").toLowerCase().includes((reparEst?.cliente||"").toLowerCase())&&(reparEst?.cliente||"").length>=2)
+                      .slice(0,8).map(c=>({label:c.nombre||c.NOMBRE,sub:(c.codigo||c.CODIGO||c.id)+(c.equipo?" · "+c.equipo:""),tipo:"cliente",obj:c}))}
+                    onSelect={s=>setReparEst(r=>({...(r||{}),cliente:s.label,clienteCodigo:(s.obj&&(s.obj.codigo||s.obj.CODIGO))||"",clienteId:(s.obj&&s.obj.id)||"",equipo:(s.obj&&s.obj.equipo)||r?.equipo||""}))}/>
+                </div>
+              )}
+              {!sel.agente&&(
+                <div style={{marginBottom:8}}>
+                  <p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:"#92400E",textTransform:"uppercase"}}>Agente asignado (vacío)</p>
+                  <select value={reparEst?.agente||""} onChange={e=>{
+                      const u=USUARIOS.find(x=>x.id===e.target.value);
+                      setReparEst(r=>({...(r||{}),agente:e.target.value,equipo:u?.equipo||r?.equipo||""}));
+                    }}
+                    style={{width:"100%",padding:"10px 12px",borderRadius:9,border:`1.5px solid ${T.amber}`,fontSize:13,outline:"none",background:"#fff"}}>
+                    <option value="">— Selecciona un comercial —</option>
+                    {USUARIOS.filter(u=>u.rol==="agente").map(u=>(
+                      <option key={u.id} value={u.id}>{u.nombre} · {u.equipo}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <button onClick={()=>{
+                const updates={};
+                if(!sel.cliente&&reparEst?.cliente){
+                  updates.cliente=reparEst.cliente;
+                  updates.clienteNombre=reparEst.cliente;
+                  updates.clienteCodigo=reparEst.clienteCodigo||"";
+                  updates.clienteId=reparEst.clienteId||"";
+                }
+                if(!sel.agente&&reparEst?.agente){
+                  updates.agente=reparEst.agente;
+                  const u=USUARIOS.find(x=>x.id===reparEst.agente);
+                  updates.agenteNombre=u?.nombre||"";
+                  updates.equipo=u?.equipo||reparEst?.equipo||"";
+                }
+                if(Object.keys(updates).length===0){alert("Rellena al menos un campo para reparar");return;}
+                const updated={...sel,...updates,
+                  historialEscalado:[...(sel.historialEscalado||[]),{
+                    accion:"🔧 Estrategia reparada por "+usuario.nombre+" — "+Object.keys(updates).join(", "),
+                    por:usuario.nombre,fecha:new Date().toLocaleDateString("es-ES"),nota:JSON.stringify(updates)
+                  }]};
+                setEstrategias(prev=>prev.map(x=>x.id===sel.id?updated:x));
+                fbEscribir("estrategias",sel.id,updated).then(()=>{
+                  alert("✅ Estrategia reparada. Datos: "+Object.keys(updates).join(", "));
+                  setSel(updated);
+                  setReparEst(null);
+                });
+              }}
+                style={{width:"100%",padding:"10px 14px",background:T.amber,color:"#fff",border:"none",borderRadius:9,fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                🔧 Reparar estrategia
+              </button>
+            </div>
+          )}
+
           {/* (v3.22.15) Botones editar/eliminar/calendario — con control de permisos */}
           {(()=>{
             const puedeEditar = sel.creadoPor===usuario.id||esJefe||esRolDir||esRolCeo;
@@ -6549,18 +6616,25 @@ function MisEstrategias({usuario}){
 
   const CardEst=({e,onClick,children})=>{
     const ag=USUARIOS.find(u=>u.id===e.agente);
+    const sinCliente=!e.cliente&&!e.clienteNombre;
+    const sinTexto=!e.texto&&!e.estrategia;
+    const productoFallback=(e.ofertas||[])[0];
     return(
       <div onClick={onClick} style={{background:"#fff",borderRadius:14,padding:"14px 16px",
-        marginBottom:8,cursor:"pointer",border:`1px solid ${T.border}`,
+        marginBottom:8,cursor:"pointer",border:`1px solid ${sinCliente?T.amber:T.border}`,
         boxShadow:"0 1px 3px rgba(0,0,0,.04)"}}>
         <div style={{display:"flex",gap:8,marginBottom:6,flexWrap:"wrap"}}>
           {esJefe&&ag&&<Badge label={ag.nombre} color={ag.color}/>}
+          {sinCliente&&<Badge label="⚠️ SIN CLIENTE" color={T.amber}/>}
           {children}
         </div>
-        <p style={{margin:"0 0 2px",fontSize:14,fontWeight:800}}>{e.cliente||e.clienteNombre}</p>
-        <p style={{margin:0,fontSize:12,color:T.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-          {e.texto||e.estrategia}
+        <p style={{margin:"0 0 2px",fontSize:14,fontWeight:800,color:sinCliente?T.amber:T.text}}>
+          {e.cliente||e.clienteNombre||(productoFallback?"⚠️ "+(productoFallback.nombre||"Producto sin cliente"):"⚠️ Estrategia sin cliente — pulsa para asignar")}
         </p>
+        <p style={{margin:0,fontSize:12,color:T.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+          {e.texto||e.estrategia||(sinTexto&&productoFallback?("Producto: "+(productoFallback.nombre||"")):"")}
+        </p>
+        {!e.cliente&&!e.clienteNombre&&e.id&&<p style={{margin:"4px 0 0",fontSize:9,color:T.muted,fontFamily:"ui-monospace,Menlo,monospace"}}>id: {e.id}</p>}
       </div>
     );
   };
@@ -6587,6 +6661,31 @@ function MisEstrategias({usuario}){
               padding:"9px 14px",cursor:cargando?"default":"pointer",color:T.muted,fontSize:13}}>
             {cargando?"⏳":"🔄"}
           </button>
+          {(esRolCeo||esRolDir||esRolJefe)&&(
+            <button onClick={async()=>{
+              try{
+                const r=await fetch(`${FB_BASE}/estrategias?pageSize=300`,{cache:"no-store"});
+                const data=await r.json();
+                const docs=(data.documents||[]);
+                let resumen="🔍 DIAGNÓSTICO FIREBASE\n\nTotal docs en BD: "+docs.length+"\n\n";
+                docs.slice(0,10).forEach((d,i)=>{
+                  const f=d.fields||{};
+                  const get=(k)=>f[k]?(f[k].stringValue||f[k].integerValue||"—"):"—";
+                  const id=(d.name||"").split("/").pop();
+                  resumen+=(i+1)+") "+id.substring(0,30)+"\n";
+                  resumen+="  cliente: "+get("cliente")+"\n";
+                  resumen+="  agente: "+get("agente")+" · equipo: "+get("equipo")+"\n";
+                  resumen+="  estado: "+get("estado")+" · eliminada: "+(f.eliminada?f.eliminada.booleanValue:"no")+"\n\n";
+                });
+                if(docs.length>10) resumen+="... y "+(docs.length-10)+" más";
+                alert(resumen);
+              }catch(e){alert("❌ Error: "+e.message);}
+            }}
+              style={{background:"#FEF3C7",border:`1px solid ${T.amber}`,borderRadius:9,
+                padding:"9px 10px",cursor:"pointer",color:"#92400E",fontSize:13,fontWeight:700}}>
+              🔍
+            </button>
+          )}
         </div>
       </div>
 
