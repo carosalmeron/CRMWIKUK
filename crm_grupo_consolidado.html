@@ -293,7 +293,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.5.6";
+const CRM_VERSION = "3.6.0";
 const CRM_BUILD = "02/05/2026";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -1128,30 +1128,24 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
   var visitasARevisar = [];
   var opsARevisar = [];
   if(esResp){
+    // Resp: TODAS las visitas/ops de agentes que ya cerraron — incluye las ya revisadas
     visitasARevisar = (visitasDB||[]).filter(function(v){
       if(v.eliminada) return false;
       if(parseInt(v.semana||0) !== semana) return false;
-      if(!_idsListos.has(((v.agente||v.agenteId||"")+"").toUpperCase())) return false;
-      // Excluir las que ya revisé (tienen fechaAprobResp)
-      if(v.fechaAprobResp) return false;
-      return true;
+      return _idsListos.has(((v.agente||v.agenteId||"")+"").toUpperCase());
     });
     opsARevisar = (oportunidadesDB||[]).filter(function(o){
       if(o.eliminada) return false;
       if(parseInt(o.semana||0) !== semana) return false;
-      if(!_idsListos.has(((o.agente||o.agenteId||"")+"").toUpperCase())) return false;
-      if(o.fechaAprobResp) return false;
-      return true;
+      return _idsListos.has(((o.agente||o.agenteId||"")+"").toUpperCase());
     });
   } else if(esDir){
+    // Dir: TODAS las visitas/ops aprobadas por algún Resp — incluye las ya revisadas
     visitasARevisar = (visitasDB||[]).filter(function(v){
       if(v.eliminada) return false;
       if(parseInt(v.semana||0) !== semana) return false;
-      // Solo las que el Resp ya revisó y aprobó
       if(!v.fechaAprobResp) return false;
       if(v.aprobadoResp === false) return false;
-      // Excluir las que ya revisé yo
-      if(v.fechaAprobJefe) return false;
       return true;
     });
     opsARevisar = (oportunidadesDB||[]).filter(function(o){
@@ -1159,7 +1153,6 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
       if(parseInt(o.semana||0) !== semana) return false;
       if(!o.fechaAprobResp) return false;
       if(o.aprobadoResp === false) return false;
-      if(o.fechaAprobJefe) return false;
       return true;
     });
   }
@@ -1177,30 +1170,57 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
     setCheckOps(co);
   },[_visitasKey, _opsKey, esResp, esDir, semana]);
 
-  // Función de envío de la revisión
+  // ── Auto-guardado de un check individual (visita u oportunidad) ──
+  var toggleVisita = function(v){
+    var nuevoChecked = checkVisitas[v.id] === false; // invertir
+    setCheckVisitas(function(prev){var n=Object.assign({},prev);n[v.id]=nuevoChecked;return n;});
+    var campoAprob = esResp ? "aprobadoResp" : "aprobadoJefe";
+    var campoFecha = esResp ? "fechaAprobResp" : "fechaAprobJefe";
+    var update = {};
+    update[campoAprob] = nuevoChecked;
+    update[campoFecha] = new Date().toISOString();
+    fbEscribir("visitas", v.id, update).catch(function(e){
+      console.error("Error guardando check visita:", e);
+    });
+  };
+  var toggleOp = function(o){
+    var nuevoChecked = checkOps[o.id] === false;
+    setCheckOps(function(prev){var n=Object.assign({},prev);n[o.id]=nuevoChecked;return n;});
+    var campoAprob = esResp ? "aprobadoResp" : "aprobadoJefe";
+    var campoFecha = esResp ? "fechaAprobResp" : "fechaAprobJefe";
+    var update = {};
+    update[campoAprob] = nuevoChecked;
+    update[campoFecha] = new Date().toISOString();
+    fbEscribir("oportunidades", o.id, update).catch(function(e){
+      console.error("Error guardando check op:", e);
+    });
+  };
+
+  // ── Cerrar revisión: marca el plan como enviado (los checks ya están guardados) ──
   var enviarRevision = function(){
     if(enviandoRev) return;
     if(!plan) return;
-    if(!confirm("¿Enviar revisión al "+(esResp?"Jefe de Ventas":"CEO")+"?\n\nEsta acción es definitiva para la semana "+semana+".")) return;
+    if(!confirm("¿Cerrar tu revisión y enviar al "+(esResp?"Jefe de Ventas":"CEO")+"?\n\nPodrás reabrir si nuevos agentes cierran la semana después.")) return;
     setEnviandoRev(true);
     var fecha = new Date().toISOString();
+    // Asegurar que TODAS las visitas/ops visibles tengan campoFecha (también las no tocadas)
     var campoAprob = esResp ? "aprobadoResp" : "aprobadoJefe";
     var campoFecha = esResp ? "fechaAprobResp" : "fechaAprobJefe";
-
     var promesas = [];
     visitasARevisar.forEach(function(v){
+      if(v[campoFecha]) return; // ya guardado
       var update = {};
       update[campoAprob] = checkVisitas[v.id] !== false;
       update[campoFecha] = fecha;
       promesas.push(fbEscribir("visitas", v.id, update));
     });
     opsARevisar.forEach(function(o){
+      if(o[campoFecha]) return;
       var update = {};
       update[campoAprob] = checkOps[o.id] !== false;
       update[campoFecha] = fecha;
       promesas.push(fbEscribir("oportunidades", o.id, update));
     });
-
     Promise.all(promesas).then(function(){
       var campoEnv = esResp ? "revisionEnviadaResp" : "revisionEnviadaDir";
       var campoFR  = esResp ? "fechaRevisionResp"  : "fechaRevisionDir";
@@ -1210,7 +1230,6 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
       return fbEscribir("planes_semanales", plan.id, planUpdate).then(function(){
         var nuevoPlan = Object.assign({}, plan, planUpdate);
         setPlan(nuevoPlan);
-        // Actualizar también todosPlanes para que el director vea los cambios sin recargar
         setTodosPlanes(function(prev){
           var arr = (prev||[]).slice();
           var idx = arr.findIndex(function(p){return p.id===plan.id;});
@@ -1218,14 +1237,44 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
           return arr;
         });
         setEnviandoRev(false);
-        alert("✅ Revisión enviada al "+(esResp?"Jefe de Ventas":"CEO")+" correctamente.");
+        alert("✅ Revisión cerrada y enviada al "+(esResp?"Jefe de Ventas":"CEO")+".");
       });
     }).catch(function(e){
-      console.error("Error enviando revisión:", e);
+      console.error("Error cerrando revisión:", e);
       setEnviandoRev(false);
-      alert("❌ Error al enviar la revisión. Intenta de nuevo.");
+      alert("❌ Error al cerrar la revisión. Intenta de nuevo.");
     });
   };
+
+  // ── Reabrir revisión (si entra contenido nuevo después del cierre) ──
+  var reabrirRevision = function(){
+    if(!plan) return;
+    var campoEnv = esResp ? "revisionEnviadaResp" : "revisionEnviadaDir";
+    var planUpdate = {};
+    planUpdate[campoEnv] = false;
+    fbEscribir("planes_semanales", plan.id, planUpdate).then(function(){
+      var nuevoPlan = Object.assign({}, plan); nuevoPlan[campoEnv] = false;
+      setPlan(nuevoPlan);
+      setTodosPlanes(function(prev){
+        var arr = (prev||[]).slice();
+        var idx = arr.findIndex(function(p){return p.id===plan.id;});
+        if(idx>=0) arr[idx] = nuevoPlan; else arr.push(nuevoPlan);
+        return arr;
+      });
+    });
+  };
+
+  // ── Detectar contenido nuevo POSTERIOR al cierre de la revisión ──
+  // Si la revisión está marcada como enviada PERO hay visitas/ops sin campoFecha
+  // (= sin haber sido revisadas en la última pasada), reabrir automáticamente.
+  var campoFechaActual = esResp ? "fechaAprobResp" : "fechaAprobJefe";
+  var hayContenidoNuevo = revisionYaEnviada && (
+    visitasARevisar.some(function(v){return !v[campoFechaActual];}) ||
+    opsARevisar.some(function(o){return !o[campoFechaActual];})
+  );
+  React.useEffect(function(){
+    if(hayContenidoNuevo) reabrirRevision();
+  },[hayContenidoNuevo]);
   // ════════════════════════════════════════════════════════════════════
   
   // Clientes con actividad esta semana (visitas + oportunidades + muestras + estrategias + incidencias)
@@ -1828,14 +1877,14 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                     </div>
                   )}
 
-                  {/* Banner verde: ya envié al menos una vez */}
-                  {revisionYaEnviada&&(
+                  {/* Banner verde: revisión cerrada (enviada y vigente) */}
+                  {revisionYaEnviada&&!hayContenidoNuevo&&(
                     <div style={{background:"#DCFCE7",border:"1.5px solid #86EFAC",borderRadius:14,padding:12,marginBottom:14,display:"flex",alignItems:"center",gap:10}}>
                       <span style={{fontSize:20}}>✅</span>
                       <div style={{flex:1}}>
-                        <p style={{margin:0,fontSize:13,fontWeight:700,color:"#166534"}}>Ya enviaste una revisión esta semana</p>
+                        <p style={{margin:0,fontSize:13,fontWeight:700,color:"#166534"}}>Revisión cerrada y enviada al {esResp?"Jefe de Ventas":"CEO"}</p>
                         {plan&&(esResp?plan.fechaRevisionResp:plan.fechaRevisionDir)&&(
-                          <p style={{margin:"2px 0 0",fontSize:11,color:"#15803D"}}>Última: {new Date(esResp?plan.fechaRevisionResp:plan.fechaRevisionDir).toLocaleString("es-ES",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"})}</p>
+                          <p style={{margin:"2px 0 0",fontSize:11,color:"#15803D"}}>{new Date(esResp?plan.fechaRevisionResp:plan.fechaRevisionDir).toLocaleString("es-ES",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"})}</p>
                         )}
                       </div>
                     </div>
@@ -1891,9 +1940,7 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                                 var lb=v.resultado==="pedido"?"Pedido":v.resultado==="llamada"?"Llamada":v.resultado==="no_contesta"?"No contesta":"Visita";
                                 var notaTexto = v.notas || v.nota || "";
                                 return (
-                                  <div key={v.id} onClick={function(){
-                                    setCheckVisitas(function(prev){var n=Object.assign({},prev);n[v.id]=!checked;return n;});
-                                  }} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"12px",borderRadius:10,marginBottom:6,cursor:"pointer",background:checked?"#F0FDF4":"#FAFAFA",border:"1.5px solid "+(checked?"#86EFAC":"#E2E8F0"),transition:"all .15s"}}>
+                                  <div key={v.id} onClick={function(){toggleVisita(v);}} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"12px",borderRadius:10,marginBottom:6,cursor:"pointer",background:checked?"#F0FDF4":"#FAFAFA",border:"1.5px solid "+(checked?"#86EFAC":"#E2E8F0"),transition:"all .15s"}}>
                                     <div style={{width:22,height:22,borderRadius:6,border:"2px solid "+(checked?"#22C55E":"#94A3B8"),background:checked?"#22C55E":"#fff",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,marginTop:1}}>
                                       {checked&&<span style={{color:"#fff",fontSize:13,fontWeight:800,lineHeight:1}}>✓</span>}
                                     </div>
@@ -1949,9 +1996,7 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                                 var et=ESTADOS&&ESTADOS[o.etapa||o.estado];
                                 var descTexto = o.descripcion || o.notas || o.descripcionCliente || "";
                                 return (
-                                  <div key={o.id} onClick={function(){
-                                    setCheckOps(function(prev){var n=Object.assign({},prev);n[o.id]=!checked;return n;});
-                                  }} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"12px",borderRadius:10,marginBottom:6,cursor:"pointer",background:checked?"#F0FDF4":"#FAFAFA",border:"1.5px solid "+(checked?"#86EFAC":"#E2E8F0"),transition:"all .15s"}}>
+                                  <div key={o.id} onClick={function(){toggleOp(o);}} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"12px",borderRadius:10,marginBottom:6,cursor:"pointer",background:checked?"#F0FDF4":"#FAFAFA",border:"1.5px solid "+(checked?"#86EFAC":"#E2E8F0"),transition:"all .15s"}}>
                                     <div style={{width:22,height:22,borderRadius:6,border:"2px solid "+(checked?"#22C55E":"#94A3B8"),background:checked?"#22C55E":"#fff",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,marginTop:1}}>
                                       {checked&&<span style={{color:"#fff",fontSize:13,fontWeight:800,lineHeight:1}}>✓</span>}
                                     </div>
@@ -1997,10 +2042,14 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                           <p style={{margin:"4px 0 0",fontSize:22,fontWeight:800,color:"#EF4444"}}>{visitasARevisar.filter(function(v){return checkVisitas[v.id]===false;}).length+opsARevisar.filter(function(o){return checkOps[o.id]===false;}).length}</p>
                         </div>
                       </div>
-                      <button onClick={enviarRevision} disabled={enviandoRev} style={{width:"100%",padding:14,borderRadius:12,border:"none",background:enviandoRev?"#94A3B8":T.green,color:"#fff",fontWeight:800,fontSize:14,cursor:enviandoRev?"wait":"pointer",boxShadow:enviandoRev?"none":"0 2px 8px rgba(34,197,94,.3)"}}>
-                        {enviandoRev?"Enviando...":"🚀 Enviar al "+(esResp?"Jefe de Ventas":"CEO")}
-                      </button>
-                      <p style={{margin:"10px 0 0",fontSize:10,color:T.muted,textAlign:"center"}}>Acción definitiva. No podrás modificar la revisión después.</p>
+                      {(!revisionYaEnviada)&&(
+                        <button onClick={enviarRevision} disabled={enviandoRev} style={{width:"100%",padding:14,borderRadius:12,border:"none",background:enviandoRev?"#94A3B8":T.green,color:"#fff",fontWeight:800,fontSize:14,cursor:enviandoRev?"wait":"pointer",boxShadow:enviandoRev?"none":"0 2px 8px rgba(34,197,94,.3)"}}>
+                          {enviandoRev?"Cerrando...":"🔒 Cerrar revisión semana "+semana+" y enviar al "+(esResp?"Jefe de Ventas":"CEO")}
+                        </button>
+                      )}
+                      {(!revisionYaEnviada)&&(
+                        <p style={{margin:"10px 0 0",fontSize:10,color:T.muted,textAlign:"center"}}>Los cambios se guardan automáticamente. Pulsa para cerrar tu revisión.</p>
+                      )}
                     </div>
                   )}
                 </div>
