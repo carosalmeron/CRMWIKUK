@@ -279,8 +279,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.22.20";
-const CRM_BUILD = "03/05/2026-diag-write";
+const CRM_VERSION = "3.22.21";
+const CRM_BUILD = "03/05/2026-precedencia-fix";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -6250,8 +6250,8 @@ function MisEstrategias({usuario}){
             </div>
           )}
 
-          {/* (v3.22.19) PANEL REPARAR — Solo aparece si la estrategia es huérfana y el usuario tiene permisos */}
-          {(!sel.cliente&&!sel.clienteNombre||!sel.agente||!sel.equipo)&&(esRolCeo||esRolDir||esRolJefe)&&(
+          {/* (v3.22.21) PANEL REPARAR — Solo si FALTA cliente Y agente. NO por equipo vacío (CEO no tiene equipo) */}
+          {((!sel.cliente&&!sel.clienteNombre)||!sel.agente)&&(esRolCeo||esRolDir||esRolJefe)&&(
             <div style={{background:"#FEF3C7",border:`2px solid ${T.amber}`,borderRadius:12,padding:14,marginBottom:14}}>
               <p style={{margin:"0 0 10px",fontSize:13,fontWeight:800,color:"#92400E"}}>
                 ⚠️ Estrategia incompleta — Repara los campos vacíos
@@ -6661,31 +6661,30 @@ function MisEstrategias({usuario}){
               padding:"9px 14px",cursor:cargando?"default":"pointer",color:T.muted,fontSize:13}}>
             {cargando?"⏳":"🔄"}
           </button>
-          {(esRolCeo||esRolDir||esRolJefe)&&(
-            <button onClick={async()=>{
+          {/* (v3.22.21) Botón diagnóstico Firebase visible para TODOS los roles */}
+          <button onClick={async()=>{
               try{
                 const r=await fetch(`${FB_BASE}/estrategias?pageSize=300`,{cache:"no-store"});
                 const data=await r.json();
-                const docs=(data.documents||[]);
-                let resumen="🔍 DIAGNÓSTICO FIREBASE\n\nTotal docs en BD: "+docs.length+"\n\n";
-                docs.slice(0,10).forEach((d,i)=>{
+                const docs=(data.documents||[]).filter(d=>{const f=d.fields||{};return !(f.eliminada&&f.eliminada.booleanValue);});
+                let resumen="🔍 DIAGNÓSTICO FIREBASE\n\nDocs en BD (no eliminados): "+docs.length+"\n\n";
+                docs.slice(0,8).forEach((d,i)=>{
                   const f=d.fields||{};
-                  const get=(k)=>f[k]?(f[k].stringValue||f[k].integerValue||"—"):"—";
+                  const get=(k)=>f[k]?(f[k].stringValue||f[k].integerValue||"—"):"VACÍO";
                   const id=(d.name||"").split("/").pop();
                   resumen+=(i+1)+") "+id.substring(0,30)+"\n";
                   resumen+="  cliente: "+get("cliente")+"\n";
                   resumen+="  agente: "+get("agente")+" · equipo: "+get("equipo")+"\n";
-                  resumen+="  estado: "+get("estado")+" · eliminada: "+(f.eliminada?f.eliminada.booleanValue:"no")+"\n\n";
+                  resumen+="  estado: "+get("estado")+"\n\n";
                 });
-                if(docs.length>10) resumen+="... y "+(docs.length-10)+" más";
+                if(docs.length>8) resumen+="... y "+(docs.length-8)+" más";
                 alert(resumen);
               }catch(e){alert("❌ Error: "+e.message);}
             }}
-              style={{background:"#FEF3C7",border:`1px solid ${T.amber}`,borderRadius:9,
-                padding:"9px 10px",cursor:"pointer",color:"#92400E",fontSize:13,fontWeight:700}}>
-              🔍
-            </button>
-          )}
+            style={{background:"#FEF3C7",border:`1px solid ${T.amber}`,borderRadius:9,
+              padding:"9px 10px",cursor:"pointer",color:"#92400E",fontSize:13,fontWeight:700}}>
+            🔍
+          </button>
         </div>
       </div>
 
@@ -6951,20 +6950,8 @@ function MisEstrategias({usuario}){
                 por:usuario.nombre,fecha:hoy,nota:formEst.texto
               }],
             };
-            // (v3.22.20) ALERT pre-guardado para diagnóstico
-            const _resumen = `cliente: ${est.cliente||"VACÍO"}\ncodigo: ${est.clienteCodigo||"VACÍO"}\nagente: ${est.agente||"VACÍO"}\nequipo: ${est.equipo||"VACÍO"}\nestado: ${est.estado||"VACÍO"}\nresolucion: ${est.resolucion?est.resolucion.tipo:"ninguna"}`;
-            alert("📤 ANTES de guardar:\n"+_resumen);
             setEstrategias([...estrategias,est]);
-            fbEscribir("estrategias",est.id,est).then(ok=>{
-              // (v3.22.20) Verificar leyendo de Firebase tras escribir
-              setTimeout(()=>{
-                fetch(`${FB_BASE}/estrategias/${est.id}`).then(r=>r.json()).then(data=>{
-                  const f = (data && data.fields) || {};
-                  const _read = `cliente: ${f.cliente?f.cliente.stringValue:"❌ FALTA"}\ncodigo: ${f.clienteCodigo?f.clienteCodigo.stringValue:"❌ FALTA"}\nagente: ${f.agente?f.agente.stringValue:"❌ FALTA"}\nestado: ${f.estado?f.estado.stringValue:"❌ FALTA"}`;
-                  alert("📥 DESPUÉS de guardar (leído de Firebase):\n"+_read);
-                }).catch(err=>alert("❌ Error releyendo Firebase: "+err.message));
-              }, 1500);
-            });
+            fbEscribir("estrategias",est.id,est);
 
             // Notificar
             if(estadoInicial==="pendiente_aprobacion"&&pendienteDeId){
@@ -10221,7 +10208,7 @@ async function fbLeer(coleccion, pageSize=200){
     let docs=[], nextPage=null, intentos=0;
     do{
       const url=`${FB_BASE}/${coleccion}?pageSize=300${nextPage?"&pageToken="+nextPage:""}`;
-      const r=await fetch(url);
+      const r=await fetch(url,{cache:"no-store"});
       if(!r.ok){
         // Offline o error → intentar caché
         const cached=cacheLeer(coleccion);
@@ -10233,8 +10220,8 @@ async function fbLeer(coleccion, pageSize=200){
       nextPage=data.nextPageToken||null;
       intentos++;
     }while(nextPage&&intentos<10);
-    // Guardar en caché para uso offline
-    if(docs.length>0) cacheGuardar(coleccion,docs);
+    // (v3.22.21) SIEMPRE guardar en caché tras leer Firebase para sobrescribir datos antiguos
+    cacheGuardar(coleccion,docs);
     return docs;
   }catch(e){
     console.warn("📴 FB leer offline:",e.message);
