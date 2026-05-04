@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.22.55";
-const CRM_BUILD = "04/05/2026-ofertas-funcionando";
+const CRM_VERSION = "3.23.1";
+const CRM_BUILD = "04/05/2026-compras-stock-calidad";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -314,9 +314,12 @@ let USUARIOS = [
   {id:"resp_log", nombre:"Resp. Logística",      rol:"tipologia", tipologia:"logistica",      color:"#0EA5E9",icon:"🚚", email:""},
   {id:"resp_cal", nombre:"Resp. Calidad",         rol:"tipologia", tipologia:"calidad",         color:"#F59E0B",icon:"⚠️", email:""},
   {id:"resp_adm", nombre:"Resp. Administración",  rol:"tipologia", tipologia:"administracion",  color:"#8B5CF6",icon:"📄", email:""},
-  {id:"resp_stk", nombre:"Resp. Stock",           rol:"tipologia", tipologia:"stock",           color:"#EF4444",icon:"📦", email:""},
+  // (v3.23.1) Resp. Stock SUSTITUIDO por rol Compras - mantenemos por retrocompatibilidad pero oculto
+  {id:"resp_stk", nombre:"Resp. Stock",           rol:"tipologia", tipologia:"stock",           color:"#EF4444",icon:"📦", email:"", _legacy:true},
   {id:"resp_prd", nombre:"Resp. Producción",      rol:"tipologia", tipologia:"produccion",      color:"#059669",icon:"🏭", email:""},
   {id:"resp_id",  nombre:"Resp. I+D",             rol:"tipologia", tipologia:"id",              color:"#7C3AED",icon:"🔬", email:""},
+  // (v3.23.0) Rol Compras - acceso a "Vamos caros" para informe a proveedores
+  {id:"compras", nombre:"Compras",                rol:"compras",   equipo:null,       color:"#0891B2", icon:"🛒", email:""},
 ];
 
 // ── Helper: resolver todos los IDs CRM de un usuario ────────────
@@ -8018,6 +8021,660 @@ const INCIDENCIAS_SEED = [];
 // ═══════════════════════════════════════════════════════════════════
 // ─── (v3.22.35) Vista clientes sin asignar dentro de Recuperar ────────
 // ─── (v3.22.43) Módulo Ofertas - seguimiento de cotizaciones ──────────
+// ─── (v3.23.1) Módulo Incidencias Compras (stock + calidad) ─────────
+function IncidenciasCompras({usuario, incidenciasDB, setIncidenciasDB, clientesFB, tipoFijo, onBack}){
+  // tipoFijo: "stock" o "calidad" - filtra automáticamente
+  React.useEffect(function(){
+    if(typeof setIncidenciasDB==="function" && typeof fbLeer==="function"){
+      fbLeer("incidencias").then(function(arr){
+        if(arr) setIncidenciasDB(arr);
+      }).catch(function(){});
+    }
+  },[]);
+
+  var _filtro = React.useState("abiertas"); var filtro = _filtro[0], setFiltro = _filtro[1];
+  // abiertas | en_proceso | resueltas
+  var _sel = React.useState(null); var sel = _sel[0], setSel = _sel[1];
+  var _comentario = React.useState(""); var comentario = _comentario[0], setComentario = _comentario[1];
+  var _modalAccion = React.useState(null); var modalAccion = _modalAccion[0], setModalAccion = _modalAccion[1];
+
+  function nombreCliente(inc){
+    return inc.cliente || inc.clienteNombre || "(Sin cliente)";
+  }
+
+  // Filtrar por tipología
+  var todas = (incidenciasDB||[]).filter(function(i){
+    if(i.eliminada) return false;
+    var t=(i.tipo||i.tipologia||"").toLowerCase();
+    if(tipoFijo==="stock") return t==="stock"||t==="rotura"||t.indexOf("stock")>=0;
+    if(tipoFijo==="calidad") return t==="calidad"||t.indexOf("calidad")>=0;
+    return true;
+  });
+
+  var abiertas = todas.filter(function(i){return i.estado!=="cerrada"&&i.estado!=="resuelta"&&i.estado!=="en_proceso";});
+  var enProceso = todas.filter(function(i){return i.estado==="en_proceso";});
+  var resueltas = todas.filter(function(i){return i.estado==="cerrada"||i.estado==="resuelta";});
+
+  var lista = filtro==="abiertas"?abiertas:filtro==="en_proceso"?enProceso:resueltas;
+  lista = lista.slice().sort(function(a,b){
+    var fa=a.fechaCreacion||a.fecha||"";
+    var fb=b.fechaCreacion||b.fecha||"";
+    return (fb+"").localeCompare(fa+"");
+  });
+
+  function diasDesde(iso){
+    if(!iso) return 0;
+    var d=new Date(iso);
+    if(isNaN(d.getTime())) return 0;
+    return Math.floor((Date.now()-d.getTime())/(1000*60*60*24));
+  }
+
+  function cambiarEstado(inc, nuevoEstado, nota){
+    var hoy=new Date().toLocaleDateString("es-ES");
+    var hist=(inc.historial||[]).slice();
+    var lblAccion = nuevoEstado==="en_proceso"?"⏳ En proceso"
+                  : nuevoEstado==="resuelta"?"✅ Resuelta"
+                  : nuevoEstado==="cerrada"?"⬜ Cerrada"
+                  : "Cambio estado";
+    hist.push({accion:lblAccion, fecha:hoy, por:usuario.nombre, nota:nota||""});
+    var actualizada = Object.assign({},inc,{
+      estado:nuevoEstado,
+      fechaUltimoCambio:new Date().toISOString(),
+      ultimoCambioPor:usuario.nombre,
+      historial:hist
+    });
+    if(nuevoEstado==="resuelta"||nuevoEstado==="cerrada"){
+      actualizada.fechaCierre=new Date().toISOString();
+      actualizada.cerradoPor=usuario.nombre;
+    }
+    fbEscribir("incidencias",inc.id,actualizada).then(function(ok){
+      if(ok){
+        setIncidenciasDB(function(prev){return (prev||[]).map(function(x){return x.id===inc.id?actualizada:x;});});
+        setSel(actualizada);
+        setModalAccion(null);
+        setComentario("");
+        alert(lblAccion+" registrado");
+      } else {
+        alert("No se pudo guardar el cambio");
+      }
+    }).catch(function(e){alert("Error: "+e.message);});
+  }
+
+  function añadirComentario(inc, texto){
+    if(!texto.trim()) return;
+    var hoy=new Date().toLocaleDateString("es-ES");
+    var hist=(inc.historial||[]).slice();
+    hist.push({accion:"💬 Comentario", fecha:hoy, por:usuario.nombre, nota:texto.trim()});
+    var actualizada = Object.assign({},inc,{historial:hist, fechaUltimoCambio:new Date().toISOString()});
+    fbEscribir("incidencias",inc.id,actualizada).then(function(ok){
+      if(ok){
+        setIncidenciasDB(function(prev){return (prev||[]).map(function(x){return x.id===inc.id?actualizada:x;});});
+        setSel(actualizada);
+        setComentario("");
+        alert("Comentario añadido");
+      }
+    }).catch(function(e){alert("Error: "+e.message);});
+  }
+
+  var iconoTipo = tipoFijo==="stock" ? "📦" : tipoFijo==="calidad" ? "⚠️" : "🚨";
+  var titulo = tipoFijo==="stock" ? "Stock - Rotura/Falta" : tipoFijo==="calidad" ? "Calidad" : "Incidencias";
+  var colorTipo = tipoFijo==="stock" ? "#EF4444" : tipoFijo==="calidad" ? "#F59E0B" : T.red;
+
+  // VISTA DETALLE
+  if(sel){
+    var diasT = diasDesde(sel.fechaCreacion||sel.fecha);
+    var puedeAccionar = sel.estado!=="cerrada" && sel.estado!=="resuelta";
+    return (
+      <div style={{padding:"16px",paddingBottom:80}}>
+        <button onClick={function(){setSel(null);setModalAccion(null);}}
+          style={{background:"#fff",border:"1.5px solid "+T.border,padding:"10px 16px",borderRadius:11,marginBottom:14,fontSize:13,fontWeight:700,color:T.text,cursor:"pointer"}}>
+          ← Volver
+        </button>
+
+        <Card style={{marginBottom:14,borderLeft:"4px solid "+colorTipo}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,marginBottom:10}}>
+            <div style={{flex:1,minWidth:0}}>
+              <p style={{margin:0,fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>{iconoTipo} {titulo}</p>
+              <p style={{margin:"4px 0 6px",fontSize:18,fontWeight:800,color:T.text}}>{nombreCliente(sel)}</p>
+              <p style={{margin:0,fontSize:13,color:T.text,fontWeight:600}}>{sel.titulo||sel.asunto||sel.descripcion||"(Sin descripción)"}</p>
+            </div>
+            <span style={{fontSize:10,fontWeight:800,color:colorTipo,background:colorTipo+"15",padding:"4px 9px",borderRadius:8,whiteSpace:"nowrap",textTransform:"uppercase"}}>
+              {sel.estado==="abierta"?"🔴 Abierta":sel.estado==="en_proceso"?"🟡 En proceso":sel.estado==="resuelta"?"✅ Resuelta":sel.estado==="cerrada"?"⬜ Cerrada":sel.estado||"—"}
+            </span>
+          </div>
+          <div style={{display:"flex",gap:14,fontSize:11,color:T.muted,flexWrap:"wrap"}}>
+            <span>📅 {sel.fechaCreacionStr||sel.fecha||""}</span>
+            <span>👤 {sel.agenteNombre||sel.agente||sel.autor||"—"}</span>
+            {diasT>0 && <span style={{color:diasT>=7?T.red:T.amber,fontWeight:700}}>⏳ {diasT} día{diasT===1?"":"s"} abierta</span>}
+          </div>
+          {sel.descripcion && sel.descripcion!==sel.titulo && (
+            <p style={{margin:"10px 0 0",fontSize:12,color:T.text,padding:"8px 12px",background:"#F8FAFC",borderRadius:8,borderLeft:"3px solid "+colorTipo}}>
+              {sel.descripcion}
+            </p>
+          )}
+          {sel.producto && (
+            <p style={{margin:"8px 0 0",fontSize:12,color:T.text}}>
+              <strong>Producto:</strong> {sel.producto}{sel.calibre?" · "+sel.calibre:""}{sel.cantidad?" · "+sel.cantidad+" "+(sel.unidad||""):""}
+            </p>
+          )}
+        </Card>
+
+        {/* Historial */}
+        {(sel.historial||[]).length>0 && (
+          <div style={{marginBottom:14}}>
+            <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>📜 Histórico</p>
+            {(sel.historial||[]).map(function(h,i){
+              return <div key={i} style={{padding:"8px 12px",background:"#F8FAFC",borderRadius:8,marginBottom:4,fontSize:11}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
+                  <strong style={{color:T.text}}>{h.accion}</strong>
+                  <span style={{color:T.muted,fontSize:10}}>{h.fecha} · {h.por}</span>
+                </div>
+                {h.nota && <p style={{margin:"3px 0 0",fontStyle:"italic",color:T.muted}}>"{h.nota}"</p>}
+              </div>;
+            })}
+          </div>
+        )}
+
+        {/* Añadir comentario */}
+        {puedeAccionar && (
+          <Card style={{marginBottom:14}}>
+            <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>💬 Añadir comentario</p>
+            <textarea value={comentario} onChange={function(e){setComentario(e.target.value);}}
+              placeholder="Ej: Hablado con proveedor, llega lote viernes..."
+              rows={2}
+              style={{width:"100%",border:"1.5px solid "+T.border,borderRadius:9,padding:"8px 10px",fontSize:12,resize:"none",fontFamily:"inherit",boxSizing:"border-box",marginBottom:8}}/>
+            <button onClick={function(){añadirComentario(sel,comentario);}} disabled={!comentario.trim()}
+              style={{padding:"8px 14px",borderRadius:8,border:"none",background:comentario.trim()?T.navy:T.border,color:"#fff",fontWeight:700,fontSize:12,cursor:comentario.trim()?"pointer":"not-allowed"}}>
+              + Añadir comentario
+            </button>
+          </Card>
+        )}
+
+        {/* Acciones cierre */}
+        {puedeAccionar && (
+          <div style={{display:"grid",gridTemplateColumns:sel.estado==="abierta"?"1fr 1fr":"1fr",gap:6,marginTop:8}}>
+            {sel.estado==="abierta" && (
+              <button onClick={function(){setModalAccion("en_proceso");}}
+                style={{padding:"12px",border:"none",background:T.amber,color:"#fff",fontWeight:800,fontSize:13,borderRadius:10,cursor:"pointer"}}>
+                ⏳ Marcar en proceso
+              </button>
+            )}
+            <button onClick={function(){setModalAccion("resuelta");}}
+              style={{padding:"12px",border:"none",background:T.green,color:"#fff",fontWeight:800,fontSize:13,borderRadius:10,cursor:"pointer"}}>
+              ✅ Marcar resuelta
+            </button>
+          </div>
+        )}
+
+        {/* Modal acción */}
+        {modalAccion && (
+          <div onClick={function(){setModalAccion(null);}}
+            style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+            <div onClick={function(e){e.stopPropagation();}}
+              style={{background:"#fff",borderRadius:"20px 20px 0 0",padding:24,width:"100%",maxWidth:440}}>
+              <p style={{margin:"0 0 14px",fontSize:17,fontWeight:800,textAlign:"center"}}>
+                {modalAccion==="en_proceso"?"⏳ Marcar en proceso":"✅ Marcar como resuelta"}
+              </p>
+              <textarea value={comentario} onChange={function(e){setComentario(e.target.value);}}
+                placeholder={modalAccion==="resuelta"?"¿Cómo se resolvió? (ej: lote llegado el 8/5)":"Nota opcional sobre el progreso"}
+                rows={3}
+                style={{width:"100%",padding:"10px 12px",border:"1.5px solid "+T.border,borderRadius:10,fontSize:13,resize:"none",fontFamily:"inherit",boxSizing:"border-box",marginBottom:14}}/>
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={function(){setModalAccion(null);setComentario("");}}
+                  style={{flex:1,padding:"12px",borderRadius:10,border:"1.5px solid "+T.border,background:"#fff",color:T.text,fontWeight:700,fontSize:13,cursor:"pointer"}}>
+                  Cancelar
+                </button>
+                <button onClick={function(){cambiarEstado(sel,modalAccion,comentario);}}
+                  style={{flex:2,padding:"12px",borderRadius:10,border:"none",background:modalAccion==="resuelta"?T.green:T.amber,color:"#fff",fontWeight:800,fontSize:14,cursor:"pointer"}}>
+                  {modalAccion==="resuelta"?"✅ Confirmar":"⏳ Confirmar"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // VISTA LISTA
+  return (
+    <div style={{padding:"16px",paddingBottom:80}}>
+      {onBack && (
+        <button onClick={onBack}
+          style={{background:"#fff",border:"1.5px solid "+T.border,padding:"10px 16px",borderRadius:11,marginBottom:14,fontSize:13,fontWeight:700,color:T.text,cursor:"pointer"}}>
+          ← Volver
+        </button>
+      )}
+
+      <p style={{margin:"0 0 14px",fontSize:22,fontWeight:800,color:T.text}}>{iconoTipo} {titulo}</p>
+
+      {/* Tabs */}
+      <div style={{display:"flex",gap:5,marginBottom:14,padding:4,background:T.bg,borderRadius:11}}>
+        {[
+          {k:"abiertas",lbl:"🔴 Abiertas",n:abiertas.length,c:T.red},
+          {k:"en_proceso",lbl:"🟡 En proceso",n:enProceso.length,c:T.amber},
+          {k:"resueltas",lbl:"✅ Resueltas",n:resueltas.length,c:T.green}
+        ].map(function(t){
+          var act=filtro===t.k;
+          return <button key={t.k} onClick={function(){setFiltro(t.k);}}
+            style={{flex:1,padding:"9px 6px",borderRadius:9,border:"none",
+              background:act?t.c:"transparent",color:act?"#fff":T.muted,
+              fontWeight:act?800:600,fontSize:11.5,cursor:"pointer",whiteSpace:"nowrap"}}>
+            {t.lbl} ({t.n})
+          </button>;
+        })}
+      </div>
+
+      {/* Lista */}
+      {lista.length===0 ? (
+        <div style={{textAlign:"center",padding:"40px 20px"}}>
+          <p style={{fontSize:36,margin:"0 0 8px"}}>📭</p>
+          <p style={{margin:0,fontSize:14,fontWeight:700,color:T.muted}}>
+            Sin incidencias {filtro==="abiertas"?"abiertas":filtro==="en_proceso"?"en proceso":"resueltas"}
+          </p>
+        </div>
+      ) : (
+        lista.map(function(inc){
+          var diasT=diasDesde(inc.fechaCreacion||inc.fecha);
+          var alerta = filtro==="abiertas" && diasT>=3;
+          return (
+            <Card key={inc.id} onClick={function(){setSel(inc);}}
+              style={{marginBottom:8,padding:"14px 16px",cursor:"pointer",
+                borderLeft:"4px solid "+(alerta?T.red:colorTipo)}}>
+              <div style={{display:"flex",alignItems:"flex-start",gap:10}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                    {nombreCliente(inc)}
+                  </p>
+                  <p style={{margin:"3px 0 0",fontSize:11,color:T.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                    {inc.titulo||inc.asunto||inc.descripcion||"(Sin asunto)"}
+                  </p>
+                  <p style={{margin:"3px 0 0",fontSize:10,color:T.muted}}>
+                    {inc.fechaCreacionStr||inc.fecha||""}
+                    {(inc.agenteNombre||inc.agente||inc.autor)?" · "+(inc.agenteNombre||inc.agente||inc.autor):""}
+                    {inc.producto?" · "+inc.producto:""}
+                  </p>
+                </div>
+                {filtro==="abiertas" && (
+                  <span style={{fontSize:11,fontWeight:800,color:alerta?T.red:T.amber,background:(alerta?T.red:T.amber)+"15",padding:"4px 9px",borderRadius:7,whiteSpace:"nowrap"}}>
+                    {diasT}d
+                  </span>
+                )}
+              </div>
+            </Card>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+// ─── (v3.23.0) Módulo Vamos Caros — informe ejecutivo para Compras/CEO ───
+function VamosCaros({usuario, ofertasDB, setOfertasDB, onBack}){
+  // Recargar ofertas al entrar
+  React.useEffect(function(){
+    if(typeof setOfertasDB==="function" && typeof fbLeer==="function"){
+      fbLeer("ofertas").then(function(arr){
+        if(arr) setOfertasDB(arr.filter(function(o){return !o.eliminada;}));
+      }).catch(function(){});
+    }
+  },[]);
+
+  var _vista = React.useState("articulo"); var vista = _vista[0], setVista = _vista[1];
+  // articulo | cliente | agente | tabla
+  var _equipoF = React.useState(""); var equipoF = _equipoF[0], setEquipoF = _equipoF[1];
+  var _agenteF = React.useState(""); var agenteF = _agenteF[0], setAgenteF = _agenteF[1];
+  var _periodoF = React.useState("30d"); var periodoF = _periodoF[0], setPeriodoF = _periodoF[1];
+  // 7d | 30d | 90d | all
+  var _expandido = React.useState(null); var expandido = _expandido[0], setExpandido = _expandido[1];
+
+  // Filtrar solo ofertas marcadas como caras
+  var hoy = new Date();
+  var corte = new Date(hoy.getTime());
+  if(periodoF==="7d") corte.setDate(corte.getDate()-7);
+  else if(periodoF==="30d") corte.setDate(corte.getDate()-30);
+  else if(periodoF==="90d") corte.setDate(corte.getDate()-90);
+  else corte = new Date(0);
+
+  var todasCaras = (ofertasDB||[]).filter(function(o){
+    if(o.eliminada) return false;
+    if(o.estado!=="caro") return false;
+    if(equipoF && o.equipo!==equipoF) return false;
+    if(agenteF){
+      var ag=(o.agente||"").toLowerCase();
+      if(ag!==agenteF.toLowerCase()) return false;
+    }
+    if(periodoF!=="all"){
+      var fc=o.fechaCierre||o.fechaCreacion;
+      if(!fc) return false;
+      var d=new Date(fc);
+      if(isNaN(d.getTime())) return false;
+      if(d<corte) return false;
+    }
+    return true;
+  });
+
+  // Aplanar líneas: cada línea con su contexto cliente/agente
+  var lineas=[];
+  todasCaras.forEach(function(o){
+    (o.lineas||[]).forEach(function(l){
+      if(l.precioCompetencia==null) return; // solo líneas con competencia conocida
+      lineas.push({
+        ofertaId:o.id,
+        clienteNombre:o.clienteNombre||"",
+        clienteCodigo:o.clienteCodigo||"",
+        agente:o.agente||"",
+        agenteNombre:o.agenteNombre||o.agente||"",
+        equipo:o.equipo||"",
+        fecha:o.fechaCierre||o.fechaCreacion,
+        fechaStr:o.fechaCreacionStr||"",
+        producto:l.producto||"",
+        calibre:l.calibre||"",
+        unidad:l.unidad||"€/kg",
+        precio:Number(l.precio)||0,
+        precioCompetencia:Number(l.precioCompetencia)||0,
+        diferencia:(Number(l.precio)||0)-(Number(l.precioCompetencia)||0),
+        diferenciaPct: l.precioCompetencia>0 ? (((Number(l.precio)||0)-(Number(l.precioCompetencia)||0))/(Number(l.precioCompetencia)||1))*100 : 0,
+        notas:l.notas||""
+      });
+    });
+  });
+
+  // KPIs cabecera
+  var totalCaras = todasCaras.length;
+  var totalLineas = lineas.length;
+  var difMedia = lineas.length>0 ? lineas.reduce(function(a,l){return a+l.diferencia;},0)/lineas.length : 0;
+  var difMediaPct = lineas.length>0 ? lineas.reduce(function(a,l){return a+l.diferenciaPct;},0)/lineas.length : 0;
+  var clientesUnicos = {};
+  lineas.forEach(function(l){clientesUnicos[l.clienteNombre]=true;});
+
+  // Agrupación por artículo (clave: producto+calibre normalizado)
+  function keyArt(l){
+    return ((l.producto||"")+"|"+(l.calibre||"")).toUpperCase().replace(/\s+/g," ").trim();
+  }
+  var agrArt = {};
+  lineas.forEach(function(l){
+    var k=keyArt(l);
+    if(!agrArt[k]) agrArt[k]={producto:l.producto,calibre:l.calibre,unidad:l.unidad,lineas:[],clientes:{},agentes:{}};
+    agrArt[k].lineas.push(l);
+    agrArt[k].clientes[l.clienteNombre]=true;
+    agrArt[k].agentes[l.agente]=true;
+  });
+  var listArt = Object.keys(agrArt).map(function(k){
+    var g=agrArt[k];
+    var sumP=0,sumC=0,minC=Infinity,maxC=-Infinity;
+    g.lineas.forEach(function(l){
+      sumP+=l.precio; sumC+=l.precioCompetencia;
+      if(l.precioCompetencia<minC) minC=l.precioCompetencia;
+      if(l.precioCompetencia>maxC) maxC=l.precioCompetencia;
+    });
+    var prom=sumP/g.lineas.length;
+    var pComp=sumC/g.lineas.length;
+    return Object.assign({},g,{
+      key:k,
+      nLineas:g.lineas.length,
+      nClientes:Object.keys(g.clientes).length,
+      nAgentes:Object.keys(g.agentes).length,
+      precioPromedio:prom,
+      compPromedio:pComp,
+      minComp:minC===Infinity?0:minC,
+      maxComp:maxC===-Infinity?0:maxC,
+      diferencia:prom-pComp,
+      diferenciaPct: pComp>0?((prom-pComp)/pComp)*100:0
+    });
+  }).sort(function(a,b){return b.diferenciaPct-a.diferenciaPct;});
+
+  // Listas únicas para filtros
+  var equiposUnicos = ["WIKUK","INTERKEY"];
+  var agentesUnicos = {};
+  (ofertasDB||[]).forEach(function(o){
+    if(o.estado==="caro" && o.agente) agentesUnicos[o.agente]={id:o.agente,nombre:o.agenteNombre||o.agente};
+  });
+  var listAg = Object.keys(agentesUnicos).map(function(k){return agentesUnicos[k];}).sort(function(a,b){return a.nombre.localeCompare(b.nombre);});
+
+  // Top 3 artículos peores
+  var top3 = listArt.slice(0,3);
+  // Top 3 clientes peores
+  var clientesAgr={};
+  lineas.forEach(function(l){
+    if(!clientesAgr[l.clienteNombre]) clientesAgr[l.clienteNombre]={nombre:l.clienteNombre,n:0,sumDif:0};
+    clientesAgr[l.clienteNombre].n++;
+    clientesAgr[l.clienteNombre].sumDif+=l.diferenciaPct;
+  });
+  var top3Cli = Object.keys(clientesAgr).map(function(k){
+    return Object.assign({},clientesAgr[k],{difMedia:clientesAgr[k].sumDif/clientesAgr[k].n});
+  }).sort(function(a,b){return b.difMedia-a.difMedia;}).slice(0,3);
+
+  function fmt(n){return Number(n).toFixed(2).replace(".",",");}
+  function fmtPct(n){return (n>=0?"+":"")+Number(n).toFixed(1).replace(".",",")+"%";}
+
+  // Generar PDF (usando window.print con CSS de impresión)
+  function exportarPDF(){
+    var w=window.open("","_blank","width=900,height=700");
+    if(!w){alert("Tu navegador bloqueó la ventana. Permite popups.");return;}
+    var html=[];
+    html.push('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Informe Vamos Caros - '+new Date().toLocaleDateString("es-ES")+'</title>');
+    html.push('<style>');
+    html.push('body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:#1F2937;padding:30px;line-height:1.5;max-width:900px;margin:0 auto;}');
+    html.push('h1{color:#0F172A;border-bottom:3px solid #DC2626;padding-bottom:10px;margin-bottom:6px;}');
+    html.push('.subtitle{color:#6B7280;font-size:13px;margin-bottom:24px;}');
+    html.push('.kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:30px;}');
+    html.push('.kpi{background:#FEF2F2;border:1px solid #FECACA;border-radius:10px;padding:14px;text-align:center;}');
+    html.push('.kpi-num{font-size:24px;font-weight:800;color:#DC2626;margin:0;}');
+    html.push('.kpi-lbl{font-size:11px;font-weight:600;color:#7F1D1D;margin:4px 0 0;text-transform:uppercase;}');
+    html.push('h2{color:#0F172A;font-size:16px;margin:24px 0 12px;border-left:4px solid #DC2626;padding-left:10px;}');
+    html.push('table{width:100%;border-collapse:collapse;margin-bottom:20px;font-size:12px;}');
+    html.push('th{background:#F1F5F9;padding:8px 10px;text-align:left;border-bottom:2px solid #94A3B8;font-weight:700;color:#1E293B;}');
+    html.push('td{padding:8px 10px;border-bottom:1px solid #E2E8F0;}');
+    html.push('tr:nth-child(even) td{background:#F8FAFC;}');
+    html.push('.cara{color:#DC2626;font-weight:700;}');
+    html.push('.bar{display:inline-block;height:14px;background:#FCA5A5;border-radius:3px;vertical-align:middle;margin-right:6px;}');
+    html.push('.footer{margin-top:30px;padding-top:14px;border-top:1px solid #E5E7EB;font-size:10px;color:#9CA3AF;text-align:center;}');
+    html.push('@media print {body{padding:15px;} .noprint{display:none;} h1{page-break-before:auto;}}');
+    html.push('.btn{position:fixed;top:14px;right:14px;background:#DC2626;color:white;padding:10px 18px;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;box-shadow:0 4px 12px rgba(220,38,38,.25);}');
+    html.push('</style></head><body>');
+    html.push('<button onclick="window.print()" class="btn noprint">🖨️ Imprimir / Guardar PDF</button>');
+    html.push('<h1>📊 Informe "Vamos Caros"</h1>');
+    var rangoLbl = periodoF==="7d"?"Últimos 7 días":periodoF==="30d"?"Últimos 30 días":periodoF==="90d"?"Últimos 90 días":"Histórico completo";
+    html.push('<p class="subtitle">'+rangoLbl+' · Generado el '+new Date().toLocaleString("es-ES")+(equipoF?" · Equipo: "+equipoF:"")+(agenteF?" · Agente filtrado":"")+'</p>');
+    // KPIs
+    html.push('<div class="kpi-grid">');
+    html.push('<div class="kpi"><p class="kpi-num">'+totalCaras+'</p><p class="kpi-lbl">Ofertas caras</p></div>');
+    html.push('<div class="kpi"><p class="kpi-num">'+totalLineas+'</p><p class="kpi-lbl">Líneas analizadas</p></div>');
+    html.push('<div class="kpi"><p class="kpi-num">'+fmtPct(difMediaPct)+'</p><p class="kpi-lbl">Sobre la competencia</p></div>');
+    html.push('<div class="kpi"><p class="kpi-num">'+Object.keys(clientesUnicos).length+'</p><p class="kpi-lbl">Clientes afectados</p></div>');
+    html.push('</div>');
+    // Top 3 artículos
+    html.push('<h2>🏷️ Top artículos donde estamos más caros</h2>');
+    html.push('<table><thead><tr><th>Artículo</th><th>Calibre</th><th>Tu precio</th><th>Competencia</th><th>Diferencia</th><th># Casos</th><th># Clientes</th></tr></thead><tbody>');
+    listArt.forEach(function(g){
+      html.push('<tr><td><strong>'+g.producto+'</strong></td><td>'+g.calibre+'</td>');
+      html.push('<td>'+fmt(g.precioPromedio)+' '+g.unidad+'</td>');
+      html.push('<td>'+fmt(g.compPromedio)+' '+g.unidad+'</td>');
+      html.push('<td class="cara">'+fmtPct(g.diferenciaPct)+' ('+(g.diferencia>=0?"+":"")+fmt(g.diferencia)+')</td>');
+      html.push('<td>'+g.nLineas+'</td><td>'+g.nClientes+'</td></tr>');
+    });
+    if(listArt.length===0) html.push('<tr><td colspan="7" style="text-align:center;color:#9CA3AF;padding:20px;">Sin datos en el periodo</td></tr>');
+    html.push('</tbody></table>');
+    // Detalle todas las líneas
+    html.push('<h2>📋 Detalle líneas individuales</h2>');
+    html.push('<table><thead><tr><th>Fecha</th><th>Cliente</th><th>Agente</th><th>Producto</th><th>Tu precio</th><th>Competencia</th><th>Dif.</th></tr></thead><tbody>');
+    lineas.slice().sort(function(a,b){return b.diferenciaPct-a.diferenciaPct;}).forEach(function(l){
+      html.push('<tr><td>'+(l.fechaStr||"")+'</td><td>'+l.clienteNombre+'</td><td>'+l.agenteNombre+'</td>');
+      html.push('<td>'+l.producto+(l.calibre?" · "+l.calibre:"")+'</td>');
+      html.push('<td>'+fmt(l.precio)+' '+l.unidad+'</td>');
+      html.push('<td>'+fmt(l.precioCompetencia)+' '+l.unidad+'</td>');
+      html.push('<td class="cara">'+fmtPct(l.diferenciaPct)+'</td></tr>');
+    });
+    if(lineas.length===0) html.push('<tr><td colspan="7" style="text-align:center;color:#9CA3AF;padding:20px;">Sin líneas con precio competencia</td></tr>');
+    html.push('</tbody></table>');
+    html.push('<div class="footer">CRM Grupo Consolidado · Documento confidencial</div>');
+    html.push('</body></html>');
+    w.document.write(html.join(""));
+    w.document.close();
+  }
+
+  return (
+    <div style={{padding:"16px",paddingBottom:80}}>
+      {onBack && (
+        <button onClick={onBack}
+          style={{background:"#fff",border:"1.5px solid "+T.border,padding:"10px 16px",borderRadius:11,marginBottom:14,fontSize:13,fontWeight:700,color:T.text,cursor:"pointer"}}>
+          ← Volver
+        </button>
+      )}
+
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+        <div>
+          <p style={{margin:0,fontSize:22,fontWeight:800,color:T.text}}>📊 Vamos caros</p>
+          <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>Informe ejecutivo para Compras</p>
+        </div>
+        <button onClick={exportarPDF}
+          style={{background:T.red,color:"#fff",border:"none",padding:"10px 16px",borderRadius:10,fontSize:13,fontWeight:700,cursor:"pointer",boxShadow:"0 2px 6px rgba(220,38,38,.3)"}}>
+          📄 PDF
+        </button>
+      </div>
+
+      {/* Filtros */}
+      <Card style={{marginBottom:14,padding:"12px 14px"}}>
+        <p style={{margin:"0 0 8px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Filtros</p>
+        <div style={{display:"flex",gap:6,marginBottom:6,flexWrap:"wrap"}}>
+          {[{k:"7d",l:"7 días"},{k:"30d",l:"30 días"},{k:"90d",l:"90 días"},{k:"all",l:"Histórico"}].map(function(p){
+            var act=periodoF===p.k;
+            return <button key={p.k} onClick={function(){setPeriodoF(p.k);}}
+              style={{padding:"7px 12px",borderRadius:8,border:"1.5px solid "+(act?T.red:T.border),background:act?T.red:"#fff",color:act?"#fff":T.text,fontWeight:act?800:600,fontSize:12,cursor:"pointer"}}>
+              {p.l}
+            </button>;
+          })}
+        </div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          <select value={equipoF} onChange={function(e){setEquipoF(e.target.value);}}
+            style={{flex:1,minWidth:120,padding:"8px 10px",border:"1.5px solid "+T.border,borderRadius:8,fontSize:12,background:"#fff"}}>
+            <option value="">Todos los equipos</option>
+            {equiposUnicos.map(function(eq){return <option key={eq} value={eq}>{eq}</option>;})}
+          </select>
+          <select value={agenteF} onChange={function(e){setAgenteF(e.target.value);}}
+            style={{flex:1,minWidth:120,padding:"8px 10px",border:"1.5px solid "+T.border,borderRadius:8,fontSize:12,background:"#fff"}}>
+            <option value="">Todos los agentes</option>
+            {listAg.map(function(a){return <option key={a.id} value={a.id}>{a.nombre}</option>;})}
+          </select>
+        </div>
+      </Card>
+
+      {/* KPIs */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:14}}>
+        {[
+          {l:"Ofertas",v:totalCaras,c:T.red},
+          {l:"Líneas",v:totalLineas,c:T.amber},
+          {l:"vs Comp.",v:fmtPct(difMediaPct),c:difMediaPct>0?T.red:T.green},
+          {l:"Clientes",v:Object.keys(clientesUnicos).length,c:T.navy}
+        ].map(function(k,i){
+          return (
+            <div key={i} style={{background:"#fff",borderRadius:10,padding:"10px 6px",textAlign:"center",border:"1.5px solid "+k.c+"33"}}>
+              <p style={{margin:0,fontSize:k.l==="vs Comp."?13:18,fontWeight:800,color:k.c,whiteSpace:"nowrap"}}>{k.v}</p>
+              <p style={{margin:"3px 0 0",fontSize:9,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>{k.l}</p>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Top 3 + Top 3 */}
+      {(top3.length>0 || top3Cli.length>0) && (
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:14}}>
+          {top3.length>0 && (
+            <Card style={{padding:"10px 12px"}}>
+              <p style={{margin:"0 0 6px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>🏷️ Top artículos caros</p>
+              {top3.map(function(g,i){
+                return <p key={i} style={{margin:"3px 0",fontSize:11,color:T.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                  <strong>{i+1}.</strong> {g.producto}{g.calibre?" "+g.calibre:""} <span style={{color:T.red,fontWeight:700}}>{fmtPct(g.diferenciaPct)}</span>
+                </p>;
+              })}
+            </Card>
+          )}
+          {top3Cli.length>0 && (
+            <Card style={{padding:"10px 12px"}}>
+              <p style={{margin:"0 0 6px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>👥 Top clientes alertan</p>
+              {top3Cli.map(function(c,i){
+                return <p key={i} style={{margin:"3px 0",fontSize:11,color:T.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                  <strong>{i+1}.</strong> {c.nombre} <span style={{color:T.red,fontWeight:700}}>{fmtPct(c.difMedia)}</span>
+                </p>;
+              })}
+            </Card>
+          )}
+        </div>
+      )}
+
+      {/* Lista por artículo */}
+      <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>
+        🏷️ {listArt.length} artículo{listArt.length===1?"":"s"} con casos
+      </p>
+      {listArt.length===0 ? (
+        <div style={{textAlign:"center",padding:"40px 20px",background:"#fff",borderRadius:12,border:"1px dashed "+T.border}}>
+          <p style={{fontSize:36,margin:"0 0 8px"}}>📭</p>
+          <p style={{margin:0,fontSize:13,fontWeight:700,color:T.muted}}>Sin ofertas marcadas como "vamos caros"</p>
+          <p style={{margin:"4px 0 0",fontSize:11,color:T.muted}}>en este periodo y filtros</p>
+        </div>
+      ) : (
+        listArt.map(function(g){
+          var open = expandido===g.key;
+          var difColor = g.diferenciaPct>10?T.red:g.diferenciaPct>5?T.amber:T.muted;
+          return (
+            <Card key={g.key} style={{marginBottom:8,padding:"12px 14px",borderLeft:"4px solid "+difColor}}>
+              <div onClick={function(){setExpandido(open?null:g.key);}} style={{cursor:"pointer"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{margin:0,fontSize:14,fontWeight:800,color:T.text}}>
+                      {g.producto}{g.calibre?<span style={{color:T.muted}}> · {g.calibre}</span>:null}
+                    </p>
+                    <p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>
+                      {g.nLineas} caso{g.nLineas===1?"":"s"} · {g.nClientes} cliente{g.nClientes===1?"":"s"} · {g.nAgentes} agente{g.nAgentes===1?"":"s"}
+                    </p>
+                  </div>
+                  <span style={{fontSize:13,fontWeight:800,color:difColor,whiteSpace:"nowrap"}}>{fmtPct(g.diferenciaPct)}</span>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginTop:8,fontSize:11}}>
+                  <div>
+                    <p style={{margin:0,color:T.muted,fontSize:10}}>Tu precio</p>
+                    <p style={{margin:0,fontWeight:800,color:T.text}}>{fmt(g.precioPromedio)} {g.unidad}</p>
+                  </div>
+                  <div>
+                    <p style={{margin:0,color:T.muted,fontSize:10}}>Competencia</p>
+                    <p style={{margin:0,fontWeight:800,color:T.red}}>{fmt(g.compPromedio)} {g.unidad}</p>
+                  </div>
+                  <div>
+                    <p style={{margin:0,color:T.muted,fontSize:10}}>Rango comp.</p>
+                    <p style={{margin:0,fontSize:10,color:T.text}}>{fmt(g.minComp)}–{fmt(g.maxComp)}</p>
+                  </div>
+                </div>
+                <p style={{margin:"6px 0 0",fontSize:10,color:T.muted,textAlign:"right"}}>
+                  {open?"▼ Ocultar líneas":"▶ Ver líneas individuales"}
+                </p>
+              </div>
+              {open && (
+                <div style={{marginTop:10,paddingTop:10,borderTop:"1px dashed "+T.border}}>
+                  {g.lineas.map(function(l,i){
+                    return (
+                      <div key={i} style={{padding:"6px 8px",marginBottom:4,background:"#FAFAFA",borderRadius:7,fontSize:11}}>
+                        <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
+                          <span style={{fontWeight:700,color:T.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{l.clienteNombre}</span>
+                          <span style={{color:difColor,fontWeight:700,whiteSpace:"nowrap"}}>{fmtPct(l.diferenciaPct)}</span>
+                        </div>
+                        <p style={{margin:"2px 0 0",fontSize:10,color:T.muted}}>
+                          {l.fechaStr} · {l.agenteNombre} · Tu: <strong>{fmt(l.precio)}</strong> · Comp: <strong style={{color:T.red}}>{fmt(l.precioCompetencia)}</strong>
+                          {l.notas?" · "+l.notas:""}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </Card>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
 function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente}){
   // (v3.22.44) Recargar al entrar para mostrar las últimas ofertas guardadas
   React.useEffect(function(){
@@ -17996,7 +18653,8 @@ function App(props){
     }catch(e){}
     return null;
   });
-  const [section,setSection_]=useState("dashboard");
+  // (v3.23.0) Sección inicial: para rol compras es directamente vamos_caros
+  const [section,setSection_]=useState(usuario.rol==="compras"?"vamos_caros":"dashboard");
   const prevSectionRef=React.useRef("dashboard");
   const [hideNav,setHideNav]=useState(false);
   const refreshDBs=function(){
@@ -18527,13 +19185,35 @@ function App(props){
     {id:"estrategias",  icon:"🎯",label:"Estrategias",  color:T.green, badge:estEnCurso},
     {id:"oportunidades",icon:"💼",label:"Ops",          color:T.navy,  badge:opsAbiertas},
     {id:"ofertas",      icon:"💰",label:"Ofertas",     color:T.amber, badge:ofertasPendCount},
+    {id:"vamos_caros",  icon:"📊",label:"Caros",        color:"#DC2626"},
     {id:"proyectos",    icon:"📁",label:"Proyectos",    color:T.purple},
     {id:"incidencias",  icon:"🚨",label:"Incidencias",  color:T.red,   badge:incAbiertas},
     {id:"reporting",    icon:"📈",label:"Reporting",     color:T.navy},
     {id:"ia",           icon:"🤖",label:"IA",           color:T.purple},
   ];
 
-  const nav=esAgente?NAV_AGENTE:esJefe?NAV_JEFE:NAV_DIR;
+  const esCompras = usuario.rol==="compras";
+
+  // (v3.23.1) Contadores incidencias stock/calidad para Compras
+  var incStockAb = 0, incCalidadAb = 0;
+  if(esCompras){
+    (incidenciasDB||[]).forEach(function(i){
+      if(i.eliminada) return;
+      if(i.estado==="cerrada"||i.estado==="resuelta") return;
+      var t=(i.tipo||i.tipologia||"").toLowerCase();
+      if(t==="stock"||t.indexOf("stock")>=0) incStockAb++;
+      else if(t==="calidad"||t.indexOf("calidad")>=0) incCalidadAb++;
+    });
+  }
+
+  // (v3.23.0/3.23.1) Menú minimalista para rol Compras
+  const NAV_COMPRAS=[
+    {id:"vamos_caros",  icon:"📊",label:"Vamos caros", color:"#DC2626"},
+    {id:"inc_stock",    icon:"📦",label:"Stock",       color:"#EF4444", badge:incStockAb},
+    {id:"inc_calidad",  icon:"⚠️",label:"Calidad",     color:"#F59E0B", badge:incCalidadAb},
+  ];
+
+  const nav=esCompras?NAV_COMPRAS:esAgente?NAV_AGENTE:esJefe?NAV_JEFE:NAV_DIR;
 
   // Dashboard del jefe: solo su equipo
   const DashJefe=()=>{
@@ -19113,6 +19793,11 @@ function App(props){
         {section==="recuperacion"&& <Recuperacion usuario={usuario} ventasDB={ventasDB} clientesFB={misClientesFB} onBack={()=>setSection("dashboard")} onNav={setSection} onAbrirCliente={function(data){var obj=typeof data==="string"?{nombre:data,ts:Date.now()}:Object.assign({},data,{ts:Date.now()});setClienteDirecto(obj);setHideNav(true);setSection(esAgente?"clientes":"clientes_eq");}}/>}
         {/* (v3.22.43) Módulo Ofertas */}
         {section==="ofertas"&& <OfertasModule usuario={usuario} ofertasDB={ofertasDB} setOfertasDB={setOfertasDB} onBack={function(){setSection("dashboard");}}/>}
+        {/* (v3.23.0) Módulo Vamos Caros - informe ejecutivo */}
+        {section==="vamos_caros"&& <VamosCaros usuario={usuario} ofertasDB={ofertasDB} setOfertasDB={setOfertasDB} onBack={function(){setSection(usuario.rol==="compras"?"vamos_caros":"dashboard");}}/>}
+        {/* (v3.23.1) Incidencias Stock y Calidad - para Compras (sustituye Resp. Stock) */}
+        {section==="inc_stock"&& <IncidenciasCompras usuario={usuario} incidenciasDB={incidenciasDB} setIncidenciasDB={setIncidenciasDB} clientesFB={misClientesFB} tipoFijo="stock" onBack={function(){setSection(usuario.rol==="compras"?"inc_stock":"dashboard");}}/>}
+        {section==="inc_calidad"&& <IncidenciasCompras usuario={usuario} incidenciasDB={incidenciasDB} setIncidenciasDB={setIncidenciasDB} clientesFB={misClientesFB} tipoFijo="calidad" onBack={function(){setSection(usuario.rol==="compras"?"inc_calidad":"dashboard");}}/>}
         {section==="informe"&&esAgente&&    <Informe usuario={usuario} actividadSemana={actividadSemana} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} incidenciasDB={incidenciasDB}/>}
         {section==="informe"&&!esAgente&&   <Informe usuario={usuario} actividadSemana={actividadSemana} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} incidenciasDB={incidenciasDB}/>}
         {section==="informe_jefe"&&         <InformeJefe usuario={usuario} oportunidadesDB={oportunidadesDB}/>}
