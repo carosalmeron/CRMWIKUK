@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.22.42";
-const CRM_BUILD = "04/05/2026-ofertas-ficha-cliente";
+const CRM_VERSION = "3.22.43";
+const CRM_BUILD = "04/05/2026-modulo-ofertas";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -7848,6 +7848,294 @@ const INCIDENCIAS_SEED = [];
 // RECUPERACIÓN — clientes perdidos / en riesgo / atención (v3.19.0)
 // ═══════════════════════════════════════════════════════════════════
 // ─── (v3.22.35) Vista clientes sin asignar dentro de Recuperar ────────
+// ─── (v3.22.43) Módulo Ofertas - seguimiento de cotizaciones ──────────
+function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente}){
+  var _filtro = React.useState("pendiente"); var filtro = _filtro[0], setFiltro = _filtro[1];
+  var _sel = React.useState(null); var sel = _sel[0], setSel = _sel[1];
+  var _modal = React.useState(null); var modal = _modal[0], setModal = _modal[1];
+  // null | "caro" | "no_responde"
+  var _preciosComp = React.useState({}); var preciosComp = _preciosComp[0], setPreciosComp = _preciosComp[1];
+  var _notaCierre = React.useState(""); var notaCierre = _notaCierre[0], setNotaCierre = _notaCierre[1];
+
+  var miIdLow = (usuario.id||"").toLowerCase();
+  var esAgente = usuario.rol==="agente";
+  var esJefe = usuario.rol==="jefe";
+
+  function visibles(o){
+    if(o.eliminada) return false;
+    var ag=(o.agente||"").toLowerCase();
+    if(esAgente) return ag===miIdLow;
+    if(esJefe) return (o.equipo||"")===usuario.equipo;
+    return true; // director/ceo
+  }
+  var todas = (ofertasDB||[]).filter(visibles);
+  var pendientes = todas.filter(function(o){return o.estado==="pendiente";});
+  var pedido = todas.filter(function(o){return o.estado==="pedido";});
+  var caras = todas.filter(function(o){return o.estado==="caro";});
+  var noResp = todas.filter(function(o){return o.estado==="no_responde";});
+
+  var lista = filtro==="pendiente"?pendientes:filtro==="pedido"?pedido:filtro==="caro"?caras:noResp;
+  // Ordenar por fecha (más nuevas primero)
+  lista = lista.slice().sort(function(a,b){return (b.fechaCreacion||"").localeCompare(a.fechaCreacion||"");});
+
+  function diasDesde(iso){
+    if(!iso) return 0;
+    var d=new Date(iso);
+    if(isNaN(d.getTime())) return 0;
+    return Math.floor((Date.now()-d.getTime())/(1000*60*60*24));
+  }
+
+  function cambiarEstado(oferta, nuevoEstado, extras){
+    var hoy=new Date().toLocaleDateString("es-ES");
+    var seg=Object.assign({},oferta.seguimientos?oferta.seguimientos:[]);
+    var seguimientos=(oferta.seguimientos||[]).slice();
+    var accionLbl = nuevoEstado==="pedido"?"✅ Hizo pedido":nuevoEstado==="caro"?"💸 Vamos caros":nuevoEstado==="no_responde"?"🔇 No responde":"Cambio";
+    seguimientos.push({accion:accionLbl, fecha:hoy, por:usuario.nombre, nota:(extras&&extras.nota)||""});
+    var actualizada = Object.assign({},oferta,{
+      estado:nuevoEstado,
+      fechaCierre:new Date().toISOString(),
+      cerradoPor:usuario.nombre,
+      cerradoPorId:usuario.id,
+      seguimientos:seguimientos
+    });
+    if(extras&&extras.preciosComp){
+      // Añadir precio competencia a cada línea
+      actualizada.lineas = (oferta.lineas||[]).map(function(l){
+        var pc = extras.preciosComp[l.id];
+        if(pc!=null && pc!=="") return Object.assign({},l,{precioCompetencia:parseFloat((pc+"").replace(",","."))});
+        return l;
+      });
+    }
+    fbEscribir("ofertas",oferta.id,actualizada).then(function(){
+      setOfertasDB(function(prev){return (prev||[]).map(function(x){return x.id===oferta.id?actualizada:x;});});
+      setSel(null);
+      setModal(null);
+      setPreciosComp({});
+      setNotaCierre("");
+      alert(accionLbl+" registrado");
+    }).catch(function(e){alert("Error: "+e.message);});
+  }
+
+  // VISTA DETALLE
+  if(sel){
+    var diasTrans = diasDesde(sel.fechaCreacion);
+    return (
+      <div style={{padding:"16px",paddingBottom:80}}>
+        <button onClick={function(){setSel(null);setModal(null);setPreciosComp({});}}
+          style={{background:"#fff",border:"1.5px solid "+T.border,padding:"10px 16px",borderRadius:11,marginBottom:14,fontSize:13,fontWeight:700,color:T.text,cursor:"pointer"}}>
+          ← Volver
+        </button>
+
+        {/* Cabecera */}
+        <Card style={{marginBottom:14}}>
+          <p style={{margin:0,fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Cliente</p>
+          <p style={{margin:"4px 0 8px",fontSize:18,fontWeight:800,color:T.text}}>{sel.clienteNombre||"(sin nombre)"}</p>
+          <div style={{display:"flex",gap:14,fontSize:12,color:T.muted}}>
+            <span>📅 {sel.fechaCreacionStr||sel.fechaCreacion||""}</span>
+            <span>👤 {sel.agenteNombre||sel.agente}</span>
+            {diasTrans>0 && <span style={{color:diasTrans>=5?T.red:T.amber,fontWeight:700}}>⏳ {diasTrans} día{diasTrans!==1?"s":""}</span>}
+          </div>
+          {sel.notaInicial && (
+            <p style={{margin:"10px 0 0",fontSize:12,color:T.text,fontStyle:"italic",padding:"8px 12px",background:"#F8FAFC",borderRadius:8,borderLeft:"3px solid "+T.amber}}>
+              💬 {sel.notaInicial}
+            </p>
+          )}
+        </Card>
+
+        {/* Líneas de oferta */}
+        <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>
+          💰 {(sel.lineas||[]).length} línea{(sel.lineas||[]).length===1?"":"s"} ofertada{(sel.lineas||[]).length===1?"":"s"}
+        </p>
+        {(sel.lineas||[]).map(function(l){
+          return (
+            <Card key={l.id} style={{marginBottom:8,padding:"12px 14px"}}>
+              <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>{l.producto}{l.calibre?" · "+l.calibre:""}</p>
+              <div style={{display:"flex",gap:12,marginTop:4,alignItems:"baseline"}}>
+                <span style={{fontSize:16,fontWeight:900,color:T.amber}}>
+                  {Number(l.precio).toFixed(2).replace(".",",")} {l.unidad}
+                </span>
+                {l.precioCompetencia!=null && (
+                  <span style={{fontSize:12,fontWeight:700,color:T.red}}>
+                    Competencia: {Number(l.precioCompetencia).toFixed(2).replace(".",",")} {l.unidad}
+                  </span>
+                )}
+              </div>
+              {l.notas && <p style={{margin:"4px 0 0",fontSize:11,color:T.muted,fontStyle:"italic"}}>{l.notas}</p>}
+            </Card>
+          );
+        })}
+
+        {/* Seguimientos */}
+        {(sel.seguimientos||[]).length>0 && (
+          <div style={{marginTop:14}}>
+            <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>📜 Seguimientos</p>
+            {(sel.seguimientos||[]).map(function(s,i){
+              return <p key={i} style={{margin:"3px 0",fontSize:11,color:T.text,padding:"6px 10px",background:"#F8FAFC",borderRadius:7}}>
+                <strong>{s.accion}</strong> · <span style={{color:T.muted}}>{s.fecha} · {s.por}</span>
+                {s.nota && <span style={{display:"block",fontStyle:"italic",color:T.muted,marginTop:2}}>"{s.nota}"</span>}
+              </p>;
+            })}
+          </div>
+        )}
+
+        {/* Botones de acción - solo si pendiente */}
+        {sel.estado==="pendiente" && (
+          <div style={{marginTop:18,display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
+            <button onClick={function(){
+              if(!confirm("¿Confirmas que el cliente HA HECHO PEDIDO?")) return;
+              cambiarEstado(sel,"pedido",{nota:""});
+            }} style={{padding:"12px 8px",border:"none",background:T.green,color:"#fff",fontWeight:800,fontSize:12,borderRadius:9,cursor:"pointer"}}>
+              ✅ Hizo pedido
+            </button>
+            <button onClick={function(){setModal("caro");setPreciosComp({});}}
+              style={{padding:"12px 8px",border:"none",background:T.red,color:"#fff",fontWeight:800,fontSize:12,borderRadius:9,cursor:"pointer"}}>
+              💸 Vamos caros
+            </button>
+            <button onClick={function(){setModal("no_responde");setNotaCierre("");}}
+              style={{padding:"12px 8px",border:"none",background:T.muted,color:"#fff",fontWeight:800,fontSize:12,borderRadius:9,cursor:"pointer"}}>
+              🔇 No responde
+            </button>
+          </div>
+        )}
+
+        {/* Modal "Vamos caros" - pedir precio competencia */}
+        {modal==="caro" && (
+          <div onClick={function(){setModal(null);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+            <div onClick={function(e){e.stopPropagation();}} style={{background:"#fff",borderRadius:"20px 20px 0 0",padding:24,width:"100%",maxWidth:480}}>
+              <p style={{margin:"0 0 6px",fontSize:17,fontWeight:800,textAlign:"center"}}>💸 Vamos caros</p>
+              <p style={{margin:"0 0 14px",fontSize:12,color:T.muted,textAlign:"center"}}>
+                Introduce el precio que paga la competencia (opcional pero recomendado)
+              </p>
+              {(sel.lineas||[]).map(function(l){
+                return (
+                  <div key={l.id} style={{marginBottom:10,padding:"10px 12px",background:"#F8FAFC",borderRadius:9,border:"1px solid "+T.border}}>
+                    <p style={{margin:"0 0 4px",fontSize:12,fontWeight:700,color:T.text}}>{l.producto}{l.calibre?" · "+l.calibre:""}</p>
+                    <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                      <span style={{fontSize:11,color:T.muted}}>Tu precio: <strong>{Number(l.precio).toFixed(2).replace(".",",")} {l.unidad}</strong></span>
+                    </div>
+                    <div style={{display:"flex",gap:6,marginTop:6,alignItems:"center"}}>
+                      <span style={{fontSize:11,color:T.red,fontWeight:700}}>Competencia:</span>
+                      <input type="text" inputMode="decimal" value={preciosComp[l.id]||""}
+                        onChange={function(e){var v=e.target.value;setPreciosComp(function(p){var n={};Object.keys(p).forEach(function(k){n[k]=p[k];});n[l.id]=v;return n;});}}
+                        placeholder="ej: 10.50"
+                        style={{flex:1,padding:"7px 9px",border:"1px solid "+T.border,borderRadius:6,fontSize:13,boxSizing:"border-box"}}/>
+                      <span style={{fontSize:11,color:T.muted}}>{l.unidad}</span>
+                    </div>
+                  </div>
+                );
+              })}
+              <div style={{display:"flex",gap:8,marginTop:14}}>
+                <button onClick={function(){setModal(null);setPreciosComp({});}}
+                  style={{flex:1,padding:"12px",borderRadius:10,border:"1.5px solid "+T.border,background:"#fff",color:T.text,fontWeight:700,fontSize:13,cursor:"pointer"}}>
+                  Cancelar
+                </button>
+                <button onClick={function(){cambiarEstado(sel,"caro",{preciosComp:preciosComp,nota:"Cliente nos dijo que estamos caros"});}}
+                  style={{flex:2,padding:"12px",borderRadius:10,border:"none",background:T.red,color:"#fff",fontWeight:800,fontSize:14,cursor:"pointer"}}>
+                  💸 Confirmar "vamos caros"
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Modal "No responde" */}
+        {modal==="no_responde" && (
+          <div onClick={function(){setModal(null);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+            <div onClick={function(e){e.stopPropagation();}} style={{background:"#fff",borderRadius:"20px 20px 0 0",padding:24,width:"100%",maxWidth:440}}>
+              <p style={{margin:"0 0 14px",fontSize:17,fontWeight:800,textAlign:"center"}}>🔇 No responde</p>
+              <textarea value={notaCierre} onChange={function(e){setNotaCierre(e.target.value);}}
+                placeholder="Nota opcional (ej: ya he llamado 3 veces y no contesta)"
+                rows={3} style={{width:"100%",padding:"10px 12px",border:"1.5px solid "+T.border,borderRadius:10,fontSize:13,resize:"none",fontFamily:"inherit",boxSizing:"border-box",marginBottom:14}}/>
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={function(){setModal(null);}}
+                  style={{flex:1,padding:"12px",borderRadius:10,border:"1.5px solid "+T.border,background:"#fff",color:T.text,fontWeight:700,fontSize:13,cursor:"pointer"}}>
+                  Cancelar
+                </button>
+                <button onClick={function(){cambiarEstado(sel,"no_responde",{nota:notaCierre});}}
+                  style={{flex:2,padding:"12px",borderRadius:10,border:"none",background:T.muted,color:"#fff",fontWeight:800,fontSize:14,cursor:"pointer"}}>
+                  🔇 Confirmar
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // VISTA LISTA
+  return (
+    <div style={{padding:"16px",paddingBottom:80}}>
+      <button onClick={onBack}
+        style={{background:"#fff",border:"1.5px solid "+T.border,padding:"10px 16px",borderRadius:11,marginBottom:14,fontSize:13,fontWeight:700,color:T.text,cursor:"pointer"}}>
+        ← Volver
+      </button>
+
+      <p style={{margin:"0 0 14px",fontSize:22,fontWeight:800,color:T.text}}>💰 Ofertas</p>
+
+      {/* Tabs */}
+      <div style={{display:"flex",gap:5,marginBottom:14,padding:4,background:T.bg,borderRadius:11,overflowX:"auto"}}>
+        {[
+          {k:"pendiente",lbl:"⏳ Pendientes",n:pendientes.length,c:T.amber},
+          {k:"pedido",lbl:"✅ Pedidos",n:pedido.length,c:T.green},
+          {k:"caro",lbl:"💸 Caros",n:caras.length,c:T.red},
+          {k:"no_responde",lbl:"🔇 No respond.",n:noResp.length,c:T.muted}
+        ].map(function(t){
+          var act=filtro===t.k;
+          return <button key={t.k} onClick={function(){setFiltro(t.k);}}
+            style={{flex:1,minWidth:100,padding:"9px 6px",borderRadius:9,border:"none",
+              background:act?t.c:"transparent",color:act?"#fff":T.muted,
+              fontWeight:act?800:600,fontSize:11.5,cursor:"pointer",whiteSpace:"nowrap"}}>
+            {t.lbl} ({t.n})
+          </button>;
+        })}
+      </div>
+
+      {/* Lista */}
+      {lista.length===0 ? (
+        <div style={{textAlign:"center",padding:"40px 20px"}}>
+          <p style={{fontSize:36,margin:"0 0 8px"}}>📭</p>
+          <p style={{margin:0,fontSize:14,fontWeight:700,color:T.muted}}>Sin ofertas {filtro==="pendiente"?"pendientes":filtro==="pedido"?"con pedido":filtro==="caro"?"marcadas como caras":"sin respuesta"}</p>
+        </div>
+      ) : (
+        lista.map(function(o){
+          var diasT=diasDesde(o.fechaCreacion);
+          var alerta = filtro==="pendiente" && diasT>=5;
+          return (
+            <Card key={o.id} onClick={function(){setSel(o);setModal(null);setPreciosComp({});setNotaCierre("");}}
+              style={{marginBottom:8,padding:"14px 16px",cursor:"pointer",
+                borderLeft:"4px solid "+(alerta?T.red:T.amber)}}>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                    {o.clienteNombre}
+                  </p>
+                  <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
+                    {(o.lineas||[]).length} línea{(o.lineas||[]).length===1?"":"s"}
+                    {o.fechaCreacionStr?" · "+o.fechaCreacionStr:""}
+                    {!esAgente?" · "+(o.agenteNombre||o.agente):""}
+                  </p>
+                </div>
+                {filtro==="pendiente" && (
+                  <span style={{fontSize:11,fontWeight:800,color:alerta?T.red:T.amber,background:(alerta?T.red:T.amber)+"15",padding:"4px 9px",borderRadius:7}}>
+                    {diasT}d
+                  </span>
+                )}
+                {filtro==="caro" && (
+                  <span style={{fontSize:14}}>💸</span>
+                )}
+                {filtro==="pedido" && (
+                  <span style={{fontSize:14}}>✅</span>
+                )}
+              </div>
+            </Card>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
 function SinAsignarView({usuario, clientesFB, ventasDB, onAbrirCliente, onNav}){
   var _q = React.useState(""); var q = _q[0], setQ = _q[1];
   var _eq = React.useState("todos"); var eqFiltro = _eq[0], setEqFiltro = _eq[1];
@@ -17513,6 +17801,11 @@ function App(props){
   const [estrategiasDB,setEstrategiasDB]=useState(ESTRATEGIAS_SEED);
   const [incidenciasDB,setIncidenciasDB]=useState(INCIDENCIAS_SEED);
   const [portalUsersDB,setPortalUsersDB]=useState([]);
+  // (v3.22.43) Ofertas
+  const [ofertasDB,setOfertasDB]=useState([]);
+  React.useEffect(function(){
+    fbLeer("ofertas").then(function(arr){if(arr&&arr.length>0) setOfertasDB(arr.filter(function(o){return !o.eliminada;}));}).catch(function(){});
+  },[]);
   const [fbCargando,setFbCargando]=useState(false);
   const [fbStatus,setFbStatus]=useState(""); // "ok" | "error" | ""
   const [oportunidadesDB,setOportunidadesDB]=useState(OPORTUNIDADES_SEED);
@@ -17852,12 +18145,23 @@ function App(props){
 
   const urgCount=0; // badge dinámico — cargado en TareasWidget
 
+  // (v3.22.43) Contador de ofertas pendientes de revisión propias
+  var miIdLow=(usuario.id||"").toLowerCase();
+  var ofertasPendCount=(ofertasDB||[]).filter(function(o){
+    if(o.estado!=="pendiente") return false;
+    var ag=(o.agente||"").toLowerCase();
+    if(usuario.rol==="agente") return ag===miIdLow;
+    if(usuario.rol==="jefe") return (o.equipo||"")===usuario.equipo;
+    return true; // director/ceo ven todas
+  }).length;
+
   const NAV_AGENTE=[
     {id:"dashboard",    icon:"🏠",label:"Inicio",      color:usuario.color},
     {id:"plan_semanal", icon:"📅",label:"Mi semana",   color:T.blue},
     {id:"recuperacion", icon:"🩹",label:"Recuperar",   color:"#DC2626"},
     {id:"clientes",     icon:"📋",label:"Clientes",    color:T.blue},
     {id:"oportunidades",icon:"💼",label:"Ops",         color:T.navy,  badge:opsAbiertas},
+    {id:"ofertas",      icon:"💰",label:"Ofertas",     color:T.amber, badge:ofertasPendCount},
     {id:"muestras",     icon:"📦",label:"Muestras",    color:T.purple, badge:pend},
     {id:"proyectos",    icon:"📁",label:"Proyectos",   color:T.purple},
     {id:"estrategias",  icon:"🎯",label:"Estrategias", color:T.green,  badge:estEnCurso},
@@ -17878,6 +18182,7 @@ function App(props){
     {id:"muestras",     icon:"📦",label:"Muestras",    color:T.purple, badge:pend},
     {id:"estrategias",  icon:"🎯",label:"Estrategias", color:T.green, badge:estEnCurso},
     {id:"oportunidades",icon:"💼",label:"Ops",         color:T.navy,  badge:opsAbiertas},
+    {id:"ofertas",      icon:"💰",label:"Ofertas",     color:T.amber, badge:ofertasPendCount},
     {id:"proyectos",    icon:"📁",label:"Proyectos",   color:T.purple},
     {id:"incidencias",  icon:"🚨",label:"Incidencias", color:T.red,   badge:incAbiertas},
     {id:"reporting",    icon:"📈",label:"Reporting",    color:T.navy},
@@ -17894,6 +18199,7 @@ function App(props){
     {id:"muestras",     icon:"📦",label:"Muestras",     color:T.purple, badge:pend},
     {id:"estrategias",  icon:"🎯",label:"Estrategias",  color:T.green, badge:estEnCurso},
     {id:"oportunidades",icon:"💼",label:"Ops",          color:T.navy,  badge:opsAbiertas},
+    {id:"ofertas",      icon:"💰",label:"Ofertas",     color:T.amber, badge:ofertasPendCount},
     {id:"proyectos",    icon:"📁",label:"Proyectos",    color:T.purple},
     {id:"incidencias",  icon:"🚨",label:"Incidencias",  color:T.red,   badge:incAbiertas},
     {id:"reporting",    icon:"📈",label:"Reporting",     color:T.navy},
@@ -18478,6 +18784,8 @@ function App(props){
         {esAgente&&section==="plan_semanal"&& <MiSemana usuario={usuario} clientesFB={misClientesFB} onBack={()=>setSection("dashboard")} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} muestrasDB={muestrasDB} actividad={actividadSemana} onAbrirCliente={function(data){var obj=typeof data==="string"?{nombre:data,ts:Date.now()}:Object.assign({},data,{ts:Date.now()});setClienteDirecto(obj);setHideNav(true);setSection("clientes");}} onAbrirProyecto={function(nombre){setProyectoDirecto({nombre:nombre,ts:Date.now()});setSection("proyectos");}} onNewCliente={function(nuevo){setClientesDB(function(prev){if(!prev||!prev._todos)return prev;return Object.assign({},prev,{_todos:[nuevo].concat(prev._todos)});});}} onAbrirOportunidad={function(opo){setOpoDirecta(Object.assign({},opo,{ts:Date.now()}));setSection("oportunidades");}}/>}
         {!esAgente&&section==="plan_semanal"&& <MiSemana usuario={usuario} clientesFB={misClientesFB} onBack={()=>setSection("dashboard")} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} muestrasDB={muestrasDB} actividad={actividadSemana} onAbrirCliente={function(data){var obj=typeof data==="string"?{nombre:data,ts:Date.now()}:Object.assign({},data,{ts:Date.now()});setClienteDirecto(obj);setHideNav(true);setSection(esJefeOmas?"clientes_eq":"clientes");}} onAbrirProyecto={function(nombre){setProyectoDirecto({nombre:nombre,ts:Date.now()});setSection("proyectos");}} onNewCliente={function(nuevo){setClientesDB(function(prev){if(!prev||!prev._todos)return prev;return Object.assign({},prev,{_todos:[nuevo].concat(prev._todos)});});}} onAbrirOportunidad={function(opo){setOpoDirecta(Object.assign({},opo,{ts:Date.now()}));setSection("oportunidades");}}/>}
         {section==="recuperacion"&& <Recuperacion usuario={usuario} ventasDB={ventasDB} clientesFB={misClientesFB} onBack={()=>setSection("dashboard")} onNav={setSection} onAbrirCliente={function(data){var obj=typeof data==="string"?{nombre:data,ts:Date.now()}:Object.assign({},data,{ts:Date.now()});setClienteDirecto(obj);setHideNav(true);setSection(esAgente?"clientes":"clientes_eq");}}/>}
+        {/* (v3.22.43) Módulo Ofertas */}
+        {section==="ofertas"&& <OfertasModule usuario={usuario} ofertasDB={ofertasDB} setOfertasDB={setOfertasDB} onBack={function(){setSection("dashboard");}}/>}
         {section==="informe"&&esAgente&&    <Informe usuario={usuario} actividadSemana={actividadSemana} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} incidenciasDB={incidenciasDB}/>}
         {section==="informe"&&!esAgente&&   <Informe usuario={usuario} actividadSemana={actividadSemana} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} incidenciasDB={incidenciasDB}/>}
         {section==="informe_jefe"&&         <InformeJefe usuario={usuario} oportunidadesDB={oportunidadesDB}/>}
