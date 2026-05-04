@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.22.34";
-const CRM_BUILD = "03/05/2026-sin-asignar";
+const CRM_VERSION = "3.22.35";
+const CRM_BUILD = "03/05/2026-sin-asignar-detalle";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -7463,14 +7463,16 @@ const INCIDENCIAS_SEED = [];
 // ═══════════════════════════════════════════════════════════════════
 // RECUPERACIÓN — clientes perdidos / en riesgo / atención (v3.19.0)
 // ═══════════════════════════════════════════════════════════════════
-// ─── (v3.22.34) Vista clientes sin asignar dentro de Recuperar ────────
+// ─── (v3.22.35) Vista clientes sin asignar dentro de Recuperar ────────
 function SinAsignarView({usuario, clientesFB, ventasDB, onAbrirCliente, onNav}){
   var _q = React.useState(""); var q = _q[0], setQ = _q[1];
   var _eq = React.useState("todos"); var eqFiltro = _eq[0], setEqFiltro = _eq[1];
   var _sels = React.useState(new Set()); var sels = _sels[0], setSels = _sels[1];
   var _modal = React.useState(null); var modal = _modal[0], setModal = _modal[1];
-  // null | "asignar" | "oportunidad"
+  // null | "asignar" | "oportunidad" | "asignar_one" | "oportunidad_one"
   var _agentSel = React.useState(""); var agentSel = _agentSel[0], setAgentSel = _agentSel[1];
+  var _expand = React.useState(null); var expand = _expand[0], setExpand = _expand[1]; // id cliente expandido
+  var _oneCli = React.useState(null); var oneCli = _oneCli[0], setOneCli = _oneCli[1]; // cliente para acción individual
 
   // ID válido = id de un comercial existente en USUARIOS
   var idsValidos = React.useMemo(function(){
@@ -7480,13 +7482,58 @@ function SinAsignarView({usuario, clientesFB, ventasDB, onAbrirCliente, onNav}){
     return s;
   }, []);
 
+  // (v3.22.35) Calcular ventas v2025/v2026 + pérdida + artículos top, igual que Recuperar
+  var ventasInfo = React.useMemo(function(){
+    var m = {};
+    function num(x){var n=parseFloat((x+"").replace(",","."));return isNaN(n)?0:n;}
+    function pick(obj, keys){for(var i=0;i<keys.length;i++){if(obj[keys[i]]!=null) return obj[keys[i]];}return null;}
+    (ventasDB||[]).forEach(function(v){
+      var cod = ((pick(v,["cod_cliente","CODIGO","codigoCliente","codigo","CLIENTE"])||"")+"").toUpperCase();
+      if(!cod) return;
+      if(!m[cod]) m[cod] = {v2025:0, v2026:0, articulos:[]};
+      var v1 = num(pick(v, ["ventas1Ant","ventas_1_ant","v25","ventasAnioAnterior"]));
+      var vA = num(pick(v, ["ventasActual","ventas_actual","v26","ventasAnio"]));
+      m[cod].v2025 += v1;
+      m[cod].v2026 += vA;
+      if(v1>0 || vA>0){
+        m[cod].articulos.push({
+          p: pick(v, ["productoPadre","PRODUCTOPADRE","producto_padre","articuloCodigo","ARTICULO"]) || "",
+          cal: pick(v, ["calibre","CALIBRE"]) || "",
+          v25: v1, v26: vA
+        });
+      }
+    });
+    return m;
+  }, [ventasDB]);
+
+  // Calcular pérdida y clase para cada cliente
+  function calcPerdida(c){
+    var info = ventasInfo[(c.codigo||c.id||"").toUpperCase()] || {v2025:0,v2026:0,articulos:[]};
+    var v25 = info.v2025, v26 = info.v2026;
+    var cls=null, perdida=0, pct=0;
+    if(v25 > 100){
+      if(v26 === 0){cls="lost"; perdida=v25; pct=-100;}
+      else if(v26 < v25){
+        var dpct=(v26-v25)/v25*100;
+        perdida = Math.abs(v26-v25);
+        pct = Math.round(dpct);
+        if(dpct<=-30) cls="risk";
+        else if(dpct<=-10) cls="warn";
+      }
+    }
+    var arts = info.articulos.filter(function(a){return a.v25>0 && (a.v26===0||a.v26<a.v25*0.5);});
+    arts.sort(function(a,b){return (a.v26-a.v25)-(b.v26-b.v25);});
+    return {v25:Math.round(v25), v26:Math.round(v26), cls:cls, perdida:Math.round(perdida), pct:pct,
+            arts:arts.slice(0,3).map(function(a){return {p:String(a.p).substring(0,30), cal:a.cal, v25:Math.round(a.v25)};})};
+  }
+
   // Identificar huérfanos: sin agente o con agente que no existe
   var huerfanos = React.useMemo(function(){
     return (clientesFB||[]).filter(function(c){
       if(c.eliminado) return false;
       var ag = ((c.agente||c.GRUPOAGENTE||c.grupoAgente||"")+"").trim().toUpperCase();
-      if(!ag) return true; // sin agente
-      if(!idsValidos.has(ag)) return true; // agente que ya no existe
+      if(!ag) return true;
+      if(!idsValidos.has(ag)) return true;
       return false;
     });
   }, [clientesFB, idsValidos]);
@@ -7507,18 +7554,8 @@ function SinAsignarView({usuario, clientesFB, ventasDB, onAbrirCliente, onNav}){
     return true;
   });
 
-  // Calcular ventas históricas (suma de ventas)
-  var ventasMap = React.useMemo(function(){
-    var m={};
-    (ventasDB||[]).forEach(function(v){
-      var cod=((v.cod_cliente||v.CODIGO||v.codigoCliente||"")+"").toUpperCase();
-      if(!cod) return;
-      m[cod] = (m[cod]||0) + (parseFloat(v.totalVenta||v.TOTAL||v.importe||0)||0);
-    });
-    return m;
-  }, [ventasDB]);
-
-  function toggleSel(id){
+  function toggleSel(id, ev){
+    if(ev) ev.stopPropagation();
     var n = new Set(sels);
     if(n.has(id)) n.delete(id); else n.add(id);
     setSels(n);
@@ -7528,15 +7565,28 @@ function SinAsignarView({usuario, clientesFB, ventasDB, onAbrirCliente, onNav}){
     else{var s=new Set();filtrados.forEach(function(c){s.add(c.id||c.codigo);});setSels(s);}
   }
 
-  function asignarMasivo(){
+  // Acción individual: crear estrategia → navega al wizard de Estrategias con cliente preseleccionado
+  function crearEstrategiaIndividual(c){
+    var perd = calcPerdida(c);
+    sessionStorage.setItem("recuperarCliente", JSON.stringify({
+      nombre: c.nombre||c.NOMBRE, codigo: c.codigo||c.id, cls: perd.cls||"warn",
+      perdida: perd.perdida, pct: perd.pct, arts: perd.arts, equipo: c.equipo||"", agente:""
+    }));
+    if(onNav) onNav("estrategias");
+  }
+
+  function asignarUnoOTodos(){
+    var ids = oneCli ? [oneCli.id||oneCli.codigo] : Array.from(sels);
+    if(!ids.length){alert("Sin clientes seleccionados");return;}
     if(!agentSel){alert("Selecciona un comercial");return;}
     var ag=USUARIOS.find(function(u){return u.id===agentSel;});
     if(!ag){alert("Comercial no encontrado");return;}
-    if(!confirm("¿Asignar "+sels.size+" cliente(s) a "+ag.nombre+"?")) return;
+    var nClientes = ids.length;
+    if(!confirm("¿Asignar "+nClientes+" cliente(s) a "+ag.nombre+"?")) return;
     var pendientes = [];
     huerfanos.forEach(function(c){
       var cid=c.id||c.codigo;
-      if(!sels.has(cid)) return;
+      if(ids.indexOf(cid)<0) return;
       var actualizado = Object.assign({}, c, {
         agente: ag.id,
         GRUPOAGENTE: (ag.grupoAgente||ag.id||"").toUpperCase(),
@@ -7549,24 +7599,25 @@ function SinAsignarView({usuario, clientesFB, ventasDB, onAbrirCliente, onNav}){
       pendientes.push(fbEscribir("clientes", cid, actualizado));
     });
     Promise.all(pendientes).then(function(){
-      alert("✅ "+sels.size+" cliente(s) asignados a "+ag.nombre);
+      alert("✅ "+nClientes+" cliente(s) asignados a "+ag.nombre);
       setSels(new Set());
       setModal(null);
       setAgentSel("");
+      setOneCli(null);
+      setExpand(null);
     }).catch(function(e){alert("❌ Error: "+e.message);});
   }
 
-  function crearOportunidadesMasivas(){
+  function crearOportunidadUnoOTodos(){
+    var lista = oneCli ? [oneCli] : huerfanos.filter(function(c){return sels.has(c.id||c.codigo);});
+    if(!lista.length){alert("Sin clientes seleccionados");return;}
     if(!agentSel){alert("Selecciona un comercial");return;}
     var ag=USUARIOS.find(function(u){return u.id===agentSel;});
     if(!ag){alert("Comercial no encontrado");return;}
-    if(!confirm("¿Crear "+sels.size+" oportunidad(es) para "+ag.nombre+"?\nLos clientes NO cambiarán de agente, solo se creará una oportunidad de visita.")) return;
+    if(!confirm("¿Crear "+lista.length+" oportunidad(es) para "+ag.nombre+"?\nLos clientes NO cambiarán de agente.")) return;
     var hoy = new Date();
     var fechaStr = hoy.toLocaleDateString("es-ES");
-    var pendientes = [];
-    huerfanos.forEach(function(c){
-      var cid=c.id||c.codigo;
-      if(!sels.has(cid)) return;
+    var pendientes = lista.map(function(c){
       var op = {
         id: "op_huer_"+(c.codigo||c.id||"sin")+"_"+Date.now()+"_"+Math.random().toString(36).slice(2,5),
         clienteCodigo: c.codigo||c.id,
@@ -7588,13 +7639,15 @@ function SinAsignarView({usuario, clientesFB, ventasDB, onAbrirCliente, onNav}){
         prioridad: "media",
         seguimientos: [{accion:"Oportunidad creada por "+usuario.nombre, fecha:fechaStr, por:usuario.nombre}]
       };
-      pendientes.push(fbEscribir("oportunidades", op.id, op));
+      return fbEscribir("oportunidades", op.id, op);
     });
     Promise.all(pendientes).then(function(){
-      alert("✅ "+sels.size+" oportunidad(es) creadas para "+ag.nombre);
+      alert("✅ "+lista.length+" oportunidad(es) creadas para "+ag.nombre);
       setSels(new Set());
       setModal(null);
       setAgentSel("");
+      setOneCli(null);
+      setExpand(null);
     }).catch(function(e){alert("❌ Error: "+e.message);});
   }
 
@@ -7631,7 +7684,6 @@ function SinAsignarView({usuario, clientesFB, ventasDB, onAbrirCliente, onNav}){
         style={{width:"100%", padding:"10px 14px", border:"1px solid "+T.border, borderRadius:10,
           fontSize:13, background:"#F8FAFC", marginBottom:10, boxSizing:"border-box"}}/>
 
-      {/* Botón seleccionar todos */}
       {filtrados.length>0 && (
         <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10, padding:"0 4px"}}>
           <span style={{fontSize:11, color:T.muted, fontWeight:600}}>
@@ -7644,7 +7696,6 @@ function SinAsignarView({usuario, clientesFB, ventasDB, onAbrirCliente, onNav}){
         </div>
       )}
 
-      {/* Lista */}
       {filtrados.length===0 ? (
         <div style={{textAlign:"center", padding:"40px 20px"}}>
           <p style={{fontSize:36, margin:"0 0 8px"}}>✅</p>
@@ -7658,29 +7709,99 @@ function SinAsignarView({usuario, clientesFB, ventasDB, onAbrirCliente, onNav}){
             var cid = c.id||c.codigo;
             var ag = ((c.agente||c.GRUPOAGENTE||c.grupoAgente||"")+"").trim();
             var motivoText = !ag ? "Sin agente" : "Agente inexistente: "+ag;
-            var ventas = ventasMap[(c.codigo||c.id||"").toUpperCase()] || 0;
             var sel = sels.has(cid);
+            var isExpand = expand===cid;
+            var perd = calcPerdida(c);
+            var perdColor = perd.cls==="lost" ? "#DC2626" : perd.cls==="risk" ? "#EF4444" : perd.cls==="warn" ? T.amber : T.muted;
             return (
-              <div key={cid} onClick={function(){toggleSel(cid);}}
-                style={{display:"flex", alignItems:"center", gap:10, padding:"12px 14px", marginBottom:6,
-                  background:sel?"#EFF6FF":"#fff", border:"1.5px solid "+(sel?T.blue:T.border),
-                  borderRadius:11, cursor:"pointer"}}>
-                <div style={{width:20, height:20, borderRadius:5, border:"2px solid "+(sel?T.blue:T.border),
-                  background:sel?T.blue:"#fff", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0}}>
-                  {sel && <span style={{color:"#fff", fontSize:13, fontWeight:900}}>✓</span>}
+              <div key={cid} style={{marginBottom:6, border:"1.5px solid "+(sel?T.blue:isExpand?T.navy:T.border),
+                borderRadius:11, background:"#fff", overflow:"hidden"}}>
+                {/* Fila resumen */}
+                <div onClick={function(){setExpand(isExpand?null:cid);}}
+                  style={{display:"flex", alignItems:"center", gap:10, padding:"12px 14px",
+                    background:sel?"#EFF6FF":isExpand?"#F8FAFC":"#fff", cursor:"pointer"}}>
+                  <div onClick={function(ev){toggleSel(cid,ev);}}
+                    style={{width:20, height:20, borderRadius:5, border:"2px solid "+(sel?T.blue:T.border),
+                      background:sel?T.blue:"#fff", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0}}>
+                    {sel && <span style={{color:"#fff", fontSize:13, fontWeight:900}}>✓</span>}
+                  </div>
+                  <div style={{flex:1, minWidth:0}}>
+                    <p style={{margin:0, fontSize:13, fontWeight:800, color:T.text, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>
+                      {c.nombre||c.NOMBRE||"(sin nombre)"}
+                    </p>
+                    <p style={{margin:"2px 0 0", fontSize:10.5, color:T.muted}}>
+                      {(c.codigo||c.id||"")} · {motivoText}{c.equipo?" · "+c.equipo:""}
+                    </p>
+                  </div>
+                  {perd.perdida>0 ? (
+                    <div style={{textAlign:"right", flexShrink:0}}>
+                      <p style={{margin:0, fontSize:13, fontWeight:900, color:perdColor}}>-{fmt(perd.perdida)}</p>
+                      <p style={{margin:0, fontSize:9, color:T.muted, textTransform:"uppercase"}}>{perd.pct}%</p>
+                    </div>
+                  ) : perd.v25>0 ? (
+                    <div style={{textAlign:"right", flexShrink:0}}>
+                      <p style={{margin:0, fontSize:11, fontWeight:700, color:T.green}}>{fmt(perd.v26||perd.v25)}</p>
+                      <p style={{margin:0, fontSize:9, color:T.muted, textTransform:"uppercase"}}>activo</p>
+                    </div>
+                  ) : (
+                    <span style={{fontSize:18, color:T.muted}}>{isExpand?"▼":"▶"}</span>
+                  )}
                 </div>
-                <div style={{flex:1, minWidth:0}}>
-                  <p style={{margin:0, fontSize:13, fontWeight:800, color:T.text, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>
-                    {c.nombre||c.NOMBRE||"(sin nombre)"}
-                  </p>
-                  <p style={{margin:"2px 0 0", fontSize:10.5, color:T.muted}}>
-                    {(c.codigo||c.id||"")} · {motivoText}{c.equipo?" · "+c.equipo:""}
-                  </p>
-                </div>
-                {ventas>0 && (
-                  <div style={{textAlign:"right", flexShrink:0}}>
-                    <p style={{margin:0, fontSize:12, fontWeight:800, color:T.green}}>{fmt(ventas)}</p>
-                    <p style={{margin:0, fontSize:9, color:T.muted, textTransform:"uppercase"}}>histórico</p>
+
+                {/* Panel expandido — detalles + botones individuales */}
+                {isExpand && (
+                  <div style={{borderTop:"1px solid "+T.border, padding:"14px 16px", background:"#F8FAFC"}}>
+                    {/* Bloque pérdida */}
+                    {perd.perdida>0 ? (
+                      <div style={{background:"#fff", borderRadius:10, padding:"12px 14px", marginBottom:12, border:"1px solid "+T.border}}>
+                        <p style={{margin:"0 0 8px", fontSize:11, fontWeight:700, color:T.muted, textTransform:"uppercase"}}>
+                          {perd.cls==="lost"?"❌ Cliente perdido":perd.cls==="risk"?"⚠️ En riesgo":"📉 Bajada"}
+                        </p>
+                        <div style={{display:"flex", gap:14, alignItems:"baseline", marginBottom:8}}>
+                          <p style={{margin:0, fontSize:24, fontWeight:900, color:perdColor}}>-{fmt(perd.perdida)}</p>
+                          <p style={{margin:0, fontSize:14, fontWeight:700, color:perdColor}}>{perd.pct}%</p>
+                        </div>
+                        <div style={{display:"flex", justifyContent:"space-between", fontSize:11, color:T.muted}}>
+                          <span>Año anterior: <strong style={{color:T.text}}>{fmt(perd.v25)}</strong></span>
+                          <span>Año actual: <strong style={{color:perdColor}}>{fmt(perd.v26)}</strong></span>
+                        </div>
+                        {perd.arts.length>0 && (
+                          <div style={{marginTop:10, paddingTop:10, borderTop:"1px solid "+T.border}}>
+                            <p style={{margin:"0 0 6px", fontSize:10, fontWeight:700, color:T.muted, textTransform:"uppercase"}}>
+                              Top artículos a recuperar
+                            </p>
+                            {perd.arts.map(function(a,i){
+                              return <p key={i} style={{margin:"2px 0", fontSize:11, color:T.text}}>
+                                — {a.p||"(sin nombre)"}{a.cal?" · "+a.cal:""} <span style={{color:T.muted}}>({fmt(a.v25)})</span>
+                              </p>;
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div style={{background:"#fff", borderRadius:10, padding:"10px 14px", marginBottom:12, border:"1px solid "+T.border, fontSize:12, color:T.muted}}>
+                        Sin datos suficientes de venta histórica.
+                      </div>
+                    )}
+
+                    {/* Botones individuales */}
+                    <div style={{display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:6}}>
+                      <button onClick={function(){crearEstrategiaIndividual(c);}}
+                        style={{padding:"10px 8px", borderRadius:9, border:"none",
+                          background:T.amber, color:"#fff", fontWeight:800, fontSize:11, cursor:"pointer"}}>
+                        🎯 Estrategia
+                      </button>
+                      <button onClick={function(){setOneCli(c);setModal("asignar_one");}}
+                        style={{padding:"10px 8px", borderRadius:9, border:"none",
+                          background:T.blue, color:"#fff", fontWeight:800, fontSize:11, cursor:"pointer"}}>
+                        👤 Asignar
+                      </button>
+                      <button onClick={function(){setOneCli(c);setModal("oportunidad_one");}}
+                        style={{padding:"10px 8px", borderRadius:9, border:"none",
+                          background:T.green, color:"#fff", fontWeight:800, fontSize:11, cursor:"pointer"}}>
+                        🆕 Oportunidad
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -7694,7 +7815,7 @@ function SinAsignarView({usuario, clientesFB, ventasDB, onAbrirCliente, onNav}){
         </div>
       )}
 
-      {/* Barra flotante de acciones */}
+      {/* Barra flotante de acciones masivas */}
       {sels.size>0 && (
         <div style={{position:"fixed", bottom:62, left:"50%", transform:"translateX(-50%)",
           maxWidth:420, width:"calc(100% - 24px)", background:T.text, color:"#fff",
@@ -7703,12 +7824,12 @@ function SinAsignarView({usuario, clientesFB, ventasDB, onAbrirCliente, onNav}){
           <div style={{flex:1}}>
             <p style={{margin:0, fontSize:13, fontWeight:800}}>{sels.size} seleccionado{sels.size===1?"":"s"}</p>
           </div>
-          <button onClick={function(){setModal("asignar");}}
+          <button onClick={function(){setOneCli(null);setModal("asignar");}}
             style={{background:T.blue, border:"none", color:"#fff", padding:"8px 11px",
               borderRadius:8, fontWeight:800, fontSize:11, cursor:"pointer"}}>
             👤 Asignar
           </button>
-          <button onClick={function(){setModal("oportunidad");}}
+          <button onClick={function(){setOneCli(null);setModal("oportunidad");}}
             style={{background:T.green, border:"none", color:"#fff", padding:"8px 11px",
               borderRadius:8, fontWeight:800, fontSize:11, cursor:"pointer"}}>
             🎯 Oportunidad
@@ -7716,21 +7837,23 @@ function SinAsignarView({usuario, clientesFB, ventasDB, onAbrirCliente, onNav}){
         </div>
       )}
 
-      {/* Modal Asignar / Oportunidad */}
+      {/* Modal Asignar / Oportunidad — sirve para individual y masivo */}
       {modal && (
-        <div onClick={function(){setModal(null);setAgentSel("");}}
+        <div onClick={function(){setModal(null);setAgentSel("");setOneCli(null);}}
           style={{position:"fixed", inset:0, background:"rgba(0,0,0,.5)", zIndex:200,
             display:"flex", alignItems:"flex-end", justifyContent:"center"}}>
           <div onClick={function(e){e.stopPropagation();}}
             style={{background:"#fff", borderRadius:"20px 20px 0 0", padding:24,
               width:"100%", maxWidth:440}}>
             <p style={{margin:"0 0 4px", fontSize:17, fontWeight:800, textAlign:"center"}}>
-              {modal==="asignar" ? "👤 Asignar clientes" : "🎯 Crear oportunidades"}
+              {(modal==="asignar"||modal==="asignar_one") ? "👤 Asignar" : "🎯 Crear oportunidad"}
             </p>
             <p style={{margin:"0 0 16px", fontSize:12, color:T.muted, textAlign:"center"}}>
-              {modal==="asignar"
-                ? <span><strong>{sels.size}</strong> cliente(s) cambiarán de agente permanentemente</span>
-                : <span><strong>{sels.size}</strong> oportunidad(es) sin cambiar el agente del cliente</span>}
+              {oneCli
+                ? <span><strong>{oneCli.nombre||oneCli.NOMBRE||"(sin nombre)"}</strong></span>
+                : (modal==="asignar"
+                    ? <span><strong>{sels.size}</strong> cliente(s) cambiarán de agente permanentemente</span>
+                    : <span><strong>{sels.size}</strong> oportunidad(es) sin cambiar el agente del cliente</span>)}
             </p>
             <p style={{margin:"0 0 6px", fontSize:11, fontWeight:700, color:T.muted, textTransform:"uppercase"}}>
               Comercial destino
@@ -7744,17 +7867,17 @@ function SinAsignarView({usuario, clientesFB, ventasDB, onAbrirCliente, onNav}){
               })}
             </select>
             <div style={{display:"flex", gap:8}}>
-              <button onClick={function(){setModal(null);setAgentSel("");}}
+              <button onClick={function(){setModal(null);setAgentSel("");setOneCli(null);}}
                 style={{flex:1, padding:"12px", borderRadius:10, border:"1.5px solid "+T.border,
                   background:"#fff", color:T.text, fontWeight:700, fontSize:13, cursor:"pointer"}}>
                 Cancelar
               </button>
-              <button onClick={modal==="asignar"?asignarMasivo:crearOportunidadesMasivas}
+              <button onClick={(modal==="asignar"||modal==="asignar_one")?asignarUnoOTodos:crearOportunidadUnoOTodos}
                 disabled={!agentSel}
                 style={{flex:2, padding:"12px", borderRadius:10, border:"none",
                   background:agentSel?T.navy:"#CBD5E1", color:"#fff", fontWeight:800, fontSize:14,
                   cursor:agentSel?"pointer":"default"}}>
-                {modal==="asignar"?"✅ Confirmar asignación":"🎯 Crear oportunidades"}
+                {(modal==="asignar"||modal==="asignar_one")?"✅ Asignar":"🎯 Crear"}
               </button>
             </div>
           </div>
