@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.22.33";
-const CRM_BUILD = "03/05/2026-reabrir-simple";
+const CRM_VERSION = "3.22.34";
+const CRM_BUILD = "03/05/2026-sin-asignar";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -7463,6 +7463,307 @@ const INCIDENCIAS_SEED = [];
 // ═══════════════════════════════════════════════════════════════════
 // RECUPERACIÓN — clientes perdidos / en riesgo / atención (v3.19.0)
 // ═══════════════════════════════════════════════════════════════════
+// ─── (v3.22.34) Vista clientes sin asignar dentro de Recuperar ────────
+function SinAsignarView({usuario, clientesFB, ventasDB, onAbrirCliente, onNav}){
+  var _q = React.useState(""); var q = _q[0], setQ = _q[1];
+  var _eq = React.useState("todos"); var eqFiltro = _eq[0], setEqFiltro = _eq[1];
+  var _sels = React.useState(new Set()); var sels = _sels[0], setSels = _sels[1];
+  var _modal = React.useState(null); var modal = _modal[0], setModal = _modal[1];
+  // null | "asignar" | "oportunidad"
+  var _agentSel = React.useState(""); var agentSel = _agentSel[0], setAgentSel = _agentSel[1];
+
+  // ID válido = id de un comercial existente en USUARIOS
+  var idsValidos = React.useMemo(function(){
+    var s = new Set();
+    USUARIOS.forEach(function(u){if(u.rol==="agente") s.add((u.id||"").toUpperCase());});
+    USUARIOS.forEach(function(u){if(u.rol==="agente"&&u.grupoAgente) s.add((u.grupoAgente||"").toUpperCase());});
+    return s;
+  }, []);
+
+  // Identificar huérfanos: sin agente o con agente que no existe
+  var huerfanos = React.useMemo(function(){
+    return (clientesFB||[]).filter(function(c){
+      if(c.eliminado) return false;
+      var ag = ((c.agente||c.GRUPOAGENTE||c.grupoAgente||"")+"").trim().toUpperCase();
+      if(!ag) return true; // sin agente
+      if(!idsValidos.has(ag)) return true; // agente que ya no existe
+      return false;
+    });
+  }, [clientesFB, idsValidos]);
+
+  // Filtros UI
+  var filtrados = huerfanos.filter(function(c){
+    if(eqFiltro!=="todos"){
+      var eq=(c.equipo||c.EQUIPO||"").toUpperCase();
+      if(eqFiltro==="sineq" && eq) return false;
+      if(eqFiltro!=="sineq" && eq!==eqFiltro) return false;
+    }
+    if(q){
+      var ql=q.toLowerCase();
+      var nom=(c.nombre||c.NOMBRE||"").toLowerCase();
+      var cod=(c.codigo||c.CODIGO||c.id||"").toLowerCase();
+      if(nom.indexOf(ql)<0 && cod.indexOf(ql)<0) return false;
+    }
+    return true;
+  });
+
+  // Calcular ventas históricas (suma de ventas)
+  var ventasMap = React.useMemo(function(){
+    var m={};
+    (ventasDB||[]).forEach(function(v){
+      var cod=((v.cod_cliente||v.CODIGO||v.codigoCliente||"")+"").toUpperCase();
+      if(!cod) return;
+      m[cod] = (m[cod]||0) + (parseFloat(v.totalVenta||v.TOTAL||v.importe||0)||0);
+    });
+    return m;
+  }, [ventasDB]);
+
+  function toggleSel(id){
+    var n = new Set(sels);
+    if(n.has(id)) n.delete(id); else n.add(id);
+    setSels(n);
+  }
+  function toggleSelAll(){
+    if(sels.size===filtrados.length){setSels(new Set());}
+    else{var s=new Set();filtrados.forEach(function(c){s.add(c.id||c.codigo);});setSels(s);}
+  }
+
+  function asignarMasivo(){
+    if(!agentSel){alert("Selecciona un comercial");return;}
+    var ag=USUARIOS.find(function(u){return u.id===agentSel;});
+    if(!ag){alert("Comercial no encontrado");return;}
+    if(!confirm("¿Asignar "+sels.size+" cliente(s) a "+ag.nombre+"?")) return;
+    var pendientes = [];
+    huerfanos.forEach(function(c){
+      var cid=c.id||c.codigo;
+      if(!sels.has(cid)) return;
+      var actualizado = Object.assign({}, c, {
+        agente: ag.id,
+        GRUPOAGENTE: (ag.grupoAgente||ag.id||"").toUpperCase(),
+        grupoAgente: ag.grupoAgente||ag.id,
+        equipo: ag.equipo||c.equipo||"",
+        EQUIPO: (ag.equipo||c.equipo||"").toUpperCase(),
+        reasignadoPor: usuario.nombre,
+        reasignadoFecha: new Date().toISOString()
+      });
+      pendientes.push(fbEscribir("clientes", cid, actualizado));
+    });
+    Promise.all(pendientes).then(function(){
+      alert("✅ "+sels.size+" cliente(s) asignados a "+ag.nombre);
+      setSels(new Set());
+      setModal(null);
+      setAgentSel("");
+    }).catch(function(e){alert("❌ Error: "+e.message);});
+  }
+
+  function crearOportunidadesMasivas(){
+    if(!agentSel){alert("Selecciona un comercial");return;}
+    var ag=USUARIOS.find(function(u){return u.id===agentSel;});
+    if(!ag){alert("Comercial no encontrado");return;}
+    if(!confirm("¿Crear "+sels.size+" oportunidad(es) para "+ag.nombre+"?\nLos clientes NO cambiarán de agente, solo se creará una oportunidad de visita.")) return;
+    var hoy = new Date();
+    var fechaStr = hoy.toLocaleDateString("es-ES");
+    var pendientes = [];
+    huerfanos.forEach(function(c){
+      var cid=c.id||c.codigo;
+      if(!sels.has(cid)) return;
+      var op = {
+        id: "op_huer_"+(c.codigo||c.id||"sin")+"_"+Date.now()+"_"+Math.random().toString(36).slice(2,5),
+        clienteCodigo: c.codigo||c.id,
+        clienteNombre: c.nombre||c.NOMBRE||"(sin nombre)",
+        cliente: c.nombre||c.NOMBRE||"(sin nombre)",
+        agente: ag.id,
+        agenteNombre: ag.nombre,
+        equipo: ag.equipo||"",
+        creadoPor: usuario.id,
+        creadoPorNombre: usuario.nombre,
+        rolCreador: usuario.rol,
+        tipo: "captacion",
+        origen: "cliente_sin_asignar",
+        descripcion: "Cliente sin asignar — primera visita / captación",
+        estado: "abierta",
+        etapa: "primera_visita",
+        fechaCreacion: fechaStr,
+        fecha: fechaStr,
+        prioridad: "media",
+        seguimientos: [{accion:"Oportunidad creada por "+usuario.nombre, fecha:fechaStr, por:usuario.nombre}]
+      };
+      pendientes.push(fbEscribir("oportunidades", op.id, op));
+    });
+    Promise.all(pendientes).then(function(){
+      alert("✅ "+sels.size+" oportunidad(es) creadas para "+ag.nombre);
+      setSels(new Set());
+      setModal(null);
+      setAgentSel("");
+    }).catch(function(e){alert("❌ Error: "+e.message);});
+  }
+
+  var totalSinAg = huerfanos.filter(function(c){var ag=((c.agente||c.GRUPOAGENTE||c.grupoAgente||"")+"").trim();return !ag;}).length;
+  var totalAgInexistente = huerfanos.length - totalSinAg;
+  var comerciales = USUARIOS.filter(function(u){return u.rol==="agente";});
+
+  return (
+    <div>
+      {/* Resumen */}
+      <div style={{background:"#FEF3C7", border:"1.5px solid "+T.amber, borderRadius:14, padding:"14px 16px", marginBottom:14}}>
+        <p style={{margin:"0 0 4px", fontSize:15, fontWeight:800, color:"#92400E"}}>
+          ⚠️ {huerfanos.length} cliente{huerfanos.length===1?"":"s"} sin asignar
+        </p>
+        <p style={{margin:0, fontSize:11, color:"#78350F"}}>
+          Sin agente: {totalSinAg} · Agente inexistente: {totalAgInexistente}
+        </p>
+      </div>
+
+      {/* Filtro por equipo */}
+      <div style={{display:"flex", gap:6, marginBottom:10, overflowX:"auto"}}>
+        {[{k:"todos",lbl:"Todos"},{k:"WIKUK",lbl:"WIKUK"},{k:"INTERKEY",lbl:"INTERKEY"},{k:"sineq",lbl:"Sin equipo"}].map(function(t){
+          var act=eqFiltro===t.k;
+          return <button key={t.k} onClick={function(){setEqFiltro(t.k);}}
+            style={{padding:"7px 12px", borderRadius:9, border:"1.5px solid "+(act?T.navy:T.border),
+              background:act?T.navy:"#fff", color:act?"#fff":T.muted,
+              fontSize:12, fontWeight:700, cursor:"pointer", whiteSpace:"nowrap"}}>{t.lbl}</button>;
+        })}
+      </div>
+
+      {/* Búsqueda */}
+      <input value={q} onChange={function(e){setQ(e.target.value);}}
+        placeholder="🔍 Buscar por nombre o código..."
+        style={{width:"100%", padding:"10px 14px", border:"1px solid "+T.border, borderRadius:10,
+          fontSize:13, background:"#F8FAFC", marginBottom:10, boxSizing:"border-box"}}/>
+
+      {/* Botón seleccionar todos */}
+      {filtrados.length>0 && (
+        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10, padding:"0 4px"}}>
+          <span style={{fontSize:11, color:T.muted, fontWeight:600}}>
+            {filtrados.length} resultado{filtrados.length===1?"":"s"}
+          </span>
+          <button onClick={toggleSelAll}
+            style={{background:"none", border:"none", color:T.blue, fontSize:12, fontWeight:700, cursor:"pointer", padding:0}}>
+            {sels.size===filtrados.length?"Deseleccionar":"Seleccionar"} todos
+          </button>
+        </div>
+      )}
+
+      {/* Lista */}
+      {filtrados.length===0 ? (
+        <div style={{textAlign:"center", padding:"40px 20px"}}>
+          <p style={{fontSize:36, margin:"0 0 8px"}}>✅</p>
+          <p style={{margin:0, fontSize:14, fontWeight:700, color:T.muted}}>
+            No hay clientes sin asignar{q?" que coincidan":""}
+          </p>
+        </div>
+      ) : (
+        <div>
+          {filtrados.slice(0,150).map(function(c){
+            var cid = c.id||c.codigo;
+            var ag = ((c.agente||c.GRUPOAGENTE||c.grupoAgente||"")+"").trim();
+            var motivoText = !ag ? "Sin agente" : "Agente inexistente: "+ag;
+            var ventas = ventasMap[(c.codigo||c.id||"").toUpperCase()] || 0;
+            var sel = sels.has(cid);
+            return (
+              <div key={cid} onClick={function(){toggleSel(cid);}}
+                style={{display:"flex", alignItems:"center", gap:10, padding:"12px 14px", marginBottom:6,
+                  background:sel?"#EFF6FF":"#fff", border:"1.5px solid "+(sel?T.blue:T.border),
+                  borderRadius:11, cursor:"pointer"}}>
+                <div style={{width:20, height:20, borderRadius:5, border:"2px solid "+(sel?T.blue:T.border),
+                  background:sel?T.blue:"#fff", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0}}>
+                  {sel && <span style={{color:"#fff", fontSize:13, fontWeight:900}}>✓</span>}
+                </div>
+                <div style={{flex:1, minWidth:0}}>
+                  <p style={{margin:0, fontSize:13, fontWeight:800, color:T.text, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>
+                    {c.nombre||c.NOMBRE||"(sin nombre)"}
+                  </p>
+                  <p style={{margin:"2px 0 0", fontSize:10.5, color:T.muted}}>
+                    {(c.codigo||c.id||"")} · {motivoText}{c.equipo?" · "+c.equipo:""}
+                  </p>
+                </div>
+                {ventas>0 && (
+                  <div style={{textAlign:"right", flexShrink:0}}>
+                    <p style={{margin:0, fontSize:12, fontWeight:800, color:T.green}}>{fmt(ventas)}</p>
+                    <p style={{margin:0, fontSize:9, color:T.muted, textTransform:"uppercase"}}>histórico</p>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {filtrados.length>150 && (
+            <p style={{fontSize:11, color:T.muted, textAlign:"center", margin:"10px 0"}}>
+              Mostrando primeros 150 de {filtrados.length}. Filtra para ver más específicos.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Barra flotante de acciones */}
+      {sels.size>0 && (
+        <div style={{position:"fixed", bottom:62, left:"50%", transform:"translateX(-50%)",
+          maxWidth:420, width:"calc(100% - 24px)", background:T.text, color:"#fff",
+          borderRadius:14, padding:"12px 14px", display:"flex", alignItems:"center", gap:8,
+          boxShadow:"0 8px 24px rgba(0,0,0,.3)", zIndex:100}}>
+          <div style={{flex:1}}>
+            <p style={{margin:0, fontSize:13, fontWeight:800}}>{sels.size} seleccionado{sels.size===1?"":"s"}</p>
+          </div>
+          <button onClick={function(){setModal("asignar");}}
+            style={{background:T.blue, border:"none", color:"#fff", padding:"8px 11px",
+              borderRadius:8, fontWeight:800, fontSize:11, cursor:"pointer"}}>
+            👤 Asignar
+          </button>
+          <button onClick={function(){setModal("oportunidad");}}
+            style={{background:T.green, border:"none", color:"#fff", padding:"8px 11px",
+              borderRadius:8, fontWeight:800, fontSize:11, cursor:"pointer"}}>
+            🎯 Oportunidad
+          </button>
+        </div>
+      )}
+
+      {/* Modal Asignar / Oportunidad */}
+      {modal && (
+        <div onClick={function(){setModal(null);setAgentSel("");}}
+          style={{position:"fixed", inset:0, background:"rgba(0,0,0,.5)", zIndex:200,
+            display:"flex", alignItems:"flex-end", justifyContent:"center"}}>
+          <div onClick={function(e){e.stopPropagation();}}
+            style={{background:"#fff", borderRadius:"20px 20px 0 0", padding:24,
+              width:"100%", maxWidth:440}}>
+            <p style={{margin:"0 0 4px", fontSize:17, fontWeight:800, textAlign:"center"}}>
+              {modal==="asignar" ? "👤 Asignar clientes" : "🎯 Crear oportunidades"}
+            </p>
+            <p style={{margin:"0 0 16px", fontSize:12, color:T.muted, textAlign:"center"}}>
+              {modal==="asignar"
+                ? <span><strong>{sels.size}</strong> cliente(s) cambiarán de agente permanentemente</span>
+                : <span><strong>{sels.size}</strong> oportunidad(es) sin cambiar el agente del cliente</span>}
+            </p>
+            <p style={{margin:"0 0 6px", fontSize:11, fontWeight:700, color:T.muted, textTransform:"uppercase"}}>
+              Comercial destino
+            </p>
+            <select value={agentSel} onChange={function(e){setAgentSel(e.target.value);}}
+              style={{width:"100%", padding:"11px 14px", borderRadius:10, border:"1.5px solid "+T.border,
+                fontSize:14, background:"#fff", marginBottom:14, boxSizing:"border-box"}}>
+              <option value="">— Selecciona un comercial —</option>
+              {comerciales.map(function(u){
+                return <option key={u.id} value={u.id}>{u.nombre} ({u.equipo||"sin equipo"})</option>;
+              })}
+            </select>
+            <div style={{display:"flex", gap:8}}>
+              <button onClick={function(){setModal(null);setAgentSel("");}}
+                style={{flex:1, padding:"12px", borderRadius:10, border:"1.5px solid "+T.border,
+                  background:"#fff", color:T.text, fontWeight:700, fontSize:13, cursor:"pointer"}}>
+                Cancelar
+              </button>
+              <button onClick={modal==="asignar"?asignarMasivo:crearOportunidadesMasivas}
+                disabled={!agentSel}
+                style={{flex:2, padding:"12px", borderRadius:10, border:"none",
+                  background:agentSel?T.navy:"#CBD5E1", color:"#fff", fontWeight:800, fontSize:14,
+                  cursor:agentSel?"pointer":"default"}}>
+                {modal==="asignar"?"✅ Confirmar asignación":"🎯 Crear oportunidades"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirCliente}){
   var rol = usuario.rol;
   var esAgente = rol === "agente";
@@ -8226,7 +8527,8 @@ function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirClie
         {[
           {k:"clientes", lbl:"👤 Clientes", show:true},
           {k:"agentes", lbl:"📊 Por agente", show:!esAgente},
-          {k:"articulos", lbl:"📦 Por artículo", show:true}
+          {k:"articulos", lbl:"📦 Por artículo", show:true},
+          {k:"sinasignar", lbl:"⚠️ Sin asignar", show:!esAgente}
         ].filter(function(t){return t.show;}).map(function(tab){
           var act = vista===tab.k;
           return <button key={tab.k} onClick={function(){setVista(tab.k);}}
@@ -8462,6 +8764,12 @@ function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirClie
             );
           })()}
         </div>
+      )}
+
+      {/* (v3.22.34) Vista CLIENTES SIN ASIGNAR — solo CEO/Director/Jefe */}
+      {vista==="sinasignar" && !esAgente && (
+        <SinAsignarView usuario={usuario} clientesFB={clientesFB} ventasDB={ventasDB}
+          onAbrirCliente={onAbrirCliente} onNav={onNav}/>
       )}
 
       {/* Barra flotante multi-select */}
