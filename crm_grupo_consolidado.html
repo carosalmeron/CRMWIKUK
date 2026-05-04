@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.22.41";
-const CRM_BUILD = "04/05/2026-fix-agente-muestras";
+const CRM_VERSION = "3.22.42";
+const CRM_BUILD = "04/05/2026-ofertas-ficha-cliente";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -14957,6 +14957,29 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
                   ...entrada,clienteId:clienteSel.id,clienteNombre:clienteSel.nombre,
                   agente:usuario.id,semana
                 });
+                // (v3.22.42) Si trae ofertas, crear documento en colección ofertas
+                if(v.ofertas && v.ofertas.length>0){
+                  const hoy=new Date();
+                  const plazo=new Date(hoy.getTime()+5*24*60*60*1000);
+                  const ofertaId="oferta_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
+                  const ofertaDoc={
+                    id:ofertaId,
+                    clienteNombre:clienteSel.nombre,
+                    clienteCodigo:clienteSel.codigo||clienteSel.id||"",
+                    clienteId:clienteSel.id||"",
+                    agente:usuario.id,
+                    agenteNombre:usuario.nombre,
+                    equipo:usuario.equipo||"",
+                    lineas:v.ofertas,
+                    estado:"pendiente",
+                    fechaCreacion:hoy.toISOString(),
+                    fechaCreacionStr:entrada.fecha,
+                    fechaPlazo:plazo.toISOString(),
+                    notaInicial:v.nota||"",
+                    seguimientos:[{accion:"Oferta enviada", fecha:entrada.fecha, por:usuario.nombre, nota:""}]
+                  };
+                  fbEscribir("ofertas",ofertaId,ofertaDoc).catch(function(e){console.warn("[OFERTAS] Error:",e);});
+                }
               }}
             />
           )}
@@ -15606,6 +15629,10 @@ function VisitaTab({cliente,act,resultados,onGuardar}){
   const [guardado,setGuardado]=useState(false);
   const [micOn,setMicOn]=useState(false);
   const micRef=React.useRef(null);
+  // (v3.22.42) Ofertas dentro de la visita (igual que Mi Semana)
+  const [ofertasVisita,setOfertasVisita]=useState([]);
+  const [showOfertaForm,setShowOfertaForm]=useState(false);
+  const [ofertaForm,setOfertaForm]=useState({producto:"",calibre:"",precio:"",unidad:"€/kg",notas:""});
 
   const dictarNota=()=>{
     const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
@@ -15626,10 +15653,12 @@ function VisitaTab({cliente,act,resultados,onGuardar}){
 
   const guardar=()=>{
     if(!res) return;
-    onGuardar({resultado:res,nota});
+    onGuardar({resultado:res,nota,ofertas:ofertasVisita.length>0?ofertasVisita:undefined,tieneOferta:ofertasVisita.length>0});
     setGuardado(true);
     setTimeout(()=>setGuardado(false),3000);
     setNota(""); setRes("");
+    setOfertasVisita([]); setShowOfertaForm(false);
+    setOfertaForm({producto:"",calibre:"",precio:"",unidad:"€/kg",notas:""});
   };
 
   return(
@@ -15674,6 +15703,90 @@ function VisitaTab({cliente,act,resultados,onGuardar}){
           borderRadius:12,padding:"12px",fontSize:13,resize:"none",outline:"none",
           boxSizing:"border-box",lineHeight:1.6,fontFamily:"inherit",marginBottom:16,
           background:micOn?"#FEF2F2":"#fff"}}/>
+
+      {/* (v3.22.42) Bloque ofertas */}
+      <div style={{marginBottom:16, padding:"12px 14px", background:"#FFFBEB", border:"1.5px solid "+T.amber+"60", borderRadius:11}}>
+        <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:ofertasVisita.length>0?10:0}}>
+          <p style={{margin:0, fontSize:11, fontWeight:800, color:"#92400E", textTransform:"uppercase"}}>
+            💰 Ofertas/cotizaciones {ofertasVisita.length>0?"("+ofertasVisita.length+" línea"+(ofertasVisita.length===1?"":"s")+")":""}
+          </p>
+          <button onClick={()=>setShowOfertaForm(!showOfertaForm)}
+            style={{background:"none", border:"none", color:T.amber, fontSize:12, fontWeight:700, cursor:"pointer", padding:"2px 6px"}}>
+            {showOfertaForm?"− Cerrar":"+ Añadir"}
+          </button>
+        </div>
+
+        {ofertasVisita.map(function(l){
+          return (
+            <div key={l.id} style={{display:"flex", gap:8, alignItems:"center", padding:"8px 10px", background:"#fff",
+              border:"1px solid "+T.amber+"40", borderRadius:8, marginBottom:5}}>
+              <div style={{flex:1, minWidth:0}}>
+                <p style={{margin:0, fontWeight:700, color:T.text, fontSize:12, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>
+                  {l.producto}{l.calibre?" · "+l.calibre:""}
+                </p>
+                <p style={{margin:0, color:T.muted, fontSize:11}}>
+                  <strong style={{color:T.amber}}>{Number(l.precio).toFixed(2).replace(".",",")} {l.unidad}</strong>
+                  {l.notas?" · "+l.notas:""}
+                </p>
+              </div>
+              <button onClick={function(){setOfertasVisita(p=>p.filter(x=>x.id!==l.id));}}
+                style={{background:"none", border:"none", color:T.red, cursor:"pointer", fontSize:16, padding:"2px 6px"}}>✕</button>
+            </div>
+          );
+        })}
+
+        {showOfertaForm && (
+          <div style={{marginTop:ofertasVisita.length>0?8:10, padding:"10px 12px", background:"#fff", borderRadius:9, border:"1px solid "+T.amber+"60"}}>
+            <input value={ofertaForm.producto} onChange={e=>setOfertaForm(f=>({...f,producto:e.target.value}))}
+              placeholder="Producto / código (ej: BR1 vacuno, CX50.9K)"
+              style={{width:"100%", padding:"8px 10px", border:"1px solid "+T.border, borderRadius:7, fontSize:13, marginBottom:6, boxSizing:"border-box", fontFamily:"inherit"}}/>
+            <div style={{display:"flex", gap:6, marginBottom:6}}>
+              <input value={ofertaForm.calibre} onChange={e=>setOfertaForm(f=>({...f,calibre:e.target.value}))}
+                placeholder="Calibre"
+                style={{flex:1, padding:"8px 10px", border:"1px solid "+T.border, borderRadius:7, fontSize:13, boxSizing:"border-box", fontFamily:"inherit"}}/>
+              <input value={ofertaForm.precio} onChange={e=>setOfertaForm(f=>({...f,precio:e.target.value}))}
+                placeholder="Precio" type="text" inputMode="decimal"
+                style={{width:90, padding:"8px 10px", border:"1px solid "+T.border, borderRadius:7, fontSize:13, boxSizing:"border-box", fontFamily:"inherit"}}/>
+              <select value={ofertaForm.unidad} onChange={e=>setOfertaForm(f=>({...f,unidad:e.target.value}))}
+                style={{padding:"8px 4px", border:"1px solid "+T.border, borderRadius:7, fontSize:11, background:"#fff", boxSizing:"border-box"}}>
+                <option value="€/kg">€/kg</option>
+                <option value="€/m">€/m</option>
+                <option value="€/ud">€/ud</option>
+                <option value="€/madeja">€/madeja</option>
+                <option value="€/palet">€/palet</option>
+              </select>
+            </div>
+            <input value={ofertaForm.notas} onChange={e=>setOfertaForm(f=>({...f,notas:e.target.value}))}
+              placeholder="Notas (opcional: 90 metros, palet completo, etc.)"
+              style={{width:"100%", padding:"8px 10px", border:"1px solid "+T.border, borderRadius:7, fontSize:13, marginBottom:8, boxSizing:"border-box", fontFamily:"inherit"}}/>
+            <button onClick={function(){
+              if(!ofertaForm.producto.trim()||!ofertaForm.precio){alert("Producto y precio son obligatorios");return;}
+              const precio=parseFloat((ofertaForm.precio+"").replace(",","."));
+              if(isNaN(precio)){alert("Precio inválido");return;}
+              setOfertasVisita(p=>[...p,{
+                id:"l"+Date.now()+"_"+Math.random().toString(36).slice(2,5),
+                producto:ofertaForm.producto.trim(),
+                calibre:ofertaForm.calibre.trim(),
+                precio:precio,
+                unidad:ofertaForm.unidad,
+                notas:ofertaForm.notas.trim()
+              }]);
+              setOfertaForm({producto:"",calibre:"",precio:"",unidad:ofertaForm.unidad,notas:""});
+            }}
+              style={{width:"100%", padding:"9px", border:"none", background:T.amber, color:"#fff",
+                fontWeight:700, fontSize:13, borderRadius:8, cursor:"pointer"}}>
+              ➕ Añadir línea
+            </button>
+          </div>
+        )}
+
+        {ofertasVisita.length===0 && !showOfertaForm && (
+          <p style={{margin:"6px 0 0", fontSize:11, color:"#78350F", fontStyle:"italic"}}>
+            Pulsa "+ Añadir" para registrar precios cotizados al cliente.
+          </p>
+        )}
+      </div>
+
       <button onClick={guardar} disabled={!res}
         style={{width:"100%",padding:"14px",borderRadius:12,border:"none",
           background:res?"#0F172A":"#CBD5E1",color:"#fff",fontWeight:700,
