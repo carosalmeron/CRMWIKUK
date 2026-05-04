@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.22.37";
-const CRM_BUILD = "03/05/2026-muestra-editar";
+const CRM_VERSION = "3.22.39";
+const CRM_BUILD = "04/05/2026-fix-fecha-iso";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -1044,18 +1044,37 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
   }
   function _semDeFecha(fechaStr){
     if(!fechaStr) return 0;
-    var p=(fechaStr+"").split("/");
-    if(p.length!==3) return 0;
-    var dd=parseInt(p[0]),mm=parseInt(p[1])-1,yy=parseInt(p[2]);
-    if(yy<100) yy+=2000;
-    var d=new Date(yy,mm,dd);
-    if(isNaN(d.getTime())) return 0;
+    var d = null;
+    var s = (fechaStr+"").trim();
+    // (v3.22.39) Soporta tanto formato ISO (2026-05-04T...) como dd/mm/aa
+    if(s.indexOf("-")>0 && s.indexOf("T")>=0){
+      // Formato ISO
+      var iso = new Date(s);
+      if(!isNaN(iso.getTime())) d = iso;
+    }
+    if(!d){
+      // Formato dd/mm/aa o dd/mm/aaaa
+      var p = s.split("/");
+      if(p.length===3){
+        var dd=parseInt(p[0]),mm=parseInt(p[1])-1,yy=parseInt(p[2]);
+        if(yy<100) yy+=2000;
+        d=new Date(yy,mm,dd);
+      }
+    }
+    if(!d || isNaN(d.getTime())) return 0;
     return _semISO_dt(d);
   }
   var opsNuevasSem360 = misOps.filter(function(o){
     var s = parseInt(o.semana||0);
     if(s) return s === semana;
-    if(o.fechaCreacion) return _semDeFecha(o.fechaCreacion) === semana;
+    // (v3.22.39) Probar varios campos de fecha por orden de prioridad
+    var candidatas = [o.fechaCreacionStr, o.fechaCreacion, o.fecha, o.fechaActualizacion];
+    for(var i=0;i<candidatas.length;i++){
+      if(candidatas[i]){
+        var sm = _semDeFecha(candidatas[i]);
+        if(sm) return sm === semana;
+      }
+    }
     return false;
   });
   var opsEnCursoSem360 = misOps.filter(function(o){
@@ -3954,18 +3973,72 @@ function NuevoClienteForm({ruta,onGuardar,onBack,backLabel,clienteEditar}){
 }
 
 // Componente fila cliente con nota y histórico
-function ClienteRow({nombre,visita,ops,onSave}){
+function ClienteRow({nombre,visita,ops,onSave,clienteCodigo,clienteId,equipo,agente,agenteNombre}){
   const [open,setOpen]=useState(false);
   const [nota,setNota]=useState(visita?.nota||"");
   const [resultado,setResultado]=useState(visita?.resultado||"");
+  // (v3.22.38) Sistema de ofertas
+  const [ofertas,setOfertas]=useState([]); // líneas pendientes de añadir a esta visita
+  const [showOfertaForm,setShowOfertaForm]=useState(false);
+  const [ofertaForm,setOfertaForm]=useState({producto:"",calibre:"",precio:"",unidad:"€/kg",notas:""});
 
   const op=ops.find(o=>o.k===resultado);
   const hist=visita?.historial||[];
 
+  const addLineaOferta=()=>{
+    if(!ofertaForm.producto.trim()||!ofertaForm.precio){alert("Producto y precio son obligatorios");return;}
+    const precio=parseFloat((ofertaForm.precio+"").replace(",","."));
+    if(isNaN(precio)){alert("Precio inválido");return;}
+    setOfertas(p=>[...p,{
+      id:"l"+Date.now()+"_"+Math.random().toString(36).slice(2,5),
+      producto:ofertaForm.producto.trim(),
+      calibre:ofertaForm.calibre.trim(),
+      precio:precio,
+      unidad:ofertaForm.unidad,
+      notas:ofertaForm.notas.trim()
+    }]);
+    setOfertaForm({producto:"",calibre:"",precio:"",unidad:ofertaForm.unidad,notas:""});
+  };
+
+  const quitarLinea=(id)=>{setOfertas(p=>p.filter(l=>l.id!==id));};
+
   const guardar=()=>{
     if(!resultado) return;
-    onSave({resultado,nota,fecha:new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"})});
+    const fechaStr=new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
+    // Si hay ofertas, las guardamos como un documento en la colección "ofertas"
+    if(ofertas.length>0){
+      const hoy=new Date();
+      const plazo=new Date(hoy.getTime()+5*24*60*60*1000); // 5 días por defecto
+      const ofertaDoc={
+        id:"oferta_"+Date.now()+"_"+Math.random().toString(36).slice(2,5),
+        clienteNombre:nombre,
+        clienteCodigo:clienteCodigo||"",
+        clienteId:clienteId||"",
+        agente:agente||"",
+        agenteNombre:agenteNombre||"",
+        equipo:equipo||"",
+        lineas:ofertas,
+        estado:"pendiente", // pendiente | pedido | caro | no_responde
+        fechaCreacion:hoy.toISOString(),
+        fechaCreacionStr:fechaStr,
+        fechaPlazo:plazo.toISOString(),
+        notaInicial:nota||"",
+        seguimientos:[{accion:"Oferta enviada", fecha:fechaStr, por:agenteNombre||"", nota:""}]
+      };
+      // Guardar en Firebase
+      if(typeof fbEscribir==="function"){
+        fbEscribir("ofertas",ofertaDoc.id,ofertaDoc).catch(function(e){console.warn("[OFERTAS] Error guardando:",e);});
+      }
+    }
+    onSave({
+      resultado,
+      nota,
+      fecha:fechaStr,
+      ofertas:ofertas.length>0?ofertas:undefined,
+      tieneOferta:ofertas.length>0
+    });
     setOpen(false);
+    setOfertas([]);
   };
 
   return(
@@ -3979,9 +4052,10 @@ function ClienteRow({nombre,visita,ops,onSave}){
         <div style={{flex:1,minWidth:0}}>
           <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text,
             overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{nombre}</p>
-          <div style={{display:"flex",gap:6,alignItems:"center",marginTop:2}}>
+          <div style={{display:"flex",gap:6,alignItems:"center",marginTop:2,flexWrap:"wrap"}}>
             {op?<Badge label={op.label} color={op.color}/>
             :<span style={{fontSize:11,color:T.muted}}>Sin marcar</span>}
+            {visita?.tieneOferta&&<Badge label="💰 Oferta" color={T.amber}/>}
             {visita?.nota&&<span style={{fontSize:10,color:T.muted,fontStyle:"italic",
               overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:120}}>
               · {visita.nota}
@@ -4028,6 +4102,75 @@ function ClienteRow({nombre,visita,ops,onSave}){
               padding:"10px 12px",fontSize:13,resize:"none",outline:"none",
               boxSizing:"border-box",lineHeight:1.5,fontFamily:"inherit",
               marginBottom:10}}/>
+
+          {/* (v3.22.38) Bloque de ofertas */}
+          <div style={{marginBottom:14, padding:"10px 12px", background:"#FFFBEB", border:"1.5px solid "+T.amber+"50", borderRadius:10}}>
+            <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:ofertas.length>0?8:0}}>
+              <p style={{margin:0, fontSize:11, fontWeight:800, color:"#92400E", textTransform:"uppercase"}}>
+                💰 Ofertas/cotizaciones {ofertas.length>0?"("+ofertas.length+")":""}
+              </p>
+              <button onClick={()=>setShowOfertaForm(!showOfertaForm)}
+                style={{background:"none", border:"none", color:T.amber, fontSize:12, fontWeight:700, cursor:"pointer", padding:0}}>
+                {showOfertaForm?"− Cerrar":"+ Añadir"}
+              </button>
+            </div>
+
+            {/* Lista de líneas ya añadidas */}
+            {ofertas.map(l=>(
+              <div key={l.id} style={{display:"flex", gap:8, alignItems:"center", padding:"6px 8px", background:"#fff",
+                border:"1px solid "+T.amber+"40", borderRadius:7, marginBottom:5, fontSize:11}}>
+                <div style={{flex:1, minWidth:0}}>
+                  <p style={{margin:0, fontWeight:700, color:T.text, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>
+                    {l.producto}{l.calibre?" · "+l.calibre:""}
+                  </p>
+                  <p style={{margin:0, color:T.muted, fontSize:10}}>
+                    {l.precio.toFixed(2).replace(".",",")} {l.unidad}{l.notas?" · "+l.notas:""}
+                  </p>
+                </div>
+                <button onClick={()=>quitarLinea(l.id)} style={{background:"none", border:"none", color:T.red,
+                  cursor:"pointer", fontSize:14, padding:"2px 4px"}}>✕</button>
+              </div>
+            ))}
+
+            {/* Formulario añadir línea */}
+            {showOfertaForm && (
+              <div style={{marginTop:ofertas.length>0?6:8, padding:"8px 10px", background:"#fff", borderRadius:8, border:"1px solid "+T.amber+"50"}}>
+                <input value={ofertaForm.producto} onChange={e=>setOfertaForm(f=>({...f,producto:e.target.value}))}
+                  placeholder="Producto / código (ej: BR1 vacuno, CX50.9K)"
+                  style={{width:"100%", padding:"7px 9px", border:"1px solid "+T.border, borderRadius:6, fontSize:12, marginBottom:5, boxSizing:"border-box", fontFamily:"inherit"}}/>
+                <div style={{display:"flex", gap:5, marginBottom:5}}>
+                  <input value={ofertaForm.calibre} onChange={e=>setOfertaForm(f=>({...f,calibre:e.target.value}))}
+                    placeholder="Calibre"
+                    style={{flex:1, padding:"7px 9px", border:"1px solid "+T.border, borderRadius:6, fontSize:12, boxSizing:"border-box", fontFamily:"inherit"}}/>
+                  <input value={ofertaForm.precio} onChange={e=>setOfertaForm(f=>({...f,precio:e.target.value}))}
+                    placeholder="Precio" type="text" inputMode="decimal"
+                    style={{width:80, padding:"7px 9px", border:"1px solid "+T.border, borderRadius:6, fontSize:12, boxSizing:"border-box", fontFamily:"inherit"}}/>
+                  <select value={ofertaForm.unidad} onChange={e=>setOfertaForm(f=>({...f,unidad:e.target.value}))}
+                    style={{padding:"7px 4px", border:"1px solid "+T.border, borderRadius:6, fontSize:11, background:"#fff", boxSizing:"border-box"}}>
+                    <option value="€/kg">€/kg</option>
+                    <option value="€/m">€/m</option>
+                    <option value="€/ud">€/ud</option>
+                    <option value="€/madeja">€/madeja</option>
+                    <option value="€/palet">€/palet</option>
+                  </select>
+                </div>
+                <input value={ofertaForm.notas} onChange={e=>setOfertaForm(f=>({...f,notas:e.target.value}))}
+                  placeholder="Notas opcional (90 metros, palet completo...)"
+                  style={{width:"100%", padding:"7px 9px", border:"1px solid "+T.border, borderRadius:6, fontSize:12, marginBottom:6, boxSizing:"border-box", fontFamily:"inherit"}}/>
+                <button onClick={addLineaOferta}
+                  style={{width:"100%", padding:"7px", border:"none", background:T.amber, color:"#fff",
+                    fontWeight:700, fontSize:12, borderRadius:6, cursor:"pointer"}}>
+                  ➕ Añadir línea
+                </button>
+              </div>
+            )}
+
+            {ofertas.length===0 && !showOfertaForm && (
+              <p style={{margin:"6px 0 0", fontSize:10.5, color:"#78350F", fontStyle:"italic"}}>
+                Pulsa "+ Añadir" para registrar una cotización con precio. Aparecerá en seguimiento de ofertas.
+              </p>
+            )}
+          </div>
 
           <button onClick={guardar} disabled={!resultado}
             style={{width:"100%",padding:"12px",borderRadius:11,border:"none",
@@ -4175,6 +4318,10 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
   const [rutaSel,setRutaSel]=useState(null);
   const [clienteSel,setClienteSel]=useState(null);
   const [formV,setFormV]=useState({resultado:"pedido",notas:""});
+  // (v3.22.38) Sistema de ofertas dentro de la visita
+  const [ofertasVisita,setOfertasVisita]=useState([]);
+  const [showOfertaForm,setShowOfertaForm]=useState(false);
+  const [ofertaForm,setOfertaForm]=useState({producto:"",calibre:"",precio:"",unidad:"€/kg",notas:""});
   var abrirCliente=function(c){
     var cid=c.id||"";
     var cnom=(c.nombre||c.NOMBRE||"").toUpperCase();
@@ -4203,6 +4350,7 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
     if(v&&!v.notas&&v.nota) v.notas=v.nota;
     setClienteSel(c);
     setFormV(v?{resultado:v.resultado||"pedido",notas:v.notas||v.nota||""}:{resultado:"pedido",notas:""});
+    setOfertasVisita([]); setShowOfertaForm(false);
   };
   const [showNuevo,setShowNuevo]=useState(false);
   const [nuevosCreados,setNuevosCreados]=useState([]);
@@ -4304,6 +4452,7 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
   const guardarVisita=()=>{
     if(!clienteSel||!formV.resultado) return;
     const fecha=new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
+    const tieneOferta = ofertasVisita.length>0;
     const visitaDoc={
       clienteId:clienteSel.id,
       clienteNombre:clienteSel.nombre,
@@ -4313,18 +4462,45 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
       semana,
       agente:usuario.id,
       equipo:usuario.equipo||"",
+      tieneOferta:tieneOferta,
     };
     // Guardar visita en Firebase
     fbEscribir("visitas", `${usuario.id}_${clienteSel.id}_sem${semana}`, visitaDoc);
+
+    // (v3.22.38) Si hay ofertas, crear documento separado en colección "ofertas"
+    if(tieneOferta){
+      const hoy=new Date();
+      const plazo=new Date(hoy.getTime()+5*24*60*60*1000); // 5 días
+      const ofertaId="oferta_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
+      const ofertaDoc={
+        id:ofertaId,
+        clienteNombre:clienteSel.nombre,
+        clienteCodigo:clienteSel.codigo||clienteSel.id||"",
+        clienteId:clienteSel.id||"",
+        agente:usuario.id,
+        agenteNombre:usuario.nombre,
+        equipo:usuario.equipo||"",
+        lineas:ofertasVisita,
+        estado:"pendiente",
+        fechaCreacion:hoy.toISOString(),
+        fechaCreacionStr:fecha,
+        fechaPlazo:plazo.toISOString(),
+        notaInicial:formV.notas||"",
+        seguimientos:[{accion:"Oferta enviada", fecha:fecha, por:usuario.nombre, nota:""}]
+      };
+      fbEscribir("ofertas",ofertaId,ofertaDoc).catch(function(e){console.warn("[OFERTAS] Error:",e);});
+    }
 
     setVisitas(prev=>{
       const existing=prev[clienteSel.id];
       const historial=existing
         ?[...(existing.historial||[]),{resultado:existing.resultado,notas:existing.notas||"",fecha:existing.fecha}]
         :[];
-      return{...prev,[clienteSel.id]:{clienteNombre:clienteSel.nombre,resultado:formV.resultado,notas:formV.notas,fecha,historial}};
+      return{...prev,[clienteSel.id]:{clienteNombre:clienteSel.nombre,resultado:formV.resultado,notas:formV.notas,fecha,historial,tieneOferta}};
     });
     setFormV({resultado:"pedido",notas:""});
+    setOfertasVisita([]); setShowOfertaForm(false);
+    setOfertaForm({producto:"",calibre:"",precio:"",unidad:"€/kg",notas:""});
     setClienteSel(null);
   };
 
@@ -4474,6 +4650,90 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
                   borderRadius:10,padding:"12px",fontSize:13,resize:"none",outline:"none",
                   boxSizing:"border-box",lineHeight:1.5,fontFamily:"inherit",marginBottom:16,
                   background:micActivo?"#FEF2F2":"#fff"}}/>
+
+              {/* (v3.22.38) Bloque ofertas */}
+              <div style={{marginBottom:16, padding:"12px 14px", background:"#FFFBEB", border:"1.5px solid "+T.amber+"60", borderRadius:11}}>
+                <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:ofertasVisita.length>0?10:0}}>
+                  <p style={{margin:0, fontSize:11, fontWeight:800, color:"#92400E", textTransform:"uppercase"}}>
+                    💰 Ofertas/cotizaciones {ofertasVisita.length>0?"("+ofertasVisita.length+" línea"+(ofertasVisita.length===1?"":"s")+")":""}
+                  </p>
+                  <button onClick={()=>setShowOfertaForm(!showOfertaForm)}
+                    style={{background:"none", border:"none", color:T.amber, fontSize:12, fontWeight:700, cursor:"pointer", padding:"2px 6px"}}>
+                    {showOfertaForm?"− Cerrar":"+ Añadir"}
+                  </button>
+                </div>
+
+                {ofertasVisita.map(function(l){
+                  return (
+                    <div key={l.id} style={{display:"flex", gap:8, alignItems:"center", padding:"8px 10px", background:"#fff",
+                      border:"1px solid "+T.amber+"40", borderRadius:8, marginBottom:5}}>
+                      <div style={{flex:1, minWidth:0}}>
+                        <p style={{margin:0, fontWeight:700, color:T.text, fontSize:12, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>
+                          {l.producto}{l.calibre?" · "+l.calibre:""}
+                        </p>
+                        <p style={{margin:0, color:T.muted, fontSize:11}}>
+                          <strong style={{color:T.amber}}>{Number(l.precio).toFixed(2).replace(".",",")} {l.unidad}</strong>
+                          {l.notas?" · "+l.notas:""}
+                        </p>
+                      </div>
+                      <button onClick={function(){setOfertasVisita(p=>p.filter(x=>x.id!==l.id));}}
+                        style={{background:"none", border:"none", color:T.red, cursor:"pointer", fontSize:16, padding:"2px 6px"}}>✕</button>
+                    </div>
+                  );
+                })}
+
+                {showOfertaForm && (
+                  <div style={{marginTop:ofertasVisita.length>0?8:10, padding:"10px 12px", background:"#fff", borderRadius:9, border:"1px solid "+T.amber+"60"}}>
+                    <input value={ofertaForm.producto} onChange={e=>setOfertaForm(f=>({...f,producto:e.target.value}))}
+                      placeholder="Producto / código (ej: BR1 vacuno, CX50.9K)"
+                      style={{width:"100%", padding:"8px 10px", border:"1px solid "+T.border, borderRadius:7, fontSize:13, marginBottom:6, boxSizing:"border-box", fontFamily:"inherit"}}/>
+                    <div style={{display:"flex", gap:6, marginBottom:6}}>
+                      <input value={ofertaForm.calibre} onChange={e=>setOfertaForm(f=>({...f,calibre:e.target.value}))}
+                        placeholder="Calibre"
+                        style={{flex:1, padding:"8px 10px", border:"1px solid "+T.border, borderRadius:7, fontSize:13, boxSizing:"border-box", fontFamily:"inherit"}}/>
+                      <input value={ofertaForm.precio} onChange={e=>setOfertaForm(f=>({...f,precio:e.target.value}))}
+                        placeholder="Precio" type="text" inputMode="decimal"
+                        style={{width:90, padding:"8px 10px", border:"1px solid "+T.border, borderRadius:7, fontSize:13, boxSizing:"border-box", fontFamily:"inherit"}}/>
+                      <select value={ofertaForm.unidad} onChange={e=>setOfertaForm(f=>({...f,unidad:e.target.value}))}
+                        style={{padding:"8px 4px", border:"1px solid "+T.border, borderRadius:7, fontSize:11, background:"#fff", boxSizing:"border-box"}}>
+                        <option value="€/kg">€/kg</option>
+                        <option value="€/m">€/m</option>
+                        <option value="€/ud">€/ud</option>
+                        <option value="€/madeja">€/madeja</option>
+                        <option value="€/palet">€/palet</option>
+                      </select>
+                    </div>
+                    <input value={ofertaForm.notas} onChange={e=>setOfertaForm(f=>({...f,notas:e.target.value}))}
+                      placeholder="Notas (opcional: 90 metros, palet completo, etc.)"
+                      style={{width:"100%", padding:"8px 10px", border:"1px solid "+T.border, borderRadius:7, fontSize:13, marginBottom:8, boxSizing:"border-box", fontFamily:"inherit"}}/>
+                    <button onClick={function(){
+                      if(!ofertaForm.producto.trim()||!ofertaForm.precio){alert("Producto y precio son obligatorios");return;}
+                      const precio=parseFloat((ofertaForm.precio+"").replace(",","."));
+                      if(isNaN(precio)){alert("Precio inválido");return;}
+                      setOfertasVisita(p=>[...p,{
+                        id:"l"+Date.now()+"_"+Math.random().toString(36).slice(2,5),
+                        producto:ofertaForm.producto.trim(),
+                        calibre:ofertaForm.calibre.trim(),
+                        precio:precio,
+                        unidad:ofertaForm.unidad,
+                        notas:ofertaForm.notas.trim()
+                      }]);
+                      setOfertaForm({producto:"",calibre:"",precio:"",unidad:ofertaForm.unidad,notas:""});
+                    }}
+                      style={{width:"100%", padding:"9px", border:"none", background:T.amber, color:"#fff",
+                        fontWeight:700, fontSize:13, borderRadius:8, cursor:"pointer"}}>
+                      ➕ Añadir línea
+                    </button>
+                  </div>
+                )}
+
+                {ofertasVisita.length===0 && !showOfertaForm && (
+                  <p style={{margin:"6px 0 0", fontSize:11, color:"#78350F", fontStyle:"italic"}}>
+                    Pulsa "+ Añadir" para registrar precios cotizados. Aparecerán en seguimiento de ofertas.
+                  </p>
+                )}
+              </div>
+
               <button onClick={guardarVisita}
                 style={{width:"100%",padding:"14px",borderRadius:12,border:"none",
                   background:T.navy,color:"#fff",fontWeight:700,fontSize:15,cursor:"pointer",marginBottom:16}}>
