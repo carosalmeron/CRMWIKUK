@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.23.4";
-const CRM_BUILD = "04/05/2026-cron-compras-17utc";
+const CRM_VERSION = "3.23.5";
+const CRM_BUILD = "04/05/2026-ops-misemana-reorg";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -997,6 +997,9 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
   var treeRootOpenMS = _strop[0], setTreeRootOpenMS = _strop[1];
   var _steop = React.useState(null);
   var treeEqOpenMS = _steop[0], setTreeEqOpenMS = _steop[1];
+  // (v3.23.5) Estado para sección "Sin movimiento" colapsable
+  var _smv = React.useState(false);
+  var sinMovOpenMS = _smv[0], setSinMovOpenMS = _smv[1];
 
   // Map agente → equipo (todos los IDs posibles)
   var agenteEquipoMap = {};
@@ -1088,9 +1091,34 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
     }
     return false;
   });
-  var opsEnCursoSem360 = misOps.filter(function(o){
-    return opsNuevasSem360.indexOf(o) < 0;
-  });
+  // (v3.23.5) opsEnCursoSem360 y opsDormidasSem360 se calculan más abajo (necesitan visitasDetalladasDia)
+  var opsEnCursoSem360 = [];
+  var opsDormidasSem360 = [];
+  // Función para calcular días sin movimiento (usada para ordenar dormidas)
+  function _diasSinMov(o){
+    var fechas=[];
+    if(o.fechaUltimoCambio) fechas.push(o.fechaUltimoCambio);
+    if(o.fechaFeedback) fechas.push(o.fechaFeedback);
+    if(o.fechaActualizacion) fechas.push(o.fechaActualizacion);
+    if(o.fechaCreacion) fechas.push(o.fechaCreacion);
+    if(o.fechaCreacionStr) fechas.push(o.fechaCreacionStr);
+    if(Array.isArray(o.historial)){
+      o.historial.forEach(function(h){if(h.fecha)fechas.push(h.fecha);});
+    }
+    var maxTs=0;
+    fechas.forEach(function(f){
+      if(!f) return;
+      var d=null;
+      if((f+"").indexOf("T")>0) d=new Date(f);
+      else {
+        var p=(f+"").split("/");
+        if(p.length===3){var dd=parseInt(p[0]),mm=parseInt(p[1])-1,yy=parseInt(p[2]); if(yy<100)yy+=2000; d=new Date(yy,mm,dd);}
+      }
+      if(d && !isNaN(d.getTime()) && d.getTime()>maxTs) maxTs=d.getTime();
+    });
+    if(!maxTs) return 999;
+    return Math.floor((Date.now()-maxTs)/(1000*60*60*24));
+  }
   var opsResueltasSem360 = (oportunidadesDB||[]).filter(function(o){
     if(o.eliminada) return false;
     if(["ganada","perdida","cerrada_ganada","cerrada_perdida"].indexOf(o.estado||o.etapa) < 0) return false;
@@ -1833,6 +1861,54 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
     return oa-ob;
   });
 
+  // (v3.23.5) Construir set de clientes con visita esta semana → vincular ops a visitas
+  var _clientesConVisitaEstaSem = {};
+  diasOrdenados.forEach(function(dk){
+    (visitasDetalladasDia[dk]||[]).forEach(function(v){
+      var key = (v.clienteNombre||v.cliente||"").trim().toLowerCase();
+      if(key) _clientesConVisitaEstaSem[key] = true;
+    });
+  });
+  // Op tiene movimiento esta semana si: comentario/feedback/cambio de etapa cae esta sem, o cliente tiene visita esta sem
+  function _opTieneMovEstaSem(o){
+    if(Array.isArray(o.historial)){
+      for(var i=0;i<o.historial.length;i++){
+        var h=o.historial[i];
+        var f=h.fecha||h.fechaStr;
+        if(f && _semDeFecha(f)===semana) return true;
+      }
+    }
+    if(Array.isArray(o.comentarios)){
+      for(var j=0;j<o.comentarios.length;j++){
+        var c=o.comentarios[j];
+        var fc=c.fecha||c.fechaStr;
+        if(fc && _semDeFecha(fc)===semana) return true;
+      }
+    }
+    if(o.fechaUltimoCambio && _semDeFecha(o.fechaUltimoCambio)===semana) return true;
+    if(o.fechaFeedback && _semDeFecha(o.fechaFeedback)===semana) return true;
+    if(o.fechaCierre && _semDeFecha(o.fechaCierre)===semana) return true;
+    var nm=(o.cliente||o.nombre||o.clienteNombre||"").trim().toLowerCase();
+    if(nm && _clientesConVisitaEstaSem[nm]) return true;
+    return false;
+  }
+  // (v3.23.5) Set de clientes con oportunidad abierta (excluyendo cerradas) - para badge en visitas
+  var _clientesConOpAbierta = {};
+  misOps.forEach(function(o){
+    var nm=(o.cliente||o.nombre||o.clienteNombre||"").trim().toLowerCase();
+    if(nm) _clientesConOpAbierta[nm] = o; // guarda referencia a la op
+  });
+  // Recalcular ahora que tenemos visitas
+  opsEnCursoSem360 = misOps.filter(function(o){
+    if(opsNuevasSem360.indexOf(o)>=0) return false;
+    return _opTieneMovEstaSem(o);
+  });
+  opsDormidasSem360 = misOps.filter(function(o){
+    if(opsNuevasSem360.indexOf(o)>=0) return false;
+    if(opsEnCursoSem360.indexOf(o)>=0) return false;
+    return true;
+  });
+
   // Clientes nuevos creados esta semana (con filtros)
   var clientesNuevosSemana = (clientesFB||[]).filter(function(c){
     if(!pasaFiltroDia(c.fechaCreacion||c.fecha)) return false;
@@ -2335,6 +2411,9 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                           var lb = visLabel(v.resultado);
                           var nota = v.notas || v.nota || "";
                           var agName = nombreAgenteId(v.agente||v.agenteId);
+                          // (v3.23.5) Detectar si este cliente tiene oportunidad abierta
+                          var nmCli=(v.clienteNombre||v.cliente||"").trim().toLowerCase();
+                          var opCli = nmCli ? _clientesConOpAbierta[nmCli] : null;
                           return (
                             <div key={v.id} onClick={function(){
                               if(v.esOpoActividad && v.opoRef && onAbrirOportunidad){
@@ -2346,7 +2425,17 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                               else if(onAbrirCliente) onAbrirCliente(v.clienteNombre||v.cliente);
                             }} style={{padding:"10px 12px",borderRadius:10,marginBottom:6,cursor:"pointer",background:v.esOpoActividad?"#F8FAFC":"#FAFAFA",borderLeft:"3px solid "+c}}>
                               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
-                                <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text,wordBreak:"break-word",flex:1}}>{v.clienteNombre||v.cliente||"—"}{!esAgenteRol&&agName?<span style={{color:T.muted,fontWeight:500,fontSize:11}}> ({agName})</span>:null}</p>
+                                <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text,wordBreak:"break-word",flex:1}}>
+                                  {v.clienteNombre||v.cliente||"—"}
+                                  {opCli && !v.esOpoActividad && !v.esOferta && (
+                                    <span onClick={function(e){e.stopPropagation(); if(onAbrirOportunidad) onAbrirOportunidad(opCli);}}
+                                      style={{marginLeft:6,fontSize:9,fontWeight:700,padding:"2px 6px",borderRadius:6,background:"#EFF6FF",color:"#1E3A5F",border:"1px solid #BFDBFE",cursor:"pointer"}}
+                                      title="Cliente con oportunidad abierta - click para abrir">
+                                      💼 Op.{opCli.valor?" "+parseInt(opCli.valor).toLocaleString("es-ES")+"€":""}
+                                    </span>
+                                  )}
+                                  {!esAgenteRol&&agName?<span style={{color:T.muted,fontWeight:500,fontSize:11}}> ({agName})</span>:null}
+                                </p>
                               </div>
                               <p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>{v.fecha||""} · {ic} <span style={{color:c,fontWeight:600}}>{lb}</span>{v.ciudad?" · "+v.ciudad:""}</p>
                               {nota&&(
@@ -2581,13 +2670,13 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                 </div>
               )}
 
-              {(!tipoFiltroMS||tipoFiltroMS==="ops")&&(opsNuevasSem360.length+opsEnCursoSem360.length+opsResueltasSem360.length)>0&&(
+              {(!tipoFiltroMS||tipoFiltroMS==="ops")&&(opsNuevasSem360.length+opsEnCursoSem360.length+opsResueltasSem360.length+opsDormidasSem360.length)>0&&(
                 <div style={{background:"#fff",borderRadius:16,padding:18,marginBottom:14,borderLeft:"4px solid #1E3A5F",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
                   <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
                     <div style={{width:40,height:40,borderRadius:12,background:"#EFF6FF",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,color:T.navy}}>💼</div>
                     <div>
                       <p style={{margin:0,fontSize:15,fontWeight:800,color:T.navy}}>Oportunidades</p>
-                      <p style={{margin:0,fontSize:11,color:T.muted}}>{opsNuevasSem360.length} nuevas · {opsEnCursoSem360.length} en curso · {opsResueltasSem360.length} resueltas{pipeVal>0?" · "+pipeVal.toLocaleString("es-ES")+"€ pipeline":""}</p>
+                      <p style={{margin:0,fontSize:11,color:T.muted}}>{opsNuevasSem360.length} nuevas · {opsEnCursoSem360.length} con movimiento · {opsResueltasSem360.length} resueltas · <span style={{color:T.muted}}>{opsDormidasSem360.length} sin tocar</span>{pipeVal>0?" · "+pipeVal.toLocaleString("es-ES")+"€ pipeline":""}</p>
                     </div>
                   </div>
 
@@ -2595,9 +2684,15 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                     <p style={{margin:"4px 0 6px",fontSize:11,fontWeight:700,color:"#1E3A5F",textTransform:"uppercase",letterSpacing:.4}}>🆕 Nuevas esta semana ({opsNuevasSem360.length})</p>
                     {opsNuevasSem360.map(function(o){
                       var agO = nombreAgenteId(o.agenteId||o.agente);
+                      var nm=(o.cliente||o.nombre||o.clienteNombre||"").trim().toLowerCase();
+                      var conVisita = nm && _clientesConVisitaEstaSem[nm];
                       return <div key={o.id} onClick={function(){onNav("oportunidades");}} style={{padding:"8px 12px",marginBottom:6,borderRadius:10,background:"#FAFAFA",borderLeft:"3px solid #1E3A5F",cursor:"pointer"}}>
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
-                          <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{o.nombre||o.cliente}{agO?<span style={{color:T.muted,fontWeight:500,fontSize:11}}> ({agO})</span>:null}</p>
+                          <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>
+                            {o.nombre||o.cliente}
+                            {conVisita?<span style={{marginLeft:6,fontSize:9,fontWeight:700,padding:"2px 6px",borderRadius:6,background:"#22C55E15",color:"#16A34A"}}>📍 visita</span>:null}
+                            {agO?<span style={{color:T.muted,fontWeight:500,fontSize:11}}> ({agO})</span>:null}
+                          </p>
                           <span style={{fontSize:13,fontWeight:800,color:T.green,whiteSpace:"nowrap"}}>{o.valor?parseInt(o.valor).toLocaleString("es-ES")+"€":""}</span>
                         </div>
                         <p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>{ESTADOS[o.etapa||o.estado]?ESTADOS[o.etapa||o.estado].label:(o.estado||o.etapa||"")}</p>
@@ -2606,12 +2701,18 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                   </div>}
 
                   {opsEnCursoSem360.length>0&&<div style={{marginTop:opsNuevasSem360.length>0?12:0}}>
-                    <p style={{margin:"4px 0 6px",fontSize:11,fontWeight:700,color:"#F59E0B",textTransform:"uppercase",letterSpacing:.4}}>🔄 En curso ({opsEnCursoSem360.length})</p>
+                    <p style={{margin:"4px 0 6px",fontSize:11,fontWeight:700,color:"#F59E0B",textTransform:"uppercase",letterSpacing:.4}}>⚡ Con movimiento esta semana ({opsEnCursoSem360.length})</p>
                     {opsEnCursoSem360.map(function(o){
                       var agO = nombreAgenteId(o.agenteId||o.agente);
-                      return <div key={o.id} onClick={function(){onNav("oportunidades");}} style={{padding:"8px 12px",marginBottom:6,borderRadius:10,background:"#FAFAFA",borderLeft:"3px solid #F59E0B",cursor:"pointer"}}>
+                      var nm=(o.cliente||o.nombre||o.clienteNombre||"").trim().toLowerCase();
+                      var conVisita = nm && _clientesConVisitaEstaSem[nm];
+                      return <div key={o.id} onClick={function(){onNav("oportunidades");}} style={{padding:"8px 12px",marginBottom:6,borderRadius:10,background:"#FFFBEB",borderLeft:"3px solid #F59E0B",cursor:"pointer"}}>
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
-                          <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{o.nombre||o.cliente}{agO?<span style={{color:T.muted,fontWeight:500,fontSize:11}}> ({agO})</span>:null}</p>
+                          <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>
+                            {o.nombre||o.cliente}
+                            {conVisita?<span style={{marginLeft:6,fontSize:9,fontWeight:700,padding:"2px 6px",borderRadius:6,background:"#22C55E15",color:"#16A34A"}}>📍 visita esta sem</span>:null}
+                            {agO?<span style={{color:T.muted,fontWeight:500,fontSize:11}}> ({agO})</span>:null}
+                          </p>
                           <span style={{fontSize:13,fontWeight:800,color:T.green,whiteSpace:"nowrap"}}>{o.valor?parseInt(o.valor).toLocaleString("es-ES")+"€":""}</span>
                         </div>
                         <p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>{ESTADOS[o.etapa||o.estado]?ESTADOS[o.etapa||o.estado].label:(o.estado||o.etapa||"")}</p>
@@ -2634,6 +2735,38 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                         <p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>{lbl}{o.fechaCierre?" · "+o.fechaCierre:""}</p>
                       </div>;
                     })}
+                  </div>}
+
+                  {/* (v3.23.5) Sección "Sin movimiento" - colapsable */}
+                  {opsDormidasSem360.length>0&&<div style={{marginTop:(opsNuevasSem360.length+opsEnCursoSem360.length+opsResueltasSem360.length)>0?12:0}}>
+                    <button onClick={function(){setSinMovOpenMS(!sinMovOpenMS);}}
+                      style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1px solid "+T.border,background:"#fff",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase",letterSpacing:.4,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <span>{sinMovOpenMS?"▼":"▶"} 💤 Sin movimiento esta semana ({opsDormidasSem360.length})</span>
+                      <span style={{fontSize:9,color:T.muted,textTransform:"none"}}>
+                        {opsDormidasSem360.filter(function(o){return _diasSinMov(o)>=30;}).length>0?
+                          opsDormidasSem360.filter(function(o){return _diasSinMov(o)>=30;}).length+" estancadas":""}
+                      </span>
+                    </button>
+                    {sinMovOpenMS&&<div style={{marginTop:6}}>
+                      {opsDormidasSem360.slice().sort(function(a,b){return _diasSinMov(b)-_diasSinMov(a);}).map(function(o){
+                        var agO = nombreAgenteId(o.agenteId||o.agente);
+                        var dias = _diasSinMov(o);
+                        var estancada = dias>=30;
+                        return <div key={o.id} onClick={function(){onNav("oportunidades");}}
+                          style={{padding:"7px 12px",marginBottom:5,borderRadius:9,background:estancada?"#FEF2F2":"#FAFAFA",borderLeft:"3px solid "+(estancada?"#DC2626":T.border),cursor:"pointer",opacity:.85}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                            <p style={{margin:0,fontSize:12,fontWeight:600,color:T.text}}>
+                              {o.nombre||o.cliente}
+                              {agO?<span style={{color:T.muted,fontWeight:500,fontSize:10}}> ({agO})</span>:null}
+                            </p>
+                            <span style={{fontSize:10,fontWeight:700,color:estancada?T.red:T.muted,whiteSpace:"nowrap"}}>
+                              {estancada?"⚠️ ":""}{dias>=999?"sin actividad":dias+"d sin tocar"}
+                            </span>
+                          </div>
+                          <p style={{margin:"2px 0 0",fontSize:10,color:T.muted}}>{ESTADOS[o.etapa||o.estado]?ESTADOS[o.etapa||o.estado].label:(o.estado||o.etapa||"")}</p>
+                        </div>;
+                      })}
+                    </div>}
                   </div>}
                 </div>
               )}
