@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.22.29";
-const CRM_BUILD = "03/05/2026-bloqueo-cierre";
+const CRM_VERSION = "3.22.30";
+const CRM_BUILD = "03/05/2026-routing-aprobador";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -6056,13 +6056,23 @@ function MisEstrategias({usuario}){
   };
 
   // Pendientes de MI aprobación (usa el nuevo campo pendienteDe)
-  const pendAprobMia=estrategias.filter(e=>
-    e.estado==="pendiente_aprobacion"&&!e.eliminada&&
-    (e.pendienteDe===usuario.id || 
-     // Fallback legacy: si no tiene pendienteDe, usar lógica antigua
-     (!e.pendienteDe && esRolJefe && !e.escaladoA && deEquipo(e)) ||
-     (!e.pendienteDe && e.escaladoA===usuario.id))
-  );
+  // (v3.22.30) También incluye al CREADOR de la estrategia si su rol >= rol del pendienteDe
+  // Ej: jefe de ventas (director) creó la estrategia y la solicitud va al Responsable → director también la ve
+  const pendAprobMia=estrategias.filter(e=>{
+    if(e.estado!=="pendiente_aprobacion"||e.eliminada) return false;
+    // Caso 1: yo soy el destinatario directo
+    if(e.pendienteDe===usuario.id) return true;
+    // Caso 2: yo soy el creador y tengo rango superior al destinatario actual
+    if(e.creadoPor===usuario.id&&e.pendienteDe&&e.pendienteDe!==usuario.id){
+      const rolDest=(USUARIOS.find(u=>u.id===e.pendienteDe)||{}).rol;
+      const orden={ceo:3,director:2,jefe:1,agente:0};
+      if((orden[usuario.rol]||0)>=(orden[rolDest]||0)) return true;
+    }
+    // Fallback legacy
+    if(!e.pendienteDe && esRolJefe && !e.escaladoA && deEquipo(e)) return true;
+    if(!e.pendienteDe && e.escaladoA===usuario.id) return true;
+    return false;
+  });
 
   const elevadasPorMi=estrategias.filter(e=>
     e.estado==="pendiente_aprobacion"&&!e.eliminada&&
@@ -6722,17 +6732,55 @@ function MisEstrategias({usuario}){
     const jefeVentas=USUARIOS.find(u=>u.rol==="director");
     const ceoUser=USUARIOS.find(u=>u.rol==="ceo");
     let pendienteDeId,pendienteDeNombre;
-    const yaAproboCEO=(e.cadenaAprobacion||[]).some(c=>c.rol==="ceo"&&c.estado==="aprobado")
-      ||e.aprobadoPor==="CEO"||(e.resolucion&&e.resolucion.rol==="ceo");
-    if(yaAproboCEO){
-      pendienteDeId=ceoUser&&ceoUser.id;pendienteDeNombre=(ceoUser&&ceoUser.nombre)||"CEO";
-    } else if(nuevoDto<=cfg.jefe){
-      pendienteDeId=responsable&&responsable.id;pendienteDeNombre=(responsable&&responsable.nombre)||"Responsable";
-    } else if(nuevoDto<=cfg.director){
-      pendienteDeId=jefeVentas&&jefeVentas.id;pendienteDeNombre=(jefeVentas&&jefeVentas.nombre)||"Jefe de Ventas";
-    } else {
-      pendienteDeId=ceoUser&&ceoUser.id;pendienteDeNombre=(ceoUser&&ceoUser.nombre)||"CEO";
+
+    // (v3.22.30) Detectar último aprobador real de esta estrategia.
+    // Si la creó CEO/Director/Jefe y se auto-aprobó, ese mismo es quien debe revaluar.
+    // Si pasó por una cadena de aprobación, vamos al nivel más alto que aprobó.
+    let ultimoAprobadorRol=null,ultimoAprobadorId=null,ultimoAprobadorNombre=null;
+    // Primero buscar en la cadena oficial de aprobación
+    const aprobaciones=(e.cadenaAprobacion||[]).filter(c=>c.estado==="aprobado");
+    if(aprobaciones.length>0){
+      // Quedarse con el rol más alto: ceo > director > jefe
+      const orden={ceo:3,director:2,jefe:1};
+      aprobaciones.sort((a,b)=>(orden[b.rol]||0)-(orden[a.rol]||0));
+      ultimoAprobadorRol=aprobaciones[0].rol;
+      ultimoAprobadorId=aprobaciones[0].id;
+      ultimoAprobadorNombre=aprobaciones[0].nombre;
+    } else if(e.resolucion&&(e.resolucion.tipo==="aprobada"||e.resolucion.tipo==="aprobada_parcial")){
+      // Fallback: usar el rol de la resolución
+      ultimoAprobadorRol=e.resolucion.rol||(e.aprobadoPor==="CEO"?"ceo":null);
+      ultimoAprobadorNombre=e.resolucion.por;
+      // Buscar id por nombre/rol
+      const u=USUARIOS.find(u=>u.nombre===ultimoAprobadorNombre)||USUARIOS.find(u=>u.rol===ultimoAprobadorRol);
+      if(u){ultimoAprobadorId=u.id;ultimoAprobadorNombre=u.nombre;}
+    } else if(e.rolCreador==="ceo"||e.rolCreador==="director"){
+      // Si la creó CEO/Director (auto-aprobada), va a quien la creó
+      ultimoAprobadorRol=e.rolCreador;
+      ultimoAprobadorId=e.creadoPor;
+      ultimoAprobadorNombre=e.creadoPorNombre||(USUARIOS.find(u=>u.id===e.creadoPor)||{}).nombre;
     }
+
+    if(ultimoAprobadorId&&ultimoAprobadorRol){
+      // Si el descuento solicitado está por encima del nivel del último aprobador, escalar al siguiente
+      const orden={ceo:3,director:2,jefe:1};
+      const nivelMaxNecesario= nuevoDto<=cfg.jefe?1 : nuevoDto<=cfg.director?2 : 3;
+      if((orden[ultimoAprobadorRol]||0)>=nivelMaxNecesario){
+        // Su nivel cubre el nuevo dto: vuelve a él
+        pendienteDeId=ultimoAprobadorId;
+        pendienteDeNombre=ultimoAprobadorNombre;
+      } else {
+        // Necesita un nivel superior: ir al siguiente
+        if(nivelMaxNecesario===3){pendienteDeId=ceoUser&&ceoUser.id;pendienteDeNombre=(ceoUser&&ceoUser.nombre)||"CEO";}
+        else if(nivelMaxNecesario===2){pendienteDeId=jefeVentas&&jefeVentas.id;pendienteDeNombre=(jefeVentas&&jefeVentas.nombre)||"Jefe de Ventas";}
+        else {pendienteDeId=responsable&&responsable.id;pendienteDeNombre=(responsable&&responsable.nombre)||"Responsable";}
+      }
+    } else {
+      // No hay aprobador previo: enrutar por nivel de descuento como una solicitud nueva
+      if(nuevoDto<=cfg.jefe){pendienteDeId=responsable&&responsable.id;pendienteDeNombre=(responsable&&responsable.nombre)||"Responsable";}
+      else if(nuevoDto<=cfg.director){pendienteDeId=jefeVentas&&jefeVentas.id;pendienteDeNombre=(jefeVentas&&jefeVentas.nombre)||"Jefe de Ventas";}
+      else {pendienteDeId=ceoUser&&ceoUser.id;pendienteDeNombre=(ceoUser&&ceoUser.nombre)||"CEO";}
+    }
+
     const updated={...e,estado:"pendiente_aprobacion",maxDescuento:nuevoDto,dtoSolicitado:nuevoDto,
       // (v3.22.28) Marcar contexto de re-aprobación para que el aprobador vea que es solicitud de más dto
       solicitudReaprobacion:{
