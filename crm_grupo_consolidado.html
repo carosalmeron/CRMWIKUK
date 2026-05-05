@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.23.16";
-const CRM_BUILD = "05/05/2026-email-nombremap-rebuild";
+const CRM_VERSION = "3.23.17";
+const CRM_BUILD = "05/05/2026-misemana-agrupar-por-dia";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -1936,6 +1936,60 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
     return true;
   });
 
+  // (v3.23.17) Helpers para agrupar items por día dentro de la semana
+  function _normalizarDia(fechaStr){
+    if(!fechaStr) return {key:"sin-fecha", label:"Sin fecha", ts:0};
+    var d = null;
+    var s = String(fechaStr).trim();
+    if(s.indexOf("-")>0 && s.indexOf("T")>=0){
+      var iso = new Date(s);
+      if(!isNaN(iso.getTime())) d = iso;
+    }
+    if(!d){
+      var p = s.split("/");
+      if(p.length===3){
+        var dd=parseInt(p[0]),mm=parseInt(p[1])-1,yy=parseInt(p[2]);
+        if(yy<100) yy+=2000;
+        d=new Date(yy,mm,dd);
+      }
+    }
+    if(!d || isNaN(d.getTime())) return {key:"sin-fecha", label:"Sin fecha", ts:0};
+    var diasNombres = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
+    var meses = ["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
+    var key = d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");
+    var label = diasNombres[d.getDay()]+" "+d.getDate()+" "+meses[d.getMonth()];
+    return {key:key, label:label, ts:d.getTime()};
+  }
+  function _fechaParaOp(o, modo){
+    if(modo === "creacion") return o.fechaCreacionStr || o.fechaCreacion || o.fecha || o.fechaActualizacion || "";
+    if(modo === "cierre") return o.fechaCierre || o.fechaResolucion || o.fechaActualizacion || "";
+    if(modo === "movimiento"){
+      // Buscar la última actividad de esta semana
+      if(Array.isArray(o.actividad)){
+        for(var i=o.actividad.length-1;i>=0;i--){
+          var a=o.actividad[i];
+          if(a && a.fecha && _semDeFecha(a.fecha)===semana) return a.fecha;
+        }
+      }
+      if(o.fechaUltimoCambio && _semDeFecha(o.fechaUltimoCambio)===semana) return o.fechaUltimoCambio;
+      if(o.fechaActualizacion && _semDeFecha(o.fechaActualizacion)===semana) return o.fechaActualizacion;
+      if(o.fechaFeedback && _semDeFecha(o.fechaFeedback)===semana) return o.fechaFeedback;
+    }
+    return "";
+  }
+  function _agruparPorDia(items, fnFecha){
+    var grupos = {};
+    items.forEach(function(it){
+      var f = (typeof fnFecha === "function") ? fnFecha(it) : (it[fnFecha] || "");
+      var info = _normalizarDia(f);
+      if(!grupos[info.key]) grupos[info.key] = {label:info.label, ts:info.ts, items:[]};
+      grupos[info.key].items.push(it);
+    });
+    var arr = Object.keys(grupos).map(function(k){return {key:k, label:grupos[k].label, ts:grupos[k].ts, items:grupos[k].items};});
+    arr.sort(function(a,b){return (b.ts||0)-(a.ts||0);});
+    return arr;
+  }
+
   // Clientes nuevos creados esta semana (con filtros)
   var clientesNuevosSemana = (clientesFB||[]).filter(function(c){
     if(!pasaFiltroDia(c.fechaCreacion||c.fecha)) return false;
@@ -2515,7 +2569,10 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                   {muestrasNuevas360.length>0&&(
                     <div>
                       <p style={{margin:"4px 0 6px",fontSize:11,fontWeight:700,color:"#F59E0B",textTransform:"uppercase",letterSpacing:.4}}>🆕 Nuevas ({muestrasNuevas360.length})</p>
-                      {muestrasNuevas360.map(function(m){
+                      {_agruparPorDia(muestrasNuevas360, function(m){return m.fecha||m.fechaCreacion||"";}).map(function(grupo){
+                      return <div key={grupo.key} style={{marginBottom:6}}>
+                        <p style={{margin:"6px 0 4px",fontSize:10,fontWeight:700,color:"#94A3B8",textTransform:"uppercase",letterSpacing:.4}}>📆 {grupo.label} <span style={{color:"#CBD5E1",fontWeight:500}}>({grupo.items.length})</span></p>
+                        {grupo.items.map(function(m){
                         var ag = nombreAgenteId(m.agente);
                         return (
                           <div key={m.id} onClick={function(){onNav("muestras");}} style={{padding:"8px 12px",marginBottom:6,borderRadius:10,background:"#FAFAFA",borderLeft:"3px solid #F59E0B",cursor:"pointer"}}>
@@ -2527,13 +2584,18 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                           </div>
                         );
                       })}
+                      </div>;
+                      })}
                     </div>
                   )}
 
                   {muestrasResueltas360.length>0&&(
                     <div style={{marginTop:muestrasNuevas360.length>0?12:0}}>
                       <p style={{margin:"4px 0 6px",fontSize:11,fontWeight:700,color:"#22C55E",textTransform:"uppercase",letterSpacing:.4}}>✅ Resueltas ({muestrasResueltas360.length})</p>
-                      {muestrasResueltas360.map(function(m){
+                      {_agruparPorDia(muestrasResueltas360, function(m){return m.fechaFeedback||m.fechaCierre||m.fecha||"";}).map(function(grupo){
+                      return <div key={grupo.key} style={{marginBottom:6}}>
+                        <p style={{margin:"6px 0 4px",fontSize:10,fontWeight:700,color:"#94A3B8",textTransform:"uppercase",letterSpacing:.4}}>📆 {grupo.label} <span style={{color:"#CBD5E1",fontWeight:500}}>({grupo.items.length})</span></p>
+                        {grupo.items.map(function(m){
                         var ag = nombreAgenteId(m.agente);
                         var estLab = m.estado==="pedido"?"Pedido":m.estado==="positivo"?"Positivo":"KO";
                         // (v3.23.9) Extraer nota de feedback
@@ -2553,6 +2615,8 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                             )}
                           </div>
                         );
+                      })}
+                      </div>;
                       })}
                     </div>
                   )}
@@ -2717,7 +2781,10 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
 
                   {opsNuevasSem360.length>0&&<div>
                     <p style={{margin:"4px 0 6px",fontSize:11,fontWeight:700,color:"#1E3A5F",textTransform:"uppercase",letterSpacing:.4}}>🆕 Nuevas esta semana ({opsNuevasSem360.length})</p>
-                    {opsNuevasSem360.map(function(o){
+                    {_agruparPorDia(opsNuevasSem360, function(o){return _fechaParaOp(o,"creacion");}).map(function(grupo){
+                    return <div key={grupo.key} style={{marginBottom:6}}>
+                      <p style={{margin:"6px 0 4px",fontSize:10,fontWeight:700,color:"#94A3B8",textTransform:"uppercase",letterSpacing:.4}}>📆 {grupo.label} <span style={{color:"#CBD5E1",fontWeight:500}}>({grupo.items.length})</span></p>
+                      {grupo.items.map(function(o){
                       var agO = nombreAgenteId(o.agenteId||o.agente);
                       var nm=(o.cliente||o.nombre||o.clienteNombre||"").trim().toLowerCase();
                       var conVisita = nm && _clientesConVisitaEstaSem[nm];
@@ -2733,11 +2800,16 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                         <p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>{ESTADOS[o.etapa||o.estado]?ESTADOS[o.etapa||o.estado].label:(o.estado||o.etapa||"")}</p>
                       </div>;
                     })}
+                    </div>;
+                    })}
                   </div>}
 
                   {opsEnCursoSem360.length>0&&<div style={{marginTop:opsNuevasSem360.length>0?12:0}}>
                     <p style={{margin:"4px 0 6px",fontSize:11,fontWeight:700,color:"#F59E0B",textTransform:"uppercase",letterSpacing:.4}}>⚡ Con movimiento esta semana ({opsEnCursoSem360.length})</p>
-                    {opsEnCursoSem360.map(function(o){
+                    {_agruparPorDia(opsEnCursoSem360, function(o){return _fechaParaOp(o,"movimiento");}).map(function(grupo){
+                    return <div key={grupo.key} style={{marginBottom:6}}>
+                      <p style={{margin:"6px 0 4px",fontSize:10,fontWeight:700,color:"#94A3B8",textTransform:"uppercase",letterSpacing:.4}}>📆 {grupo.label} <span style={{color:"#CBD5E1",fontWeight:500}}>({grupo.items.length})</span></p>
+                      {grupo.items.map(function(o){
                       var agO = nombreAgenteId(o.agenteId||o.agente);
                       var nm=(o.cliente||o.nombre||o.clienteNombre||"").trim().toLowerCase();
                       var conVisita = nm && _clientesConVisitaEstaSem[nm];
@@ -2766,11 +2838,16 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                         )}
                       </div>;
                     })}
+                    </div>;
+                    })}
                   </div>}
 
                   {opsResueltasSem360.length>0&&<div style={{marginTop:(opsNuevasSem360.length+opsEnCursoSem360.length)>0?12:0}}>
                     <p style={{margin:"4px 0 6px",fontSize:11,fontWeight:700,color:"#22C55E",textTransform:"uppercase",letterSpacing:.4}}>✅ Resueltas esta semana ({opsResueltasSem360.length})</p>
-                    {opsResueltasSem360.map(function(o){
+                    {_agruparPorDia(opsResueltasSem360, function(o){return _fechaParaOp(o,"cierre");}).map(function(grupo){
+                    return <div key={grupo.key} style={{marginBottom:6}}>
+                      <p style={{margin:"6px 0 4px",fontSize:10,fontWeight:700,color:"#94A3B8",textTransform:"uppercase",letterSpacing:.4}}>📆 {grupo.label} <span style={{color:"#CBD5E1",fontWeight:500}}>({grupo.items.length})</span></p>
+                      {grupo.items.map(function(o){
                       var agO = nombreAgenteId(o.agenteId||o.agente);
                       var est = o.estado||o.etapa;
                       var icCol = (est==="ganada"||est==="cerrada_ganada")?"#22C55E":(est==="perdida"||est==="cerrada_perdida")?"#EF4444":"#1E3A5F";
@@ -2798,6 +2875,8 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                           </p>
                         )}
                       </div>;
+                    })}
+                    </div>;
                     })}
                   </div>}
 
