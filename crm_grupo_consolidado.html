@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.23.31";
-const CRM_BUILD = "05/05/2026-misemana-kpi-incidencias-filtro";
+const CRM_VERSION = "3.23.33";
+const CRM_BUILD = "05/05/2026-fix-misids-portal-estrategias-agente";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -327,14 +327,25 @@ let USUARIOS = [
 // Esta función devuelve un Set con todos los posibles IDs para comparar.
 function resolverMisIds(usuario){
   if(!usuario) return new Set();
+  // (v3.23.33) Incluir TODOS los identificadores posibles del usuario
   const ids=new Set([
     (usuario.id||"").toUpperCase(),
+    (usuario._docId||"").toUpperCase(),
     (usuario.user||"").toUpperCase(),
     (usuario.username||"").toUpperCase(),
     (usuario.grupoAgente||"").toUpperCase(),
+    (usuario.catalogoVendedor||"").toUpperCase(),
+    (usuario.portalId||"").toUpperCase(),
+    (usuario.portalDocId||"").toUpperCase(),
+    (usuario.nombre||"").toUpperCase(),
   ].filter(Boolean));
   if(usuario.grupoAgente){
     const match=USUARIOS.find(u=>u.grupoAgente&&u.grupoAgente.toUpperCase()===(usuario.grupoAgente||"").toUpperCase());
+    if(match) ids.add(match.id.toUpperCase());
+  }
+  // (v3.23.33) Si tiene catalogoVendedor, buscar usuario CRM con grupoAgente=catalogoVendedor
+  if(usuario.catalogoVendedor){
+    const match=USUARIOS.find(u=>u.grupoAgente&&u.grupoAgente.toUpperCase()===(usuario.catalogoVendedor||"").toUpperCase());
     if(match) ids.add(match.id.toUpperCase());
   }
   return ids;
@@ -2934,6 +2945,61 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
               )}
 
               {/* ═══ Sección Incidencias (v3.10.0/v3.23.30) ═══ */}
+              {(function(){
+                // (v3.23.32) Incidencias del usuario con respuesta nueva sin leer
+                var incRespNueva = (incidenciasDB||[]).filter(function(inc){
+                  if(inc.eliminada) return false;
+                  if(inc.autor!==usuario.id && (inc.informadoA||[]).indexOf(usuario.id)<0) return false;
+                  var hist = inc.historialEscalado||[];
+                  if(hist.length===0) return false;
+                  var ultPorOtro = null;
+                  for(var k=hist.length-1;k>=0;k--){
+                    if(hist[k].por && hist[k].por!==usuario.nombre){ ultPorOtro=hist[k]; break; }
+                  }
+                  if(!ultPorOtro) return false;
+                  var visto = inc["lecturas_"+usuario.id];
+                  if(!visto) return true;
+                  if(!ultPorOtro.fecha) return false;
+                  var pH = ultPorOtro.fecha.split("/");
+                  if(pH.length<3) return false;
+                  var fAct = new Date(pH[2].length===2?"20"+pH[2]:pH[2],pH[1]-1,pH[0]).getTime();
+                  var fVis = new Date(visto).getTime();
+                  return fAct > fVis;
+                });
+                if(incRespNueva.length===0) return null;
+                if(tipoFiltroMS && tipoFiltroMS!=="inc") return null;
+                return (
+                  <div style={{background:"#fff",borderRadius:16,padding:16,marginBottom:14,borderLeft:"4px solid #3B82F6",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+                      <div style={{width:40,height:40,borderRadius:12,background:"#DBEAFE",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>💬</div>
+                      <div>
+                        <p style={{margin:0,fontSize:15,fontWeight:800,color:T.navy}}>Respuestas a tus incidencias</p>
+                        <p style={{margin:0,fontSize:11,color:T.muted}}>{incRespNueva.length} sin leer</p>
+                      </div>
+                    </div>
+                    {incRespNueva.slice(0,5).map(function(inc){
+                      var hist = inc.historialEscalado||[];
+                      var ult = null;
+                      for(var k=hist.length-1;k>=0;k--){
+                        if(hist[k].por && hist[k].por!==usuario.nombre){ ult=hist[k]; break; }
+                      }
+                      return (
+                        <div key={inc.id} onClick={function(){onNav("incidencias");}} style={{padding:"10px 12px",background:"#EFF6FF",borderRadius:10,borderLeft:"3px solid #3B82F6",marginBottom:6,cursor:"pointer"}}>
+                          <p style={{margin:0,fontSize:13,fontWeight:700,color:"#1E40AF"}}>{inc.titulo||inc.descripcion||inc.tipo||"Incidencia"}</p>
+                          <p style={{margin:"3px 0 0",fontSize:11,color:"#1E3A8A"}}>{ult?(ult.accion+" — "+ult.por):"actividad nueva"}{ult&&ult.fecha?" · "+ult.fecha:""}</p>
+                          {ult&&ult.nota&&(
+                            <p style={{margin:"4px 0 0",fontSize:11,color:"#475569",fontStyle:"italic",padding:"4px 8px",background:"rgba(59,130,246,.08)",borderRadius:6}}>
+                              💬 {ult.nota.substring(0,200)}{ult.nota.length>200?"…":""}
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+
+              {/* ═══ Sección Incidencias abiertas — vista para responsables (v3.10.0/v3.23.30) ═══ */}
               {(function(){
                 // Filtrar incidencias por semana actual + filtro de día
                 var incFiltradas = misInc.filter(function(i){
@@ -6975,10 +7041,18 @@ function MisEstrategias({usuario}){
   );
 
   // Helper: ¿la estrategia pertenece al usuario o es global?
+  // (v3.23.33) Agentes solo ven SUS estrategias (no las del equipo entero)
   const esDelEquipoOGlobal=(e)=>{
-    if(e.agente===usuario.id) return true;
-    if(e.equipo&&e.equipo===miEquipo) return true;
-    if(!e.equipo||e.equipo==="") return true;
+    const misIds = resolverMisIds(usuario);
+    // Match por cualquier identificador del usuario
+    if(e.agente && misIds.has(String(e.agente).toUpperCase())) return true;
+    if(e.agenteId && misIds.has(String(e.agenteId).toUpperCase())) return true;
+    if(e.creadoPor && misIds.has(String(e.creadoPor).toUpperCase())) return true;
+    // Para roles superiores, ver todas las del equipo
+    if(!esAgente){
+      if(e.equipo&&e.equipo===miEquipo) return true;
+      if(!e.equipo||e.equipo==="") return true;
+    }
     return false;
   };
 
@@ -10923,6 +10997,26 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB}
     }
   };
 
+  // (v3.23.32) Notificar al autor cuando alguien comenta su incidencia
+  const comentar=(inc,nota)=>{
+    addHistorial(inc,"💬 Nota",nota);
+    if(inc.autor && inc.autor !== usuario.id){
+      despacharNotificacion({tipo:"incidencia",
+        titulo:`💬 Nueva nota en tu incidencia: ${inc.titulo||inc.asunto||inc.tipo||""}`,
+        mensaje:`${usuario.nombre} ha comentado: ${nota||""}`,
+        destinatarioId:inc.autor,prioridad:"normal",creadoPor:usuario.id});
+    }
+    // También notificar a quienes están informados
+    (inc.informadoA||[]).forEach(infId=>{
+      if(infId!==usuario.id){
+        despacharNotificacion({tipo:"incidencia",
+          titulo:`💬 Nueva nota: ${inc.titulo||inc.asunto||inc.tipo||""}`,
+          mensaje:`${usuario.nombre} ha comentado: ${nota||""}`,
+          destinatarioId:infId,prioridad:"normal",creadoPor:usuario.id});
+      }
+    });
+  };
+
   // Filtrar por rol
   const appMisIds=resolverMisIds(usuario);
   const misMostrar=incidencias.filter(i=>{
@@ -11226,7 +11320,7 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
   );
 }
 
-  if(sel) return <DetIncidencia sel={sel} usuario={usuario} director={director} ceo={ceo} esJefe={esJefe} esRolJefe={esRolJefe} onBack={()=>setSel(null)} onEscalar={(destId,nota)=>{escalar(sel,destId,nota);setSel({...sel,escaladoA:destId,estado:"escalada"});}} onInformar={(destId)=>informar(sel,destId)} onNota={(nota)=>addHistorial(sel,"💬 Nota",nota)} onCerrar={(nota,extras)=>cerrar(sel,nota,extras)} onDel={function(id){fbEscribir("incidencias",id,{id:id,eliminada:true,eliminadoPor:usuario.id,fechaEliminacion:new Date().toISOString()});setIncidencias(function(p){return p.filter(function(i){return i.id!==id;});});setSel(null);}}/>;
+  if(sel) return <DetIncidencia sel={sel} usuario={usuario} director={director} ceo={ceo} esJefe={esJefe} esRolJefe={esRolJefe} onBack={()=>setSel(null)} onEscalar={(destId,nota)=>{escalar(sel,destId,nota);setSel({...sel,escaladoA:destId,estado:"escalada"});}} onInformar={(destId)=>informar(sel,destId)} onNota={(nota)=>comentar(sel,nota)} onCerrar={(nota,extras)=>cerrar(sel,nota,extras)} onDel={function(id){fbEscribir("incidencias",id,{id:id,eliminada:true,eliminadoPor:usuario.id,fechaEliminacion:new Date().toISOString()});setIncidencias(function(p){return p.filter(function(i){return i.id!==id;});});setSel(null);}}/>;
 
   // ── LISTA ─────────────────────────────────────────────────────────
   return(
@@ -19317,6 +19411,36 @@ function App(props){
       notifs.push({tipo:"incidencia",icon:"🚨",color:"#EF4444",prioridad:3,
         titulo:inc.titulo||inc.asunto||"Incidencia",
         sub:`🔴 Abierta — ${inc.tipo||""}${inc.cliente?" · "+inc.cliente:""}`,
+        accion:()=>{setNotifOpen(false);setSection("incidencias");}});
+    });
+    // (v3.23.32) Incidencias del usuario con respuesta nueva sin leer
+    incidenciasDB.filter(inc=>{
+      if(inc.eliminada) return false;
+      if(inc.autor!==usuario.id && !(inc.informadoA||[]).includes(usuario.id)) return false;
+      // Buscar si hay actividad reciente desde otro usuario que el creador no ha visto
+      const hist = inc.historialEscalado||[];
+      if(hist.length===0) return false;
+      // Última entrada del historial NO hecha por mí
+      const ultPorOtro = [...hist].reverse().find(h=>h.por && h.por!==usuario.nombre);
+      if(!ultPorOtro) return false;
+      // ¿El creador ya la vio después de esa actividad?
+      const visto = inc[`lecturas_${usuario.id}`];
+      if(!visto) return true; // nunca abrió la incidencia
+      // Comparar fechas
+      const fHist = ultPorOtro.fecha;
+      if(!fHist) return false;
+      const pH = fHist.split("/");
+      if(pH.length<3) return false;
+      const fActividad = new Date(pH[2].length===2?"20"+pH[2]:pH[2],pH[1]-1,pH[0]).getTime();
+      const fVisto = new Date(visto).getTime();
+      return fActividad > fVisto;
+    }).forEach(inc=>{
+      const hist = inc.historialEscalado||[];
+      const ult = [...hist].reverse().find(h=>h.por && h.por!==usuario.nombre);
+      const accionTxt = ult?ult.accion:"actividad nueva";
+      notifs.push({tipo:"incidencia_resp",icon:"💬",color:"#3B82F6",prioridad:2,
+        titulo:`Tu incidencia: ${inc.titulo||inc.tipo||""}`,
+        sub:`${accionTxt} por ${ult?ult.por:""}`,
         accion:()=>{setNotifOpen(false);setSection("incidencias");}});
     });
     estrategiasDB.filter(e=>{
