@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.23.34";
-const CRM_BUILD = "05/05/2026-weekly-daily-dept-portal-sync";
+const CRM_VERSION = "3.23.35";
+const CRM_BUILD = "05/05/2026-modulo-potencial-cliente";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -14710,6 +14710,233 @@ function GestorOportunidades({usuario, onAbrirCliente, onNewCliente, opoDirecta,
 
 
 
+// ─── POTENCIAL CLIENTE (v3.23.35) ──────────────────────────────────
+// Lista las líneas de potencial de un cliente.
+// Cada línea: producto (catálogo o libre), kg/anual, opcionalmente precio competencia.
+// Acciones por línea: ✏️ editar, 🗑️ eliminar, 🎯 pedir/enviar estrategia, 💰 registrar oferta.
+function PotencialCliente({clienteSel, usuario, onPedirEstrategia, onEnviarEstrategia, onRegistrarOferta, registrarActividad}){
+  const [potencial,setPotencial]=useState(null);
+  const [cargando,setCargando]=useState(true);
+  const [editando,setEditando]=useState(null); // id de línea o "nuevo"
+  const [busqProd,setBusqProd]=useState("");
+  const [form,setForm]=useState({producto:"",calibre:"",kgAnual:"",fuente:"libre",notas:""});
+  const cliId = clienteSel.id||clienteSel.codigo||"";
+  const cliNombre = clienteSel.nombre||clienteSel.NOMBRE||"";
+  const esJefeOSuper = ["jefe","director","ceo"].includes(usuario.rol);
+
+  React.useEffect(function(){
+    if(!cliId) return;
+    setCargando(true);
+    fbLeer("potenciales").then(function(arr){
+      var p = (arr||[]).find(function(x){return x.clienteId===cliId && !x.eliminada;});
+      setPotencial(p || {id:"pot_"+cliId,clienteId:cliId,clienteNombre:cliNombre,
+        agente:usuario.id,equipo:usuario.equipo||"",lineas:[],
+        fechaCreacion:new Date().toISOString(),actividad:[]});
+      setCargando(false);
+    }).catch(function(){
+      setPotencial({id:"pot_"+cliId,clienteId:cliId,clienteNombre:cliNombre,
+        agente:usuario.id,equipo:usuario.equipo||"",lineas:[],
+        fechaCreacion:new Date().toISOString(),actividad:[]});
+      setCargando(false);
+    });
+  },[cliId]);
+
+  function guardarPotencial(p){
+    p.fechaActualizacion = new Date().toISOString();
+    fbEscribir("potenciales", p.id, p).catch(function(e){console.warn(e);});
+    setPotencial(p);
+    if(typeof registrarActividad==="function"){
+      registrarActividad({tipo:"potencial",cliente:cliNombre,clienteId:cliId,
+        fecha:new Date().toLocaleDateString("es-ES"),agente:usuario.id,
+        descripcion:"Potencial actualizado · "+p.lineas.length+" líneas"});
+    }
+  }
+
+  function abrirNuevo(){
+    setEditando("nuevo");
+    setForm({producto:"",calibre:"",kgAnual:"",fuente:"libre",notas:""});
+    setBusqProd("");
+  }
+  function abrirEditar(linea){
+    setEditando(linea.id);
+    setForm({producto:linea.producto||"",calibre:linea.calibre||"",
+      kgAnual:linea.kgAnual||"",fuente:linea.fuente||"libre",notas:linea.notas||""});
+    setBusqProd("");
+  }
+  function cancelar(){ setEditando(null); }
+
+  function pickCatalogo(prod){
+    setForm(function(f){return Object.assign({},f,{
+      producto:prod.nombre||prod.descripcion||"",
+      calibre:prod.calibre||prod.formato||"",
+      fuente:"catalogo"
+    });});
+    setBusqProd("");
+  }
+
+  function guardarLinea(){
+    if(!form.producto.trim()){alert("Indica el producto");return;}
+    if(!form.kgAnual||parseFloat(form.kgAnual)<=0){alert("Indica los kg/unidades anuales");return;}
+    var p = Object.assign({},potencial);
+    p.lineas = (p.lineas||[]).slice();
+    var lineaNueva = {
+      id: editando==="nuevo" ? "lin_"+Date.now() : editando,
+      producto: form.producto.trim(),
+      calibre: form.calibre.trim(),
+      kgAnual: parseFloat(form.kgAnual),
+      fuente: form.fuente,
+      notas: form.notas.trim(),
+      fechaCreacion: new Date().toISOString(),
+      creadoPor: usuario.id,
+    };
+    if(editando==="nuevo"){
+      p.lineas.push(lineaNueva);
+    } else {
+      var idx = p.lineas.findIndex(function(l){return l.id===editando;});
+      if(idx>=0){
+        lineaNueva.fechaCreacion = p.lineas[idx].fechaCreacion || lineaNueva.fechaCreacion;
+        lineaNueva.fechaActualizacion = new Date().toISOString();
+        p.lineas[idx] = lineaNueva;
+      }
+    }
+    p.actividad = (p.actividad||[]).concat([{
+      fecha: new Date().toLocaleDateString("es-ES"),
+      por: usuario.nombre || usuario.id,
+      accion: editando==="nuevo" ? "➕ Nueva línea" : "✏️ Línea editada",
+      detalle: lineaNueva.producto+" · "+lineaNueva.kgAnual+" kg/año"
+    }]);
+    guardarPotencial(p);
+    setEditando(null);
+  }
+
+  function eliminarLinea(linea){
+    if(!window.confirm("¿Eliminar línea de "+linea.producto+"?")) return;
+    var p = Object.assign({},potencial);
+    p.lineas = (p.lineas||[]).filter(function(l){return l.id!==linea.id;});
+    p.actividad = (p.actividad||[]).concat([{
+      fecha: new Date().toLocaleDateString("es-ES"),
+      por: usuario.nombre || usuario.id,
+      accion: "🗑️ Línea eliminada",
+      detalle: linea.producto
+    }]);
+    guardarPotencial(p);
+  }
+
+  // Buscar productos en catálogo
+  var catalogo = (typeof window!=="undefined" && window._productosCatalogo) || [];
+  var resBusq = busqProd.length>=2
+    ? catalogo.filter(function(p){
+        var n = (p.nombre||p.descripcion||"").toUpperCase();
+        var q = busqProd.toUpperCase();
+        return n.indexOf(q)>=0;
+      }).slice(0,8)
+    : [];
+
+  if(cargando) return <div style={{padding:40,textAlign:"center",color:T.muted}}>Cargando potencial…</div>;
+
+  var totalKg = (potencial.lineas||[]).reduce(function(s,l){return s+(parseFloat(l.kgAnual)||0);},0);
+
+  return <div style={{padding:"0 4px"}}>
+    {/* Cabecera con KPIs */}
+    <div style={{background:"#fff",borderRadius:14,padding:14,marginBottom:14,border:"1px solid "+T.border}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+        <p style={{margin:0,fontSize:17,fontWeight:800,color:T.text}}>📈 Potencial del cliente</p>
+        {!editando && <button onClick={abrirNuevo} style={{padding:"6px 14px",background:T.navy,color:"#fff",border:"none",borderRadius:8,fontWeight:700,fontSize:12,cursor:"pointer"}}>+ Añadir línea</button>}
+      </div>
+      <div style={{display:"flex",gap:14,marginTop:6}}>
+        <div><span style={{fontSize:18,fontWeight:800,color:T.navy}}>{(potencial.lineas||[]).length}</span> <span style={{fontSize:11,color:T.muted}}>líneas</span></div>
+        <div><span style={{fontSize:18,fontWeight:800,color:T.green}}>{totalKg.toLocaleString("es-ES")}</span> <span style={{fontSize:11,color:T.muted}}>kg/año total</span></div>
+      </div>
+    </div>
+
+    {/* Formulario nuevo / editar */}
+    {editando && (
+      <div style={{background:"#FEF3C7",borderRadius:14,padding:14,marginBottom:14,border:"1px solid #F59E0B"}}>
+        <p style={{margin:"0 0 10px",fontSize:14,fontWeight:700,color:"#78350F"}}>{editando==="nuevo"?"➕ Nueva línea":"✏️ Editar línea"}</p>
+
+        {/* Buscador catálogo */}
+        <p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:"#78350F"}}>Buscar en catálogo (opcional):</p>
+        <input value={busqProd} onChange={function(e){setBusqProd(e.target.value);}}
+          placeholder="Buscar producto del catálogo…"
+          style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1px solid "+T.border,fontSize:13,boxSizing:"border-box",marginBottom:6}}/>
+        {resBusq.length>0 && (
+          <div style={{background:"#fff",borderRadius:8,padding:6,marginBottom:8,border:"1px solid "+T.border}}>
+            {resBusq.map(function(p,i){
+              return <div key={i} onClick={function(){pickCatalogo(p);}} style={{padding:"6px 8px",borderBottom:i<resBusq.length-1?"1px solid #F1F5F9":"none",cursor:"pointer",fontSize:12}}>
+                <b>{p.nombre||p.descripcion}</b> {p.calibre&&<span style={{color:T.muted}}>· {p.calibre}</span>}
+              </div>;
+            })}
+          </div>
+        )}
+
+        <p style={{margin:"6px 0 4px",fontSize:11,fontWeight:700,color:"#78350F"}}>Producto: *</p>
+        <input value={form.producto} onChange={function(e){setForm(Object.assign({},form,{producto:e.target.value,fuente:"libre"}));}}
+          placeholder="Nombre del producto"
+          style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1px solid "+T.border,fontSize:13,boxSizing:"border-box"}}/>
+
+        <p style={{margin:"8px 0 4px",fontSize:11,fontWeight:700,color:"#78350F"}}>Calibre/Formato:</p>
+        <input value={form.calibre} onChange={function(e){setForm(Object.assign({},form,{calibre:e.target.value}));}}
+          placeholder="Ej: 32/34, 28+, etc."
+          style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1px solid "+T.border,fontSize:13,boxSizing:"border-box"}}/>
+
+        <p style={{margin:"8px 0 4px",fontSize:11,fontWeight:700,color:"#78350F"}}>Kg/unidades anuales: *</p>
+        <input value={form.kgAnual} onChange={function(e){setForm(Object.assign({},form,{kgAnual:e.target.value}));}}
+          type="number" placeholder="Cantidad anual estimada"
+          style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1px solid "+T.border,fontSize:13,boxSizing:"border-box"}}/>
+
+        <p style={{margin:"8px 0 4px",fontSize:11,fontWeight:700,color:"#78350F"}}>Notas:</p>
+        <textarea value={form.notas} onChange={function(e){setForm(Object.assign({},form,{notas:e.target.value}));}}
+          placeholder="Comentarios, proveedor actual, frecuencia, etc."
+          rows={2}
+          style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1px solid "+T.border,fontSize:13,boxSizing:"border-box",resize:"vertical"}}/>
+
+        <div style={{display:"flex",gap:8,marginTop:10}}>
+          <button onClick={guardarLinea} style={{flex:1,padding:"10px",background:T.green,color:"#fff",border:"none",borderRadius:8,fontWeight:700,fontSize:13,cursor:"pointer"}}>💾 Guardar</button>
+          <button onClick={cancelar} style={{padding:"10px 16px",background:"#fff",color:T.muted,border:"1px solid "+T.border,borderRadius:8,fontWeight:700,fontSize:13,cursor:"pointer"}}>Cancelar</button>
+        </div>
+      </div>
+    )}
+
+    {/* Lista de líneas */}
+    {(potencial.lineas||[]).length===0 && !editando ? (
+      <div style={{textAlign:"center",padding:40,color:T.muted}}>
+        <span style={{fontSize:36,display:"block",marginBottom:8}}>📈</span>
+        <p style={{margin:0,fontSize:14}}>Sin potencial registrado todavía</p>
+        <p style={{margin:"4px 0 0",fontSize:12}}>Añade lo que consume el cliente para detectar oportunidades</p>
+      </div>
+    ) : (
+      (potencial.lineas||[]).map(function(linea){
+        return <div key={linea.id} style={{background:"#fff",borderRadius:12,padding:12,marginBottom:8,border:"1px solid "+T.border}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,marginBottom:6}}>
+            <div style={{flex:1}}>
+              <p style={{margin:0,fontSize:14,fontWeight:700,color:T.text}}>
+                {linea.producto}
+                {linea.fuente==="catalogo" && <span style={{marginLeft:6,fontSize:9,padding:"2px 6px",borderRadius:6,background:"#DBEAFE",color:"#1E40AF",fontWeight:700}}>📦 Catálogo</span>}
+                {linea.fuente==="libre" && <span style={{marginLeft:6,fontSize:9,padding:"2px 6px",borderRadius:6,background:"#FEF3C7",color:"#92400E",fontWeight:700}}>✍️ Libre</span>}
+              </p>
+              {linea.calibre && <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{linea.calibre}</p>}
+              <p style={{margin:"4px 0 0",fontSize:13,fontWeight:700,color:T.green}}>{(parseFloat(linea.kgAnual)||0).toLocaleString("es-ES")} kg/año</p>
+              {linea.notas && <p style={{margin:"4px 0 0",fontSize:11,color:"#475569",fontStyle:"italic"}}>{linea.notas}</p>}
+            </div>
+          </div>
+          {/* Acciones */}
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:8,paddingTop:8,borderTop:"1px solid "+T.border}}>
+            <button onClick={function(){abrirEditar(linea);}} style={{padding:"6px 10px",background:"#fff",color:T.muted,border:"1px solid "+T.border,borderRadius:6,fontSize:11,fontWeight:700,cursor:"pointer"}}>✏️ Editar</button>
+            <button onClick={function(){eliminarLinea(linea);}} style={{padding:"6px 10px",background:"#fff",color:"#EF4444",border:"1px solid #FCA5A5",borderRadius:6,fontSize:11,fontWeight:700,cursor:"pointer"}}>🗑️</button>
+            <button onClick={function(){
+              if(typeof onPedirEstrategia==="function") onPedirEstrategia(linea, clienteSel);
+            }} style={{padding:"6px 10px",background:"#F3E8FF",color:"#7C3AED",border:"1px solid #DDD6FE",borderRadius:6,fontSize:11,fontWeight:700,cursor:"pointer"}}>🎯 {esJefeOSuper?"Enviar":"Pedir"} estrategia</button>
+            <button onClick={function(){
+              if(typeof onRegistrarOferta==="function") onRegistrarOferta(linea, clienteSel);
+            }} style={{padding:"6px 10px",background:"#FEF3C7",color:"#D97706",border:"1px solid #FCD34D",borderRadius:6,fontSize:11,fontWeight:700,cursor:"pointer"}}>💰 Registrar oferta</button>
+          </div>
+        </div>;
+      })
+    )}
+  </div>;
+}
+
+
 // ─── PROYECTOS ────────────────────────────────────────────────────
 function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onProyectoDirectoUsado}){
   const [proyectos,setProyectos]=useState(PROYECTOS_SEED);
@@ -16147,7 +16374,7 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
       {id:"muestras", icon:"📦",label:"Muestras"},
       {id:"estrat",   icon:"🎯",label:"Estrategia"},
       {id:"incidencia",icon:"🚨",label:"Incidencia"},
-      {id:"proyectos",icon:"📁",label:"Proyectos"},
+      {id:"potencial",icon:"📈",label:"Potencial"},
       {id:"historial",icon:"🕐",label:"Historial"},
     ];
 
@@ -16618,6 +16845,7 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
                   });
                 }
               }}
+              onIrAPotencial={function(){setTabSel("potencial");}}
             />
           )}
 
@@ -16769,75 +16997,67 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
             />
           )}
 
-          {/* ── TAB PROYECTOS ── */}
-          {tabSel==="proyectos"&&(
-            <div>
-              {cli360.proyectos.length===0?(
-                <div style={{textAlign:"center",padding:40,color:T.muted}}>
-                  <span style={{fontSize:36,display:"block",marginBottom:8}}>📁</span>
-                  <p style={{margin:0,fontSize:14}}>Sin proyectos para este cliente</p>
-                </div>
-              ):(
-                <div>
-                  <p style={{margin:"0 0 4px",fontSize:17,fontWeight:800,color:T.text}}>📁 Proyectos</p>
-                  <p style={{margin:"0 0 16px",fontSize:12,color:T.muted}}>{cli360.proyectos.length} proyecto{cli360.proyectos.length!==1?"s":""} · {cli360.hitosPendientes.length} hitos pendientes · {cli360.hitosHechos.length} completados</p>
-
-                  {cli360.proyectos.map(function(p,pi){
-                    var hTotal=(p.hitos||[]).length;
-                    var hDone=(p.hitos||[]).filter(function(h){return h.hecho;}).length;
-                    var hPend=(p.hitos||[]).filter(function(h){return !h.hecho;});
-                    var progreso=hTotal>0?Math.round(hDone/hTotal*100):0;
-                    var estColor=p.estado==="activo"?"#22C55E":p.estado==="cerrado_ok"?"#3B82F6":"#F59E0B";
-
-                    return <div key={p.id||pi} style={{background:"#fff",borderRadius:14,marginBottom:14,border:"1px solid "+T.border,overflow:"hidden"}}>
-                      {/* Cabecera proyecto */}
-                      <div style={{padding:"14px 16px",background:estColor+"08",borderBottom:"1px solid "+T.border}}>
-                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                          <p style={{margin:0,fontSize:15,fontWeight:800,color:T.text}}>{p.nombre}</p>
-                          <span style={{fontSize:10,padding:"3px 10px",borderRadius:99,background:estColor+"15",color:estColor,fontWeight:700}}>{p.estado||"activo"}</span>
-                        </div>
-                        {p.descripcion&&<p style={{margin:"0 0 8px",fontSize:12,color:T.muted,lineHeight:1.4}}>{p.descripcion}</p>}
-                        {hTotal>0&&(
-                          <div>
-                            <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
-                              <span style={{fontSize:10,color:T.muted}}>{hDone}/{hTotal} hitos</span>
-                              <span style={{fontSize:10,fontWeight:700,color:estColor}}>{progreso}%</span>
-                            </div>
-                            <div style={{height:6,background:"#E2E8F0",borderRadius:99}}>
-                              <div style={{height:6,background:estColor,borderRadius:99,width:progreso+"%",transition:"width .3s"}}/>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Hitos */}
-                      {hTotal>0&&(
-                        <div style={{padding:"10px 16px"}}>
-                          {(p.hitos||[]).map(function(h,hi){
-                            var rU=USUARIOS.find(function(u){return u.id===h.responsable;});
-                            return <div key={hi} style={{display:"flex",gap:10,padding:"8px 0",borderBottom:hi<hTotal-1?"1px solid #F1F5F9":"none"}}>
-                              <div style={{width:28,height:28,borderRadius:8,flexShrink:0,marginTop:2,
-                                background:h.hecho?"#D1FAE5":"#FEF3C7",
-                                display:"flex",alignItems:"center",justifyContent:"center",fontSize:13}}>
-                                {h.hecho?"✅":"📍"}
-                              </div>
-                              <div style={{flex:1}}>
-                                <p style={{margin:0,fontSize:13,fontWeight:600,color:h.hecho?"#64748B":T.text,
-                                  textDecoration:h.hecho?"line-through":"none"}}>{h.nombre}</p>
-                                <div style={{display:"flex",gap:8,marginTop:3,flexWrap:"wrap"}}>
-                                  {h.fecha&&<span style={{fontSize:10,color:h.hecho?"#94A3B8":"#B45309"}}>{h.hecho?"Completado: "+(h.fechaHecho||h.fecha):"Fecha: "+h.fecha}</span>}
-                                  {rU&&<span style={{fontSize:10,color:"#64748B"}}>{rU.icon} {rU.nombre}</span>}
-                                </div>
-                              </div>
-                            </div>;
-                          })}
-                        </div>
-                      )}
-                    </div>;
-                  })}
-                </div>
-              )}
-            </div>
+          {/* ── TAB POTENCIAL (v3.23.35) ── */}
+          {tabSel==="potencial"&&(
+            <PotencialCliente
+              clienteSel={clienteSel}
+              usuario={usuario}
+              registrarActividad={function(act){
+                if(typeof onActividad==="function"){
+                  // No hacemos nada extra de momento; el potencial se guarda en su propia colección
+                }
+              }}
+              onPedirEstrategia={function(linea, cli){
+                // Crear estrategia con producto preseleccionado
+                var nueva = {
+                  id:"e_"+Date.now(),
+                  cliente:cli.nombre||cli.NOMBRE,clienteId:cli.id,
+                  agente:usuario.id,equipo:usuario.equipo||"",
+                  tipo:"recuperacion",producto:linea.producto,calibre:linea.calibre||"",
+                  objetivo:"Pedir estrategia para entrar con "+linea.producto+" ("+(linea.kgAnual||"?")+" kg/año)",
+                  texto:linea.notas||"",
+                  estado: ["jefe","director","ceo"].includes(usuario.rol) ? "en_curso" : "pendiente_resp",
+                  pendienteRespEquipo:usuario.equipo||"",
+                  fechaCreacion:new Date().toISOString(),
+                  fecha:new Date().toLocaleDateString("es-ES"),
+                  semana:getSemanaISO(),
+                  origen:"potencial"
+                };
+                fbEscribir("estrategias",nueva.id,nueva);
+                onActividad(cli.id,Object.assign({},act,{estrategias:[].concat(act.estrategias||[]).concat([nueva])}));
+                alert(["jefe","director","ceo"].includes(usuario.rol) ? "✅ Estrategia enviada" : "✅ Petición de estrategia registrada");
+              }}
+              onEnviarEstrategia={function(linea, cli){
+                // Mismo handler que pedir, en backend ya lo decide por rol
+              }}
+              onRegistrarOferta={function(linea, cli){
+                // Crear oferta nueva con la línea preseleccionada
+                var nueva = {
+                  id:"of_"+Date.now(),
+                  clienteNombre:cli.nombre||cli.NOMBRE,
+                  clienteCodigo:cli.codigo||cli.id||"",
+                  clienteId:cli.id,
+                  agente:usuario.id,
+                  agenteNombre:usuario.nombre||usuario.id,
+                  equipo:usuario.equipo||"",
+                  lineas:[{
+                    id:"li_"+Date.now(),
+                    producto:linea.producto,
+                    calibre:linea.calibre||"",
+                    precio:"",
+                    unidad:"kg",
+                    notas:linea.notas||""
+                  }],
+                  estado:"pendiente",
+                  fechaCreacion:new Date().toISOString(),
+                  fechaCreacionStr:new Date().toLocaleDateString("es-ES"),
+                  notaInicial:"Origen: potencial cliente · "+(linea.kgAnual||"?")+" kg/año estimados",
+                  origen:"potencial"
+                };
+                fbEscribir("ofertas",nueva.id,nueva);
+                alert("✅ Oferta registrada. Edítala desde el módulo Ofertas para añadir precios.");
+              }}
+            />
           )}
 
           {/* ── TAB HISTORIAL ── */}
@@ -17261,7 +17481,7 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
   );
 }
 
-function VisitaTab({cliente,act,resultados,onGuardar}){
+function VisitaTab({cliente,act,resultados,onGuardar,onIrAPotencial}){
   const [res,setRes]=useState("");
   const [nota,setNota]=useState("");
   const [guardado,setGuardado]=useState(false);
@@ -17423,6 +17643,20 @@ function VisitaTab({cliente,act,resultados,onGuardar}){
             Pulsa "+ Añadir" para registrar precios cotizados al cliente.
           </p>
         )}
+      </div>
+
+      {/* (v3.23.35) Botón acceso rápido al Potencial del cliente */}
+      <div style={{background:"#F0F9FF",borderRadius:12,padding:"10px 14px",marginBottom:12,border:"1px solid #BAE6FD"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+          <div style={{flex:1}}>
+            <p style={{margin:0,fontSize:13,fontWeight:700,color:"#075985"}}>📈 Potencial del cliente</p>
+            <p style={{margin:"2px 0 0",fontSize:11,color:"#0C4A6E"}}>Registra qué consume el cliente para detectar oportunidades</p>
+          </div>
+          <button onClick={function(){if(typeof onIrAPotencial==="function") onIrAPotencial();}}
+            style={{padding:"8px 14px",background:"#0284C7",color:"#fff",border:"none",borderRadius:8,fontWeight:700,fontSize:12,cursor:"pointer",whiteSpace:"nowrap"}}>
+            Ver / Editar
+          </button>
+        </div>
       </div>
 
       <button onClick={guardar} disabled={!res}
@@ -19600,12 +19834,12 @@ function App(props){
     {id:"oportunidades",icon:"💼",label:"Ops",         color:T.navy,  badge:opsAbiertas},
     {id:"ofertas",      icon:"💰",label:"Ofertas",     color:T.amber, badge:ofertasPendCount},
     {id:"muestras",     icon:"📦",label:"Muestras",    color:T.purple, badge:pend},
-    {id:"proyectos",    icon:"📁",label:"Proyectos",   color:T.purple},
     {id:"estrategias",  icon:"🎯",label:"Estrategias", color:T.green,  badge:estEnCurso},
     {id:"incidencias",  icon:"🚨",label:"Incidencias", color:T.red,    badge:incAbiertas},
     {id:"calendario",   icon:"🗓️",label:"Agenda",       color:T.blue},
     {id:"tareas",       icon:"📌",label:"Tareas",        color:T.red},
     {id:"reporting",    icon:"📈",label:"Reporting",     color:T.navy},
+    {id:"proyectos",    icon:"📁",label:"Proyectos",   color:T.purple},
     {id:"ia",           icon:"🤖",label:"IA",             color:T.purple},
   ];
 
@@ -19620,9 +19854,9 @@ function App(props){
     {id:"estrategias",  icon:"🎯",label:"Estrategias", color:T.green, badge:estEnCurso},
     {id:"oportunidades",icon:"💼",label:"Ops",         color:T.navy,  badge:opsAbiertas},
     {id:"ofertas",      icon:"💰",label:"Ofertas",     color:T.amber, badge:ofertasPendCount},
-    {id:"proyectos",    icon:"📁",label:"Proyectos",   color:T.purple},
     {id:"incidencias",  icon:"🚨",label:"Incidencias", color:T.red,   badge:incAbiertas},
     {id:"reporting",    icon:"📈",label:"Reporting",    color:T.navy},
+    {id:"proyectos",    icon:"📁",label:"Proyectos",   color:T.purple},
     {id:"ia",           icon:"🤖",label:"IA",          color:T.purple},
   ];
 
@@ -19638,9 +19872,9 @@ function App(props){
     {id:"oportunidades",icon:"💼",label:"Ops",          color:T.navy,  badge:opsAbiertas},
     {id:"ofertas",      icon:"💰",label:"Ofertas",     color:T.amber, badge:ofertasPendCount},
     {id:"vamos_caros",  icon:"📊",label:"Caros",        color:"#DC2626"},
-    {id:"proyectos",    icon:"📁",label:"Proyectos",    color:T.purple},
     {id:"incidencias",  icon:"🚨",label:"Incidencias",  color:T.red,   badge:incAbiertas},
     {id:"reporting",    icon:"📈",label:"Reporting",     color:T.navy},
+    {id:"proyectos",    icon:"📁",label:"Proyectos",    color:T.purple},
     {id:"ia",           icon:"🤖",label:"IA",           color:T.purple},
   ];
 
