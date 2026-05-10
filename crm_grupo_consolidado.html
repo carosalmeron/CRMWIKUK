@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.23.38";
-const CRM_BUILD = "05/05/2026-volver-a-potencial";
+const CRM_VERSION = "3.23.40";
+const CRM_BUILD = "05/05/2026-volver-cliente-fixes";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -424,16 +424,22 @@ async function cargarUsuariosFB(){
 // Helper top-level: semana ISO actual (reutilizado por todos los dashboards).
 const getSemanaISO=()=>{const d=new Date();const s=new Date(d.getFullYear(),0,1);return Math.ceil(((d-s)/86400000+s.getDay()+1)/7);};
 
-// (v3.23.38) Helper para volver al cliente/Potencial tras crear/cancelar estrategia u oferta desde Potencial
-function volverAPotencialSiCorresponde(setSection, setClienteDirecto){
+// (v3.23.38/40) Helper para volver al cliente/Potencial tras crear/cancelar estrategia u oferta desde Potencial
+function volverAPotencialSiCorresponde(setSection, setClienteDirecto, usuario){
   try{
     const raw = sessionStorage.getItem("returnToPotencial");
     if(!raw) return false;
     const ret = JSON.parse(raw);
     sessionStorage.removeItem("returnToPotencial");
     if(!ret || !ret.clienteId) return false;
-    if(typeof setClienteDirecto==="function") setClienteDirecto({id: ret.clienteId, _abrirTab: ret.tab||"potencial"});
-    if(typeof setSection==="function") setSection("clientes");
+    if(typeof setClienteDirecto==="function"){
+      setClienteDirecto({id: ret.clienteId, _abrirTab: ret.tab||"potencial", ts: Date.now()});
+    }
+    if(typeof setSection==="function"){
+      // (v3.23.40) Detectar sección correcta según rol
+      const esAgente = usuario && usuario.rol==="agente";
+      setSection(esAgente ? "clientes" : "clientes_eq");
+    }
     return true;
   }catch(e){return false;}
 }
@@ -9189,9 +9195,9 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
       setOfertasDB(function(prev){return [nueva].concat(prev||[]);});
       setShowNuevaOf(false);
       setFormOf({clienteNombre:"",clienteId:"",producto:"",calibre:"",precio:"",unidad:"kg",notas:"",notaInicial:""});
-      // (v3.23.38) Volver al potencial si venimos de allí
-      if(typeof onVolverPotencial==="function") onVolverPotencial();
-      else alert("✅ Oferta creada");
+      // (v3.23.38/40) Volver al potencial si venimos de allí; si no, mostrar feedback
+      var volvio = (typeof onVolverPotencial==="function") ? onVolverPotencial() : false;
+      if(!volvio) alert("✅ Oferta creada");
     }).catch(function(e){alert("Error: "+e.message);});
   }
 
@@ -16299,7 +16305,11 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
   const [localOpos,setLocalOpos]=useState(oportunidadesDB||[]);
   React.useEffect(function(){setLocalOpos(oportunidadesDB||[]);},[oportunidadesDB]);
   const clientes=clientesFB&&clientesFB.length>0 ? clientesFB : (CLIENTES_POR_AGENTE[usuario.id]||[]);
-  const [rutaSel,setRutaSel]=useState(null);
+  const [rutaSel,setRutaSel]=useState(function(){
+    // (v3.23.39) Si entramos con clienteDirecto, saltarse pantalla de rutas
+    if(clienteDirecto && (clienteDirecto.id || clienteDirecto.nombre)) return "libre";
+    return null;
+  });
   const [clienteSel,setClienteSel]=useState(function(){
     if(clienteDirecto&&(clienteDirecto.nombre||clienteDirecto.id)){
       var found=null;
@@ -16354,17 +16364,25 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
     });
   },[clienteSel]);
   const [editForm360,setEditForm360]=useState({});
-  // Auto-seleccionar cliente cuando clienteDirecto cambia
+  // Auto-seleccionar cliente cuando clienteDirecto cambia (v3.23.40)
   React.useEffect(function(){
-    if(!clienteDirecto||!clienteDirecto.nombre) return;
-    var q=clienteDirecto.nombre.toUpperCase();
-    var found=clientes.find(function(c){return (c.nombre||c.NOMBRE||"").toUpperCase()===q;});
-    if(!found&&clienteDirecto.id) found=clienteDirecto;
-    if(!found) found={id:"tmp_"+Date.now(),nombre:clienteDirecto.nombre,NOMBRE:clienteDirecto.nombre};
+    if(!clienteDirecto) return;
+    if(!clienteDirecto.id && !clienteDirecto.nombre) return;
+    var found = null;
+    if(clienteDirecto.id){
+      found = clientes.find(function(c){return c.id===clienteDirecto.id;});
+    }
+    if(!found && clienteDirecto.nombre){
+      var q=clienteDirecto.nombre.toUpperCase();
+      found=clientes.find(function(c){return (c.nombre||c.NOMBRE||"").toUpperCase()===q;});
+    }
+    if(!found && clienteDirecto.nombre) found={id:"tmp_"+Date.now(),nombre:clienteDirecto.nombre,NOMBRE:clienteDirecto.nombre};
+    if(!found) return; // no hacer nada si no podemos resolver el cliente
     setClienteSel(found);
-    setTabSel("visita");
+    setRutaSel("libre");
+    setTabSel(clienteDirecto._abrirTab || "visita");
     if(onClienteDirectoUsado) setTimeout(onClienteDirectoUsado,100);
-  },[clienteDirecto&&clienteDirecto.ts]);
+  },[clienteDirecto&&clienteDirecto.ts, clienteDirecto&&clienteDirecto.id, clienteDirecto&&clienteDirecto._abrirTab]);
   const [nuevoAgente,setNuevoAgente]=useState("");
   const [tareasReasig,setTareasReasig]=useState([]);
   const [rutasProgramadas,setRutasProgramadas]=useState([]);
@@ -20647,7 +20665,7 @@ function App(props){
         {!esAgente&&section==="plan_semanal"&& <MiSemana usuario={usuario} clientesFB={misClientesFB} onBack={()=>setSection("dashboard")} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} muestrasDB={muestrasDB} ofertasDB={ofertasDB} setOfertasDB={setOfertasDB} portalUsersDB={portalUsersDB} actividad={actividadSemana} onAbrirCliente={function(data){var obj=typeof data==="string"?{nombre:data,ts:Date.now()}:Object.assign({},data,{ts:Date.now()});setClienteDirecto(obj);setHideNav(true);setSection(esJefeOmas?"clientes_eq":"clientes");}} onAbrirProyecto={function(nombre){setProyectoDirecto({nombre:nombre,ts:Date.now()});setSection("proyectos");}} onNewCliente={function(nuevo){setClientesDB(function(prev){if(!prev||!prev._todos)return prev;return Object.assign({},prev,{_todos:[nuevo].concat(prev._todos)});});}} onAbrirOportunidad={function(opo){setOpoDirecta(Object.assign({},opo,{ts:Date.now()}));setSection("oportunidades");}}/>}
         {section==="recuperacion"&& <Recuperacion usuario={usuario} ventasDB={ventasDB} clientesFB={misClientesFB} onBack={()=>setSection("dashboard")} onNav={setSection} onAbrirCliente={function(data){var obj=typeof data==="string"?{nombre:data,ts:Date.now()}:Object.assign({},data,{ts:Date.now()});setClienteDirecto(obj);setHideNav(true);setSection(esAgente?"clientes":"clientes_eq");}}/>}
         {/* (v3.22.43) Módulo Ofertas */}
-        {section==="ofertas"&& <OfertasModule usuario={usuario} ofertasDB={ofertasDB} setOfertasDB={setOfertasDB} onBack={function(){setSection("dashboard");}} onVolverPotencial={function(){volverAPotencialSiCorresponde(setSection, setClienteDirecto);}}/>}
+        {section==="ofertas"&& <OfertasModule usuario={usuario} ofertasDB={ofertasDB} setOfertasDB={setOfertasDB} onBack={function(){setSection("dashboard");}} onVolverPotencial={function(){return volverAPotencialSiCorresponde(setSection, setClienteDirecto, usuario);}}/>}
         {/* (v3.23.0) Módulo Vamos Caros - informe ejecutivo */}
         {section==="vamos_caros"&& <VamosCaros usuario={usuario} ofertasDB={ofertasDB} setOfertasDB={setOfertasDB} onBack={function(){setSection(usuario.rol==="compras"?"vamos_caros":"dashboard");}}/>}
         {/* (v3.23.1) Incidencias Stock y Calidad - para Compras (sustituye Resp. Stock) */}
@@ -20705,7 +20723,7 @@ function App(props){
         {esDir&&section==="dashboard"&&     <DashDirector usuario={usuario} onNav={setSection} estrategiasDB={estrategiasDB}/>}
 
         {/* Compartidas — con filtrado por rol dentro de cada componente */}
-        {section==="estrategias"&&          <MisEstrategias usuario={usuario} onVolverPotencial={function(){volverAPotencialSiCorresponde(setSection, setClienteDirecto);}}/>}
+        {section==="estrategias"&&          <MisEstrategias usuario={usuario} onVolverPotencial={function(){return volverAPotencialSiCorresponde(setSection, setClienteDirecto, usuario);}}/>}
         {section==="oportunidades"&&        <GestorOportunidades usuario={usuario} onAbrirCliente={onAbrirCliente} opoDirecta={opoDirecta} onOpoDirectaUsada={function(){setOpoDirecta(null);}} onBack={function(){setSection(prevSectionRef.current||"dashboard");}} onNewCliente={function(nuevo){setClientesDB(function(prev){if(!prev||!prev._todos)return prev;return Object.assign({},prev,{_todos:[nuevo].concat(prev._todos)});});}}/>}
         {section==="proyectos"&&            <Proyectos usuario={usuario} onAbrirCliente={onAbrirCliente} onIrASeccion={onIrASeccion} proyectoDirecto={proyectoDirecto} onProyectoDirectoUsado={function(){setProyectoDirecto(null);}}/>}
         {section==="incidencias"&&          <Incidencias usuario={usuario} clientesFB={misClientesFB} onAbrirCliente={onAbrirCliente} incidenciasDB={incidenciasDB}/>}
