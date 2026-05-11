@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.23.40";
-const CRM_BUILD = "05/05/2026-volver-cliente-fixes";
+const CRM_VERSION = "3.23.41";
+const CRM_BUILD = "10/05/2026-ofertas-estado-por-linea";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -9141,6 +9141,9 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
   var _preciosComp = React.useState({}); var preciosComp = _preciosComp[0], setPreciosComp = _preciosComp[1];
   var _notaCierre = React.useState(""); var notaCierre = _notaCierre[0], setNotaCierre = _notaCierre[1];
 
+  // (v3.23.41) Selección de líneas para acciones por línea
+  var _lineasSel = React.useState([]); var lineasSelModal = _lineasSel[0], setLineasSelModal = _lineasSel[1];
+
   // (v3.23.37) Form nueva oferta + prefill desde Potencial
   var _showNueva = React.useState(false); var showNuevaOf = _showNueva[0], setShowNuevaOf = _showNueva[1];
   var _formOf = React.useState({clienteNombre:"",clienteId:"",producto:"",calibre:"",precio:"",unidad:"kg",notas:"",notaInicial:""});
@@ -9213,10 +9216,21 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
     return true; // director/ceo
   }
   var todas = (ofertasDB||[]).filter(visibles);
-  var pendientes = todas.filter(function(o){return o.estado==="pendiente";});
-  var pedido = todas.filter(function(o){return o.estado==="pedido";});
-  var caras = todas.filter(function(o){return o.estado==="caro";});
-  var noResp = todas.filter(function(o){return o.estado==="no_responde";});
+  // (v3.23.41) Filtros inclusivos: una oferta aparece en una pestaña si TIENE alguna línea con ese estado
+  // (o si su estado global lo es, para compat con ofertas antiguas sin estado por línea)
+  function tieneLineaEnEstado(o, estado){
+    if(!o.lineas || o.lineas.length===0) return o.estado===estado;
+    // Si alguna línea está en ese estado → cuenta
+    var match = o.lineas.some(function(l){return (l.estado||"pendiente")===estado;});
+    if(match) return true;
+    // Compat: si no hay estado por línea poblado y el estado global coincide
+    var sinEstadoLinea = o.lineas.every(function(l){return !l.estado;});
+    return sinEstadoLinea && o.estado===estado;
+  }
+  var pendientes = todas.filter(function(o){return tieneLineaEnEstado(o,"pendiente");});
+  var pedido = todas.filter(function(o){return tieneLineaEnEstado(o,"pedido");});
+  var caras = todas.filter(function(o){return tieneLineaEnEstado(o,"caro");});
+  var noResp = todas.filter(function(o){return tieneLineaEnEstado(o,"no_responde");});
 
   var lista = filtro==="pendiente"?pendientes:filtro==="pedido"?pedido:filtro==="caro"?caras:noResp;
   // Ordenar por fecha (más nuevas primero)
@@ -9229,34 +9243,72 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
     return Math.floor((Date.now()-d.getTime())/(1000*60*60*24));
   }
 
+  // (v3.23.41) Cambio de estado por LÍNEA o por toda la oferta
+  // Si extras.lineasIds es array no vacío → aplica solo a esas líneas
+  // Si no → aplica a toda la oferta (compat hacia atrás)
   function cambiarEstado(oferta, nuevoEstado, extras){
     var hoy=new Date().toLocaleDateString("es-ES");
-    var seg=Object.assign({},oferta.seguimientos?oferta.seguimientos:[]);
     var seguimientos=(oferta.seguimientos||[]).slice();
     var accionLbl = nuevoEstado==="pedido"?"✅ Hizo pedido":nuevoEstado==="caro"?"💸 Vamos caros":nuevoEstado==="no_responde"?"🔇 No responde":"Cambio";
-    seguimientos.push({accion:accionLbl, fecha:hoy, por:usuario.nombre, nota:(extras&&extras.nota)||""});
-    var actualizada = Object.assign({},oferta,{
-      estado:nuevoEstado,
-      fechaCierre:new Date().toISOString(),
-      cerradoPor:usuario.nombre,
-      cerradoPorId:usuario.id,
-      seguimientos:seguimientos
-    });
-    if(extras&&extras.preciosComp){
-      // Añadir precio competencia a cada línea
-      actualizada.lineas = (oferta.lineas||[]).map(function(l){
-        var pc = extras.preciosComp[l.id];
-        if(pc!=null && pc!=="") return Object.assign({},l,{precioCompetencia:parseFloat((pc+"").replace(",","."))});
-        return l;
+
+    var lineasOriginales = oferta.lineas || [];
+    var lineasSeleccionadas = (extras && extras.lineasIds && extras.lineasIds.length>0) ? extras.lineasIds : null;
+
+    // Construir nuevo array de líneas con su propio estado
+    var lineasActualizadas = lineasOriginales.map(function(l){
+      var aplica = !lineasSeleccionadas || lineasSeleccionadas.indexOf(l.id)>=0;
+      if(!aplica) return l;
+      var nueva = Object.assign({}, l, {
+        estado: nuevoEstado,
+        fechaCierreLinea: new Date().toISOString(),
+        cerradoPorLinea: usuario.nombre,
       });
+      if(extras && extras.preciosComp && extras.preciosComp[l.id]!=null && extras.preciosComp[l.id]!==""){
+        nueva.precioCompetencia = parseFloat((extras.preciosComp[l.id]+"").replace(",","."));
+      }
+      return nueva;
+    });
+
+    // Detalle del seguimiento: qué líneas se han marcado
+    var detalleLineas = "";
+    if(lineasSeleccionadas){
+      var nombresLineas = lineasOriginales.filter(function(l){return lineasSeleccionadas.indexOf(l.id)>=0;})
+        .map(function(l){return l.producto + (l.calibre?" "+l.calibre:"");}).join(", ");
+      detalleLineas = " · Líneas: " + nombresLineas;
     }
+    seguimientos.push({
+      accion:accionLbl,
+      fecha:hoy,
+      por:usuario.nombre,
+      nota:((extras&&extras.nota)||"") + detalleLineas,
+      lineasIds: lineasSeleccionadas || null,
+    });
+
+    // Calcular estado global de la oferta a partir de las líneas
+    var estadosLineas = lineasActualizadas.map(function(l){return l.estado || "pendiente";});
+    var uniq = estadosLineas.filter(function(v,i,a){return a.indexOf(v)===i;});
+    var estadoGlobal = uniq.length===1 ? uniq[0] : "mixta";
+    var todasCerradas = estadosLineas.every(function(e){return e!=="pendiente";});
+
+    var actualizada = Object.assign({}, oferta, {
+      estado: estadoGlobal,
+      lineas: lineasActualizadas,
+      seguimientos: seguimientos,
+    });
+    if(todasCerradas){
+      actualizada.fechaCierre = new Date().toISOString();
+      actualizada.cerradoPor = usuario.nombre;
+      actualizada.cerradoPorId = usuario.id;
+    }
+
     fbEscribir("ofertas",oferta.id,actualizada).then(function(){
       setOfertasDB(function(prev){return (prev||[]).map(function(x){return x.id===oferta.id?actualizada:x;});});
-      setSel(null);
+      setSel(estadoGlobal!=="pendiente" && !todasCerradas ? actualizada : null);
       setModal(null);
       setPreciosComp({});
       setNotaCierre("");
-      alert(accionLbl+" registrado");
+      setLineasSelModal([]);
+      alert(accionLbl+" registrado" + (lineasSeleccionadas?" en "+lineasSeleccionadas.length+" línea(s)":""));
     }).catch(function(e){alert("Error: "+e.message);});
   }
 
@@ -9291,9 +9343,18 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
           💰 {(sel.lineas||[]).length} línea{(sel.lineas||[]).length===1?"":"s"} ofertada{(sel.lineas||[]).length===1?"":"s"}
         </p>
         {(sel.lineas||[]).map(function(l){
+          var lEstado = l.estado || "pendiente";
+          var lLab = lEstado==="pedido"?"✅ Pedido":lEstado==="caro"?"💸 Caro":lEstado==="no_responde"?"🔇 No responde":"⏳ Pendiente";
+          var lColor = lEstado==="pedido"?"#22C55E":lEstado==="caro"?"#DC2626":lEstado==="no_responde"?"#64748B":"#F59E0B";
+          var lBg = lEstado==="pedido"?"#DCFCE7":lEstado==="caro"?"#FEF2F2":lEstado==="no_responde"?"#F1F5F9":"#FEF3C7";
           return (
             <Card key={l.id} style={{marginBottom:8,padding:"12px 14px"}}>
-              <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>{l.producto}{l.calibre?" · "+l.calibre:""}</p>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text,flex:1}}>{l.producto}{l.calibre?" · "+l.calibre:""}</p>
+                <span style={{fontSize:10,fontWeight:800,color:lColor,background:lBg,padding:"3px 8px",borderRadius:99,whiteSpace:"nowrap"}}>
+                  {lLab}
+                </span>
+              </div>
               <div style={{display:"flex",gap:12,marginTop:4,alignItems:"baseline"}}>
                 <span style={{fontSize:16,fontWeight:900,color:T.amber}}>
                   {Number(l.precio).toFixed(2).replace(".",",")} {l.unidad}
@@ -9323,59 +9384,103 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
         )}
 
         {/* Botones de acción - solo si pendiente */}
-        {sel.estado==="pendiente" && (
-          <div style={{marginTop:18,display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
-            <button onClick={function(){
-              if(!confirm("¿Confirmas que el cliente HA HECHO PEDIDO?")) return;
-              cambiarEstado(sel,"pedido",{nota:""});
-            }} style={{padding:"12px 8px",border:"none",background:T.green,color:"#fff",fontWeight:800,fontSize:12,borderRadius:9,cursor:"pointer"}}>
-              ✅ Hizo pedido
-            </button>
-            <button onClick={function(){setModal("caro");setPreciosComp({});}}
-              style={{padding:"12px 8px",border:"none",background:T.red,color:"#fff",fontWeight:800,fontSize:12,borderRadius:9,cursor:"pointer"}}>
-              💸 Vamos caros
-            </button>
-            <button onClick={function(){setModal("no_responde");setNotaCierre("");}}
-              style={{padding:"12px 8px",border:"none",background:T.muted,color:"#fff",fontWeight:800,fontSize:12,borderRadius:9,cursor:"pointer"}}>
-              🔇 No responde
-            </button>
-          </div>
-        )}
+        {(function(){
+          // (v3.23.41) Mostrar acciones solo si hay líneas pendientes
+          var lineasPendientes = (sel.lineas||[]).filter(function(l){return !l.estado||l.estado==="pendiente";});
+          if(lineasPendientes.length===0) return null;
+          var unaSola = lineasPendientes.length===1;
+          return (
+            <div style={{marginTop:18,display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
+              <button onClick={function(){
+                if(unaSola){
+                  if(!confirm("¿Confirmas que el cliente HA HECHO PEDIDO de "+lineasPendientes[0].producto+"?")) return;
+                  cambiarEstado(sel,"pedido",{nota:"",lineasIds:[lineasPendientes[0].id]});
+                } else {
+                  setModal("pedido");setLineasSelModal([]);
+                }
+              }} style={{padding:"12px 8px",border:"none",background:T.green,color:"#fff",fontWeight:800,fontSize:12,borderRadius:9,cursor:"pointer"}}>
+                ✅ Hizo pedido
+              </button>
+              <button onClick={function(){setModal("caro");setPreciosComp({});setLineasSelModal(unaSola?[lineasPendientes[0].id]:[]);}}
+                style={{padding:"12px 8px",border:"none",background:T.red,color:"#fff",fontWeight:800,fontSize:12,borderRadius:9,cursor:"pointer"}}>
+                💸 Vamos caros
+              </button>
+              <button onClick={function(){
+                if(unaSola){
+                  setModal("no_responde");setNotaCierre("");setLineasSelModal([lineasPendientes[0].id]);
+                } else {
+                  setModal("no_responde");setNotaCierre("");setLineasSelModal([]);
+                }
+              }} style={{padding:"12px 8px",border:"none",background:T.muted,color:"#fff",fontWeight:800,fontSize:12,borderRadius:9,cursor:"pointer"}}>
+                🔇 No responde
+              </button>
+            </div>
+          );
+        })()}
 
-        {/* Modal "Vamos caros" - pedir precio competencia */}
+        {/* Modal "Vamos caros" - selección por línea (v3.23.41) */}
         {modal==="caro" && (
-          <div onClick={function(){setModal(null);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
-            <div onClick={function(e){e.stopPropagation();}} style={{background:"#fff",borderRadius:"20px 20px 0 0",padding:24,width:"100%",maxWidth:480}}>
+          <div onClick={function(){setModal(null);setLineasSelModal([]);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+            <div onClick={function(e){e.stopPropagation();}} style={{background:"#fff",borderRadius:"20px 20px 0 0",padding:24,width:"100%",maxWidth:480,maxHeight:"90vh",overflowY:"auto"}}>
               <p style={{margin:"0 0 6px",fontSize:17,fontWeight:800,textAlign:"center"}}>💸 Vamos caros</p>
               <p style={{margin:"0 0 14px",fontSize:12,color:T.muted,textAlign:"center"}}>
-                Introduce el precio que paga la competencia (opcional pero recomendado)
+                Selecciona la(s) línea(s) que el cliente considera caras y opcionalmente el precio de competencia
               </p>
-              {(sel.lineas||[]).map(function(l){
+              {(sel.lineas||[]).filter(function(l){return !l.estado||l.estado==="pendiente";}).map(function(l){
+                var seleccionada = lineasSelModal.indexOf(l.id)>=0;
                 return (
-                  <div key={l.id} style={{marginBottom:10,padding:"10px 12px",background:"#F8FAFC",borderRadius:9,border:"1px solid "+T.border}}>
-                    <p style={{margin:"0 0 4px",fontSize:12,fontWeight:700,color:T.text}}>{l.producto}{l.calibre?" · "+l.calibre:""}</p>
-                    <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                      <span style={{fontSize:11,color:T.muted}}>Tu precio: <strong>{Number(l.precio).toFixed(2).replace(".",",")} {l.unidad}</strong></span>
-                    </div>
-                    <div style={{display:"flex",gap:6,marginTop:6,alignItems:"center"}}>
-                      <span style={{fontSize:11,color:T.red,fontWeight:700}}>Competencia:</span>
-                      <input type="text" inputMode="decimal" value={preciosComp[l.id]||""}
-                        onChange={function(e){var v=e.target.value;setPreciosComp(function(p){var n={};Object.keys(p).forEach(function(k){n[k]=p[k];});n[l.id]=v;return n;});}}
-                        placeholder="ej: 10.50"
-                        style={{flex:1,padding:"7px 9px",border:"1px solid "+T.border,borderRadius:6,fontSize:13,boxSizing:"border-box"}}/>
-                      <span style={{fontSize:11,color:T.muted}}>{l.unidad}</span>
+                  <div key={l.id}
+                    onClick={function(){
+                      setLineasSelModal(function(prev){
+                        if(prev.indexOf(l.id)>=0) return prev.filter(function(x){return x!==l.id;});
+                        return prev.concat([l.id]);
+                      });
+                    }}
+                    style={{marginBottom:10,padding:"10px 12px",
+                      background: seleccionada ? "#FEE2E2" : "#F8FAFC",
+                      borderRadius:9,
+                      border: seleccionada ? "2px solid "+T.red : "1px solid "+T.border,
+                      cursor:"pointer"}}>
+                    <div style={{display:"flex",alignItems:"flex-start",gap:8}}>
+                      <input type="checkbox" checked={seleccionada} onChange={function(){}}
+                        style={{marginTop:3,width:18,height:18,accentColor:T.red,pointerEvents:"none"}}/>
+                      <div style={{flex:1}}>
+                        <p style={{margin:"0 0 4px",fontSize:12,fontWeight:700,color:T.text}}>{l.producto}{l.calibre?" · "+l.calibre:""}</p>
+                        <span style={{fontSize:11,color:T.muted}}>Tu precio: <strong>{Number(l.precio).toFixed(2).replace(".",",")} {l.unidad}</strong></span>
+                        {seleccionada && (
+                          <div style={{display:"flex",gap:6,marginTop:8,alignItems:"center"}} onClick={function(e){e.stopPropagation();}}>
+                            <span style={{fontSize:11,color:T.red,fontWeight:700}}>Competencia:</span>
+                            <input type="text" inputMode="decimal" value={preciosComp[l.id]||""}
+                              onChange={function(e){var v=e.target.value;setPreciosComp(function(p){var n={};Object.keys(p).forEach(function(k){n[k]=p[k];});n[l.id]=v;return n;});}}
+                              placeholder="ej: 10.50"
+                              style={{flex:1,padding:"7px 9px",border:"1px solid "+T.border,borderRadius:6,fontSize:13,boxSizing:"border-box"}}/>
+                            <span style={{fontSize:11,color:T.muted}}>{l.unidad}</span>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 );
               })}
+              {(sel.lineas||[]).filter(function(l){return !l.estado||l.estado==="pendiente";}).length===0 && (
+                <p style={{textAlign:"center",fontSize:12,color:T.muted,padding:"20px 0"}}>No hay líneas pendientes en esta oferta.</p>
+              )}
               <div style={{display:"flex",gap:8,marginTop:14}}>
-                <button onClick={function(){setModal(null);setPreciosComp({});}}
+                <button onClick={function(){setModal(null);setPreciosComp({});setLineasSelModal([]);}}
                   style={{flex:1,padding:"12px",borderRadius:10,border:"1.5px solid "+T.border,background:"#fff",color:T.text,fontWeight:700,fontSize:13,cursor:"pointer"}}>
                   Cancelar
                 </button>
-                <button onClick={function(){cambiarEstado(sel,"caro",{preciosComp:preciosComp,nota:"Cliente nos dijo que estamos caros"});}}
-                  style={{flex:2,padding:"12px",borderRadius:10,border:"none",background:T.red,color:"#fff",fontWeight:800,fontSize:14,cursor:"pointer"}}>
-                  💸 Confirmar "vamos caros"
+                <button
+                  onClick={function(){
+                    if(lineasSelModal.length===0){alert("Selecciona al menos una línea");return;}
+                    cambiarEstado(sel,"caro",{preciosComp:preciosComp,nota:"Cliente nos dijo que estamos caros",lineasIds:lineasSelModal});
+                  }}
+                  disabled={lineasSelModal.length===0}
+                  style={{flex:2,padding:"12px",borderRadius:10,border:"none",
+                    background: lineasSelModal.length===0 ? "#CBD5E1" : T.red,
+                    color:"#fff",fontWeight:800,fontSize:14,
+                    cursor: lineasSelModal.length===0 ? "not-allowed" : "pointer"}}>
+                  💸 Marcar {lineasSelModal.length>0?lineasSelModal.length+" línea"+(lineasSelModal.length>1?"s":""):""} como caro
                 </button>
               </div>
             </div>
@@ -9383,21 +9488,64 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
         )}
 
         {/* Modal "No responde" */}
-        {modal==="no_responde" && (
-          <div onClick={function(){setModal(null);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
-            <div onClick={function(e){e.stopPropagation();}} style={{background:"#fff",borderRadius:"20px 20px 0 0",padding:24,width:"100%",maxWidth:440}}>
-              <p style={{margin:"0 0 14px",fontSize:17,fontWeight:800,textAlign:"center"}}>🔇 No responde</p>
+        {/* Modal "No responde" / "Pedido" con selección de líneas (v3.23.41) */}
+        {(modal==="no_responde" || modal==="pedido") && (
+          <div onClick={function(){setModal(null);setLineasSelModal([]);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+            <div onClick={function(e){e.stopPropagation();}} style={{background:"#fff",borderRadius:"20px 20px 0 0",padding:24,width:"100%",maxWidth:480,maxHeight:"90vh",overflowY:"auto"}}>
+              <p style={{margin:"0 0 6px",fontSize:17,fontWeight:800,textAlign:"center"}}>
+                {modal==="pedido" ? "✅ Hizo pedido" : "🔇 No responde"}
+              </p>
+              <p style={{margin:"0 0 14px",fontSize:12,color:T.muted,textAlign:"center"}}>
+                {modal==="pedido"
+                  ? "Selecciona qué línea(s) ha pedido el cliente"
+                  : "Selecciona qué línea(s) no han tenido respuesta"}
+              </p>
+              {(sel.lineas||[]).filter(function(l){return !l.estado||l.estado==="pendiente";}).map(function(l){
+                var seleccionada = lineasSelModal.indexOf(l.id)>=0;
+                var col = modal==="pedido" ? T.green : T.muted;
+                return (
+                  <div key={l.id}
+                    onClick={function(){
+                      setLineasSelModal(function(prev){
+                        if(prev.indexOf(l.id)>=0) return prev.filter(function(x){return x!==l.id;});
+                        return prev.concat([l.id]);
+                      });
+                    }}
+                    style={{marginBottom:10,padding:"10px 12px",
+                      background: seleccionada ? (modal==="pedido"?"#DCFCE7":"#F1F5F9") : "#F8FAFC",
+                      borderRadius:9,
+                      border: seleccionada ? "2px solid "+col : "1px solid "+T.border,
+                      cursor:"pointer"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <input type="checkbox" checked={seleccionada} onChange={function(){}}
+                        style={{width:18,height:18,accentColor:col,pointerEvents:"none"}}/>
+                      <div style={{flex:1}}>
+                        <p style={{margin:"0 0 4px",fontSize:12,fontWeight:700,color:T.text}}>{l.producto}{l.calibre?" · "+l.calibre:""}</p>
+                        <span style={{fontSize:11,color:T.muted}}>Tu precio: <strong>{Number(l.precio).toFixed(2).replace(".",",")} {l.unidad}</strong></span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
               <textarea value={notaCierre} onChange={function(e){setNotaCierre(e.target.value);}}
-                placeholder="Nota opcional (ej: ya he llamado 3 veces y no contesta)"
-                rows={3} style={{width:"100%",padding:"10px 12px",border:"1.5px solid "+T.border,borderRadius:10,fontSize:13,resize:"none",fontFamily:"inherit",boxSizing:"border-box",marginBottom:14}}/>
+                placeholder={modal==="pedido"?"Nota opcional (cantidad, fecha entrega…)":"Nota opcional (ej: ya he llamado 3 veces)"}
+                rows={2} style={{width:"100%",padding:"10px 12px",border:"1.5px solid "+T.border,borderRadius:10,fontSize:13,resize:"none",fontFamily:"inherit",boxSizing:"border-box",marginBottom:14}}/>
               <div style={{display:"flex",gap:8}}>
-                <button onClick={function(){setModal(null);}}
+                <button onClick={function(){setModal(null);setNotaCierre("");setLineasSelModal([]);}}
                   style={{flex:1,padding:"12px",borderRadius:10,border:"1.5px solid "+T.border,background:"#fff",color:T.text,fontWeight:700,fontSize:13,cursor:"pointer"}}>
                   Cancelar
                 </button>
-                <button onClick={function(){cambiarEstado(sel,"no_responde",{nota:notaCierre});}}
-                  style={{flex:2,padding:"12px",borderRadius:10,border:"none",background:T.muted,color:"#fff",fontWeight:800,fontSize:14,cursor:"pointer"}}>
-                  🔇 Confirmar
+                <button
+                  onClick={function(){
+                    if(lineasSelModal.length===0){alert("Selecciona al menos una línea");return;}
+                    cambiarEstado(sel,modal,{nota:notaCierre,lineasIds:lineasSelModal});
+                  }}
+                  disabled={lineasSelModal.length===0}
+                  style={{flex:2,padding:"12px",borderRadius:10,border:"none",
+                    background: lineasSelModal.length===0 ? "#CBD5E1" : (modal==="pedido"?T.green:T.muted),
+                    color:"#fff",fontWeight:800,fontSize:14,
+                    cursor: lineasSelModal.length===0 ? "not-allowed" : "pointer"}}>
+                  {modal==="pedido" ? "✅" : "🔇"} Confirmar {lineasSelModal.length>0?"("+lineasSelModal.length+")":""}
                 </button>
               </div>
             </div>
