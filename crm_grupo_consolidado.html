@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.23.41";
-const CRM_BUILD = "10/05/2026-ofertas-estado-por-linea";
+const CRM_VERSION = "3.23.42";
+const CRM_BUILD = "10/05/2026-fix-reabrir-semana-portal";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -1264,12 +1264,12 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
       if(!planAnterior) continue;
       // Plan cerrado = OK; sin plan cerrado = revisar informes como fallback
       if(planAnterior.estado==="cerrado") continue;
-      var hayInforme=informesMiSem.some(function(i){return(i.agente===usuario.id||i.agenteId===usuario.id)&&parseInt(i.semana)===sc;});
+      var hayInforme=informesMiSem.some(function(i){return !i.eliminado && (i.agente===usuario.id||i.agenteId===usuario.id)&&parseInt(i.semana)===sc;});
       if(!hayInforme){semanaSinCerrar=sc;break;}
     }
   }
-  // Comprobar si la semana actual está cerrada
-  var semanaActualCerrada=(plan&&plan.estado==="cerrado")||informesMiSem.some(function(i){return(i.agente===usuario.id||i.agenteId===usuario.id)&&parseInt(i.semana)===semana;});
+  // Comprobar si la semana actual está cerrada (v3.23.42: ignorar informes eliminados/reabiertos)
+  var semanaActualCerrada=(plan&&plan.estado==="cerrado")||informesMiSem.some(function(i){return !i.eliminado && (i.agente===usuario.id||i.agenteId===usuario.id)&&parseInt(i.semana)===semana;});
   var clientesSemana=plan&&plan.rutaNum&&rutaMap[plan.rutaNum]?rutaMap[plan.rutaNum]:[];
   
   // Cargar visitas reales de Firebase para esta semana
@@ -2198,29 +2198,50 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
               <p style={{margin:"2px 0 0",fontSize:12,color:"#15803D"}}>Informe enviado correctamente</p>
             </div>
           </div>
-          {/* (v3.22.33) Botón reabrir — sintaxis simple sin async/await */}
+          {/* (v3.22.33/v3.23.42) Botón reabrir — sintaxis simple sin async/await */}
           <button onClick={function(){
             if(!confirm("¿Reabrir la semana "+semana+"?\nSe sobreescribirá el plan y se podrá reprogramar.")) return;
             if(!confirm("⚠️ Confirmación final\n¿Seguro?")) return;
             var anioReal=new Date().getFullYear();
             var planId="plan_"+usuario.id+"_"+anioReal+"_s"+semana;
-            // Sobreescribir el plan a estado "activo" (en lugar de borrar)
-            fbEscribir("planes_semanales",planId,{
-              id:planId,
-              agente:usuario.id,
-              semana:semana,
-              anio:anioReal,
-              modo:"libre",
-              rutaNum:null,
-              estado:"activo",
-              visitados:[]
+
+            // (v3.23.42) Identificadores del usuario para buscar informes asociados
+            var misIds = new Set();
+            ["id","_docId","grupoAgente","username","catalogoVendedor","portalDocId","nombre"].forEach(function(k){
+              if(usuario[k]) misIds.add(String(usuario[k]).toUpperCase());
+            });
+
+            // (v3.23.42) Identificar informes de esta semana del usuario
+            var informesAEliminar = (informesMiSem||[]).filter(function(i){
+              if(parseInt(i.semana)!==semana) return false;
+              var agId = String(i.agente||i.agenteId||"").toUpperCase();
+              return misIds.has(agId);
+            });
+
+            // Primero marcar informes como eliminados (para que dejen de contar como "cerrada")
+            var promesasInf = informesAEliminar.map(function(inf){
+              return fbEscribir("informes", inf.id, Object.assign({}, inf, {
+                eliminado:true,
+                fechaReapertura:new Date().toISOString(),
+                reabiertoPor:usuario.nombre||usuario.id
+              }));
+            });
+
+            Promise.all(promesasInf).then(function(){
+              // Después sobreescribir el plan a estado "activo"
+              return fbEscribir("planes_semanales",planId,{
+                id:planId,
+                agente:usuario.id,
+                semana:semana,
+                anio:anioReal,
+                modo:"libre",
+                rutaNum:null,
+                estado:"activo",
+                visitados:[]
+              });
             }).then(function(ok){
-              if(ok){
-                alert("✅ Plan reabierto. La página se va a recargar.");
-                setTimeout(function(){window.location.reload();},500);
-              } else {
-                alert("❌ No se pudo reabrir. Revisa la consola.");
-              }
+              alert("✅ Plan reabierto ("+informesAEliminar.length+" informe"+(informesAEliminar.length!==1?"s":"")+" archivado"+(informesAEliminar.length!==1?"s":"")+"). La página se va a recargar.");
+              setTimeout(function(){window.location.reload();},500);
             }).catch(function(e){
               alert("❌ Error: "+e.message);
             });
