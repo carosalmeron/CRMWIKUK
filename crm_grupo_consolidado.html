@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.23.48";
-const CRM_BUILD = "10/05/2026-reporting-resumen-email-style";
+const CRM_VERSION = "3.23.49";
+const CRM_BUILD = "10/05/2026-oferta-publica-cliente-respuesta";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -9348,6 +9348,87 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
     }).catch(function(e){alert("Error: "+e.message);});
   }
 
+  // (v3.23.49) Generar token de cliente si la oferta no lo tiene aún
+  function generarTokenSiHaceFalta(){
+    if(!sel || sel.tokenCliente) return;
+    var token = "";
+    var chars = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    for(var i=0;i<10;i++) token += chars[Math.floor(Math.random()*chars.length)];
+    var actualizada = Object.assign({}, sel, {tokenCliente: token});
+    fbEscribir("ofertas", sel.id, actualizada).then(function(){
+      setSel(actualizada);
+      setOfertasDB(function(prev){return (prev||[]).map(function(x){return x.id===sel.id?actualizada:x;});});
+    });
+  }
+
+  // (v3.23.49) URL pública de la oferta
+  function urlPublica(){
+    if(!sel) return "";
+    var base = window.location.origin || "https://crmwikuk.vercel.app";
+    var t = sel.tokenCliente ? "?token="+sel.tokenCliente : "";
+    return base + "/of/" + sel.id + t;
+  }
+
+  // (v3.23.49) Validar respuesta del cliente — aceptar y aplicar estado
+  function validarRespuestasCliente(lineasAceptadasIds){
+    if(!sel) return;
+    var resp = sel.respuestasCliente || {};
+    var lineasActualizadas = (sel.lineas||[]).map(function(l){
+      var r = resp[l.id];
+      if(r && r.estado && !r.validada && lineasAceptadasIds.indexOf(l.id)>=0){
+        // Aplicar estado a la línea
+        var mapEst = {"pedido":"pedido","caro":"caro","no_interesa":"no_responde"};
+        var estadoLinea = mapEst[r.estado] || "pendiente";
+        var nuevaLinea = Object.assign({}, l, {
+          estado: estadoLinea,
+          fechaCierreLinea: new Date().toISOString(),
+          cerradoPorLinea: usuario.nombre,
+          respuestaClienteAplicada: r,
+        });
+        if(r.contraoferta){
+          var n = parseFloat((r.contraoferta+"").replace(",","."));
+          if(!isNaN(n)) nuevaLinea.precioCompetencia = n;
+        }
+        // Marcar respuesta como validada
+        resp[l.id] = Object.assign({}, r, {validada:true, fechaValidacion:new Date().toISOString()});
+        return nuevaLinea;
+      }
+      return l;
+    });
+
+    // Calcular estado global
+    var estadosLineas = lineasActualizadas.map(function(l){return l.estado || "pendiente";});
+    var uniq = estadosLineas.filter(function(v,i,a){return a.indexOf(v)===i;});
+    var estadoGlobal = uniq.length===1 ? uniq[0] : "mixta";
+
+    // Añadir entrada al historial
+    var seguimientos = (sel.seguimientos||[]).slice();
+    seguimientos.push({
+      accion: "✓ Validadas "+lineasAceptadasIds.length+" respuesta(s) del cliente",
+      fecha: new Date().toLocaleDateString("es-ES"),
+      por: usuario.nombre,
+      nota: "",
+    });
+
+    // Comprobar si quedan respuestas pendientes
+    var aunPendientes = Object.values(resp).some(function(r){return r && r.estado && !r.validada;});
+
+    var actualizada = Object.assign({}, sel, {
+      estado: estadoGlobal,
+      lineas: lineasActualizadas,
+      respuestasCliente: resp,
+      seguimientos: seguimientos,
+      hayRespuestaPendienteValidacion: aunPendientes,
+    });
+
+    fbEscribir("ofertas", sel.id, actualizada).then(function(){
+      setOfertasDB(function(prev){return (prev||[]).map(function(x){return x.id===sel.id?actualizada:x;});});
+      setSel(actualizada);
+      setModal(null);
+      alert("✅ Respuesta validada");
+    }).catch(function(e){alert("Error: "+e.message);});
+  }
+
   // VISTA DETALLE
   if(sel){
     var diasTrans = diasDesde(sel.fechaCreacion);
@@ -9373,6 +9454,42 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
             </p>
           )}
         </Card>
+
+        {/* (v3.23.49) Banner respuesta cliente pendiente de validar */}
+        {sel.hayRespuestaPendienteValidacion && (function(){
+          var lineasConResp = (sel.lineas||[]).filter(function(l){
+            var r = (sel.respuestasCliente||{})[l.id];
+            return r && r.estado && !r.validada;
+          });
+          if(lineasConResp.length===0) return null;
+          return (
+            <div style={{background:"#EFF6FF",border:"2px solid #3B82F6",borderRadius:12,padding:"14px 16px",marginBottom:14}}>
+              <p style={{margin:0,fontSize:13,fontWeight:800,color:"#1E40AF"}}>📨 Respuesta del cliente pendiente de validar</p>
+              <p style={{margin:"4px 0 10px",fontSize:11,color:"#3B82F6"}}>{lineasConResp.length} línea{lineasConResp.length>1?"s":""} con respuesta · revisa y confirma abajo</p>
+              <button onClick={function(){setModal("validar_cliente");}}
+                style={{padding:"9px 14px",border:"none",background:"#1E40AF",color:"#fff",
+                  borderRadius:9,fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                👁️ Ver respuestas del cliente
+              </button>
+            </div>
+          );
+        })()}
+
+        {/* (v3.23.49) Botón Enviar al cliente */}
+        {(function(){
+          var hayPend = (sel.lineas||[]).some(function(l){return !l.estado||l.estado==="pendiente";});
+          if(!hayPend) return null;
+          return (
+            <div style={{marginBottom:14}}>
+              <button onClick={function(){setModal("enviar_cliente");generarTokenSiHaceFalta();}}
+                style={{width:"100%",padding:"12px 16px",border:"1.5px solid "+T.navy,background:"#fff",color:T.navy,
+                  borderRadius:11,fontSize:13,fontWeight:700,cursor:"pointer",display:"flex",
+                  alignItems:"center",justifyContent:"center",gap:8}}>
+                📤 Enviar al cliente para que responda
+              </button>
+            </div>
+          );
+        })()}
 
         {/* Líneas de oferta */}
         <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>
@@ -9587,6 +9704,109 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
             </div>
           </div>
         )}
+
+        {/* (v3.23.49) Modal Enviar al cliente */}
+        {modal==="enviar_cliente" && (
+          <div onClick={function(){setModal(null);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+            <div onClick={function(e){e.stopPropagation();}} style={{background:"#fff",borderRadius:"20px 20px 0 0",padding:24,width:"100%",maxWidth:480,maxHeight:"90vh",overflowY:"auto"}}>
+              <p style={{margin:"0 0 6px",fontSize:17,fontWeight:800,textAlign:"center"}}>📤 Enviar al cliente</p>
+              <p style={{margin:"0 0 14px",fontSize:12,color:T.muted,textAlign:"center"}}>
+                Envía este enlace al cliente para que pueda ver la oferta y responder
+              </p>
+              <div style={{padding:"10px 12px",background:"#F8FAFC",border:"1px solid "+T.border,borderRadius:9,marginBottom:14}}>
+                <p style={{margin:"0 0 6px",fontSize:10,color:T.muted,fontWeight:700,textTransform:"uppercase"}}>Enlace</p>
+                <p style={{margin:0,fontSize:11,color:T.text,wordBreak:"break-all",fontFamily:"monospace"}}>{urlPublica()}</p>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+                <button onClick={function(){
+                    var url=urlPublica();
+                    if(navigator.clipboard){
+                      navigator.clipboard.writeText(url).then(function(){alert("✓ Enlace copiado");}).catch(function(){
+                        var ta=document.createElement("textarea");ta.value=url;document.body.appendChild(ta);ta.select();document.execCommand("copy");document.body.removeChild(ta);alert("✓ Enlace copiado");
+                      });
+                    } else {
+                      var ta=document.createElement("textarea");ta.value=url;document.body.appendChild(ta);ta.select();document.execCommand("copy");document.body.removeChild(ta);alert("✓ Enlace copiado");
+                    }
+                  }}
+                  style={{padding:"12px",border:"none",background:T.navy,color:"#fff",borderRadius:10,fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                  📋 Copiar enlace
+                </button>
+                <button onClick={function(){
+                    var url=urlPublica();
+                    var msg="Hola, te paso la oferta que comentamos:\n\n"+url+"\n\nPuedes responder desde el mismo enlace. Saludos!";
+                    var wa="https://wa.me/?text="+encodeURIComponent(msg);
+                    window.open(wa,"_blank");
+                  }}
+                  style={{padding:"12px",border:"none",background:"#25D366",color:"#fff",borderRadius:10,fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                  💬 WhatsApp
+                </button>
+              </div>
+              <button onClick={function(){
+                  var url=urlPublica();
+                  var subj=encodeURIComponent("Oferta: "+(sel.clienteNombre||""));
+                  var body=encodeURIComponent("Hola,\n\nTe paso la oferta que comentamos:\n\n"+url+"\n\nPuedes ver el detalle y responder directamente desde el enlace.\n\nUn saludo,\n"+(usuario.nombre||""));
+                  window.location.href="mailto:?subject="+subj+"&body="+body;
+                }}
+                style={{width:"100%",padding:"12px",border:"1.5px solid "+T.border,background:"#fff",color:T.text,borderRadius:10,fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:14}}>
+                ✉️ Email
+              </button>
+              <button onClick={function(){setModal(null);}}
+                style={{width:"100%",padding:"10px",borderRadius:9,border:"1.5px solid "+T.border,background:"#fff",color:T.muted,fontWeight:700,fontSize:12,cursor:"pointer"}}>
+                Cerrar
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* (v3.23.49) Modal Validar respuestas del cliente */}
+        {modal==="validar_cliente" && (function(){
+          var lineasConResp = (sel.lineas||[]).filter(function(l){
+            var r = (sel.respuestasCliente||{})[l.id];
+            return r && r.estado && !r.validada;
+          });
+          if(lineasConResp.length===0){return null;}
+          return (
+            <div onClick={function(){setModal(null);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+              <div onClick={function(e){e.stopPropagation();}} style={{background:"#fff",borderRadius:"20px 20px 0 0",padding:24,width:"100%",maxWidth:520,maxHeight:"90vh",overflowY:"auto"}}>
+                <p style={{margin:"0 0 6px",fontSize:17,fontWeight:800,textAlign:"center"}}>📨 Respuestas del cliente</p>
+                <p style={{margin:"0 0 14px",fontSize:12,color:T.muted,textAlign:"center"}}>
+                  Revisa y valida para aplicar el estado a la oferta
+                </p>
+                {lineasConResp.map(function(l){
+                  var r = sel.respuestasCliente[l.id];
+                  var lab = r.estado==="pedido"?"✅ HIZO PEDIDO":r.estado==="caro"?"💸 VAMOS CAROS":"🔇 NO INTERESA";
+                  var col = r.estado==="pedido"?T.green:r.estado==="caro"?T.red:T.muted;
+                  var bg = r.estado==="pedido"?"#DCFCE7":r.estado==="caro"?"#FEE2E2":"#F1F5F9";
+                  return (
+                    <div key={l.id} style={{marginBottom:12,padding:"12px 14px",background:bg,borderRadius:10,border:"1px solid "+col+"33"}}>
+                      <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>{l.producto}{l.calibre?" · "+l.calibre:""}</p>
+                      <p style={{margin:"3px 0 8px",fontSize:11,color:T.muted}}>Tu precio: <strong>{Number(l.precio).toFixed(2).replace(".",",")} {l.unidad}</strong></p>
+                      <p style={{margin:"6px 0",fontSize:13,fontWeight:800,color:col}}>{lab}</p>
+                      {r.contraoferta && <p style={{margin:"3px 0",fontSize:12}}>💰 Contraoferta: <strong>{r.contraoferta} €</strong></p>}
+                      {r.cantidad && <p style={{margin:"3px 0",fontSize:12}}>📦 Cantidad: <strong>{r.cantidad}</strong></p>}
+                      {r.fechaEntrega && <p style={{margin:"3px 0",fontSize:12}}>📅 Entrega: <strong>{r.fechaEntrega}</strong></p>}
+                      {r.comentario && <p style={{margin:"3px 0",fontSize:12,fontStyle:"italic",color:T.text}}>"{r.comentario}"</p>}
+                      <p style={{margin:"8px 0 0",fontSize:10,color:T.muted}}>Recibido: {new Date(r.fechaRespuesta).toLocaleString("es-ES")}</p>
+                    </div>
+                  );
+                })}
+                <div style={{display:"flex",gap:8,marginTop:14}}>
+                  <button onClick={function(){setModal(null);}}
+                    style={{flex:1,padding:"12px",borderRadius:10,border:"1.5px solid "+T.border,background:"#fff",color:T.text,fontWeight:700,fontSize:13,cursor:"pointer"}}>
+                    Revisar más tarde
+                  </button>
+                  <button onClick={function(){
+                      if(!confirm("¿Validar las "+lineasConResp.length+" respuesta(s)? Se aplicará el estado a cada línea.")) return;
+                      validarRespuestasCliente(lineasConResp.map(function(l){return l.id;}));
+                    }}
+                    style={{flex:2,padding:"12px",borderRadius:10,border:"none",background:T.green,color:"#fff",fontWeight:800,fontSize:13,cursor:"pointer"}}>
+                    ✓ Validar todas
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </div>
     );
   }
@@ -9700,13 +9920,15 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
           return (
             <Card key={o.id} onClick={function(){setSel(o);setModal(null);setPreciosComp({});setNotaCierre("");}}
               style={{marginBottom:8,padding:"14px 16px",cursor:"pointer",
-                borderLeft:"4px solid "+(alerta?T.red:T.amber)}}>
+                borderLeft:"4px solid "+(o.hayRespuestaPendienteValidacion?T.blue:alerta?T.red:T.amber)}}>
               <div style={{display:"flex",alignItems:"center",gap:10}}>
                 <div style={{flex:1,minWidth:0}}>
                   <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                    {o.hayRespuestaPendienteValidacion && <span style={{color:T.blue,marginRight:4}}>📨</span>}
                     {o.clienteNombre}
                   </p>
                   <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
+                    {o.hayRespuestaPendienteValidacion && <span style={{color:T.blue,fontWeight:700}}>Respuesta pendiente · </span>}
                     {(o.lineas||[]).length} línea{(o.lineas||[]).length===1?"":"s"}
                     {o.fechaCreacionStr?" · "+o.fechaCreacionStr:""}
                     {!esAgente?" · "+(o.agenteNombre||o.agente):""}
