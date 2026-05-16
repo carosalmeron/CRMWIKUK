@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.23.62";
-const CRM_BUILD = "12/05/2026-hilo-seguimiento-email";
+const CRM_VERSION = "3.23.66";
+const CRM_BUILD = "12/05/2026-indicaciones-cola-agrupada-email";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -13732,8 +13732,17 @@ function CentroPendientes({usuario, onBack, onNav, muestrasDB, ofertasDB, incide
   // (v3.23.61) Hilo de seguimiento
   const [hiloAbierto,setHiloAbierto]=React.useState(null); // item seleccionado
   const [mensajeNuevo,setMensajeNuevo]=React.useState("");
+  const [avisarEmail,setAvisarEmail]=React.useState(false);
+  // (v3.23.66) Cola de indicaciones marcadas para email
+  const [colaEmails,setColaEmails]=React.useState([]);
+  const [enviandoCola,setEnviandoCola]=React.useState(false);
   const [enviando,setEnviando]=React.useState(false);
   const [tick,setTick]=React.useState(0); // fuerza recálculo tras enviar
+  // (v3.23.63) Filtro equipo / vendedor
+  const [equipoFiltro,setEquipoFiltro]=React.useState("todos");
+  const [agenteFiltro,setAgenteFiltro]=React.useState(null);
+  const [treeRootOpen,setTreeRootOpen]=React.useState(false);
+  const [treeEqOpen,setTreeEqOpen]=React.useState(null);
   // Copias locales mutables de muestras/ofertas/incidencias para reflejar hilos al instante
   const [muestrasLoc,setMuestrasLoc]=React.useState(muestrasDB||[]);
   const [ofertasLoc,setOfertasLoc]=React.useState(ofertasDB||[]);
@@ -13793,25 +13802,50 @@ function CentroPendientes({usuario, onBack, onNav, muestrasDB, ofertasDB, incide
       setMensajeNuevo("");
       setEnviando(false);
       setTick(function(t){return t+1;});
-      // (v3.23.61) Enviar email al responsable (best-effort, no bloquea)
-      try{
-        fetch("/api/notificar-indicacion", {
-          method:"POST",
-          headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({
+      // (v3.23.66) Si marcó la casilla, añadir a la cola de emails (no se envía aún)
+      if(avisarEmail){
+        setColaEmails(function(prev){
+          return prev.concat([{
             tipoElemento: it.tipo,
             titulo: it.titulo,
             cliente: it.cliente,
             responsableId: it.responsableId||"",
             responsableNombre: it.responsable||"",
-            autorMensaje: msg.autor,
             textoMensaje: msg.texto,
-          })
-        }).catch(function(){});
-      }catch(e){}
+          }]);
+        });
+      }
+      setAvisarEmail(false); // resetear casilla tras enviar
     }).catch(function(e){
       alert("Error al enviar: "+e.message);
       setEnviando(false);
+    });
+  }
+
+  // (v3.23.66) Enviar todas las indicaciones marcadas en lote (agrupadas por vendedor)
+  function enviarColaEmails(){
+    if(colaEmails.length===0 || enviandoCola) return;
+    setEnviandoCola(true);
+    fetch("/api/notificar-indicacion", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        indicaciones: colaEmails,
+        autorMensaje: usuario.nombre||usuario.id,
+        autorId: usuario.id,
+      })
+    }).then(function(r){return r.json();}).then(function(j){
+      setEnviandoCola(false);
+      if(j && j.ok){
+        var n=j.enviados||0;
+        alert("📧 Enviado: "+n+" email"+(n===1?"":"s")+" (uno por vendedor)");
+        setColaEmails([]);
+      } else {
+        alert("No se pudo enviar: "+((j&&j.error)||"error"));
+      }
+    }).catch(function(e){
+      setEnviandoCola(false);
+      alert("Error al enviar: "+e.message);
     });
   }
 
@@ -13823,6 +13857,38 @@ function CentroPendientes({usuario, onBack, onNav, muestrasDB, ofertasDB, incide
       return (h&&h.hiloPendiente)||[];
     }
     return (it.ref.hiloPendiente)||[];
+  }
+
+  // (v3.23.63) Lista de vendedores por equipo
+  var agentesArbol = (typeof USUARIOS!=="undefined"?USUARIOS:[]).filter(function(u){
+    return (u.rol==="agente"||u.rol==="crm_agente") && u.equipo;
+  });
+  // Resuelve el equipo de un item a partir de su responsable
+  function equipoDeItem(it){
+    if(it.ref && it.ref.equipo) return it.ref.equipo;
+    var rid=String(it.responsableId||it.responsable||"").toUpperCase();
+    var rnom=String(it.responsable||"").toUpperCase();
+    for(var i=0;i<agentesArbol.length;i++){
+      var u=agentesArbol[i];
+      var claves=[];
+      ["id","_docId","grupoAgente","nombre","username","catalogoVendedor"].forEach(function(k){
+        if(u[k]) claves.push(String(u[k]).toUpperCase());
+      });
+      if(claves.indexOf(rid)>=0 || (rnom && claves.indexOf(rnom)>=0)) return u.equipo;
+    }
+    return "";
+  }
+  function nombreDeItem(it){
+    return String(it.responsable||"").trim();
+  }
+  // Aplica el filtro equipo/agente a un item
+  function pasaFiltro(it){
+    if(equipoFiltro==="todos" && !agenteFiltro) return true;
+    var eq=equipoDeItem(it);
+    if(agenteFiltro){
+      return nombreDeItem(it).toUpperCase()===String(agenteFiltro).toUpperCase();
+    }
+    return eq===equipoFiltro;
   }
 
   // Normaliza cualquier fecha a YYYY-MM-DD
@@ -13976,7 +14042,9 @@ function CentroPendientes({usuario, onBack, onNav, muestrasDB, ofertasDB, incide
   });
 
   // Filtro por tipo
-  var itemsFiltrados=filtroTipo==="todos"?items:items.filter(function(x){return x.tipo===filtroTipo;});
+  // Filtro por equipo/agente primero, luego por tipo
+  var itemsEquipo=items.filter(pasaFiltro);
+  var itemsFiltrados=filtroTipo==="todos"?itemsEquipo:itemsEquipo.filter(function(x){return x.tipo===filtroTipo;});
 
   // Agrupar por urgencia
   var grupos={
@@ -14021,7 +14089,7 @@ function CentroPendientes({usuario, onBack, onNav, muestrasDB, ofertasDB, incide
               </div>
               {/* (v3.23.61) Botón de hilo de seguimiento */}
               <div style={{marginTop:10,display:"flex",gap:8}}>
-                <button onClick={function(){setHiloAbierto(it);setMensajeNuevo("");}}
+                <button onClick={function(){setHiloAbierto(it);setMensajeNuevo("");setAvisarEmail(false);}}
                   style={{flex:1,padding:"8px 10px",borderRadius:9,border:"1.5px solid "+(nMsg>0?T.navy:T.border),
                     background:nMsg>0?"#EFF6FF":"#fff",color:nMsg>0?T.navy:T.muted,
                     fontSize:12,fontWeight:700,cursor:"pointer"}}>
@@ -14053,11 +14121,96 @@ function CentroPendientes({usuario, onBack, onNav, muestrasDB, ofertasDB, incide
         Todo lo que requiere seguimiento, ordenado por urgencia
       </p>
 
+      {/* (v3.23.63) Árbol de filtro equipo / vendedor */}
+      {(usuario.rol==="director"||usuario.rol==="ceo"||usuario.rol==="jefe") && (
+        <div style={{marginBottom:16}}>
+          {/* Nivel 1: Todos los equipos */}
+          <div onClick={function(){
+              var wasSel = equipoFiltro==="todos" && !agenteFiltro;
+              if(wasSel){ setTreeRootOpen(!treeRootOpen); }
+              else { setEquipoFiltro("todos"); setAgenteFiltro(null); setTreeEqOpen(null); setTreeRootOpen(true); }
+            }}
+            style={{background:equipoFiltro==="todos"&&!agenteFiltro?T.navy:"#fff",
+              borderRadius:11,padding:"10px 14px",cursor:"pointer",
+              border:"2px solid "+(equipoFiltro==="todos"&&!agenteFiltro?T.navy:T.border),
+              marginBottom:6,display:"flex",alignItems:"center",gap:10}}>
+            <span style={{fontSize:18}}>🌐</span>
+            <div style={{flex:1}}>
+              <p style={{margin:0,fontSize:13,fontWeight:700,
+                color:equipoFiltro==="todos"&&!agenteFiltro?"#fff":T.text}}>Todos los equipos</p>
+              <p style={{margin:0,fontSize:10,
+                color:equipoFiltro==="todos"&&!agenteFiltro?"rgba(255,255,255,.65)":T.muted}}>
+                {agentesArbol.length} vendedores
+              </p>
+            </div>
+            {equipoFiltro==="todos"&&!agenteFiltro&&<span style={{color:"#fff",fontWeight:800,marginRight:4}}>✓</span>}
+            <span style={{color:equipoFiltro==="todos"&&!agenteFiltro?"rgba(255,255,255,.8)":T.muted,
+              fontSize:18,transform:treeRootOpen?"rotate(90deg)":"rotate(0deg)",
+              display:"inline-block",transition:"transform .2s"}}>›</span>
+          </div>
+
+          {/* Nivel 2: Equipos */}
+          {treeRootOpen&&["WIKUK","INTERKEY"].map(function(eq){
+            var eqColor = eq==="WIKUK" ? T.green : "#F59E0B";
+            var agEq = agentesArbol.filter(function(v){return v.equipo===eq;});
+            var isOpen = treeEqOpen===eq;
+            var isSel = equipoFiltro===eq && !agenteFiltro;
+            return (
+              <div key={eq} style={{marginBottom:6}}>
+                <div onClick={function(){
+                    if(isSel){ setTreeEqOpen(isOpen?null:eq); }
+                    else { setEquipoFiltro(eq); setAgenteFiltro(null); setTreeEqOpen(eq); }
+                  }}
+                  style={{background:isSel?eqColor+"15":"#fff",borderRadius:11,padding:"10px 14px",
+                    cursor:"pointer",border:"2px solid "+(isSel?eqColor:T.border),
+                    display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{width:30,height:30,borderRadius:8,background:eqColor+"20",
+                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,
+                    color:eqColor,fontWeight:800,flexShrink:0}}>{eq[0]}</div>
+                  <div style={{flex:1}}>
+                    <p style={{margin:0,fontSize:13,fontWeight:700,color:isSel?eqColor:T.text}}>{eq}</p>
+                    <p style={{margin:0,fontSize:10,color:T.muted}}>{agEq.length} vendedores</p>
+                  </div>
+                  {isSel&&<span style={{color:eqColor,fontWeight:800}}>✓</span>}
+                  <span style={{color:isOpen?eqColor:T.muted,fontSize:16,
+                    transform:isOpen?"rotate(90deg)":"rotate(0deg)",display:"inline-block",transition:"transform .2s"}}>›</span>
+                </div>
+                {/* Nivel 3: Vendedores */}
+                {isOpen&&(
+                  <div style={{marginLeft:12,borderLeft:"2px solid "+eqColor+"22",paddingLeft:10,marginTop:6}}>
+                    {agEq.map(function(v){
+                      var sel = agenteFiltro===v.nombre;
+                      return (
+                        <div key={v.nombre||v.id} onClick={function(){
+                            setAgenteFiltro(sel?null:v.nombre);
+                            setEquipoFiltro(eq);
+                          }}
+                          style={{background:sel?eqColor+"12":"#fff",borderRadius:10,
+                            padding:"9px 12px",marginBottom:5,cursor:"pointer",
+                            border:"1.5px solid "+(sel?eqColor:T.border),
+                            display:"flex",alignItems:"center",gap:10}}>
+                          <div style={{width:28,height:28,borderRadius:7,background:eqColor+"20",
+                            display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,flexShrink:0}}>🧑‍💼</div>
+                          <div style={{flex:1}}>
+                            <p style={{margin:0,fontSize:12,fontWeight:700,color:T.text}}>{v.nombre}</p>
+                          </div>
+                          {sel&&<span style={{color:eqColor,fontWeight:800}}>✓</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* Filtros por tipo */}
       <div style={{display:"flex",gap:6,marginBottom:16,overflowX:"auto",paddingBottom:4}}>
         {TIPOS_FILTRO.map(function(tf){
           var activo=filtroTipo===tf.k;
-          var n=tf.k==="todos"?items.length:items.filter(function(x){return x.tipo===tf.k;}).length;
+          var n=tf.k==="todos"?itemsEquipo.length:itemsEquipo.filter(function(x){return x.tipo===tf.k;}).length;
           return (
             <button key={tf.k} onClick={function(){setFiltroTipo(tf.k);}}
               style={{padding:"7px 12px",borderRadius:99,border:"1.5px solid "+(activo?T.navy:T.border),
@@ -14084,6 +14237,34 @@ function CentroPendientes({usuario, onBack, onNav, muestrasDB, ofertasDB, incide
           {renderGrupo("vencido","🔴 Vencido / urgente","#991B1B","#FEE2E2")}
           {renderGrupo("semana","🟠 Esta semana","#92400E","#FEF3C7")}
           {renderGrupo("luego","🟢 Más adelante","#166534","#DCFCE7")}
+        </div>
+      )}
+
+      {/* (v3.23.66) Botón flotante para enviar la cola de indicaciones marcadas */}
+      {colaEmails.length>0 && (
+        <div style={{position:"fixed",left:0,right:0,bottom:0,padding:"12px 16px",
+          background:"#fff",borderTop:"1px solid "+T.border,
+          boxShadow:"0 -4px 16px rgba(0,0,0,.08)",zIndex:150,
+          display:"flex",alignItems:"center",gap:10,maxWidth:600,margin:"0 auto"}}>
+          <div style={{flex:1}}>
+            <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>
+              📧 {colaEmails.length} indicación{colaEmails.length===1?"":"es"} marcada{colaEmails.length===1?"":"s"}
+            </p>
+            <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
+              Se agrupan por vendedor en un email cada uno
+            </p>
+          </div>
+          <button onClick={function(){setColaEmails([]);}}
+            style={{padding:"9px 12px",borderRadius:9,border:"1.5px solid "+T.border,
+              background:"#fff",color:T.muted,fontSize:12,fontWeight:700,cursor:"pointer"}}>
+            Descartar
+          </button>
+          <button onClick={enviarColaEmails} disabled={enviandoCola}
+            style={{padding:"9px 16px",borderRadius:9,border:"none",
+              background:enviandoCola?"#CBD5E1":T.navy,color:"#fff",
+              fontSize:12,fontWeight:800,cursor:enviandoCola?"not-allowed":"pointer"}}>
+            {enviandoCola?"Enviando…":"📨 Enviar"}
+          </button>
         </div>
       )}
 
@@ -14155,8 +14336,27 @@ function CentroPendientes({usuario, onBack, onNav, muestrasDB, ofertasDB, incide
                     fontSize:13,fontWeight:800,cursor:(enviando||!mensajeNuevo.trim())?"not-allowed":"pointer"}}>
                   {enviando?"Enviando…":"📨 Enviar indicación"}
                 </button>
-                <p style={{margin:"8px 0 0",fontSize:10,color:T.muted,textAlign:"center"}}>
-                  🔔 Se notifica en la app y 📧 por email al responsable
+                {/* (v3.23.65) Casilla avisar por email */}
+                <div onClick={function(){setAvisarEmail(!avisarEmail);}}
+                  style={{display:"flex",alignItems:"center",gap:8,marginTop:10,cursor:"pointer",
+                    padding:"8px 10px",borderRadius:8,
+                    background:avisarEmail?"#EFF6FF":"transparent",
+                    border:"1px solid "+(avisarEmail?T.navy:"transparent")}}>
+                  <div style={{width:20,height:20,borderRadius:5,flexShrink:0,
+                    border:"2px solid "+(avisarEmail?T.navy:T.border),
+                    background:avisarEmail?T.navy:"#fff",
+                    display:"flex",alignItems:"center",justifyContent:"center",
+                    color:"#fff",fontSize:13,fontWeight:800}}>
+                    {avisarEmail?"✓":""}
+                  </div>
+                  <span style={{fontSize:12,color:avisarEmail?T.navy:T.muted,fontWeight:600}}>
+                    📧 Marcar para enviar por email
+                  </span>
+                </div>
+                <p style={{margin:"6px 0 0",fontSize:10,color:T.muted,textAlign:"center"}}>
+                  {avisarEmail
+                    ? "Se añadirá a la cola de emails — los envías todos juntos desde el botón"
+                    : "Solo notificación en la app (sin email)"}
                 </p>
               </div>
             </div>
