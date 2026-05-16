@@ -53,17 +53,15 @@
 const FB = "https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
 const PWD_OK = "wikuk2026";
 
-// Vendedores reales (id canónico + todas sus variantes conocidas)
-const VENDEDORES = [
-  {id:"wk1", nombre:"David Mag",  variantes:["WK1","DAVIDMAG","DAVID MAG","DAVID"]},
-  {id:"wk2", nombre:"Verónica",   variantes:["WK2","VERONICA","VEROLOPEZ","VERÓNICA"]},
-  {id:"wk3", nombre:"Silvia",     variantes:["WK3","SILVIA"]},
-  {id:"ik1", nombre:"Carlos G.",  variantes:["IK1","CARLOSG","CARLOS G.","CARLOS G","CARLOS"]},
-  {id:"ik2", nombre:"Ricardo",    variantes:["IK2","RICARDO"]},
-  {id:"ik4", nombre:"Azarco",     variantes:["IK4","AZARCO"]},
-  {id:"rpiedra", nombre:"Ramon",  variantes:["RPIEDRA","RAMON","RAMÓN"]},
-  {id:"jl",  nombre:"Jose Luis",  variantes:["JL","JLGARCIA","JOSE LUIS","JOSÉ LUIS","JLUIS"]},
-];
+// Vendedores: se cargan dinámicamente de Firebase (usuarios + portal_users).
+// Cada uno: {id (canónico), nombre, equipo, variantes:[todas sus claves]}
+let VENDEDORES = [];
+// Mapa de respaldo: id canónico conocido por nombre (para los del CRM original)
+const CANONICO_POR_NOMBRE = {
+  "DAVID MAG":"wk1","VERONICA":"wk2","VERÓNICA":"wk2","SILVIA":"wk3",
+  "CARLOS G.":"ik1","CARLOS G":"ik1","RICARDO":"ik2","AZARCO":"ik4",
+  "RAMON":"rpiedra","RAMÓN":"rpiedra","JOSE LUIS":"jl","JOSÉ LUIS":"jl"
+};
 
 // Colecciones a normalizar y en qué campo está el vendedor
 const COLECCIONES = [
@@ -153,39 +151,70 @@ let DATOS=[]; // [{col, campos, docs:[...]}]
 let vistaFiltro="todos"; // todos | pendientes | dudosos
 let MAPA_PORTAL={}; // u_xxxxx (mayúsculas) -> {nombre, rol}
 
-// (v2) Carga portal_users + usuarios CRM y amplía las variantes de cada vendedor
-// con sus IDs largos del portal (u_xxxxx), username, catalogoVendedor, etc.
+// (v3) Carga usuarios de Firebase y construye la lista de VENDEDORES dinámicamente.
+// Un "vendedor" = usuario con rol agente/crm_agente. Reúne todas sus claves como variantes.
 async function cargarMapaUsuarios(){
   let portalUsers=[], crmUsers=[];
   try{ portalUsers=await fbList("portal_users"); }catch(e){}
   try{ crmUsers=await fbList("usuarios"); }catch(e){}
   const todos=portalUsers.concat(crmUsers);
 
-  todos.forEach(u=>{
-    const claves=[];
+  // Agrupar registros por persona: la clave de agrupación es nombre (normalizado)
+  // o cualquier variante compartida. Usamos un mapa por nombre.
+  const porPersona={}; // nombreNorm -> {nombre, equipo, rol, claves:Set}
+
+  function clavesDe(u){
+    const c=[];
     ["_docId","id","grupoAgente","username","catalogoVendedor","nombre","portalId","portalDocId"].forEach(k=>{
-      if(u[k]) claves.push(String(u[k]).toUpperCase().trim());
+      if(u[k]) c.push(String(u[k]).toUpperCase().trim());
     });
-    // Guardar en el mapa de IDs del portal: cada clave apunta al nombre/rol
-    const nom=u.nombre||u.username||u.catalogoVendedor||"";
-    const rol=u.rol||"";
-    claves.forEach(c=>{
-      if(!MAPA_PORTAL[c]) MAPA_PORTAL[c]={nombre:nom, rol:rol};
-    });
-    // ¿A qué vendedor de nuestra lista corresponde?
-    let ve=null;
-    for(const cv of VENDEDORES){
-      for(const c of claves){
-        if(cv.id.toUpperCase()===c || cv.variantes.indexOf(c)>=0){ ve=cv; break; }
-      }
-      if(ve) break;
+    return c;
+  }
+
+  todos.forEach(u=>{
+    const rol=(u.rol||"").toLowerCase();
+    const nom=(u.nombre||u.username||u.catalogoVendedor||"").trim();
+    const claves=clavesDe(u);
+    // Guardar mapa de IDs -> nombre/rol (para las pistas)
+    const nomP=u.nombre||u.username||u.catalogoVendedor||"";
+    claves.forEach(c=>{ if(!MAPA_PORTAL[c]) MAPA_PORTAL[c]={nombre:nomP, rol:u.rol||""}; });
+
+    // Solo nos interesan los vendedores (agente / crm_agente)
+    if(rol!=="agente" && rol!=="crm_agente") return;
+    if(!nom) return;
+    const key=nom.toUpperCase();
+    if(!porPersona[key]){
+      porPersona[key]={nombre:nom, equipo:u.equipo||"", rol:rol, claves:new Set()};
     }
-    if(ve){
-      claves.forEach(c=>{
-        if(ve.variantes.indexOf(c)<0 && c!==ve.id.toUpperCase()) ve.variantes.push(c);
+    if(u.equipo && !porPersona[key].equipo) porPersona[key].equipo=u.equipo;
+    claves.forEach(c=>porPersona[key].claves.add(c));
+  });
+
+  // Convertir a lista VENDEDORES con id canónico
+  VENDEDORES=[];
+  Object.keys(porPersona).forEach(key=>{
+    const p=porPersona[key];
+    // id canónico: el conocido del CRM original, o el código corto si existe, o el _docId
+    let idCanon=CANONICO_POR_NOMBRE[key];
+    if(!idCanon){
+      // buscar una clave que parezca código corto (wk1, ik2, etc.)
+      p.claves.forEach(c=>{
+        if(!idCanon && /^[A-Z]{2}\d+$/.test(c)) idCanon=c.toLowerCase();
       });
     }
+    if(!idCanon){
+      // si no, usar la primera clave que no sea un u_xxxxx largo
+      p.claves.forEach(c=>{
+        if(!idCanon && c.indexOf("U_")!==0 && c.length<=12) idCanon=c.toLowerCase();
+      });
+    }
+    if(!idCanon) idCanon=key.toLowerCase().replace(/\s+/g,"");
+    VENDEDORES.push({
+      id:idCanon, nombre:p.nombre, equipo:p.equipo,
+      variantes:Array.from(p.claves)
+    });
   });
+  VENDEDORES.sort((a,b)=>(a.equipo||"").localeCompare(b.equipo||"")||a.nombre.localeCompare(b.nombre));
 }
 
 async function escanear(){
@@ -274,7 +303,7 @@ function render(){
       } else {
         // Dudoso: selector manual
         let opts='<option value="">— elegir —</option>';
-        VENDEDORES.forEach(v=>{ opts+=`<option value="${v.id}">${v.id} · ${v.nombre}</option>`; });
+        VENDEDORES.forEach(v=>{ opts+=`<option value="${v.id}">${v.nombre}${v.equipo?" ("+v.equipo+")":""}</option>`; });
         opts+='<option value="dir">📊 Director</option>';
         opts+='<option value="rw1">🏆 Jefe WIKUK</option>';
         opts+='<option value="ri1">🏆 Jefe INTERKEY</option>';
