@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Normalizar identificadores — CRM</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}
+  body{background:#F1F5F9;color:#0F172A;padding:16px;line-height:1.5}
+  .wrap{max-width:760px;margin:0 auto}
+  .header{background:linear-gradient(135deg,#1E3A5F,#0F172A);color:#fff;padding:20px;
+    border-radius:14px;margin-bottom:16px}
+  .header h1{font-size:20px;margin-bottom:4px}
+  .header .sub{font-size:12px;opacity:.75}
+  .pwd{background:#fff;padding:16px;border-radius:10px;border:1px solid #E2E8F0}
+  .pwd input{width:100%;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:8px;font-size:14px}
+  .pwd button{margin-top:10px;width:100%;padding:11px;background:#1E3A5F;color:#fff;
+    border:none;border-radius:8px;font-weight:700;cursor:pointer}
+  .stat-row{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+  .stat{background:#fff;border:1px solid #E2E8F0;border-radius:10px;padding:10px 14px;flex:1;min-width:120px;text-align:center}
+  .stat .n{font-size:22px;font-weight:900}
+  .stat .l{font-size:10px;color:#64748B;text-transform:uppercase;font-weight:700}
+  .stat.ok .n{color:#22C55E}
+  .stat.warn .n{color:#F59E0B}
+  .stat.danger .n{color:#DC2626}
+  .col-title{font-size:14px;font-weight:800;margin:16px 0 8px;display:flex;align-items:center;gap:8px}
+  .doc{background:#fff;border:1px solid #E2E8F0;border-radius:10px;padding:12px 14px;margin-bottom:8px}
+  .doc.resuelto{border-left:4px solid #22C55E}
+  .doc.dudoso{border-left:4px solid #F59E0B;background:#FFFBEB}
+  .doc.ok-ya{border-left:4px solid #CBD5E1;opacity:.6}
+  .doc .info{font-size:12px;color:#475569}
+  .doc .info b{color:#0F172A}
+  .doc .cambio{font-size:13px;margin:6px 0;font-weight:700}
+  .doc .cambio .old{color:#DC2626;text-decoration:line-through}
+  .doc .cambio .new{color:#059669}
+  .doc select{padding:7px 10px;border:1.5px solid #E2E8F0;border-radius:7px;font-size:13px;margin-right:8px}
+  .doc button{padding:7px 14px;border:none;border-radius:7px;font-size:12px;font-weight:700;cursor:pointer}
+  .btn-aplicar{background:#22C55E;color:#fff}
+  .btn-aplicado{background:#E2E8F0;color:#64748B}
+  .btn-todos{background:#1E3A5F;color:#fff;padding:10px 18px;border:none;border-radius:9px;
+    font-size:13px;font-weight:700;cursor:pointer;margin-bottom:12px}
+  .loader{text-align:center;padding:40px;color:#64748B}
+  .filtros-vista{display:flex;gap:6px;margin-bottom:12px}
+  .fv{padding:6px 12px;border-radius:99px;border:1.5px solid #E2E8F0;background:#fff;
+    font-size:12px;font-weight:700;cursor:pointer}
+  .fv.activo{background:#1E3A5F;color:#fff;border-color:#1E3A5F}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"><div class="loader">Cargando…</div></div>
+
+<script>
+const FB = "https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const PWD_OK = "wikuk2026";
+
+// Vendedores reales (id canónico + todas sus variantes conocidas)
+const VENDEDORES = [
+  {id:"wk1", nombre:"David Mag",  variantes:["WK1","DAVIDMAG","DAVID MAG","DAVID"]},
+  {id:"wk2", nombre:"Verónica",   variantes:["WK2","VERONICA","VEROLOPEZ","VERÓNICA"]},
+  {id:"wk3", nombre:"Silvia",     variantes:["WK3","SILVIA"]},
+  {id:"ik1", nombre:"Carlos G.",  variantes:["IK1","CARLOSG","CARLOS G.","CARLOS G","CARLOS"]},
+  {id:"ik2", nombre:"Ricardo",    variantes:["IK2","RICARDO"]},
+  {id:"ik4", nombre:"Azarco",     variantes:["IK4","AZARCO"]},
+  {id:"rpiedra", nombre:"Ramon",  variantes:["RPIEDRA","RAMON","RAMÓN"]},
+  {id:"jl",  nombre:"Jose Luis",  variantes:["JL","JLGARCIA","JOSE LUIS","JOSÉ LUIS","JLUIS"]},
+];
+
+// Colecciones a normalizar y en qué campo está el vendedor
+const COLECCIONES = [
+  {col:"muestras",      campos:["agente","agenteId","creadoPor"]},
+  {col:"oportunidades", campos:["agente","agenteId","creadoPor","autor"]},
+  {col:"ofertas",       campos:["agente","agenteId","creadoPor"]},
+  {col:"incidencias",   campos:["autor","agente","creadoPor"]},
+  {col:"planes_semanales", campos:["agente","grupoAgente"]},
+];
+
+function fsToObj(doc){
+  if(!doc||!doc.fields) return null;
+  const o={};
+  for(const k in doc.fields){
+    const v=doc.fields[k];
+    if(v.stringValue!==undefined)o[k]=v.stringValue;
+    else if(v.integerValue!==undefined)o[k]=parseInt(v.integerValue);
+    else if(v.doubleValue!==undefined)o[k]=parseFloat(v.doubleValue);
+    else if(v.booleanValue!==undefined)o[k]=v.booleanValue;
+    else if(v.timestampValue!==undefined)o[k]=v.timestampValue;
+    else if(v.nullValue!==undefined)o[k]=null;
+    else if(v.arrayValue&&v.arrayValue.values){
+      o[k]=v.arrayValue.values.map(x=>{
+        if(x.stringValue!==undefined)return x.stringValue;
+        if(x.integerValue!==undefined)return parseInt(x.integerValue);
+        if(x.mapValue)return fsToObj({fields:x.mapValue.fields});
+        return x;
+      });
+    } else if(v.mapValue)o[k]=fsToObj({fields:v.mapValue.fields});
+  }
+  return o;
+}
+function toFsValue(v){
+  if(v===null||v===undefined) return {nullValue:null};
+  if(typeof v==="string") return {stringValue:v};
+  if(typeof v==="boolean") return {booleanValue:v};
+  if(typeof v==="number") return Number.isInteger(v)?{integerValue:String(v)}:{doubleValue:v};
+  if(Array.isArray(v)) return {arrayValue:{values:v.map(toFsValue)}};
+  if(typeof v==="object"){
+    const f={}; for(const k in v) f[k]=toFsValue(v[k]);
+    return {mapValue:{fields:f}};
+  }
+  return {stringValue:String(v)};
+}
+
+async function fbList(col){
+  let docs=[], pageToken=null;
+  do{
+    const url=`${FB}/${col}?pageSize=200${pageToken?`&pageToken=${pageToken}`:""}`;
+    const r=await fetch(url);
+    if(!r.ok) break;
+    const j=await r.json();
+    if(j.documents){
+      j.documents.forEach(d=>{
+        const o=fsToObj(d);
+        o._docId=d.name.split("/").pop();
+        docs.push(o);
+      });
+    }
+    pageToken=j.nextPageToken;
+  }while(pageToken);
+  return docs;
+}
+
+// Actualiza UN campo de un documento (con updateMask, no destruye lo demás)
+async function fbUpdateCampo(col, id, campo, valor){
+  const url=`${FB}/${col}/${id}?updateMask.fieldPaths=${encodeURIComponent(campo)}`;
+  const body={fields:{}};
+  body.fields[campo]=toFsValue(valor);
+  const r=await fetch(url,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  if(!r.ok) throw new Error(await r.text());
+  return true;
+}
+
+// Resuelve un valor a un id canónico de vendedor
+function resolverVendedor(valor){
+  if(!valor) return null;
+  const v=String(valor).toUpperCase().trim();
+  for(const ve of VENDEDORES){
+    if(ve.id.toUpperCase()===v) return ve;
+    if(ve.variantes.indexOf(v)>=0) return ve;
+  }
+  return null;
+}
+
+let DATOS=[]; // [{col, campos, docs:[...]}]
+let vistaFiltro="todos"; // todos | pendientes | dudosos
+
+async function escanear(){
+  document.getElementById("app").innerHTML='<div class="loader">Escaneando colecciones…</div>';
+  DATOS=[];
+  for(const c of COLECCIONES){
+    let docs=[];
+    try{ docs=await fbList(c.col); }catch(e){ docs=[]; }
+    const filas=[];
+    docs.forEach(d=>{
+      if(d.eliminada) return;
+      // Buscar el primer campo con valor
+      let campoUsado=null, valorActual=null;
+      for(const campo of c.campos){
+        if(d[campo]){ campoUsado=campo; valorActual=d[campo]; break; }
+      }
+      if(!campoUsado) return; // sin campo de vendedor — se ignora
+      const ve=resolverVendedor(valorActual);
+      const yaCanonico = ve && String(valorActual).toUpperCase()===ve.id.toUpperCase();
+      filas.push({
+        col:c.col, docId:d._docId, campo:campoUsado,
+        valorActual:valorActual,
+        vendedor:ve, yaCanonico:yaCanonico,
+        nombreDoc: d.cliente||d.clienteNombre||d.producto||d.prod||d.titulo||d.nombre||d._docId,
+        aplicado:false,
+      });
+    });
+    DATOS.push({col:c.col, filas:filas});
+  }
+  render();
+}
+
+function render(){
+  let totalDocs=0, yaOk=0, porMigrar=0, dudosos=0;
+  DATOS.forEach(g=>{
+    g.filas.forEach(f=>{
+      totalDocs++;
+      if(f.yaCanonico) yaOk++;
+      else if(f.vendedor) porMigrar++;
+      else dudosos++;
+    });
+  });
+
+  let html=`
+    <div class="header">
+      <h1>🔧 Normalizar identificadores</h1>
+      <div class="sub">Unifica el campo de vendedor al id canónico (wk1, ik2, ik4…)</div>
+    </div>
+    <div class="stat-row">
+      <div class="stat ok"><div class="n">${yaOk}</div><div class="l">Ya correctos</div></div>
+      <div class="stat warn"><div class="n">${porMigrar}</div><div class="l">Por migrar</div></div>
+      <div class="stat danger"><div class="n">${dudosos}</div><div class="l">Sin resolver</div></div>
+    </div>
+    <div class="filtros-vista">
+      <div class="fv ${vistaFiltro==='todos'?'activo':''}" onclick="setVista('todos')">Todos (${totalDocs})</div>
+      <div class="fv ${vistaFiltro==='pendientes'?'activo':''}" onclick="setVista('pendientes')">Por migrar (${porMigrar})</div>
+      <div class="fv ${vistaFiltro==='dudosos'?'activo':''}" onclick="setVista('dudosos')">Sin resolver (${dudosos})</div>
+    </div>
+  `;
+
+  if(porMigrar>0 && vistaFiltro!=='dudosos'){
+    html+=`<button class="btn-todos" onclick="aplicarTodosResueltos()">✓ Aplicar todos los que tienen vendedor claro (${porMigrar})</button>`;
+  }
+
+  DATOS.forEach((g,gi)=>{
+    let filasVista=g.filas;
+    if(vistaFiltro==='pendientes') filasVista=g.filas.filter(f=>!f.yaCanonico&&f.vendedor&&!f.aplicado);
+    else if(vistaFiltro==='dudosos') filasVista=g.filas.filter(f=>!f.vendedor&&!f.aplicado);
+    if(filasVista.length===0) return;
+
+    html+=`<div class="col-title">📁 ${g.col} <span style="font-size:11px;color:#94A3B8;font-weight:600">(${filasVista.length})</span></div>`;
+    filasVista.forEach((f,fi)=>{
+      const idx=g.filas.indexOf(f);
+      if(f.aplicado){
+        html+=`<div class="doc ok-ya"><div class="info"><b>${esc(f.nombreDoc)}</b> · ${f.campo}: <b>${esc(f.valorActual)}</b> ✓ aplicado</div></div>`;
+      } else if(f.yaCanonico){
+        html+=`<div class="doc ok-ya"><div class="info"><b>${esc(f.nombreDoc)}</b> · ${f.campo}=<b>${esc(f.valorActual)}</b> · ya correcto</div></div>`;
+      } else if(f.vendedor){
+        html+=`<div class="doc resuelto">
+          <div class="info"><b>${esc(f.nombreDoc)}</b></div>
+          <div class="cambio">${f.campo}: <span class="old">${esc(f.valorActual)}</span> → <span class="new">${f.vendedor.id}</span> <span style="color:#64748B;font-weight:400">(${f.vendedor.nombre})</span></div>
+          <button class="btn-aplicar" onclick="aplicarUno(${gi},${idx})">Aplicar</button>
+        </div>`;
+      } else {
+        // Dudoso: selector manual
+        let opts='<option value="">— elegir vendedor —</option>';
+        VENDEDORES.forEach(v=>{ opts+=`<option value="${v.id}">${v.id} · ${v.nombre}</option>`; });
+        html+=`<div class="doc dudoso">
+          <div class="info"><b>${esc(f.nombreDoc)}</b> · ${f.campo} = <b>${esc(f.valorActual)}</b></div>
+          <div class="cambio" style="color:#92400E">No se reconoce este código. Asigna el vendedor:</div>
+          <select id="sel-${gi}-${idx}">${opts}</select>
+          <button class="btn-aplicar" onclick="aplicarManual(${gi},${idx})">Aplicar</button>
+        </div>`;
+      }
+    });
+  });
+
+  if(totalDocs===0) html+='<div class="doc"><div class="info">No se encontraron documentos.</div></div>';
+
+  document.getElementById("app").innerHTML=html;
+}
+
+function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function setVista(v){vistaFiltro=v;render();}
+
+async function aplicarUno(gi,idx){
+  const f=DATOS[gi].filas[idx];
+  if(!f.vendedor) return;
+  try{
+    await fbUpdateCampo(f.col,f.docId,f.campo,f.vendedor.id);
+    f.aplicado=true; f.yaCanonico=true; f.valorActual=f.vendedor.id;
+    render();
+  }catch(e){ alert("Error: "+e.message); }
+}
+
+async function aplicarManual(gi,idx){
+  const f=DATOS[gi].filas[idx];
+  const sel=document.getElementById(`sel-${gi}-${idx}`);
+  const id=sel.value;
+  if(!id){ alert("Elige un vendedor primero"); return; }
+  try{
+    await fbUpdateCampo(f.col,f.docId,f.campo,id);
+    f.aplicado=true; f.yaCanonico=true; f.valorActual=id;
+    f.vendedor=VENDEDORES.find(v=>v.id===id);
+    render();
+  }catch(e){ alert("Error: "+e.message); }
+}
+
+async function aplicarTodosResueltos(){
+  let pendientes=[];
+  DATOS.forEach((g,gi)=>{
+    g.filas.forEach((f,idx)=>{
+      if(!f.yaCanonico&&f.vendedor&&!f.aplicado) pendientes.push({gi,idx});
+    });
+  });
+  if(pendientes.length===0) return;
+  if(!confirm(`¿Aplicar ${pendientes.length} cambios? Cada documento se actualizará al id canónico.`)) return;
+  document.getElementById("app").innerHTML='<div class="loader">Aplicando '+pendientes.length+' cambios…</div>';
+  let ok=0,err=0;
+  for(const p of pendientes){
+    const f=DATOS[p.gi].filas[p.idx];
+    try{
+      await fbUpdateCampo(f.col,f.docId,f.campo,f.vendedor.id);
+      f.aplicado=true; f.yaCanonico=true; f.valorActual=f.vendedor.id;
+      ok++;
+    }catch(e){ err++; }
+  }
+  alert(`Aplicados: ${ok}${err>0?" · Errores: "+err:""}`);
+  render();
+}
+
+function pedirPwd(){
+  document.getElementById("app").innerHTML=`
+    <div class="header"><h1>🔧 Normalizar identificadores</h1>
+      <div class="sub">Herramienta restringida</div></div>
+    <div class="pwd">
+      <label style="display:block;font-size:12px;font-weight:700;color:#64748B;margin-bottom:6px">CONTRASEÑA</label>
+      <input type="password" id="pwd" placeholder="Contraseña">
+      <button onclick="comprobarPwd()">Entrar</button>
+    </div>`;
+  document.getElementById("pwd").addEventListener("keypress",e=>{if(e.key==="Enter")comprobarPwd();});
+}
+function comprobarPwd(){
+  if(document.getElementById("pwd").value===PWD_OK){
+    sessionStorage.setItem("norm_ok","1");
+    escanear();
+  } else alert("Contraseña incorrecta");
+}
+
+if(sessionStorage.getItem("norm_ok")==="1") escanear();
+else pedirPwd();
+</script>
+</body>
+</html>
