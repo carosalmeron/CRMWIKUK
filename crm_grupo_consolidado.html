@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.23.59";
-const CRM_BUILD = "12/05/2026-daily-comercial-incidencias-por-vendedor";
+const CRM_VERSION = "3.23.62";
+const CRM_BUILD = "12/05/2026-hilo-seguimiento-email";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -13720,6 +13720,453 @@ const OPORTUNIDADES_SEED = [];
 // Fallback de proyectos_seed — VACÍO. Los datos vienen de Firebase.
 const PROYECTOS_SEED = [];
 
+// ─── CENTRO DE PENDIENTES (v3.23.60) ─────────────────────────────
+// Reúne en una sola pantalla todo lo que requiere acción: muestras sin
+// feedback, ofertas sin cerrar, proyectos parados, tareas/hitos vencidos
+// e incidencias abiertas. Agrupado por urgencia (Vencido / Esta semana / Más adelante).
+function CentroPendientes({usuario, onBack, onNav, muestrasDB, ofertasDB, incidenciasDB}){
+  const [tareas,setTareas]=React.useState([]);
+  const [proyectos,setProyectos]=React.useState([]);
+  const [cargando,setCargando]=React.useState(true);
+  const [filtroTipo,setFiltroTipo]=React.useState("todos");
+  // (v3.23.61) Hilo de seguimiento
+  const [hiloAbierto,setHiloAbierto]=React.useState(null); // item seleccionado
+  const [mensajeNuevo,setMensajeNuevo]=React.useState("");
+  const [enviando,setEnviando]=React.useState(false);
+  const [tick,setTick]=React.useState(0); // fuerza recálculo tras enviar
+  // Copias locales mutables de muestras/ofertas/incidencias para reflejar hilos al instante
+  const [muestrasLoc,setMuestrasLoc]=React.useState(muestrasDB||[]);
+  const [ofertasLoc,setOfertasLoc]=React.useState(ofertasDB||[]);
+  const [incidenciasLoc,setIncidenciasLoc]=React.useState(incidenciasDB||[]);
+  React.useEffect(function(){setMuestrasLoc(muestrasDB||[]);},[muestrasDB]);
+  React.useEffect(function(){setOfertasLoc(ofertasDB||[]);},[ofertasDB]);
+  React.useEffect(function(){setIncidenciasLoc(incidenciasDB||[]);},[incidenciasDB]);
+
+  React.useEffect(function(){
+    Promise.all([
+      fbLeer("tareas").catch(function(){return [];}),
+      fbLeer("proyectos").catch(function(){return [];})
+    ]).then(function(res){
+      setTareas(res[0]||[]);
+      setProyectos(res[1]||[]);
+      setCargando(false);
+    });
+  },[]);
+
+  // (v3.23.61) Enviar mensaje al hilo de un elemento
+  function enviarMensajeHilo(){
+    if(!hiloAbierto || !mensajeNuevo.trim() || enviando) return;
+    setEnviando(true);
+    var it=hiloAbierto;
+    var msg={
+      autor: usuario.nombre||usuario.id,
+      autorId: usuario.id,
+      rol: usuario.rol||"",
+      texto: mensajeNuevo.trim(),
+      fecha: new Date().toISOString(),
+    };
+    var doc=Object.assign({}, it.ref);
+
+    if(it.tipo==="hito"){
+      // El hilo vive dentro del hito del proyecto
+      var hitos=(doc.hitos||[]).map(function(h){
+        if((h.nombre||"")===it.hitoNombre){
+          var nh=Object.assign({}, h);
+          nh.hiloPendiente=(nh.hiloPendiente||[]).concat([msg]);
+          return nh;
+        }
+        return h;
+      });
+      doc.hitos=hitos;
+    } else {
+      doc.hiloPendiente=(doc.hiloPendiente||[]).concat([msg]);
+    }
+
+    fbEscribir(it.coleccion, it.docId, doc).then(function(){
+      // Actualizar copia local
+      if(it.coleccion==="muestras") setMuestrasLoc(function(p){return p.map(function(x){return (x.id||x._docId)===it.docId?doc:x;});});
+      else if(it.coleccion==="ofertas") setOfertasLoc(function(p){return p.map(function(x){return (x.id||x._docId)===it.docId?doc:x;});});
+      else if(it.coleccion==="incidencias") setIncidenciasLoc(function(p){return p.map(function(x){return (x.id||x._docId)===it.docId?doc:x;});});
+      else if(it.coleccion==="tareas") setTareas(function(p){return p.map(function(x){return (x.id||x._docId)===it.docId?doc:x;});});
+      else if(it.coleccion==="proyectos") setProyectos(function(p){return p.map(function(x){return (x.id||x._docId)===it.docId?doc:x;});});
+      setHiloAbierto(Object.assign({}, it, {ref:doc}));
+      setMensajeNuevo("");
+      setEnviando(false);
+      setTick(function(t){return t+1;});
+      // (v3.23.61) Enviar email al responsable (best-effort, no bloquea)
+      try{
+        fetch("/api/notificar-indicacion", {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({
+            tipoElemento: it.tipo,
+            titulo: it.titulo,
+            cliente: it.cliente,
+            responsableId: it.responsableId||"",
+            responsableNombre: it.responsable||"",
+            autorMensaje: msg.autor,
+            textoMensaje: msg.texto,
+          })
+        }).catch(function(){});
+      }catch(e){}
+    }).catch(function(e){
+      alert("Error al enviar: "+e.message);
+      setEnviando(false);
+    });
+  }
+
+  // Obtiene el hilo de mensajes de un item
+  function getHilo(it){
+    if(!it) return [];
+    if(it.tipo==="hito"){
+      var h=(it.ref.hitos||[]).find(function(x){return (x.nombre||"")===it.hitoNombre;});
+      return (h&&h.hiloPendiente)||[];
+    }
+    return (it.ref.hiloPendiente)||[];
+  }
+
+  // Normaliza cualquier fecha a YYYY-MM-DD
+  function normFecha(f){
+    if(!f) return "";
+    f = String(f);
+    if(f.indexOf("/")>=0){
+      var p=f.split("/");
+      if(p.length===3){
+        var dd=p[0].padStart(2,"0"),mm=p[1].padStart(2,"0"),yy=p[2];
+        if(yy.length===2) yy="20"+yy;
+        return yy+"-"+mm+"-"+dd;
+      }
+    }
+    return f.substring(0,10);
+  }
+  function diasDesde(f){
+    var fn=normFecha(f);
+    if(!fn) return null;
+    var d=new Date(fn+"T00:00:00");
+    if(isNaN(d)) return null;
+    return Math.floor((Date.now()-d.getTime())/(1000*60*60*24));
+  }
+  function fmtES(f){
+    var fn=normFecha(f);
+    if(!fn) return "";
+    var p=fn.split("-");
+    if(p.length===3) return p[2]+"/"+p[1]+"/"+p[0];
+    return fn;
+  }
+
+  var hoyISO=new Date().toISOString().substring(0,10);
+  var en7=new Date(Date.now()+7*86400000).toISOString().substring(0,10);
+
+  // Construir lista unificada de pendientes
+  var items=[];
+
+  // ── MUESTRAS: entregadas/pendientes hace +10 días sin feedback ──
+  (muestrasLoc||[]).forEach(function(m){
+    if(m.eliminada) return;
+    if(m.estado!=="pendiente") return; // ya tiene resultado
+    var dias=diasDesde(m.fecha||m.fechaCreacion);
+    if(dias===null) dias=0;
+    items.push({
+      tipo:"muestra", icon:"📦", color:"#F59E0B",
+      titulo:m.prod||m.producto||"Muestra",
+      cliente:m.cliente||m.clienteNombre||"—",
+      responsable:m.agenteNombre||m.agente||"",
+      detalle:"Sin feedback hace "+dias+" día"+(dias===1?"":"s"),
+      dias:dias,
+      urgencia: dias>=10?"vencido":dias>=5?"semana":"luego",
+      nav:"muestras",
+      coleccion:"muestras", docId:m.id||m._docId, ref:m,
+      responsableId:m.agente||m.agenteId||""
+    });
+  });
+
+  // ── OFERTAS: pendientes sin cerrar +7 días, o con respuesta sin validar ──
+  (ofertasLoc||[]).forEach(function(o){
+    if(o.eliminada) return;
+    var tieneResp=o.hayRespuestaPendienteValidacion;
+    var abierta=(o.lineas||[]).some(function(l){return !l.estado||l.estado==="pendiente";});
+    if(!tieneResp && !abierta) return; // cerrada del todo
+    var dias=diasDesde(o.fechaEnvioCliente||o.fechaCreacion);
+    if(dias===null) dias=0;
+    items.push({
+      tipo:"oferta", icon:tieneResp?"📨":"💰", color:tieneResp?"#3B82F6":"#DC2626",
+      titulo:tieneResp?"Respuesta del cliente sin validar":"Oferta sin cerrar",
+      cliente:o.clienteNombre||"—",
+      responsable:o.agenteNombre||o.agente||"",
+      detalle:tieneResp?"El cliente respondió · valida la oferta":"Enviada hace "+dias+" día"+(dias===1?"":"s"),
+      dias:dias,
+      urgencia: tieneResp?"vencido":dias>=7?"vencido":dias>=3?"semana":"luego",
+      nav:"oportunidades",
+      coleccion:"ofertas", docId:o.id||o._docId, ref:o,
+      responsableId:o.agente||o.agenteId||o.creadoPor||""
+    });
+  });
+
+  // ── INCIDENCIAS: abiertas (urgente=vencido siempre; resto +5 días) ──
+  (incidenciasLoc||[]).forEach(function(i){
+    if(i.eliminada) return;
+    if(i.estado==="cerrada"||i.estado==="resuelta") return;
+    var dias=diasDesde(i.fechaCreacion||i.fecha);
+    if(dias===null) dias=0;
+    var esUrgente=i.prioridad==="urgente"||i.prioridad==="alta";
+    items.push({
+      tipo:"incidencia", icon:"🚨", color:"#991B1B",
+      titulo:i.titulo||i.asunto||i.descripcion||"Incidencia",
+      cliente:i.cliente||i.clienteNombre||"—",
+      responsable:i.autorNombre||i.autor||i.agente||"",
+      detalle:(i.tipo||"")+" · abierta hace "+dias+" día"+(dias===1?"":"s"),
+      dias:dias,
+      urgencia: esUrgente?"vencido":dias>=5?"vencido":dias>=2?"semana":"luego",
+      nav:"incidencias",
+      coleccion:"incidencias", docId:i.id||i._docId, ref:i,
+      responsableId:i.autor||i.agente||""
+    });
+  });
+
+  // ── TAREAS: con vencimiento, no hechas ──
+  (tareas||[]).forEach(function(t){
+    if(t.eliminada||t.estado==="hecha") return;
+    var f=normFecha(t.vence||t.fecha);
+    var dias=f?Math.floor((Date.now()-new Date(f+"T00:00:00").getTime())/(1000*60*60*24)):null;
+    var urg;
+    if(!f) urg="luego";
+    else if(f<hoyISO) urg="vencido";
+    else if(f<=en7) urg="semana";
+    else urg="luego";
+    items.push({
+      tipo:"tarea", icon:"✅", color:"#0EA5E9",
+      titulo:t.titulo||t.texto||t.nombre||"Tarea",
+      cliente:t.cliente||t.clienteNombre||"",
+      responsable:t.agenteNombre||t.agente||"",
+      detalle:f?(f<hoyISO?"Venció el "+fmtES(f):"Vence el "+fmtES(f)):"Sin fecha límite",
+      dias:dias||0,
+      urgencia:urg,
+      nav:"plan_semanal",
+      coleccion:"tareas", docId:t.id||t._docId, ref:t,
+      responsableId:t.agente||t.agenteId||""
+    });
+  });
+
+  // ── HITOS: de proyectos activos, no hechos ──
+  (proyectos||[]).forEach(function(p){
+    if(p.eliminada||p.estado!=="activo") return;
+    (p.hitos||[]).forEach(function(h){
+      if(h.hecho) return;
+      var f=normFecha(h.fecha);
+      var urg;
+      if(!f) urg="luego";
+      else if(f<hoyISO) urg="vencido";
+      else if(f<=en7) urg="semana";
+      else urg="luego";
+      var dias=f?Math.floor((Date.now()-new Date(f+"T00:00:00").getTime())/(1000*60*60*24)):0;
+      items.push({
+        tipo:"hito", icon:"🎯", color:"#14B8A6",
+        titulo:h.nombre||"Hito",
+        cliente:p.cliente||p.clienteNombre||p.nombre||"",
+        responsable:h.responsable||"",
+        detalle:"Proyecto "+(p.nombre||"")+(f?(f<hoyISO?" · venció "+fmtES(f):" · vence "+fmtES(f)):""),
+        dias:dias,
+        urgencia:urg,
+        nav:"proyectos",
+        coleccion:"proyectos", docId:p.id||p._docId, ref:p,
+        hitoNombre:h.nombre||"", hitoRef:h,
+        responsableId:h.responsable||""
+      });
+    });
+  });
+
+  // Filtro por tipo
+  var itemsFiltrados=filtroTipo==="todos"?items:items.filter(function(x){return x.tipo===filtroTipo;});
+
+  // Agrupar por urgencia
+  var grupos={
+    vencido: itemsFiltrados.filter(function(x){return x.urgencia==="vencido";}).sort(function(a,b){return b.dias-a.dias;}),
+    semana:  itemsFiltrados.filter(function(x){return x.urgencia==="semana";}).sort(function(a,b){return b.dias-a.dias;}),
+    luego:   itemsFiltrados.filter(function(x){return x.urgencia==="luego";}).sort(function(a,b){return b.dias-a.dias;}),
+  };
+
+  var TIPOS_FILTRO=[
+    {k:"todos",label:"Todo",icon:"📋"},
+    {k:"muestra",label:"Muestras",icon:"📦"},
+    {k:"oferta",label:"Ofertas",icon:"💰"},
+    {k:"incidencia",label:"Incidencias",icon:"🚨"},
+    {k:"tarea",label:"Tareas",icon:"✅"},
+    {k:"hito",label:"Hitos",icon:"🎯"},
+  ];
+
+  function renderGrupo(clave,titulo,colorCab,bgCab){
+    var lista=grupos[clave];
+    if(lista.length===0) return null;
+    return (
+      <div style={{marginBottom:18}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+          <span style={{background:bgCab,color:colorCab,fontWeight:800,fontSize:12,
+            padding:"4px 12px",borderRadius:99}}>{titulo} · {lista.length}</span>
+        </div>
+        {lista.map(function(it,idx){
+          var nMsg=getHilo(it).length;
+          return (
+            <Card key={clave+idx}
+              style={{marginBottom:8,padding:"12px 14px",
+                borderLeft:"4px solid "+it.color}}>
+              <div style={{display:"flex",alignItems:"flex-start",gap:10}}>
+                <div style={{fontSize:20,flexShrink:0}}>{it.icon}</div>
+                <div style={{flex:1,minWidth:0,cursor:"pointer"}} onClick={function(){if(onNav)onNav(it.nav);}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text,
+                    whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{it.titulo}</p>
+                  <p style={{margin:"2px 0 0",fontSize:12,color:T.text}}>{it.cliente}</p>
+                  <p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>{it.detalle}</p>
+                  {it.responsable && <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>👤 {it.responsable}</p>}
+                </div>
+              </div>
+              {/* (v3.23.61) Botón de hilo de seguimiento */}
+              <div style={{marginTop:10,display:"flex",gap:8}}>
+                <button onClick={function(){setHiloAbierto(it);setMensajeNuevo("");}}
+                  style={{flex:1,padding:"8px 10px",borderRadius:9,border:"1.5px solid "+(nMsg>0?T.navy:T.border),
+                    background:nMsg>0?"#EFF6FF":"#fff",color:nMsg>0?T.navy:T.muted,
+                    fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                  💬 {nMsg>0?("Seguimiento ("+nMsg+")"):"Dar indicación"}
+                </button>
+                <button onClick={function(){if(onNav)onNav(it.nav);}}
+                  style={{padding:"8px 12px",borderRadius:9,border:"1.5px solid "+T.border,
+                    background:"#fff",color:T.muted,fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                  Abrir ›
+                </button>
+              </div>
+            </Card>
+          );
+        })}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{padding:"16px",paddingBottom:80}}>
+      <button onClick={onBack}
+        style={{background:"#fff",border:"1.5px solid "+T.border,padding:"10px 16px",
+          borderRadius:11,marginBottom:14,fontSize:13,fontWeight:700,color:T.text,cursor:"pointer"}}>
+        ← Volver
+      </button>
+
+      <p style={{margin:"0 0 4px",fontSize:22,fontWeight:800,color:T.text}}>📌 Centro de pendientes</p>
+      <p style={{margin:"0 0 14px",fontSize:13,color:T.muted}}>
+        Todo lo que requiere seguimiento, ordenado por urgencia
+      </p>
+
+      {/* Filtros por tipo */}
+      <div style={{display:"flex",gap:6,marginBottom:16,overflowX:"auto",paddingBottom:4}}>
+        {TIPOS_FILTRO.map(function(tf){
+          var activo=filtroTipo===tf.k;
+          var n=tf.k==="todos"?items.length:items.filter(function(x){return x.tipo===tf.k;}).length;
+          return (
+            <button key={tf.k} onClick={function(){setFiltroTipo(tf.k);}}
+              style={{padding:"7px 12px",borderRadius:99,border:"1.5px solid "+(activo?T.navy:T.border),
+                background:activo?T.navy:"#fff",color:activo?"#fff":T.text,
+                fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap",flexShrink:0}}>
+              {tf.icon} {tf.label} {n>0?"("+n+")":""}
+            </button>
+          );
+        })}
+      </div>
+
+      {cargando && <p style={{textAlign:"center",color:T.muted,padding:30}}>Cargando…</p>}
+
+      {!cargando && itemsFiltrados.length===0 && (
+        <Card style={{padding:30,textAlign:"center"}}>
+          <p style={{margin:0,fontSize:40}}>✓</p>
+          <p style={{margin:"8px 0 0",fontSize:15,fontWeight:800,color:T.green}}>Nada pendiente</p>
+          <p style={{margin:"4px 0 0",fontSize:12,color:T.muted}}>No hay {filtroTipo==="todos"?"elementos":TIPOS_FILTRO.find(function(t){return t.k===filtroTipo;}).label.toLowerCase()} que requieran acción</p>
+        </Card>
+      )}
+
+      {!cargando && (
+        <div>
+          {renderGrupo("vencido","🔴 Vencido / urgente","#991B1B","#FEE2E2")}
+          {renderGrupo("semana","🟠 Esta semana","#92400E","#FEF3C7")}
+          {renderGrupo("luego","🟢 Más adelante","#166534","#DCFCE7")}
+        </div>
+      )}
+
+      {/* (v3.23.61) Modal de hilo de seguimiento */}
+      {hiloAbierto && (function(){
+        var hilo=getHilo(hiloAbierto);
+        return (
+          <div onClick={function(){setHiloAbierto(null);}}
+            style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:300,
+              display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+            <div onClick={function(e){e.stopPropagation();}}
+              style={{background:"#fff",borderRadius:"20px 20px 0 0",width:"100%",maxWidth:520,
+                maxHeight:"88vh",display:"flex",flexDirection:"column"}}>
+              {/* Cabecera */}
+              <div style={{padding:"18px 20px 12px",borderBottom:"1px solid "+T.border}}>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <span style={{fontSize:20}}>{hiloAbierto.icon}</span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{margin:0,fontSize:14,fontWeight:800,color:T.text,
+                      whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{hiloAbierto.titulo}</p>
+                    <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{hiloAbierto.cliente}{hiloAbierto.responsable?" · "+hiloAbierto.responsable:""}</p>
+                  </div>
+                  <button onClick={function(){setHiloAbierto(null);}}
+                    style={{background:"none",border:"none",fontSize:22,color:T.muted,cursor:"pointer",lineHeight:1}}>×</button>
+                </div>
+              </div>
+
+              {/* Mensajes */}
+              <div style={{flex:1,overflowY:"auto",padding:"14px 20px",minHeight:120,background:"#F8FAFC"}}>
+                {hilo.length===0 && (
+                  <p style={{textAlign:"center",fontSize:12,color:T.muted,padding:"20px 0"}}>
+                    No hay mensajes todavía.<br/>Escribe la primera indicación para el responsable.
+                  </p>
+                )}
+                {hilo.map(function(m,i){
+                  var mio=m.autorId===usuario.id;
+                  return (
+                    <div key={i} style={{marginBottom:10,display:"flex",
+                      justifyContent:mio?"flex-end":"flex-start"}}>
+                      <div style={{maxWidth:"80%",background:mio?T.navy:"#fff",
+                        color:mio?"#fff":T.text,borderRadius:12,padding:"8px 12px",
+                        border:mio?"none":"1px solid "+T.border}}>
+                        <p style={{margin:0,fontSize:10,fontWeight:700,
+                          color:mio?"rgba(255,255,255,.7)":T.muted}}>
+                          {m.autor}{m.rol?" · "+m.rol:""}
+                        </p>
+                        <p style={{margin:"3px 0 0",fontSize:13,whiteSpace:"pre-wrap"}}>{m.texto}</p>
+                        <p style={{margin:"4px 0 0",fontSize:9,
+                          color:mio?"rgba(255,255,255,.6)":"#94A3B8"}}>
+                          {new Date(m.fecha).toLocaleString("es-ES",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Caja de escribir */}
+              <div style={{padding:"12px 16px 18px",borderTop:"1px solid "+T.border}}>
+                <textarea value={mensajeNuevo}
+                  onChange={function(e){setMensajeNuevo(e.target.value);}}
+                  placeholder="Escribe una indicación…"
+                  style={{width:"100%",padding:"10px 12px",border:"1.5px solid "+T.border,
+                    borderRadius:10,fontSize:13,fontFamily:"inherit",resize:"none",
+                    minHeight:60,boxSizing:"border-box"}}/>
+                <button onClick={enviarMensajeHilo} disabled={enviando||!mensajeNuevo.trim()}
+                  style={{width:"100%",marginTop:8,padding:"11px",borderRadius:10,border:"none",
+                    background:(enviando||!mensajeNuevo.trim())?"#CBD5E1":T.navy,color:"#fff",
+                    fontSize:13,fontWeight:800,cursor:(enviando||!mensajeNuevo.trim())?"not-allowed":"pointer"}}>
+                  {enviando?"Enviando…":"📨 Enviar indicación"}
+                </button>
+                <p style={{margin:"8px 0 0",fontSize:10,color:T.muted,textAlign:"center"}}>
+                  🔔 Se notifica en la app y 📧 por email al responsable
+                </p>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+    </div>
+  );
+}
+
 // ─── ESCÁNER DE TARJETA DE VISITA ────────────────────────────────
 
 function DashDirector({usuario, onNav, estrategiasDB}){
@@ -13753,6 +14200,18 @@ function DashDirector({usuario, onNav, estrategiasDB}){
     <div style={{padding:"20px 16px 100px"}}>
       <p style={{margin:"0 0 4px",fontSize:22,fontWeight:900,color:T.text}}>{usuario.icon} {usuario.nombre}</p>
       <p style={{margin:"0 0 16px",fontSize:13,color:T.muted}}>Sem. {semanaActual} · Consolidado</p>
+
+      {/* (v3.23.60) Acceso Centro de Pendientes */}
+      <div onClick={function(){if(onNav)onNav("centro_pendientes");}}
+        style={{display:"flex",alignItems:"center",gap:12,padding:"14px 16px",marginBottom:16,
+          background:"linear-gradient(135deg,#1E3A5F,#0F172A)",borderRadius:14,cursor:"pointer"}}>
+        <div style={{fontSize:24}}>📌</div>
+        <div style={{flex:1}}>
+          <p style={{margin:0,fontSize:14,fontWeight:800,color:"#fff"}}>Centro de pendientes</p>
+          <p style={{margin:"2px 0 0",fontSize:11,color:"#94A3B8"}}>Muestras, ofertas, tareas, hitos e incidencias por urgencia</p>
+        </div>
+        <span style={{color:"#fff",fontSize:18}}>›</span>
+      </div>
 
       {/* ══ 1. VENTAS — selector período + tarjeta consolidada ══ */}
       <div style={{display:"flex",gap:6,marginBottom:12}}>
@@ -20388,9 +20847,35 @@ function App(props){
         titulo:o.nombre||o.cliente||"Oportunidad",sub:"Sin actividad reciente",
         accion:()=>{setNotifOpen(false);setSection("oportunidades");}});
     });
+    // (v3.23.61) Notificaciones de hilos de seguimiento del Centro de Pendientes
+    function chequearHilo(hilo, titulo, icono, seccion){
+      if(!Array.isArray(hilo)||hilo.length===0) return;
+      var ult=hilo[hilo.length-1];
+      if(!ult||ult.autorId===usuario.id) return; // el último mensaje es mío, no notifico
+      notifs.push({tipo:"hilo",icon:"💬",color:"#1E3A5F",prioridad:3,
+        titulo:"Indicación: "+titulo,
+        sub:icono+" "+(ult.autor||"")+": "+(ult.texto||"").substring(0,50),
+        accion:()=>{setNotifOpen(false);setSection("centro_pendientes");}});
+    }
+    (muestrasDB||[]).forEach(function(m){
+      if(m.eliminada) return;
+      if(_esAgente&&!_appMisIds.has((m.agente||"").toUpperCase())) return;
+      chequearHilo(m.hiloPendiente,(m.prod||m.producto||"Muestra")+" · "+(m.cliente||""),"📦","centro_pendientes");
+    });
+    (ofertasDB||[]).forEach(function(o){
+      if(o.eliminada) return;
+      if(_esAgente&&!_appMisIds.has((o.agente||"").toUpperCase())) return;
+      chequearHilo(o.hiloPendiente,(o.clienteNombre||"Oferta"),"💰","centro_pendientes");
+    });
+    (incidenciasDB||[]).forEach(function(i){
+      if(i.eliminada) return;
+      if(_esAgente&&!_appMisIds.has((i.autor||i.agente||"").toUpperCase())) return;
+      chequearHilo(i.hiloPendiente,(i.titulo||i.asunto||"Incidencia"),"🚨","centro_pendientes");
+    });
+
     notifs.sort((a,b)=>b.prioridad-a.prioridad);
     return notifs;
-  },[muestrasDB,incidenciasDB,estrategiasDB,oportunidadesDB,usuario?.id]);
+  },[muestrasDB,incidenciasDB,estrategiasDB,oportunidadesDB,ofertasDB,usuario?.id]);
 
   if(!usuario){
     // Si estamos dentro del iframe del portal, volver al Hub en vez de mostrar Login
@@ -21174,6 +21659,8 @@ function App(props){
         {esAgente&&section==="plan_semanal"&& <MiSemana usuario={usuario} clientesFB={misClientesFB} onBack={null} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} muestrasDB={muestrasDB} ofertasDB={ofertasDB} setOfertasDB={setOfertasDB} portalUsersDB={portalUsersDB} actividad={actividadSemana} onAbrirCliente={function(data){var obj=typeof data==="string"?{nombre:data,ts:Date.now()}:Object.assign({},data,{ts:Date.now()});setClienteDirecto(obj);setHideNav(true);setSection("clientes");}} onAbrirProyecto={function(nombre){setProyectoDirecto({nombre:nombre,ts:Date.now()});setSection("proyectos");}} onNewCliente={function(nuevo){setClientesDB(function(prev){if(!prev||!prev._todos)return prev;return Object.assign({},prev,{_todos:[nuevo].concat(prev._todos)});});}} onAbrirOportunidad={function(opo){setOpoDirecta(Object.assign({},opo,{ts:Date.now()}));setSection("oportunidades");}}/>}
         {!esAgente&&section==="plan_semanal"&& <MiSemana usuario={usuario} clientesFB={misClientesFB} onBack={null} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} muestrasDB={muestrasDB} ofertasDB={ofertasDB} setOfertasDB={setOfertasDB} portalUsersDB={portalUsersDB} actividad={actividadSemana} onAbrirCliente={function(data){var obj=typeof data==="string"?{nombre:data,ts:Date.now()}:Object.assign({},data,{ts:Date.now()});setClienteDirecto(obj);setHideNav(true);setSection(esJefeOmas?"clientes_eq":"clientes");}} onAbrirProyecto={function(nombre){setProyectoDirecto({nombre:nombre,ts:Date.now()});setSection("proyectos");}} onNewCliente={function(nuevo){setClientesDB(function(prev){if(!prev||!prev._todos)return prev;return Object.assign({},prev,{_todos:[nuevo].concat(prev._todos)});});}} onAbrirOportunidad={function(opo){setOpoDirecta(Object.assign({},opo,{ts:Date.now()}));setSection("oportunidades");}}/>}
         {section==="recuperacion"&& <Recuperacion usuario={usuario} ventasDB={ventasDB} clientesFB={misClientesFB} onBack={()=>setSection("dashboard")} onNav={setSection} onAbrirCliente={function(data){var obj=typeof data==="string"?{nombre:data,ts:Date.now()}:Object.assign({},data,{ts:Date.now()});setClienteDirecto(obj);setHideNav(true);setSection(esAgente?"clientes":"clientes_eq");}}/>}
+        {/* (v3.23.60) Centro de Pendientes */}
+        {section==="centro_pendientes"&& <CentroPendientes usuario={usuario} muestrasDB={muestrasDB} ofertasDB={ofertasDB} incidenciasDB={incidenciasDB} onBack={function(){setSection("dashboard");}} onNav={setSection}/>}
         {/* (v3.22.43) Módulo Ofertas */}
         {section==="ofertas"&& <OfertasModule usuario={usuario} ofertasDB={ofertasDB} setOfertasDB={setOfertasDB} onBack={function(){setSection("dashboard");}} onVolverPotencial={function(){return volverAPotencialSiCorresponde(setSection, setClienteDirecto, usuario);}}/>}
         {/* (v3.23.0) Módulo Vamos Caros - informe ejecutivo */}
