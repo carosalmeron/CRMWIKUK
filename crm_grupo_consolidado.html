@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.23.80";
-const CRM_BUILD = "18/05/2026-jefe-misemana-solo-su-equipo";
+const CRM_VERSION = "3.23.81";
+const CRM_BUILD = "18/05/2026-panel-admin-cambiar-equipo";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -12598,6 +12598,56 @@ function PanelAdmin({onBack}){
   const [formOpen,setFormOpen]=useState(false);
   const [form,setForm]=useState({nombre:"",rol:"agente",equipo:"WIKUK",user:"",pass:"",email:""});
   const [showPassId,setShowPassId]=useState(null);
+  // (v3.23.81) Vendedores reales de Firebase para la pestaña Equipos
+  const [vendReales,setVendReales]=useState([]);
+  const [cargandoVend,setCargandoVend]=useState(false);
+  const [guardandoEq,setGuardandoEq]=useState(null);
+
+  React.useEffect(function(){
+    if(tab!=="equipos") return;
+    setCargandoVend(true);
+    Promise.all([fbLeer("usuarios"),fbLeer("portal_users")]).then(function(res){
+      var todos=(res[0]||[]).map(function(u){return Object.assign({},u,{_col:"usuarios"});})
+        .concat((res[1]||[]).map(function(u){return Object.assign({},u,{_col:"portal_users"});}));
+      // Solo agentes/comerciales, sin cuentas marcadas como duplicadas
+      var vend=todos.filter(function(u){
+        var r=(u.rol||"").toLowerCase();
+        return (r==="agente"||r==="crm_agente") && !u.duplicadaDe;
+      });
+      vend.sort(function(a,b){
+        return (a.equipo||"").localeCompare(b.equipo||"")||
+          (a.nombre||a.username||"").localeCompare(b.nombre||b.username||"");
+      });
+      setVendReales(vend);
+      setCargandoVend(false);
+    }).catch(function(){ setCargandoVend(false); });
+  },[tab]);
+
+  function cambiarEquipo(vend,nuevoEq){
+    if(vend.equipo===nuevoEq) return;
+    if(!confirm("Mover a "+(vend.nombre||vend.username)+" de "+
+      (vend.equipo||"sin equipo")+" a "+nuevoEq+"?")) return;
+    var docId=vend._id||vend.id;
+    var col=vend._col||"usuarios";
+    setGuardandoEq(docId);
+    var url=FB_BASE+"/"+col+"/"+encodeURIComponent(docId)+"?updateMask.fieldPaths=equipo";
+    fetch(url,{method:"PATCH",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({fields:{equipo:{stringValue:nuevoEq}}})})
+      .then(function(r){
+        if(r.ok){
+          setVendReales(function(prev){return prev.map(function(v){
+            return (v._id||v.id)===docId?Object.assign({},v,{equipo:nuevoEq}):v;
+          });});
+          // Actualizar USUARIOS global si está ahí
+          USUARIOS=USUARIOS.map(function(u){
+            return (u.id===vend.id||u.id===docId)?Object.assign({},u,{equipo:nuevoEq}):u;
+          });
+        } else {
+          alert("No se pudo cambiar el equipo. Inténtalo de nuevo.");
+        }
+        setGuardandoEq(null);
+      }).catch(function(){ alert("Error de conexión."); setGuardandoEq(null); });
+  }
 
   const genPass=()=>{
     const c="abcdefghijkmnpqrstuvwxyz23456789";
@@ -12642,7 +12692,7 @@ function PanelAdmin({onBack}){
 
       {/* Tabs */}
       <div style={{display:"flex",gap:6,marginBottom:24,background:T.bg,borderRadius:12,padding:4}}>
-        {[["jerarquia","🏗 Jerarquía"],["usuarios","👥 Usuarios"],["claves","🔑 Claves"]].map(([k,l])=>(
+        {[["jerarquia","🏗 Jerarquía"],["usuarios","👥 Usuarios"],["equipos","🔀 Equipos"],["claves","🔑 Claves"]].map(([k,l])=>(
           <button key={k} onClick={()=>setTab(k)}
             style={{flex:1,padding:"9px",borderRadius:9,border:"none",
               background:tab===k?T.white:"transparent",
@@ -12849,6 +12899,129 @@ function PanelAdmin({onBack}){
               </Card>
             );
           })}
+        </div>
+      )}
+
+      {/* TAB: EQUIPOS — (v3.23.81) mover vendedores de equipo */}
+      {tab==="equipos"&&(
+        <div>
+          <div style={{background:T.amberL,border:`1.5px solid ${T.amber}`,borderRadius:12,
+            padding:"12px 14px",marginBottom:16,display:"flex",gap:8}}>
+            <span style={{fontSize:20}}>🔀</span>
+            <p style={{margin:0,fontSize:12,color:"#92400E",fontWeight:600}}>
+              Cambia el equipo de un vendedor pulsando WIKUK o INTERKEY. El cambio se guarda
+              al instante. Sus visitas anteriores se mantienen como estaban.
+            </p>
+          </div>
+
+          {cargandoVend&&(
+            <div style={{textAlign:"center",padding:"30px",color:T.muted}}>
+              <div style={{fontSize:28,marginBottom:8}}>⏳</div>
+              <p style={{margin:0,fontSize:13}}>Cargando vendedores…</p>
+            </div>
+          )}
+
+          {!cargandoVend&&vendReales.length===0&&(
+            <div style={{textAlign:"center",padding:"30px",color:T.muted}}>
+              <p style={{margin:0,fontSize:13}}>No se encontraron vendedores.</p>
+            </div>
+          )}
+
+          {!cargandoVend&&["WIKUK","INTERKEY"].map(function(eq){
+            var delEq=vendReales.filter(function(v){return v.equipo===eq;});
+            var eqColor=eq==="WIKUK"?T.green:"#F59E0B";
+            return (
+              <div key={eq} style={{marginBottom:18}}>
+                <p style={{margin:"0 0 8px",fontSize:13,fontWeight:800,color:eqColor}}>
+                  {eq} · {delEq.length} vendedor{delEq.length!==1?"es":""}
+                </p>
+                {delEq.length===0&&(
+                  <p style={{margin:"0 0 8px",fontSize:12,color:T.muted,fontStyle:"italic"}}>
+                    Sin vendedores en este equipo.
+                  </p>
+                )}
+                {delEq.map(function(v){
+                  var docId=v._id||v.id;
+                  var guardando=guardandoEq===docId;
+                  return (
+                    <Card key={docId} style={{marginBottom:8,padding:"12px 14px",
+                      opacity:guardando?.5:1}}>
+                      <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                        <span style={{fontSize:18}}>🧑‍💼</span>
+                        <div style={{flex:1,minWidth:0}}>
+                          <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>
+                            {v.nombre||v.username}
+                          </p>
+                          <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
+                            {v.equipo||"sin equipo"} · {v._col}
+                          </p>
+                        </div>
+                        <div style={{display:"flex",gap:6}}>
+                          {["WIKUK","INTERKEY"].map(function(opc){
+                            var activo=v.equipo===opc;
+                            var oColor=opc==="WIKUK"?T.green:"#F59E0B";
+                            return (
+                              <button key={opc} disabled={guardando}
+                                onClick={function(){cambiarEquipo(v,opc);}}
+                                style={{padding:"7px 11px",borderRadius:8,fontSize:11,fontWeight:800,
+                                  cursor:guardando?"default":"pointer",
+                                  border:"2px solid "+(activo?oColor:T.border),
+                                  background:activo?oColor:"#fff",
+                                  color:activo?"#fff":T.muted}}>
+                                {opc}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </Card>
+                  );
+                })}
+              </div>
+            );
+          })}
+
+          {/* Vendedores sin equipo asignado */}
+          {!cargandoVend&&(function(){
+            var sinEq=vendReales.filter(function(v){return v.equipo!=="WIKUK"&&v.equipo!=="INTERKEY";});
+            if(sinEq.length===0) return null;
+            return (
+              <div style={{marginBottom:18}}>
+                <p style={{margin:"0 0 8px",fontSize:13,fontWeight:800,color:T.red}}>
+                  ⚠️ Sin equipo · {sinEq.length}
+                </p>
+                {sinEq.map(function(v){
+                  var docId=v._id||v.id;
+                  var guardando=guardandoEq===docId;
+                  return (
+                    <Card key={docId} style={{marginBottom:8,padding:"12px 14px",opacity:guardando?.5:1}}>
+                      <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                        <span style={{fontSize:18}}>🧑‍💼</span>
+                        <div style={{flex:1,minWidth:0}}>
+                          <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{v.nombre||v.username}</p>
+                          <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>sin equipo · {v._col}</p>
+                        </div>
+                        <div style={{display:"flex",gap:6}}>
+                          {["WIKUK","INTERKEY"].map(function(opc){
+                            var oColor=opc==="WIKUK"?T.green:"#F59E0B";
+                            return (
+                              <button key={opc} disabled={guardando}
+                                onClick={function(){cambiarEquipo(v,opc);}}
+                                style={{padding:"7px 11px",borderRadius:8,fontSize:11,fontWeight:800,
+                                  cursor:guardando?"default":"pointer",border:"2px solid "+T.border,
+                                  background:"#fff",color:T.muted}}>
+                                {opc}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </Card>
+                  );
+                })}
+              </div>
+            );
+          })()}
         </div>
       )}
 
