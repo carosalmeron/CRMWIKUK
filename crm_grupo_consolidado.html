@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.23.83";
-const CRM_BUILD = "18/05/2026-cambio-equipo-en-portal";
+const CRM_VERSION = "3.23.85";
+const CRM_BUILD = "18/05/2026-nombre-agente-cuenta-duplicada";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -322,6 +322,39 @@ let USUARIOS = [
   // (v3.23.0) Rol Compras - acceso a "Vamos caros" para informe a proveedores
   {id:"compras", nombre:"Compras",                rol:"compras",   equipo:null,       color:"#0891B2", icon:"🛒", email:""},
 ];
+
+// ── (v3.23.84) Helper: ¿de qué equipo es este identificador de agente? ──
+// Tolerante a variantes (tildes, mayúsculas) y a todos los campos id.
+function _normEqG(s){
+  return String(s||"").toUpperCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+}
+function equipoDeAgente(idAgente){
+  if(!idAgente) return "";
+  var clave=_normEqG(idAgente);
+  for(var i=0;i<USUARIOS.length;i++){
+    var u=USUARIOS[i];
+    if(!u.equipo) continue;
+    var campos=[u.id,u.grupoAgente,u.username,u.catalogoVendedor,u.crmId,u.nombre,u._id];
+    for(var j=0;j<campos.length;j++){
+      if(campos[j] && _normEqG(campos[j])===clave) return u.equipo;
+    }
+  }
+  return "";
+}
+
+// ── (v3.23.85) Helper global: nombre de un vendedor a partir de su id ──
+function nombreDeAgente(idAgente){
+  if(!idAgente) return "";
+  var clave=_normEqG(idAgente);
+  for(var i=0;i<USUARIOS.length;i++){
+    var u=USUARIOS[i];
+    var campos=[u.id,u.grupoAgente,u.username,u.catalogoVendedor,u.crmId,u.nombre,u._id];
+    for(var j=0;j<campos.length;j++){
+      if(campos[j] && _normEqG(campos[j])===clave) return u.nombre||u.username||idAgente;
+    }
+  }
+  return idAgente;
+}
 
 // ── Helper: resolver todos los IDs CRM de un usuario ────────────
 // El portal puede asignar IDs distintos (ej: "U_xxx") al CRM (ej: "ik4").
@@ -1124,7 +1157,15 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
     if(equipoFiltroMS==="todos") return true;
     return eqItem === equipoFiltroMS;
   }
-  var misEst=(estrategiasDB||[]).filter(function(e){return !e.eliminada&&(e.estado==="en_curso"||e.estado==="pendiente_aprobacion")&&(esAgenteRol?appMisIds.has((e.agente||"").toUpperCase())||e.pendienteDe===usuario.id||e.creadoPor===usuario.id:true);});
+  var misEst=(estrategiasDB||[]).filter(function(e){
+    if(e.eliminada) return false;
+    if(e.estado!=="en_curso"&&e.estado!=="pendiente_aprobacion") return false;
+    if(esAgenteRol){
+      return appMisIds.has((e.agente||"").toUpperCase())||e.pendienteDe===usuario.id||e.creadoPor===usuario.id;
+    }
+    // (v3.23.84) jefe/director/ceo: aplicar filtro de equipo
+    return pasaFiltroEq(e);
+  });
   var misOps=(oportunidadesDB||[]).filter(function(o){
     if(o.eliminada) return false;
     if(["ganada","perdida","cerrada_ganada","cerrada_perdida"].indexOf(o.estado||o.etapa)>=0) return false;
@@ -1239,7 +1280,15 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
     if(!pasaFiltroEq(e)) return false;
     return _semUltSeg(e) === semana;
   });
-  var misInc=(incidenciasDB||[]).filter(function(i){return !i.eliminada&&i.estado!=="cerrada"&&i.estado!=="resuelta"&&(esAgenteRol?appMisIds.has((i.agente||i.autor||"").toUpperCase()):true);});
+  var misInc=(incidenciasDB||[]).filter(function(i){
+    if(i.eliminada) return false;
+    if(i.estado==="cerrada"||i.estado==="resuelta") return false;
+    if(esAgenteRol){
+      return appMisIds.has((i.agente||i.autor||"").toUpperCase());
+    }
+    // (v3.23.84) jefe/director/ceo: aplicar filtro de equipo
+    return pasaFiltroEq(i);
+  });
   var misMue=(muestrasDB||[]).filter(function(m){return !m.eliminada&&m.estado==="pendiente"&&(esAgenteRol?appMisIds.has((m.agente||"").toUpperCase()):true);});
   var _s5=React.useState([]);var tareasDB=_s5[0],setTareasDB=_s5[1];
   var _s6=React.useState([]);var proyectosDB=_s6[0],setProyectosDB=_s6[1];
@@ -1756,20 +1805,30 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
   // Helper para nombre de agente
   function nombreAgenteId(id){
     if(!id) return "";
-    var k = String(id).toUpperCase().trim();
-    // 1. Buscar en USUARIOS hardcoded
+    function _nrm(s){
+      return String(s||"").toUpperCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+    }
+    var k = _nrm(id);
+    var campos = ["id","grupoAgente","nombre","username","catalogoVendedor","crmId","_id"];
+    // 1. Buscar en USUARIOS
     var u = USUARIOS.find(function(x){
-      return ["id","grupoAgente","nombre","username","catalogoVendedor"].some(function(kk){
-        return x[kk] && String(x[kk]).toUpperCase() === k;
-      });
+      return campos.some(function(kk){ return x[kk] && _nrm(x[kk]) === k; });
     });
-    if(u) return u.nombre;
-    // 2. (v3.23.9) Buscar en portalUsersDB (empleados como Esther que solo están en portal)
+    if(u){
+      // (v3.23.85) Si la cuenta está marcada como duplicada, usar el nombre de la cuenta buena
+      if(u.duplicadaDe){
+        var dk=_nrm(u.duplicadaDe);
+        var buena=USUARIOS.find(function(x){
+          return campos.some(function(kk){ return x[kk] && _nrm(x[kk]) === dk; });
+        });
+        if(buena&&buena.nombre) return buena.nombre;
+      }
+      return u.nombre;
+    }
+    // 2. Buscar en portalUsersDB (empleados que solo están en el portal)
     if(typeof portalUsersDB !== "undefined" && Array.isArray(portalUsersDB)){
       var pu = portalUsersDB.find(function(x){
-        return ["id","catalogoVendedor","nombre","username"].some(function(kk){
-          return x[kk] && String(x[kk]).toUpperCase() === k;
-        });
+        return campos.some(function(kk){ return x[kk] && _nrm(x[kk]) === k; });
       });
       if(pu) return pu.nombre || pu.username || pu.catalogoVendedor || id;
     }
@@ -2632,7 +2691,7 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                           var ic = visIcon(v.resultado);
                           var lb = visLabel(v.resultado);
                           var nota = v.notas || v.nota || "";
-                          var agName = nombreAgenteId(v.agente||v.agenteId);
+                          var agName = nombreAgenteId(v.agente||v.agenteId||v.agenteAsignado||v.creadoPor);
                           // (v3.23.5) Detectar si este cliente tiene oportunidad abierta
                           var nmCli=(v.clienteNombre||v.cliente||"").trim().toLowerCase();
                           var opCli = nmCli ? _clientesConOpAbierta[nmCli] : null;
@@ -11070,7 +11129,8 @@ function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirClie
   var porAgente = React.useMemo(function(){
     var m = {};
     clientesFiltrados.forEach(function(c){
-      if(!m[c.agente]) m[c.agente] = {agente:c.agente, equipo:c.equipo, n_lost:0, n_risk:0, n_warn:0, amt:0};
+      if(!m[c.agente]) m[c.agente] = {agente:c.agente, nombre:nombreDeAgente(c.agente),
+        equipo:c.equipo, n_lost:0, n_risk:0, n_warn:0, amt:0};
       m[c.agente]["n_"+c.cls]++;
       m[c.agente].amt += Math.abs(c.perdida);
     });
@@ -11606,7 +11666,7 @@ function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirClie
                   <div style={{flex:1, minWidth:0}}>
                     <p style={{margin:0, fontSize:13, fontWeight:800, color:T.text, lineHeight:1.2}}>{c.nombre}</p>
                     <p style={{margin:"3px 0 0", fontSize:10.5, color:T.muted}}>
-                      {c.codigo} · <span style={{background:"#F1F5F9", padding:"1px 5px", borderRadius:4, fontWeight:700, color:"#475569"}}>{c.agente}</span>
+                      {c.codigo} · <span style={{background:"#F1F5F9", padding:"1px 5px", borderRadius:4, fontWeight:700, color:"#475569"}}>{nombreDeAgente(c.agente)}</span>
                       {c.equipo && <span style={{marginLeft:4, fontSize:9.5, padding:"1px 5px", borderRadius:4, fontWeight:700,
                         background:c.equipo==="WIKUK"?"#DCFCE7":"#FEF3C7",
                         color:c.equipo==="WIKUK"?"#166534":"#92400E"}}>{c.equipo}</span>}
@@ -11705,9 +11765,9 @@ function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirClie
                   border:"1.5px solid "+T.border, cursor:"pointer", display:"flex", alignItems:"center", gap:12}}>
                 <div style={{width:36, height:36, borderRadius:99, background:"#F5F3FF",
                   display:"flex", alignItems:"center", justifyContent:"center",
-                  fontSize:11, fontWeight:800, color:T.purple, flexShrink:0}}>{a.agente.substring(0,2)}</div>
+                  fontSize:11, fontWeight:800, color:T.purple, flexShrink:0}}>{(a.nombre||a.agente).substring(0,2).toUpperCase()}</div>
                 <div style={{flex:1}}>
-                  <p style={{margin:0, fontSize:13, fontWeight:700}}>{a.agente}</p>
+                  <p style={{margin:0, fontSize:13, fontWeight:700}}>{a.nombre||a.agente}</p>
                   <p style={{margin:"2px 0 0", fontSize:10.5, color:T.muted}}>
                     {a.n_lost} perd · {a.n_risk} riesgo · {a.n_warn} aten
                     <span style={{marginLeft:6, fontSize:9.5, padding:"1px 5px", borderRadius:4, fontWeight:700,
@@ -21362,7 +21422,7 @@ function App(props){
     muestrasDB.filter(m=>{
       if(m.estado!=="pendiente") return false;
       if(_esAgente&&!_appMisIds.has((m.agente||"").toUpperCase())) return false;
-      if(_esJefe){const ag=USUARIOS.find(u=>u.id===m.agente);if(!ag||ag.equipo!==_miEquipo) return false;}
+      if(_esJefe){var eqM=equipoDeAgente(m.agente||m.agenteId||m.creadoPor);if(eqM&&eqM!==_miEquipo) return false;if(!eqM) return false;}
       const sem=parseInt(m.semana)||0;
       return sem>0&&(semActual-sem)>=2;
     }).forEach(m=>{
@@ -21374,7 +21434,7 @@ function App(props){
     incidenciasDB.filter(inc=>{
       if(inc.estado==="cerrada"||inc.estado==="resuelta") return false;
       if(_esAgente&&inc.autor!==usuario.id) return false;
-      if(_esJefe&&inc.equipo!==_miEquipo) return false;
+      if(_esJefe){var eqI=equipoDeAgente(inc.autor||inc.agente||inc.creadoPor)||inc.equipo;if(eqI!==_miEquipo) return false;}
       if(!inc.fecha) return true;
       const parts=inc.fecha.split("/");if(parts.length<3) return false;
       const f=new Date(parts[2].length===2?"20"+parts[2]:parts[2],parts[1]-1,parts[0]);
@@ -21418,7 +21478,7 @@ function App(props){
     estrategiasDB.filter(e=>{
       if(e.estado==="completada"||e.estado==="cancelada"||e.eliminada) return false;
       if(_esAgente&&!_appMisIds.has((e.agente||e.agenteId||"").toUpperCase())) return false;
-      if(_esJefe){const ag=USUARIOS.find(u=>u.id===(e.agente||e.agenteId));if(!ag||ag.equipo!==_miEquipo) return false;}
+      if(_esJefe){var eqE=equipoDeAgente(e.agente||e.agenteId||e.creadoPor);if(eqE&&eqE!==_miEquipo) return false;if(!eqE) return false;}
       return true;
     }).forEach(e=>{
       notifs.push({tipo:"estrategia",icon:"🎯",color:"#22C55E",prioridad:1,
@@ -21428,7 +21488,7 @@ function App(props){
     oportunidadesDB.filter(o=>{
       if(["ganada","perdida","cerrada_ganada","cerrada_perdida"].includes(o.estado||o.etapa)) return false;
       if(_esAgente&&!esDelUsuario(o.agente,_appMisIds)&&!esDelUsuario(o.agenteId,_appMisIds)) return false;
-      if(_esJefe){const ag=USUARIOS.find(u=>u.id===(o.agenteId||o.agente));if(!ag||ag.equipo!==_miEquipo) return false;}
+      if(_esJefe){var eqO=equipoDeAgente(o.agenteId||o.agente||o.creadoPor);if(eqO&&eqO!==_miEquipo) return false;if(!eqO) return false;}
       const notas=o.actividad||o.notas||[];
       if(Array.isArray(notas)&&notas.length>0){
         const ult=notas[notas.length-1];
