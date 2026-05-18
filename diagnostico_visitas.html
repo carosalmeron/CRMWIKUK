@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Diagnóstico visitas</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:#0B1220;color:#E2E8F0;padding:16px;line-height:1.5;font-size:13px}
+  .wrap{max-width:600px;margin:0 auto}
+  h1{font-size:18px;margin-bottom:4px}
+  .sub{color:#94A3B8;font-size:12px;margin-bottom:16px}
+  .gate input{padding:10px;border-radius:8px;border:none;font-size:15px;width:200px}
+  .gate button{padding:10px 18px;background:#F59E0B;color:#0B1220;border:none;
+    border-radius:8px;font-weight:800;cursor:pointer;font-size:14px}
+  .card{background:#1E293B;border-radius:10px;padding:13px 15px;margin-bottom:10px}
+  .card h3{font-size:13px;color:#FBBF24;margin-bottom:8px}
+  .row{display:flex;justify-content:space-between;padding:4px 0;
+    border-bottom:1px solid #334155;font-size:12px;gap:8px}
+  .row:last-child{border-bottom:none}
+  .row .k{color:#94A3B8;flex-shrink:0}
+  .row .v{font-weight:700;font-family:monospace;color:#fff;word-break:break-all;text-align:right}
+  .loading{text-align:center;padding:40px;color:#94A3B8}
+  pre{background:#0F172A;padding:10px;border-radius:8px;font-size:11px;
+    overflow-x:auto;color:#7DD3FC;white-space:pre-wrap;word-break:break-all}
+  .big{font-size:20px;font-weight:900;color:#FBBF24}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const PWD="wikuk2026";
+
+function fsToObj(doc){
+  if(!doc||!doc.fields)return null;
+  const o={};
+  for(const k in doc.fields){
+    const v=doc.fields[k];
+    if(v.stringValue!==undefined)o[k]=v.stringValue;
+    else if(v.integerValue!==undefined)o[k]=parseInt(v.integerValue);
+    else if(v.doubleValue!==undefined)o[k]=parseFloat(v.doubleValue);
+    else if(v.booleanValue!==undefined)o[k]=v.booleanValue;
+    else if(v.timestampValue!==undefined)o[k]=v.timestampValue;
+    else if(v.mapValue)o[k]="(objeto)";
+    else if(v.arrayValue&&v.arrayValue.values)o[k]="["+v.arrayValue.values.length+" items]";
+  }
+  return o;
+}
+async function fbList(col){
+  let docs=[],tok=null,p=0;
+  do{
+    const u=FB+"/"+col+"?pageSize=300"+(tok?"&pageToken="+tok:"");
+    let r; try{r=await fetch(u);}catch(e){break;}
+    if(!r.ok)return {error:r.status};
+    const j=await r.json();
+    if(j.documents)j.documents.forEach(d=>{const o=fsToObj(d);if(o){o._id=d.name.split("/").pop();docs.push(o);}});
+    tok=j.nextPageToken;p++;
+  }while(tok&&p<25);
+  return docs;
+}
+function esc(s){return String(s==null?"":s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+
+async function run(){
+  document.getElementById("app").innerHTML='<div class="loading">⏳ Cargando…</div>';
+  const visitas=await fbList("visitas");
+  let html='<h1>🔬 Diagnóstico de visitas</h1><div class="sub">Qué hay realmente en la colección</div>';
+
+  // ── Buscar Miguel en colecciones de cuentas ──
+  const colsUsuarios=["usuarios","portal_users","agentes","vendedores","users"];
+  html+='<div class="card"><h3>👤 ¿Dónde está Miguel?</h3>';
+  for(const cu of colsUsuarios){
+    const data=await fbList(cu);
+    if(data.error){
+      html+='<div class="row"><span class="k">'+cu+'</span><span class="v">no existe</span></div>';
+      continue;
+    }
+    const migs=data.filter(u=>JSON.stringify(u).toUpperCase().indexOf("MIGUEL")>=0);
+    html+='<div class="row"><span class="k">'+cu+' ('+data.length+' total)</span>'+
+      '<span class="v">'+migs.length+' Miguel</span></div>';
+    migs.forEach(u=>{
+      html+='<pre>'+esc(JSON.stringify(u,null,1))+'</pre>';
+    });
+  }
+  html+='</div>';
+
+  if(visitas.error){
+    html+='<div class="card"><h3>❌ Error</h3><div class="row"><span class="v">No se pudo leer "visitas" — código '+visitas.error+'</span></div></div>';
+    document.getElementById("app").innerHTML=html;
+    return;
+  }
+
+  // Total
+  html+='<div class="card"><h3>Total en colección "visitas"</h3>'+
+    '<div class="big">'+visitas.length+' documentos</div></div>';
+
+  if(visitas.length===0){
+    html+='<div class="card"><h3>⚠️ La colección "visitas" está vacía</h3>'+
+      '<div class="row"><span class="v">Las visitas que ves en el CRM están en otra colección. '+
+      'Dime en qué pantalla las ves.</span></div></div>';
+    document.getElementById("app").innerHTML='<div class="wrap">'+html+'</div>';
+    return;
+  }
+
+  // Campos que aparecen
+  const campos={};
+  visitas.forEach(v=>{Object.keys(v).forEach(k=>{campos[k]=(campos[k]||0)+1;});});
+  html+='<div class="card"><h3>Campos presentes (y en cuántas visitas)</h3>';
+  Object.keys(campos).sort((a,b)=>campos[b]-campos[a]).forEach(k=>{
+    html+='<div class="row"><span class="k">'+esc(k)+'</span><span class="v">'+campos[k]+'</span></div>';
+  });
+  html+='</div>';
+
+  // Identificadores de agente
+  const ags={};
+  visitas.forEach(v=>{
+    const a=v.agente||v.agenteId||v.creadoPor||v.grupoAgente||"(sin agente)";
+    ags[a]=(ags[a]||0)+1;
+  });
+  html+='<div class="card"><h3>Identificadores de agente en las visitas</h3>';
+  Object.keys(ags).sort((a,b)=>ags[b]-ags[a]).forEach(a=>{
+    html+='<div class="row"><span class="k">"'+esc(a)+'"</span><span class="v">'+ags[a]+' visita(s)</span></div>';
+  });
+  html+='</div>';
+
+  // Primeras 5 visitas completas
+  html+='<div class="card"><h3>Ejemplo — 5 visitas completas</h3>';
+  visitas.slice(0,5).forEach(v=>{
+    html+='<pre>'+esc(JSON.stringify(v,null,1))+'</pre>';
+  });
+  html+='</div>';
+
+  // Buscar Miguel / FEMAR en cualquier campo
+  const conMiguel=visitas.filter(v=>JSON.stringify(v).toUpperCase().indexOf("MIGUEL")>=0);
+  const conFemar=visitas.filter(v=>JSON.stringify(v).toUpperCase().indexOf("FEMAR")>=0);
+  html+='<div class="card"><h3>Búsqueda libre</h3>'+
+    '<div class="row"><span class="k">visitas con "MIGUEL" en algún campo</span><span class="v">'+conMiguel.length+'</span></div>'+
+    '<div class="row"><span class="k">visitas con "FEMAR" en algún campo</span><span class="v">'+conFemar.length+'</span></div>';
+  if(conFemar.length>0){
+    html+='<pre>'+esc(JSON.stringify(conFemar[0],null,1))+'</pre>';
+  }
+  html+='</div>';
+
+  document.getElementById("app").innerHTML='<div class="wrap">'+html+'</div>';
+}
+
+function gate(){
+  document.getElementById("app").innerHTML=
+    '<h1>🔬 Diagnóstico visitas</h1><div class="sub">Acceso restringido</div>'+
+    '<div class="gate"><input type="password" id="p" placeholder="Contraseña"> '+
+    '<button onclick="chk()">Entrar</button></div>';
+  document.getElementById("p").addEventListener("keypress",e=>{if(e.key==="Enter")chk();});
+}
+function chk(){
+  if(document.getElementById("p").value===PWD) run();
+  else alert("Contraseña incorrecta");
+}
+gate();
+</script>
+</body>
+</html>
