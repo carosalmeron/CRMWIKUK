@@ -167,32 +167,76 @@ function contarActividad(claves){
 }
 
 function agrupar(){
-  // Junta cuentas de usuarios + portal_users por nombre normalizado
-  const porNombre={};
-  function add(cuenta,origen){
-    const nom=up(cuenta.nombre||cuenta.username||cuenta.catalogoVendedor);
-    if(!nom) return;
-    if(!porNombre[nom]) porNombre[nom]={nombre:cuenta.nombre||cuenta.username||nom,cuentas:[]};
+  // (v2) Junta cuentas que comparten NOMBRE o cualquier IDENTIFICADOR
+  const todas=[];
+  function prep(cuenta,origen){
     cuenta._origen=origen;
     cuenta._claves=todasLasClaves(cuenta);
     cuenta._actividad=contarActividad(cuenta._claves);
-    porNombre[nom].cuentas.push(cuenta);
+    todas.push(cuenta);
   }
-  DATA.usuarios.forEach(u=>add(u,"usuarios"));
-  DATA.portal.forEach(u=>add(u,"portal_users"));
+  DATA.usuarios.forEach(u=>prep(u,"usuarios"));
+  DATA.portal.forEach(u=>prep(u,"portal_users"));
 
-  PERSONAS=Object.keys(porNombre).map(k=>{
-    const p=porNombre[k];
-    p.total=p.cuentas.reduce((s,c)=>s+c._actividad,0);
-    p.duplicado=p.cuentas.length>1;
-    // por defecto, elegir la cuenta con más actividad
+  // Cada cuenta tiene un conjunto de "huellas": nombre + todos sus ids
+  function huellas(c){
+    const h=new Set();
+    const nom=up(c.nombre||c.username||c.catalogoVendedor);
+    if(nom) h.add("N:"+nom);
+    c._claves.forEach(k=>{
+      // ids cortos/significativos sirven de enlace; ignorar genéricos
+      if(k && k.length>=2) h.add("K:"+k);
+    });
+    return h;
+  }
+  todas.forEach(c=>{ c._huellas=huellas(c); });
+
+  // Unión: dos cuentas van al mismo grupo si comparten alguna huella
+  const grupos=[]; // cada uno = {cuentas:[], huellas:Set}
+  todas.forEach(c=>{
+    let destino=null;
+    for(const g of grupos){
+      for(const h of c._huellas){ if(g.huellas.has(h)){ destino=g; break; } }
+      if(destino) break;
+    }
+    if(!destino){ destino={cuentas:[],huellas:new Set()}; grupos.push(destino); }
+    destino.cuentas.push(c);
+    c._huellas.forEach(h=>destino.huellas.add(h));
+  });
+  // Segunda pasada: fusionar grupos que quedaron conectados indirectamente
+  let fusionado=true;
+  while(fusionado){
+    fusionado=false;
+    for(let i=0;i<grupos.length;i++){
+      for(let j=i+1;j<grupos.length;j++){
+        let comun=false;
+        for(const h of grupos[j].huellas){ if(grupos[i].huellas.has(h)){ comun=true; break; } }
+        if(comun){
+          grupos[j].cuentas.forEach(c=>grupos[i].cuentas.push(c));
+          grupos[j].huellas.forEach(h=>grupos[i].huellas.add(h));
+          grupos.splice(j,1); fusionado=true; j--;
+        }
+      }
+    }
+  }
+
+  PERSONAS=grupos.map((g,gi)=>{
+    // nombre representativo: el de la cuenta con más actividad
+    let mejor=g.cuentas[0];
+    g.cuentas.forEach(c=>{ if(c._actividad>mejor._actividad) mejor=c; });
+    const p={
+      nombre: mejor.nombre||mejor.username||"Cuenta "+(gi+1),
+      cuentas: g.cuentas,
+      total: g.cuentas.reduce((s,c)=>s+c._actividad,0),
+      duplicado: g.cuentas.length>1,
+      _key: "g"+gi
+    };
     let maxIdx=0,maxN=-1;
     p.cuentas.forEach((c,i)=>{ if(c._actividad>maxN){maxN=c._actividad;maxIdx=i;} });
-    elegidas[k]=maxIdx;
-    equipoElegido[k]=p.cuentas[maxIdx].equipo||p.cuentas[0].equipo||"";
+    elegidas[p._key]=maxIdx;
+    equipoElegido[p._key]=p.cuentas[maxIdx].equipo||p.cuentas[0].equipo||"";
     return p;
   });
-  // duplicados primero, dentro por actividad desc
   PERSONAS.sort((a,b)=>{
     if(a.duplicado!==b.duplicado) return a.duplicado?-1:1;
     return b.total-a.total;
@@ -219,7 +263,7 @@ function render(){
   }
 
   dups.forEach(p=>{
-    const key=up(p.nombre);
+    const key=p._key;
     html+='<div class="card dup" id="card-'+esc(key)+'">';
     html+='<h3>👤 '+esc(p.nombre)+'</h3>';
     html+='<div class="meta">'+p.cuentas.length+' cuentas · '+p.total+' registros de actividad en total</div>';
@@ -266,14 +310,14 @@ function render(){
 
 window.elegir=function(key,i){ elegidas[key]=i;
   // al cambiar de cuenta, sugerir su equipo
-  const p=PERSONAS.find(x=>up(x.nombre)===key);
+  const p=PERSONAS.find(x=>x._key===key);
   if(p&&p.cuentas[i].equipo) equipoElegido[key]=p.cuentas[i].equipo;
   render();
 };
 window.setEquipo=function(key,eq){ equipoElegido[key]=eq; render(); };
 
 window.unificar=async function(key){
-  const p=PERSONAS.find(x=>up(x.nombre)===key);
+  const p=PERSONAS.find(x=>x._key===key);
   if(!p) return;
   const buena=p.cuentas[elegidas[key]];
   const malas=p.cuentas.filter((c,i)=>i!==elegidas[key]);
