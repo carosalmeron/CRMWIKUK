@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.23.71";
-const CRM_BUILD = "18/05/2026-mensaje-cliente-editable-antes-de-enviar";
+const CRM_VERSION = "3.23.74";
+const CRM_BUILD = "18/05/2026-mensaje-cliente-en-modal-visita";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -4960,6 +4960,8 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
   const [ofertasVisita,setOfertasVisita]=useState([]);
   const [showOfertaForm,setShowOfertaForm]=useState(false);
   const [ofertaForm,setOfertaForm]=useState({producto:"",calibre:"",precio:"",unidad:"€/kg",notas:""});
+  const [ofertaCreada,setOfertaCreada]=useState(null); // (v3.23.72) modal enviar tras crear
+  const [msgClienteVisita,setMsgClienteVisita]=useState(""); // (v3.23.74) mensaje editable
   var abrirCliente=function(c){
     var cid=c.id||"";
     var cnom=(c.nombre||c.NOMBRE||"").toUpperCase();
@@ -5106,10 +5108,15 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
     fbEscribir("visitas", `${usuario.id}_${clienteSel.id}_sem${semana}`, visitaDoc);
 
     // (v3.22.38) Si hay ofertas, crear documento separado en colección "ofertas"
+    var ofertaParaEnviar=null;
     if(tieneOferta){
       const hoy=new Date();
       const plazo=new Date(hoy.getTime()+5*24*60*60*1000); // 5 días
       const ofertaId="oferta_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
+      // (v3.23.72) Generar token de cliente ya, para poder enviar sin salir
+      var token="";
+      var chars="ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+      for(var ti=0;ti<10;ti++) token+=chars[Math.floor(Math.random()*chars.length)];
       const ofertaDoc={
         id:ofertaId,
         clienteNombre:clienteSel.nombre,
@@ -5125,9 +5132,12 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
         fechaPlazo:plazo.toISOString(),
         notaInicial:"",
         notas:formV.notas||"",
-        seguimientos:[{accion:"Oferta enviada", fecha:fecha, por:usuario.nombre, nota:""}]
+        tokenCliente:token,
+        fechaEnvioCliente:hoy.toISOString(),
+        seguimientos:[{accion:"Oferta creada", fecha:fecha, por:usuario.nombre, nota:""}]
       };
       fbEscribir("ofertas",ofertaId,ofertaDoc).catch(function(e){console.warn("[OFERTAS] Error:",e);});
+      ofertaParaEnviar={id:ofertaId, token:token, clienteNombre:clienteSel.nombre};
     }
 
     setVisitas(prev=>{
@@ -5141,6 +5151,8 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
     setOfertasVisita([]); setShowOfertaForm(false);
     setOfertaForm({producto:"",calibre:"",precio:"",unidad:"€/kg",notas:""});
     setClienteSel(null);
+    // (v3.23.72) Si se creó oferta, abrir modal para enviarla al cliente sin salir
+    if(ofertaParaEnviar){ setMsgClienteVisita(""); setOfertaCreada(ofertaParaEnviar); }
   };
 
   if(cargandoClientes){
@@ -5190,6 +5202,100 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
 
   return(
     <div style={{padding:"16px 16px 100px"}}>
+      {/* (v3.23.72/74) Modal: oferta creada en la visita — enviar al cliente sin salir */}
+      {ofertaCreada && (function(){
+        var base=window.location.origin||"https://crmwikuk.vercel.app";
+        var url=base+"/of.html?id="+ofertaCreada.id+"&token="+ofertaCreada.token;
+        // Guarda el mensaje al cliente en la oferta (se llama antes de cada envío)
+        var guardarMsg=function(){
+          if(!msgClienteVisita.trim()) return;
+          if(ofertaCreada.notaInicialGuardada===msgClienteVisita) return;
+          fbLeer("ofertas").then(function(todas){
+            var of=(todas||[]).find(function(o){return o.id===ofertaCreada.id;});
+            if(of){
+              var act=Object.assign({},of,{notaInicial:msgClienteVisita});
+              fbEscribir("ofertas",ofertaCreada.id,act).catch(function(){});
+            }
+          }).catch(function(){});
+          setOfertaCreada(Object.assign({},ofertaCreada,{notaInicialGuardada:msgClienteVisita}));
+        };
+        return (
+          <div onClick={function(){setOfertaCreada(null);}}
+            style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:300,
+              display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+            <div onClick={function(e){e.stopPropagation();}}
+              style={{background:"#fff",borderRadius:"20px 20px 0 0",padding:24,width:"100%",
+                maxWidth:480,maxHeight:"90vh",overflowY:"auto"}}>
+              <div style={{fontSize:38,textAlign:"center"}}>✅</div>
+              <p style={{margin:"6px 0 4px",fontSize:17,fontWeight:800,textAlign:"center"}}>Oferta creada</p>
+              <p style={{margin:"0 0 16px",fontSize:12,color:T.muted,textAlign:"center"}}>
+                Para {ofertaCreada.clienteNombre}. ¿Se la envías ahora al cliente?
+              </p>
+
+              {/* (v3.23.74) Mensaje al cliente — para toda la oferta */}
+              <div style={{marginBottom:14}}>
+                <p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:"#0369A1"}}>
+                  💬 Mensaje para el cliente (verá este texto al abrir la oferta)
+                </p>
+                <textarea value={msgClienteVisita}
+                  onChange={function(e){setMsgClienteVisita(e.target.value);}}
+                  rows={3} placeholder="Opcional. Ej: Estimado cliente, le enviamos la oferta que hemos comentado en la visita. Quedamos a su disposición."
+                  style={{width:"100%",padding:"10px 12px",borderRadius:10,border:"1.5px solid #7DD3FC",
+                    fontSize:13,boxSizing:"border-box",resize:"vertical",fontFamily:"inherit",background:"#F0F9FF"}}/>
+                <p style={{margin:"5px 0 0",fontSize:10,color:T.muted,textAlign:"center"}}>
+                  Se guarda en la oferta al pulsar cualquier botón de envío
+                </p>
+              </div>
+
+              <div style={{padding:"10px 12px",background:"#F8FAFC",border:"1px solid "+T.border,
+                borderRadius:9,marginBottom:14}}>
+                <p style={{margin:"0 0 6px",fontSize:10,color:T.muted,fontWeight:700,textTransform:"uppercase"}}>Enlace para el cliente</p>
+                <p style={{margin:0,fontSize:11,color:T.text,wordBreak:"break-all",fontFamily:"monospace"}}>{url}</p>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+                <button onClick={function(){
+                    guardarMsg();
+                    if(navigator.clipboard){
+                      navigator.clipboard.writeText(url).then(function(){alert("✓ Enlace copiado");}).catch(function(){
+                        var ta=document.createElement("textarea");ta.value=url;document.body.appendChild(ta);ta.select();document.execCommand("copy");document.body.removeChild(ta);alert("✓ Enlace copiado");
+                      });
+                    } else {
+                      var ta=document.createElement("textarea");ta.value=url;document.body.appendChild(ta);ta.select();document.execCommand("copy");document.body.removeChild(ta);alert("✓ Enlace copiado");
+                    }
+                  }}
+                  style={{padding:"12px",border:"none",background:T.navy,color:"#fff",borderRadius:10,
+                    fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                  📋 Copiar enlace
+                </button>
+                <button onClick={function(){
+                    guardarMsg();
+                    var msg="Hola, te paso la oferta que comentamos:\n\n"+url+"\n\nPuedes responder desde el mismo enlace. Saludos!";
+                    window.open("https://wa.me/?text="+encodeURIComponent(msg),"_blank");
+                  }}
+                  style={{padding:"12px",border:"none",background:"#25D366",color:"#fff",borderRadius:10,
+                    fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                  💬 WhatsApp
+                </button>
+              </div>
+              <button onClick={function(){
+                  guardarMsg();
+                  var subj=encodeURIComponent("Oferta: "+(ofertaCreada.clienteNombre||""));
+                  var body=encodeURIComponent("Hola,\n\nTe paso la oferta que comentamos:\n\n"+url+"\n\nPuedes ver el detalle y responder directamente desde el enlace.\n\nUn saludo,\n"+(usuario.nombre||""));
+                  window.location.href="mailto:?subject="+subj+"&body="+body;
+                }}
+                style={{width:"100%",padding:"12px",border:"1.5px solid "+T.border,background:"#fff",
+                  color:T.text,borderRadius:10,fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:10}}>
+                ✉️ Email
+              </button>
+              <button onClick={function(){guardarMsg();setOfertaCreada(null);}}
+                style={{width:"100%",padding:"10px",borderRadius:9,border:"1.5px solid "+T.border,
+                  background:"#fff",color:T.muted,fontWeight:700,fontSize:12,cursor:"pointer"}}>
+                Ahora no · la envío luego
+              </button>
+            </div>
+          </div>
+        );
+      })()}
       {/* Stepper */}
       <div style={{display:"flex",gap:4,marginBottom:24}}>
         {PASOS.map((p,i)=>{
@@ -10014,15 +10120,21 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
               </div>
             </div>
 
-            <p style={{margin:"10px 0 4px",fontSize:11,fontWeight:700,color:"#0369A1"}}>💬 Mensaje para el cliente (lo verá en la oferta):</p>
-            <textarea value={formOf.notaInicial||""} onChange={function(e){setFormOf(Object.assign({},formOf,{notaInicial:e.target.value}));}}
-              rows={2} placeholder="Ej: Estimado cliente, le enviamos nuestra mejor propuesta. Quedamos a su disposición."
-              style={{width:"100%",padding:"10px 12px",borderRadius:10,border:"1.5px solid #7DD3FC",fontSize:13,boxSizing:"border-box",resize:"vertical",fontFamily:"inherit",background:"#F0F9FF"}}/>
+            {/* (v3.23.73) Mensaje y nota — a nivel de OFERTA completa, no de línea */}
+            <div style={{marginTop:18,paddingTop:16,borderTop:"2px solid "+T.border}}>
+              <p style={{margin:"0 0 10px",fontSize:12,fontWeight:800,color:T.text}}>
+                📄 Datos de la oferta completa
+              </p>
+              <p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:"#0369A1"}}>💬 Mensaje para el cliente (verá este texto al abrir la oferta entera):</p>
+              <textarea value={formOf.notaInicial||""} onChange={function(e){setFormOf(Object.assign({},formOf,{notaInicial:e.target.value}));}}
+                rows={2} placeholder="Ej: Estimado cliente, le enviamos nuestra mejor propuesta. Quedamos a su disposición."
+                style={{width:"100%",padding:"10px 12px",borderRadius:10,border:"1.5px solid #7DD3FC",fontSize:13,boxSizing:"border-box",resize:"vertical",fontFamily:"inherit",background:"#F0F9FF"}}/>
 
-            <p style={{margin:"10px 0 4px",fontSize:11,fontWeight:700,color:T.muted}}>🔒 Nota interna (NO la ve el cliente):</p>
-            <textarea value={formOf.notas||""} onChange={function(e){setFormOf(Object.assign({},formOf,{notas:e.target.value}));}}
-              rows={2} placeholder="Ej: cliente quería precio antes de pedir 5000 kg"
-              style={{width:"100%",padding:"10px 12px",borderRadius:10,border:"1px solid "+T.border,fontSize:13,boxSizing:"border-box",resize:"vertical",fontFamily:"inherit"}}/>
+              <p style={{margin:"10px 0 4px",fontSize:11,fontWeight:700,color:T.muted}}>🔒 Nota interna (NO la ve el cliente):</p>
+              <textarea value={formOf.notas||""} onChange={function(e){setFormOf(Object.assign({},formOf,{notas:e.target.value}));}}
+                rows={2} placeholder="Ej: cliente quería precio antes de pedir 5000 kg"
+                style={{width:"100%",padding:"10px 12px",borderRadius:10,border:"1px solid "+T.border,fontSize:13,boxSizing:"border-box",resize:"vertical",fontFamily:"inherit"}}/>
+            </div>
 
             <div style={{display:"flex",gap:8,marginTop:14}}>
               <button onClick={function(){
