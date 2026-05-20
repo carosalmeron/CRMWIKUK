@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.23.87";
-const CRM_BUILD = "18/05/2026-notif-hilos-filtro-equipo-jefe";
+const CRM_VERSION = "3.23.88";
+const CRM_BUILD = "18/05/2026-muestras-responsables-enviar-cliente";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -6282,6 +6282,11 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
   // (v3.22.37) Edición/eliminación
   const [editandoMuestra,setEditandoMuestra]=useState(false);
   const [editForm,setEditForm]=useState({});
+  // (v3.23.88) Gestión de responsables y envío al cliente
+  const [showResp,setShowResp]=useState(false);
+  const [nuevoResp,setNuevoResp]=useState({nombre:"",email:""});
+  const [showEnviar,setShowEnviar]=useState(false);
+  const [msgClienteMue,setMsgClienteMue]=useState("");
 
   const esAgente=usuario.rol==="agente";
   const esJefe=usuario.rol==="jefe";
@@ -6402,6 +6407,57 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
 
   if(cargando) return <div style={{padding:40,textAlign:"center",color:T.muted}}>⏳ Cargando muestras…</div>;
 
+  // (v3.23.88) Helpers para responsables y envío al cliente
+  function addResponsableMue(){
+    if(!sel) return;
+    if(!nuevoResp.email||!/^[^@]+@[^@]+\.[^@]+$/.test(nuevoResp.email)){
+      alert("Introduce un email válido"); return;
+    }
+    var list=(sel.responsables||[]).concat([{nombre:nuevoResp.nombre||nuevoResp.email,email:nuevoResp.email}]);
+    var updated=Object.assign({},sel,{responsables:list});
+    fbEscribir("muestras",sel.id,updated).then(function(){
+      setSel(updated);
+      setMuestras(function(prev){return prev.map(function(m){return m.id===sel.id?updated:m;});});
+      setNuevoResp({nombre:"",email:""});
+    }).catch(function(e){alert("Error: "+e.message);});
+  }
+  function delResponsableMue(idx){
+    if(!sel) return;
+    var list=(sel.responsables||[]).filter(function(_,i){return i!==idx;});
+    var updated=Object.assign({},sel,{responsables:list});
+    fbEscribir("muestras",sel.id,updated).then(function(){
+      setSel(updated);
+      setMuestras(function(prev){return prev.map(function(m){return m.id===sel.id?updated:m;});});
+    }).catch(function(e){alert("Error: "+e.message);});
+  }
+  function generarTokenMue(callback){
+    if(!sel) return;
+    if(sel.tokenCliente){ if(callback)callback(sel.tokenCliente); return; }
+    var token="";
+    var chars="ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    for(var i=0;i<10;i++) token+=chars[Math.floor(Math.random()*chars.length)];
+    var updated=Object.assign({},sel,{tokenCliente:token,fechaEnvioCliente:new Date().toISOString()});
+    fbEscribir("muestras",sel.id,updated).then(function(){
+      setSel(updated);
+      setMuestras(function(prev){return prev.map(function(m){return m.id===sel.id?updated:m;});});
+      if(callback) callback(token);
+    }).catch(function(e){alert("Error: "+e.message);});
+  }
+  function urlPublicaMue(){
+    if(!sel||!sel.tokenCliente) return "";
+    var base=window.location.origin||"https://crmwikuk.vercel.app";
+    return base+"/seg.html?tipo=muestra&id="+sel.id+"&token="+sel.tokenCliente;
+  }
+  function guardarMsgClienteMue(){
+    if(!sel) return Promise.resolve();
+    if(msgClienteMue===(sel.notaInicial||"")) return Promise.resolve();
+    var updated=Object.assign({},sel,{notaInicial:msgClienteMue});
+    return fbEscribir("muestras",sel.id,updated).then(function(){
+      setSel(updated);
+      setMuestras(function(prev){return prev.map(function(m){return m.id===sel.id?updated:m;});});
+    });
+  }
+
   if(sel){
     const esPendiente=sel.estado==="pendiente";
     const estadoSel={
@@ -6417,7 +6473,145 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
     const puedeBorrar=sel.agente===usuario.id||usuario.rol==="director"||usuario.rol==="ceo";
     return(
       <div style={{padding:"20px 16px 100px"}}>
-        <BackBar label="Volver" onBack={()=>{setSel(null);setEditandoMuestra(false);setEditForm({});}}/>
+        <BackBar label="Volver" onBack={()=>{setSel(null);setEditandoMuestra(false);setEditForm({});setShowResp(false);setShowEnviar(false);}}/>
+
+        {/* (v3.23.88) Sistema de seguimiento bidireccional — responsables + enviar al cliente */}
+        <Card style={{marginBottom:14,padding:"14px 16px",border:"1.5px solid "+T.border}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+            <div style={{flex:1,minWidth:0}}>
+              <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>🔗 Seguimiento con el cliente</p>
+              <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
+                {(sel.responsables||[]).length} responsable{(sel.responsables||[]).length===1?"":"s"}
+                {sel.tokenCliente?" · enlace activo":" · sin enlace"}
+              </p>
+            </div>
+            <button onClick={function(){setShowResp(function(x){return !x;});}}
+              style={{padding:"8px 12px",borderRadius:9,border:"1.5px solid "+T.border,
+                background:"#fff",color:T.text,fontSize:12,fontWeight:700,cursor:"pointer"}}>
+              {showResp?"Ocultar":"👥 Responsables"}
+            </button>
+          </div>
+
+          {showResp && (
+            <div style={{marginTop:12,paddingTop:12,borderTop:"1px solid "+T.border}}>
+              <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>
+                Responsables del seguimiento
+              </p>
+              {(sel.responsables||[]).length===0 && (
+                <p style={{margin:"0 0 8px",fontSize:12,color:T.muted,fontStyle:"italic"}}>
+                  Aún no hay responsables. Añade al menos uno para que reciba las notificaciones por email.
+                </p>
+              )}
+              {(sel.responsables||[]).map(function(r,idx){
+                return (
+                  <div key={idx} style={{display:"flex",gap:8,alignItems:"center",
+                    padding:"7px 10px",background:"#F8FAFC",border:"1px solid "+T.border,
+                    borderRadius:7,marginBottom:6}}>
+                    <div style={{flex:1,minWidth:0}}>
+                      <p style={{margin:0,fontSize:12,fontWeight:700,color:T.text}}>{r.nombre||r.email}</p>
+                      <p style={{margin:0,fontSize:11,color:T.muted,wordBreak:"break-all"}}>{r.email}</p>
+                    </div>
+                    <button onClick={function(){delResponsableMue(idx);}}
+                      style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:16,padding:"2px 6px"}}>✕</button>
+                  </div>
+                );
+              })}
+              <div style={{display:"flex",gap:6,marginTop:8}}>
+                <input value={nuevoResp.nombre} onChange={function(e){setNuevoResp(Object.assign({},nuevoResp,{nombre:e.target.value}));}}
+                  placeholder="Nombre"
+                  style={{flex:1,padding:"8px 10px",border:"1px solid "+T.border,borderRadius:7,fontSize:12,boxSizing:"border-box",minWidth:0}}/>
+                <input value={nuevoResp.email} onChange={function(e){setNuevoResp(Object.assign({},nuevoResp,{email:e.target.value}));}}
+                  placeholder="Email *" type="email"
+                  style={{flex:1.4,padding:"8px 10px",border:"1px solid "+T.border,borderRadius:7,fontSize:12,boxSizing:"border-box",minWidth:0}}/>
+                <button onClick={addResponsableMue}
+                  style={{padding:"8px 12px",border:"none",background:T.navy,color:"#fff",
+                    borderRadius:7,fontSize:12,fontWeight:700,cursor:"pointer"}}>+ Añadir</button>
+              </div>
+            </div>
+          )}
+
+          <button onClick={function(){setMsgClienteMue(sel.notaInicial||"");generarTokenMue();setShowEnviar(true);}}
+            style={{width:"100%",marginTop:12,padding:"11px",border:"1.5px solid "+T.navy,
+              background:"#fff",color:T.navy,borderRadius:10,fontSize:13,fontWeight:700,
+              cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+            📤 Enviar enlace al cliente
+          </button>
+        </Card>
+
+        {/* (v3.23.88) Modal Enviar al cliente */}
+        {showEnviar && sel.tokenCliente && (function(){
+          var url=urlPublicaMue();
+          return (
+            <div onClick={function(){setShowEnviar(false);}}
+              style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:300,
+                display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+              <div onClick={function(e){e.stopPropagation();}}
+                style={{background:"#fff",borderRadius:"20px 20px 0 0",padding:24,width:"100%",
+                  maxWidth:480,maxHeight:"90vh",overflowY:"auto"}}>
+                <p style={{margin:"0 0 4px",fontSize:17,fontWeight:800,textAlign:"center"}}>📤 Enviar al cliente</p>
+                <p style={{margin:"0 0 14px",fontSize:12,color:T.muted,textAlign:"center"}}>
+                  Para que el cliente vea el estado de la muestra y pueda comentar
+                </p>
+
+                <p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:"#0369A1"}}>
+                  💬 Mensaje para el cliente (opcional)
+                </p>
+                <textarea value={msgClienteMue}
+                  onChange={function(e){setMsgClienteMue(e.target.value);}}
+                  rows={3} placeholder="Ej: Hola, te paso el seguimiento de la muestra para que puedas ver su evolución y dejar tus comentarios."
+                  style={{width:"100%",padding:"10px 12px",borderRadius:10,border:"1.5px solid #7DD3FC",
+                    fontSize:13,boxSizing:"border-box",resize:"vertical",fontFamily:"inherit",
+                    background:"#F0F9FF",marginBottom:12}}/>
+
+                <div style={{padding:"10px 12px",background:"#F8FAFC",border:"1px solid "+T.border,
+                  borderRadius:9,marginBottom:14}}>
+                  <p style={{margin:"0 0 6px",fontSize:10,color:T.muted,fontWeight:700,textTransform:"uppercase"}}>Enlace</p>
+                  <p style={{margin:0,fontSize:11,color:T.text,wordBreak:"break-all",fontFamily:"monospace"}}>{url}</p>
+                </div>
+
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+                  <button onClick={function(){
+                      guardarMsgClienteMue().then(function(){
+                        if(navigator.clipboard){
+                          navigator.clipboard.writeText(url).then(function(){alert("✓ Enlace copiado");}).catch(function(){
+                            var ta=document.createElement("textarea");ta.value=url;document.body.appendChild(ta);ta.select();document.execCommand("copy");document.body.removeChild(ta);alert("✓ Enlace copiado");
+                          });
+                        } else {
+                          var ta=document.createElement("textarea");ta.value=url;document.body.appendChild(ta);ta.select();document.execCommand("copy");document.body.removeChild(ta);alert("✓ Enlace copiado");
+                        }
+                      });
+                    }}
+                    style={{padding:"12px",border:"none",background:T.navy,color:"#fff",borderRadius:10,
+                      fontSize:13,fontWeight:700,cursor:"pointer"}}>📋 Copiar enlace</button>
+                  <button onClick={function(){
+                      guardarMsgClienteMue().then(function(){
+                        var msg="Hola, te paso el seguimiento de la muestra:\n\n"+url+"\n\nPuedes ver su estado y dejar comentarios desde el enlace. Saludos!";
+                        window.open("https://wa.me/?text="+encodeURIComponent(msg),"_blank");
+                      });
+                    }}
+                    style={{padding:"12px",border:"none",background:"#25D366",color:"#fff",borderRadius:10,
+                      fontSize:13,fontWeight:700,cursor:"pointer"}}>💬 WhatsApp</button>
+                </div>
+                <button onClick={function(){
+                    guardarMsgClienteMue().then(function(){
+                      var subj=encodeURIComponent("Seguimiento de muestra: "+(sel.cliente||sel.clienteNombre||""));
+                      var body=encodeURIComponent("Hola,\n\nTe paso el seguimiento de la muestra:\n\n"+url+"\n\nDesde el enlace puedes ver su estado y dejar comentarios.\n\nUn saludo,\n"+(usuario.nombre||""));
+                      window.location.href="mailto:?subject="+subj+"&body="+body;
+                    });
+                  }}
+                  style={{width:"100%",padding:"12px",border:"1.5px solid "+T.border,background:"#fff",
+                    color:T.text,borderRadius:10,fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:10}}>
+                  ✉️ Email
+                </button>
+                <button onClick={function(){setShowEnviar(false);}}
+                  style={{width:"100%",padding:"10px",borderRadius:9,border:"1.5px solid "+T.border,
+                    background:"#fff",color:T.muted,fontWeight:700,fontSize:12,cursor:"pointer"}}>
+                  Cerrar
+                </button>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* (v3.22.37) Modo edición */}
         {editandoMuestra&&(
