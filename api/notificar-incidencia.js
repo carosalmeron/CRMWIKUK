@@ -7,6 +7,10 @@
 
 const FB = "https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
 
+// (v3.23.95) Copia automática en TODOS los emails de notificación de incidencias.
+// Para añadir más copias, separa con comas: "antonio@unitedcaro.com, otro@x.com"
+const CC_SIEMPRE = "antonio@unitedcaro.com";
+
 function fsToObj(doc){
   if(!doc||!doc.fields) return null;
   const o={};
@@ -130,15 +134,26 @@ async function enviarEmail(to, subject, text){
     .filter(s=>s.length>0 && s.indexOf("@")>0);
   if(destinatarios.length===0) return {ok:false, error:"destinatario inválido"};
 
+  // (v3.23.95) Añadir copias automáticas (CC_SIEMPRE), evitando duplicados
+  const finales = destinatarios.slice();
+  String(CC_SIEMPRE||"")
+    .split(/[;,]/)
+    .map(s=>s.trim())
+    .filter(s=>s.length>0 && s.indexOf("@")>0)
+    .forEach(cc=>{
+      const yaEsta = finales.some(d=>d.toLowerCase()===cc.toLowerCase());
+      if(!yaEsta) finales.push(cc);
+    });
+
   const base=process.env.VERCEL_URL?("https://"+process.env.VERCEL_URL):"https://crmwikuk.vercel.app";
   const r=await fetch(base+"/api/send-email",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({to:destinatarios, subject, text})
+    body:JSON.stringify({to:finales, subject, text})
   });
   let body=null;
   try{ body = await r.text(); }catch(e){}
-  return {ok:r.ok, status:r.status, destinatarios, response:body};
+  return {ok:r.ok, status:r.status, destinatarios:finales, response:body};
 }
 
 // Construye cuerpo y asunto según es nuevo o recordatorio
