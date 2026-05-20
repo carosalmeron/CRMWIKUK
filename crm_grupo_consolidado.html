@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.23.89";
-const CRM_BUILD = "18/05/2026-muestras-chat-cliente-y-segHTML";
+const CRM_VERSION = "3.23.93";
+const CRM_BUILD = "20/05/2026-portal-campo-email-y-resolucion-tipologia";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -391,6 +391,19 @@ function esDelUsuario(agenteField, misIds){
 
 // (v3.23.69) Devuelve SIEMPRE el id canónico corto del CRM (wk1, ik2, ik4...).
 // Resuelve el problema de que usuario.id pueda ser un u_xxxxx largo del portal.
+// (v3.23.92) Notifica al responsable de tipología cuando se crea una incidencia
+// Llama al endpoint serverless; falla silenciosamente para no romper la UI
+function notificarNuevaIncidencia(incidenciaId){
+  if(!incidenciaId) return;
+  try{
+    fetch("/api/notificar-incidencia",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({incidenciaId:incidenciaId})
+    }).catch(function(){/* silencioso */});
+  } catch(e){/* silencioso */}
+}
+
 // Estrategia: cruza todas las claves del usuario contra el seed USUARIOS y,
 // si encuentra el match, devuelve su .id corto. Si no, devuelve usuario.id tal cual.
 function idCanonico(usuario){
@@ -3553,6 +3566,188 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
 }
 
 
+// (v3.23.91) Dashboard para responsables de tipología (calidad, stock, logística, etc.)
+// Solo muestra las incidencias de su tipo, agrupadas por estado/prioridad.
+// La acción (gestionar/cerrar) se hace en el módulo de incidencias normal.
+function DashTipologia({usuario, onNav, incidenciasDB}){
+  // Etiquetas y colores por tipología — todo el mapeo en un sitio
+  const META={
+    calidad:       {label:"Calidad",        icon:"⚠️",  color:"#F59E0B"},
+    logistica:     {label:"Logística",      icon:"🚚",  color:"#0EA5E9"},
+    administracion:{label:"Administración", icon:"📄",  color:"#8B5CF6"},
+    stock:         {label:"Stock",          icon:"📦",  color:"#EF4444"},
+    produccion:    {label:"Producción",     icon:"🏭",  color:"#059669"},
+    id:            {label:"I+D",            icon:"🔬",  color:"#7C3AED"},
+    coordinacion:  {label:"Coordinación",   icon:"🧭",  color:"#0F766E"}
+  };
+  const tip=(usuario&&usuario.tipologia)||"";
+  const meta=META[tip]||{label:tip||"Tipología",icon:"⚙️",color:T.muted};
+
+  // Filtrar incidencias del tipo del responsable
+  // (v3.23.91) Para stock también incluimos "rotura" y variantes
+  function esDeMiTipo(i){
+    if(!i||i.eliminada) return false;
+    var t=String(i.tipo||"").toLowerCase();
+    if(tip==="stock") return t==="stock"||t==="rotura"||t.indexOf("stock")>=0;
+    return t===tip;
+  }
+  const todasMis=(incidenciasDB||[]).filter(esDeMiTipo);
+
+  // Agrupaciones — abiertas urgentes / abiertas normales / en proceso / resueltas hoy
+  const abiertas=todasMis.filter(function(i){return i.estado==="abierta"||!i.estado;});
+  const urgentes=abiertas.filter(function(i){return (i.prioridad||"").toLowerCase()==="alta"||(i.prioridad||"").toLowerCase()==="urgente";});
+  const normales=abiertas.filter(function(i){return !urgentes.includes(i);});
+  const enProceso=todasMis.filter(function(i){return i.estado==="en_proceso";});
+  // Resueltas recientes (últimos 14 días)
+  function diasDesde(fecha){
+    if(!fecha) return 999;
+    var p=String(fecha).split("/");
+    if(p.length<3) return 999;
+    var f=new Date(p[2].length===2?"20"+p[2]:p[2], parseInt(p[1])-1, parseInt(p[0]));
+    return (Date.now()-f.getTime())/(1000*60*60*24);
+  }
+  const resueltasRec=todasMis.filter(function(i){
+    return (i.estado==="resuelta"||i.estado==="cerrada")&&diasDesde(i.fechaResolucion||i.fecha)<=14;
+  });
+
+  function abrirIncidencia(){
+    // Navegar al módulo de incidencias (el filtro por tipo lo hará el módulo según rol)
+    if(onNav) onNav("incidencias");
+  }
+
+  function pintarIncidencia(i,idx){
+    var p=(i.prioridad||"media").toLowerCase();
+    var pColor=p==="alta"||p==="urgente"?T.red:p==="baja"?T.muted:T.amber;
+    var pLabel=p==="alta"||p==="urgente"?"🔴 ALTA":p==="baja"?"⚪ Baja":"🟡 Media";
+    return (
+      <div key={i.id||idx} onClick={abrirIncidencia}
+        style={{background:"#fff",border:"1px solid "+T.border,borderRadius:11,
+          padding:"12px 14px",marginBottom:8,cursor:"pointer",
+          boxShadow:"0 1px 3px rgba(0,0,0,.04)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,marginBottom:5}}>
+          <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text,flex:1,minWidth:0,
+            overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+            {i.cliente||i.clienteNombre||"—"}
+          </p>
+          <span style={{fontSize:10,fontWeight:800,color:pColor,whiteSpace:"nowrap"}}>{pLabel}</span>
+        </div>
+        <p style={{margin:0,fontSize:12,color:T.muted,lineHeight:1.4,
+          display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>
+          {i.descripcion||"Sin descripción"}
+        </p>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:7,gap:6}}>
+          <span style={{fontSize:10,color:T.muted}}>📅 {i.fecha||"—"}</span>
+          {i.estado==="en_proceso" && <span style={{fontSize:10,fontWeight:700,color:T.amber}}>🟡 En proceso</span>}
+          {(i.estado==="resuelta"||i.estado==="cerrada") && <span style={{fontSize:10,fontWeight:700,color:T.green}}>✅ {i.estado==="cerrada"?"Cerrada":"Resuelta"}</span>}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{padding:"16px 16px 100px"}}>
+      {/* Cabecera */}
+      <div style={{background:meta.color,borderRadius:14,padding:"18px 18px",marginBottom:16,
+        color:"#fff",boxShadow:"0 4px 12px "+meta.color+"40"}}>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          <span style={{fontSize:32}}>{meta.icon}</span>
+          <div style={{flex:1}}>
+            <p style={{margin:0,fontSize:11,letterSpacing:".08em",textTransform:"uppercase",opacity:.85,fontWeight:700}}>
+              Responsable de {meta.label}
+            </p>
+            <p style={{margin:"2px 0 0",fontSize:18,fontWeight:900}}>{usuario.nombre}</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Resumen numérico */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:16}}>
+        <div style={{background:"#fff",border:"1.5px solid "+T.border,borderRadius:11,padding:"11px 8px",textAlign:"center"}}>
+          <p style={{margin:0,fontSize:22,fontWeight:900,color:T.red,lineHeight:1}}>{urgentes.length}</p>
+          <p style={{margin:"3px 0 0",fontSize:10,color:T.muted,fontWeight:700}}>URGENTES</p>
+        </div>
+        <div style={{background:"#fff",border:"1.5px solid "+T.border,borderRadius:11,padding:"11px 8px",textAlign:"center"}}>
+          <p style={{margin:0,fontSize:22,fontWeight:900,color:T.amber,lineHeight:1}}>{normales.length+enProceso.length}</p>
+          <p style={{margin:"3px 0 0",fontSize:10,color:T.muted,fontWeight:700}}>PENDIENTES</p>
+        </div>
+        <div style={{background:"#fff",border:"1.5px solid "+T.border,borderRadius:11,padding:"11px 8px",textAlign:"center"}}>
+          <p style={{margin:0,fontSize:22,fontWeight:900,color:T.green,lineHeight:1}}>{resueltasRec.length}</p>
+          <p style={{margin:"3px 0 0",fontSize:10,color:T.muted,fontWeight:700}}>RESUELTAS 14d</p>
+        </div>
+      </div>
+
+      {/* Bloque URGENTES */}
+      {urgentes.length>0 && (
+        <div style={{marginBottom:16}}>
+          <p style={{margin:"0 0 8px",fontSize:13,fontWeight:800,color:T.red}}>
+            🔴 Urgentes · {urgentes.length}
+          </p>
+          {urgentes.map(pintarIncidencia)}
+        </div>
+      )}
+
+      {/* Bloque PENDIENTES NORMALES */}
+      {normales.length>0 && (
+        <div style={{marginBottom:16}}>
+          <p style={{margin:"0 0 8px",fontSize:13,fontWeight:800,color:T.amber}}>
+            🟡 Pendientes · {normales.length}
+          </p>
+          {normales.map(pintarIncidencia)}
+        </div>
+      )}
+
+      {/* Bloque EN PROCESO */}
+      {enProceso.length>0 && (
+        <div style={{marginBottom:16}}>
+          <p style={{margin:"0 0 8px",fontSize:13,fontWeight:800,color:T.blue||"#0EA5E9"}}>
+            ⏳ En proceso · {enProceso.length}
+          </p>
+          {enProceso.map(pintarIncidencia)}
+        </div>
+      )}
+
+      {/* Vacío */}
+      {urgentes.length===0 && normales.length===0 && enProceso.length===0 && (
+        <div style={{background:"#F0FDF4",border:"1.5px dashed #BBF7D0",borderRadius:14,
+          padding:"30px 20px",textAlign:"center",marginBottom:16}}>
+          <p style={{margin:0,fontSize:32}}>🎉</p>
+          <p style={{margin:"8px 0 4px",fontSize:15,fontWeight:800,color:"#166534"}}>
+            Sin pendientes en {meta.label}
+          </p>
+          <p style={{margin:0,fontSize:12,color:"#15803D"}}>
+            No tienes incidencias abiertas ni en proceso.
+          </p>
+        </div>
+      )}
+
+      {/* Resueltas recientes */}
+      {resueltasRec.length>0 && (
+        <div style={{marginBottom:16}}>
+          <p style={{margin:"0 0 8px",fontSize:12,fontWeight:700,color:T.muted}}>
+            ✅ Resueltas recientes ({resueltasRec.length})
+          </p>
+          {resueltasRec.slice(0,5).map(pintarIncidencia)}
+          {resueltasRec.length>5 && (
+            <p onClick={abrirIncidencia} style={{margin:"4px 0 0",fontSize:11,color:T.blue,textAlign:"center",cursor:"pointer",textDecoration:"underline"}}>
+              Ver todas ({resueltasRec.length}) →
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* CTA al módulo */}
+      <div onClick={abrirIncidencia}
+        style={{background:"#fff",border:"1.5px solid "+meta.color,borderRadius:12,padding:"14px",
+          marginTop:8,cursor:"pointer",textAlign:"center"}}>
+        <p style={{margin:0,fontSize:13,fontWeight:800,color:meta.color}}>
+          📋 Ver todas las incidencias de {meta.label} →
+        </p>
+      </div>
+    </div>
+  );
+}
+
+
 function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, estrategiasDB, incidenciasDB, calendarioDB, actividad, _ver}){
   const {id,equipo,color}=usuario;
   const opsBD=oportunidadesDB||OPORTUNIDADES_SEED;
@@ -6184,6 +6379,7 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
                     fecha:new Date().toLocaleDateString("es-ES"),semana:semana,
                     historialEscalado:[{accion:"Creada",por:usuario.nombre,fecha:new Date().toLocaleDateString("es-ES")}]};
                   fbEscribir("incidencias",id,nueva);
+                  notificarNuevaIncidencia(id);
                   incidenciasSemana.push(nueva);
                   setShowNewInc(false);
                   setIncForm({tipo:"calidad",cliente:"",descripcion:"",prioridad:"media"});
@@ -6342,6 +6538,17 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
     if(fb==="proyecto"){
       const hoy=new Date().toLocaleDateString("es-ES");
       const proyId="PROY_"+Date.now();
+      // (v3.23.90) Heredar seguimiento bidireccional de la muestra
+      const muestraResp=sel.responsables||[];
+      const muestraMsgs=sel.mensajesCliente||[];
+      // Mensaje del sistema en el chat para que el cliente vea la transición
+      const msgsConTransicion=muestraMsgs.concat([{
+        autor:"sistema",
+        autorNombre:"Sistema",
+        texto:"🚀 La muestra ha sido convertida en proyecto. A partir de ahora seguirás su evolución en este mismo enlace.",
+        fecha:new Date().toISOString(),
+        tipo:"transicion"
+      }]);
       const updatedM={...sel,estado:"proyecto",nota,fechaFeedback:hoy,proyectoId:proyId};
       setMuestras(mm=>mm.map(m=>m.id===sel.id?updatedM:m));
       fbEscribir("muestras",sel.id,updatedM);
@@ -6350,8 +6557,14 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
         producto:sel.prod||"",muestraId:sel.id,
         estado:"activo",tipo:"industrial",inicio:hoy,fin:"",
         responsableComercial:usuario.id,responsableNombre:usuario.nombre,
-        agente:idCanonico(usuario),equipo:usuario.equipo||"",
+        agente:idCanonico(usuario),agenteNombre:usuario.nombre||"",
+        equipo:usuario.equipo||"",
         deptos:proyForm.deptos,nota:proyForm.nota||nota,progreso:0,
+        // (v3.23.90) Heredar de la muestra el seguimiento bidireccional
+        responsables:muestraResp,
+        mensajesCliente:msgsConTransicion,
+        notaInicial:sel.notaInicial||"",
+        // No heredar el token: el proyecto tiene su propio enlace cuando se genere
         hitos:[
           {nombre:"Muestra aprobada por cliente",hecho:true,fecha:hoy},
           {nombre:"Prueba industrial programada",hecho:false,fecha:""},
@@ -6361,7 +6574,9 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
         historial:[{accion:"🚀 Proyecto creado desde muestra",por:usuario.nombre,fecha:hoy,
           nota:"Muestra: "+sel.prod+" · Cliente: "+(sel.cliente||"")}],
       };
-      fbEscribir("proyectos",proyId,p).then(()=>alert("✅ Proyecto industrial creado"));
+      fbEscribir("proyectos",proyId,p).then(()=>alert("✅ Proyecto industrial creado"+
+        (muestraResp.length>0?"\n\n👥 Heredados "+muestraResp.length+" responsable(s) de la muestra":"")+
+        (muestraMsgs.length>0?"\n💬 Heredada conversación con el cliente ("+muestraMsgs.length+" mensajes)":"")));
       setSel(null);setNota("");setFb("");setProyForm({nombre:"",deptos:[],nota:""});
       return;
     }
@@ -12288,6 +12503,8 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB}
     fbEscribir("incidencias",nueva.id,nueva).then(ok=>{
       console.log("[INC] Firebase:",ok?"✅ Guardada":"❌ Error al guardar");
     });
+    // (v3.23.92) Notificar por email al responsable de tipología
+    notificarNuevaIncidencia(nueva.id);
     // Notificar al jefe del equipo
     const jefe=USUARIOS.find(u=>(u.rol==="jefe"||u.rol==="director")&&(u.equipo===usuario.equipo||u.equipo===null));
     if(jefe&&jefe.id!==usuario.id) notificarAsignacion("incidencia",{...nueva,agente:jefe.id},usuario.id);
@@ -17013,6 +17230,13 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
   const [notaCierre,setNotaCierre]=useState("");
   const [motivoCierreProy,setMotivoCierreProy]=useState("");
   const [nuevaTarea,setNuevaTarea]=useState({depto:"",texto:"",resp:""});
+  // (v3.23.90) Sistema de seguimiento bidireccional para proyectos
+  const [showRespP,setShowRespP]=useState(false);
+  const [nuevoRespP,setNuevoRespP]=useState({nombre:"",email:""});
+  const [showEnviarP,setShowEnviarP]=useState(false);
+  const [msgClienteProy,setMsgClienteProy]=useState("");
+  const [chatTxtP,setChatTxtP]=useState("");
+  const [chatEnviandoP,setChatEnviandoP]=useState(false);
   const esJefeOmas=["jefe","director","ceo"].includes(usuario?.rol);
   const esAgente=usuario?.rol==="agente";
   const esJefe=usuario?.rol==="jefe";
@@ -17223,6 +17447,71 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
     setFormOpen(false);
   };
 
+  // (v3.23.90) Helpers para seguimiento bidireccional con el cliente (mismo patrón que muestras)
+  function addResponsableProy(){
+    if(!sel) return;
+    if(!nuevoRespP.email||!/^[^@]+@[^@]+\.[^@]+$/.test(nuevoRespP.email)){
+      alert("Introduce un email válido"); return;
+    }
+    var list=(sel.responsables||[]).concat([{nombre:nuevoRespP.nombre||nuevoRespP.email,email:nuevoRespP.email}]);
+    var updated=Object.assign({},sel,{responsables:list});
+    fbEscribir("proyectos",sel.id,updated).then(function(){
+      setSel(updated);
+      setProyectos(function(prev){return prev.map(function(p){return p.id===sel.id?updated:p;});});
+      setNuevoRespP({nombre:"",email:""});
+    }).catch(function(e){alert("Error: "+e.message);});
+  }
+  function delResponsableProy(idx){
+    if(!sel) return;
+    var list=(sel.responsables||[]).filter(function(_,i){return i!==idx;});
+    var updated=Object.assign({},sel,{responsables:list});
+    fbEscribir("proyectos",sel.id,updated).then(function(){
+      setSel(updated);
+      setProyectos(function(prev){return prev.map(function(p){return p.id===sel.id?updated:p;});});
+    }).catch(function(e){alert("Error: "+e.message);});
+  }
+  function generarTokenProy(callback){
+    if(!sel) return;
+    if(sel.tokenCliente){ if(callback)callback(sel.tokenCliente); return; }
+    var token="";
+    var chars="ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    for(var i=0;i<10;i++) token+=chars[Math.floor(Math.random()*chars.length)];
+    var updated=Object.assign({},sel,{tokenCliente:token,fechaEnvioCliente:new Date().toISOString()});
+    fbEscribir("proyectos",sel.id,updated).then(function(){
+      setSel(updated);
+      setProyectos(function(prev){return prev.map(function(p){return p.id===sel.id?updated:p;});});
+      if(callback) callback(token);
+    }).catch(function(e){alert("Error: "+e.message);});
+  }
+  function urlPublicaProy(){
+    if(!sel||!sel.tokenCliente) return "";
+    var base=window.location.origin||"https://crmwikuk.vercel.app";
+    return base+"/seg.html?tipo=proyecto&id="+sel.id+"&token="+sel.tokenCliente;
+  }
+  function guardarMsgClienteProy(){
+    if(!sel) return Promise.resolve();
+    if(msgClienteProy===(sel.notaInicial||"")) return Promise.resolve();
+    var updated=Object.assign({},sel,{notaInicial:msgClienteProy});
+    return fbEscribir("proyectos",sel.id,updated).then(function(){
+      setSel(updated);
+      setProyectos(function(prev){return prev.map(function(p){return p.id===sel.id?updated:p;});});
+    });
+  }
+  function enviarChatComercialProy(){
+    if(!sel||!chatTxtP.trim()) return;
+    if(chatEnviandoP) return;
+    setChatEnviandoP(true);
+    var msgs=(sel.mensajesCliente||[]).slice();
+    msgs.push({autor:"comercial",autorNombre:usuario.nombre||"Comercial",texto:chatTxtP.trim(),fecha:new Date().toISOString()});
+    var updated=Object.assign({},sel,{mensajesCliente:msgs});
+    fbEscribir("proyectos",sel.id,updated).then(function(){
+      setSel(updated);
+      setProyectos(function(prev){return prev.map(function(p){return p.id===sel.id?updated:p;});});
+      setChatTxtP("");
+      setChatEnviandoP(false);
+    }).catch(function(e){alert("Error: "+e.message);setChatEnviandoP(false);});
+  }
+
   // Detalle proyecto
   if(sel){
     const tipo=TIPOS[sel.tipo]||TIPOS.otro;
@@ -17232,7 +17521,194 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
   const progresoReal=hitosValidos.length>0?Math.round(hechos/hitosValidos.length*100):0;
     return(
       <div style={{padding:"16px 16px 100px"}}>
-        <BackBar label="Volver" onBack={()=>setSel(null)}/>
+        <BackBar label="Volver" onBack={()=>{setSel(null);setShowRespP(false);setShowEnviarP(false);}}/>
+
+        {/* (v3.23.90) Sistema de seguimiento bidireccional — responsables + enviar al cliente */}
+        <Card style={{marginBottom:14,padding:"14px 16px",border:"1.5px solid "+T.border}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+            <div style={{flex:1,minWidth:0}}>
+              <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>🔗 Seguimiento con el cliente</p>
+              <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
+                {(sel.responsables||[]).length} responsable{(sel.responsables||[]).length===1?"":"s"}
+                {sel.tokenCliente?" · enlace activo":" · sin enlace"}
+                {sel.muestraId?" · 📦 viene de muestra":""}
+              </p>
+            </div>
+            <button onClick={function(){setShowRespP(function(x){return !x;});}}
+              style={{padding:"8px 12px",borderRadius:9,border:"1.5px solid "+T.border,
+                background:"#fff",color:T.text,fontSize:12,fontWeight:700,cursor:"pointer"}}>
+              {showRespP?"Ocultar":"👥 Responsables"}
+            </button>
+          </div>
+
+          {showRespP && (
+            <div style={{marginTop:12,paddingTop:12,borderTop:"1px solid "+T.border}}>
+              <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>
+                Responsables del seguimiento
+              </p>
+              {(sel.responsables||[]).length===0 && (
+                <p style={{margin:"0 0 8px",fontSize:12,color:T.muted,fontStyle:"italic"}}>
+                  Aún no hay responsables. Añade al menos uno para que reciba las notificaciones por email.
+                </p>
+              )}
+              {(sel.responsables||[]).map(function(r,idx){
+                return (
+                  <div key={idx} style={{display:"flex",gap:8,alignItems:"center",
+                    padding:"7px 10px",background:"#F8FAFC",border:"1px solid "+T.border,
+                    borderRadius:7,marginBottom:6}}>
+                    <div style={{flex:1,minWidth:0}}>
+                      <p style={{margin:0,fontSize:12,fontWeight:700,color:T.text}}>{r.nombre||r.email}</p>
+                      <p style={{margin:0,fontSize:11,color:T.muted,wordBreak:"break-all"}}>{r.email}</p>
+                    </div>
+                    <button onClick={function(){delResponsableProy(idx);}}
+                      style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:16,padding:"2px 6px"}}>✕</button>
+                  </div>
+                );
+              })}
+              <div style={{display:"flex",gap:6,marginTop:8}}>
+                <input value={nuevoRespP.nombre} onChange={function(e){setNuevoRespP(Object.assign({},nuevoRespP,{nombre:e.target.value}));}}
+                  placeholder="Nombre"
+                  style={{flex:1,padding:"8px 10px",border:"1px solid "+T.border,borderRadius:7,fontSize:12,boxSizing:"border-box",minWidth:0}}/>
+                <input value={nuevoRespP.email} onChange={function(e){setNuevoRespP(Object.assign({},nuevoRespP,{email:e.target.value}));}}
+                  placeholder="Email *" type="email"
+                  style={{flex:1.4,padding:"8px 10px",border:"1px solid "+T.border,borderRadius:7,fontSize:12,boxSizing:"border-box",minWidth:0}}/>
+                <button onClick={addResponsableProy}
+                  style={{padding:"8px 12px",border:"none",background:T.navy,color:"#fff",
+                    borderRadius:7,fontSize:12,fontWeight:700,cursor:"pointer"}}>+ Añadir</button>
+              </div>
+            </div>
+          )}
+
+          <button onClick={function(){setMsgClienteProy(sel.notaInicial||"");generarTokenProy();setShowEnviarP(true);}}
+            style={{width:"100%",marginTop:12,padding:"11px",border:"1.5px solid "+T.navy,
+              background:"#fff",color:T.navy,borderRadius:10,fontSize:13,fontWeight:700,
+              cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+            📤 Enviar enlace al cliente
+          </button>
+
+          {/* Chat con el cliente — solo si hay enlace activo */}
+          {sel.tokenCliente && (
+            <div style={{marginTop:14,paddingTop:12,borderTop:"1px solid "+T.border}}>
+              <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>
+                💬 Conversación con el cliente
+              </p>
+              <div style={{maxHeight:300,overflowY:"auto",padding:"4px 2px"}}>
+                {(sel.mensajesCliente||[]).length===0 ? (
+                  <p style={{margin:0,fontSize:12,color:T.muted,fontStyle:"italic",textAlign:"center",padding:"10px"}}>
+                    Aún no hay mensajes en este hilo.
+                  </p>
+                ) : (sel.mensajesCliente||[]).map(function(m,i){
+                  var esCliente=m.autor==="cliente";
+                  var esAsist=m.tipo==="asistencia";
+                  return (
+                    <div key={i} style={{display:"flex",flexDirection:"column",
+                      alignItems:esCliente?"flex-end":"flex-start",marginBottom:8}}>
+                      <div style={{maxWidth:"82%",padding:"9px 12px",borderRadius:13,fontSize:13,
+                        whiteSpace:"pre-wrap",wordBreak:"break-word",
+                        background:esAsist?"#FEE2E2":(esCliente?"#1E3A5F":"#F1F5F9"),
+                        color:esAsist?"#7F1D1D":(esCliente?"#fff":T.text),
+                        borderBottomLeftRadius:esCliente?13:4,
+                        borderBottomRightRadius:esCliente?4:13}}>
+                        {m.texto}
+                      </div>
+                      <div style={{fontSize:10,color:T.muted,marginTop:2,padding:"0 4px"}}>
+                        {esCliente?(sel.cliente||"Cliente"):(m.autorNombre||"Comercial")} ·
+                        {" "+new Date(m.fecha).toLocaleString("es-ES",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{display:"flex",gap:6,marginTop:8}}>
+                <textarea value={chatTxtP} onChange={function(e){setChatTxtP(e.target.value);}}
+                  placeholder="Escribe una respuesta para el cliente..."
+                  rows={2}
+                  style={{flex:1,padding:"8px 10px",border:"1px solid "+T.border,borderRadius:8,
+                    fontSize:13,resize:"none",fontFamily:"inherit",minWidth:0}}/>
+                <button onClick={enviarChatComercialProy} disabled={chatEnviandoP||!chatTxtP.trim()}
+                  style={{padding:"0 14px",border:"none",background:T.navy,color:"#fff",
+                    borderRadius:8,fontSize:13,fontWeight:700,cursor:"pointer",opacity:(chatEnviandoP||!chatTxtP.trim())?.5:1}}>
+                  Enviar
+                </button>
+              </div>
+              <p style={{margin:"6px 0 0",fontSize:10,color:T.muted,textAlign:"center"}}>
+                Lo que escribas aquí lo verá el cliente en su enlace.
+              </p>
+            </div>
+          )}
+        </Card>
+
+        {/* (v3.23.90) Modal Enviar al cliente */}
+        {showEnviarP && sel.tokenCliente && (function(){
+          var url=urlPublicaProy();
+          return (
+            <div onClick={function(){setShowEnviarP(false);}}
+              style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:300,
+                display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+              <div onClick={function(e){e.stopPropagation();}}
+                style={{background:"#fff",borderRadius:"20px 20px 0 0",padding:24,width:"100%",
+                  maxWidth:480,maxHeight:"90vh",overflowY:"auto"}}>
+                <p style={{margin:"0 0 4px",fontSize:17,fontWeight:800,textAlign:"center"}}>📤 Enviar al cliente</p>
+                <p style={{margin:"0 0 14px",fontSize:12,color:T.muted,textAlign:"center"}}>
+                  Para que el cliente vea el estado del proyecto y pueda comentar
+                </p>
+                <p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:"#0369A1"}}>
+                  💬 Mensaje para el cliente (opcional)
+                </p>
+                <textarea value={msgClienteProy}
+                  onChange={function(e){setMsgClienteProy(e.target.value);}}
+                  rows={3} placeholder="Ej: Te paso el seguimiento del proyecto para que veas su evolución."
+                  style={{width:"100%",padding:"10px 12px",borderRadius:10,border:"1.5px solid #7DD3FC",
+                    fontSize:13,boxSizing:"border-box",resize:"vertical",fontFamily:"inherit",
+                    background:"#F0F9FF",marginBottom:12}}/>
+                <div style={{padding:"10px 12px",background:"#F8FAFC",border:"1px solid "+T.border,
+                  borderRadius:9,marginBottom:14}}>
+                  <p style={{margin:"0 0 6px",fontSize:10,color:T.muted,fontWeight:700,textTransform:"uppercase"}}>Enlace</p>
+                  <p style={{margin:0,fontSize:11,color:T.text,wordBreak:"break-all",fontFamily:"monospace"}}>{url}</p>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+                  <button onClick={function(){
+                      guardarMsgClienteProy().then(function(){
+                        if(navigator.clipboard){
+                          navigator.clipboard.writeText(url).then(function(){alert("✓ Enlace copiado");}).catch(function(){
+                            var ta=document.createElement("textarea");ta.value=url;document.body.appendChild(ta);ta.select();document.execCommand("copy");document.body.removeChild(ta);alert("✓ Enlace copiado");
+                          });
+                        } else {
+                          var ta=document.createElement("textarea");ta.value=url;document.body.appendChild(ta);ta.select();document.execCommand("copy");document.body.removeChild(ta);alert("✓ Enlace copiado");
+                        }
+                      });
+                    }}
+                    style={{padding:"12px",border:"none",background:T.navy,color:"#fff",borderRadius:10,
+                      fontSize:13,fontWeight:700,cursor:"pointer"}}>📋 Copiar enlace</button>
+                  <button onClick={function(){
+                      guardarMsgClienteProy().then(function(){
+                        var msg="Hola, te paso el seguimiento del proyecto:\n\n"+url+"\n\nPuedes ver su estado y dejar comentarios desde el enlace.";
+                        window.open("https://wa.me/?text="+encodeURIComponent(msg),"_blank");
+                      });
+                    }}
+                    style={{padding:"12px",border:"none",background:"#25D366",color:"#fff",borderRadius:10,
+                      fontSize:13,fontWeight:700,cursor:"pointer"}}>💬 WhatsApp</button>
+                </div>
+                <button onClick={function(){
+                    guardarMsgClienteProy().then(function(){
+                      var subj=encodeURIComponent("Seguimiento de proyecto: "+(sel.nombre||""));
+                      var body=encodeURIComponent("Hola,\n\nTe paso el seguimiento del proyecto:\n\n"+url+"\n\nDesde el enlace puedes ver su estado y dejar comentarios.\n\nUn saludo,\n"+(usuario.nombre||""));
+                      window.location.href="mailto:?subject="+subj+"&body="+body;
+                    });
+                  }}
+                  style={{width:"100%",padding:"12px",border:"1.5px solid "+T.border,background:"#fff",
+                    color:T.text,borderRadius:10,fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:10}}>
+                  ✉️ Email
+                </button>
+                <button onClick={function(){setShowEnviarP(false);}}
+                  style={{width:"100%",padding:"10px",borderRadius:9,border:"1.5px solid "+T.border,
+                    background:"#fff",color:T.muted,fontWeight:700,fontSize:12,cursor:"pointer"}}>
+                  Cerrar
+                </button>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Cabecera */}
         <Card style={{marginBottom:16}}>
@@ -19064,6 +19540,7 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
                   estado:"abierta"};
                 onActividad(clienteSel.id,{...act,incidencias:[...(act.incidencias||[]),nueva]});
                 fbEscribir("incidencias",nueva.id,nueva);
+                notificarNuevaIncidencia(nueva.id);
                 if(onNewIncidencia) onNewIncidencia(nueva);
               }}
               onCerrar={(id)=>{
@@ -21868,6 +22345,8 @@ function App(props){
   const esJefe=usuario.rol==="jefe";
   const esDir=["director","ceo"].includes(usuario.rol);
   const esJefeOmas=esJefe||esDir;
+  // (v3.23.91) Responsables de tipología (calidad, stock, logística, etc.)
+  const esTipologia=usuario.rol==="tipologia";
   const miEquipo=usuario.equipo;
   // Firebase usa grupoAgente (= catalogoVendedor del portal, ej: "CARLOSG", "DAVIDMAG")
   const getClientesPara=(agenteId)=>{
@@ -22345,7 +22824,7 @@ function App(props){
         <div style={{flex:1}}>
           <p style={{margin:0,fontSize:14,fontWeight:800,color:T.text}}>{usuario.nombre}</p>
           <p style={{margin:0,fontSize:11,color:T.muted}}>
-            {esAgente?"Comercial":esJefe?"Responsable":usuario.rol==="director"?"Jefe de Ventas":"CEO"}
+            {esAgente?"Comercial":esJefe?"Responsable":esTipologia?("Resp. "+(usuario.tipologia||"")):usuario.rol==="director"?"Jefe de Ventas":"CEO"}
             {usuario.equipo?` · ${usuario.equipo}`:""}
             {" · "}
             {fbCargando&&<span style={{color:T.amber}}>⏳ Cargando nube…</span>}
@@ -22693,6 +23172,9 @@ function App(props){
 
         {/* DIRECTOR / CEO — dashboard global */}
         {esDir&&section==="dashboard"&&     <DashDirector usuario={usuario} onNav={setSection} estrategiasDB={estrategiasDB}/>}
+
+        {/* (v3.23.91) RESPONSABLE TIPOLOGÍA — dashboard de pendientes de su departamento */}
+        {esTipologia&&section==="dashboard"&& <DashTipologia usuario={usuario} onNav={setSection} incidenciasDB={incidenciasDB}/>}
 
         {/* Compartidas — con filtrado por rol dentro de cada componente */}
         {section==="estrategias"&&          <MisEstrategias usuario={usuario} onVolverPotencial={function(){return volverAPotencialSiCorresponde(setSection, setClienteDirecto, usuario);}}/>}
