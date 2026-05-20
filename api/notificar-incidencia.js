@@ -120,16 +120,25 @@ function diasDesde(fechaRaw){
   return Math.floor((Date.now()-d.getTime())/(1000*60*60*24));
 }
 
-// Construye y envía un email
+// Construye y envía un email. Acepta destinatario simple o múltiple separado por ; o ,
 async function enviarEmail(to, subject, text){
   if(!to) return {ok:false, error:"sin destinatario"};
+  // (v3.23.94) Trocear strings con varios emails ("a@x.com;b@y.com" o "a@x.com,b@y.com")
+  const destinatarios = String(to)
+    .split(/[;,]/)
+    .map(s=>s.trim())
+    .filter(s=>s.length>0 && s.indexOf("@")>0);
+  if(destinatarios.length===0) return {ok:false, error:"destinatario inválido"};
+
   const base=process.env.VERCEL_URL?("https://"+process.env.VERCEL_URL):"https://crmwikuk.vercel.app";
   const r=await fetch(base+"/api/send-email",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({to:[to], subject, text})
+    body:JSON.stringify({to:destinatarios, subject, text})
   });
-  return {ok:r.ok, status:r.status};
+  let body=null;
+  try{ body = await r.text(); }catch(e){}
+  return {ok:r.ok, status:r.status, destinatarios, response:body};
 }
 
 // Construye cuerpo y asunto según es nuevo o recordatorio
@@ -184,7 +193,12 @@ module.exports = async function handler(req, res){
         await setCampo("incidencias", incidenciaId, "ultimoAvisoFecha", new Date().toISOString());
         await setCampo("incidencias", incidenciaId, "ultimoAvisoTipo", "creacion");
       }
-      res.status(200).json({ok:send.ok, to:email});
+      res.status(200).json({
+        ok:send.ok,
+        to:send.destinatarios,
+        status:send.status,
+        response: send.response ? String(send.response).substring(0,200) : null
+      });
       return;
     }
 
@@ -199,7 +213,8 @@ module.exports = async function handler(req, res){
       return e==="abierta"; // solo abiertas: en_proceso, resuelta, cerrada se excluyen
     });
 
-    let enviadas=0, saltadas=0, sinEmail=0;
+    let enviadas=0, saltadas=0, sinEmail=0, fallidas=0;
+    const errores=[];
     for(const inc of abiertas){
       const dias = diasDesde(inc.fecha);
       if(dias<1) continue; // 0 días = se acaba de crear, ya tiene su email inicial
@@ -216,16 +231,27 @@ module.exports = async function handler(req, res){
       const {subject, body} = construirEmail(inc, dias);
       const send = await enviarEmail(email, subject, body);
       if(send.ok){
+        // (v3.23.94) Solo marcar como avisada si el envío fue OK
         await setCampo("incidencias", inc._id, "ultimoAvisoFecha", new Date().toISOString());
         await setCampo("incidencias", inc._id, "ultimoAvisoTipo", "recordatorio_d"+dias);
         enviadas++;
+      } else {
+        fallidas++;
+        errores.push({
+          id: inc._id,
+          tipo: inc.tipo,
+          destinatarios: send.destinatarios,
+          status: send.status,
+          response: send.response ? String(send.response).substring(0, 200) : null
+        });
       }
     }
 
     res.status(200).json({
       ok:true,
       revisadas: abiertas.length,
-      enviadas, saltadas, sinEmail
+      enviadas, saltadas, sinEmail, fallidas,
+      errores: errores.length>0 ? errores.slice(0,5) : undefined
     });
   } catch(e){
     res.status(500).json({error:String(e&&e.message||e)});
