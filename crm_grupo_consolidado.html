@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.23.88";
-const CRM_BUILD = "18/05/2026-muestras-responsables-enviar-cliente";
+const CRM_VERSION = "3.23.89";
+const CRM_BUILD = "18/05/2026-muestras-chat-cliente-y-segHTML";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -6287,6 +6287,9 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
   const [nuevoResp,setNuevoResp]=useState({nombre:"",email:""});
   const [showEnviar,setShowEnviar]=useState(false);
   const [msgClienteMue,setMsgClienteMue]=useState("");
+  // (v3.23.89) Chat con el cliente y gestión de sugerencias de cierre
+  const [chatTxt,setChatTxt]=useState("");
+  const [chatEnviando,setChatEnviando]=useState(false);
 
   const esAgente=usuario.rol==="agente";
   const esJefe=usuario.rol==="jefe";
@@ -6457,6 +6460,50 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
       setMuestras(function(prev){return prev.map(function(m){return m.id===sel.id?updated:m;});});
     });
   }
+  // (v3.23.89) Responder al cliente desde el CRM
+  function enviarChatComercial(){
+    if(!sel||!chatTxt.trim()) return;
+    if(chatEnviando) return;
+    setChatEnviando(true);
+    var msgs=(sel.mensajesCliente||[]).slice();
+    msgs.push({autor:"comercial",autorNombre:usuario.nombre||"Comercial",texto:chatTxt.trim(),fecha:new Date().toISOString()});
+    var updated=Object.assign({},sel,{mensajesCliente:msgs});
+    fbEscribir("muestras",sel.id,updated).then(function(){
+      setSel(updated);
+      setMuestras(function(prev){return prev.map(function(m){return m.id===sel.id?updated:m;});});
+      setChatTxt("");
+      setChatEnviando(false);
+    }).catch(function(e){alert("Error: "+e.message);setChatEnviando(false);});
+  }
+  // (v3.23.89) Aceptar o rechazar la sugerencia de cierre del cliente
+  function gestionarSugerencia(accion){
+    if(!sel||!sel.cierreSugerido) return;
+    var cs=sel.cierreSugerido;
+    if(accion==="aceptar"){
+      // Cambiar estado de la muestra al sugerido (ok→positivo, ko→ko)
+      var nuevoEstado=cs.tipo==="ok"?"positivo":"ko";
+      var hist=(sel.historialEstado||[]).slice();
+      hist.push({estado:nuevoEstado,fecha:new Date().toISOString(),por:usuario.nombre||"Comercial",fuente:"sugerencia cliente"});
+      var updated=Object.assign({},sel,{
+        estado:nuevoEstado,
+        historialEstado:hist,
+        cierreSugerido:Object.assign({},cs,{pendiente:false,aceptada:true,fechaResolucion:new Date().toISOString()})
+      });
+      fbEscribir("muestras",sel.id,updated).then(function(){
+        setSel(updated);
+        setMuestras(function(prev){return prev.map(function(m){return m.id===sel.id?updated:m;});});
+      }).catch(function(e){alert("Error: "+e.message);});
+    } else {
+      // Rechazar — solo marca como no pendiente
+      var updated=Object.assign({},sel,{
+        cierreSugerido:Object.assign({},cs,{pendiente:false,aceptada:false,fechaResolucion:new Date().toISOString()})
+      });
+      fbEscribir("muestras",sel.id,updated).then(function(){
+        setSel(updated);
+        setMuestras(function(prev){return prev.map(function(m){return m.id===sel.id?updated:m;});});
+      }).catch(function(e){alert("Error: "+e.message);});
+    }
+  }
 
   if(sel){
     const esPendiente=sel.estado==="pendiente";
@@ -6536,6 +6583,82 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
               cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
             📤 Enviar enlace al cliente
           </button>
+
+          {/* (v3.23.89) Sugerencia de cierre del cliente pendiente de respuesta */}
+          {sel.tokenCliente && sel.cierreSugerido && sel.cierreSugerido.pendiente && (
+            <div style={{marginTop:14,padding:"12px 14px",background:"#FEF3C7",
+              borderLeft:"4px solid "+T.amber,borderRadius:9}}>
+              <p style={{margin:"0 0 4px",fontSize:12,fontWeight:800,color:"#92400E"}}>
+                ⚠️ El cliente sugiere cerrar como {sel.cierreSugerido.tipo==="ok"?"✅ ÉXITO":"❌ SIN ÉXITO"}
+              </p>
+              <p style={{margin:"0 0 8px",fontSize:12.5,color:"#451A03",whiteSpace:"pre-wrap"}}>
+                « {sel.cierreSugerido.comentario} »
+              </p>
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={function(){gestionarSugerencia("aceptar");}}
+                  style={{flex:1,padding:"9px",border:"none",background:T.green,color:"#fff",
+                    borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                  ✓ Aceptar y cerrar
+                </button>
+                <button onClick={function(){gestionarSugerencia("rechazar");}}
+                  style={{flex:1,padding:"9px",border:"1.5px solid "+T.border,background:"#fff",
+                    color:T.muted,borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                  Rechazar
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* (v3.23.89) Chat con el cliente — solo si hay enlace activo */}
+          {sel.tokenCliente && (
+            <div style={{marginTop:14,paddingTop:12,borderTop:"1px solid "+T.border}}>
+              <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>
+                💬 Conversación con el cliente
+              </p>
+              <div style={{maxHeight:300,overflowY:"auto",padding:"4px 2px"}}>
+                {(sel.mensajesCliente||[]).length===0 ? (
+                  <p style={{margin:0,fontSize:12,color:T.muted,fontStyle:"italic",textAlign:"center",padding:"10px"}}>
+                    Aún no hay mensajes en este hilo.
+                  </p>
+                ) : (sel.mensajesCliente||[]).map(function(m,i){
+                  var esCliente=m.autor==="cliente";
+                  var esAsist=m.tipo==="asistencia";
+                  return (
+                    <div key={i} style={{display:"flex",flexDirection:"column",
+                      alignItems:esCliente?"flex-end":"flex-start",marginBottom:8}}>
+                      <div style={{maxWidth:"82%",padding:"9px 12px",borderRadius:13,fontSize:13,
+                        whiteSpace:"pre-wrap",wordBreak:"break-word",
+                        background:esAsist?"#FEE2E2":(esCliente?"#1E3A5F":"#F1F5F9"),
+                        color:esAsist?"#7F1D1D":(esCliente?"#fff":T.text),
+                        borderBottomLeftRadius:esCliente?13:4,
+                        borderBottomRightRadius:esCliente?4:13}}>
+                        {m.texto}
+                      </div>
+                      <div style={{fontSize:10,color:T.muted,marginTop:2,padding:"0 4px"}}>
+                        {esCliente?(sel.cliente||sel.clienteNombre||"Cliente"):(m.autorNombre||"Comercial")} ·
+                        {" "+new Date(m.fecha).toLocaleString("es-ES",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{display:"flex",gap:6,marginTop:8}}>
+                <textarea value={chatTxt} onChange={function(e){setChatTxt(e.target.value);}}
+                  placeholder="Escribe una respuesta para el cliente..."
+                  rows={2}
+                  style={{flex:1,padding:"8px 10px",border:"1px solid "+T.border,borderRadius:8,
+                    fontSize:13,resize:"none",fontFamily:"inherit",minWidth:0}}/>
+                <button onClick={enviarChatComercial} disabled={chatEnviando||!chatTxt.trim()}
+                  style={{padding:"0 14px",border:"none",background:T.navy,color:"#fff",
+                    borderRadius:8,fontSize:13,fontWeight:700,cursor:"pointer",opacity:(chatEnviando||!chatTxt.trim())?.5:1}}>
+                  Enviar
+                </button>
+              </div>
+              <p style={{margin:"6px 0 0",fontSize:10,color:T.muted,textAlign:"center"}}>
+                Lo que escribas aquí lo verá el cliente en su enlace. Las notas internas están en otro sitio.
+              </p>
+            </div>
+          )}
         </Card>
 
         {/* (v3.23.88) Modal Enviar al cliente */}
