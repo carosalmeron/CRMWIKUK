@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Diagnóstico — Emails responsables</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:#0B1220;color:#E2E8F0;padding:16px;line-height:1.5;font-size:13px}
+  .wrap{max-width:680px;margin:0 auto}
+  h1{font-size:19px;margin-bottom:4px}
+  .sub{color:#94A3B8;font-size:12px;margin-bottom:18px}
+  .gate input{padding:11px;border-radius:8px;border:none;font-size:15px;width:220px}
+  .gate button{padding:11px 20px;background:#F59E0B;color:#0B1220;border:none;
+    border-radius:8px;font-weight:800;cursor:pointer;font-size:14px}
+  .loading{text-align:center;padding:40px;color:#94A3B8}
+  .loading .s{font-size:30px;margin-bottom:8px}
+
+  .card{background:#1E293B;border-radius:11px;padding:14px 16px;margin-bottom:11px}
+  .card h3{font-size:13px;color:#FBBF24;margin-bottom:9px}
+  .row{display:flex;justify-content:space-between;align-items:center;
+    padding:8px 0;border-bottom:1px solid #334155;gap:8px}
+  .row:last-child{border-bottom:none}
+  .row .lbl{flex:1;min-width:0}
+  .row .name{font-size:13px;font-weight:700;color:#fff}
+  .row .meta{font-size:11px;color:#94A3B8;margin-top:2px}
+  .badge{display:inline-block;padding:3px 8px;border-radius:5px;font-size:10px;font-weight:800;white-space:nowrap}
+  .ok{background:#064E3B;color:#6EE7B7}
+  .bad{background:#7F1D1D;color:#FCA5A5}
+  .warn{background:#78350F;color:#FCD34D}
+
+  .summary{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:14px}
+  .stat{background:#1E293B;border-radius:10px;padding:12px 8px;text-align:center}
+  .stat .n{font-size:22px;font-weight:900}
+  .stat .l{font-size:10px;color:#94A3B8;margin-top:3px;font-weight:700}
+  .stat.ok .n{color:#22C55E}
+  .stat.warn .n{color:#F59E0B}
+  .stat.bad .n{color:#EF4444}
+
+  .por-tipo{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .chip{padding:5px 10px;background:#0F172A;border-radius:6px;font-size:11px}
+  .nota{background:#0F172A;border-left:3px solid #F59E0B;padding:10px 12px;
+    border-radius:6px;font-size:12px;margin-top:12px;color:#CBD5E1}
+  pre{background:#0F172A;padding:10px;border-radius:8px;font-size:10.5px;
+    overflow-x:auto;color:#7DD3FC;white-space:pre-wrap;word-break:break-all}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const PWD="wikuk2026";
+
+const ID_A_TIPOLOGIA = {
+  resp_cal: "calidad",
+  resp_log: "logistica",
+  resp_adm: "administracion",
+  resp_stk: "stock",
+  resp_prd: "produccion",
+  resp_id:  "id",
+  resp_coord: "coordinacion"
+};
+const TIPO_A_TIPOLOGIA = {
+  calidad:"calidad", logistica:"logistica", administracion:"administracion",
+  stock:"stock", rotura:"stock", produccion:"produccion", id:"id", coordinacion:"coordinacion"
+};
+const ETIQUETAS = {
+  calidad:"⚠️ Calidad", logistica:"🚚 Logística", administracion:"📄 Administración",
+  stock:"📦 Stock", produccion:"🏭 Producción", id:"🔬 I+D", coordinacion:"🧭 Coordinación"
+};
+
+function fsToObj(doc){
+  if(!doc||!doc.fields) return null;
+  const o={};
+  for(const k in doc.fields){
+    const v=doc.fields[k];
+    if(v.stringValue!==undefined) o[k]=v.stringValue;
+    else if(v.integerValue!==undefined) o[k]=parseInt(v.integerValue);
+    else if(v.booleanValue!==undefined) o[k]=v.booleanValue;
+  }
+  return o;
+}
+async function fbList(col){
+  let docs=[],tok=null,p=0;
+  do{
+    const u=FB+"/"+col+"?pageSize=300"+(tok?"&pageToken="+tok:"");
+    let r; try{r=await fetch(u);}catch(e){return {error:"red"};}
+    if(!r.ok) return {error:r.status};
+    const j=await r.json();
+    if(j.documents) j.documents.forEach(d=>{const o=fsToObj(d);if(o){o._id=d.name.split("/").pop();docs.push(o);}});
+    tok=j.nextPageToken; p++;
+  }while(tok && p<20);
+  return docs;
+}
+function esc(s){return String(s==null?"":s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+
+async function run(){
+  document.getElementById("app").innerHTML='<div class="loading"><div class="s">⏳</div><p>Cargando datos…</p></div>';
+  const portal = await fbList("portal_users");
+  const usuarios = await fbList("usuarios");
+  const incidencias = await fbList("incidencias");
+  if(portal.error||usuarios.error||incidencias.error){
+    document.getElementById("app").innerHTML='<div class="card"><h3>Error</h3><p>No se ha podido leer Firebase</p></div>';
+    return;
+  }
+
+  // 1. Por tipología — buscar responsable y email
+  const tipologias = ["calidad","logistica","administracion","stock","produccion","id","coordinacion"];
+  const estadoPorTip = tipologias.map(tip => {
+    const enPortal = portal.find(u=>{
+      const t = u.tipologia || ID_A_TIPOLOGIA[u.id||u._id];
+      return t===tip;
+    });
+    const enUsuarios = usuarios.find(u=>{
+      const t = u.tipologia || ID_A_TIPOLOGIA[u.id||u._id];
+      return t===tip;
+    });
+    const emailFinal = (enPortal&&enPortal.email)||(enUsuarios&&enUsuarios.email)||null;
+    return {tip, enPortal, enUsuarios, emailFinal};
+  });
+
+  // 2. Incidencias abiertas por tipo
+  const abiertas = incidencias.filter(i=>!i.eliminada && (i.estado||"abierta")==="abierta");
+  const porTipo = {};
+  abiertas.forEach(i=>{
+    const t = TIPO_A_TIPOLOGIA[(i.tipo||"").toLowerCase()] || ("(?)"+i.tipo);
+    porTipo[t] = (porTipo[t]||0)+1;
+  });
+
+  // 3. Render
+  let html = '<h1>🔬 Diagnóstico — emails responsables</h1>'+
+    '<div class="sub">Estado de la configuración para notificaciones automáticas</div>';
+
+  const conEmail = estadoPorTip.filter(e=>e.emailFinal).length;
+  const sinEmail = estadoPorTip.length - conEmail;
+
+  html += '<div class="summary">'+
+    '<div class="stat ok"><div class="n">'+conEmail+'</div><div class="l">CON EMAIL</div></div>'+
+    '<div class="stat bad"><div class="n">'+sinEmail+'</div><div class="l">SIN EMAIL</div></div>'+
+    '<div class="stat warn"><div class="n">'+abiertas.length+'</div><div class="l">INC. ABIERTAS</div></div>'+
+  '</div>';
+
+  // Lista por tipología
+  html += '<div class="card"><h3>Responsable por tipología</h3>';
+  estadoPorTip.forEach(e=>{
+    const incCount = porTipo[e.tip]||0;
+    let estado;
+    if(e.emailFinal){
+      estado = '<span class="badge ok">✓ '+esc(e.emailFinal)+'</span>';
+    } else if(e.enPortal||e.enUsuarios){
+      estado = '<span class="badge bad">SIN EMAIL</span>';
+    } else {
+      estado = '<span class="badge warn">SIN RESPONSABLE</span>';
+    }
+    html += '<div class="row">'+
+      '<div class="lbl"><div class="name">'+ETIQUETAS[e.tip]+'</div>'+
+      '<div class="meta">'+incCount+' incidencia(s) abierta(s)'+
+      (e.enPortal?' · ID portal: '+esc(e.enPortal.id||e.enPortal._id):'')+
+      '</div></div>'+
+      estado+
+    '</div>';
+  });
+  html += '</div>';
+
+  // Detalle responsables encontrados
+  const respPortal = portal.filter(u=>(u.id||u._id||"").toString().startsWith("resp_"));
+  if(respPortal.length>0){
+    html += '<div class="card"><h3>👥 Responsables en portal_users ('+respPortal.length+')</h3>';
+    respPortal.forEach(u=>{
+      const tipDed = ID_A_TIPOLOGIA[u.id||u._id] || u.tipologia || '(sin mapear)';
+      html += '<div class="row">'+
+        '<div class="lbl"><div class="name">'+esc(u.nombre||u.id)+'</div>'+
+        '<div class="meta">id: '+esc(u.id||u._id)+' · tipología: '+esc(tipDed)+'</div></div>'+
+        (u.email
+          ? '<span class="badge ok">✓ '+esc(u.email)+'</span>'
+          : '<span class="badge bad">sin email</span>')+
+      '</div>';
+    });
+    html += '</div>';
+  }
+
+  // Incidencias abiertas por tipo
+  if(Object.keys(porTipo).length>0){
+    html += '<div class="card"><h3>📋 Incidencias abiertas por tipo</h3><div class="por-tipo">';
+    Object.keys(porTipo).forEach(t=>{
+      html += '<span class="chip">'+esc(t)+': <b>'+porTipo[t]+'</b></span>';
+    });
+    html += '</div></div>';
+  }
+
+  // Diagnóstico final
+  let diag = '';
+  if(sinEmail===estadoPorTip.length){
+    diag = '🔴 <b>Ninguna tipología tiene email configurado.</b> '+
+      'Ve al portal → Zona Administrador → Usuarios → abre cada responsable (Resp. Calidad, Resp. Stock, etc.) y pon su email. '+
+      'Sin emails configurados, las incidencias no pueden notificar.';
+  } else if(sinEmail>0){
+    diag = '🟡 <b>Algunas tipologías sin email.</b> Las incidencias de esos tipos no podrán notificar. '+
+      'Configura el email para todas las tipologías que uses.';
+  } else {
+    diag = '🟢 <b>Todas las tipologías tienen email configurado.</b> Si no llegan los emails, '+
+      'comprueba el endpoint /api/notificar-incidencia y que SMTP funciona.';
+  }
+  html += '<div class="nota">'+diag+'</div>';
+
+  document.getElementById("app").innerHTML='<div class="wrap">'+html+'</div>';
+}
+
+function gate(){
+  document.getElementById("app").innerHTML=
+    '<h1>🔬 Diagnóstico emails responsables</h1><div class="sub">Acceso restringido</div>'+
+    '<div class="gate"><input type="password" id="p" placeholder="Contraseña"> '+
+    '<button onclick="chk()">Entrar</button></div>';
+  document.getElementById("p").addEventListener("keypress",e=>{if(e.key==="Enter")chk();});
+}
+window.chk=function(){
+  if(document.getElementById("p").value===PWD){
+    sessionStorage.setItem("diag_email_ok","1"); run();
+  } else alert("Contraseña incorrecta");
+};
+if(sessionStorage.getItem("diag_email_ok")==="1") run();
+else gate();
+</script>
+</body>
+</html>
