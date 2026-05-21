@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.23.93";
-const CRM_BUILD = "20/05/2026-portal-campo-email-y-resolucion-tipologia";
+const CRM_VERSION = "3.24.0";
+const CRM_BUILD = "21/05/2026-panel-seguimiento-activo";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -3748,6 +3748,239 @@ function DashTipologia({usuario, onNav, incidenciasDB}){
 }
 
 
+
+// ─── PANEL DE SEGUIMIENTO ACTIVO ─────────────────────────────────
+// (v3.24.0) Calcula envejecimiento de todos los módulos y muestra
+// los elementos que llevan demasiado tiempo sin actividad
+function PanelSeguimiento({usuario, oportunidadesDB, muestrasDB, estrategiasDB, incidenciasDB, onNav}){
+  var esAgente=usuario.rol==="agente";
+  var esJefe=["jefe","director","ceo"].includes(usuario.rol);
+  var miEquipo=usuario.equipo;
+  var appMisIds=resolverMisIds(usuario);
+
+  // Helpers de fecha
+  function parseAnyDate(d){
+    if(!d) return null;
+    if(d instanceof Date) return d;
+    if(typeof d==="string"){
+      if(d.match(/^\d{4}-\d{2}/)) return new Date(d);
+      var parts=d.split("/");
+      if(parts.length>=2){
+        var day=parseInt(parts[0],10);
+        var month=parseInt(parts[1],10)-1;
+        var year=parts[2]?parseInt(parts[2],10):2026;
+        if(year<100) year+=2000;
+        return new Date(year,month,day);
+      }
+    }
+    if(typeof d==="number"&&d>1000000000){
+      return new Date(d>9999999999?d:d*1000);
+    }
+    return null;
+  }
+
+  function semanaAFecha(sem){
+    if(!sem) return null;
+    var d=new Date(2026,0,1);
+    d.setDate(d.getDate()+(sem-1)*7);
+    return d;
+  }
+
+  function diasDesde(fecha){
+    var d=parseAnyDate(fecha);
+    if(!d||isNaN(d.getTime())) return 999;
+    var hoy=new Date();
+    return Math.floor((hoy-d)/(1000*60*60*24));
+  }
+
+  // Umbrales (días sin actividad para considerarlo "vencido")
+  var UMBRAL={
+    oportunidad:7,
+    muestra:10,
+    incidencia_urgente:2,
+    incidencia_alta:3,
+    incidencia_media:5,
+    incidencia_baja:7,
+    estrategia:5,
+  };
+
+  // ── 1. Oportunidades sin avance ──
+  var opsDB=oportunidadesDB||[];
+  var opsVencidas=opsDB.filter(function(o){
+    var cerrada=["ganada","perdida","cerrada_ganada","cerrada_perdida"].some(function(e){return o.etapa===e||o.estado===e;});
+    if(cerrada) return false;
+    if(esAgente&&!esDelUsuario(o.agente,appMisIds)&&!esDelUsuario(o.agenteId,appMisIds)) return false;
+    if(!esAgente&&usuario.rol==="jefe"){
+      var ag=USUARIOS.find(function(u){return u.id===(o.agenteId||o.agente);});
+      if(!ag||ag.equipo!==miEquipo) return false;
+    }
+    var ultAct=(o.actividad&&o.actividad.length>0)?(o.actividad[0]||{}).fecha:null;
+    var fechaRef=ultAct||o.fecha||o.fechaCreacion;
+    return diasDesde(fechaRef)>=UMBRAL.oportunidad;
+  }).map(function(o){
+    var ultAct=(o.actividad&&o.actividad.length>0)?(o.actividad[0]||{}).fecha:null;
+    var fechaRef=ultAct||o.fecha||o.fechaCreacion;
+    return {tipo:"oportunidad",icon:"\uD83D\uDCBC",color:"#3B82F6",bg:"#EFF6FF",
+      titulo:o.prod||(o.cliente||"Oportunidad"),sub:o.cliente||"",
+      dias:diasDesde(fechaRef),etapa:o.etapa||"",valor:o.valor||0,
+      nav:"oportunidades",id:o.id};
+  });
+
+  // ── 2. Muestras pendientes de feedback ──
+  var mDB=muestrasDB||[];
+  var muestrasVencidas=mDB.filter(function(m){
+    if(m.estado!=="pendiente") return false;
+    if(m.eliminada) return false;
+    if(esAgente&&!esDelUsuario(m.agente,appMisIds)) return false;
+    if(!esAgente&&usuario.rol==="jefe"){
+      var ag=USUARIOS.find(function(u){return u.id===m.agente;});
+      if(!ag||ag.equipo!==miEquipo) return false;
+    }
+    var fechaRef=m.fecha||semanaAFecha(m.semana);
+    return diasDesde(fechaRef)>=UMBRAL.muestra;
+  }).map(function(m){
+    var fechaRef=m.fecha||semanaAFecha(m.semana);
+    return {tipo:"muestra",icon:"\uD83D\uDCE6",color:"#7C3AED",bg:"#F5F3FF",
+      titulo:m.prod||m.prodNombre||"Muestra",sub:m.cliente||m.clienteNombre||"",
+      dias:diasDesde(fechaRef),nav:"muestras",id:m.id};
+  });
+
+  // ── 3. Incidencias abiertas envejecidas ──
+  var iDB=incidenciasDB||[];
+  var incVencidas=iDB.filter(function(inc){
+    if(inc.estado!=="abierta"&&inc.estado!=="en_gestion") return false;
+    if(esAgente&&!esDelUsuario(inc.autor,appMisIds)&&!esDelUsuario(inc.agente,appMisIds)) return false;
+    if(!esAgente&&usuario.rol==="jefe"&&inc.equipo!==miEquipo) return false;
+    var prio=inc.prioridad||"media";
+    var umbral=prio==="urgente"?UMBRAL.incidencia_urgente:
+               prio==="alta"?UMBRAL.incidencia_alta:
+               prio==="media"?UMBRAL.incidencia_media:UMBRAL.incidencia_baja;
+    return diasDesde(inc.fecha)>=umbral;
+  }).map(function(inc){
+    return {tipo:"incidencia",icon:"\uD83D\uDEA8",color:"#EF4444",bg:"#FEF2F2",
+      titulo:inc.tipo?(inc.tipo.charAt(0).toUpperCase()+inc.tipo.slice(1)):"Incidencia",
+      sub:inc.clienteNombre||"",dias:diasDesde(inc.fecha),
+      prioridad:inc.prioridad||"media",nav:"incidencias",id:inc.id};
+  });
+
+  // ── 4. Estrategias pendientes de aprobación ──
+  var eDB=estrategiasDB||[];
+  var estVencidas=eDB.filter(function(e){
+    if(e.estado!=="pendiente_aprobacion") return false;
+    if(e.eliminada) return false;
+    if(esAgente&&!esDelUsuario(e.agente,appMisIds)) return false;
+    if(!esAgente&&usuario.rol==="jefe"){
+      var ag=USUARIOS.find(function(u){return u.id===e.agente;});
+      if(!ag||ag.equipo!==miEquipo) return false;
+    }
+    var fechaRef=e.fecha||semanaAFecha(e.semana);
+    return diasDesde(fechaRef)>=UMBRAL.estrategia;
+  }).map(function(e){
+    var fechaRef=e.fecha||semanaAFecha(e.semana);
+    return {tipo:"estrategia",icon:"\uD83C\uDFAF",color:"#3B82F6",bg:"#EFF6FF",
+      titulo:e.estrategia||(e.clienteNombre||"Estrategia"),sub:e.clienteNombre||e.cliente||"",
+      dias:diasDesde(fechaRef),nav:"estrategias",id:e.id};
+  });
+
+  // Combinar y ordenar
+  var todos=[].concat(opsVencidas,muestrasVencidas,incVencidas,estVencidas);
+  todos.sort(function(a,b){return b.dias-a.dias;});
+
+  if(todos.length===0){
+    return(
+      <div style={{background:"#F0FDF4",borderRadius:16,padding:"14px 18px",
+        marginBottom:16,border:"1px solid #BBF7D0",
+        display:"flex",alignItems:"center",gap:12}}>
+        <span style={{fontSize:22}}>{"✅"}</span>
+        <div>
+          <p style={{margin:0,fontSize:13,fontWeight:700,color:"#15803D"}}>Todo al día</p>
+          <p style={{margin:"2px 0 0",fontSize:11,color:"#22C55E"}}>Sin elementos pendientes que requieran atención urgente</p>
+        </div>
+      </div>
+    );
+  }
+
+  var urgentes=todos.filter(function(t){return t.dias>=14;}).length;
+  var advertencias=todos.length-urgentes;
+
+  return(
+    <div style={{marginBottom:16}}>
+      <div style={{background:"#fff",borderRadius:16,overflow:"hidden",
+        border:"1px solid "+(urgentes>0?"#FECACA":"#FDE68A"),
+        boxShadow:"0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06)"}}>
+
+        {/* Header */}
+        <div style={{padding:"14px 18px",
+          background:urgentes>0?"#FEF2F2":"#FFFBEB",
+          borderBottom:"1px solid "+(urgentes>0?"#FECACA":"#FDE68A"),
+          display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <span style={{fontSize:20}}>{urgentes>0?"⚠️":"👀"}</span>
+            <div>
+              <p style={{margin:0,fontSize:14,fontWeight:800,color:"#0F172A"}}>Requiere tu atención</p>
+              <p style={{margin:"2px 0 0",fontSize:11,color:"#64748B"}}>
+                {todos.length} elemento{todos.length!==1?"s":""} sin actividad reciente
+              </p>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:6}}>
+            {urgentes>0&&<span style={{background:"#FEE2E2",color:"#DC2626",
+              fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:99}}>
+              {urgentes} urgente{urgentes!==1?"s":""}
+            </span>}
+            {advertencias>0&&<span style={{background:"#FEF3C7",color:"#D97706",
+              fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:99}}>
+              {advertencias} aviso{advertencias!==1?"s":""}
+            </span>}
+          </div>
+        </div>
+
+        {/* Items */}
+        {todos.slice(0,6).map(function(item,i){
+          var esUrgente=item.dias>=14;
+          return(
+            <div key={item.id||("ps"+i)} onClick={function(){onNav(item.nav);}}
+              className="pend-row"
+              style={{display:"flex",alignItems:"center",gap:12,padding:"12px 16px",
+                cursor:"pointer",transition:"background .15s",
+                borderBottom:i<Math.min(todos.length,6)-1?"1px solid #F1F5F9":"none"}}>
+              <div style={{width:36,height:36,borderRadius:10,
+                background:item.bg,display:"flex",alignItems:"center",justifyContent:"center",
+                fontSize:16,flexShrink:0}}>{item.icon}</div>
+              <div style={{flex:1,minWidth:0}}>
+                <p style={{margin:0,fontSize:12,fontWeight:600,color:"#0F172A",
+                  overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.titulo}</p>
+                <p style={{margin:"1px 0 0",fontSize:10,color:"#94A3B8",
+                  overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                  {item.sub}{item.etapa?" · "+item.etapa:""}{item.valor?" · "+fmt(item.valor)+"€":""}
+                </p>
+              </div>
+              <span style={{
+                background:esUrgente?"#FEE2E2":"#FEF3C7",
+                color:esUrgente?"#DC2626":"#D97706",
+                fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:99,
+                whiteSpace:"nowrap",flexShrink:0}}>
+                {item.dias} días
+              </span>
+              <span style={{color:"#CBD5E1",fontSize:16,flexShrink:0}}>{"›"}</span>
+            </div>
+          );
+        })}
+
+        {/* Footer si hay más */}
+        {todos.length>6&&(
+          <div style={{padding:"10px 18px",background:"#FAFAFA",textAlign:"center",
+            borderTop:"1px solid #F1F5F9"}}>
+            <p style={{margin:0,fontSize:11,color:"#94A3B8"}}>
+              +{todos.length-6} elemento{todos.length-6!==1?"s":""} más pendientes
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, estrategiasDB, incidenciasDB, calendarioDB, actividad, _ver}){
   const {id,equipo,color}=usuario;
   const opsBD=oportunidadesDB||OPORTUNIDADES_SEED;
@@ -4002,6 +4235,11 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, es
             <span style={{color:T.muted,fontSize:14}}>›</span>
           </div>
         )}
+
+        {/* ── PANEL SEGUIMIENTO ACTIVO (v3.24.0) ── */}
+        <PanelSeguimiento usuario={usuario} oportunidadesDB={oportunidadesDB}
+          muestrasDB={muestrasDB} estrategiasDB={estrategiasDB}
+          incidenciasDB={incidenciasDB} onNav={onNav}/>
 
         {/* ── Mis clientes ── */}
         <div onClick={()=>onNav("clientes")}
@@ -15325,7 +15563,7 @@ function CentroPendientes({usuario, onBack, onNav, muestrasDB, ofertasDB, incide
 
 // ─── ESCÁNER DE TARJETA DE VISITA ────────────────────────────────
 
-function DashDirector({usuario, onNav, estrategiasDB}){
+function DashDirector({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasDB, incidenciasDB}){
   // Legacy EQUIPO_DATA eliminado — se usa AGENTES_DATA top-level
   const opsActivas=OPORTUNIDADES_SEED.filter(o=>!o.etapa.includes("cerrada"));
   const valPipeline=opsActivas.reduce((s,o)=>s+o.valor,0);
@@ -15368,6 +15606,11 @@ function DashDirector({usuario, onNav, estrategiasDB}){
         </div>
         <span style={{color:"#fff",fontSize:18}}>›</span>
       </div>
+
+      {/* ── PANEL SEGUIMIENTO ACTIVO (v3.24.0) ── */}
+      <PanelSeguimiento usuario={usuario} oportunidadesDB={oportunidadesDB}
+        muestrasDB={muestrasDB} estrategiasDB={estrategiasDB}
+        incidenciasDB={incidenciasDB} onNav={onNav}/>
 
       {/* ══ 1. VENTAS — selector período + tarjeta consolidada ══ */}
       <div style={{display:"flex",gap:6,marginBottom:12}}>
@@ -22722,6 +22965,11 @@ function App(props){
               note={`${mbAnualEq>=mbAnualObjEq?"+":""}${(mbAnualEq-mbAnualObjEq).toFixed(1)}pp`}/>
           </div>
 
+          {/* ── PANEL SEGUIMIENTO ACTIVO (v3.24.0) ── */}
+          <PanelSeguimiento usuario={usuario} oportunidadesDB={oportunidadesDB}
+            muestrasDB={muestrasDB} estrategiasDB={estrategiasDB}
+            incidenciasDB={incidenciasDB} onNav={setSection}/>
+
           {/* 3 · Pendientes */}
           {MODS.length>0&&(
             <>
@@ -23171,7 +23419,7 @@ function App(props){
         {esJefeOmas&&section==="clientes_eq"&& <GestorClientes usuario={usuario} actividad={actividadSemana} onActividad={onActividad} onBack={function(){setHideNav(false);setClienteDirecto(null);setSection(prevSectionRef.current||"dashboard");}} clientesFB={misClientesFB} muestrasDB={muestrasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} estrategiasDB={estrategiasDB} ofertasDB={ofertasDB} clienteDirecto={clienteDirecto} onClienteDirectoUsado={()=>setClienteDirecto(null)} onNewIncidencia={function(inc){setIncidenciasDB(function(prev){return [inc].concat(prev);});}} onNewMuestra={function(m){setMuestrasDB(function(prev){return [m].concat(prev);});}} onNewEstrategia={function(e){setEstrategiasDB(function(prev){return [e].concat(prev);});}} onNewOferta={function(o){setOfertasDB(function(prev){return [o].concat(prev||[]);});}} onNavegar={setSection}/>}
 
         {/* DIRECTOR / CEO — dashboard global */}
-        {esDir&&section==="dashboard"&&     <DashDirector usuario={usuario} onNav={setSection} estrategiasDB={estrategiasDB}/>}
+        {esDir&&section==="dashboard"&&     <DashDirector usuario={usuario} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} muestrasDB={muestrasDB} incidenciasDB={incidenciasDB}/>}
 
         {/* (v3.23.91) RESPONSABLE TIPOLOGÍA — dashboard de pendientes de su departamento */}
         {esTipologia&&section==="dashboard"&& <DashTipologia usuario={usuario} onNav={setSection} incidenciasDB={incidenciasDB}/>}
