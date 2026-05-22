@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.24.4";
-const CRM_BUILD = "22/05/2026-fix-envio-indicaciones-safari";
+const CRM_VERSION = "3.24.5";
+const CRM_BUILD = "22/05/2026-bandeja-salida-persistente-historial";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -14907,11 +14907,46 @@ function CentroPendientes({usuario, onBack, onNav, muestrasDB, ofertasDB, incide
   const [hiloAbierto,setHiloAbierto]=React.useState(null); // item seleccionado
   const [mensajeNuevo,setMensajeNuevo]=React.useState("");
   const [avisarEmail,setAvisarEmail]=React.useState(true);
-  // (v3.23.66) Cola de indicaciones marcadas para email
+  // (v3.24.4) Cola de indicaciones PERSISTENTE en Firebase
   const [colaEmails,setColaEmails]=React.useState([]);
   const [enviandoCola,setEnviandoCola]=React.useState(false);
   const [enviando,setEnviando]=React.useState(false);
-  const [tick,setTick]=React.useState(0); // fuerza recálculo tras enviar
+  const [tick,setTick]=React.useState(0);
+  const [historialEnvios,setHistorialEnvios]=React.useState([]);
+  const [showHistorial,setShowHistorial]=React.useState(false);
+  const colaIdRef=React.useRef("cola_"+idCanonico(usuario));
+
+  // Cargar cola pendiente e historial desde Firebase al montar
+  React.useEffect(function(){
+    fbLeer("cola_indicaciones").then(function(docs){
+      var miCola=(docs||[]).find(function(d){return d.id===colaIdRef.current});
+      if(miCola&&miCola.items&&miCola.items.length>0){
+        setColaEmails(miCola.items);
+      }
+    });
+    fbLeer("historial_indicaciones").then(function(docs){
+      var mis=(docs||[]).filter(function(d){return d.autorId===idCanonico(usuario)||d.autorId===usuario.id});
+      mis.sort(function(a,b){return(b.fecha||"").localeCompare(a.fecha||"")});
+      setHistorialEnvios(mis.slice(0,30));
+    });
+  },[]);
+
+  // Guardar cola en Firebase cada vez que cambie
+  React.useEffect(function(){
+    if(colaEmails.length>0){
+      fbEscribir("cola_indicaciones",colaIdRef.current,{
+        items:colaEmails,
+        autorId:idCanonico(usuario),
+        autorNombre:usuario.nombre||"",
+        fechaActualizacion:new Date().toISOString()
+      });
+    }else{
+      // Limpiar de Firebase cuando la cola está vacía
+      fbEscribir("cola_indicaciones",colaIdRef.current,{
+        items:[],autorId:idCanonico(usuario),fechaActualizacion:new Date().toISOString()
+      });
+    }
+  },[colaEmails]);
   // (v3.23.63) Filtro equipo / vendedor
   const [equipoFiltro,setEquipoFiltro]=React.useState("todos");
   const [agenteFiltro,setAgenteFiltro]=React.useState(null);
@@ -14996,45 +15031,80 @@ function CentroPendientes({usuario, onBack, onNav, muestrasDB, ofertasDB, incide
     });
   }
 
-  // (v3.23.66) Enviar todas las indicaciones marcadas en lote (agrupadas por vendedor)
+  // (v3.24.4) Enviar indicaciones usando /api/send-email (que sí existe)
   function enviarColaEmails(){
     if(colaEmails.length===0 || enviandoCola) return;
     setEnviandoCola(true);
-    // (v3.24.3) Sanitizar datos antes de enviar para evitar errores en Safari
-    var datosLimpios;
-    try{
-      datosLimpios=JSON.stringify({
-        indicaciones: colaEmails.map(function(item){
-          return {
-            tipoElemento: String(item.tipoElemento||""),
-            titulo: String(item.titulo||""),
-            cliente: String(item.cliente||""),
-            responsableId: String(item.responsableId||""),
-            responsableNombre: String(item.responsableNombre||""),
-            textoMensaje: String(item.textoMensaje||"").replace(/[\u0000-\u001F]/g,""),
-          };
-        }),
-        autorMensaje: String(usuario.nombre||usuario.id||""),
-        autorId: String(usuario.id||""),
-      });
-    }catch(jsonErr){
+    // Agrupar por vendedor
+    var porVendedor={};
+    colaEmails.forEach(function(item){
+      var key=item.responsableNombre||item.responsableId||"sin_asignar";
+      if(!porVendedor[key])porVendedor[key]={nombre:key,items:[]};
+      porVendedor[key].items.push(item);
+    });
+    // Buscar email del vendedor en USUARIOS o portal_users
+    var emailsToSend=Object.values(porVendedor).map(function(grupo){
+      var u=USUARIOS.find(function(x){return x.nombre===grupo.nombre||x.id===grupo.nombre||x.grupoAgente===grupo.nombre});
+      var email=u&&u.email?u.email:null;
+      var listaHtml=grupo.items.map(function(it){
+        return '<div style="padding:10px 0;border-bottom:1px solid #E2E8F0"><strong>'+((it.titulo||"").replace(/</g,"&lt;"))+'</strong> — '+(it.cliente||"")+
+          '<br><span style="color:#64748B;font-size:13px">'+(it.textoMensaje||"").replace(/</g,"&lt;").slice(0,200)+'</span></div>';
+      }).join("");
+      return{
+        to:email,
+        vendedorNombre:grupo.nombre,
+        subject:"[CRM] "+grupo.items.length+" indicación"+(grupo.items.length>1?"es":"")+" de "+(usuario.nombre||"Dirección"),
+        html:'<div style="font-family:sans-serif;max-width:500px;margin:0 auto;padding:20px">'+
+          '<div style="background:#1E3A5F;color:#fff;padding:16px 20px;border-radius:12px 12px 0 0">'+
+          '<h2 style="margin:0;font-size:16px">📧 Indicaciones — CRM Grupo Consolidado</h2></div>'+
+          '<div style="padding:16px 20px;border:1px solid #E2E8F0;border-top:none;border-radius:0 0 12px 12px">'+
+          '<p style="margin:0 0 12px;font-size:14px;color:#1E293B"><strong>'+(usuario.nombre||"")+'</strong> te ha dejado '+grupo.items.length+' indicación'+(grupo.items.length>1?"es":"")+':</p>'+
+          listaHtml+
+          '<p style="margin:16px 0 0;font-size:12px;color:#94A3B8">Abre el CRM para ver los detalles completos.</p>'+
+          '</div></div>',
+        count:grupo.items.length
+      };
+    });
+    // Enviar los que tengan email
+    var conEmail=emailsToSend.filter(function(e){return e.to});
+    var sinEmail=emailsToSend.filter(function(e){return!e.to});
+    if(conEmail.length===0){
       setEnviandoCola(false);
-      alert("Error preparando datos: "+jsonErr.message);
+      var nombres=sinEmail.map(function(e){return e.vendedorNombre}).join(", ");
+      alert("No se encontró email para: "+nombres+". Configura los emails en USUARIOS.");
+      setColaEmails([]);
       return;
     }
-    fetch("/api/notificar-indicacion", {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body: datosLimpios
-    }).then(function(r){return r.json();}).then(function(j){
+    Promise.all(conEmail.map(function(e){
+      return fetch("/api/send-email",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({to:e.to,subject:e.subject,html:e.html})
+      }).then(function(r){return r.ok?1:0}).catch(function(){return 0});
+    })).then(function(results){
+      var ok=results.reduce(function(s,v){return s+v},0);
       setEnviandoCola(false);
-      if(j && j.ok){
-        var n=j.enviados||0;
-        alert("📧 Enviado: "+n+" email"+(n===1?"":"s")+" (uno por vendedor)");
-        setColaEmails([]);
-      } else {
-        alert("No se pudo enviar: "+((j&&j.error)||"error"));
-      }
+      // (v3.24.4) Guardar registro de envío en Firebase
+      var registroId="envio_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
+      var registro={
+        id:registroId,
+        autorId:idCanonico(usuario),
+        autorNombre:usuario.nombre||"",
+        fecha:new Date().toISOString(),
+        fechaStr:new Date().toLocaleDateString("es-ES")+" "+new Date().toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}),
+        totalIndicaciones:colaEmails.length,
+        emailsEnviados:ok,
+        emailsFallidos:conEmail.length-ok,
+        sinEmail:sinEmail.map(function(e){return e.vendedorNombre}),
+        destinatarios:conEmail.map(function(e){return{nombre:e.vendedorNombre,email:e.to,indicaciones:e.count}}),
+        detalle:colaEmails.map(function(it){return{titulo:it.titulo||"",cliente:it.cliente||"",vendedor:it.responsableNombre||"",texto:(it.textoMensaje||"").slice(0,200)}})
+      };
+      fbEscribir("historial_indicaciones",registroId,registro);
+      setHistorialEnvios(function(prev){return[registro].concat(prev).slice(0,30)});
+      setColaEmails([]);
+      var msg="📧 "+ok+" email"+(ok!==1?"s":"")+" enviado"+(ok!==1?"s":"");
+      if(sinEmail.length>0)msg+="\n⚠️ Sin email: "+sinEmail.map(function(e){return e.vendedorNombre}).join(", ");
+      alert(msg);
     }).catch(function(e){
       setEnviandoCola(false);
       alert("Error al enviar: "+e.message);
@@ -15445,6 +15515,12 @@ function CentroPendientes({usuario, onBack, onNav, muestrasDB, ofertasDB, incide
             </button>
           );
         })}
+        <button onClick={function(){setShowHistorial(!showHistorial);}}
+          style={{padding:"7px 12px",borderRadius:99,border:"1.5px solid "+T.border,
+            background:showHistorial?"#EFF6FF":"#fff",color:showHistorial?T.blue:T.muted,
+            fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap",flexShrink:0}}>
+          📋 Enviados
+        </button>
       </div>
 
       {cargando && <p style={{textAlign:"center",color:T.muted,padding:30}}>Cargando…</p>}
@@ -15465,31 +15541,66 @@ function CentroPendientes({usuario, onBack, onNav, muestrasDB, ofertasDB, incide
         </div>
       )}
 
-      {/* (v3.23.66) Botón flotante para enviar la cola de indicaciones marcadas */}
-      {colaEmails.length>0 && (
+      {/* (v3.24.4) Botón flotante — cola persistente + historial */}
+      {(colaEmails.length>0 || showHistorial) && (
         <div style={{position:"fixed",left:0,right:0,bottom:0,padding:"12px 16px",
           background:"#fff",borderTop:"1px solid "+T.border,
           boxShadow:"0 -4px 16px rgba(0,0,0,.08)",zIndex:150,
-          display:"flex",alignItems:"center",gap:10,maxWidth:600,margin:"0 auto"}}>
-          <div style={{flex:1}}>
-            <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>
-              📧 {colaEmails.length} indicación{colaEmails.length===1?"":"es"} marcada{colaEmails.length===1?"":"s"}
-            </p>
-            <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
-              Se agrupan por vendedor en un email cada uno
-            </p>
+          maxWidth:600,margin:"0 auto"}}>
+          {colaEmails.length>0 && (
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:showHistorial?10:0}}>
+              <div style={{flex:1}}>
+                <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>
+                  📧 {colaEmails.length} indicación{colaEmails.length===1?"":"es"} en bandeja
+                </p>
+                <p style={{margin:"2px 0 0",fontSize:10,color:T.green,fontWeight:600}}>
+                  ✓ Guardadas — no se pierden al salir
+                </p>
+              </div>
+              <button onClick={function(){setColaEmails([]);}}
+                style={{padding:"9px 12px",borderRadius:9,border:"1.5px solid "+T.border,
+                  background:"#fff",color:T.muted,fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                Descartar
+              </button>
+              <button onClick={enviarColaEmails} disabled={enviandoCola}
+                style={{padding:"9px 16px",borderRadius:9,border:"none",
+                  background:enviandoCola?"#CBD5E1":T.navy,color:"#fff",
+                  fontSize:12,fontWeight:800,cursor:enviandoCola?"not-allowed":"pointer"}}>
+                {enviandoCola?"Enviando…":"📨 Enviar"}
+              </button>
+            </div>
+          )}
+          <div style={{display:"flex",alignItems:"center",gap:8,marginTop:colaEmails.length>0?8:0}}>
+            <button onClick={function(){setShowHistorial(!showHistorial);}}
+              style={{flex:1,padding:"8px 12px",borderRadius:9,border:"1.5px solid "+T.border,
+                background:showHistorial?"#F8FAFC":"#fff",color:T.text,fontSize:11,fontWeight:700,cursor:"pointer",textAlign:"left"}}>
+              {showHistorial?"▾ Ocultar historial":"▸ Historial de envíos"+(historialEnvios.length>0?" ("+historialEnvios.length+")":"")}
+            </button>
           </div>
-          <button onClick={function(){setColaEmails([]);}}
-            style={{padding:"9px 12px",borderRadius:9,border:"1.5px solid "+T.border,
-              background:"#fff",color:T.muted,fontSize:12,fontWeight:700,cursor:"pointer"}}>
-            Descartar
-          </button>
-          <button onClick={enviarColaEmails} disabled={enviandoCola}
-            style={{padding:"9px 16px",borderRadius:9,border:"none",
-              background:enviandoCola?"#CBD5E1":T.navy,color:"#fff",
-              fontSize:12,fontWeight:800,cursor:enviandoCola?"not-allowed":"pointer"}}>
-            {enviandoCola?"Enviando…":"📨 Enviar"}
-          </button>
+          {showHistorial && (
+            <div style={{maxHeight:250,overflowY:"auto",marginTop:8}}>
+              {historialEnvios.length===0 ? (
+                <p style={{textAlign:"center",color:T.muted,fontSize:12,padding:16}}>Sin envíos registrados</p>
+              ) : historialEnvios.map(function(h,i){
+                return (
+                  <div key={h.id||i} style={{padding:"10px 0",borderBottom:"1px solid "+T.border}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <span style={{fontSize:11,fontWeight:800,color:h.emailsEnviados>0?T.green:T.red}}>
+                        {h.emailsEnviados>0?"✅":"❌"} {h.fechaStr||h.fecha}
+                      </span>
+                      <span style={{fontSize:10,color:T.muted}}>
+                        {h.totalIndicaciones} indicación{h.totalIndicaciones!==1?"es":""} → {h.emailsEnviados} email{h.emailsEnviados!==1?"s":""}
+                      </span>
+                    </div>
+                    {h.destinatarios&&h.destinatarios.map(function(d,j){
+                      return <span key={j} style={{fontSize:10,color:T.textL,marginRight:8}}>📧 {d.nombre} ({d.indicaciones})</span>;
+                    })}
+                    {h.sinEmail&&h.sinEmail.length>0&&<span style={{fontSize:10,color:T.red}}>⚠️ Sin email: {h.sinEmail.join(", ")}</span>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
