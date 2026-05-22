@@ -86,7 +86,16 @@ var h=React.createElement,_s=React.useState,_e=React.useEffect;
 var FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
 function pv(v){if(!v)return;if("stringValue"in v)return v.stringValue;if("integerValue"in v)return+v.integerValue;if("doubleValue"in v)return+v.doubleValue;if("booleanValue"in v)return v.booleanValue;if("nullValue"in v)return null;if("timestampValue"in v)return v.timestampValue;if("arrayValue"in v)return(v.arrayValue.values||[]).map(pv);if("mapValue"in v){var o={};Object.entries(v.mapValue.fields||{}).forEach(function(e){o[e[0]]=pv(e[1])});return o}}
 function fromFS(doc){if(!doc||!doc.fields)return{id:(doc&&doc.name||"").split("/").pop()};var o={id:(doc.name||"").split("/").pop()};Object.entries(doc.fields).forEach(function(e){var val=pv(e[1]);if(val!==undefined)o[e[0]]=val});return o}
-function fbL(col){return fetch(FB+"/"+col+"?pageSize=300",{cache:"no-store"}).then(function(r){return r.json()}).then(function(d){var docs=d.documents?d.documents.map(fromFS):[];function pag(tk,acc,n){if(!tk||n>30)return Promise.resolve(acc);return fetch(FB+"/"+col+"?pageSize=300&pageToken="+tk,{cache:"no-store"}).then(function(r){return r.json()}).then(function(d2){var m=d2.documents?d2.documents.map(fromFS):[];return pag(d2.nextPageToken,acc.concat(m),n+1)})}return pag(d.nextPageToken,docs,0)}).catch(function(){return[]})}
+function fbL(col){
+  return Promise.race([
+    fetch(FB+"/"+col+"?pageSize=300",{cache:"no-store"}).then(function(r){if(!r.ok)throw new Error(r.status);return r.json()}).then(function(d){
+      var docs=d.documents?d.documents.map(fromFS):[];
+      function pag(tk,acc,n){if(!tk||n>10)return Promise.resolve(acc);return fetch(FB+"/"+col+"?pageSize=300&pageToken="+tk,{cache:"no-store"}).then(function(r){return r.json()}).then(function(d2){var m=d2.documents?d2.documents.map(fromFS):[];return pag(d2.nextPageToken,acc.concat(m),n+1)}).catch(function(){return acc})}
+      return pag(d.nextPageToken,docs,0);
+    }).catch(function(e){console.warn("FB "+col+":",e.message);return[]}),
+    new Promise(function(res){setTimeout(function(){console.warn("FB "+col+": timeout");res([])},8000)})
+  ]);
+}
 
 // ═══ USUARIOS ═══
 var USR=[
@@ -126,13 +135,33 @@ function App(){
   var s6=_s(null),detail=s6[0],setDetail=s6[1];
   var s7=_s("todos"),edadF=s7[0],setEdadF=s7[1]; // aging filter
 
+  var s8=_s(""),prog=s8[0],setProg=s8[1];
+
   _e(function(){
-    Promise.all([fbL("oportunidades"),fbL("muestras"),fbL("estrategias"),fbL("incidencias"),fbL("ofertas"),fbL("visitas"),fbL("potenciales")]).then(function(r){
-      setData({ops:r[0],mue:r[1],est:r[2],inc:r[3],ofe:r[4],vis:r[5],pot:r[6]});setLoading(false);
-    });
+    var resultado={ops:[],mue:[],est:[],inc:[],ofe:[],vis:[],pot:[]};
+    var cols=[
+      {k:"ops",c:"oportunidades"},
+      {k:"mue",c:"muestras"},
+      {k:"est",c:"estrategias"},
+      {k:"inc",c:"incidencias"},
+      {k:"ofe",c:"ofertas"},
+      {k:"vis",c:"visitas"},
+      {k:"pot",c:"potenciales"},
+    ];
+    var done=0;
+    function next(){
+      if(done>=cols.length){setData(resultado);setLoading(false);return}
+      var item=cols[done];
+      setProg("Cargando "+item.c+"... ("+(done+1)+"/"+cols.length+")");
+      fbL(item.c).then(function(docs){
+        resultado[item.k]=docs;
+        done++;next();
+      });
+    }
+    next();
   },[]);
 
-  if(loading)return h("div",{className:"app"},h("div",{style:{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:12,color:"#6B7280"}},h("div",{style:{width:24,height:24,border:"3px solid #374151",borderTopColor:"#3B82F6",borderRadius:"50%",animation:"spin .8s linear infinite"}}),h("span",null,"Conectando con Firebase...")));
+  if(loading)return h("div",{className:"app"},h("div",{style:{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:12,color:"#6B7280"}},h("div",{style:{width:24,height:24,border:"3px solid #374151",borderTopColor:"#3B82F6",borderRadius:"50%",animation:"spin .8s linear infinite"}}),h("span",null,prog||"Conectando...")));
 
   // ═══ FILTRADO GLOBAL ═══
   function fil(arr){return(arr||[]).filter(function(i){if(i.eliminada||i.eliminado)return false;var ag=i.agente||i.autor||i.agenteId||"";if(eqF!=="todos"&&eq(ag)!==eqF)return false;if(agF!=="todos"){var up=(ag||"").toUpperCase();var uA=USR.find(function(u){return u.id===agF});if(!uA)return false;if(![uA.id,uA.ga].some(function(x){return x&&x.toUpperCase()===up}))return false}return true})}
