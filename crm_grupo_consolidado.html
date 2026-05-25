@@ -281,7 +281,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 
 // ─── PALETA ────────────────────────────────────────────────────────
 const CRM_VERSION = "3.26.0";
-const CRM_BUILD = "25/05/2026-enlace-cliente-estrategia-independiente";
+const CRM_BUILD = "25/05/2026-flujo-estrategia-oferta-cierre-auto";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -1320,7 +1320,15 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
     if(!(e.estado==="completada"||e.estado==="sin_exito")) return false;
     if(esAgenteRol && !(appMisIds.has((e.agente||"").toUpperCase())||e.creadoPor===usuario.id)) return false;
     if(!pasaFiltroEq(e)) return false;
-    return _semUltSeg(e) === semana;
+    // (v3.26.0) Más permisivo: campo semana, último seguimiento, o cualquier fecha
+    var s=parseInt(e.semana||0);
+    if(s===semana) return true;
+    if(_semUltSeg(e)===semana) return true;
+    var candidatas=[e.fechaCierre,e.fechaResolucion,e.fechaActualizacion];
+    for(var ci=0;ci<candidatas.length;ci++){
+      if(candidatas[ci]&&_semDeFecha(candidatas[ci])===semana) return true;
+    }
+    return false;
   });
   var misInc=(incidenciasDB||[]).filter(function(i){
     if(i.eliminada) return false;
@@ -8873,33 +8881,63 @@ function MisEstrategias({usuario, onVolverPotencial}){
                 </button>
               </div>
 
-              {/* (v3.26.0) Crear enlace para el cliente — guardado en la propia estrategia */}
+              {/* (v3.26.0) Crear oferta desde estrategia — el resultado de la oferta cerrará la estrategia */}
               <button onClick={()=>{
-                var token=sel.tokenCliente||"";
-                if(!token){
-                  var chars="ABCDEFGHJKMNPQRSTUVWXYZ23456789";
-                  for(var ti=0;ti<10;ti++)token+=chars[Math.floor(Math.random()*chars.length)];
-                }
-                var updated={...sel,
-                  tokenCliente:token,
-                  fechaEnvioCliente:new Date().toISOString(),
-                  seguimientos:[...(sel.seguimientos||[]),{accion:"📤 Enlace enviado al cliente",fecha:new Date().toLocaleDateString("es-ES"),por:usuario.nombre}],
-                  historialEscalado:[...(sel.historialEscalado||[]),{accion:"📤 Enlace enviado al cliente",por:usuario.nombre,fecha:new Date().toLocaleDateString("es-ES")}]
-                };
-                fbEscribir("estrategias",sel.id,updated).then(function(){
-                  setEstrategias(prev=>prev.map(e=>e.id===sel.id?updated:e));
-                  setSel(updated);
-                  var url=(window.location.origin||"https://crmwikuk.vercel.app")+"/est.html?id="+sel.id+"&token="+token;
-                  if(navigator.share){
-                    navigator.share({title:"Oferta comercial — "+(sel.cliente||sel.clienteNombre||""),text:"Hola, te envío nuestra propuesta comercial:",url:url}).catch(function(){});
-                  }else{
-                    navigator.clipboard.writeText(url).then(function(){alert("📋 Enlace copiado:\n"+url)}).catch(function(){prompt("Copia este enlace:",url)});
-                  }
+                var productos=(sel.productos||[]).map(function(p){
+                  return{id:"l_"+Date.now()+"_"+Math.random().toString(36).slice(2,5),
+                    producto:p.nombre||p.producto||"",
+                    calibre:p.calibre||"",
+                    precio:p.precioOferta||p.precio||0,
+                    unidad:p.unidad||"kg",
+                    notas:"Dto: "+(sel.maxDescuento||0)+"%",
+                    estado:"pendiente"};
                 });
-              }} style={{width:"100%",marginTop:8,padding:"13px 10px",borderRadius:10,border:"1.5px solid "+T.navy,
-                background:"#EFF6FF",color:T.navy,fontWeight:700,fontSize:13,cursor:"pointer",
-                display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
-                📤 {sel.tokenCliente?"Reenviar enlace":"Crear enlace"} para el cliente
+                if(productos.length===0){
+                  productos=[{id:"l_"+Date.now(),
+                    producto:sel.estrategia||sel.descripcion||"Producto",
+                    calibre:"",precio:0,unidad:"kg",
+                    notas:"Dto. máx: "+(sel.maxDescuento||0)+"%",
+                    estado:"pendiente"}];
+                }
+                var ofertaId="of_est_"+Date.now();
+                var oferta={
+                  id:ofertaId,
+                  clienteNombre:sel.cliente||sel.clienteNombre||"",
+                  clienteId:sel.clienteId||"",
+                  agente:sel.agente||idCanonico(usuario),
+                  agenteNombre:sel.agenteNombre||usuario.nombre,
+                  equipo:sel.equipo||usuario.equipo||"",
+                  creadoPor:idCanonico(usuario),
+                  creadoPorNombre:usuario.nombre,
+                  lineas:productos,
+                  estado:"pendiente",
+                  fechaCreacion:new Date().toISOString(),
+                  fechaCreacionStr:new Date().toLocaleDateString("es-ES"),
+                  notaInicial:"Oferta de estrategia: "+(sel.estrategia||"")+" — Dto: "+(sel.maxDescuento||0)+"%",
+                  desdeEstrategia:sel.id,
+                  estrategiaId:sel.id,
+                  seguimientos:[{accion:"Oferta creada desde estrategia",fecha:new Date().toLocaleDateString("es-ES"),por:usuario.nombre}]
+                };
+                fbEscribir("ofertas",ofertaId,oferta).then(function(){
+                  // Registrar en la estrategia
+                  var updated={...sel,
+                    ofertaVinculada:ofertaId,
+                    seguimientos:[...(sel.seguimientos||[]),{accion:"📄 Oferta creada",fecha:new Date().toLocaleDateString("es-ES"),por:usuario.nombre,nota:"Oferta: "+ofertaId}],
+                    historialEscalado:[...(sel.historialEscalado||[]),{accion:"📄 Oferta creada desde estrategia",por:usuario.nombre,fecha:new Date().toLocaleDateString("es-ES")}]
+                  };
+                  setEstrategias(prev=>prev.map(e=>e.id===sel.id?updated:e));
+                  fbEscribir("estrategias",sel.id,updated);
+                  setSel(updated);
+                  alert("✅ Oferta creada. Ve a Ofertas para enviar el enlace al cliente.\nEl resultado de la oferta cerrará esta estrategia automáticamente.");
+                });
+              }} disabled={sel.ofertaVinculada}
+                style={{width:"100%",marginTop:8,padding:"13px 10px",borderRadius:10,
+                  border:"1.5px solid "+(sel.ofertaVinculada?"#BBF7D0":T.navy),
+                  background:sel.ofertaVinculada?"#F0FDF4":"#EFF6FF",
+                  color:sel.ofertaVinculada?"#15803D":T.navy,
+                  fontWeight:700,fontSize:13,cursor:sel.ofertaVinculada?"default":"pointer",
+                  display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+                {sel.ofertaVinculada?"✅ Oferta creada — ver en Ofertas":"📄 Crear oferta para el cliente"}
               </button>
             </Card>
           )}
@@ -10681,6 +10719,30 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
       setNotaCierre("");
       setLineasSelModal([]);
       alert(accionLbl+" registrado" + (lineasSeleccionadas?" en "+lineasSeleccionadas.length+" línea(s)":""));
+
+      // (v3.26.0) Si la oferta viene de una estrategia y TODAS las líneas están cerradas → cerrar la estrategia
+      if(todasCerradas && (oferta.estrategiaId || oferta.desdeEstrategia)){
+        var estId = oferta.estrategiaId || oferta.desdeEstrategia;
+        var resultadoEst = estadoGlobal==="pedido"?"completada":"sin_exito";
+        var resultadoLabel = estadoGlobal==="pedido"?"✅ Pedido confirmado":"❌ Sin éxito";
+        fbLeer("estrategias").then(function(allEst){
+          var est = (allEst||[]).find(function(e){return e.id===estId});
+          if(!est) return;
+          var updatedEst = Object.assign({},est,{
+            estado:resultadoEst,
+            resultado:resultadoEst==="completada"?"exito":"sin_exito",
+            cierreFinal:{por:usuario.nombre,fecha:hoy,resultado:estadoGlobal,nota:"Cerrada automáticamente desde oferta "+oferta.id},
+            resolucion:{tipo:estadoGlobal,fecha:hoy,por:usuario.nombre,nota:"Resultado de oferta vinculada"},
+            seguimientos:[].concat(est.seguimientos||[],[{
+              accion:resultadoLabel+" (desde oferta)",fecha:hoy,por:usuario.nombre,nota:"Oferta "+oferta.id+" cerrada como "+estadoGlobal
+            }]),
+            historialEscalado:[].concat(est.historialEscalado||[],[{
+              accion:resultadoLabel+" — cerrada desde oferta",por:usuario.nombre,fecha:hoy
+            }])
+          });
+          fbEscribir("estrategias",estId,updatedEst);
+        });
+      }
     }).catch(function(e){alert("Error: "+e.message);});
   }
 
