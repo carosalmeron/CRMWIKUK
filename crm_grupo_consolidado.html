@@ -280,8 +280,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.24.7";
-const CRM_BUILD = "22/05/2026-fix-cola-email-persistencia";
+const CRM_VERSION = "3.24.8";
+const CRM_BUILD = "25/05/2026-muestras-agrupadas-por-mes-gps";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -295,6 +295,25 @@ const T = {
 };
 const s = (x)=>({...x}); // identity helper
 const fmt = (n)=>new Intl.NumberFormat("es-ES",{minimumFractionDigits:0}).format(n);
+
+// (v3.24.8) Geolocalización — capturar GPS al registrar visita
+function captureGPS(){
+  return new Promise(function(resolve){
+    if(!navigator.geolocation){resolve(null);return;}
+    navigator.geolocation.getCurrentPosition(
+      function(pos){
+        resolve({
+          lat:Math.round(pos.coords.latitude*1e6)/1e6,
+          lng:Math.round(pos.coords.longitude*1e6)/1e6,
+          accuracy:Math.round(pos.coords.accuracy),
+          timestamp:new Date().toISOString()
+        });
+      },
+      function(){resolve(null);},
+      {enableHighAccuracy:true,timeout:8000,maximumAge:60000}
+    );
+  });
+}
 
 // ─── DATOS DEMO ────────────────────────────────────────────────────
 let USUARIOS = [
@@ -2741,7 +2760,7 @@ function MiSemana({usuario,clientesFB,onBack,onNav,estrategiasDB,oportunidadesDB
                                   {!esAgenteRol&&agName?<span style={{color:T.muted,fontWeight:500,fontSize:11}}> ({agName})</span>:null}
                                 </p>
                               </div>
-                              <p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>{v.fecha||""} · {ic} <span style={{color:c,fontWeight:600}}>{lb}</span>{v.ciudad?" · "+v.ciudad:""}</p>
+                              <p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>{v.fecha||""} · {ic} <span style={{color:c,fontWeight:600}}>{lb}</span>{v.ciudad?" · "+v.ciudad:""}{v.gps?<a href={"https://www.google.com/maps?q="+v.gps.lat+","+v.gps.lng} target="_blank" rel="noopener" onClick={function(e){e.stopPropagation();}} style={{marginLeft:6,fontSize:9,fontWeight:700,padding:"1px 5px",borderRadius:5,background:"#F0FDF4",color:"#15803D",border:"1px solid #BBF7D0",textDecoration:"none"}} title={"📍 "+v.gps.lat+", "+v.gps.lng+" (±"+(v.gps.accuracy||"?")+"m) — "+v.gps.timestamp}>📍 GPS ✓</a>:null}</p>
                               {nota&&(
                                 <p style={{margin:"6px 0 0",fontSize:12,color:"#1F2937",lineHeight:1.4,padding:"6px 10px",background:"rgba(255,255,255,.7)",borderRadius:7,border:"1px solid rgba(0,0,0,.06)",whiteSpace:"pre-wrap",wordBreak:"break-word"}}>💬 {nota}</p>
                               )}
@@ -5637,10 +5656,12 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
   const visitasDone=Object.keys(visitas).length;
   const ventasOk=ventas.venta&&ventas.mb;
 
-  const guardarVisita=()=>{
+  const guardarVisita=async()=>{
     if(!clienteSel||!formV.resultado) return;
     const fecha=new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
     const tieneOferta = ofertasVisita.length>0;
+    // (v3.24.8) Capturar GPS
+    const gps=await captureGPS();
     const visitaDoc={
       clienteId:clienteSel.id,
       clienteNombre:clienteSel.nombre,
@@ -5651,6 +5672,7 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
       agente:idCanonico(usuario),
       equipo:usuario.equipo||"",
       tieneOferta:tieneOferta,
+      gps:gps||null,
     };
     // Guardar visita en Firebase
     fbEscribir("visitas", `${usuario.id}_${clienteSel.id}_sem${semana}`, visitaDoc);
@@ -7646,48 +7668,89 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
           <span style={{fontSize:40,display:"block",marginBottom:8}}>📭</span>
           <p style={{margin:0,fontSize:14}}>Sin muestras en este estado</p>
         </div>
-      ):(
-        visibles.map(m=>{
-          const estado={
-            pendiente:{icon:"⏳",color:T.amber,label:"Pendiente",bg:T.amberL},
-            positivo: {icon:"✅",color:T.green, label:"Positivo", bg:T.greenL},
-            pedido:   {icon:"🛒",color:T.blue,  label:"Ha pedido",bg:T.blueL},
-            ko:       {icon:"❌",color:T.red,   label:"KO",       bg:T.redL},
-          }[m.estado]||{icon:"⏳",color:T.muted,label:"",bg:T.bg};
-          return(
-            <Card key={m.id} onClick={()=>{setSel(m);setComentario("");}}
-              style={{marginBottom:10,border:`2px solid ${estado.color}33`,background:estado.bg,
-                cursor:"pointer"}}>
-              <div style={{display:"flex",gap:12,alignItems:"center"}}>
-                <span style={{fontSize:28}}>{estado.icon}</span>
-                <div style={{flex:1}}>
-                  <p style={{margin:0,fontSize:14,fontWeight:700,color:T.text}}>{m.prod}</p>
-                  <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{m.cliente} · S{m.semana}
-                    {esJefeOmas&&(()=>{
-                      // (v3.22.41) Buscar agente por id, grupoAgente o cualquier ID alternativo
-                      var idLow=(m.agente||"").toLowerCase();
-                      var ag=USUARIOS.find(u=>u.id===m.agente
-                        ||(u.grupoAgente&&u.grupoAgente.toLowerCase()===idLow)
-                        ||(u.idsCRM&&u.idsCRM.some(x=>(x||"").toLowerCase()===idLow)));
-                      if(ag) return ` · ${ag.icon||""} ${ag.nombre}`;
-                      // Si no se encuentra, probar nombre legible guardado
-                      if(m.agenteNombre) return ` · ${m.agenteNombre}`;
-                      if(m.creadoPorNombre) return ` · ${m.creadoPorNombre}`;
-                      // Si solo tenemos id técnico u_xxx, mostrar "Sin asignar"
-                      if(m.agente&&m.agente.indexOf("u_")===0) return ` · ⚠️ Sin agente CRM`;
-                      return m.agente?` · ${m.agente}`:"";
-                    })()}
-                  </p>
-                  {m.nota&&<p style={{margin:"4px 0 0",fontSize:12,color:estado.color,fontStyle:"italic"}}>"{m.nota}"</p>}
-                  {(m.historial||[]).length>0&&<p style={{margin:"3px 0 0",fontSize:10,color:T.blue,fontWeight:600}}>💬 {m.historial.length} comentario{m.historial.length>1?"s":""}</p>}
-                </div>
-                {m.estado==="pendiente"?<span style={{fontSize:13,color:T.amber,fontWeight:700}}>Registrar →</span>
-                :<span style={{fontSize:13,color:T.muted}}>Ver →</span>}
+      ):(function(){
+        // (v3.24.8) Agrupar muestras por mes
+        var MESES=["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
+        function mesFromMuestra(m){
+          // Intentar fecha directa primero
+          if(m.fecha){
+            var d=typeof m.fecha==="string"&&m.fecha.includes("-")?new Date(m.fecha):
+              typeof m.fecha==="string"&&m.fecha.includes("/")?
+                (function(){var p=m.fecha.split("/");var yr=p[2]?+p[2]:2026;if(yr<100)yr+=2000;return new Date(yr,+p[1]-1,+p[0])})():null;
+            if(d&&!isNaN(d))return{mes:d.getMonth(),anio:d.getFullYear(),key:d.getFullYear()+"-"+String(d.getMonth()).padStart(2,"0")};
+          }
+          // Derivar del número de semana
+          if(m.semana){
+            var s=parseInt(m.semana);
+            var d2=new Date(2026,0,1);
+            d2.setDate(d2.getDate()+(s-1)*7);
+            return{mes:d2.getMonth(),anio:d2.getFullYear(),key:d2.getFullYear()+"-"+String(d2.getMonth()).padStart(2,"0")};
+          }
+          return{mes:-1,anio:0,key:"sin-fecha"};
+        }
+        // Ordenar visibles por mes descendente (más reciente primero)
+        var porMes={};
+        visibles.forEach(function(m){
+          var info=mesFromMuestra(m);
+          if(!porMes[info.key])porMes[info.key]={mes:info.mes,anio:info.anio,key:info.key,items:[]};
+          porMes[info.key].items.push(m);
+        });
+        var gruposMes=Object.values(porMes).sort(function(a,b){return b.key.localeCompare(a.key)});
+        var coloresMes=["#3B82F6","#8B5CF6","#0EA5E9","#F59E0B","#EF4444","#22C55E","#EC4899","#6366F1","#14B8A6","#F97316","#06B6D4","#84CC16"];
+
+        return gruposMes.map(function(grupo){
+          var nombreMes=grupo.mes>=0?MESES[grupo.mes]+" "+grupo.anio:"Sin fecha";
+          var colorMes=coloresMes[grupo.mes>=0?grupo.mes%12:0];
+          return <div key={grupo.key} style={{marginBottom:20}}>
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10,position:"sticky",top:0,zIndex:5,paddingTop:4,paddingBottom:4,background:T.bg}}>
+              <div style={{background:colorMes,color:"#fff",padding:"6px 14px",borderRadius:99,
+                fontSize:12,fontWeight:800,display:"flex",alignItems:"center",gap:6,
+                boxShadow:"0 2px 8px "+colorMes+"40"}}>
+                📅 {nombreMes}
               </div>
-            </Card>
-          );
-        })
-      )}
+              <span style={{fontSize:11,fontWeight:700,color:T.muted}}>{grupo.items.length} muestra{grupo.items.length!==1?"s":""}</span>
+              <div style={{flex:1,height:1,background:T.border}}/>
+            </div>
+            {grupo.items.map(function(m){
+              var estado2={
+                pendiente:{icon:"⏳",color:T.amber,label:"Pendiente",bg:T.amberL},
+                positivo: {icon:"✅",color:T.green, label:"Positivo", bg:T.greenL},
+                pedido:   {icon:"🛒",color:T.blue,  label:"Ha pedido",bg:T.blueL},
+                ko:       {icon:"❌",color:T.red,   label:"KO",       bg:T.redL},
+              }[m.estado]||{icon:"⏳",color:T.muted,label:"",bg:T.bg};
+              return(
+                <Card key={m.id} onClick={()=>{setSel(m);setComentario("");}}
+                  style={{marginBottom:10,border:"2px solid "+estado2.color+"33",background:estado2.bg,
+                    cursor:"pointer"}}>
+                  <div style={{display:"flex",gap:12,alignItems:"center"}}>
+                    <span style={{fontSize:28}}>{estado2.icon}</span>
+                    <div style={{flex:1}}>
+                      <p style={{margin:0,fontSize:14,fontWeight:700,color:T.text}}>{m.prod}</p>
+                      <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{m.cliente} · S{m.semana}
+                        {esJefeOmas&&(()=>{
+                          var idLow=(m.agente||"").toLowerCase();
+                          var ag=USUARIOS.find(u=>u.id===m.agente
+                            ||(u.grupoAgente&&u.grupoAgente.toLowerCase()===idLow)
+                            ||(u.idsCRM&&u.idsCRM.some(x=>(x||"").toLowerCase()===idLow)));
+                          if(ag) return " · "+(ag.icon||"")+" "+ag.nombre;
+                          if(m.agenteNombre) return " · "+m.agenteNombre;
+                          if(m.creadoPorNombre) return " · "+m.creadoPorNombre;
+                          if(m.agente&&m.agente.indexOf("u_")===0) return " · ⚠️ Sin agente CRM";
+                          return m.agente?" · "+m.agente:"";
+                        })()}
+                      </p>
+                      {m.nota&&<p style={{margin:"4px 0 0",fontSize:12,color:estado2.color,fontStyle:"italic"}}>"{m.nota}"</p>}
+                      {(m.historial||[]).length>0&&<p style={{margin:"3px 0 0",fontSize:10,color:T.blue,fontWeight:600}}>💬 {m.historial.length} comentario{m.historial.length>1?"s":""}</p>}
+                    </div>
+                    {m.estado==="pendiente"?<span style={{fontSize:13,color:T.amber,fontWeight:700}}>Registrar →</span>
+                    :<span style={{fontSize:13,color:T.muted}}>Ver →</span>}
+                  </div>
+                </Card>
+              );
+            })}
+          </div>;
+        });
+      })()}
     </div>
   );
 }
@@ -15368,7 +15431,7 @@ function CentroPendientes({usuario, onBack, onNav, muestrasDB, ofertasDB, incide
       detalle:tieneResp?"El cliente respondió · valida la oferta":"Enviada hace "+dias+" día"+(dias===1?"":"s"),
       dias:dias,
       urgencia: tieneResp?"vencido":dias>=7?"vencido":dias>=3?"semana":"luego",
-      nav:"oportunidades",
+      nav:"ofertas",
       coleccion:"ofertas", docId:o.id||o._docId, ref:o,
       responsableId:o.agente||o.agenteId||o.creadoPor||""
     });
@@ -20038,10 +20101,13 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
                   ...act,
                   visitas:[...(act.visitas||[]),entrada]
                 });
-                // Guardar en Firebase
-                fbEscribir("visitas",`${usuario.id}_${clienteSel.id}_sem${semana}_${Date.now()}`,{
-                  ...entrada,clienteId:clienteSel.id,clienteNombre:clienteSel.nombre,
-                  agente:idCanonico(usuario),semana
+                // Guardar en Firebase con GPS
+                captureGPS().then(function(gps){
+                  fbEscribir("visitas",`${usuario.id}_${clienteSel.id}_sem${semana}_${Date.now()}`,{
+                    ...entrada,clienteId:clienteSel.id,clienteNombre:clienteSel.nombre,
+                    agente:idCanonico(usuario),semana,
+                    gps:gps||null
+                  });
                 });
                 // (v3.22.44) Si trae ofertas, crear documento en colección ofertas
                 if(v.ofertas && v.ofertas.length>0){
@@ -25589,10 +25655,11 @@ function HistorialSemanal({ usuario }) {
     });
   };
 
-  const guardarVisita = () => {
+  const guardarVisita = async() => {
     if(!formVis.clienteNombre.trim()) return;
     const hoy = new Date().toLocaleDateString("es-ES");
     const id  = "vis_"+Date.now();
+    const gps = await captureGPS();
     const doc = {
       id,
       clienteNombre: formVis.clienteNombre,
@@ -25608,6 +25675,7 @@ function HistorialSemanal({ usuario }) {
       semana,
       fecha:         hoy,
       tipo:          "visita_director",
+      gps:           gps||null,
     };
     fbEscribir("visitas", id, doc).then(()=>{
       setVisitas(prev=>[...prev, doc]);
