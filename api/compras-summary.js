@@ -1,6 +1,5 @@
-// /api/compras-summary.js
-// (v3.23.2) Endpoint Vercel - resumen semanal a Compras
-// Frecuencia: lunes 7am (configurado en vercel.json)
+// (v3.26.6) Endpoint Vercel - resumen semanal a Compras + Resp.Stock + CEO
+// Frecuencia: lunes y jueves 8:00 CET (configurado en vercel.json)
 // Email manual: GET/POST con ?manual=1 lo permite también
 
 const nodemailer = require('nodemailer');
@@ -29,7 +28,7 @@ function deserializeValue(v) {
 
 function deserializeDoc(doc) {
   if (!doc.fields) return {};
-  const out = {};
+  const out = { _id: (doc.name || '').split('/').pop() };
   for (const k in doc.fields) out[k] = deserializeValue(doc.fields[k]);
   return out;
 }
@@ -37,7 +36,7 @@ function deserializeDoc(doc) {
 async function fetchCollection(name) {
   const docs = [];
   let pageToken = null;
-  let safety = 50; // máx ~5000 docs
+  let safety = 50;
   do {
     const url = `${FB_BASE}/${name}?pageSize=100${pageToken ? `&pageToken=${pageToken}` : ''}`;
     const res = await fetch(url);
@@ -54,42 +53,70 @@ async function fetchCollection(name) {
 }
 
 // ── Lógica del informe ──────────────────────────────────
-function computeReport(ofertas, incidencias) {
+function computeReport(ofertas, incidencias, usuarios) {
   const hoy = new Date();
   const haceUnaSemana = new Date(hoy.getTime() - 7 * 24 * 60 * 60 * 1000);
 
+  // Mapa de usuarios para resolver agentes
+  const allUsers = usuarios || [];
+  function findUser(agId) {
+    if (!agId) return null;
+    const up = (agId || '').toUpperCase();
+    return allUsers.find(u =>
+      u.id === agId || u._id === agId ||
+      (u.catalogoVendedor || '').toUpperCase() === up ||
+      (u.grupoAgente || '').toUpperCase() === up ||
+      (u.nombre || '').toUpperCase() === up
+    );
+  }
+
   // OFERTAS marcadas como caras
-  const caras = (ofertas || []).filter(o => {
-    if (o.eliminada) return false;
-    if (o.estado !== 'caro') return false;
-    return true;
-  });
+  const caras = (ofertas || []).filter(o => !o.eliminada && o.estado === 'caro');
 
   // Líneas con precio competencia
   const lineas = [];
   caras.forEach(o => {
+    const usr = findUser(o.agente || o.agenteId);
+    const equipo = (usr && usr.equipo) ? usr.equipo : (o.equipo || 'Sin equipo');
+    const agNombre = usr ? (usr.nombre || o.agente) : (o.agenteNombre || o.agente || '');
+
     (o.lineas || []).forEach(l => {
-      if (l.precioCompetencia == null) return;
       const precio = Number(l.precio) || 0;
       const comp = Number(l.precioCompetencia) || 0;
       lineas.push({
         ofertaId: o.id,
         cliente: o.clienteNombre || '',
-        agente: o.agenteNombre || o.agente || '',
-        equipo: o.equipo || '',
+        agente: agNombre,
+        equipo: equipo,
         fechaCierre: o.fechaCierre || o.fechaCreacion,
+        fechaStr: o.fechaCreacionStr || '',
         producto: l.producto || '',
         calibre: l.calibre || '',
         unidad: l.unidad || '€/kg',
-        precio: precio,
-        precioCompetencia: comp,
+        precio, precioCompetencia: comp,
         diferencia: precio - comp,
         diferenciaPct: comp > 0 ? ((precio - comp) / comp) * 100 : 0,
       });
     });
+
+    // Si no tiene líneas, incluir la oferta como una entrada
+    if (!o.lineas || o.lineas.length === 0) {
+      lineas.push({
+        ofertaId: o.id,
+        cliente: o.clienteNombre || '',
+        agente: agNombre,
+        equipo: equipo,
+        fechaCierre: o.fechaCierre || o.fechaCreacion,
+        fechaStr: o.fechaCreacionStr || '',
+        producto: '(Sin producto)',
+        calibre: '', unidad: '€/kg',
+        precio: 0, precioCompetencia: 0,
+        diferencia: 0, diferenciaPct: 0,
+      });
+    }
   });
 
-  // Caros nuevos esta semana (cierre últimos 7 días)
+  // Caros nuevos esta semana
   const carasNuevas = caras.filter(o => {
     const fc = o.fechaCierre || o.fechaCreacion;
     if (!fc) return false;
@@ -99,13 +126,48 @@ function computeReport(ofertas, incidencias) {
 
   // KPIs
   const totalCaras = caras.length;
-  const totalLineas = lineas.length;
-  const difMediaPct = lineas.length > 0
-    ? lineas.reduce((a, l) => a + l.diferenciaPct, 0) / lineas.length
+  const lineasConPrecio = lineas.filter(l => l.precioCompetencia > 0);
+  const difMediaPct = lineasConPrecio.length > 0
+    ? lineasConPrecio.reduce((a, l) => a + l.diferenciaPct, 0) / lineasConPrecio.length
     : 0;
   const clientesUnicos = new Set(lineas.map(l => l.cliente));
 
-  // Agrupar por artículo
+  // ── Agrupar por EQUIPO y luego por PRODUCTO ──
+  const porEquipo = {};
+  lineas.forEach(l => {
+    if (!porEquipo[l.equipo]) porEquipo[l.equipo] = { equipo: l.equipo, lineas: [], clientes: new Set() };
+    porEquipo[l.equipo].lineas.push(l);
+    porEquipo[l.equipo].clientes.add(l.cliente);
+  });
+
+  const equipos = Object.values(porEquipo).map(g => {
+    // Sub-agrupar por producto
+    const porProd = {};
+    g.lineas.forEach(l => {
+      const k = ((l.producto || '') + '|' + (l.calibre || '')).toUpperCase().trim();
+      if (!porProd[k]) porProd[k] = { producto: l.producto, calibre: l.calibre, unidad: l.unidad, lineas: [], clientes: new Set() };
+      porProd[k].lineas.push(l);
+      porProd[k].clientes.add(l.cliente);
+    });
+
+    const productos = Object.values(porProd).map(p => {
+      const sumP = p.lineas.reduce((a, l) => a + l.precio, 0);
+      const sumC = p.lineas.reduce((a, l) => a + l.precioCompetencia, 0);
+      const prom = sumP / p.lineas.length;
+      const comp = sumC / p.lineas.length;
+      return {
+        producto: p.producto, calibre: p.calibre, unidad: p.unidad,
+        nLineas: p.lineas.length, nClientes: p.clientes.size,
+        precioPromedio: prom, compPromedio: comp,
+        diferenciaPct: comp > 0 ? ((prom - comp) / comp) * 100 : 0,
+        detalle: p.lineas,
+      };
+    }).sort((a, b) => b.nLineas - a.nLineas);
+
+    return { equipo: g.equipo, total: g.lineas.length, clientes: g.clientes.size, productos };
+  }).sort((a, b) => b.total - a.total);
+
+  // Artículos global (top 5)
   const agrArt = {};
   lineas.forEach(l => {
     const k = ((l.producto || '') + '|' + (l.calibre || '')).toUpperCase().trim();
@@ -120,13 +182,9 @@ function computeReport(ofertas, incidencias) {
     const prom = sumP / g.lineas.length;
     const comp = sumC / g.lineas.length;
     return {
-      producto: g.producto,
-      calibre: g.calibre,
-      unidad: g.unidad,
-      nLineas: g.lineas.length,
-      nClientes: g.clientes.size,
-      precioPromedio: prom,
-      compPromedio: comp,
+      producto: g.producto, calibre: g.calibre, unidad: g.unidad,
+      nLineas: g.lineas.length, nClientes: g.clientes.size,
+      precioPromedio: prom, compPromedio: comp,
       diferenciaPct: comp > 0 ? ((prom - comp) / comp) * 100 : 0,
     };
   }).sort((a, b) => b.diferenciaPct - a.diferenciaPct);
@@ -137,35 +195,28 @@ function computeReport(ofertas, incidencias) {
     const t = (i.tipo || i.tipologia || '').toLowerCase();
     return t.indexOf('stock') >= 0 || t.indexOf('calidad') >= 0;
   });
-
   const incAbiertas = incFiltradas.filter(i => i.estado !== 'cerrada' && i.estado !== 'resuelta');
   const incStock = incAbiertas.filter(i => (i.tipo || i.tipologia || '').toLowerCase().indexOf('stock') >= 0);
   const incCalidad = incAbiertas.filter(i => (i.tipo || i.tipologia || '').toLowerCase().indexOf('calidad') >= 0);
-
-  // Críticas: abiertas hace 5+ días
   const incCriticas = incAbiertas.filter(i => {
     const fc = i.fechaCreacion || i.fecha;
     if (!fc) return false;
     const d = new Date(fc);
     if (isNaN(d.getTime())) return false;
-    const dias = Math.floor((Date.now() - d.getTime()) / (1000 * 60 * 60 * 24));
-    return dias >= 5;
+    return Math.floor((Date.now() - d.getTime()) / (1000 * 60 * 60 * 24)) >= 5;
   });
 
   return {
     ofertas: {
-      total: totalCaras,
-      nuevasSemana: carasNuevas.length,
-      lineas: totalLineas,
-      difMediaPct,
+      total: totalCaras, nuevasSemana: carasNuevas.length,
+      lineas: lineas.length, difMediaPct,
       clientesAfectados: clientesUnicos.size,
       topArticulos: listArt.slice(0, 5),
+      equipos,
     },
     incidencias: {
-      total: incAbiertas.length,
-      stock: incStock.length,
-      calidad: incCalidad.length,
-      criticas: incCriticas.length,
+      total: incAbiertas.length, stock: incStock.length,
+      calidad: incCalidad.length, criticas: incCriticas.length,
       detalleStock: incStock.slice(0, 8),
       detalleCalidad: incCalidad.slice(0, 8),
     },
@@ -175,6 +226,7 @@ function computeReport(ofertas, incidencias) {
 // ── HTML del email ──────────────────────────────────────
 function fmtNum(n) { return Number(n).toFixed(2).replace('.', ','); }
 function fmtPct(n) { return (n >= 0 ? '+' : '') + Number(n).toFixed(1).replace('.', ',') + '%'; }
+function esc(s) { return (s || '').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
 function buildEmailHtml(report, crmUrl) {
   const o = report.ofertas;
@@ -205,6 +257,9 @@ function buildEmailHtml(report, crmUrl) {
     th{background:#F1F5F9;padding:8px 10px;text-align:left;border-bottom:2px solid #94A3B8;font-weight:700;color:#1E293B;}
     td{padding:7px 10px;border-bottom:1px solid #E5E7EB;}
     .cara{color:#DC2626;font-weight:700;}
+    .eq-header{padding:12px 16px;color:#fff;font-weight:800;font-size:14px;border-radius:10px 10px 0 0;margin-top:16px;}
+    .eq-body{background:#fff;padding:14px 16px;border:1px solid #E2E8F0;border-top:none;border-radius:0 0 10px 10px;margin-bottom:4px;}
+    .prod-title{margin:0 0 6px;font-size:13px;font-weight:800;color:#0F172A;}
     .cta-box{text-align:center;padding:24px;background:#F8FAFC;}
     .cta{display:inline-block;background:#DC2626;color:white !important;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:700;font-size:14px;}
     .footer{padding:16px 24px;background:#F1F5F9;color:#6B7280;font-size:11px;text-align:center;}
@@ -214,7 +269,7 @@ function buildEmailHtml(report, crmUrl) {
   <div class="container">
 
     <div class="header">
-      <h1>📊 Resumen Compras</h1>
+      <h1>📊 Resumen Compras + Stock</h1>
       <p>${fechaStr.charAt(0).toUpperCase() + fechaStr.slice(1)} · CRM Grupo Consolidado</p>
     </div>
 
@@ -227,20 +282,46 @@ function buildEmailHtml(report, crmUrl) {
         <div class="kpi"><p class="kpi-num">${o.clientesAfectados}</p><p class="kpi-lbl">Clientes afectados</p></div>
       </div>`;
 
+  // ── Top artículos global ──
   if (o.topArticulos.length > 0) {
-    html += `<table>
+    html += `<p style="margin:14px 0 6px;font-size:13px;font-weight:700;color:#0F172A;">🏆 Top artículos más caros vs competencia</p>
+      <table>
       <thead><tr><th>Artículo</th><th>Tu precio</th><th>Competencia</th><th>Dif.</th><th>Casos</th></tr></thead>
       <tbody>`;
     o.topArticulos.forEach(a => {
       html += `<tr>
-        <td><strong>${a.producto}</strong>${a.calibre ? ' · ' + a.calibre : ''}</td>
-        <td>${fmtNum(a.precioPromedio)} ${a.unidad}</td>
-        <td>${fmtNum(a.compPromedio)} ${a.unidad}</td>
-        <td class="cara">${fmtPct(a.diferenciaPct)}</td>
+        <td><strong>${esc(a.producto)}</strong>${a.calibre ? ' · ' + esc(a.calibre) : ''}</td>
+        <td>${fmtNum(a.precioPromedio)} ${esc(a.unidad)}</td>
+        <td>${a.compPromedio > 0 ? fmtNum(a.compPromedio) + ' ' + esc(a.unidad) : '—'}</td>
+        <td class="cara">${a.compPromedio > 0 ? fmtPct(a.diferenciaPct) : '—'}</td>
         <td>${a.nLineas} (${a.nClientes} cli)</td>
       </tr>`;
     });
     html += `</tbody></table>`;
+  }
+
+  // ── Desglose por EQUIPO ──
+  if (o.equipos && o.equipos.length > 0) {
+    html += `<p style="margin:20px 0 4px;font-size:13px;font-weight:700;color:#0F172A;">📋 Desglose por equipo</p>`;
+    o.equipos.forEach(eq => {
+      const eqColor = eq.equipo === 'WIKUK' ? '#22C55E' : eq.equipo === 'INTERKEY' ? '#F59E0B' : '#94A3B8';
+      html += `<div class="eq-header" style="background:${eqColor}">${esc(eq.equipo)} — ${eq.total} línea${eq.total !== 1 ? 's' : ''} · ${eq.clientes} cliente${eq.clientes !== 1 ? 's' : ''}</div>
+      <div class="eq-body">`;
+      eq.productos.forEach(p => {
+        html += `<p class="prod-title">📦 ${esc(p.producto)}${p.calibre ? ' · ' + esc(p.calibre) : ''} <span style="color:#94A3B8;font-weight:600">(${p.nLineas})</span></p>`;
+        html += `<table><thead><tr><th>Cliente</th><th>Agente</th><th>Fecha</th><th>Precio</th></tr></thead><tbody>`;
+        p.detalle.forEach(d => {
+          html += `<tr>
+            <td>${esc(d.cliente)}</td>
+            <td>${esc(d.agente)}</td>
+            <td>${esc(d.fechaStr)}</td>
+            <td style="font-weight:700;color:#DC2626">${d.precio > 0 ? fmtNum(d.precio) + ' ' + esc(d.unidad) : '—'}</td>
+          </tr>`;
+        });
+        html += `</tbody></table>`;
+      });
+      html += `</div>`;
+    });
   } else {
     html += `<div class="empty">Sin ofertas marcadas como caras</div>`;
   }
@@ -261,9 +342,9 @@ function buildEmailHtml(report, crmUrl) {
     i.detalleStock.forEach(inc => {
       const dias = inc.fechaCreacion ? Math.floor((Date.now() - new Date(inc.fechaCreacion).getTime()) / (1000 * 60 * 60 * 24)) : 0;
       html += `<div class="alert-row">
-        <strong>${inc.cliente || inc.clienteNombre || '(Sin cliente)'}</strong>
-        ${inc.titulo || inc.asunto || inc.descripcion || ''}
-        <br><small style="color:#6B7280;">📅 ${inc.fechaCreacionStr || inc.fecha || ''} · ${dias}d abierta · ${inc.agenteNombre || inc.agente || ''}</small>
+        <strong>${esc(inc.cliente || inc.clienteNombre)}</strong>
+        ${esc(inc.titulo || inc.asunto || inc.descripcion)}
+        <br><small style="color:#6B7280;">📅 ${esc(inc.fechaCreacionStr || inc.fecha)} · ${dias}d abierta · ${esc(inc.agenteNombre || inc.agente)}</small>
       </div>`;
     });
   }
@@ -273,9 +354,9 @@ function buildEmailHtml(report, crmUrl) {
     i.detalleCalidad.forEach(inc => {
       const dias = inc.fechaCreacion ? Math.floor((Date.now() - new Date(inc.fechaCreacion).getTime()) / (1000 * 60 * 60 * 24)) : 0;
       html += `<div class="alert-row">
-        <strong>${inc.cliente || inc.clienteNombre || '(Sin cliente)'}</strong>
-        ${inc.titulo || inc.asunto || inc.descripcion || ''}
-        <br><small style="color:#6B7280;">📅 ${inc.fechaCreacionStr || inc.fecha || ''} · ${dias}d abierta · ${inc.agenteNombre || inc.agente || ''}</small>
+        <strong>${esc(inc.cliente || inc.clienteNombre)}</strong>
+        ${esc(inc.titulo || inc.asunto || inc.descripcion)}
+        <br><small style="color:#6B7280;">📅 ${esc(inc.fechaCreacionStr || inc.fecha)} · ${dias}d abierta · ${esc(inc.agenteNombre || inc.agente)}</small>
       </div>`;
     });
   }
@@ -288,11 +369,10 @@ function buildEmailHtml(report, crmUrl) {
 
     <div class="cta-box">
       <a href="${crmUrl}" class="cta">🔗 Abrir CRM</a>
-      <p style="margin:10px 0 0;font-size:11px;color:#6B7280;">Login: <strong>compras</strong></p>
     </div>
 
     <div class="footer">
-      Email automático generado los miércoles y viernes a las 19:00 · CRM Grupo Consolidado
+      Email automático · Lunes y Jueves 8:00 · CRM Grupo Consolidado
     </div>
 
   </div>
@@ -304,18 +384,51 @@ function buildEmailHtml(report, crmUrl) {
 // ── Handler Vercel ──────────────────────────────────────
 export default async function handler(req, res) {
   try {
-    const ofertas = await fetchCollection('ofertas');
-    const incidencias = await fetchCollection('incidencias');
+    const [ofertas, incidencias, usuarios, portalUsers] = await Promise.all([
+      fetchCollection('ofertas'),
+      fetchCollection('incidencias'),
+      fetchCollection('usuarios'),
+      fetchCollection('portal_users'),
+    ]);
 
-    const report = computeReport(ofertas, incidencias);
+    // Merge usuarios + portal_users
+    const allUsers = [...(usuarios || [])];
+    (portalUsers || []).forEach(pu => {
+      if (!pu.nombre) return;
+      const yaExiste = allUsers.some(u =>
+        (u.id || u._id) === (pu.id || pu._id || pu.username) ||
+        (u.nombre || '').toUpperCase() === (pu.nombre || '').toUpperCase()
+      );
+      if (!yaExiste) allUsers.push(pu);
+    });
+
+    const report = computeReport(ofertas, incidencias, allUsers);
     const crmUrl = process.env.CRM_URL || 'https://crmwikuk.vercel.app';
     const html = buildEmailHtml(report, crmUrl);
 
-    const destinatario = (req.query && req.query.to) || process.env.EMAIL_COMPRAS;
-    if (!destinatario) {
+    // ── Destinatarios: Compras + Resp.Stock + CEO ──
+    const destinatarios = [];
+
+    // Email de compras (variable de entorno)
+    const emailCompras = (req.query && req.query.to) || process.env.EMAIL_COMPRAS;
+    if (emailCompras) destinatarios.push(emailCompras);
+
+    // Resp. Stock y CEO desde Firebase
+    allUsers.forEach(u => {
+      if (!u.email) return;
+      const id = (u.id || u._id || '').toLowerCase();
+      const rol = (u.rol || '').toLowerCase();
+      if (id === 'resp_stk' || rol === 'ceo') {
+        if (!destinatarios.includes(u.email)) {
+          destinatarios.push(u.email);
+        }
+      }
+    });
+
+    if (destinatarios.length === 0) {
       return res.status(400).json({
         ok: false,
-        error: 'No hay destinatario. Configura EMAIL_COMPRAS en Vercel o pasa ?to=email@…'
+        error: 'Sin destinatarios. Configura EMAIL_COMPRAS o verifica emails de resp_stk/CEO en Firebase.'
       });
     }
 
@@ -323,31 +436,34 @@ export default async function handler(req, res) {
       host: process.env.SMTP_HOST,
       port: parseInt(process.env.SMTP_PORT || '587'),
       secure: (process.env.SMTP_SECURE || 'false') === 'true',
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-      },
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
     });
 
-    const subject = `📊 Resumen Compras — ${new Date().toLocaleDateString('es-ES')} · ${report.ofertas.nuevasSemana} caros / ${report.incidencias.total} incidencias`;
+    const subject = `📊 Resumen Compras — ${new Date().toLocaleDateString('es-ES')} · ${report.ofertas.nuevasSemana} caros nuevos / ${report.incidencias.total} incidencias`;
 
-    const info = await transporter.sendMail({
-      from: process.env.SMTP_FROM || process.env.SMTP_USER,
-      to: destinatario,
-      subject,
-      html,
-    });
+    const resultados = [];
+    for (const email of destinatarios) {
+      try {
+        const info = await transporter.sendMail({
+          from: process.env.SMTP_FROM || process.env.SMTP_USER,
+          to: email,
+          subject,
+          html,
+        });
+        resultados.push({ email, ok: true, messageId: info.messageId });
+      } catch (e) {
+        resultados.push({ email, ok: false, error: e.message });
+      }
+    }
 
     return res.status(200).json({
       ok: true,
-      messageId: info.messageId,
-      destinatario,
+      destinatarios: resultados,
       kpis: {
         ofertasCaras: report.ofertas.total,
         ofertasNuevas: report.ofertas.nuevasSemana,
+        equipos: report.ofertas.equipos.map(e => `${e.equipo}:${e.total}`),
         incidenciasAbiertas: report.incidencias.total,
-        incidenciasStock: report.incidencias.stock,
-        incidenciasCalidad: report.incidencias.calidad,
       },
     });
   } catch (err) {
