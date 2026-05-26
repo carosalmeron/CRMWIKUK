@@ -228,11 +228,11 @@ function fmtNum(n) { return Number(n).toFixed(2).replace('.', ','); }
 function fmtPct(n) { return (n >= 0 ? '+' : '') + Number(n).toFixed(1).replace('.', ',') + '%'; }
 function esc(s) { return (s || '').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
-function buildEmailHtml(report, crmUrl) {
+function buildEmailHtml(report, crmUrl, equipoFilter) {
   const o = report.ofertas;
-  const i = report.incidencias;
   const ahora = new Date();
   const fechaStr = ahora.toLocaleDateString('es-ES', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' });
+  const tituloEquipo = equipoFilter ? ` — ${equipoFilter}` : '';
 
   let html = `
   <!DOCTYPE html>
@@ -269,7 +269,7 @@ function buildEmailHtml(report, crmUrl) {
   <div class="container">
 
     <div class="header">
-      <h1>📊 Resumen Compras + Stock</h1>
+      <h1>📊 Resumen Compras${tituloEquipo}</h1>
       <p>${fechaStr.charAt(0).toUpperCase() + fechaStr.slice(1)} · CRM Grupo Consolidado</p>
     </div>
 
@@ -328,45 +328,6 @@ function buildEmailHtml(report, crmUrl) {
 
   html += `</div>
 
-    <div class="section">
-      <h2 class="green">📦 Incidencias Stock + Calidad</h2>
-      <div class="kpi-grid">
-        <div class="kpi"><p class="kpi-num">${i.total}</p><p class="kpi-lbl">Total abiertas</p></div>
-        <div class="kpi amber"><p class="kpi-num">${i.stock}</p><p class="kpi-lbl">📦 Stock</p></div>
-        <div class="kpi amber"><p class="kpi-num">${i.calidad}</p><p class="kpi-lbl">⚠️ Calidad</p></div>
-        <div class="kpi"><p class="kpi-num">${i.criticas}</p><p class="kpi-lbl">🚨 Críticas (5d+)</p></div>
-      </div>`;
-
-  if (i.detalleStock.length > 0) {
-    html += `<p style="margin:14px 0 6px;font-size:13px;font-weight:700;color:#0F172A;">📦 Stock — primeras ${i.detalleStock.length}</p>`;
-    i.detalleStock.forEach(inc => {
-      const dias = inc.fechaCreacion ? Math.floor((Date.now() - new Date(inc.fechaCreacion).getTime()) / (1000 * 60 * 60 * 24)) : 0;
-      html += `<div class="alert-row">
-        <strong>${esc(inc.cliente || inc.clienteNombre)}</strong>
-        ${esc(inc.titulo || inc.asunto || inc.descripcion)}
-        <br><small style="color:#6B7280;">📅 ${esc(inc.fechaCreacionStr || inc.fecha)} · ${dias}d abierta · ${esc(inc.agenteNombre || inc.agente)}</small>
-      </div>`;
-    });
-  }
-
-  if (i.detalleCalidad.length > 0) {
-    html += `<p style="margin:14px 0 6px;font-size:13px;font-weight:700;color:#0F172A;">⚠️ Calidad — primeras ${i.detalleCalidad.length}</p>`;
-    i.detalleCalidad.forEach(inc => {
-      const dias = inc.fechaCreacion ? Math.floor((Date.now() - new Date(inc.fechaCreacion).getTime()) / (1000 * 60 * 60 * 24)) : 0;
-      html += `<div class="alert-row">
-        <strong>${esc(inc.cliente || inc.clienteNombre)}</strong>
-        ${esc(inc.titulo || inc.asunto || inc.descripcion)}
-        <br><small style="color:#6B7280;">📅 ${esc(inc.fechaCreacionStr || inc.fecha)} · ${dias}d abierta · ${esc(inc.agenteNombre || inc.agente)}</small>
-      </div>`;
-    });
-  }
-
-  if (i.detalleStock.length === 0 && i.detalleCalidad.length === 0) {
-    html += `<div class="empty">Sin incidencias abiertas de Stock ni Calidad</div>`;
-  }
-
-  html += `</div>
-
     <div class="cta-box">
       <a href="${crmUrl}" class="cta">🔗 Abrir CRM</a>
     </div>
@@ -406,29 +367,38 @@ export default async function handler(req, res) {
     const crmUrl = process.env.CRM_URL || 'https://crmwikuk.vercel.app';
     const html = buildEmailHtml(report, crmUrl);
 
-    // ── Destinatarios: Compras + Resp.Stock + CEO ──
+    // ── Destinatarios: Compras + Resp.Stock + CEO + Director + Jefes ──
     const destinatarios = [];
+    const emailsVistos = new Set();
 
     // Email de compras (variable de entorno)
     const emailCompras = (req.query && req.query.to) || process.env.EMAIL_COMPRAS;
-    if (emailCompras) destinatarios.push(emailCompras);
+    if (emailCompras) {
+      destinatarios.push({ email: emailCompras, nombre: 'Compras', rol: 'compras', equipo: '' });
+      emailsVistos.add(emailCompras);
+    }
 
-    // Resp. Stock y CEO desde Firebase
+    // Resp. Stock, CEO, Director y Jefes desde Firebase
     allUsers.forEach(u => {
-      if (!u.email) return;
+      if (!u.email || emailsVistos.has(u.email)) return;
       const id = (u.id || u._id || '').toLowerCase();
       const rol = (u.rol || '').toLowerCase();
-      if (id === 'resp_stk' || rol === 'ceo') {
-        if (!destinatarios.includes(u.email)) {
-          destinatarios.push(u.email);
-        }
+      const tipo = (u.tipologia || '').toLowerCase();
+      const nombre = (u.nombre || '').toLowerCase();
+      const isStock = id === 'resp_stk' || tipo === 'stock' || nombre.indexOf('stock') >= 0;
+      const isCeo = id === 'ceo' || rol === 'ceo';
+      const isDirector = id === 'dir' || rol === 'director' || rol === 'crm_director';
+      const isJefe = rol === 'jefe' || rol === 'crm_jefe';
+      if (isStock || isCeo || isDirector || isJefe) {
+        destinatarios.push({ email: u.email, nombre: u.nombre || id, rol, equipo: u.equipo || '' });
+        emailsVistos.add(u.email);
       }
     });
 
     if (destinatarios.length === 0) {
       return res.status(400).json({
         ok: false,
-        error: 'Sin destinatarios. Configura EMAIL_COMPRAS o verifica emails de resp_stk/CEO en Firebase.'
+        error: 'Sin destinatarios. Configura EMAIL_COMPRAS o verifica emails en Firebase.'
       });
     }
 
@@ -439,20 +409,48 @@ export default async function handler(req, res) {
       auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
     });
 
-    const subject = `📊 Resumen Compras — ${new Date().toLocaleDateString('es-ES')} · ${report.ofertas.nuevasSemana} caros nuevos / ${report.incidencias.total} incidencias`;
-
+    // (v3.26.6) Envío personalizado: jefes ven solo su equipo
     const resultados = [];
-    for (const email of destinatarios) {
+    for (const dest of destinatarios) {
+      // Buscar usuario de este email
+      const destUser = allUsers.find(u => u.email === dest.email);
+      const rolDest = (destUser && destUser.rol || '').toLowerCase();
+      const equipoDest = destUser && destUser.equipo || '';
+      const esJefe = rolDest === 'jefe' || rolDest === 'crm_jefe';
+
+      // Filtrar report para jefes — solo su equipo
+      let reportPersonal = report;
+      if (esJefe && equipoDest) {
+        const equiposFiltrados = report.ofertas.equipos.filter(e => e.equipo === equipoDest);
+        const lineasEquipo = equiposFiltrados.reduce((a, e) => a + e.total, 0);
+        const clientesEquipo = new Set();
+        equiposFiltrados.forEach(e => e.productos.forEach(p => p.detalle.forEach(d => clientesEquipo.add(d.cliente))));
+        reportPersonal = {
+          ofertas: {
+            ...report.ofertas,
+            total: lineasEquipo,
+            clientesAfectados: clientesEquipo.size,
+            equipos: equiposFiltrados,
+            topArticulos: [],  // no aplica en vista individual
+          }
+        };
+      }
+
+      const html = buildEmailHtml(reportPersonal, crmUrl, esJefe ? equipoDest : null);
+      const subject = esJefe
+        ? `📊 Vamos Caros ${equipoDest} — ${new Date().toLocaleDateString('es-ES')}`
+        : `📊 Resumen Compras — ${new Date().toLocaleDateString('es-ES')} · ${report.ofertas.nuevasSemana} caros nuevos`;
+
       try {
         const info = await transporter.sendMail({
           from: process.env.SMTP_FROM || process.env.SMTP_USER,
-          to: email,
+          to: dest.email,
           subject,
           html,
         });
-        resultados.push({ email, ok: true, messageId: info.messageId });
+        resultados.push({ email: dest.email, nombre: dest.nombre, rol: dest.rol, ok: true, messageId: info.messageId });
       } catch (e) {
-        resultados.push({ email, ok: false, error: e.message });
+        resultados.push({ email: dest.email, nombre: dest.nombre, ok: false, error: e.message });
       }
     }
 
