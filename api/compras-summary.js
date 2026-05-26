@@ -378,18 +378,23 @@ export default async function handler(req, res) {
       emailsVistos.add(emailCompras);
     }
 
-    // Resp. Stock, CEO, Director y Jefes desde Firebase
+    // Resp. Stock — búsqueda precisa por ID primero
+    var stockUser = allUsers.find(u => u.email && (u.id||u._id||'') === 'resp_stk');
+    if (!stockUser) stockUser = allUsers.find(u => u.email && (u.tipologia||'').toLowerCase() === 'stock' && (u.rol||'').toLowerCase() === 'tipologia');
+    if (stockUser && !emailsVistos.has(stockUser.email)) {
+      destinatarios.push({ email: stockUser.email, nombre: stockUser.nombre || 'Resp. Stock', rol: 'tipologia', equipo: '' });
+      emailsVistos.add(stockUser.email);
+    }
+
+    // CEO, Director y Jefes desde Firebase
     allUsers.forEach(u => {
       if (!u.email || emailsVistos.has(u.email)) return;
       const id = (u.id || u._id || '').toLowerCase();
       const rol = (u.rol || '').toLowerCase();
-      const tipo = (u.tipologia || '').toLowerCase();
-      const nombre = (u.nombre || '').toLowerCase();
-      const isStock = id === 'resp_stk' || tipo === 'stock' || nombre.indexOf('stock') >= 0;
       const isCeo = id === 'ceo' || rol === 'ceo';
       const isDirector = id === 'dir' || rol === 'director' || rol === 'crm_director';
       const isJefe = rol === 'jefe' || rol === 'crm_jefe';
-      if (isStock || isCeo || isDirector || isJefe) {
+      if (isCeo || isDirector || isJefe) {
         destinatarios.push({ email: u.email, nombre: u.nombre || id, rol, equipo: u.equipo || '' });
         emailsVistos.add(u.email);
       }
