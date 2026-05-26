@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.26.7";
-const CRM_BUILD = "26/05/2026-vamos-caros-en-misemana-crear-estrategia";
+const CRM_VERSION = "3.26.8";
+const CRM_BUILD = "26/05/2026-email-caros-sin-prompt-todos-destinatarios";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -10360,6 +10360,7 @@ function VamosCaros({usuario, ofertasDB, setOfertasDB, onBack}){
   var _periodoF = React.useState("30d"); var periodoF = _periodoF[0], setPeriodoF = _periodoF[1];
   // 7d | 30d | 90d | all
   var _expandido = React.useState(null); var expandido = _expandido[0], setExpandido = _expandido[1];
+  var esAgente = ["agente","comercial","vendedor","crm_agente"].includes((usuario.rol||"").toLowerCase());
 
   // Filtrar solo ofertas marcadas como caras
   var hoy = new Date();
@@ -10562,21 +10563,18 @@ function VamosCaros({usuario, ofertasDB, setOfertasDB, onBack}){
           <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>Informe ejecutivo para Compras</p>
         </div>
         <div style={{display:"flex",gap:6,flexShrink:0}}>
-          {/* (v3.23.2) Enviar email manual a Compras */}
+          {/* (v3.26.8) Enviar informe a todos los destinatarios configurados */}
           <button onClick={function(){
-            var dest = prompt("Email destinatario (vacío = usar EMAIL_COMPRAS de Vercel):", "");
-            if(dest===null) return;
-            var url = "/api/compras-summary" + (dest ? "?to="+encodeURIComponent(dest) : "");
-            fetch(url).then(function(r){return r.json();}).then(function(d){
+            if(!confirm("¿Enviar informe Vamos Caros a CEO, Director, Resp. Stock y Jefes?")) return;
+            fetch("/api/compras-summary").then(function(r){return r.json();}).then(function(d){
               if(d.ok){
-                alert("✅ Email enviado a "+d.destinatario+"\n\n"+
-                  "Ofertas caras: "+d.kpis.ofertasCaras+" ("+d.kpis.ofertasNuevas+" nuevas esta semana)\n"+
-                  "Incidencias: "+d.kpis.incidenciasAbiertas+" ("+d.kpis.incidenciasStock+" stock + "+d.kpis.incidenciasCalidad+" calidad)");
+                var enviados=(d.destinatarios||[]).filter(function(x){return x.ok;}).map(function(x){return x.nombre+" ("+x.email+")";}).join("\n");
+                alert("✅ Informe enviado a:\n"+enviados+"\n\nOfertas caras: "+d.kpis.ofertasCaras+"\nEquipos: "+(d.kpis.equipos||[]).join(", "));
               } else {
                 alert("❌ Error: "+(d.error||"desconocido"));
               }
             }).catch(function(e){alert("❌ Error de red: "+e.message);});
-          }} title="Enviar email manual ahora"
+          }} title="Enviar informe a CEO, Director, Stock y Jefes"
             style={{background:"#0891B2",color:"#fff",border:"none",padding:"10px 14px",borderRadius:10,fontSize:13,fontWeight:700,cursor:"pointer",boxShadow:"0 2px 6px rgba(8,145,178,.3)"}}>
             📧 Email
           </button>
@@ -10715,6 +10713,41 @@ function VamosCaros({usuario, ofertasDB, setOfertasDB, onBack}){
                           {l.fechaStr} · {l.agenteNombre} · Tu: <strong>{fmt(l.precio)}</strong> · Comp: <strong style={{color:T.red}}>{fmt(l.precioCompetencia)}</strong>
                           {l.notas?" · "+l.notas:""}
                         </p>
+                        {/* (v3.26.7) Crear estrategia por cliente — solo jefes+ */}
+                        {!esAgente && (
+                          <button onClick={function(e){
+                            e.stopPropagation();
+                            // Buscar la oferta original
+                            var ofOrig=(ofertasDB||[]).find(function(o){return o.id===l.ofertaId;});
+                            if(ofOrig&&ofOrig.estrategiaVinculada){alert("✅ Ya tiene estrategia vinculada");return;}
+                            var agUser2=USUARIOS.find(function(u){return u.id===l.agente||(u.grupoAgente||"").toUpperCase()===(l.agente||"").toUpperCase()||u.nombre===l.agenteNombre;});
+                            var hoy3=new Date().toLocaleDateString("es-ES");
+                            var est2={
+                              id:"est_caro_"+Date.now(),
+                              cliente:l.clienteNombre||"",
+                              agente:l.agente||"",
+                              agenteNombre:l.agenteNombre||"",
+                              equipo:agUser2?agUser2.equipo:(l.equipo||""),
+                              estrategia:"Ajuste precio "+g.producto+(g.calibre?" "+g.calibre:"")+" — "+l.clienteNombre,
+                              descripcion:"Nuestro precio: "+fmt(l.precio)+" "+g.unidad+". Competencia: "+fmt(l.precioCompetencia)+" "+g.unidad+". Diferencia: "+fmtPct(l.diferenciaPct),
+                              maxDescuento:Math.round(l.diferenciaPct)||10,
+                              productos:[{nombre:g.producto,calibre:g.calibre||"",precioActual:l.precio,precioOferta:l.precioCompetencia,unidad:g.unidad,precioCompetencia:l.precioCompetencia}],
+                              estado:"pendiente",prioridad:"alta",
+                              fechaCreacion:new Date().toISOString(),fechaCreacionStr:hoy3,
+                              semana:Math.ceil(((new Date()-new Date(new Date().getFullYear(),0,1))/86400000+new Date(new Date().getFullYear(),0,1).getDay()+1)/7),
+                              creadoPor:usuario.id,creadoPorNombre:usuario.nombre,
+                              desdeOferta:l.ofertaId||"",
+                              seguimientos:[{accion:"📊 Estrategia desde Vamos caros",fecha:hoy3,por:usuario.nombre}],
+                              historialEscalado:[{accion:"📊 Creada desde panel Vamos caros",por:usuario.nombre,fecha:hoy3}]
+                            };
+                            fbEscribir("estrategias",est2.id,est2).then(function(){
+                              if(l.ofertaId) fbEscribir("ofertas",l.ofertaId,{estrategiaVinculada:est2.id},true);
+                              alert("✅ Estrategia creada para "+l.clienteNombre+"\nProducto: "+g.producto+"\nDto sugerido: "+Math.round(l.diferenciaPct)+"%");
+                            });
+                          }} style={{marginTop:4,padding:"6px 10px",borderRadius:7,border:"1.5px solid #7C3AED",background:"#F5F3FF",color:"#7C3AED",fontSize:10,fontWeight:700,cursor:"pointer",width:"100%",textAlign:"center"}}>
+                            🎯 Crear estrategia para {l.clienteNombre.substring(0,20)}
+                          </button>
+                        )}
                       </div>
                     );
                   })}
