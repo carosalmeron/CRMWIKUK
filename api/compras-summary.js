@@ -352,15 +352,35 @@ export default async function handler(req, res) {
       fetchCollection('portal_users'),
     ]);
 
-    // Merge usuarios + portal_users
-    const allUsers = [...(usuarios || [])];
+    // Merge usuarios + portal_users — portal_users tiene prioridad (se edita desde admin)
+    const allUsers = [];
+    const emailByProfile = {};
+    // Primero portal_users (tiene emails actualizados desde el admin)
     (portalUsers || []).forEach(pu => {
       if (!pu.nombre) return;
-      const yaExiste = allUsers.some(u =>
-        (u.id || u._id) === (pu.id || pu._id || pu.username) ||
-        (u.nombre || '').toUpperCase() === (pu.nombre || '').toUpperCase()
+      pu._src = 'portal';
+      allUsers.push(pu);
+      // Mapear perfil CRM a email
+      if (pu.email) {
+        if (pu.perfilCRM) emailByProfile[pu.perfilCRM.toLowerCase()] = pu.email;
+        if (pu.id) emailByProfile[(pu.id+'').toLowerCase()] = pu.email;
+        if (pu._id) emailByProfile[(pu._id+'').toLowerCase()] = pu.email;
+        if (pu.username) emailByProfile[pu.username.toLowerCase()] = pu.email;
+      }
+    });
+    // Luego usuarios CRM — si el email está vacío, usar el de portal_users
+    (usuarios || []).forEach(u => {
+      var email = u.email || '';
+      if (!email) {
+        var idLow = (u.id || u._id || '').toLowerCase();
+        email = emailByProfile[idLow] || '';
+      }
+      u.email = email;
+      u._src = 'crm';
+      const yaExiste = allUsers.some(au =>
+        (au.id || au._id || au.nombre || '').toLowerCase() === (u.id || u._id || u.nombre || '').toLowerCase()
       );
-      if (!yaExiste) allUsers.push(pu);
+      if (!yaExiste) allUsers.push(u);
     });
 
     const report = computeReport(ofertas, incidencias, allUsers);
@@ -378,8 +398,13 @@ export default async function handler(req, res) {
       emailsVistos.add(emailCompras);
     }
 
-    // Resp. Stock — búsqueda precisa por ID primero
-    var stockUser = allUsers.find(u => u.email && (u.id||u._id||'') === 'resp_stk');
+    // Resp. Stock — buscar en portal_users primero (tiene email actualizado)
+    var stockEmail = emailByProfile['resp_stk'] || emailByProfile['margarita'] || '';
+    var stockUser = null;
+    if (stockEmail) {
+      stockUser = allUsers.find(u => u.email === stockEmail);
+    }
+    if (!stockUser) stockUser = allUsers.find(u => u.email && ((u.id||u._id||'') === 'resp_stk'));
     if (!stockUser) stockUser = allUsers.find(u => u.email && (u.tipologia||'').toLowerCase() === 'stock' && (u.rol||'').toLowerCase() === 'tipologia');
     if (stockUser && !emailsVistos.has(stockUser.email)) {
       destinatarios.push({ email: stockUser.email, nombre: stockUser.nombre || 'Resp. Stock', rol: 'tipologia', equipo: '' });
