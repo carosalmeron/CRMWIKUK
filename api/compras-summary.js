@@ -411,18 +411,20 @@ export default async function handler(req, res) {
       emailsVistos.add(stockUser.email);
     }
 
-    // CEO, Director y Jefes de equipo comercial (no responsables de departamento)
+    // CEO, Director y Jefes de equipo comercial
     allUsers.forEach(u => {
       if (!u.email || emailsVistos.has(u.email)) return;
       const id = (u.id || u._id || '').toLowerCase();
       const rol = (u.rol || '').toLowerCase();
-      const tipo = (u.tipologia || '').toLowerCase();
       const equipo = (u.equipo || '').toUpperCase();
-      const isCeo = id === 'ceo' || rol === 'ceo';
+      const nombre = (u.nombre || '').toLowerCase();
+      const isCeo = id === 'ceo' || rol === 'ceo' || nombre.indexOf('ceo') >= 0;
       const isDirector = id === 'dir' || rol === 'director' || rol === 'crm_director';
-      // Jefe de equipo comercial = tiene equipo (WIKUK/INTERKEY) y NO tiene tipologia de departamento
-      const isJefeComercial = (rol === 'jefe' || rol === 'crm_jefe') && equipo && !tipo;
-      if (isCeo || isDirector || isJefeComercial) {
+      // Jefe de equipo = rol jefe/crm_jefe con equipo WIKUK o INTERKEY
+      const isJefeComercial = (rol === 'jefe' || rol === 'crm_jefe') && (equipo === 'WIKUK' || equipo === 'INTERKEY');
+      // También incluir si el nombre contiene "Resp. WIKUK" o "Resp. INTERKEY"
+      const isRespEquipo = nombre.indexOf('resp. wikuk') >= 0 || nombre.indexOf('resp. interkey') >= 0 || nombre.indexOf('resp wikuk') >= 0 || nombre.indexOf('resp interkey') >= 0;
+      if (isCeo || isDirector || isJefeComercial || isRespEquipo) {
         destinatarios.push({ email: u.email, nombre: u.nombre || id, rol, equipo: equipo });
         emailsVistos.add(u.email);
       }
