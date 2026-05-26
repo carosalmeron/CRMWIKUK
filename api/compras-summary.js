@@ -411,16 +411,19 @@ export default async function handler(req, res) {
       emailsVistos.add(stockUser.email);
     }
 
-    // CEO, Director y Jefes desde Firebase
+    // CEO, Director y Jefes de equipo comercial (no responsables de departamento)
     allUsers.forEach(u => {
       if (!u.email || emailsVistos.has(u.email)) return;
       const id = (u.id || u._id || '').toLowerCase();
       const rol = (u.rol || '').toLowerCase();
+      const tipo = (u.tipologia || '').toLowerCase();
+      const equipo = (u.equipo || '').toUpperCase();
       const isCeo = id === 'ceo' || rol === 'ceo';
       const isDirector = id === 'dir' || rol === 'director' || rol === 'crm_director';
-      const isJefe = rol === 'jefe' || rol === 'crm_jefe';
-      if (isCeo || isDirector || isJefe) {
-        destinatarios.push({ email: u.email, nombre: u.nombre || id, rol, equipo: u.equipo || '' });
+      // Jefe de equipo comercial = tiene equipo (WIKUK/INTERKEY) y NO tiene tipologia de departamento
+      const isJefeComercial = (rol === 'jefe' || rol === 'crm_jefe') && equipo && !tipo;
+      if (isCeo || isDirector || isJefeComercial) {
+        destinatarios.push({ email: u.email, nombre: u.nombre || id, rol, equipo: equipo });
         emailsVistos.add(u.email);
       }
     });
