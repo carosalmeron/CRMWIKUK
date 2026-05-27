@@ -148,13 +148,6 @@ input,button,select{font-family:inherit;}
         <div class="entry-card-sub">Seguimiento · Priorización · Equipo</div>
       </div>
     </div>
-    <div class="entry-card" onclick="window.location.href='backup.html'">
-      <div class="entry-card-icon" style="background:#0F172A">💾</div>
-      <div>
-        <div class="entry-card-title">Backup & Restaurar</div>
-        <div class="entry-card-sub">Copia de seguridad · Exportar · Importar</div>
-      </div>
-    </div>
   </div>
   <button class="entry-admin" onclick="showLogin()">⚙️ Zona Administrador</button>
 </div>
@@ -223,6 +216,7 @@ input,button,select{font-family:inherit;}
     <button class="admin-tab" onclick="setAdminTab('descuentos',this)">Descuentos</button>
     <button class="admin-tab" onclick="setAdminTab('datos',this)">Datos</button>
     <button class="admin-tab" onclick="setAdminTab('config',this)">Config</button>
+    <button class="admin-tab" onclick="setAdminTab('backup',this)">💾 Backup</button>
   </div>
   <div class="admin-body" id="admin-body"></div>
 </div>
@@ -742,6 +736,7 @@ function renderAdminBody(){
   else if(adminTab==='accesos') body.innerHTML=renderAccesos();
   else if(adminTab==='descuentos') { body.innerHTML=renderDescuentos(); cargarDescuentosPortal(); }
   else if(adminTab==='datos') body.innerHTML=renderDatos();
+  else if(adminTab==='backup') { body.innerHTML=renderBackup(); initBackup(); }
   else body.innerHTML=renderConfig();
   attachAdminEvents();
 }
@@ -1296,6 +1291,204 @@ document.getElementById('inp-user').addEventListener('keydown',function(e){if(e.
 
 // Preload Firebase users in background
 loadUsersFB().then(function(u){saveUsersLocal(u);}).catch(function(){});
+
+// ══════════════════════════════════════════════════════════════
+// BACKUP & RESTAURAR
+// ══════════════════════════════════════════════════════════════
+var BK_COLLECTIONS=[
+  "portal_users","clientes","visitas","ofertas","muestras","oportunidades",
+  "estrategias","incidencias","planes_semanales","informes","calendario",
+  "tareas","proyectos","potenciales","inteligencia_mercado","notificaciones_email",
+  "ventas","ventas_anuales","planificacion","fotos_oportunidades",
+  "cola_indicaciones","historial_indicaciones"
+];
+var bkImportData=null;
+
+function renderBackup(){
+  var lastBk=localStorage.getItem("lastBackup")||"Nunca";
+  return '<div style="padding:4px 0">'
+    // STATUS
+    +'<div style="background:#F8FAFC;border:1.5px solid #E8E3DC;border-radius:14px;padding:16px;margin-bottom:14px">'
+    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><span style="font-size:18px">📊</span><div><p style="margin:0;font-size:14px;font-weight:800;color:#1A1816">Estado de la base de datos</p><p style="margin:0;font-size:11px;color:#8A8078">Último backup: <strong>'+lastBk+'</strong></p></div></div>'
+    +'<div id="bk-stats" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px">'
+    +'<div style="background:#fff;border:1px solid #E8E3DC;border-radius:10px;padding:10px;text-align:center"><div style="font-size:18px;font-weight:900;color:#1A1816" class="bk-loading">—</div><div style="font-size:9px;font-weight:700;color:#8A8078;text-transform:uppercase">Colecciones</div></div>'
+    +'<div style="background:#fff;border:1px solid #E8E3DC;border-radius:10px;padding:10px;text-align:center"><div style="font-size:18px;font-weight:900;color:#1A1816" class="bk-loading">—</div><div style="font-size:9px;font-weight:700;color:#8A8078;text-transform:uppercase">Documentos</div></div>'
+    +'<div style="background:#fff;border:1px solid #E8E3DC;border-radius:10px;padding:10px;text-align:center"><div style="font-size:18px;font-weight:900;color:#2E6B42">'+lastBk+'</div><div style="font-size:9px;font-weight:700;color:#8A8078;text-transform:uppercase">Último backup</div></div>'
+    +'</div>'
+    +'<div id="bk-collections" style="display:flex;flex-wrap:wrap;gap:5px"></div>'
+    +'</div>'
+
+    // EXPORT
+    +'<div style="background:#EDF4F0;border:1.5px solid #C6DFD0;border-radius:14px;padding:16px;margin-bottom:14px">'
+    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><span style="font-size:18px">📤</span><div><p style="margin:0;font-size:14px;font-weight:800;color:#2E6B42">Exportar backup completo</p><p style="margin:0;font-size:11px;color:#5A8A6A">Descarga todas las colecciones en un archivo JSON</p></div></div>'
+    +'<div id="bk-export-progress" style="display:none;margin-bottom:10px"><div style="width:100%;height:6px;background:#C6DFD0;border-radius:99px;overflow:hidden"><div id="bk-export-bar" style="height:100%;width:0%;background:#2E6B42;border-radius:99px;transition:width .3s"></div></div><p id="bk-export-status" style="font-size:10px;color:#5A8A6A;text-align:center;margin-top:4px"></p></div>'
+    +'<button onclick="bkExport()" id="bk-export-btn" style="width:100%;padding:12px;border:none;border-radius:10px;background:#2E6B42;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">💾 Descargar backup completo</button>'
+    +'<div id="bk-export-log" style="display:none;background:#fff;border:1px solid #C6DFD0;border-radius:8px;padding:10px;margin-top:10px;max-height:160px;overflow:auto;font-size:10px;color:#5A8A6A;line-height:1.8;white-space:pre-wrap"></div>'
+    +'</div>'
+
+    // IMPORT
+    +'<div style="background:#FEF9EE;border:1.5px solid #F0DDB4;border-radius:14px;padding:16px;margin-bottom:14px">'
+    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><span style="font-size:18px">📥</span><div><p style="margin:0;font-size:14px;font-weight:800;color:#92400E">Restaurar desde backup</p><p style="margin:0;font-size:11px;color:#B5893A">Sube un archivo JSON de backup para restaurar datos</p></div></div>'
+    +'<div style="background:#FFF8EB;border:1px solid #FDE68A;border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:11px;color:#92400E;line-height:1.5">⚠️ Restaurar <strong>sobreescribe</strong> documentos existentes. Los nuevos no se eliminan. <strong>Haz backup antes.</strong></div>'
+    +'<div id="bk-file-drop" onclick="document.getElementById(\'bk-file-input\').click()" style="border:2px dashed #F0DDB4;border-radius:12px;padding:24px 16px;text-align:center;cursor:pointer;margin-bottom:12px;transition:all .2s">'
+    +'<div style="font-size:28px">📁</div>'
+    +'<p style="font-size:12px;color:#92400E;margin-top:6px">Pulsa para seleccionar .json</p>'
+    +'<input type="file" id="bk-file-input" accept=".json" onchange="bkHandleFile(this.files[0])" style="display:none">'
+    +'</div>'
+    +'<div id="bk-import-preview" style="display:none"></div>'
+    +'<div id="bk-import-progress" style="display:none;margin-bottom:10px"><div style="width:100%;height:6px;background:#F0DDB4;border-radius:99px;overflow:hidden"><div id="bk-import-bar" style="height:100%;width:0%;background:#92400E;border-radius:99px;transition:width .3s"></div></div><p id="bk-import-status" style="font-size:10px;color:#92400E;text-align:center;margin-top:4px"></p></div>'
+    +'<button onclick="bkImport()" id="bk-import-btn" style="display:none;width:100%;padding:12px;border:none;border-radius:10px;background:#92400E;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">⚡ Restaurar datos</button>'
+    +'<div id="bk-import-log" style="display:none;background:#fff;border:1px solid #F0DDB4;border-radius:8px;padding:10px;margin-top:10px;max-height:160px;overflow:auto;font-size:10px;color:#92400E;line-height:1.8;white-space:pre-wrap"></div>'
+    +'</div>'
+
+    // SINGLE COLLECTION
+    +'<div style="background:#FEF2F2;border:1.5px solid #FECACA;border-radius:14px;padding:16px">'
+    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><span style="font-size:18px">🗑️</span><div><p style="margin:0;font-size:14px;font-weight:800;color:#991B1B">Zona peligrosa</p><p style="margin:0;font-size:11px;color:#B91C1C">Exportar o vaciar una colección individual</p></div></div>'
+    +'<select id="bk-single-col" style="width:100%;padding:10px 12px;border-radius:10px;border:1.5px solid #FECACA;background:#fff;font-size:12px;font-family:inherit;margin-bottom:10px"><option value="">— Selecciona colección —</option></select>'
+    +'<div style="display:flex;gap:8px">'
+    +'<button onclick="bkExportSingle()" style="flex:1;padding:10px;border:1.5px solid #E8E3DC;border-radius:10px;background:#fff;color:#1A1816;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit">📤 Exportar</button>'
+    +'<button onclick="bkDeleteSingle()" style="flex:1;padding:10px;border:none;border-radius:10px;background:#991B1B;color:#fff;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;opacity:.8">🗑️ Vaciar</button>'
+    +'</div></div>'
+
+    +'</div>';
+}
+
+function initBackup(){
+  bkScan();
+  // Drag & drop
+  var drop=document.getElementById("bk-file-drop");
+  if(drop){
+    drop.addEventListener("dragover",function(e){e.preventDefault();drop.style.borderColor="#3B82F6";drop.style.background="rgba(59,130,246,.05)";});
+    drop.addEventListener("dragleave",function(){drop.style.borderColor="#F0DDB4";drop.style.background="transparent";});
+    drop.addEventListener("drop",function(e){e.preventDefault();drop.style.borderColor="#F0DDB4";drop.style.background="transparent";bkHandleFile(e.dataTransfer.files[0]);});
+  }
+}
+
+async function bkFbRead(col){
+  var all=[];var nextPage="";
+  while(true){
+    var url="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents/"+col+"?pageSize=300"+(nextPage?"&pageToken="+nextPage:"");
+    var r=await fetch(url);var j=await r.json();
+    if(!j.documents)break;
+    j.documents.forEach(function(doc){
+      var id=doc.name.split("/").pop();var o={id:id};
+      if(doc.fields)Object.keys(doc.fields).forEach(function(k){var f=doc.fields[k];
+        if(f.stringValue!==undefined)o[k]=f.stringValue;
+        else if(f.integerValue!==undefined)o[k]=parseInt(f.integerValue);
+        else if(f.doubleValue!==undefined)o[k]=f.doubleValue;
+        else if(f.booleanValue!==undefined)o[k]=f.booleanValue;
+        else if(f.nullValue!==undefined)o[k]=null;
+        else if(f.mapValue)o[k]=bkParseMap(f.mapValue);
+        else if(f.arrayValue)o[k]=bkParseArr(f.arrayValue);
+        else o[k]=JSON.stringify(f);
+      });
+      all.push(o);
+    });
+    if(!j.nextPageToken)break;nextPage=j.nextPageToken;
+  }
+  return all;
+}
+function bkParseMap(mv){var o={};if(mv.fields)Object.keys(mv.fields).forEach(function(k){var f=mv.fields[k];if(f.stringValue!==undefined)o[k]=f.stringValue;else if(f.integerValue!==undefined)o[k]=parseInt(f.integerValue);else if(f.doubleValue!==undefined)o[k]=f.doubleValue;else if(f.booleanValue!==undefined)o[k]=f.booleanValue;else if(f.nullValue!==undefined)o[k]=null;else if(f.mapValue)o[k]=bkParseMap(f.mapValue);else if(f.arrayValue)o[k]=bkParseArr(f.arrayValue);else o[k]=JSON.stringify(f);});return o;}
+function bkParseArr(av){if(!av.values)return[];return av.values.map(function(f){if(f.stringValue!==undefined)return f.stringValue;if(f.integerValue!==undefined)return parseInt(f.integerValue);if(f.doubleValue!==undefined)return f.doubleValue;if(f.booleanValue!==undefined)return f.booleanValue;if(f.nullValue!==undefined)return null;if(f.mapValue)return bkParseMap(f.mapValue);if(f.arrayValue)return bkParseArr(f.arrayValue);return JSON.stringify(f);});}
+function bkToFV(v){if(v===null||v===undefined)return{nullValue:null};if(typeof v==="string")return{stringValue:v};if(typeof v==="boolean")return{booleanValue:v};if(typeof v==="number")return Number.isInteger(v)?{integerValue:String(v)}:{doubleValue:v};if(Array.isArray(v))return{arrayValue:{values:v.map(bkToFV)}};if(typeof v==="object"){var fields={};Object.keys(v).forEach(function(k){fields[k]=bkToFV(v[k]);});return{mapValue:{fields:fields}};} return{stringValue:String(v)};}
+async function bkFbWrite(col,id,data){var fields={};Object.keys(data).forEach(function(k){if(k==="id")return;fields[k]=bkToFV(data[k]);});await fetch("https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents/"+col+"/"+id+"?updateMask.fieldPaths="+Object.keys(fields).join("&updateMask.fieldPaths="),{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:fields})});}
+
+async function bkScan(){
+  var stats=document.getElementById("bk-stats");var list=document.getElementById("bk-collections");var sel=document.getElementById("bk-single-col");
+  if(!stats)return;
+  var totalDocs=0;var colCount=0;var tags="";
+  if(sel)sel.innerHTML='<option value="">— Selecciona colección —</option>';
+  for(var i=0;i<BK_COLLECTIONS.length;i++){
+    try{
+      var docs=await bkFbRead(BK_COLLECTIONS[i]);
+      if(docs.length>0){colCount++;totalDocs+=docs.length;
+        tags+='<span style="background:#fff;border:1px solid #E8E3DC;border-radius:6px;padding:3px 8px;font-size:10px;font-weight:600;color:#8A8078">'+BK_COLLECTIONS[i]+' <strong style="color:#1A1816">'+docs.length+'</strong></span>';
+        if(sel)sel.innerHTML+='<option value="'+BK_COLLECTIONS[i]+'">'+BK_COLLECTIONS[i]+' ('+docs.length+')</option>';
+      }
+    }catch(e){}
+  }
+  var lastBk=localStorage.getItem("lastBackup")||"Nunca";
+  stats.innerHTML='<div style="background:#fff;border:1px solid #E8E3DC;border-radius:10px;padding:10px;text-align:center"><div style="font-size:18px;font-weight:900;color:#1A1816">'+colCount+'</div><div style="font-size:9px;font-weight:700;color:#8A8078;text-transform:uppercase">Colecciones</div></div>'
+    +'<div style="background:#fff;border:1px solid #E8E3DC;border-radius:10px;padding:10px;text-align:center"><div style="font-size:18px;font-weight:900;color:#1A1816">'+totalDocs+'</div><div style="font-size:9px;font-weight:700;color:#8A8078;text-transform:uppercase">Documentos</div></div>'
+    +'<div style="background:#fff;border:1px solid #E8E3DC;border-radius:10px;padding:10px;text-align:center"><div style="font-size:12px;font-weight:900;color:#2E6B42">'+lastBk+'</div><div style="font-size:9px;font-weight:700;color:#8A8078;text-transform:uppercase">Último backup</div></div>';
+  if(list)list.innerHTML=tags;
+}
+
+async function bkExport(){
+  var btn=document.getElementById("bk-export-btn");var bar=document.getElementById("bk-export-bar");
+  var prog=document.getElementById("bk-export-progress");var status=document.getElementById("bk-export-status");
+  var log=document.getElementById("bk-export-log");
+  btn.disabled=true;btn.textContent="⏳ Exportando...";prog.style.display="block";log.style.display="block";log.innerHTML="";
+  var backup={_meta:{version:"3.29.6",fecha:new Date().toISOString(),fechaStr:new Date().toLocaleDateString("es-ES")+" "+new Date().toLocaleTimeString("es-ES")},collections:{}};
+  var totalDocs=0;
+  for(var i=0;i<BK_COLLECTIONS.length;i++){
+    var col=BK_COLLECTIONS[i];status.textContent="Leyendo "+col+"...";bar.style.width=Math.round((i/BK_COLLECTIONS.length)*100)+"%";
+    try{var docs=await bkFbRead(col);if(docs.length>0){backup.collections[col]=docs;totalDocs+=docs.length;log.innerHTML+='<span style="color:#2E6B42">✅ '+col+': '+docs.length+'</span>\n';}else{log.innerHTML+='<span style="color:#8A8078">⬜ '+col+': vacía</span>\n';}}
+    catch(e){log.innerHTML+='<span style="color:#991B1B">❌ '+col+': '+e.message+'</span>\n';}
+  }
+  backup._meta.totalDocumentos=totalDocs;backup._meta.totalColecciones=Object.keys(backup.collections).length;
+  bar.style.width="100%";status.textContent="✅ "+totalDocs+" docs de "+Object.keys(backup.collections).length+" colecciones";
+  var blob=new Blob([JSON.stringify(backup,null,2)],{type:"application/json"});
+  var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="backup_crm_"+new Date().toISOString().split("T")[0].replace(/-/g,"")+".json";a.click();
+  localStorage.setItem("lastBackup",new Date().toLocaleDateString("es-ES"));
+  log.innerHTML+='<span style="color:#2E6B42">\n💾 Descargado ('+Math.round(blob.size/1024)+' KB)</span>\n';
+  btn.disabled=false;btn.textContent="💾 Descargar backup completo";
+}
+
+function bkHandleFile(file){
+  if(!file)return;var reader=new FileReader();
+  reader.onload=function(e){
+    try{bkImportData=JSON.parse(e.target.result);
+      if(!bkImportData.collections){alert("Archivo no válido");bkImportData=null;return;}
+      var cols=Object.keys(bkImportData.collections);var td=cols.reduce(function(s,c){return s+(bkImportData.collections[c]||[]).length;},0);
+      var meta=bkImportData._meta||{};
+      var prev=document.getElementById("bk-import-preview");var btn=document.getElementById("bk-import-btn");
+      prev.style.display="block";
+      prev.innerHTML='<div style="background:#fff;border:1px solid #F0DDB4;border-radius:10px;padding:12px;margin-bottom:10px">'
+        +'<p style="margin:0 0 4px;font-size:12px;font-weight:700;color:#92400E">📋 Contenido del backup</p>'
+        +'<p style="margin:0;font-size:11px;color:#8A8078">Fecha: <strong>'+(meta.fechaStr||"?")+'</strong> · '+cols.length+' colecciones · '+td+' documentos</p>'
+        +'<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:8px">'+cols.map(function(c){return '<span style="background:#FEF9EE;border:1px solid #F0DDB4;border-radius:6px;padding:2px 8px;font-size:10px;font-weight:600;color:#92400E">'+c+' <strong>'+(bkImportData.collections[c]||[]).length+'</strong></span>';}).join("")+'</div></div>';
+      btn.style.display="block";
+    }catch(err){alert("Error: "+err.message);}
+  };reader.readAsText(file);
+}
+
+async function bkImport(){
+  if(!bkImportData||!bkImportData.collections)return;
+  if(!confirm("⚠️ ¿Seguro? Sobreescribirá documentos existentes."))return;
+  var btn=document.getElementById("bk-import-btn");var bar=document.getElementById("bk-import-bar");
+  var prog=document.getElementById("bk-import-progress");var status=document.getElementById("bk-import-status");
+  var log=document.getElementById("bk-import-log");
+  btn.disabled=true;btn.textContent="⏳ Restaurando...";prog.style.display="block";log.style.display="block";log.innerHTML="";
+  var cols=Object.keys(bkImportData.collections);var totalDocs=cols.reduce(function(s,c){return s+(bkImportData.collections[c]||[]).length;},0);
+  var written=0;var errors=0;
+  for(var ci=0;ci<cols.length;ci++){
+    var col=cols[ci];var docs=bkImportData.collections[col]||[];
+    status.textContent=col+" ("+docs.length+")...";log.innerHTML+='<span style="color:#3B82F6">📝 '+col+'...</span>\n';
+    for(var di=0;di<docs.length;di++){
+      try{await bkFbWrite(col,docs[di].id||col+"_"+di,docs[di]);written++;}catch(e){errors++;}
+      if((written+errors)%20===0)bar.style.width=Math.round(((written+errors)/totalDocs)*100)+"%";
+    }
+    log.innerHTML+='<span style="color:#2E6B42">  ✅ '+col+': '+docs.length+'</span>\n';
+  }
+  bar.style.width="100%";status.textContent="✅ "+written+" escritos, "+errors+" errores";
+  btn.disabled=false;btn.textContent="⚡ Restaurar datos";
+}
+
+async function bkExportSingle(){
+  var col=document.getElementById("bk-single-col").value;if(!col){alert("Selecciona colección");return;}
+  var docs=await bkFbRead(col);
+  var blob=new Blob([JSON.stringify({_meta:{collection:col,fecha:new Date().toISOString(),total:docs.length},documents:docs},null,2)],{type:"application/json"});
+  var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="backup_"+col+"_"+new Date().toISOString().split("T")[0]+".json";a.click();
+}
+
+async function bkDeleteSingle(){
+  var col=document.getElementById("bk-single-col").value;if(!col){alert("Selecciona colección");return;}
+  if(!confirm("⚠️ PELIGRO: Eliminar TODOS los documentos de '"+col+"'?"))return;
+  if(!confirm("⚠️ ÚLTIMA OPORTUNIDAD: No se puede deshacer."))return;
+  var docs=await bkFbRead(col);for(var i=0;i<docs.length;i++){await fetch("https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents/"+col+"/"+docs[i].id,{method:"DELETE"});}
+  alert("✅ "+docs.length+" docs eliminados de "+col);bkScan();
+}
 </script>
 </body>
 </html>
