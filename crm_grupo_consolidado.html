@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.28.2";
-const CRM_BUILD = "27/05/2026-fix-estPreviewCaros-en-MiSemana";
+const CRM_VERSION = "3.28.3";
+const CRM_BUILD = "27/05/2026-emails-estrategia-aprobacion-rechazo";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -8414,6 +8414,37 @@ function MisEstrategias({usuario, onVolverPotencial}){
   const [editEst,setEditEst]=useState(null);
   const [reparEst,setReparEst]=useState(null);
 
+  // (v3.28.2) Helper para enviar emails de estrategia
+  function emailEstrategia(destinatarioId, asunto, mensaje, estrategia){
+    // Buscar email del destinatario en USUARIOS y portal_users
+    var destUser=USUARIOS.find(function(u){return u.id===destinatarioId;});
+    var email=destUser&&destUser.email;
+    if(!email){
+      // Buscar en portal_users via Firebase
+      var pu=(window._portalUsersDB||[]).find(function(u){
+        return u.username===destinatarioId||u.id===destinatarioId||(u.perfilCRM||"")=== destinatarioId||(u.nombre||"").toLowerCase()===(destinatarioId||"").toLowerCase();
+      });
+      if(pu) email=pu.email;
+    }
+    if(!email){console.log("[EST-EMAIL] Sin email para "+destinatarioId);return;}
+    var htmlEmail='<div style="font-family:-apple-system,sans-serif;max-width:500px;margin:0 auto;background:#F8FAFC;padding:20px">'
+      +'<div style="background:linear-gradient(135deg,#7C3AED,#A78BFA);color:#fff;padding:20px;border-radius:14px 14px 0 0;text-align:center">'
+      +'<h2 style="margin:0;font-size:16px">🎯 '+asunto.replace(/</g,'&lt;')+'</h2></div>'
+      +'<div style="background:#fff;padding:16px;border:1px solid #E2E8F0;border-top:none">'
+      +'<p style="margin:0 0 8px;font-size:13px;color:#1F2937">'+mensaje.replace(/\n/g,'<br>').replace(/</g,'&lt;')+'</p>'
+      +(estrategia?'<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:10px;margin-top:10px">'
+        +'<p style="margin:0;font-size:12px;font-weight:700">Cliente: '+(estrategia.cliente||estrategia.clienteNombre||'')+'</p>'
+        +(estrategia.maxDescuento?'<p style="margin:4px 0 0;font-size:12px">Dto máx: <strong style="color:#7C3AED">'+estrategia.maxDescuento+'%</strong></p>':'')
+        +'</div>':'')
+      +'</div>'
+      +'<div style="background:#F1F5F9;padding:12px;border:1px solid #E2E8F0;border-top:none;border-radius:0 0 14px 14px;text-align:center">'
+      +'<a href="https://crmwikuk.vercel.app" style="color:#7C3AED;font-weight:700;font-size:12px;text-decoration:none">🔗 Abrir CRM</a></div></div>';
+    fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({to:email,subject:"[CRM] "+asunto,html:htmlEmail})
+    }).then(function(r){console.log("[EST-EMAIL] "+(r.ok?"✅":"❌")+" → "+email);})
+    .catch(function(e){console.warn("[EST-EMAIL] Error:",e);});
+  }
+
   // (v3.23.37/38) Si llegamos desde Potencial con datos preseleccionados, abrir form
   useEffect(()=>{
     try{
@@ -8782,6 +8813,11 @@ function MisEstrategias({usuario, onVolverPotencial}){
                         if(sel.creadoPor!==usuario.id && sel.creadoPor!==sel.agente) despacharNotificacion({tipo:"estrategia",titulo:`✅ Tu estrategia aprobada: ${sel.cliente}`,
                           mensaje:`Cadena completada. ${sel.agenteNombre} puede ejecutar.`,
                           destinatarioId:sel.creadoPor,prioridad:"normal",creadoPor:usuario.id});
+                        // (v3.28.2) Enviar email al agente y creador
+                        emailEstrategia(sel.agente,"✅ Estrategia aprobada — "+sel.cliente,
+                          "Tu estrategia ha sido aprobada por "+usuario.nombre+".\nDescuento: "+dto+"%\nCliente: "+sel.cliente+"\n\nYa puedes ejecutarla.",sel);
+                        if(sel.creadoPor&&sel.creadoPor!==sel.agente) emailEstrategia(sel.creadoPor,"✅ Estrategia aprobada — "+sel.cliente,
+                          "La estrategia que creaste ha sido aprobada.\nDescuento: "+dto+"%\nCliente: "+sel.cliente,sel);
                       }
                     }}
                       style={{padding:"12px",borderRadius:10,border:"none",
@@ -8810,6 +8846,9 @@ function MisEstrategias({usuario, onVolverPotencial}){
                         titulo:`📤 Estrategia escalada: ${sel.cliente} (dto. ${dto}%)`,
                         mensaje:`${usuario.nombre} te escala esta estrategia. Dto: ${dto}% (su límite: ${miLimite}%).\nCliente: ${sel.cliente}\nAcción: ${sel.texto}`,
                         destinatarioId:superiorId,prioridad:"alta",creadoPor:usuario.id});
+                      // (v3.28.2) Email al superior
+                      emailEstrategia(superiorId,"📤 Estrategia escalada — "+sel.cliente,
+                        usuario.nombre+" te escala una estrategia para tu aprobación.\nDescuento: "+dto+"% (límite de "+usuario.nombre+": "+miLimite+"%)\nCliente: "+sel.cliente,sel);
                     }}
                       style={{padding:"12px",borderRadius:10,border:`2px solid ${T.blue}`,
                         background:"#EFF6FF",color:T.blue,fontWeight:700,fontSize:13,cursor:"pointer"}}>
@@ -8835,6 +8874,11 @@ function MisEstrategias({usuario, onVolverPotencial}){
                       titulo:`❌ Estrategia rechazada: ${sel.cliente}`,
                       mensaje:`${usuario.nombre} ha rechazado. Motivo: ${motivo}`,
                       destinatarioId:sel.creadoPor,prioridad:"normal",creadoPor:usuario.id});
+                    // (v3.28.2) Email al creador y agente
+                    emailEstrategia(sel.creadoPor||sel.agente,"❌ Estrategia rechazada — "+sel.cliente,
+                      usuario.nombre+" ha rechazado la estrategia.\nMotivo: "+motivo+"\nCliente: "+sel.cliente,sel);
+                    if(sel.agente&&sel.agente!==sel.creadoPor) emailEstrategia(sel.agente,"❌ Estrategia rechazada — "+sel.cliente,
+                      usuario.nombre+" ha rechazado.\nMotivo: "+motivo+"\nCliente: "+sel.cliente,sel);
                   }}
                     style={{padding:"12px",borderRadius:10,border:`2px solid ${T.red}`,
                       background:"#FEF2F2",color:T.red,fontWeight:700,fontSize:13,cursor:"pointer"}}>
@@ -10188,6 +10232,12 @@ function MisEstrategias({usuario, onVolverPotencial}){
                 setEstrategias(prev=>prev.map(e=>e.id===updated.id?updated:e));
                 setSel(updated);
                 fbEscribir("estrategias",updated.id,updated);
+                // (v3.28.2) Email al agente/creador si se añadió comentario
+                if(editEst._nuevoComentario){
+                  var destId=updated.agente&&updated.agente!==usuario.id?updated.agente:(updated.creadoPor&&updated.creadoPor!==usuario.id?updated.creadoPor:null);
+                  if(destId) emailEstrategia(destId,"💬 Nuevo comentario en estrategia — "+(updated.cliente||""),
+                    usuario.nombre+" ha comentado en la estrategia:\n\n\""+editEst._nuevoComentario+"\"\n\nCliente: "+(updated.cliente||""),updated);
+                }
                 setEditEst(null);
               }}
                 style={{flex:2,padding:"12px",borderRadius:10,border:"none",background:T.navy,color:"#fff",fontSize:14,fontWeight:700,cursor:"pointer"}}>
@@ -24318,6 +24368,7 @@ function App(props){
       fbLeerTodos("ventas_anuales"), // (v3.22.0) Sin límite de páginas — 31k+ registros
     ]).then(([muestras,estrategias,incidencias,visitas,opos,pUsers,ventas])=>{
       if(pUsers&&pUsers.length>0) setPortalUsersDB(pUsers);
+      window._portalUsersDB=pUsers||[];
       if(muestras.length>0) setMuestrasDB(muestras.filter(m=>!m.eliminada));
       if(ventas&&ventas.length>0){
         console.log("[VENTAS] Cargadas desde Firebase:",ventas.length,"registros");
