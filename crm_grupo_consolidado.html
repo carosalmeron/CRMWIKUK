@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.29.8";
-const CRM_BUILD = "27/05/2026-dias-estrategia-y-pendiente-visible";
+const CRM_VERSION = "3.30.0";
+const CRM_BUILD = "27/05/2026-incidencias-filtro-dia-actividad";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -2834,14 +2834,17 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
               <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:16}}>
                 {(function(){
                   var misIncFiltradas = misInc.filter(function(i){
-                    // (v3.25.9) Más permisivo: mostrar si semana coincide, O si fecha es de esta semana, O si está abierta y sin fecha
-                    var s = parseInt(i.semana||0);
-                    if(s === semana) return true;
-                    var candidatas = [i.fechaCreacion, i.fecha, i.fechaCreacionStr, i.creadaEn];
+                    // (v3.29.9) Incluir por fecha creación O actividad reciente (historial/cierre)
+                    var candidatas = [i.fechaCreacion, i.fecha, i.fechaCreacionStr, i.creadaEn, i.fechaCierre];
+                    (i.historialEscalado||[]).forEach(function(h){if(h.fecha) candidatas.push(h.fecha);});
+                    (i.seguimientos||[]).forEach(function(s){if(s.fecha) candidatas.push(s.fecha);});
                     for(var ci=0;ci<candidatas.length;ci++){
-                      if(candidatas[ci]){
-                        var sm = _semDeFecha(candidatas[ci]);
-                        if(sm === semana) return true;
+                      if(!candidatas[ci]) continue;
+                      var sm=_semDeFecha(candidatas[ci]);
+                      if(sm===semana){
+                        if(diaFiltroMS){
+                          if(_diaSemanaDe(candidatas[ci])===diaFiltroMS) return true;
+                        } else { return true; }
                       }
                     }
                     return false;
@@ -3384,6 +3387,8 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
                     if(hist[k].por && hist[k].por!==usuario.nombre){ ultPorOtro=hist[k]; break; }
                   }
                   if(!ultPorOtro) return false;
+                  // (v3.29.9) Filtrar por día si hay filtro activo
+                  if(diaFiltroMS && ultPorOtro.fecha && _diaSemanaDe(ultPorOtro.fecha)!==diaFiltroMS) return false;
                   var visto = inc["lecturas_"+usuario.id];
                   if(!visto) return true;
                   if(!ultPorOtro.fecha) return false;
@@ -3428,20 +3433,29 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
 
               {/* ═══ Sección Incidencias abiertas — vista para responsables (v3.10.0/v3.23.30) ═══ */}
               {(function(){
-                // (v3.25.9) Filtro permisivo: semana field O cualquier campo de fecha
+                // (v3.29.9) Filtro: semana de creación O semana de última actividad (historial/cierre)
                 var incFiltradas = misInc.filter(function(i){
-                  var s = parseInt(i.semana||0);
-                  if(s === semana) return true;
-                  var candidatas = [i.fechaCreacion, i.fecha, i.fechaCreacionStr, i.creadaEn];
+                  // Candidatas: fecha creación + todas las fechas del historial + fecha cierre
+                  var candidatas = [i.fechaCreacion, i.fecha, i.fechaCreacionStr, i.creadaEn, i.fechaCierre];
+                  (i.historialEscalado||[]).forEach(function(h){if(h.fecha) candidatas.push(h.fecha);});
+                  (i.seguimientos||[]).forEach(function(s){if(s.fecha) candidatas.push(s.fecha);});
+                  
+                  // Si alguna fecha cae en esta semana, mostrar
+                  var enSemana=false;
                   for(var ci=0;ci<candidatas.length;ci++){
-                    if(candidatas[ci]){
-                      var sm = _semDeFecha(candidatas[ci]);
-                      if(sm === semana){
-                        if(!pasaFiltroDia(candidatas[ci])) return false;
+                    if(!candidatas[ci]) continue;
+                    var sm=_semDeFecha(candidatas[ci]);
+                    if(sm===semana){
+                      enSemana=true;
+                      // Si hay filtro de día, comprobar que al menos una fecha coincida
+                      if(diaFiltroMS){
+                        if(_diaSemanaDe(candidatas[ci])===diaFiltroMS) return true;
+                      } else {
                         return true;
                       }
                     }
                   }
+                  // Si estaba en la semana pero ninguna fecha coincide con el día filtrado
                   return false;
                 });
                 if(!(!tipoFiltroMS||tipoFiltroMS==="inc") || incFiltradas.length===0) return null;
@@ -9849,7 +9863,8 @@ function MisEstrategias({usuario, onVolverPotencial}){
     // (v3.29.7) Días desde creación
     var diasEst=0;
     if(e.fechaCreacion){var fc=new Date(e.fechaCreacion);if(!isNaN(fc.getTime()))diasEst=Math.floor((Date.now()-fc.getTime())/86400000);}
-    else if(e.fechaCreacionStr){var pp=(e.fechaCreacionStr||"").split("/");if(pp.length===3){var fd=new Date(2000+parseInt(pp[2]||0),parseInt(pp[1]||1)-1,parseInt(pp[0]||1));if(!isNaN(fd.getTime()))diasEst=Math.floor((Date.now()-fd.getTime())/86400000);}}
+    else if(e.fechaCreacionStr){var pp=(e.fechaCreacionStr||"").split("/");if(pp.length===3){var yy=parseInt(pp[2]||0);if(yy<100)yy+=2000;var fd=new Date(yy,parseInt(pp[1]||1)-1,parseInt(pp[0]||1));if(!isNaN(fd.getTime()))diasEst=Math.floor((Date.now()-fd.getTime())/86400000);}}
+    if(diasEst<0)diasEst=0;
     var diasColor=diasEst>14?T.red:diasEst>7?T.amber:T.green;
     // Último seguimiento
     var ultSeg=(e.seguimientos||[]).length>0?(e.seguimientos||[])[e.seguimientos.length-1]:null;
