@@ -49,13 +49,26 @@ async function fetchCollection(name) {
 function esAyer(fechaStr) {
   if (!fechaStr) return false;
   const ayer = new Date(Date.now() - 86400000);
-  const ayerStr = ayer.toLocaleDateString('es-ES');
-  if (fechaStr === ayerStr) return true;
+  const ayerD = ayer.getDate(), ayerM = ayer.getMonth() + 1, ayerY = ayer.getFullYear();
+  
+  // Parse the input date
+  let d, m, y;
   if (fechaStr.includes('T')) {
-    const d = new Date(fechaStr);
-    return d.toLocaleDateString('es-ES') === ayerStr;
+    // ISO format
+    const dt = new Date(fechaStr);
+    if (isNaN(dt.getTime())) return false;
+    d = dt.getDate(); m = dt.getMonth() + 1; y = dt.getFullYear();
+  } else if (fechaStr.includes('/')) {
+    // dd/mm/yy or dd/mm/yyyy
+    const parts = fechaStr.split('/');
+    if (parts.length < 3) return false;
+    d = parseInt(parts[0]); m = parseInt(parts[1]); y = parseInt(parts[2]);
+    if (y < 100) y += 2000;
+  } else {
+    return false;
   }
-  return false;
+  
+  return d === ayerD && m === ayerM && y === ayerY;
 }
 
 function esc(s) { return (s || '').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
@@ -79,16 +92,15 @@ module.exports = async function handler(req, res) {
     // Semana actual
     const hoy = new Date();
     const ayer = new Date(Date.now() - 86400000);
-    const hoyStr = hoy.toLocaleDateString('es-ES');
-    const ayerStr = ayer.toLocaleDateString('es-ES');
+    const ayerStr = ayer.getDate() + '/' + (ayer.getMonth() + 1) + '/' + ayer.getFullYear();
     const start = new Date(hoy.getFullYear(), 0, 1);
     const semana = Math.ceil(((hoy - start) / 86400000 + start.getDay() + 1) / 7);
     const diaSemanaAyer = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'][ayer.getDay()];
 
     // Filtrar actividad reciente (ayer = último día laborable)
-    const visitasAyer = visitas.filter(v => !v.eliminada && esAyer(v.fecha));
-    const ofertasRecientes = ofertas.filter(o => !o.eliminada && (esAyer(o.fechaCreacionStr) || esAyer(o.fechaCierre)));
-    const muestrasRecientes = muestras.filter(m => !m.eliminada && (esAyer(m.fecha) || esAyer(m.fechaCreacion)));
+    const visitasAyer = visitas.filter(v => !v.eliminada && (esAyer(v.fecha) || esAyer(v.fechaCreacion) || esAyer(v.fechaCreacionStr)));
+    const ofertasRecientes = ofertas.filter(o => !o.eliminada && (esAyer(o.fechaCreacionStr) || esAyer(o.fechaCreacion) || esAyer(o.fechaCierre)));
+    const muestrasRecientes = muestras.filter(m => !m.eliminada && (esAyer(m.fecha) || esAyer(m.fechaCreacion) || esAyer(m.fechaCreacionStr)));
     const estrategiasRecientes = estrategias.filter(e => {
       if (e.eliminada) return false;
       if (esAyer(e.fechaCreacionStr)) return true;
@@ -267,7 +279,7 @@ module.exports = async function handler(req, res) {
       auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
     });
 
-    const asunto = `📊 Resumen diario — ${diaSemanaAyer} ${ayerStr} — ${totalVisitas} visitas · ${ofertasRecientes.length} ofertas · ${estrategiasRecientes.length} estrategias`;
+    const asunto = `📊 Resumen del día anterior — ${diaSemanaAyer} ${ayerStr} — ${totalVisitas} visitas · ${ofertasRecientes.length} ofertas · ${estrategiasRecientes.length} estrategias`;
     let enviados = 0;
 
     for (const dest of destinatarios) {
