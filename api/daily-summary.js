@@ -46,19 +46,6 @@ async function fetchCollection(name) {
   return docs;
 }
 
-function esHoy(fechaStr) {
-  if (!fechaStr) return false;
-  const hoy = new Date();
-  const hoyStr = hoy.toLocaleDateString('es-ES');
-  if (fechaStr === hoyStr) return true;
-  // ISO
-  if (fechaStr.includes('T')) {
-    const d = new Date(fechaStr);
-    return d.toLocaleDateString('es-ES') === hoyStr;
-  }
-  return false;
-}
-
 function esAyer(fechaStr) {
   if (!fechaStr) return false;
   const ayer = new Date(Date.now() - 86400000);
@@ -69,10 +56,6 @@ function esAyer(fechaStr) {
     return d.toLocaleDateString('es-ES') === ayerStr;
   }
   return false;
-}
-
-function esReciente(fechaStr) {
-  return esHoy(fechaStr) || esAyer(fechaStr);
 }
 
 function esc(s) { return (s || '').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
@@ -95,29 +78,30 @@ module.exports = async function handler(req, res) {
 
     // Semana actual
     const hoy = new Date();
+    const ayer = new Date(Date.now() - 86400000);
     const hoyStr = hoy.toLocaleDateString('es-ES');
-    const ayerStr = new Date(Date.now() - 86400000).toLocaleDateString('es-ES');
+    const ayerStr = ayer.toLocaleDateString('es-ES');
     const start = new Date(hoy.getFullYear(), 0, 1);
     const semana = Math.ceil(((hoy - start) / 86400000 + start.getDay() + 1) / 7);
-    const diaSemana = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'][hoy.getDay()];
+    const diaSemanaAyer = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'][ayer.getDay()];
 
     // Filtrar actividad reciente (ayer = último día laborable)
-    const visitasAyer = visitas.filter(v => !v.eliminada && esReciente(v.fecha));
-    const ofertasRecientes = ofertas.filter(o => !o.eliminada && (esReciente(o.fechaCreacionStr) || esReciente(o.fechaCierre)));
-    const muestrasRecientes = muestras.filter(m => !m.eliminada && (esReciente(m.fecha) || esReciente(m.fechaCreacion)));
+    const visitasAyer = visitas.filter(v => !v.eliminada && esAyer(v.fecha));
+    const ofertasRecientes = ofertas.filter(o => !o.eliminada && (esAyer(o.fechaCreacionStr) || esAyer(o.fechaCierre)));
+    const muestrasRecientes = muestras.filter(m => !m.eliminada && (esAyer(m.fecha) || esAyer(m.fechaCreacion)));
     const estrategiasRecientes = estrategias.filter(e => {
       if (e.eliminada) return false;
-      if (esReciente(e.fechaCreacionStr)) return true;
+      if (esAyer(e.fechaCreacionStr)) return true;
       const segs = e.seguimientos || [];
-      return segs.some(s => esReciente(s.fecha));
+      return segs.some(s => esAyer(s.fecha));
     });
     const incidenciasRecientes = incidencias.filter(i => {
       if (i.eliminada) return false;
-      if (esReciente(i.fecha) || esReciente(i.fechaCreacion)) return true;
+      if (esAyer(i.fecha) || esAyer(i.fechaCreacion)) return true;
       const hist = i.historialEscalado || [];
-      return hist.some(h => esReciente(h.fecha));
+      return hist.some(h => esAyer(h.fecha));
     });
-    const tareasRecientes = tareas.filter(t => !t.eliminada && (esReciente(t.fechaCreacion) || esReciente(t.vencimiento)));
+    const tareasRecientes = tareas.filter(t => !t.eliminada && (esAyer(t.fechaCreacion) || esAyer(t.vencimiento)));
 
     // Agrupar visitas por agente
     const visitasPorAgente = {};
@@ -186,9 +170,9 @@ module.exports = async function handler(req, res) {
     const emailHtml = `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:600px;margin:0 auto;background:#F8FAFC">
       <div style="background:linear-gradient(135deg,#0F172A,#1E293B);padding:28px 24px;border-radius:16px 16px 0 0;text-align:center">
         <div style="background:rgba(255,255,255,.15);display:inline-block;padding:6px 16px;border-radius:99px;margin-bottom:10px">
-          <span style="font-size:11px;font-weight:800;color:#fff;letter-spacing:.05em">📊 RESUMEN DIARIO</span>
+          <span style="font-size:11px;font-weight:800;color:#fff;letter-spacing:.05em">📊 RESUMEN DEL DÍA ANTERIOR</span>
         </div>
-        <h1 style="margin:0;font-size:20px;font-weight:800;color:#fff">${diaSemana} ${hoyStr}</h1>
+        <h1 style="margin:0;font-size:20px;font-weight:800;color:#fff">${diaSemanaAyer} ${ayerStr}</h1>
         <p style="margin:6px 0 0;font-size:12px;color:rgba(255,255,255,.6)">Semana ${semana} · CRM Grupo Consolidado</p>
       </div>
 
@@ -283,7 +267,7 @@ module.exports = async function handler(req, res) {
       auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
     });
 
-    const asunto = `📊 Resumen diario — ${diaSemana} ${hoyStr} — ${totalVisitas} visitas · ${ofertasRecientes.length} ofertas · ${estrategiasRecientes.length} estrategias`;
+    const asunto = `📊 Resumen diario — ${diaSemanaAyer} ${ayerStr} — ${totalVisitas} visitas · ${ofertasRecientes.length} ofertas · ${estrategiasRecientes.length} estrategias`;
     let enviados = 0;
 
     for (const dest of destinatarios) {
