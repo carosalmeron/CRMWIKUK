@@ -115,21 +115,23 @@ module.exports = async function handler(req, res) {
     });
     const tareasRecientes = tareas.filter(t => !t.eliminada && (esAyer(t.fechaCreacion) || esAyer(t.vencimiento)));
 
-    // Resolver nombres de agentes
+    // Resolver nombres de agentes - build comprehensive map
     const nombreMap = {};
     portalUsers.forEach(u => {
-      const id = (u.username || u.id || '').toLowerCase();
-      const nombre = u.nombre || u.username || u.id || '';
-      if (id) nombreMap[id] = nombre;
-      // Also map perfilCRM
-      if (u.perfilCRM) nombreMap[u.perfilCRM.toLowerCase()] = nombre;
-      // grupoAgente
-      if (u.grupoAgente) nombreMap[u.grupoAgente.toLowerCase()] = nombre;
+      const nombre = u.nombre || '';
+      if (!nombre) return;
+      // Map all possible ID fields to nombre
+      const keys = [u.username, u.id, u.perfilCRM, u.grupoAgente, u.catalogoVendedor, u._id];
+      keys.forEach(k => { if (k) nombreMap[k.toLowerCase()] = nombre; });
     });
     function resolverNombre(idOrName) {
       if (!idOrName) return 'Desconocido';
-      const n = nombreMap[(idOrName || '').toLowerCase()];
-      return n || idOrName;
+      const n = nombreMap[idOrName.toLowerCase()];
+      if (n) return n;
+      // Maybe it's already a name - check if any nombre matches
+      const found = portalUsers.find(u => (u.nombre || '').toLowerCase() === idOrName.toLowerCase());
+      if (found) return found.nombre;
+      return idOrName;
     }
     function resolverEstado(estado) {
       if (estado === 'en_curso') return 'aprobada';
@@ -338,7 +340,7 @@ module.exports = async function handler(req, res) {
       auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
     });
 
-    const asunto = `📊 Resumen del día anterior — ${diaSemanaAyer} ${ayerStr} — ${totalVisitas} visitas · ${ofertasRecientes.length} ofertas · ${estrategiasRecientes.length} estrategias`;
+    const asunto = `📊 Resumen ${diaSemanaAyer} ${ayerStr} — ${totalVisitas} vis · ${ofertasRecientes.length} ofe · ${muestrasRecientes.length} mue · ${estrategiasRecientes.length} est · ${incidenciasRecientes.length} inc`;
     let enviados = 0;
 
     for (const dest of destinatarios) {
