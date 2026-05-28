@@ -153,34 +153,34 @@ module.exports = async function handler(req, res) {
     const totalVisitas = visitasAyer.length;
     const agentes = Object.keys(visitasPorAgente);
 
+    // Build visit cards per agent (old informe style)
     let htmlVisitas = '';
     agentes.sort((a, b) => visitasPorAgente[b].length - visitasPorAgente[a].length).forEach(ag => {
       const vs = visitasPorAgente[ag];
       const pedidos = vs.filter(v => v.resultado === 'pedido').length;
       const llamadas = vs.filter(v => v.resultado === 'llamada').length;
-      const sinPedido = vs.filter(v => v.resultado === 'visita_sin_pedido').length;
-      const primera = vs.filter(v => v.resultado === 'primera_visita').length;
-      // Resultados summary
-      let resTxt = [];
-      if (pedidos) resTxt.push(`<strong style="color:#22C55E">${pedidos} ped.</strong>`);
-      if (llamadas) resTxt.push(`${llamadas} llam.`);
-      if (sinPedido) resTxt.push(`${sinPedido} s/ped.`);
-      if (primera) resTxt.push(`${primera} 1ª vis.`);
 
-      htmlVisitas += `<tr>
-        <td style="padding:10px 12px;border-bottom:1px solid #F1F5F9;vertical-align:top">
-          <strong style="font-size:13px;color:#0F172A">${esc(ag)}</strong>
-          <div style="margin-top:4px;font-size:10px;color:#94A3B8;line-height:1.6">
-            ${vs.slice(0, 6).map(v => {
-              const resIcon = v.resultado === 'pedido' ? '✅' : v.resultado === 'llamada' ? '📞' : v.resultado === 'primera_visita' ? '🆕' : v.resultado === 'no_contesta' ? '🔇' : '👋';
-              return `${resIcon} ${esc(v.clienteNombre || v.cliente || '?')}${v.notas || v.nota ? ' — <em>' + esc((v.notas || v.nota || '').substring(0, 50)) + '</em>' : ''}`;
-            }).join('<br>')}
-            ${vs.length > 6 ? `<br><span style="color:#64748B">+${vs.length - 6} más</span>` : ''}
+      htmlVisitas += `<div style="margin-bottom:16px">
+        <div style="background:#1E3A5F;color:#fff;padding:8px 14px;border-radius:8px;margin-bottom:8px;display:inline-block">
+          <span style="font-size:13px;font-weight:800">🧑‍💼 ${esc(ag)}</span>
+          <span style="font-size:11px;opacity:.7"> · ${vs.length} visitas${pedidos ? ' · ' + pedidos + ' ped.' : ''}${llamadas ? ' · ' + llamadas + ' llam.' : ''}</span>
+        </div>`;
+
+      vs.forEach(v => {
+        const resColor = v.resultado === 'pedido' ? '#22C55E' : v.resultado === 'llamada' ? '#3B82F6' : v.resultado === 'primera_visita' ? '#8B5CF6' : v.resultado === 'no_contesta' ? '#94A3B8' : '#F59E0B';
+        const resLabel = v.resultado === 'pedido' ? 'Pedido' : v.resultado === 'llamada' ? 'Llamada' : v.resultado === 'primera_visita' ? 'Primera visita' : v.resultado === 'no_contesta' ? 'No contesta' : v.resultado === 'visita_sin_pedido' ? 'Visita s/pedido' : (v.resultado || 'Visita');
+        const nota = v.notas || v.nota || '';
+
+        htmlVisitas += `<div style="padding:8px 12px;margin-bottom:4px;border-left:3px solid ${resColor};background:#FAFAFA;border-radius:0 8px 8px 0">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <strong style="font-size:13px;color:#0F172A">${esc(v.clienteNombre || v.cliente || '?')}</strong>
           </div>
-        </td>
-        <td style="padding:10px 12px;border-bottom:1px solid #F1F5F9;text-align:center;font-weight:800;font-size:16px;color:#22C55E;vertical-align:top">${vs.length}</td>
-        <td style="padding:10px 12px;border-bottom:1px solid #F1F5F9;text-align:center;font-size:11px;vertical-align:top">${resTxt.length > 0 ? resTxt.join(' · ') : '-'}</td>
-      </tr>`;
+          <p style="margin:2px 0 0;font-size:11px;color:${resColor};font-weight:700">${resLabel}</p>
+          ${nota ? `<p style="margin:4px 0 0;font-size:12px;color:#334155;line-height:1.5">${esc(nota)}</p>` : ''}
+        </div>`;
+      });
+
+      htmlVisitas += `</div>`;
     });
 
     let htmlOfertas = '';
@@ -272,14 +272,11 @@ module.exports = async function handler(req, res) {
         </div>
       </div>
 
-      <!-- Visitas por agente -->
+      <!-- Visitas por vendedor -->
       ${totalVisitas > 0 ? `
-      <div style="background:#fff;padding:0 24px 16px;border-left:1px solid #E2E8F0;border-right:1px solid #E2E8F0">
-        <p style="margin:0 0 8px;font-size:11px;font-weight:800;color:#94A3B8;text-transform:uppercase;letter-spacing:.05em">👥 Visitas por vendedor</p>
-        <table style="width:100%;border-collapse:collapse;background:#FAFAFA;border-radius:10px;overflow:hidden">
-          <tr style="background:#F1F5F9"><th style="padding:6px 12px;text-align:left;font-size:10px;color:#64748B">Vendedor</th><th style="padding:6px 12px;text-align:center;font-size:10px;color:#64748B">Visitas</th><th style="padding:6px 12px;text-align:center;font-size:10px;color:#64748B">Resultado</th></tr>
-          ${htmlVisitas}
-        </table>
+      <div style="background:#fff;padding:16px 24px;border-left:1px solid #E2E8F0;border-right:1px solid #E2E8F0">
+        <p style="margin:0 0 12px;font-size:13px;font-weight:800;color:#0F172A">📋 Visitas por vendedor</p>
+        ${htmlVisitas}
       </div>` : ''}
 
       <!-- Ofertas -->
