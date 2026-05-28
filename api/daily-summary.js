@@ -115,10 +115,31 @@ module.exports = async function handler(req, res) {
     });
     const tareasRecientes = tareas.filter(t => !t.eliminada && (esAyer(t.fechaCreacion) || esAyer(t.vencimiento)));
 
-    // Agrupar visitas por agente
+    // Resolver nombres de agentes
+    const nombreMap = {};
+    portalUsers.forEach(u => {
+      const id = (u.username || u.id || '').toLowerCase();
+      const nombre = u.nombre || u.username || u.id || '';
+      if (id) nombreMap[id] = nombre;
+      // Also map perfilCRM
+      if (u.perfilCRM) nombreMap[u.perfilCRM.toLowerCase()] = nombre;
+      // grupoAgente
+      if (u.grupoAgente) nombreMap[u.grupoAgente.toLowerCase()] = nombre;
+    });
+    function resolverNombre(idOrName) {
+      if (!idOrName) return 'Desconocido';
+      const n = nombreMap[(idOrName || '').toLowerCase()];
+      return n || idOrName;
+    }
+    function resolverEstado(estado) {
+      if (estado === 'en_curso') return 'aprobada';
+      return estado || 'pendiente';
+    }
+
+    // Agrupar visitas por agente (nombre resuelto)
     const visitasPorAgente = {};
     visitasAyer.forEach(v => {
-      const ag = v.agenteNombre || v.agente || 'Desconocido';
+      const ag = resolverNombre(v.agente || v.agenteId || v.agenteNombre);
       if (!visitasPorAgente[ag]) visitasPorAgente[ag] = [];
       visitasPorAgente[ag].push(v);
     });
@@ -137,10 +158,28 @@ module.exports = async function handler(req, res) {
       const vs = visitasPorAgente[ag];
       const pedidos = vs.filter(v => v.resultado === 'pedido').length;
       const llamadas = vs.filter(v => v.resultado === 'llamada').length;
+      const sinPedido = vs.filter(v => v.resultado === 'visita_sin_pedido').length;
+      const primera = vs.filter(v => v.resultado === 'primera_visita').length;
+      // Resultados summary
+      let resTxt = [];
+      if (pedidos) resTxt.push(`<strong style="color:#22C55E">${pedidos} ped.</strong>`);
+      if (llamadas) resTxt.push(`${llamadas} llam.`);
+      if (sinPedido) resTxt.push(`${sinPedido} s/ped.`);
+      if (primera) resTxt.push(`${primera} 1ª vis.`);
+
       htmlVisitas += `<tr>
-        <td style="padding:8px 12px;border-bottom:1px solid #F1F5F9;font-weight:700;font-size:13px">${esc(ag)}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #F1F5F9;text-align:center;font-weight:800;font-size:14px;color:#22C55E">${vs.length}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #F1F5F9;text-align:center;font-size:12px">${pedidos > 0 ? `<strong style="color:#22C55E">${pedidos} ped.</strong>` : '-'} ${llamadas > 0 ? `<span style="color:#64748B">${llamadas} llam.</span>` : ''}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #F1F5F9;vertical-align:top">
+          <strong style="font-size:13px;color:#0F172A">${esc(ag)}</strong>
+          <div style="margin-top:4px;font-size:10px;color:#94A3B8;line-height:1.6">
+            ${vs.slice(0, 6).map(v => {
+              const resIcon = v.resultado === 'pedido' ? '✅' : v.resultado === 'llamada' ? '📞' : v.resultado === 'primera_visita' ? '🆕' : v.resultado === 'no_contesta' ? '🔇' : '👋';
+              return `${resIcon} ${esc(v.clienteNombre || v.cliente || '?')}${v.notas || v.nota ? ' — <em>' + esc((v.notas || v.nota || '').substring(0, 50)) + '</em>' : ''}`;
+            }).join('<br>')}
+            ${vs.length > 6 ? `<br><span style="color:#64748B">+${vs.length - 6} más</span>` : ''}
+          </div>
+        </td>
+        <td style="padding:10px 12px;border-bottom:1px solid #F1F5F9;text-align:center;font-weight:800;font-size:16px;color:#22C55E;vertical-align:top">${vs.length}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #F1F5F9;text-align:center;font-size:11px;vertical-align:top">${resTxt.length > 0 ? resTxt.join(' · ') : '-'}</td>
       </tr>`;
     });
 
@@ -148,10 +187,17 @@ module.exports = async function handler(req, res) {
     ofertasRecientes.slice(0, 8).forEach(o => {
       const estColor = o.estado === 'pedido' ? '#22C55E' : o.estado === 'caro' ? '#EF4444' : '#F59E0B';
       const estLabel = o.estado === 'pedido' ? '✅ Pedido' : o.estado === 'caro' ? '💸 Caros' : '⏳ Pendiente';
-      htmlOfertas += `<div style="padding:8px 12px;border-bottom:1px solid #F1F5F9;display:flex;justify-content:space-between;align-items:center">
-        <div><strong style="font-size:12px">${esc(o.clienteNombre || o.cliente || '')}</strong>
-        <span style="font-size:11px;color:#64748B"> · ${esc(o.agenteNombre || o.agente || '')}</span></div>
-        <span style="font-size:10px;font-weight:700;color:${estColor};background:${estColor}15;padding:2px 8px;border-radius:99px">${estLabel}</span>
+      const lineas = o.lineas || [];
+      htmlOfertas += `<div style="padding:10px 12px;border-bottom:1px solid #F1F5F9">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div><strong style="font-size:12px">${esc(o.clienteNombre || o.cliente || '')}</strong>
+          <span style="font-size:11px;color:#64748B"> · ${esc(resolverNombre(o.agente || o.agenteId))}</span></div>
+          <span style="font-size:10px;font-weight:700;color:${estColor};background:${estColor}15;padding:2px 8px;border-radius:99px">${estLabel}</span>
+        </div>
+        ${lineas.length > 0 ? `<div style="margin-top:4px;font-size:11px;color:#64748B">${lineas.map(l => 
+          `📦 ${esc(l.producto || '')}${l.calibre ? ' · ' + esc(l.calibre) : ''} → <strong style="color:#0F172A">${l.precio ? Number(l.precio).toFixed(2).replace('.', ',') + '€/' + (l.unidad || 'kg') : ''}</strong>${l.precioCompetencia ? ' <span style="color:#EF4444">(comp: ' + Number(l.precioCompetencia).toFixed(2).replace('.', ',') + '€)</span>' : ''}`
+        ).join('<br>')}</div>` : ''}
+        ${o.notaCaro ? `<p style="margin:3px 0 0;font-size:10px;color:#991B1B;font-style:italic">"${esc(o.notaCaro.substring(0, 80))}"</p>` : ''}
       </div>`;
     });
 
@@ -159,10 +205,21 @@ module.exports = async function handler(req, res) {
     estrategiasRecientes.slice(0, 6).forEach(e => {
       const segs = e.seguimientos || [];
       const ult = segs.length > 0 ? segs[segs.length - 1] : null;
-      htmlEstrategias += `<div style="padding:8px 12px;border-bottom:1px solid #F1F5F9">
-        <div style="display:flex;justify-content:space-between"><strong style="font-size:12px">${esc(e.cliente || e.clienteNombre || '')}</strong>
-        <span style="font-size:10px;font-weight:700;color:#7C3AED;background:#F5F3FF;padding:2px 8px;border-radius:99px">${esc(e.estado || 'pendiente')}</span></div>
-        ${ult ? `<p style="margin:3px 0 0;font-size:11px;color:#64748B">💬 ${esc(ult.por || '')} · ${esc(ult.fecha || '')}${ult.nota ? ' — ' + esc(ult.nota).substring(0, 80) : ''}</p>` : ''}
+      const estado = resolverEstado(e.estado);
+      const estColor = estado === 'aprobada' ? '#22C55E' : estado === 'rechazada' ? '#EF4444' : estado === 'pendiente_aprobacion' ? '#F59E0B' : '#7C3AED';
+      const estLabel = estado === 'aprobada' ? '✅ Aprobada' : estado === 'rechazada' ? '❌ Rechazada' : estado === 'pendiente_aprobacion' ? '⏳ Pend. aprob.' : '📋 Pendiente';
+      htmlEstrategias += `<div style="padding:10px 12px;border-bottom:1px solid #F1F5F9">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <strong style="font-size:12px">${esc(e.cliente || e.clienteNombre || '')}</strong>
+          <span style="font-size:10px;font-weight:700;color:${estColor};background:${estColor}15;padding:2px 8px;border-radius:99px">${estLabel}</span>
+        </div>
+        <p style="margin:2px 0 0;font-size:11px;color:#64748B">${esc(resolverNombre(e.agente))}${e.maxDescuento ? ' · Dto: <strong>' + e.maxDescuento + '%</strong>' : ''}</p>
+        <p style="margin:2px 0 0;font-size:11px;color:#475569">${esc((e.texto || e.estrategia || e.descripcion || '').substring(0, 100))}</p>
+        ${ult ? `<div style="margin-top:4px;padding:4px 8px;background:#F8FAFC;border-radius:6px;border-left:2px solid ${estColor}">
+          <span style="font-size:10px;font-weight:700;color:#0F172A">${esc(ult.por || '')}</span>
+          <span style="font-size:9px;color:#94A3B8"> · ${esc(ult.fecha || '')}</span>
+          ${ult.nota ? `<p style="margin:2px 0 0;font-size:10px;color:#475569">${esc(ult.nota.substring(0, 100))}</p>` : ''}
+        </div>` : ''}
       </div>`;
     });
 
@@ -171,11 +228,16 @@ module.exports = async function handler(req, res) {
       const esCerrada = i.estado === 'cerrada' || i.estado === 'resuelta';
       const hist = i.historialEscalado || [];
       const ult = hist.length > 0 ? hist[hist.length - 1] : null;
-      htmlIncidencias += `<div style="padding:8px 12px;border-bottom:1px solid #F1F5F9">
+      htmlIncidencias += `<div style="padding:10px 12px;border-bottom:1px solid #F1F5F9;border-left:3px solid ${esCerrada ? '#22C55E' : '#EF4444'}">
         <div style="display:flex;justify-content:space-between;align-items:center">
-          <strong style="font-size:12px;color:${esCerrada ? '#22C55E' : '#991B1B'}">${esCerrada ? '✅ ' : ''}${esc(i.titulo || i.descripcion || i.tipo || '')}</strong>
+          <strong style="font-size:12px;color:${esCerrada ? '#22C55E' : '#991B1B'}">${esCerrada ? '✅ ' : '🔴 '}${esc((i.titulo || i.descripcion || i.tipo || '').substring(0, 60))}</strong>
         </div>
-        <p style="margin:2px 0 0;font-size:11px;color:#64748B">${esc(i.clienteNombre || '')}${ult ? ` · ${esc(ult.por || '')} · ${esc(ult.fecha || '')}` : ''}</p>
+        <p style="margin:2px 0 0;font-size:11px;color:#64748B">${esc(i.clienteNombre || '')} · ${esc(resolverNombre(i.autor || i.agente))} · ${esc(i.tipo || '')}</p>
+        ${ult ? `<div style="margin-top:4px;padding:4px 8px;background:${esCerrada ? '#F0FDF4' : '#FEF2F2'};border-radius:6px">
+          <span style="font-size:10px;font-weight:700;color:${esCerrada ? '#166534' : '#1E40AF'}">${esc(ult.por || '')}</span>
+          <span style="font-size:9px;color:#94A3B8"> · ${esc(ult.fecha || '')}</span>
+          ${ult.nota || ult.accion ? `<p style="margin:2px 0 0;font-size:10px;color:#475569">${esc((ult.nota || ult.accion || '').substring(0, 100))}</p>` : ''}
+        </div>` : ''}
       </div>`;
     });
 
@@ -246,7 +308,7 @@ module.exports = async function handler(req, res) {
       <div style="background:#fff;padding:0 24px 16px;border-left:1px solid #E2E8F0;border-right:1px solid #E2E8F0">
         <p style="margin:0 0 8px;font-size:11px;font-weight:800;color:#94A3B8;text-transform:uppercase;letter-spacing:.05em">📦 Muestras (${muestrasRecientes.length})</p>
         <div style="background:#FAFAFA;border-radius:10px;overflow:hidden;padding:8px 12px;font-size:12px;color:#64748B">
-          ${muestrasRecientes.slice(0, 6).map(m => `<div style="padding:4px 0;border-bottom:1px solid #F1F5F9"><strong>${esc(m.producto || '')}</strong> → ${esc(m.clienteNombre || m.cliente || '')} · ${esc(m.agenteNombre || m.agente || '')} <span style="color:${m.estado === 'aprobada' || m.feedback === 'positivo' ? '#22C55E' : m.estado === 'rechazada' || m.feedback === 'negativo' ? '#EF4444' : '#F59E0B'};font-weight:700">${m.estado === 'aprobada' || m.feedback === 'positivo' ? '✅' : m.estado === 'rechazada' || m.feedback === 'negativo' ? '❌' : '⏳'}</span></div>`).join('')}
+          ${muestrasRecientes.slice(0, 6).map(m => `<div style="padding:6px 0;border-bottom:1px solid #F1F5F9"><strong>${esc(m.producto || '')}</strong> → ${esc(m.clienteNombre || m.cliente || '')} · ${esc(resolverNombre(m.agente || m.agenteId))} <span style="color:${m.estado === 'aprobada' || m.feedback === 'positivo' ? '#22C55E' : m.estado === 'rechazada' || m.feedback === 'negativo' ? '#EF4444' : '#F59E0B'};font-weight:700">${m.estado === 'aprobada' || m.feedback === 'positivo' ? '✅' : m.estado === 'rechazada' || m.feedback === 'negativo' ? '❌' : '⏳'}</span></div>`).join('')}
         </div>
       </div>` : ''}
 
