@@ -117,21 +117,30 @@ module.exports = async function handler(req, res) {
 
     // Resolver nombres de agentes - build comprehensive map
     const nombreMap = {};
+    const equipoMap = {}; // agentId -> equipo
     portalUsers.forEach(u => {
       const nombre = u.nombre || '';
       if (!nombre) return;
-      // Map all possible ID fields to nombre
       const keys = [u.username, u.id, u.perfilCRM, u.grupoAgente, u.catalogoVendedor, u._id];
-      keys.forEach(k => { if (k) nombreMap[k.toLowerCase()] = nombre; });
+      keys.forEach(k => { if (k) { nombreMap[k.toLowerCase()] = nombre; equipoMap[k.toLowerCase()] = (u.equipo||'').toUpperCase(); }});
+      // Also map nombre lowercase to nombre (identity)
+      nombreMap[nombre.toLowerCase()] = nombre;
+      // Map equipoCrm members
+      if (Array.isArray(u.equipoCrm)) {
+        u.equipoCrm.forEach(m => { if (m) { nombreMap[m.toLowerCase()] = nombre; equipoMap[m.toLowerCase()] = (u.equipo||'').toUpperCase(); }});
+      }
     });
     function resolverNombre(idOrName) {
       if (!idOrName) return 'Desconocido';
       const n = nombreMap[idOrName.toLowerCase()];
       if (n) return n;
-      // Maybe it's already a name - check if any nombre matches
       const found = portalUsers.find(u => (u.nombre || '').toLowerCase() === idOrName.toLowerCase());
       if (found) return found.nombre;
       return idOrName;
+    }
+    function resolverEquipo(idOrName) {
+      if (!idOrName) return '';
+      return equipoMap[idOrName.toLowerCase()] || '';
     }
     function resolverEstado(estado) {
       if (estado === 'en_curso') return 'aprobada';
@@ -177,6 +186,35 @@ module.exports = async function handler(req, res) {
         +'<div style="flex:1;min-width:55px;background:#FEF2F2;border:1px solid #FECACA;border-radius:10px;padding:10px 6px"><div style="font-size:22px;font-weight:900;color:#EF4444">'+tinc+'</div><div style="font-size:9px;font-weight:700;color:#991B1B">INCID.</div></div>'
         +'<div style="flex:1;min-width:55px;background:#EFF6FF;border:1px solid #BFDBFE;border-radius:10px;padding:10px 6px"><div style="font-size:22px;font-weight:900;color:#3B82F6">'+tmue+'</div><div style="font-size:9px;font-weight:700;color:#1E40AF">MUESTRAS</div></div>'
         +'</div></div>'
+        // Team summary
+        +(function(){
+          var teams={WIKUK:{vis:0,ofe:0,est:0,inc:0,mue:0,ped:0,ags:{}},INTERKEY:{vis:0,ofe:0,est:0,inc:0,mue:0,ped:0,ags:{}}};
+          misVisitas.forEach(function(v){var eq=resolverEquipo(v.agente||v.agenteId)||(v.equipo||'').toUpperCase();var t=teams[eq];if(t){t.vis++;var ag=resolverNombre(v.agente||v.agenteId);t.ags[ag]=(t.ags[ag]||0)+1;if(v.resultado==='pedido')t.ped++;}});
+          misOfertas.forEach(function(o){var eq=resolverEquipo(o.agente||o.agenteId)||(o.equipo||'').toUpperCase();var t=teams[eq];if(t)t.ofe++;});
+          misEstrategias.forEach(function(e){var eq=resolverEquipo(e.agente)||(e.equipo||'').toUpperCase();var t=teams[eq];if(t)t.est++;});
+          misIncidencias.forEach(function(i){var eq=resolverEquipo(i.autor||i.agente);var t=teams[eq];if(t)t.inc++;});
+          misMuestras.forEach(function(m){var eq=resolverEquipo(m.agente||m.agenteId)||(m.equipo||'').toUpperCase();var t=teams[eq];if(t)t.mue++;});
+          var anyData=(teams.WIKUK.vis+teams.INTERKEY.vis)>0||(teams.WIKUK.ofe+teams.INTERKEY.ofe)>0;
+          if(!anyData) return '';
+          var html='<div style="background:#fff;padding:14px 24px;border-left:1px solid #E2E8F0;border-right:1px solid #E2E8F0">'
+            +'<p style="margin:0 0 10px;font-size:13px;font-weight:800;color:#0F172A">👥 Resumen por equipo</p>'
+            +'<div style="display:flex;gap:10px">';
+          [{k:'WIKUK',color:'#1E5A8A',bg:'#EBF2F8',icon:'🔵'},{k:'INTERKEY',color:'#2E6B42',bg:'#EDF4F0',icon:'🟢'}].forEach(function(eq){
+            var t=teams[eq.k];var nAg=Object.keys(t.ags).length;
+            html+='<div style="flex:1;background:'+eq.bg+';border:1.5px solid '+eq.color+'30;border-radius:12px;padding:12px;text-align:center">'
+              +'<div style="font-size:14px;font-weight:900;color:'+eq.color+'">'+eq.icon+' '+eq.k+'</div>'
+              +'<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:4px;justify-content:center">'
+              +'<span style="background:#fff;border:1px solid '+eq.color+'30;border-radius:6px;padding:2px 8px;font-size:11px"><strong style="color:'+eq.color+'">'+t.vis+'</strong> vis</span>'
+              +'<span style="background:#fff;border:1px solid '+eq.color+'30;border-radius:6px;padding:2px 8px;font-size:11px"><strong style="color:#22C55E">'+t.ped+'</strong> ped</span>'
+              +'<span style="background:#fff;border:1px solid '+eq.color+'30;border-radius:6px;padding:2px 8px;font-size:11px"><strong>'+t.ofe+'</strong> ofe</span>'
+              +'<span style="background:#fff;border:1px solid '+eq.color+'30;border-radius:6px;padding:2px 8px;font-size:11px"><strong>'+t.mue+'</strong> mue</span>'
+              +'</div>'
+              +'<p style="margin:6px 0 0;font-size:10px;color:'+eq.color+'">'+nAg+' vendedores activos</p>'
+              +'</div>';
+          });
+          html+='</div></div>';
+          return html;
+        })()
         +(tv>0?'<div style="background:#fff;padding:14px 24px;border-left:1px solid #E2E8F0;border-right:1px solid #E2E8F0"><p style="margin:0 0 10px;font-size:13px;font-weight:800;color:#0F172A">📋 Visitas</p>'+htmlVis+'</div>':'')
         +(tof>0?'<div style="background:#fff;padding:14px 24px;border-left:1px solid #E2E8F0;border-right:1px solid #E2E8F0"><p style="margin:0 0 8px;font-size:13px;font-weight:800;color:#0F172A">💰 Ofertas ('+ofPed+' ped. · '+ofCar+' caros)</p><div style="background:#FAFAFA;border-radius:8px;overflow:hidden">'+htmlOf+'</div></div>':'')
         +(test>0?'<div style="background:#fff;padding:14px 24px;border-left:1px solid #E2E8F0;border-right:1px solid #E2E8F0"><p style="margin:0 0 8px;font-size:13px;font-weight:800;color:#0F172A">🎯 Estrategias</p><div style="background:#FAFAFA;border-radius:8px;overflow:hidden">'+htmlEst+'</div></div>':'')
