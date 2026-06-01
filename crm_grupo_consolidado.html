@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.32.7";
-const CRM_BUILD = "29/05/2026-ofertas-tab-todas";
+const CRM_VERSION = "3.32.9";
+const CRM_BUILD = "01/06/2026-incidencias-dias-badge";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -14228,6 +14228,34 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB,
           destinatarioId:infId,prioridad:"normal",creadoPor:usuario.id});
       }
     });
+    // (v3.32.0) Notificar a todos los intervinientes previos del hilo (quienes hayan escrito notas)
+    var _yaNotif=new Set([usuario.id]);
+    if(inc.autor) _yaNotif.add(inc.autor);
+    (inc.informadoA||[]).forEach(function(id){_yaNotif.add(id);});
+    // Extraer los que han escrito en historialEscalado
+    (inc.historialEscalado||[]).forEach(function(h){
+      if(!h.por) return;
+      var _u=USUARIOS.find(function(x){return x.nombre===h.por;});
+      if(!_u||_yaNotif.has(_u.id)) return;
+      _yaNotif.add(_u.id);
+      // Notificación in-app
+      despacharNotificacion({tipo:"incidencia",
+        titulo:"\uD83D\uDCAC Nueva nota: "+(inc.titulo||inc.asunto||inc.tipo||""),
+        mensaje:usuario.nombre+" ha comentado: "+(nota||""),
+        destinatarioId:_u.id,prioridad:"normal",creadoPor:usuario.id});
+      // Email si tiene dirección registrada
+      var _uEmail=buscarEmailUsuario(_u.id)||buscarEmailUsuario(_u.nombre);
+      if(_uEmail&&_uEmail.email){
+        fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({to:_uEmail.email,subject:asunto,html:emailHtml})
+        }).then(function(r){
+          if(!r.ok) console.warn("[hilo] Email falló para "+_u.nombre+": "+r.status);
+          else showEmailToast("\u2705 Email enviado a "+_u.nombre+" ("+_uEmail.email+")",true);
+        }).catch(function(e){console.warn("[hilo] Email error:",e);});
+      } else {
+        console.warn("[hilo] Sin email para interviniente: "+h.por);
+      }
+    });
   };
 
   // Filtrar por rol
@@ -14240,8 +14268,20 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB,
   }).filter(i=>filtroTipo==="todas"||i.tipo===filtroTipo)
     .filter(function(i){return pasaFiltroGeneral(i,periodoIF,equipoIF,agenteIF);});
 
-  const abiertas=misMostrar.filter(i=>i.estado!=="cerrada"&&i.estado!=="resuelta");
-  const cerradas=misMostrar.filter(i=>i.estado==="cerrada"||i.estado==="resuelta");
+  // (v3.32.8) Helper: fecha real de la incidencia como objeto Date
+  function _incFecha(i){
+    if(i.fechaCreacion){var f=new Date(i.fechaCreacion);if(!isNaN(f.getTime()))return f;}
+    if(i.fecha){
+      var p=(i.fecha||"").split("/");
+      if(p.length===3){var y=parseInt(p[2]);if(y<100)y+=2000;var fd=new Date(y,parseInt(p[1])-1,parseInt(p[0]));if(!isNaN(fd.getTime()))return fd;}
+      var f2=new Date(i.fecha);if(!isNaN(f2.getTime()))return f2;
+    }
+    return new Date(0);
+  }
+  function _incDias(i){return Math.floor((Date.now()-_incFecha(i).getTime())/86400000);}
+  const _sortNuevo=(a,b)=>_incFecha(b)-_incFecha(a);
+  const abiertas=misMostrar.filter(i=>i.estado!=="cerrada"&&i.estado!=="resuelta").sort(_sortNuevo);
+  const cerradas=misMostrar.filter(i=>i.estado==="cerrada"||i.estado==="resuelta").sort(_sortNuevo);
 
   // ── DETALLE ────────────────────────────────────────────────────────
 function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscalar,onInformar,onNota,onCerrar,onDel,onReasignar}){
@@ -14809,27 +14849,35 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
                 style={{background:"#fff",borderRadius:14,padding:"14px 16px",marginBottom:8,
                   cursor:"pointer",border:`1px solid ${T.border}`,borderLeft:`4px solid ${tipo.color}`,
                   boxShadow:"0 1px 3px rgba(0,0,0,.04)"}}>
-                <div style={{display:"flex",gap:8,marginBottom:6,flexWrap:"wrap"}}>
-                  <span style={{fontSize:11,fontWeight:700,color:tipo.color,
-                    background:tipo.color+"15",borderRadius:99,padding:"2px 8px"}}>{tipo.label}</span>
-                  <span style={{fontSize:11,fontWeight:700,color:pColor,
-                    background:pColor+"15",borderRadius:99,padding:"2px 8px"}}>
-                    {(i.prioridad||"media")==="urgente"?"🔴 Urgente":(i.prioridad||"media").charAt(0).toUpperCase()+(i.prioridad||"media").slice(1)}
-                  </span>
-                  {i.escaladoA&&<span style={{fontSize:11,fontWeight:700,color:T.purple,
-                    background:T.purpleL,borderRadius:99,padding:"2px 8px"}}>
-                    ↑ {(function(){var u=USUARIOS.find(function(x){return x.id===i.escaladoA;});return u?u.nombre:"";})()}
-                  </span>}
-                  <span style={{fontSize:10,color:T.muted,marginLeft:"auto"}}>{i.fecha}</span>
+                <div style={{display:"flex",alignItems:"flex-start",gap:10}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{display:"flex",gap:6,marginBottom:5,flexWrap:"wrap"}}>
+                      <span style={{fontSize:11,fontWeight:700,color:tipo.color,
+                        background:tipo.color+"15",borderRadius:99,padding:"2px 8px"}}>{tipo.label}</span>
+                      <span style={{fontSize:11,fontWeight:700,color:pColor,
+                        background:pColor+"15",borderRadius:99,padding:"2px 8px"}}>
+                        {(i.prioridad||"media")==="urgente"?"🔴 Urgente":(i.prioridad||"media").charAt(0).toUpperCase()+(i.prioridad||"media").slice(1)}
+                      </span>
+                      {i.escaladoA&&<span style={{fontSize:11,fontWeight:700,color:T.purple,
+                        background:T.purpleL,borderRadius:99,padding:"2px 8px"}}>
+                        ↑ {(function(){var u=USUARIOS.find(function(x){return x.id===i.escaladoA;});return u?u.nombre:"";})()}
+                      </span>}
+                    </div>
+                    <p style={{margin:"0 0 2px",fontSize:14,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{i.clienteNombre||i.cliente}</p>
+                    <p style={{margin:0,fontSize:11,color:T.muted}}>
+                      {i.fecha||i.fechaCreacionStr||""}
+                      {i.autorNombre||i.autor?" · 🧑‍💼 "+(i.autorNombre||(USUARIOS.find(function(u){return u.id===i.autor;})||{}).nombre||i.autor):""}
+                    </p>
+                    <p style={{margin:"3px 0 0",fontSize:12,color:T.muted,overflow:"hidden",
+                      textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{i.descripcion||i.desc}</p>
+                    {(i.informadoA||[]).length>0&&(
+                      <p style={{margin:"4px 0 0",fontSize:10,color:T.blue,fontWeight:600}}>
+                        ℹ️ Informado a: {(i.informadoA||[]).map(function(id){var u=USUARIOS.find(function(x){return x.id===id;});return (u&&u.nombre)||id;}).join(", ")}
+                      </p>
+                    )}
+                  </div>
+                  {(function(){var d=_incDias(i);var c=d>14?T.red:d>7?T.amber:T.green;return <span style={{fontSize:11,fontWeight:800,color:c,background:c+"18",padding:"4px 9px",borderRadius:7,flexShrink:0,marginTop:2}}>{d}d</span>;}())}
                 </div>
-                <p style={{margin:"0 0 3px",fontSize:14,fontWeight:700}}>{i.clienteNombre||i.cliente}</p>
-                <p style={{margin:0,fontSize:12,color:T.muted,overflow:"hidden",
-                  textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{i.descripcion||i.desc}</p>
-                {(i.informadoA||[]).length>0&&(
-                  <p style={{margin:"4px 0 0",fontSize:10,color:T.blue,fontWeight:600}}>
-                    ℹ️ Informado a: {(i.informadoA||[]).map(function(id){var u=USUARIOS.find(function(x){return x.id===id;});return (u&&u.nombre)||id;}).join(", ")}
-                  </p>
-                )}
               </div>
             );
           })}
@@ -14855,13 +14903,18 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
               <div key={i.id} onClick={()=>setSel(i)}
                 style={{background:"#F9FAFB",borderRadius:12,padding:"12px 14px",marginBottom:6,
                   cursor:"pointer",border:`1px solid ${T.border}`,opacity:.75}}>
-                <div style={{display:"flex",gap:8,marginBottom:4}}>
-                  <Badge label={tipo.label} color={T.muted}/>
-                  <span style={{fontSize:10,color:T.muted,marginLeft:"auto"}}>{i.fecha}</span>
+                <div style={{display:"flex",alignItems:"flex-start",gap:10}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{display:"flex",gap:6,marginBottom:4}}>
+                      <Badge label={tipo.label} color={T.muted}/>
+                    </div>
+                    <p style={{margin:"0 0 2px",fontSize:13,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{i.clienteNombre||i.cliente}</p>
+                    <p style={{margin:0,fontSize:11,color:T.muted}}>{i.fecha||i.fechaCreacionStr||""}</p>
+                    <p style={{margin:"2px 0 0",fontSize:11,color:T.muted,overflow:"hidden",
+                      textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{i.descripcion||i.desc}</p>
+                  </div>
+                  <span style={{fontSize:11,fontWeight:800,color:T.muted,background:T.border,padding:"4px 9px",borderRadius:7,flexShrink:0,marginTop:2}}>{_incDias(i)}d</span>
                 </div>
-                <p style={{margin:"0 0 2px",fontSize:13,fontWeight:700}}>{i.clienteNombre||i.cliente}</p>
-                <p style={{margin:0,fontSize:11,color:T.muted,overflow:"hidden",
-                  textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{i.descripcion||i.desc}</p>
               </div>
             );
           })}
