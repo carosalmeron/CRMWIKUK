@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.36.6";
-const CRM_BUILD = "02/06/2026-fix-potenciales-ref";
+const CRM_VERSION = "3.36.9";
+const CRM_BUILD = "02/06/2026-pedidos-tres-canales";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -26131,7 +26131,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
     {k:"visitas",       label:"Visitas presenciales",   ic:"👋", pts:8,  objKey:"visitas"},
     {k:"llamadas",      label:"Llamadas",               ic:"📞", pts:4,  objKey:"llamadas"},
     {k:"aprobadas",     label:"Estrategias aprobadas",  ic:"🏆", pts:4,  objKey:"aprobadas"},
-    {k:"potencialMix",  label:"Potencial (clientes×líneas)", ic:"📈", pts:12, objKey:"potencial_mix"},
+    {k:"potencialMix",  label:"Potencial cartera (clientes×líneas)", ic:"📈", pts:12, objKey:"_potencial_auto"},
   ]; // suma = 100
 
   // Objetivo proporcional al período
@@ -26143,24 +26143,38 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
   }
 
   // Score total sobre 100 — solo con objetivos configurados
-  function calcScoreObjetivo(s,equipoId){
+  function calcScoreObjetivo(s,equipoId,clientesVendedor){
     var total=0,hayAlguno=false;
     KPIS_SCORE.forEach(function(kpi){
-      var obj=objProporcional(equipoId,kpi.objKey);
+      var obj,real;
+      if(kpi.objKey==="_potencial_auto"){
+        obj=(clientesVendedor||0)*5;
+        real=s.potencialMix||0;
+      } else {
+        obj=objProporcional(equipoId,kpi.objKey);
+        real=s[kpi.k]||0;
+      }
       if(!obj) return;
       hayAlguno=true;
-      var real=s[kpi.k]||0;
-      var pct=Math.min(1,real/obj); // cap 100% por KPI
+      var pct=Math.min(1,real/obj);
       total+=pct*kpi.pts;
     });
     return hayAlguno?Math.round(total):null;
   }
 
   // Desglose por KPI (para la ficha)
-  function desglosePuntos(s,equipoId){
+  function desglosePuntos(s,equipoId,clientesVendedor){
     return KPIS_SCORE.map(function(kpi){
-      var obj=objProporcional(equipoId,kpi.objKey);
-      var real=kpi.k==="potencialMix"?(s.potencialMix||0):(s[kpi.k]||0);
+      var obj,real;
+      if(kpi.objKey==="_potencial_auto"){
+        // Objetivo automático: clientes en cartera × 5 líneas
+        var nClientes=clientesVendedor||0;
+        obj=nClientes*5; // target fijo, no configurable
+        real=s.potencialMix||0;
+      } else {
+        obj=objProporcional(equipoId,kpi.objKey);
+        real=s[kpi.k]||0;
+      }
       var pct=obj>0?Math.min(1,real/obj):null;
       var ptsGanados=pct!==null?Math.round(pct*kpi.pts):null;
       return {k:kpi.k,label:kpi.label,ic:kpi.ic,ptsMax:kpi.pts,real,obj,pct,pts:ptsGanados};
@@ -26228,8 +26242,11 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
       var ofertasAceptadas=ofertas.filter(function(x){return x.estado==="pedido";}).length;
       var ofertasCaro=ofertas.filter(function(x){return x.estado==="caro";}).length;
       var ofertasEnviadas=ofertasPend+ofertasAceptadas+ofertasCaro; // total ofertas formales
-      var pedidosVisita=visitasPedido; // pedidos anotados en campo (van a Actividad)
-      var pedidos=ofertasAceptadas; // solo ofertas formales aceptadas
+      var pedidosVisita=visitasPedido;
+      var pedidosOferta=ofertasAceptadas;
+      var pedidosEstrategia=estrategiasAprobadas;
+      // (v3.36.9) Pedidos = visita resultado pedido + oferta aceptada + estrategia aprobada
+      var pedidos=pedidosVisita+pedidosOferta+pedidosEstrategia;
       var estrategiasAll=(estrategiasDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente)&&enPeriodo(x.fechaCreacion||x.fecha);});
       var estrategias=estrategiasAll.length;
       var estrategiasAprobadas=estrategiasAll.filter(function(x){
@@ -26274,7 +26291,12 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
       if(incViejas>0)semaforo="rojo";
       if(semaforo==="verde"&&incAbiertas>2)semaforo="ambar";
 
-      map[v.id]={nom:v.nombre,visitas,llamadas,muestras,muestrasOk,muestrasPend,muestrasKo,ofertasPend,ofertasAceptadas,ofertasCaro,ofertasEnviadas,pedidosVisita,pedidos,estrategias,estrategiasAprobadas,aprobadas:estrategiasAprobadas,opos,oposAbiertas,potenciales:potClientes,potencialMix,potClientes,potMediaLineas,incAbiertas,incViejas,diasSinAct,rawScore,score:0,semaforo,ultimaFecha,v};
+      // Clientes en cartera del vendedor
+      var nClientes=(clientesDB&&(clientesDB._todos||clientesDB)||[]).filter(function(c){
+        return esDeV(c.agente||c.agenteId)||esDeV(c.vendedor);
+      }).length;
+
+      map[v.id]={nom:v.nombre,visitas,llamadas,muestras,muestrasOk,muestrasPend,muestrasKo,ofertasPend,ofertasAceptadas,ofertasCaro,ofertasEnviadas,pedidosVisita,pedidosOferta,pedidosEstrategia,pedidos,estrategias,estrategiasAprobadas,aprobadas:estrategiasAprobadas,opos,oposAbiertas,potenciales:potClientes,potencialMix,potClientes,potMediaLineas,nClientes,incAbiertas,incViejas,diasSinAct,rawScore,score:0,semaforo,ultimaFecha,v};
     });
     // (v3.34.6) Normalizar score contra el mejor del equipo → el top = 100
     var maxRaw=Object.values(map).reduce(function(mx,s){return Math.max(mx,s.rawScore);},1);
@@ -26389,7 +26411,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
             </div>
             {(function(){
               var eq=vendedorSel.equipo||"todos";
-              var sc=calcScoreObjetivo(sv,eq);
+              var sc=calcScoreObjetivo(sv,eq,sv.nClientes||0);
               if(sc===null){
                 var col2=COL[sv.semaforo||"ambar"];
                 return <div style={{textAlign:"right"}}>
@@ -26413,7 +26435,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
         {/* (v3.36.5) Score 100 pts — filas compactas */}
         {(function(){
           var eq=vendedorSel.equipo||"todos";
-          var desglose=desglosePuntos(sv,eq);
+          var desglose=desglosePuntos(sv,eq,sv.nClientes||0);
           var totalPts=desglose.reduce(function(s,d){return s+(d.pts!==null?d.pts:0);},0);
           var maxPts=desglose.reduce(function(s,d){return s+(d.pts!==null?d.pts:d.pts===null&&d.obj>0?d.pts:0);},0);
           var hayObjetivos=desglose.some(function(d){return d.obj>0;});
@@ -26453,6 +26475,15 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
               var pct=d.pct!==null?Math.round(d.pct*100):null;
               var col=pct===null?"#94A3B8":pct>=100?"#22C55E":pct>=70?"#F59E0B":"#EF4444";
               var real=d.k==="potencialMix"?(Math.round((sv.potencialMix||0)*10)/10):d.real;
+              // Sub-info para pedidos
+              var subInfo=null;
+              if(d.k==="pedidos"&&d.real>0){
+                var parts=[];
+                if(sv.pedidosVisita>0) parts.push("👋"+sv.pedidosVisita+" visita");
+                if(sv.pedidosOferta>0) parts.push("💰"+sv.pedidosOferta+" oferta");
+                if(sv.pedidosEstrategia>0) parts.push("🏆"+sv.pedidosEstrategia+" estrategia");
+                if(parts.length>1) subInfo=parts.join(" · ");
+              }
               var objLabel=d.k==="potencialMix"?"mix":d.objKey;
               return <div key={d.k} onClick={function(){
                   var filtMap={pedidos:"pedido",muestrasOk:"muestra_ok",ofertasEnviadas:"oferta_enviada",
@@ -26480,6 +26511,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
                     <span style={{fontSize:11,fontWeight:700,color:col,flexShrink:0,minWidth:32,textAlign:"right"}}>{pct}%</span>
                     <span style={{fontSize:11,color:T.muted,flexShrink:0,minWidth:40,textAlign:"right"}}>{real}/{d.obj}</span>
                   </div>:<div style={{fontSize:11,color:"#CBD5E1",fontStyle:"italic"}}>sin objetivo</div>}
+                  {subInfo&&<div style={{fontSize:10,color:T.muted,marginTop:2}}>{subInfo}</div>}
                 </div>
               </div>;
             })}
@@ -26586,8 +26618,11 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
       {k:"visitas",       l:"👋 Visitas presenciales / mes     (8 pts)"},
       {k:"llamadas",      l:"📞 Llamadas / mes                 (4 pts)"},
       {k:"aprobadas",     l:"🏆 Estrategias aprobadas / mes   (4 pts)"},
-      {k:"potencial_mix", l:"📈 Potencial mix objetivo (clientes×líneas)  (12 pts)"},
+      // Potencial (12 pts) se calcula automáticamente: clientes cartera × 5 líneas
     ];
+    var infoAuto=<p style={{fontSize:11,color:"#6366F1",background:"#EEF2FF",borderRadius:8,padding:"8px 12px",margin:"0 0 14px"}}>
+      📈 <strong>Potencial cartera (12 pts)</strong> — calculado automáticamente: clientes del vendedor × 5 líneas objetivo. Sin configuración manual.
+    </p>;
     var objActual=objetivosDB[equipoEditando]||{};
 
     function guardarObjetivos(){
@@ -26639,6 +26674,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
           <p style={{margin:"0 0 14px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase",letterSpacing:".06em"}}>
             Equipo: {equipoEditando==="todos"?"🌐 Por defecto (todos)":equipoEditando}
           </p>
+          {infoAuto}
           {CAMPOS_OBJ.map(function(c){
             return(
               <div key={c.k} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
@@ -26774,7 +26810,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
                 </div>
                 {/* Barra de objetivo si está configurado */}
                 {(function(){
-                  var sc=calcScoreObjetivo(s,v.equipo||"todos");
+                  var sc=calcScoreObjetivo(s,v.equipo||"todos",s.nClientes||0);
                   if(sc===null) return null;
                   var bc=sc>=100?"#22C55E":sc>=70?"#F59E0B":"#EF4444";
                   return <div style={{marginTop:6}}>
@@ -26790,7 +26826,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
               </div>
               <div style={{textAlign:"right",flexShrink:0}}>
                 {(function(){
-                  var sc=calcScoreObjetivo(s,v.equipo||"todos");
+                  var sc=calcScoreObjetivo(s,v.equipo||"todos",s.nClientes||0);
                   if(sc!==null){
                     var col2=sc>=100?"#22C55E":sc>=70?"#F59E0B":"#EF4444";
                     return <><div style={{fontSize:20,fontWeight:900,color:col2}}>{sc}<span style={{fontSize:12}}>%</span></div>
