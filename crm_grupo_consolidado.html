@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.34.9";
-const CRM_BUILD = "02/06/2026-kpi-filtro-pedidos";
+const CRM_VERSION = "3.35.2";
+const CRM_BUILD = "02/06/2026-muestras-pesos-resultado";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -26146,11 +26146,20 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
       function esDeV(campo){return campo&&ids.has(String(campo).toUpperCase());}
       function esDeV2(c1,c2){return esDeV(c1)||esDeV(c2);}
 
-      var visitas=(visitasDB||[]).filter(function(x){return !x.eliminada&&esDeV2(x.agente,x.agenteId)&&enPeriodo(x.fecha||x.fechaStr);}).length;
-      var visitasPedido=(visitasDB||[]).filter(function(x){return !x.eliminada&&esDeV2(x.agente,x.agenteId)&&enPeriodo(x.fecha||x.fechaStr)&&x.resultado==="pedido";}).length;
-      var muestras=(muestrasDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente)&&enPeriodo(x.fecha||x.fechaCreacion);}).length;
+      // (v3.35.1) Diferenciar llamadas de visitas presenciales
+      var visitasAll=(visitasDB||[]).filter(function(x){return !x.eliminada&&esDeV2(x.agente,x.agenteId)&&enPeriodo(x.fecha||x.fechaStr);});
+      var visitas=visitasAll.filter(function(x){var r=x.resultado||"";return r!=="llamada"&&r!=="no_contesta";}).length;
+      var llamadas=visitasAll.filter(function(x){return x.resultado==="llamada";}).length;
+      var visitasPedido=visitasAll.filter(function(x){return x.resultado==="pedido";}).length;
+      // (v3.35.2) Muestras diferenciadas por resultado
+      var muestrasAll=(muestrasDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente)&&enPeriodo(x.fecha||x.fechaCreacion);});
+      var muestras=muestrasAll.length; // total para KPI display
+      var muestrasPend=muestrasAll.filter(function(x){return x.estado==="pendiente"||!x.estado;}).length;
+      var muestrasOk=muestrasAll.filter(function(x){return x.estado==="positivo"||x.estado==="pedido";}).length;
+      var muestrasKo=muestrasAll.filter(function(x){return x.estado==="ko";}).length;
       var ofertas=(ofertasDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente)&&enPeriodo(x.fecha||x.fechaCreacion);});
       var ofertasPend=ofertas.filter(function(x){return x.estado==="pendiente";}).length;
+      var ofertasCaro=ofertas.filter(function(x){return x.estado==="caro";}).length;
       var pedidos=ofertas.filter(function(x){return x.estado==="pedido";}).length + visitasPedido;
       var estrategias=(estrategiasDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente)&&enPeriodo(x.fechaCreacion||x.fecha);}).length;
       var opos=(oportunidadesDB||[]).filter(function(x){return !x.eliminada&&esDeV2(x.agente,x.agenteId)&&enPeriodo(x.fechaCreacion||x.creadaEn);}).length;
@@ -26175,16 +26184,19 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
       var diasSinAct=ultimaFecha?Math.floor((Date.now()-ultimaFecha.getTime())/86400000):999;
 
       var rawScore=
-        visitas*4+muestras*5+pedidos*8+estrategias*3+opos*4+potenciales*3
-        -incAbiertas*5-incViejas*8-ofertasPend*1
-        -(diasSinAct>7?(diasSinAct-7)*2:0);
+        visitas*3 + llamadas*1
+        + muestrasPend*3 + muestrasOk*12 + muestrasKo*1
+        + pedidos*15 + estrategias*4 + opos*5 + potenciales*3
+        - incAbiertas*5 - incViejas*8
+        - ofertasPend*1 - ofertasCaro*3
+        - (diasSinAct>7?(diasSinAct-7)*2:0);
       if(rawScore<0)rawScore=0;
 
       var semaforo=diasSinAct<=3?"verde":diasSinAct<=7?"ambar":"rojo";
       if(incViejas>0)semaforo="rojo";
       if(semaforo==="verde"&&incAbiertas>2)semaforo="ambar";
 
-      map[v.id]={nom:v.nombre,visitas,muestras,ofertasPend,pedidos,estrategias,opos,oposAbiertas,potenciales,incAbiertas,incViejas,diasSinAct,rawScore,score:0,semaforo,ultimaFecha,v};
+      map[v.id]={nom:v.nombre,visitas,llamadas,muestras,muestrasOk,muestrasPend,muestrasKo,ofertasPend,ofertasCaro,pedidos,estrategias,opos,oposAbiertas,potenciales,incAbiertas,incViejas,diasSinAct,rawScore,score:0,semaforo,ultimaFecha,v};
     });
     // (v3.34.6) Normalizar score contra el mejor del equipo → el top = 100
     var maxRaw=Object.values(map).reduce(function(mx,s){return Math.max(mx,s.rawScore);},1);
@@ -26270,6 +26282,8 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
       if(e.fecha<cutoff||e.fecha>cutoffTo) return false;
       if(!filtroTipoEv) return true;
       if(filtroTipoEv==="pedido") return e.tipo==="pedido"||(e.tipo==="visita"&&(e.raw||{}).resultado==="pedido")||(e.tipo==="oferta"&&(e.raw||{}).estado==="pedido");
+      if(filtroTipoEv==="llamada") return e.tipo==="visita"&&(e.raw||{}).resultado==="llamada";
+      if(filtroTipoEv==="visita") return e.tipo==="visita"&&(e.raw||{}).resultado!=="llamada";
       return e.tipo===filtroTipoEv;
     });
 
@@ -26302,8 +26316,10 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:12}}>
           {[
             {l:"Visitas",    v:sv.visitas||0,    ic:"👋",c:"#3B82F6", t:"visita"},
-            {l:"Muestras",  v:sv.muestras||0,   ic:"📦",c:"#8B5CF6", t:"muestra"},
-            {l:"Pedidos",   v:sv.pedidos||0,    ic:"✅",c:"#22C55E", t:"pedido"},
+            {l:"Llamadas",   v:sv.llamadas||0,   ic:"📞",c:"#93C5FD", t:"llamada"},
+            {l:"Muestras",   v:sv.muestras||0,   ic:"📦",c:"#8B5CF6", t:"muestra",
+              sub:(sv.muestrasOk||0)>0?"✅"+sv.muestrasOk+" ok":undefined},
+            {l:"Pedidos",    v:sv.pedidos||0,    ic:"✅",c:"#22C55E", t:"pedido"},
             {l:"Estrategias",v:sv.estrategias||0,ic:"🎯",c:"#10B981",t:"estrategia"},
             {l:"Oportunidades",v:sv.opos||0,    ic:"💼",c:"#6366F1", t:"oportunidad"},
             {l:"Potenciales",v:sv.potenciales||0,ic:"📈",c:"#0EA5E9",t:"potencial"},
@@ -26318,6 +26334,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
                 <div style={{fontSize:18}}>{k.ic}</div>
                 <div style={{fontSize:22,fontWeight:900,color:k.c}}>{k.v}</div>
                 <div style={{fontSize:10,color:activo?k.c:T.muted,marginTop:2,fontWeight:activo?700:400}}>{k.l}</div>
+                {k.sub&&<div style={{fontSize:10,color:"#22C55E",fontWeight:700}}>{k.sub}</div>}
               </div>
             );
           })}
@@ -26511,6 +26528,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
                 {/* Mini KPIs */}
                 <div style={{display:"flex",gap:6,marginTop:4,flexWrap:"wrap"}}>
                   <span style={{fontSize:10,color:"#3B82F6"}}>👋{s.visitas||0}</span>
+                  {(s.llamadas||0)>0&&<span style={{fontSize:10,color:"#93C5FD"}}>📞{s.llamadas||0}</span>}
                   <span style={{fontSize:10,color:"#8B5CF6"}}>📦{s.muestras||0}</span>
                   <span style={{fontSize:10,color:"#22C55E"}}>✅{s.pedidos||0}</span>
                   <span style={{fontSize:10,color:"#6366F1"}}>💼{s.opos||0}</span>
