@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.35.2";
-const CRM_BUILD = "02/06/2026-muestras-pesos-resultado";
+const CRM_VERSION = "3.35.5";
+const CRM_BUILD = "02/06/2026-objetivos-por-equipo";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -26081,10 +26081,20 @@ function MiniBar({datos,color,height=80,labels}){
 function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB,incidenciasDB,ofertasDB,visitasDB:visitasDBProp}){
   const [visitasDB,setVisitasDB]=React.useState(visitasDBProp||[]);
   const [potencialesDB,setPotencialesDB]=React.useState([]);
+  const [objetivosDB,setObjetivosDB]=React.useState({}); // {equipoId: {visitas,llamadas,muestras,muestrasOk,pedidos,aprobadas,...}}
+  const [vistaObjetivos,setVistaObjetivos]=React.useState(false);
+  const [guardandoObj,setGuardandoObj]=React.useState(false);
+
   React.useEffect(function(){
     if(visitasDBProp&&visitasDBProp.length>0){setVisitasDB(visitasDBProp);}
     else{fbLeer("visitas").then(function(d){setVisitasDB(d||[]);}).catch(function(){});}
     fbLeer("potenciales").then(function(d){setPotencialesDB((d||[]).filter(function(x){return !x.eliminada;}));}).catch(function(){});
+    // Cargar objetivos por equipo
+    fbLeer("objetivos_equipo").then(function(d){
+      var map={};
+      (d||[]).forEach(function(o){if(o.equipo)map[o.equipo]=o;});
+      setObjetivosDB(map);
+    }).catch(function(){});
   },[]);
   const [vendedorSel,setVendedorSel]=React.useState(null);
   const [evAbierto,setEvAbierto]=React.useState(null);
@@ -26100,6 +26110,45 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
 
   const esDir=["director","ceo"].includes(usuario.rol);
   const miEquipo=usuario.equipo||"";
+
+  // Días en el rango seleccionado → para proporcionar objetivo mensual
+  const diasRango=React.useMemo(function(){
+    var f=cutoff,t=cutoffTo;
+    return Math.max(1,Math.round((t.getTime()-f.getTime())/86400000));
+  },[cutoff,cutoffTo]);
+
+  // Objetivo proporcional: objetivo mensual × (diasRango/30)
+  function objProporcional(equipoId,campo){
+    var obj=objetivosDB[equipoId]||objetivosDB["todos"]||{};
+    var mensual=parseInt(obj[campo]||0);
+    if(!mensual) return 0;
+    return Math.max(1,Math.round(mensual*(diasRango/30)));
+  }
+
+  // Score basado en % de objetivo cumplido por KPI
+  function calcScoreObjetivo(s,equipoId){
+    var campos=[
+      {k:"visitas",    w:10},
+      {k:"llamadas",   w:5},
+      {k:"muestras",   w:15},
+      {k:"muestrasOk", w:20},
+      {k:"pedidos",    w:25},
+      {k:"aprobadas",  w:15},
+      {k:"estrategias",w:5},
+      {k:"opos",       w:5},
+    ];
+    var totalPeso=0,totalScore=0;
+    campos.forEach(function(c){
+      var obj=objProporcional(equipoId,c.k);
+      if(!obj) return; // si no hay objetivo, no cuenta
+      var real=s[c.k]||0;
+      var pct=Math.min(150,Math.round((real/obj)*100)); // cap 150%
+      totalScore+=pct*c.w;
+      totalPeso+=c.w;
+    });
+    if(!totalPeso) return null; // sin objetivos configurados
+    return Math.round(totalScore/totalPeso);
+  }
 
   // Vendedores visibles
   const vendedores=React.useMemo(()=>
@@ -26161,7 +26210,12 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
       var ofertasPend=ofertas.filter(function(x){return x.estado==="pendiente";}).length;
       var ofertasCaro=ofertas.filter(function(x){return x.estado==="caro";}).length;
       var pedidos=ofertas.filter(function(x){return x.estado==="pedido";}).length + visitasPedido;
-      var estrategias=(estrategiasDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente)&&enPeriodo(x.fechaCreacion||x.fecha);}).length;
+      var estrategiasAll=(estrategiasDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente)&&enPeriodo(x.fechaCreacion||x.fecha);});
+      var estrategias=estrategiasAll.length;
+      var estrategiasAprobadas=estrategiasAll.filter(function(x){
+        return x.estado==="aprobada"||x.estado==="en_curso"||
+          (x.resolucion&&(x.resolucion.tipo==="aprobada"||x.resolucion.tipo==="aprobada_parcial"));
+      }).length;
       var opos=(oportunidadesDB||[]).filter(function(x){return !x.eliminada&&esDeV2(x.agente,x.agenteId)&&enPeriodo(x.fechaCreacion||x.creadaEn);}).length;
       var oposAbiertas=(oportunidadesDB||[]).filter(function(x){return !x.eliminada&&esDeV2(x.agente,x.agenteId)&&!["ganada","perdida","cerrada","cerrada_ganada","cerrada_perdida"].includes(x.estado||x.etapa);}).length;
       var potenciales=(potencialesDB||[]).filter(function(x){return esDeV(x.agente)&&(x.lineas||[]).length>0;}).length;
@@ -26186,7 +26240,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
       var rawScore=
         visitas*3 + llamadas*1
         + muestrasPend*3 + muestrasOk*12 + muestrasKo*1
-        + pedidos*15 + estrategias*4 + opos*5 + potenciales*3
+        + pedidos*15 + estrategias*2 + estrategiasAprobadas*12 + opos*5 + potenciales*3
         - incAbiertas*5 - incViejas*8
         - ofertasPend*1 - ofertasCaro*3
         - (diasSinAct>7?(diasSinAct-7)*2:0);
@@ -26196,7 +26250,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
       if(incViejas>0)semaforo="rojo";
       if(semaforo==="verde"&&incAbiertas>2)semaforo="ambar";
 
-      map[v.id]={nom:v.nombre,visitas,llamadas,muestras,muestrasOk,muestrasPend,muestrasKo,ofertasPend,ofertasCaro,pedidos,estrategias,opos,oposAbiertas,potenciales,incAbiertas,incViejas,diasSinAct,rawScore,score:0,semaforo,ultimaFecha,v};
+      map[v.id]={nom:v.nombre,visitas,llamadas,muestras,muestrasOk,muestrasPend,muestrasKo,ofertasPend,ofertasCaro,pedidos,estrategias,estrategiasAprobadas,aprobadas:estrategiasAprobadas,opos,oposAbiertas,potenciales,incAbiertas,incViejas,diasSinAct,rawScore,score:0,semaforo,ultimaFecha,v};
     });
     // (v3.34.6) Normalizar score contra el mejor del equipo → el top = 100
     var maxRaw=Object.values(map).reduce(function(mx,s){return Math.max(mx,s.rawScore);},1);
@@ -26284,6 +26338,9 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
       if(filtroTipoEv==="pedido") return e.tipo==="pedido"||(e.tipo==="visita"&&(e.raw||{}).resultado==="pedido")||(e.tipo==="oferta"&&(e.raw||{}).estado==="pedido");
       if(filtroTipoEv==="llamada") return e.tipo==="visita"&&(e.raw||{}).resultado==="llamada";
       if(filtroTipoEv==="visita") return e.tipo==="visita"&&(e.raw||{}).resultado!=="llamada";
+      if(filtroTipoEv==="muestra_ok") return e.tipo==="muestra"&&((e.raw||{}).estado==="positivo"||(e.raw||{}).estado==="pedido");
+      if(filtroTipoEv==="caro") return e.tipo==="oferta"&&(e.raw||{}).estado==="caro";
+      if(filtroTipoEv==="estrategia_aprobada") return e.tipo==="estrategia"&&((e.raw||{}).estado==="aprobada"||(e.raw||{}).estado==="en_curso"||((e.raw||{}).resolucion&&((e.raw.resolucion.tipo==="aprobada")||(e.raw.resolucion.tipo==="aprobada_parcial"))));
       return e.tipo===filtroTipoEv;
     });
 
@@ -26317,10 +26374,12 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
           {[
             {l:"Visitas",    v:sv.visitas||0,    ic:"👋",c:"#3B82F6", t:"visita"},
             {l:"Llamadas",   v:sv.llamadas||0,   ic:"📞",c:"#93C5FD", t:"llamada"},
-            {l:"Muestras",   v:sv.muestras||0,   ic:"📦",c:"#8B5CF6", t:"muestra",
-              sub:(sv.muestrasOk||0)>0?"✅"+sv.muestrasOk+" ok":undefined},
-            {l:"Pedidos",    v:sv.pedidos||0,    ic:"✅",c:"#22C55E", t:"pedido"},
+            {l:"Muestras",   v:sv.muestras||0,   ic:"📦",c:"#8B5CF6", t:"muestra"},
+            {l:"M. Éxito",   v:sv.muestrasOk||0, ic:"✅",c:"#22C55E", t:"muestra_ok"},
+            {l:"Pedidos",    v:sv.pedidos||0,    ic:"🛒",c:"#16A34A", t:"pedido"},
+            {l:"Oferta 💸",  v:sv.ofertasCaro||0,ic:"💸",c:"#EF4444", t:"caro"},
             {l:"Estrategias",v:sv.estrategias||0,ic:"🎯",c:"#10B981",t:"estrategia"},
+            {l:"Of. Aprobadas",v:sv.estrategiasAprobadas||0,ic:"🏆",c:"#F59E0B",t:"estrategia_aprobada"},
             {l:"Oportunidades",v:sv.opos||0,    ic:"💼",c:"#6366F1", t:"oportunidad"},
             {l:"Potenciales",v:sv.potenciales||0,ic:"📈",c:"#0EA5E9",t:"potencial"},
             {l:"Incidencias",v:sv.incAbiertas||0,ic:"🚨",c:sv.incAbiertas>0?"#EF4444":T.muted,t:"incidencia"},
@@ -26438,6 +26497,92 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
     );
   }
 
+  // ── CONFIGURADOR DE OBJETIVOS ────────────────────────────────────
+  if(vistaObjetivos){
+    var equiposDisp=["todos",...new Set(USUARIOS.filter(function(u){return u.equipo;}).map(function(u){return u.equipo;}))];
+    var CAMPOS_OBJ=[
+      {k:"visitas",    l:"👋 Visitas presenciales/mes"},
+      {k:"llamadas",   l:"📞 Llamadas/mes"},
+      {k:"muestras",   l:"📦 Muestras totales/mes"},
+      {k:"muestrasOk", l:"✅ Muestras con éxito/mes"},
+      {k:"pedidos",    l:"🛒 Pedidos/mes"},
+      {k:"aprobadas",  l:"🏆 Ofertas aprobadas/mes"},
+      {k:"estrategias",l:"🎯 Estrategias/mes"},
+      {k:"opos",       l:"💼 Oportunidades/mes"},
+    ];
+    var [equipoEditando,setEquipoEditando]=React.useState(equiposDisp[0]);
+    var objActual=objetivosDB[equipoEditando]||{};
+    var [formObj,setFormObj]=React.useState(objActual);
+    // Sync when equipo changes
+    React.useEffect(function(){setFormObj(objetivosDB[equipoEditando]||{});},[ equipoEditando,objetivosDB]);
+
+    function guardarObjetivos(){
+      setGuardandoObj(true);
+      var doc=Object.assign({},formObj,{equipo:equipoEditando,actualizadoPor:usuario.nombre,fecha:new Date().toISOString()});
+      fbGuardar("objetivos_equipo",doc,doc.id||null).then(function(id){
+        setObjetivosDB(function(prev){var n=Object.assign({},prev);n[equipoEditando]=Object.assign({},doc,{id});return n;});
+        setGuardandoObj(false);
+        alert("✅ Objetivos guardados para \""+equipoEditando+"\"");
+      }).catch(function(e){setGuardandoObj(false);alert("Error: "+e.message);});
+    }
+
+    return(
+      <div style={{paddingBottom:80}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
+          <button onClick={function(){setVistaObjetivos(false);}} style={{background:"#1E293B",border:"none",
+            color:"#fff",borderRadius:8,padding:"8px 16px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+            ← Volver
+          </button>
+          <h2 style={{margin:0,fontSize:18,fontWeight:900}}>⚙️ Objetivos por equipo</h2>
+        </div>
+        <p style={{margin:"0 0 16px",fontSize:12,color:T.muted}}>
+          Los objetivos son mensuales (30 días). En la Sala de Mandos se adaptan automáticamente al período que estés viendo.
+        </p>
+
+        {/* Selector de equipo */}
+        <div style={{display:"flex",gap:8,marginBottom:20,overflowX:"auto",paddingBottom:4}}>
+          {equiposDisp.map(function(eq){
+            var activo=equipoEditando===eq;
+            var eqColor=USUARIOS.find(function(u){return u.equipo===eq;})?.color||"#6366F1";
+            return <button key={eq} onClick={function(){setEquipoEditando(eq);}}
+              style={{flexShrink:0,padding:"8px 16px",borderRadius:99,cursor:"pointer",
+                border:"2px solid "+(activo?eqColor:"#E2E8F0"),
+                background:activo?eqColor:"#fff",
+                color:activo?"#fff":"#475569",fontSize:12,fontWeight:700}}>
+              {eq==="todos"?"🌐 Todos los equipos":eq}
+            </button>;
+          })}
+        </div>
+
+        {/* Formulario */}
+        <div style={{background:"#fff",borderRadius:14,padding:"16px",border:"1px solid "+T.border,marginBottom:16}}>
+          <p style={{margin:"0 0 14px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase",letterSpacing:".06em"}}>
+            Equipo: {equipoEditando==="todos"?"🌐 Por defecto (todos)":equipoEditando}
+          </p>
+          {CAMPOS_OBJ.map(function(c){
+            return(
+              <div key={c.k} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                padding:"10px 0",borderBottom:"1px solid "+T.border}}>
+                <label style={{fontSize:13,color:T.text,flex:1}}>{c.l}</label>
+                <input type="number" min="0" value={formObj[c.k]||""}
+                  onChange={function(e){var v=e.target.value;setFormObj(function(f){var n=Object.assign({},f);n[c.k]=v;return n;});}}
+                  placeholder="0"
+                  style={{width:72,padding:"7px 10px",borderRadius:8,border:"1.5px solid "+T.border,
+                    fontSize:14,fontWeight:700,textAlign:"right",outline:"none",fontFamily:"inherit"}}/>
+              </div>
+            );
+          })}
+        </div>
+
+        <button onClick={guardarObjetivos} disabled={guardandoObj}
+          style={{width:"100%",padding:"14px",borderRadius:10,background:"#1E293B",color:"#fff",
+            border:"none",fontSize:15,fontWeight:700,cursor:"pointer",opacity:guardandoObj?.6:1}}>
+          {guardandoObj?"⏳ Guardando...":"💾 Guardar objetivos"}
+        </button>
+      </div>
+    );
+  }
+
   // ── VISTA RADAR ──────────────────────────────────────────────────
   if(vista==="radar") return(
     <div style={{paddingBottom:80}}>
@@ -26447,12 +26592,21 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
           <h2 style={{margin:0,fontSize:20,fontWeight:900}}>🎯 Sala de Mandos</h2>
           <p style={{margin:0,fontSize:12,color:T.muted}}>{vendedores.length} vendedores · {alertas.filter(function(a){return a.tipo==="rojo";}).length} alertas críticas</p>
         </div>
-        {alertas.length>0&&(
-          <button onClick={function(){setVista("alertas");}} style={{background:"#FEF2F2",border:"1.5px solid #EF4444",
-            color:"#DC2626",borderRadius:99,padding:"6px 14px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
-            🚨 {alertas.length}
-          </button>
-        )}
+        <div style={{display:"flex",gap:8}}>
+          {(esDir||["crm_jefe","jefe"].includes(usuario.rol))&&(
+            <button onClick={function(){setVistaObjetivos(true);}}
+              style={{background:"#F8FAFC",border:"1.5px solid #E2E8F0",color:"#475569",
+                borderRadius:8,padding:"7px 12px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+              ⚙️ Objetivos
+            </button>
+          )}
+          {alertas.length>0&&(
+            <button onClick={function(){setVista("alertas");}} style={{background:"#FEF2F2",border:"1.5px solid #EF4444",
+              color:"#DC2626",borderRadius:99,padding:"6px 14px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+              🚨 {alertas.length}
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Filtro de fechas — accesos rápidos + rango libre */}
@@ -26529,12 +26683,29 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
                 <div style={{display:"flex",gap:6,marginTop:4,flexWrap:"wrap"}}>
                   <span style={{fontSize:10,color:"#3B82F6"}}>👋{s.visitas||0}</span>
                   {(s.llamadas||0)>0&&<span style={{fontSize:10,color:"#93C5FD"}}>📞{s.llamadas||0}</span>}
-                  <span style={{fontSize:10,color:"#8B5CF6"}}>📦{s.muestras||0}</span>
-                  <span style={{fontSize:10,color:"#22C55E"}}>✅{s.pedidos||0}</span>
-                  <span style={{fontSize:10,color:"#6366F1"}}>💼{s.opos||0}</span>
-                  <span style={{fontSize:10,color:"#10B981"}}>🎯{s.estrategias||0}</span>
+                  <span style={{fontSize:10,color:"#8B5CF6"}}>📦{s.muestras||0}{(s.muestrasOk||0)>0&&<span style={{color:"#22C55E"}}>→✅{s.muestrasOk}</span>}</span>
+                  <span style={{fontSize:10,color:"#22C55E"}}>🛒{s.pedidos||0}</span>
+                  {(s.ofertasCaro||0)>0&&<span style={{fontSize:10,color:"#EF4444"}}>💸{s.ofertasCaro}</span>}
+                  {(s.opos||0)>0&&<span style={{fontSize:10,color:"#6366F1"}}>💼{s.opos}</span>}
+                  {(s.estrategias||0)>0&&<span style={{fontSize:10,color:"#10B981"}}>🎯{s.estrategias}</span>}
+                  {(s.estrategiasAprobadas||0)>0&&<span style={{fontSize:10,color:"#F59E0B",fontWeight:700}}>🏆{s.estrategiasAprobadas}</span>}
                   {s.incAbiertas>0&&<span style={{fontSize:10,color:"#EF4444"}}>🚨{s.incAbiertas}</span>}
                 </div>
+                {/* Barra de objetivo si está configurado */}
+                {(function(){
+                  var sc=calcScoreObjetivo(s,v.equipo||"todos");
+                  if(sc===null) return null;
+                  var bc=sc>=100?"#22C55E":sc>=70?"#F59E0B":"#EF4444";
+                  return <div style={{marginTop:6}}>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                      <span style={{fontSize:9,color:T.muted,fontWeight:600}}>OBJETIVO {diasRango}d</span>
+                      <span style={{fontSize:10,fontWeight:800,color:bc}}>{sc}%</span>
+                    </div>
+                    <div style={{height:4,background:T.border,borderRadius:2,overflow:"hidden"}}>
+                      <div style={{height:"100%",width:Math.min(100,sc)+"%",background:bc,borderRadius:2,transition:"width .4s"}}/>
+                    </div>
+                  </div>;
+                })()}
               </div>
               <div style={{textAlign:"right",flexShrink:0}}>
                 <div style={{fontSize:20,fontWeight:900,color:col}}>{s.score}</div>
