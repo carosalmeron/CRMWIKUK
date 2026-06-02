@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.36.3";
-const CRM_BUILD = "02/06/2026-fix-guardar-objetivos";
+const CRM_VERSION = "3.36.5";
+const CRM_BUILD = "02/06/2026-score-100pts-filas";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -26122,7 +26122,19 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
     return Math.max(1,Math.round((t.getTime()-f.getTime())/86400000));
   },[dateFrom,dateTo]);
 
-  // Objetivo proporcional: objetivo mensual × (diasRango/30)
+  // (v3.36.5) Sistema de 100 puntos fijos — pesos inamovibles
+  const KPIS_SCORE=[
+    {k:"pedidos",       label:"Pedidos cerrados",      ic:"🛒", pts:30, objKey:"pedidos"},
+    {k:"muestrasOk",    label:"Muestras con éxito",    ic:"✅", pts:20, objKey:"muestrasOk"},
+    {k:"ofertasEnviadas",label:"Ofertas enviadas",      ic:"💰", pts:13, objKey:"ofertas"},
+    {k:"muestras",      label:"Muestras enviadas",      ic:"📦", pts:9,  objKey:"muestras"},
+    {k:"visitas",       label:"Visitas presenciales",   ic:"👋", pts:8,  objKey:"visitas"},
+    {k:"llamadas",      label:"Llamadas",               ic:"📞", pts:4,  objKey:"llamadas"},
+    {k:"aprobadas",     label:"Estrategias aprobadas",  ic:"🏆", pts:4,  objKey:"aprobadas"},
+    {k:"potencialMix",  label:"Potencial (clientes×líneas)", ic:"📈", pts:12, objKey:"potencial_mix"},
+  ]; // suma = 100
+
+  // Objetivo proporcional al período
   function objProporcional(equipoId,campo){
     var obj=objetivosDB[equipoId]||objetivosDB["todos"]||{};
     var mensual=parseInt(obj[campo]||0);
@@ -26130,29 +26142,29 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
     return Math.max(1,Math.round(mensual*(diasRango/30)));
   }
 
-  // Score basado en % de objetivo cumplido por KPI
+  // Score total sobre 100 — solo con objetivos configurados
   function calcScoreObjetivo(s,equipoId){
-    var campos=[
-      {k:"visitas",    w:10},
-      {k:"llamadas",   w:5},
-      {k:"muestras",   w:15},
-      {k:"muestrasOk", w:20},
-      {k:"pedidos",    w:25},
-      {k:"aprobadas",  w:15},
-      {k:"estrategias",w:5},
-      {k:"opos",       w:5},
-    ];
-    var totalPeso=0,totalScore=0;
-    campos.forEach(function(c){
-      var obj=objProporcional(equipoId,c.k);
-      if(!obj) return; // si no hay objetivo, no cuenta
-      var real=s[c.k]||0;
-      var pct=Math.min(150,Math.round((real/obj)*100)); // cap 150%
-      totalScore+=pct*c.w;
-      totalPeso+=c.w;
+    var total=0,hayAlguno=false;
+    KPIS_SCORE.forEach(function(kpi){
+      var obj=objProporcional(equipoId,kpi.objKey);
+      if(!obj) return;
+      hayAlguno=true;
+      var real=s[kpi.k]||0;
+      var pct=Math.min(1,real/obj); // cap 100% por KPI
+      total+=pct*kpi.pts;
     });
-    if(!totalPeso) return null; // sin objetivos configurados
-    return Math.round(totalScore/totalPeso);
+    return hayAlguno?Math.round(total):null;
+  }
+
+  // Desglose por KPI (para la ficha)
+  function desglosePuntos(s,equipoId){
+    return KPIS_SCORE.map(function(kpi){
+      var obj=objProporcional(equipoId,kpi.objKey);
+      var real=kpi.k==="potencialMix"?(s.potencialMix||0):(s[kpi.k]||0);
+      var pct=obj>0?Math.min(1,real/obj):null;
+      var ptsGanados=pct!==null?Math.round(pct*kpi.pts):null;
+      return {k:kpi.k,label:kpi.label,ic:kpi.ic,ptsMax:kpi.pts,real,obj,pct,pts:ptsGanados};
+    });
   }
 
   // Vendedores visibles
@@ -26226,7 +26238,11 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
       }).length;
       var opos=(oportunidadesDB||[]).filter(function(x){return !x.eliminada&&esDeV2(x.agente,x.agenteId)&&enPeriodo(x.fechaCreacion||x.creadaEn);}).length;
       var oposAbiertas=(oportunidadesDB||[]).filter(function(x){return !x.eliminada&&esDeV2(x.agente,x.agenteId)&&!["ganada","perdida","cerrada","cerrada_ganada","cerrada_perdida"].includes(x.estado||x.etapa);}).length;
-      var potenciales=(potencialesDB||[]).filter(function(x){return esDeV(x.agente)&&(x.lineas||[]).length>0;}).length;
+      // Potencial: mix clientes × líneas
+      var potClientes=(potencialesDB||[]).filter(function(x){return esDeV(x.agente)&&(x.lineas||[]).length>0;}).length;
+      var potLineasTotal=(potencialesDB||[]).filter(function(x){return esDeV(x.agente);}).reduce(function(s,x){return s+(x.lineas||[]).length;},0);
+      var potMediaLineas=potClientes>0?Math.round((potLineasTotal/potClientes)*10)/10:0;
+      var potencialMix=Math.round(potClientes*potMediaLineas*10)/10; // clientes × media lineas
       var incAbiertas=(incidenciasDB||[]).filter(function(x){return !x.eliminada&&esDeV2(x.agente,x.autor)&&x.estado!=="cerrada"&&x.estado!=="resuelta";}).length;
       var incViejas=(incidenciasDB||[]).filter(function(x){
         if(x.eliminada||!esDeV2(x.agente,x.autor)||x.estado==="cerrada"||x.estado==="resuelta") return false;
@@ -26258,7 +26274,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
       if(incViejas>0)semaforo="rojo";
       if(semaforo==="verde"&&incAbiertas>2)semaforo="ambar";
 
-      map[v.id]={nom:v.nombre,visitas,llamadas,muestras,muestrasOk,muestrasPend,muestrasKo,ofertasPend,ofertasAceptadas,ofertasCaro,ofertasEnviadas,pedidosVisita,pedidos,estrategias,estrategiasAprobadas,aprobadas:estrategiasAprobadas,opos,oposAbiertas,potenciales,incAbiertas,incViejas,diasSinAct,rawScore,score:0,semaforo,ultimaFecha,v};
+      map[v.id]={nom:v.nombre,visitas,llamadas,muestras,muestrasOk,muestrasPend,muestrasKo,ofertasPend,ofertasAceptadas,ofertasCaro,ofertasEnviadas,pedidosVisita,pedidos,estrategias,estrategiasAprobadas,aprobadas:estrategiasAprobadas,opos,oposAbiertas,potenciales:potClientes,potencialMix,potClientes,potMediaLineas,incAbiertas,incViejas,diasSinAct,rawScore,score:0,semaforo,ultimaFecha,v};
     });
     // (v3.34.6) Normalizar score contra el mejor del equipo → el top = 100
     var maxRaw=Object.values(map).reduce(function(mx,s){return Math.max(mx,s.rawScore);},1);
@@ -26363,7 +26379,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
             ← Volver al radar
           </button>
           <div style={{display:"flex",alignItems:"center",gap:12}}>
-            <div style={{width:48,height:48,borderRadius:14,background:vendedorSel.color+"20",
+            <div style={{width:48,height:48,borderRadius:14,background:(vendedorSel.color||"#6366F1")+"20",
               display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>
               {vendedorSel.icon||"🧑‍💼"}
             </div>
@@ -26371,126 +26387,105 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
               <p style={{margin:0,fontSize:17,fontWeight:800}}>{vendedorSel.nombre}</p>
               <p style={{margin:0,fontSize:12,color:T.muted}}>{vendedorSel.equipo||""}</p>
             </div>
-            <div style={{textAlign:"right"}}>
-              <div style={{fontSize:22,fontWeight:900,color:COL[sv.semaforo||"ambar"]}}>{sv.score||0}</div>
-              <div style={{fontSize:10,color:T.muted}}>score</div>
-            </div>
+            {(function(){
+              var eq=vendedorSel.equipo||"todos";
+              var sc=calcScoreObjetivo(sv,eq);
+              if(sc===null){
+                var col2=COL[sv.semaforo||"ambar"];
+                return <div style={{textAlign:"right"}}>
+                  <div style={{fontSize:11,color:T.muted,marginBottom:2}}>Ranking equipo</div>
+                  <div style={{fontSize:26,fontWeight:900,color:col2}}>{sv.score}<span style={{fontSize:12,color:T.muted}}>/100</span></div>
+                  <div style={{fontSize:10,color:"#6366F1",marginTop:2,cursor:"pointer"}} onClick={function(){setVistaObjetivos(true);}}>⚙️ Configura objetivos</div>
+                </div>;
+              }
+              var col=sc>=100?"#22C55E":sc>=70?"#F59E0B":"#EF4444";
+              return <div style={{textAlign:"right"}}>
+                <div style={{fontSize:11,color:T.muted,marginBottom:2}}>Cumplimiento objetivo</div>
+                <div style={{fontSize:26,fontWeight:900,color:col,lineHeight:1}}>{sc}<span style={{fontSize:16,color:col}}>%</span></div>
+                <div style={{height:5,width:70,background:"#E2E8F0",borderRadius:3,marginTop:5,marginLeft:"auto"}}>
+                  <div style={{height:"100%",width:Math.min(100,sc)+"%",background:col,borderRadius:3,transition:"width .5s"}}/>
+                </div>
+              </div>;
+            })()}
           </div>
         </div>
 
-        {/* (v3.36.0) KPIs agrupados — visual, con objetivo y conversión */}
+        {/* (v3.36.5) Score 100 pts — filas compactas */}
         {(function(){
           var eq=vendedorSel.equipo||"todos";
-          function obj(k){return objProporcional(eq,k);}
-          function bar(real,objetivo,color){
-            if(!objetivo) return null;
-            var pct=Math.min(150,Math.round((real/objetivo)*100));
-            var bc=pct>=100?"#22C55E":pct>=70?"#F59E0B":"#EF4444";
-            return <div style={{marginTop:8}}>
-              <div style={{height:6,background:"#E2E8F0",borderRadius:3,overflow:"hidden"}}>
-                <div style={{height:"100%",width:Math.min(100,pct)+"%",background:bc,borderRadius:3,transition:"width .4s"}}/>
-              </div>
+          var desglose=desglosePuntos(sv,eq);
+          var totalPts=desglose.reduce(function(s,d){return s+(d.pts!==null?d.pts:0);},0);
+          var maxPts=desglose.reduce(function(s,d){return s+(d.pts!==null?d.pts:d.pts===null&&d.obj>0?d.pts:0);},0);
+          var hayObjetivos=desglose.some(function(d){return d.obj>0;});
+          var pctGlobal=hayObjetivos?totalPts:null;
+          var colGlobal=pctGlobal>=80?"#22C55E":pctGlobal>=50?"#F59E0B":"#EF4444";
+
+          if(!hayObjetivos&&(esDir||["crm_jefe","jefe"].includes(usuario.rol))){
+            return <div onClick={function(){setVistaObjetivos(true);}}
+              style={{background:"#EEF2FF",border:"1.5px dashed #6366F1",borderRadius:10,
+                padding:"12px 16px",marginBottom:12,cursor:"pointer",textAlign:"center"}}>
+              <p style={{margin:0,fontSize:13,color:"#4338CA",fontWeight:600}}>
+                ⚙️ Configura los objetivos del equipo para ver el score de 100 puntos
+              </p>
             </div>;
           }
-          function kpiCard(cfg){
-            var objetivo=cfg.objKey?obj(cfg.objKey):0;
-            var pct=objetivo>0?Math.min(150,Math.round((cfg.total/objetivo)*100)):null;
-            var pctColor=pct===null?"#94A3B8":pct>=100?"#22C55E":pct>=70?"#F59E0B":"#EF4444";
-            return <div onClick={function(){setFiltroTipoEv(filtroTipoEv===cfg.filtro?null:cfg.filtro);setEvAbierto(null);}}
-              style={{background:filtroTipoEv===cfg.filtro?cfg.color+"12":"#fff",
-                borderRadius:12,padding:"12px 14px",border:"1.5px solid "+(filtroTipoEv===cfg.filtro?cfg.color:"#E2E8F0"),
-                cursor:"pointer",transition:"all .15s",marginBottom:8}}>
-              {/* Cabecera: titulo + conseguido/objetivo */}
-              <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:6}}>
-                <span style={{fontSize:13,fontWeight:700,color:"#475569"}}>{cfg.icon} {cfg.titulo}</span>
-                <div style={{textAlign:"right",flexShrink:0,marginLeft:12}}>
-                  <div style={{display:"flex",alignItems:"baseline",gap:3}}>
-                    <span style={{fontSize:24,fontWeight:900,color:cfg.color,lineHeight:1}}>{cfg.total}</span>
-                    {objetivo>0&&<span style={{fontSize:13,color:"#94A3B8",fontWeight:600}}>/ {objetivo}</span>}
-                  </div>
-                  {pct!==null&&<div style={{fontSize:10,fontWeight:800,color:pctColor,textAlign:"right"}}>{pct}%</div>}
+
+          return <div style={{background:"#fff",borderRadius:14,border:"1px solid "+T.border,
+            marginBottom:12,overflow:"hidden"}}>
+            {/* Cabecera score total */}
+            {hayObjetivos&&<div style={{background:colGlobal+"12",padding:"12px 16px",
+              borderBottom:"1px solid "+T.border,display:"flex",alignItems:"center",gap:12}}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:11,color:T.muted,fontWeight:600,marginBottom:4}}>SCORE TOTAL · {diasRango} días</div>
+                <div style={{height:8,background:"#E2E8F0",borderRadius:4,overflow:"hidden"}}>
+                  <div style={{height:"100%",width:Math.min(100,pctGlobal)+"%",background:colGlobal,
+                    borderRadius:4,transition:"width .5s"}}/>
                 </div>
               </div>
-              {/* Sub métricas */}
-              {cfg.sub&&<div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:cfg.conv>0?4:0}}>
-                {cfg.sub.map(function(s){return <span key={s.l} style={{fontSize:11,color:"#64748B"}}>
-                  {s.ic} <strong style={{color:s.c}}>{s.v}</strong> <span style={{color:"#94A3B8"}}>{s.l}</span>
-                </span>;})}
-              </div>}
-              {/* Conversión — solo si > 0 */}
-              {cfg.conv>0&&<div style={{fontSize:11,color:"#64748B",marginBottom:2}}>
-                Conversión: <strong style={{color:cfg.conv>=30?"#22C55E":cfg.conv>=15?"#F59E0B":"#EF4444"}}>{cfg.conv}%</strong>
-              </div>}
-              {/* Barra de progreso */}
-              {bar(cfg.total,objetivo,cfg.color)}
-            </div>;
-          }
-
-          var convMuestras=sv.muestras>0?Math.round((sv.muestrasOk||0)/sv.muestras*100):0;
-          var convOfertas=(sv.ofertasPend||0)+(sv.pedidos||0)>0?Math.round((sv.pedidos||0)/((sv.ofertasPend||0)+(sv.pedidos||0))*100):0;
-          var convEstr=sv.estrategias>0?Math.round((sv.estrategiasAprobadas||0)/sv.estrategias*100):0;
-          var hayObjetivos=Object.keys(objetivosDB).length>0;
-
-          return <div style={{marginBottom:12}}>
-            {!hayObjetivos&&(esDir||["crm_jefe","jefe"].includes(usuario.rol))&&(
-              <div onClick={function(){setVistaObjetivos(true);}}
-                style={{background:"#EEF2FF",border:"1.5px dashed #6366F1",borderRadius:10,
-                  padding:"10px 14px",marginBottom:10,cursor:"pointer",textAlign:"center"}}>
-                <p style={{margin:0,fontSize:12,color:"#4338CA",fontWeight:600}}>
-                  ⚙️ Pulsa para configurar los objetivos del equipo y ver el % de cumplimiento
-                </p>
+              <div style={{textAlign:"right",flexShrink:0}}>
+                <span style={{fontSize:28,fontWeight:900,color:colGlobal}}>{totalPts}</span>
+                <span style={{fontSize:14,color:T.muted,fontWeight:600}}>/100</span>
               </div>
-            )}
-            {kpiCard({icon:"🏃",titulo:"Actividad de campo",total:(sv.visitas||0)+(sv.llamadas||0),
-              color:"#3B82F6",filtro:"visita",objKey:"visitas",
-              sub:[
-                {ic:"👋",v:sv.visitas||0,l:"presenciales",c:"#3B82F6"},
-                {ic:"📞",v:sv.llamadas||0,l:"llamadas",c:"#93C5FD"},
-                ...(sv.pedidosVisita>0?[{ic:"🛒",v:sv.pedidosVisita,l:"pedidos en visita",c:"#22C55E"}]:[]),
-              ]})}
-            {kpiCard({icon:"📦",titulo:"Muestras",total:sv.muestras||0,
-              color:"#8B5CF6",filtro:"muestra",objKey:"muestras",conv:convMuestras,
-              sub:[{ic:"⏳",v:sv.muestrasPend||0,l:"pendientes",c:"#F59E0B"},{ic:"✅",v:sv.muestrasOk||0,l:"éxito",c:"#22C55E"},{ic:"❌",v:sv.muestrasKo||0,l:"KO",c:"#EF4444"}]})}
-            {kpiCard({icon:"💰",titulo:"Ofertas formales",total:sv.ofertasEnviadas||0,
-              color:"#F59E0B",filtro:"oferta_enviada",objKey:"pedidos",
-              conv:(sv.ofertasEnviadas||0)>0?Math.round((sv.ofertasAceptadas||0)/(sv.ofertasEnviadas||1)*100):0,
-              sub:[
-                {ic:"📤",v:sv.ofertasPend||0,l:"pendientes",c:"#F59E0B"},
-                {ic:"🛒",v:sv.ofertasAceptadas||0,l:"aceptadas",c:"#22C55E"},
-                {ic:"💸",v:sv.ofertasCaro||0,l:"caras",c:"#EF4444"},
-              ]})}
-            {kpiCard({icon:"🎯",titulo:"Estrategias",total:sv.estrategias||0,
-              color:"#10B981",filtro:"estrategia",objKey:"estrategias",conv:convEstr,
-              sub:[{ic:"⏳",v:(sv.estrategias||0)-(sv.estrategiasAprobadas||0),l:"en curso",c:"#F59E0B"},{ic:"🏆",v:sv.estrategiasAprobadas||0,l:"aprobadas",c:"#F59E0B"}]})}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
-              <div onClick={function(){setFiltroTipoEv(filtroTipoEv==="oportunidad"?null:"oportunidad");setEvAbierto(null);}}
-                style={{background:filtroTipoEv==="oportunidad"?"#6366F115":"#fff",borderRadius:12,
-                  padding:"12px",border:"1.5px solid "+(filtroTipoEv==="oportunidad"?"#6366F1":"#E2E8F0"),cursor:"pointer",textAlign:"center"}}>
-                <div style={{fontSize:16}}>💼</div>
-                <div style={{fontSize:22,fontWeight:900,color:"#6366F1",lineHeight:1.2}}>{sv.opos||0}</div>
-                <div style={{fontSize:10,color:"#94A3B8",marginTop:2}}>Oportunidades</div>
-                {(sv.oposAbiertas||0)>0&&<div style={{fontSize:10,color:"#F59E0B",fontWeight:700,marginTop:2}}>{sv.oposAbiertas} abiertas</div>}
-              </div>
-              <div onClick={function(){setFiltroTipoEv(filtroTipoEv==="potencial"?null:"potencial");setEvAbierto(null);}}
-                style={{background:filtroTipoEv==="potencial"?"#0EA5E915":"#fff",borderRadius:12,
-                  padding:"12px",border:"1.5px solid "+(filtroTipoEv==="potencial"?"#0EA5E9":"#E2E8F0"),cursor:"pointer",textAlign:"center"}}>
-                <div style={{fontSize:16}}>📈</div>
-                <div style={{fontSize:22,fontWeight:900,color:"#0EA5E9",lineHeight:1.2}}>{sv.potenciales||0}</div>
-                <div style={{fontSize:10,color:"#94A3B8",marginTop:2}}>Potenciales</div>
-              </div>
-            </div>
-            {(sv.incAbiertas||0)>0&&<div onClick={function(){setFiltroTipoEv(filtroTipoEv==="incidencia"?null:"incidencia");setEvAbierto(null);}}
-              style={{background:"#FEF2F2",borderRadius:12,padding:"12px 14px",
-                border:"1.5px solid #EF4444",cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-              <div>
-                <div style={{fontSize:13,fontWeight:700,color:"#DC2626"}}>🚨 Incidencias abiertas</div>
-                {(sv.incViejas||0)>0&&<div style={{fontSize:11,color:"#EF4444"}}>{sv.incViejas} con más de 21 días</div>}
-              </div>
-              <div style={{fontSize:28,fontWeight:900,color:"#EF4444"}}>{sv.incAbiertas}</div>
             </div>}
+
+            {/* Filas de KPI */}
+            {desglose.map(function(d,i){
+              var pct=d.pct!==null?Math.round(d.pct*100):null;
+              var col=pct===null?"#94A3B8":pct>=100?"#22C55E":pct>=70?"#F59E0B":"#EF4444";
+              var real=d.k==="potencialMix"?(Math.round((sv.potencialMix||0)*10)/10):d.real;
+              var objLabel=d.k==="potencialMix"?"mix":d.objKey;
+              return <div key={d.k} onClick={function(){
+                  var filtMap={pedidos:"pedido",muestrasOk:"muestra_ok",ofertasEnviadas:"oferta_enviada",
+                    muestras:"muestra",visitas:"visita",llamadas:"llamada",aprobadas:"estrategia_aprobada",potencialMix:"potencial"};
+                  setFiltroTipoEv(filtroTipoEv===filtMap[d.k]?null:filtMap[d.k]);setEvAbierto(null);
+                }}
+                style={{display:"flex",alignItems:"center",gap:10,padding:"11px 16px",
+                  borderBottom:i<desglose.length-1?"1px solid "+T.border:"none",
+                  background:filtroTipoEv&&"potencial muestras_ok pedido oferta_enviada muestra visita llamada estrategia_aprobada".includes(filtroTipoEv)?"transparent":"transparent",
+                  cursor:"pointer"}}>
+                {/* Icono + label */}
+                <span style={{fontSize:16,flexShrink:0}}>{d.ic}</span>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:3}}>
+                    <span style={{fontSize:12,fontWeight:600,color:"#374151"}}>{d.label}</span>
+                    <span style={{fontSize:11,flexShrink:0,marginLeft:8}}>
+                      {d.pts!==null?<strong style={{color:col}}>{d.pts}</strong>:<span style={{color:"#CBD5E1"}}>—</span>}
+                      <span style={{color:T.muted}}>/{d.ptsMax}pts</span>
+                    </span>
+                  </div>
+                  {d.obj>0?<div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <div style={{flex:1,height:5,background:"#E2E8F0",borderRadius:3,overflow:"hidden"}}>
+                      <div style={{height:"100%",width:Math.min(100,pct||0)+"%",background:col,borderRadius:3,transition:"width .4s"}}/>
+                    </div>
+                    <span style={{fontSize:11,fontWeight:700,color:col,flexShrink:0,minWidth:32,textAlign:"right"}}>{pct}%</span>
+                    <span style={{fontSize:11,color:T.muted,flexShrink:0,minWidth:40,textAlign:"right"}}>{real}/{d.obj}</span>
+                  </div>:<div style={{fontSize:11,color:"#CBD5E1",fontStyle:"italic"}}>sin objetivo</div>}
+                </div>
+              </div>;
+            })}
           </div>;
         })()}
-        {/* Alertas del vendedor */}
+
         {(sv.diasSinAct>=3||sv.incViejas>0||sv.ofertasPend>3)&&(
           <div style={{background:"#FFF7ED",border:"1px solid #FED7AA",borderRadius:12,padding:"12px 14px",marginBottom:12}}>
             <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:"#C2410C",textTransform:"uppercase",letterSpacing:".06em"}}>⚡ Puntos de atención</p>
@@ -26584,14 +26579,14 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
   if(vistaObjetivos){
     var equiposDisp=["todos",...new Set(USUARIOS.filter(function(u){return u.equipo;}).map(function(u){return u.equipo;}))];
     var CAMPOS_OBJ=[
-      {k:"visitas",    l:"👋 Visitas presenciales/mes"},
-      {k:"llamadas",   l:"📞 Llamadas/mes"},
-      {k:"muestras",   l:"📦 Muestras totales/mes"},
-      {k:"muestrasOk", l:"✅ Muestras con éxito/mes"},
-      {k:"pedidos",    l:"🛒 Pedidos/mes"},
-      {k:"aprobadas",  l:"🏆 Ofertas aprobadas/mes"},
-      {k:"estrategias",l:"🎯 Estrategias/mes"},
-      {k:"opos",       l:"💼 Oportunidades/mes"},
+      {k:"pedidos",       l:"🛒 Pedidos cerrados / mes       (30 pts)"},
+      {k:"muestrasOk",    l:"✅ Muestras con éxito / mes     (20 pts)"},
+      {k:"ofertas",       l:"💰 Ofertas enviadas / mes        (13 pts)"},
+      {k:"muestras",      l:"📦 Muestras enviadas / mes        (9 pts)"},
+      {k:"visitas",       l:"👋 Visitas presenciales / mes     (8 pts)"},
+      {k:"llamadas",      l:"📞 Llamadas / mes                 (4 pts)"},
+      {k:"aprobadas",     l:"🏆 Estrategias aprobadas / mes   (4 pts)"},
+      {k:"potencial_mix", l:"📈 Potencial mix objetivo (clientes×líneas)  (12 pts)"},
     ];
     var objActual=objetivosDB[equipoEditando]||{};
 
@@ -26794,8 +26789,16 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
                 })()}
               </div>
               <div style={{textAlign:"right",flexShrink:0}}>
-                <div style={{fontSize:20,fontWeight:900,color:col}}>{s.score}</div>
-                <div style={{fontSize:9,color:T.muted}}>{diasStr}</div>
+                {(function(){
+                  var sc=calcScoreObjetivo(s,v.equipo||"todos");
+                  if(sc!==null){
+                    var col2=sc>=100?"#22C55E":sc>=70?"#F59E0B":"#EF4444";
+                    return <><div style={{fontSize:20,fontWeight:900,color:col2}}>{sc}<span style={{fontSize:12}}>%</span></div>
+                      <div style={{fontSize:9,color:T.muted}}>objetivo</div></>;
+                  }
+                  return <><div style={{fontSize:20,fontWeight:900,color:col}}>{s.score}</div>
+                    <div style={{fontSize:9,color:T.muted}}>{diasStr}</div></>;
+                })()}
               </div>
             </div>
           </div>
