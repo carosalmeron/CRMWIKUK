@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.34.2";
-const CRM_BUILD = "02/06/2026-fix-sala-mandos";
+const CRM_VERSION = "3.34.5";
+const CRM_BUILD = "02/06/2026-mandos-potenciales-rango";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -26080,13 +26080,21 @@ function MiniBar({datos,color,height=80,labels}){
 // ─── SALA DE MANDOS ───────────────────────────────────────────────────────────
 function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB,incidenciasDB,ofertasDB,visitasDB:visitasDBProp}){
   const [visitasDB,setVisitasDB]=React.useState(visitasDBProp||[]);
+  const [potencialesDB,setPotencialesDB]=React.useState([]);
   React.useEffect(function(){
-    if(visitasDBProp&&visitasDBProp.length>0){setVisitasDB(visitasDBProp);return;}
-    fbLeer("visitas").then(function(d){setVisitasDB(d||[]);}).catch(function(){});
+    if(visitasDBProp&&visitasDBProp.length>0){setVisitasDB(visitasDBProp);}
+    else{fbLeer("visitas").then(function(d){setVisitasDB(d||[]);}).catch(function(){});}
+    fbLeer("potenciales").then(function(d){setPotencialesDB((d||[]).filter(function(x){return !x.eliminada;}));}).catch(function(){});
   },[]);
   const [vendedorSel,setVendedorSel]=React.useState(null);
-  const [periodo,setPeriodo]=React.useState(30);
-  const [vista,setVista]=React.useState("radar"); // radar | ficha | alertas
+  const [vista,setVista]=React.useState("radar");
+  // (v3.34.3) Filtro por rango de fechas libre
+  var hoy=new Date();
+  var _hace30=new Date(hoy);_hace30.setDate(_hace30.getDate()-30);
+  function _toInputDate(d){return d.toISOString().slice(0,10);}
+  const [dateFrom,setDateFrom]=React.useState(_toInputDate(_hace30));
+  const [dateTo,setDateTo]=React.useState(_toInputDate(hoy));
+  const [modoRapido,setModoRapido]=React.useState("30d");
 
   const esDir=["director","ceo"].includes(usuario.rol);
   const miEquipo=usuario.equipo||"";
@@ -26100,59 +26108,82 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
     })
   ,[esDir,miEquipo]);
 
-  // Corte temporal
-  const cutoff=React.useMemo(()=>{var d=new Date();d.setDate(d.getDate()-periodo);return d;},[periodo]);
-  function enPeriodo(fechaStr){
-    if(!fechaStr) return false;
-    var f=typeof fechaStr==="object"&&fechaStr.seconds?new Date(fechaStr.seconds*1000):new Date(fechaStr);
-    return !isNaN(f.getTime())&&f>=cutoff;
+  // Corte temporal basado en rango de fechas
+  const cutoff=React.useMemo(()=>{
+    var d=dateFrom?new Date(dateFrom):new Date(0);
+    d.setHours(0,0,0,0);return d;
+  },[dateFrom]);
+  const cutoffTo=React.useMemo(()=>{
+    var d=dateTo?new Date(dateTo):new Date();
+    d.setHours(23,59,59,999);return d;
+  },[dateTo]);
+  function _parseFecha(f){
+    if(!f) return null;
+    if(typeof f==="object"&&f.seconds) return new Date(f.seconds*1000);
+    if(typeof f==="number") return new Date(f);
+    var s=String(f).trim();
+    if(s.includes("T")||s.match(/^\d{4}-\d{2}-\d{2}/)){var d=new Date(s);return isNaN(d.getTime())?null:d;}
+    if(s.includes("/")){
+      var p=s.split("/");
+      if(p.length===3){
+        var dd=parseInt(p[0]),mm=parseInt(p[1]),yy=parseInt(p[2]);
+        if(yy<100)yy+=2000;
+        var d2=new Date(yy,mm-1,dd);return isNaN(d2.getTime())?null:d2;
+      }
+    }
+    return null;
   }
+  function enPeriodo(f){var d=_parseFecha(f);return d&&d>=cutoff&&d<=cutoffTo;}
 
-  // Score por vendedor
+  // Scores por vendedor — usa resolverMisIds para matching exacto
   const scores=React.useMemo(()=>{
     var map={};
     vendedores.forEach(function(v){
-      var nom=v.nombre; var ids=new Set([v.id,(v.grupoAgente||""),nom].map(function(x){return (x||"").toUpperCase();}).filter(Boolean));
-      function esDeV(campo){return ids.has((campo||"").toUpperCase());}
+      var ids=resolverMisIds(v); // Set de todos los identificadores del vendedor
 
-      var visitas=(visitasDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente||x.agenteId)&&enPeriodo(x.fecha||x.fechaStr);}).length;
+      function esDeV(campo){return campo&&ids.has(String(campo).toUpperCase());}
+      function esDeV2(c1,c2){return esDeV(c1)||esDeV(c2);}
+
+      var visitas=(visitasDB||[]).filter(function(x){return !x.eliminada&&esDeV2(x.agente,x.agenteId)&&enPeriodo(x.fecha||x.fechaStr);}).length;
       var muestras=(muestrasDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente)&&enPeriodo(x.fecha||x.fechaCreacion);}).length;
       var ofertas=(ofertasDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente)&&enPeriodo(x.fecha||x.fechaCreacion);});
       var ofertasPend=ofertas.filter(function(x){return x.estado==="pendiente";}).length;
       var pedidos=ofertas.filter(function(x){return x.estado==="pedido";}).length;
       var estrategias=(estrategiasDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente)&&enPeriodo(x.fechaCreacion||x.fecha);}).length;
-      var opos=(oportunidadesDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente||x.agenteId)&&enPeriodo(x.fechaCreacion||x.creadaEn);}).length;
-      var oposAbiertas=(oportunidadesDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente||x.agenteId)&&!["ganada","perdida","cerrada","cerrada_ganada","cerrada_perdida"].includes(x.estado||x.etapa);}).length;
-      var incAbiertas=(incidenciasDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente||x.autor)&&x.estado!=="cerrada"&&x.estado!=="resuelta";}).length;
+      var opos=(oportunidadesDB||[]).filter(function(x){return !x.eliminada&&esDeV2(x.agente,x.agenteId)&&enPeriodo(x.fechaCreacion||x.creadaEn);}).length;
+      var oposAbiertas=(oportunidadesDB||[]).filter(function(x){return !x.eliminada&&esDeV2(x.agente,x.agenteId)&&!["ganada","perdida","cerrada","cerrada_ganada","cerrada_perdida"].includes(x.estado||x.etapa);}).length;
+      var potenciales=(potencialesDB||[]).filter(function(x){return esDeV(x.agente)&&(x.lineas||[]).length>0;}).length;
+      var incAbiertas=(incidenciasDB||[]).filter(function(x){return !x.eliminada&&esDeV2(x.agente,x.autor)&&x.estado!=="cerrada"&&x.estado!=="resuelta";}).length;
       var incViejas=(incidenciasDB||[]).filter(function(x){
-        if(x.eliminada||!esDeV(x.agente||x.autor)||x.estado==="cerrada"||x.estado==="resuelta") return false;
-        var f=x.fechaCreacion?new Date(x.fechaCreacion.seconds?x.fechaCreacion.seconds*1000:x.fechaCreacion):null;
+        if(x.eliminada||!esDeV2(x.agente,x.autor)||x.estado==="cerrada"||x.estado==="resuelta") return false;
+        var f=_parseFecha(x.fechaCreacion||x.fecha);
         return f&&(Date.now()-f.getTime())>21*86400000;
       }).length;
 
       // Última actividad
       var ultimaFechas=[];
-      (visitasDB||[]).forEach(function(x){if(esDeV(x.agente||x.agenteId)&&(x.fecha||x.fechaStr))ultimaFechas.push(new Date(x.fecha||x.fechaStr));});
-      (muestrasDB||[]).forEach(function(x){if(esDeV(x.agente)&&(x.fecha||x.fechaCreacion)){var f=x.fechaCreacion&&x.fechaCreacion.seconds?new Date(x.fechaCreacion.seconds*1000):new Date(x.fecha||x.fechaCreacion);if(!isNaN(f.getTime()))ultimaFechas.push(f);}});
+      (visitasDB||[]).forEach(function(x){if(esDeV2(x.agente,x.agenteId)){var f=_parseFecha(x.fecha||x.fechaStr);if(f)ultimaFechas.push(f);}});
+      (muestrasDB||[]).forEach(function(x){if(esDeV(x.agente)){var f=_parseFecha(x.fechaCreacion||x.fecha);if(f)ultimaFechas.push(f);}});
+      (ofertasDB||[]).forEach(function(x){if(esDeV(x.agente)){var f=_parseFecha(x.fechaCreacion||x.fecha);if(f)ultimaFechas.push(f);}});
+      (estrategiasDB||[]).forEach(function(x){if(esDeV(x.agente)){var f=_parseFecha(x.fechaCreacion||x.fecha);if(f)ultimaFechas.push(f);}});
+      (oportunidadesDB||[]).forEach(function(x){if(esDeV2(x.agente,x.agenteId)){var f=_parseFecha(x.fechaCreacion||x.creadaEn);if(f)ultimaFechas.push(f);}});
+
       var ultimaFecha=ultimaFechas.length?new Date(Math.max.apply(null,ultimaFechas)):null;
       var diasSinAct=ultimaFecha?Math.floor((Date.now()-ultimaFecha.getTime())/86400000):999;
 
-      // Score compuesto (0–100)
       var score=Math.min(100,
-        visitas*4 + muestras*5 + pedidos*8 + estrategias*3 + opos*4
-        - incAbiertas*5 - incViejas*8 - ofertasPend*1
-        - (diasSinAct>7?(diasSinAct-7)*2:0)
+        visitas*4+muestras*5+pedidos*8+estrategias*3+opos*4+potenciales*3
+        -incAbiertas*5-incViejas*8-ofertasPend*1
+        -(diasSinAct>7?(diasSinAct-7)*2:0)
       );
       if(score<0)score=0;
-
-      // Semáforo
       var semaforo=score>=60?"verde":score>=30?"ambar":"rojo";
       if(diasSinAct>7)semaforo=score>=50?"ambar":"rojo";
 
-      map[v.id]={nom,visitas,muestras,ofertasPend,pedidos,estrategias,opos,oposAbiertas,incAbiertas,incViejas,diasSinAct,score,semaforo,ultimaFecha,v};
+      map[v.id]={nom:v.nombre,visitas,muestras,ofertasPend,pedidos,estrategias,opos,oposAbiertas,potenciales,incAbiertas,incViejas,diasSinAct,score,semaforo,ultimaFecha,v};
     });
     return map;
-  },[vendedores,visitasDB,muestrasDB,ofertasDB,estrategiasDB,oportunidadesDB,incidenciasDB,periodo]);
+  },[vendedores,visitasDB,muestrasDB,ofertasDB,estrategiasDB,oportunidadesDB,incidenciasDB,potencialesDB,cutoff,cutoffTo]);
 
   // Alertas globales
   var alertas=[];
@@ -26173,49 +26204,59 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
   // ── VISTA FICHA VENDEDOR ──────────────────────────────────────────
   if(vendedorSel){
     var sv=scores[vendedorSel.id]||{};
-    var ids=new Set([vendedorSel.id,(vendedorSel.grupoAgente||""),vendedorSel.nombre].map(function(x){return (x||"").toUpperCase();}).filter(Boolean));
-    function esDeVSel(campo){return ids.has((campo||"").toUpperCase());}
+    var svIds=resolverMisIds(vendedorSel);
+    function esDeVSel(campo){return campo&&svIds.has(String(campo).toUpperCase());}
+    function esDeVSel2(c1,c2){return esDeVSel(c1)||esDeVSel(c2);}
 
     // Timeline unificada
     var eventos=[];
     (visitasDB||[]).forEach(function(x){
-      if(!x.eliminada&&esDeVSel(x.agente||x.agenteId)){
-        var f=x.fecha||x.fechaStr;
-        if(f) eventos.push({fecha:new Date(f),tipo:"visita",icon:"👋",color:"#3B82F6",desc:x.cliente||x.clienteNombre||"Visita",sub:x.resultado||x.notas||""});
+      if(!x.eliminada&&esDeVSel2(x.agente,x.agenteId)){
+        var f=_parseFecha(x.fecha||x.fechaStr);
+        if(f) eventos.push({fecha:f,tipo:"visita",icon:"👋",color:"#3B82F6",desc:x.cliente||x.clienteNombre||"Visita",sub:x.resultado||x.notas||""});
       }
     });
     (muestrasDB||[]).forEach(function(x){
       if(!x.eliminada&&esDeVSel(x.agente)){
-        var f=x.fechaCreacion&&x.fechaCreacion.seconds?new Date(x.fechaCreacion.seconds*1000):x.fecha?new Date(x.fecha):null;
+        var f=_parseFecha(x.fechaCreacion||x.fecha);
         if(f) eventos.push({fecha:f,tipo:"muestra",icon:"📦",color:"#8B5CF6",desc:x.prod||x.producto||"Muestra",sub:x.clienteNombre||x.cliente||""});
       }
     });
     (ofertasDB||[]).forEach(function(x){
       if(!x.eliminada&&esDeVSel(x.agente)){
-        var f=x.fechaCreacion&&x.fechaCreacion.seconds?new Date(x.fechaCreacion.seconds*1000):x.fecha?new Date(x.fecha):null;
+        var f=_parseFecha(x.fechaCreacion||x.fecha);
         if(f){var ec=x.estado==="pedido"?"✅":x.estado==="caro"?"💸":"💰";eventos.push({fecha:f,tipo:"oferta",icon:ec,color:x.estado==="pedido"?"#22C55E":"#F59E0B",desc:x.cliente||"Oferta",sub:x.estado||""});}
       }
     });
     (estrategiasDB||[]).forEach(function(x){
       if(!x.eliminada&&esDeVSel(x.agente)){
-        var f=x.fechaCreacion&&x.fechaCreacion.seconds?new Date(x.fechaCreacion.seconds*1000):x.fecha?new Date(x.fecha):null;
+        var f=_parseFecha(x.fechaCreacion||x.fecha);
         if(f) eventos.push({fecha:f,tipo:"estrategia",icon:"🎯",color:"#10B981",desc:x.cliente||x.clienteNombre||"Estrategia",sub:x.texto||x.estado||""});
       }
     });
     (oportunidadesDB||[]).forEach(function(x){
-      if(!x.eliminada&&esDeVSel(x.agente||x.agenteId)){
-        var f=x.fechaCreacion&&x.fechaCreacion.seconds?new Date(x.fechaCreacion.seconds*1000):x.creadaEn?new Date(x.creadaEn):null;
+      if(!x.eliminada&&esDeVSel2(x.agente,x.agenteId)){
+        var f=_parseFecha(x.fechaCreacion||x.creadaEn);
         if(f) eventos.push({fecha:f,tipo:"oportunidad",icon:"💼",color:"#6366F1",desc:x.cliente||x.nombre||"Oportunidad",sub:x.estado||x.etapa||""});
       }
     });
     (incidenciasDB||[]).forEach(function(x){
       if(!x.eliminada&&esDeVSel(x.agente||x.autor)){
-        var f=x.fechaCreacion&&x.fechaCreacion.seconds?new Date(x.fechaCreacion.seconds*1000):x.fecha?new Date(x.fecha):null;
+        var f=_parseFecha(x.fechaCreacion||x.fecha);
         if(f) eventos.push({fecha:f,tipo:"incidencia",icon:x.estado==="cerrada"?"✅":"🚨",color:x.estado==="cerrada"?"#94A3B8":"#EF4444",desc:x.clienteNombre||x.cliente||"Incidencia",sub:x.tipo||x.descripcion||""});
       }
     });
+    // Potenciales
+    (potencialesDB||[]).forEach(function(x){
+      if(!esDeVSel(x.agente)) return;
+      if(!(x.lineas||[]).length) return;
+      var f=_parseFecha(x.fechaActualizacion||x.fechaCreacion);
+      if(f) eventos.push({fecha:f,tipo:"potencial",icon:"📈",color:"#0EA5E9",
+        desc:x.clienteNombre||"Potencial",
+        sub:(x.lineas||[]).length+" líneas · "+((x.lineas||[]).reduce(function(s,l){return s+(parseFloat(l.kgAnual)||0);},0))+"kg/año"});
+    });
     eventos.sort(function(a,b){return b.fecha-a.fecha;});
-    var eventosFilt=eventos.filter(function(e){return e.fecha>=cutoff;});
+    var eventosFilt=eventos.filter(function(e){return e.fecha>=cutoff&&e.fecha<=cutoffTo;});
 
     return(
       <div style={{paddingBottom:80}}>
@@ -26245,11 +26286,12 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
         {/* KPIs */}
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:12}}>
           {[
-            {l:"Visitas",v:sv.visitas||0,ic:"👋",c:"#3B82F6"},
-            {l:"Muestras",v:sv.muestras||0,ic:"📦",c:"#8B5CF6"},
-            {l:"Pedidos",v:sv.pedidos||0,ic:"✅",c:"#22C55E"},
+            {l:"Visitas",   v:sv.visitas||0,    ic:"👋",c:"#3B82F6"},
+            {l:"Muestras",  v:sv.muestras||0,   ic:"📦",c:"#8B5CF6"},
+            {l:"Pedidos",   v:sv.pedidos||0,    ic:"✅",c:"#22C55E"},
             {l:"Estrategias",v:sv.estrategias||0,ic:"🎯",c:"#10B981"},
-            {l:"Oportunidades",v:sv.opos||0,ic:"💼",c:"#6366F1"},
+            {l:"Oportunidades",v:sv.opos||0,    ic:"💼",c:"#6366F1"},
+            {l:"Potenciales",v:sv.potenciales||0,ic:"📈",c:"#0EA5E9"},
             {l:"Incidencias",v:sv.incAbiertas||0,ic:"🚨",c:sv.incAbiertas>0?"#EF4444":T.muted},
           ].map(function(k){return(
             <div key={k.l} style={{background:"#fff",borderRadius:12,padding:"12px 10px",
@@ -26258,8 +26300,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
               <div style={{fontSize:22,fontWeight:900,color:k.c}}>{k.v}</div>
               <div style={{fontSize:10,color:T.muted,marginTop:2}}>{k.l}</div>
             </div>
-          );})
-          }
+          );})}
         </div>
 
         {/* Alertas del vendedor */}
@@ -26275,7 +26316,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
 
         {/* Timeline */}
         <p style={{margin:"0 0 10px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase",letterSpacing:".06em"}}>
-          🕐 Actividad últimos {periodo} días ({eventosFilt.length} eventos)
+          🕐 Actividad {dateFrom} → {dateTo} ({eventosFilt.length} eventos)
         </p>
         {eventosFilt.length===0&&<div style={{textAlign:"center",padding:"32px 0",color:T.muted,fontSize:13}}>Sin actividad en el período</div>}
         {eventosFilt.map(function(ev,i){
@@ -26318,18 +26359,53 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
         )}
       </div>
 
-      {/* Filtro periodo */}
-      <div style={{display:"flex",gap:6,marginBottom:16,overflowX:"auto",paddingBottom:2}}>
-        {[{v:7,l:"7 días"},{v:30,l:"30 días"},{v:90,l:"90 días"},{v:365,l:"Histórico"}].map(function(p){
-          return(
-            <button key={p.v} onClick={function(){setPeriodo(p.v);}}
-              style={{flexShrink:0,padding:"7px 14px",borderRadius:99,border:"1.5px solid "+(periodo===p.v?"#1E293B":T.border),
-                background:periodo===p.v?"#1E293B":"#fff",color:periodo===p.v?"#fff":T.muted,
-                fontSize:12,fontWeight:700,cursor:"pointer"}}>
+      {/* Filtro de fechas — accesos rápidos + rango libre */}
+      <div style={{background:"#fff",borderRadius:12,padding:"12px 14px",marginBottom:14,border:"1px solid "+T.border}}>
+        {/* Accesos rápidos */}
+        <div style={{display:"flex",gap:6,marginBottom:10,overflowX:"auto",paddingBottom:2}}>
+          {[
+            {k:"7d", l:"7d",   dias:7},
+            {k:"30d",l:"30d",  dias:30},
+            {k:"90d",l:"90d",  dias:90},
+            {k:"all",l:"Todo", dias:3650},
+          ].map(function(p){
+            var activo=modoRapido===p.k;
+            return <button key={p.k} onClick={function(){
+              var h=new Date();
+              var f=new Date(h);
+              if(p.dias<3650){f.setDate(f.getDate()-p.dias);}else{f=new Date("2020-01-01");}
+              setDateFrom(_toInputDate(f));
+              setDateTo(_toInputDate(h));
+              setModoRapido(p.k);
+            }} style={{flexShrink:0,padding:"5px 12px",borderRadius:99,
+              border:"1.5px solid "+(activo?"#1E293B":T.border),
+              background:activo?"#1E293B":"transparent",
+              color:activo?"#fff":T.muted,fontSize:12,fontWeight:700,cursor:"pointer"}}>
               {p.l}
-            </button>
-          );
-        })}
+            </button>;
+          })}
+        </div>
+        {/* Inputs de fecha */}
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <div style={{flex:1}}>
+            <div style={{fontSize:10,color:T.muted,fontWeight:600,marginBottom:3}}>DESDE</div>
+            <input type="date" value={dateFrom} onChange={function(e){setDateFrom(e.target.value);setModoRapido("custom");}}
+              style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,
+                fontSize:13,outline:"none",fontFamily:"inherit",boxSizing:"border-box"}}/>
+          </div>
+          <div style={{color:T.muted,fontSize:18,paddingTop:16}}>→</div>
+          <div style={{flex:1}}>
+            <div style={{fontSize:10,color:T.muted,fontWeight:600,marginBottom:3}}>HASTA</div>
+            <input type="date" value={dateTo} onChange={function(e){setDateTo(e.target.value);setModoRapido("custom");}}
+              style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,
+                fontSize:13,outline:"none",fontFamily:"inherit",boxSizing:"border-box"}}/>
+          </div>
+        </div>
+        {modoRapido==="custom"&&(
+          <p style={{margin:"8px 0 0",fontSize:11,color:"#6366F1",fontWeight:600,textAlign:"center"}}>
+            📅 Rango personalizado: {dateFrom} → {dateTo}
+          </p>
+        )}
       </div>
 
       {/* Grid de tarjetas */}
