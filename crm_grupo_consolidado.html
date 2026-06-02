@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.34.5";
-const CRM_BUILD = "02/06/2026-mandos-potenciales-rango";
+const CRM_VERSION = "3.34.7";
+const CRM_BUILD = "02/06/2026-score-normalizado";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -26171,16 +26171,22 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
       var ultimaFecha=ultimaFechas.length?new Date(Math.max.apply(null,ultimaFechas)):null;
       var diasSinAct=ultimaFecha?Math.floor((Date.now()-ultimaFecha.getTime())/86400000):999;
 
-      var score=Math.min(100,
+      var rawScore=
         visitas*4+muestras*5+pedidos*8+estrategias*3+opos*4+potenciales*3
         -incAbiertas*5-incViejas*8-ofertasPend*1
-        -(diasSinAct>7?(diasSinAct-7)*2:0)
-      );
-      if(score<0)score=0;
-      var semaforo=score>=60?"verde":score>=30?"ambar":"rojo";
-      if(diasSinAct>7)semaforo=score>=50?"ambar":"rojo";
+        -(diasSinAct>7?(diasSinAct-7)*2:0);
+      if(rawScore<0)rawScore=0;
 
-      map[v.id]={nom:v.nombre,visitas,muestras,ofertasPend,pedidos,estrategias,opos,oposAbiertas,potenciales,incAbiertas,incViejas,diasSinAct,score,semaforo,ultimaFecha,v};
+      var semaforo=diasSinAct<=3?"verde":diasSinAct<=7?"ambar":"rojo";
+      if(incViejas>0)semaforo="rojo";
+      if(semaforo==="verde"&&incAbiertas>2)semaforo="ambar";
+
+      map[v.id]={nom:v.nombre,visitas,muestras,ofertasPend,pedidos,estrategias,opos,oposAbiertas,potenciales,incAbiertas,incViejas,diasSinAct,rawScore,score:0,semaforo,ultimaFecha,v};
+    });
+    // (v3.34.6) Normalizar score contra el mejor del equipo → el top = 100
+    var maxRaw=Object.values(map).reduce(function(mx,s){return Math.max(mx,s.rawScore);},1);
+    Object.values(map).forEach(function(s){
+      s.score=Math.round((s.rawScore/maxRaw)*100);
     });
     return map;
   },[vendedores,visitasDB,muestrasDB,ofertasDB,estrategiasDB,oportunidadesDB,incidenciasDB,potencialesDB,cutoff,cutoffTo]);
@@ -26199,12 +26205,14 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
 
   var rankVendedores=[...vendedores].sort(function(a,b){return (scores[b.id]||{score:0}).score-(scores[a.id]||{score:0}).score;});
 
+  // Semáforo usa diasSinAct + score normalizado
   var COL={verde:"#22C55E",ambar:"#F59E0B",rojo:"#EF4444"};
 
   // ── VISTA FICHA VENDEDOR ──────────────────────────────────────────
   if(vendedorSel){
     var sv=scores[vendedorSel.id]||{};
     var svIds=resolverMisIds(vendedorSel);
+    const [evAbierto,setEvAbierto]=React.useState(null);
     function esDeVSel(campo){return campo&&svIds.has(String(campo).toUpperCase());}
     function esDeVSel2(c1,c2){return esDeVSel(c1)||esDeVSel(c2);}
 
@@ -26213,37 +26221,37 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
     (visitasDB||[]).forEach(function(x){
       if(!x.eliminada&&esDeVSel2(x.agente,x.agenteId)){
         var f=_parseFecha(x.fecha||x.fechaStr);
-        if(f) eventos.push({fecha:f,tipo:"visita",icon:"👋",color:"#3B82F6",desc:x.cliente||x.clienteNombre||"Visita",sub:x.resultado||x.notas||""});
+        if(f) eventos.push({fecha:f,tipo:"visita",icon:"👋",color:"#3B82F6",desc:x.cliente||x.clienteNombre||"Visita",sub:x.resultado||x.notas||"",raw:x});
       }
     });
     (muestrasDB||[]).forEach(function(x){
       if(!x.eliminada&&esDeVSel(x.agente)){
         var f=_parseFecha(x.fechaCreacion||x.fecha);
-        if(f) eventos.push({fecha:f,tipo:"muestra",icon:"📦",color:"#8B5CF6",desc:x.prod||x.producto||"Muestra",sub:x.clienteNombre||x.cliente||""});
+        if(f) eventos.push({fecha:f,tipo:"muestra",icon:"📦",color:"#8B5CF6",desc:x.prod||x.producto||"Muestra",sub:x.clienteNombre||x.cliente||"",raw:x});
       }
     });
     (ofertasDB||[]).forEach(function(x){
       if(!x.eliminada&&esDeVSel(x.agente)){
         var f=_parseFecha(x.fechaCreacion||x.fecha);
-        if(f){var ec=x.estado==="pedido"?"✅":x.estado==="caro"?"💸":"💰";eventos.push({fecha:f,tipo:"oferta",icon:ec,color:x.estado==="pedido"?"#22C55E":"#F59E0B",desc:x.cliente||"Oferta",sub:x.estado||""});}
+        if(f){var ec=x.estado==="pedido"?"✅":x.estado==="caro"?"💸":"💰";eventos.push({fecha:f,tipo:"oferta",icon:ec,color:x.estado==="pedido"?"#22C55E":"#F59E0B",desc:x.cliente||"Oferta",sub:x.estado||"",raw:x});}
       }
     });
     (estrategiasDB||[]).forEach(function(x){
       if(!x.eliminada&&esDeVSel(x.agente)){
         var f=_parseFecha(x.fechaCreacion||x.fecha);
-        if(f) eventos.push({fecha:f,tipo:"estrategia",icon:"🎯",color:"#10B981",desc:x.cliente||x.clienteNombre||"Estrategia",sub:x.texto||x.estado||""});
+        if(f) eventos.push({fecha:f,tipo:"estrategia",icon:"🎯",color:"#10B981",desc:x.cliente||x.clienteNombre||"Estrategia",sub:x.texto||x.estado||"",raw:x});
       }
     });
     (oportunidadesDB||[]).forEach(function(x){
       if(!x.eliminada&&esDeVSel2(x.agente,x.agenteId)){
         var f=_parseFecha(x.fechaCreacion||x.creadaEn);
-        if(f) eventos.push({fecha:f,tipo:"oportunidad",icon:"💼",color:"#6366F1",desc:x.cliente||x.nombre||"Oportunidad",sub:x.estado||x.etapa||""});
+        if(f) eventos.push({fecha:f,tipo:"oportunidad",icon:"💼",color:"#6366F1",desc:x.cliente||x.nombre||"Oportunidad",sub:x.estado||x.etapa||"",raw:x});
       }
     });
     (incidenciasDB||[]).forEach(function(x){
       if(!x.eliminada&&esDeVSel(x.agente||x.autor)){
         var f=_parseFecha(x.fechaCreacion||x.fecha);
-        if(f) eventos.push({fecha:f,tipo:"incidencia",icon:x.estado==="cerrada"?"✅":"🚨",color:x.estado==="cerrada"?"#94A3B8":"#EF4444",desc:x.clienteNombre||x.cliente||"Incidencia",sub:x.tipo||x.descripcion||""});
+        if(f) eventos.push({fecha:f,tipo:"incidencia",icon:x.estado==="cerrada"?"✅":"🚨",color:x.estado==="cerrada"?"#94A3B8":"#EF4444",desc:x.clienteNombre||x.cliente||"Incidencia",sub:x.tipo||x.descripcion||"",raw:x});
       }
     });
     // Potenciales
@@ -26322,18 +26330,69 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
         {eventosFilt.map(function(ev,i){
           var dStr=ev.fecha.toLocaleDateString("es-ES");
           var showDate=i===0||eventosFilt[i-1].fecha.toLocaleDateString("es-ES")!==dStr;
+          var abierto=evAbierto===i;
+          // Campos extra según tipo
+          var detalles=[];
+          var r=ev.raw||{};
+          if(ev.tipo==="visita"){
+            if(r.resultado) detalles.push({l:"Resultado",v:r.resultado});
+            if(r.notas||r.nota) detalles.push({l:"Notas",v:r.notas||r.nota});
+            if(r.tipo) detalles.push({l:"Tipo",v:r.tipo});
+            if(r.duracion) detalles.push({l:"Duración",v:r.duracion+" min"});
+          } else if(ev.tipo==="muestra"){
+            if(r.estado) detalles.push({l:"Estado",v:r.estado});
+            if(r.uds) detalles.push({l:"Uds",v:r.uds});
+            if(r.nota||r.notas) detalles.push({l:"Notas",v:r.nota||r.notas});
+            if(r.tipo) detalles.push({l:"Tipo",v:r.tipo});
+          } else if(ev.tipo==="oferta"){
+            if(r.estado) detalles.push({l:"Estado",v:r.estado});
+            if(r.lineas&&r.lineas.length) r.lineas.forEach(function(l){detalles.push({l:l.prod||l.producto||"Producto",v:(l.precio||l.precioFinal||"")+"€/kg"+(l.estado?" · "+l.estado:"")});});
+          } else if(ev.tipo==="estrategia"){
+            if(r.estado) detalles.push({l:"Estado",v:r.estado});
+            if(r.texto||r.estrategia) detalles.push({l:"Texto",v:r.texto||r.estrategia});
+            if(r.resolucion&&r.resolucion.nota) detalles.push({l:"Resolución",v:r.resolucion.nota});
+          } else if(ev.tipo==="oportunidad"){
+            if(r.estado||r.etapa) detalles.push({l:"Estado",v:r.estado||r.etapa});
+            if(r.valor) detalles.push({l:"Valor",v:parseInt(r.valor).toLocaleString("es-ES")+"€"});
+            if(r.descripcion||r.notas) detalles.push({l:"Notas",v:r.descripcion||r.notas});
+          } else if(ev.tipo==="potencial"){
+            (r.lineas||[]).forEach(function(l){detalles.push({l:l.producto||l.nombre||"Producto",v:(l.kgAnual||"?")+" kg/año"});});
+          } else if(ev.tipo==="incidencia"){
+            if(r.tipo||r.tipologia) detalles.push({l:"Tipo",v:r.tipo||r.tipologia});
+            if(r.estado) detalles.push({l:"Estado",v:r.estado});
+            if(r.descripcion) detalles.push({l:"Descripción",v:r.descripcion});
+            if(r.prioridad) detalles.push({l:"Prioridad",v:r.prioridad});
+          }
           return(
             <React.Fragment key={i}>
               {showDate&&<p style={{margin:"12px 0 6px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>{dStr}</p>}
-              <div style={{display:"flex",gap:10,alignItems:"flex-start",marginBottom:6,
-                background:"#fff",borderRadius:10,padding:"10px 12px",border:"1px solid "+T.border,
-                borderLeft:"3px solid "+ev.color}}>
-                <span style={{fontSize:16,flexShrink:0}}>{ev.icon}</span>
-                <div style={{flex:1,minWidth:0}}>
-                  <p style={{margin:0,fontSize:13,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ev.desc}</p>
-                  {ev.sub&&<p style={{margin:"2px 0 0",fontSize:11,color:T.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ev.sub}</p>}
+              <div onClick={function(){setEvAbierto(abierto?null:i);}}
+                style={{marginBottom:6,background:"#fff",borderRadius:10,
+                  border:"1px solid "+(abierto?ev.color:T.border),
+                  borderLeft:"3px solid "+ev.color,cursor:"pointer",overflow:"hidden"}}>
+                <div style={{display:"flex",gap:10,alignItems:"flex-start",padding:"10px 12px"}}>
+                  <span style={{fontSize:16,flexShrink:0}}>{ev.icon}</span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{margin:0,fontSize:13,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ev.desc}</p>
+                    {ev.sub&&!abierto&&<p style={{margin:"2px 0 0",fontSize:11,color:T.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ev.sub}</p>}
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
+                    <span style={{fontSize:10,color:T.muted}}>{ev.fecha.toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"})}</span>
+                    <span style={{fontSize:12,color:abierto?ev.color:T.muted,transform:abierto?"rotate(90deg)":"rotate(0deg)",display:"inline-block",transition:"transform .2s"}}>›</span>
+                  </div>
                 </div>
-                <span style={{fontSize:10,color:T.muted,flexShrink:0}}>{ev.fecha.toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"})}</span>
+                {abierto&&(
+                  <div style={{padding:"0 12px 12px 38px",borderTop:"1px solid "+T.border}}>
+                    {detalles.length===0&&<p style={{margin:"8px 0 0",fontSize:12,color:T.muted,fontStyle:"italic"}}>Sin detalles adicionales</p>}
+                    {detalles.map(function(d,di){return(
+                      <div key={di} style={{display:"flex",gap:8,padding:"6px 0",borderBottom:"1px solid "+T.border}}>
+                        <span style={{fontSize:11,color:T.muted,fontWeight:600,minWidth:80,flexShrink:0}}>{d.l}</span>
+                        <span style={{fontSize:12,color:T.text,flex:1,wordBreak:"break-word"}}>{d.v}</span>
+                      </div>
+                    );})}
+                    <p style={{margin:"8px 0 0",fontSize:10,color:T.muted}}>{ev.fecha.toLocaleString("es-ES")}</p>
+                  </div>
+                )}
               </div>
             </React.Fragment>
           );
