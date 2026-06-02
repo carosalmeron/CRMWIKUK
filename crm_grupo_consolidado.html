@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.34.0";
-const CRM_BUILD = "02/06/2026-fix-script-vendedores";
+const CRM_VERSION = "3.34.1";
+const CRM_BUILD = "02/06/2026-sala-mandos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -25256,6 +25256,7 @@ function App(props){
 
   const NAV_JEFE=[
     {id:"dashboard",    icon:"📊",label:"Mi equipo",   color:usuario.color},
+    {id:"sala_mandos",  icon:"🎯",label:"Mandos",      color:"#6366F1"},
     {id:"plan_semanal", icon:"📅",label:"Mi semana",   color:T.blue},
     {id:"recuperacion", icon:"🩹",label:"Recuperar",   color:"#DC2626"},
     {id:"calendario",   icon:"🗓️",label:"Agenda",       color:T.blue},
@@ -25273,6 +25274,7 @@ function App(props){
 
   const NAV_DIR=[
     {id:"dashboard",    icon:"📊",label:"Dashboard",    color:usuario.color},
+    {id:"sala_mandos",  icon:"🎯",label:"Mandos",       color:"#6366F1"},
     {id:"plan_semanal", icon:"📅",label:"Mi semana",    color:T.blue},
     {id:"recuperacion", icon:"🩹",label:"Recuperar",    color:"#DC2626"},
     {id:"calendario",   icon:"🗓️",label:"Agenda",        color:T.blue},
@@ -25897,6 +25899,7 @@ function App(props){
                section==="historial"?"📅 Historial semanal":
                section==="tareas"?"📌 Tareas y acciones":
                section==="calendario"?"🗓️ Agenda":
+               section==="sala_mandos"?"🎯 Sala de Mandos":
                section==="reporting"?"📈 Reporting":
                section==="ia"?"🤖 Asistente IA":
                section==="plan_semanal"?"📅 Mi semana":
@@ -25984,6 +25987,7 @@ function App(props){
         {/* Secciones nuevas */}
         {section==="historial"&& <HistorialSemanal usuario={usuario}/> }
         {section==="tareas"&&    <GestorTareas usuario={usuario} clientesFB={misClientesFB}/> }
+        {section==="sala_mandos"&&<SalaMandos usuario={usuario} clientesDB={clientesDB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} ofertasDB={ofertasDB} visitasDB={visitasDB}/>}
         {section==="reporting"&& <Reporting usuario={usuario} muestrasDB={muestrasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} estrategiasDB={estrategiasDB} clientesDB={clientesDB} misClientesFB={misClientesFB}/>}
         {section==="calendario"&& <Calendario usuario={usuario} clientesFB={misClientesFB} onAbrirCliente={onAbrirCliente} onEventosChange={setCalendarioDB}/>}
         {section==="ia"&&(
@@ -26072,8 +26076,338 @@ function MiniBar({datos,color,height=80,labels}){
   );
 }
 
+
+// ─── SALA DE MANDOS ───────────────────────────────────────────────────────────
+function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB,incidenciasDB,ofertasDB,visitasDB:visitasDBProp}){
+  const [visitasDB,setVisitasDB]=React.useState(visitasDBProp||[]);
+  React.useEffect(function(){
+    if(visitasDBProp&&visitasDBProp.length>0){setVisitasDB(visitasDBProp);return;}
+    fbLeer("visitas").then(function(d){setVisitasDB(d||[]);}).catch(function(){});
+  },[]);
+  const [vendedorSel,setVendedorSel]=React.useState(null);
+  const [periodo,setPeriodo]=React.useState(30);
+  const [vista,setVista]=React.useState("radar"); // radar | ficha | alertas
+
+  const esDir=["director","ceo"].includes(usuario.rol);
+  const miEquipo=usuario.equipo||"";
+
+  // Vendedores visibles
+  const vendedores=React.useMemo(()=>
+    USUARIOS.filter(function(u){
+      if(u.rol!=="agente"&&u.rol!=="crm_agente"&&u.rol!=="comercial") return false;
+      if(!esDir && miEquipo && u.equipo!==miEquipo) return false;
+      return true;
+    })
+  ,[esDir,miEquipo]);
+
+  // Corte temporal
+  const cutoff=React.useMemo(()=>{var d=new Date();d.setDate(d.getDate()-periodo);return d;},[periodo]);
+  function enPeriodo(fechaStr){
+    if(!fechaStr) return false;
+    var f=typeof fechaStr==="object"&&fechaStr.seconds?new Date(fechaStr.seconds*1000):new Date(fechaStr);
+    return !isNaN(f.getTime())&&f>=cutoff;
+  }
+
+  // Score por vendedor
+  const scores=React.useMemo(()=>{
+    var map={};
+    vendedores.forEach(function(v){
+      var nom=v.nombre; var ids=new Set([v.id,(v.grupoAgente||""),nom].map(function(x){return (x||"").toUpperCase();}).filter(Boolean));
+      function esDeV(campo){return ids.has((campo||"").toUpperCase());}
+
+      var visitas=(visitasDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente||x.agenteId)&&enPeriodo(x.fecha||x.fechaStr);}).length;
+      var muestras=(muestrasDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente)&&enPeriodo(x.fecha||x.fechaCreacion);}).length;
+      var ofertas=(ofertasDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente)&&enPeriodo(x.fecha||x.fechaCreacion);});
+      var ofertasPend=ofertas.filter(function(x){return x.estado==="pendiente";}).length;
+      var pedidos=ofertas.filter(function(x){return x.estado==="pedido";}).length;
+      var estrategias=(estrategiasDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente)&&enPeriodo(x.fechaCreacion||x.fecha);}).length;
+      var opos=(oportunidadesDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente||x.agenteId)&&enPeriodo(x.fechaCreacion||x.creadaEn);}).length;
+      var oposAbiertas=(oportunidadesDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente||x.agenteId)&&!["ganada","perdida","cerrada","cerrada_ganada","cerrada_perdida"].includes(x.estado||x.etapa);}).length;
+      var incAbiertas=(incidenciasDB||[]).filter(function(x){return !x.eliminada&&esDeV(x.agente||x.autor)&&x.estado!=="cerrada"&&x.estado!=="resuelta";}).length;
+      var incViejas=(incidenciasDB||[]).filter(function(x){
+        if(x.eliminada||!esDeV(x.agente||x.autor)||x.estado==="cerrada"||x.estado==="resuelta") return false;
+        var f=x.fechaCreacion?new Date(x.fechaCreacion.seconds?x.fechaCreacion.seconds*1000:x.fechaCreacion):null;
+        return f&&(Date.now()-f.getTime())>21*86400000;
+      }).length;
+
+      // Última actividad
+      var ultimaFechas=[];
+      (visitasDB||[]).forEach(function(x){if(esDeV(x.agente||x.agenteId)&&(x.fecha||x.fechaStr))ultimaFechas.push(new Date(x.fecha||x.fechaStr));});
+      (muestrasDB||[]).forEach(function(x){if(esDeV(x.agente)&&(x.fecha||x.fechaCreacion)){var f=x.fechaCreacion&&x.fechaCreacion.seconds?new Date(x.fechaCreacion.seconds*1000):new Date(x.fecha||x.fechaCreacion);if(!isNaN(f.getTime()))ultimaFechas.push(f);}});
+      var ultimaFecha=ultimaFechas.length?new Date(Math.max.apply(null,ultimaFechas)):null;
+      var diasSinAct=ultimaFecha?Math.floor((Date.now()-ultimaFecha.getTime())/86400000):999;
+
+      // Score compuesto (0–100)
+      var score=Math.min(100,
+        visitas*4 + muestras*5 + pedidos*8 + estrategias*3 + opos*4
+        - incAbiertas*5 - incViejas*8 - ofertasPend*1
+        - (diasSinAct>7?(diasSinAct-7)*2:0)
+      );
+      if(score<0)score=0;
+
+      // Semáforo
+      var semaforo=score>=60?"verde":score>=30?"ambar":"rojo";
+      if(diasSinAct>7)semaforo=score>=50?"ambar":"rojo";
+
+      map[v.id]={nom,visitas,muestras,ofertasPend,pedidos,estrategias,opos,oposAbiertas,incAbiertas,incViejas,diasSinAct,score,semaforo,ultimaFecha,v};
+    });
+    return map;
+  },[vendedores,visitasDB,muestrasDB,ofertasDB,estrategiasDB,oportunidadesDB,incidenciasDB,periodo]);
+
+  // Alertas globales
+  var alertas=[];
+  vendedores.forEach(function(v){
+    var s=scores[v.id];if(!s)return;
+    if(s.diasSinAct>=5) alertas.push({tipo:"rojo",icon:"👻",msg:v.nombre+" sin actividad hace "+s.diasSinAct+" días",v});
+    if(s.incViejas>0) alertas.push({tipo:"rojo",icon:"🚨",msg:v.nombre+" tiene "+s.incViejas+" incidencia"+(s.incViejas>1?"s":"")+" abiertas > 21 días",v});
+    if(s.ofertasPend>5) alertas.push({tipo:"ambar",icon:"💰",msg:v.nombre+" tiene "+s.ofertasPend+" ofertas pendientes sin seguimiento",v});
+    if(s.oposAbiertas>3) alertas.push({tipo:"ambar",icon:"💼",msg:v.nombre+" tiene "+s.oposAbiertas+" oportunidades abiertas sin cierre",v});
+    if(s.incAbiertas>0&&s.incViejas===0) alertas.push({tipo:"ambar",icon:"⚠️",msg:v.nombre+" tiene "+s.incAbiertas+" incidencia"+(s.incAbiertas>1?"s":"")+" abierta"+(s.incAbiertas>1?"s":""),v});
+  });
+  alertas.sort(function(a,b){return a.tipo==="rojo"&&b.tipo!=="rojo"?-1:1;});
+
+  var rankVendedores=[...vendedores].sort(function(a,b){return (scores[b.id]||{score:0}).score-(scores[a.id]||{score:0}).score;});
+
+  var COL={verde:"#22C55E",ambar:"#F59E0B",rojo:"#EF4444"};
+
+  // ── VISTA FICHA VENDEDOR ──────────────────────────────────────────
+  if(vendedorSel){
+    var sv=scores[vendedorSel.id]||{};
+    var ids=new Set([vendedorSel.id,(vendedorSel.grupoAgente||""),vendedorSel.nombre].map(function(x){return (x||"").toUpperCase();}).filter(Boolean));
+    function esDeVSel(campo){return ids.has((campo||"").toUpperCase());}
+
+    // Timeline unificada
+    var eventos=[];
+    (visitasDB||[]).forEach(function(x){
+      if(!x.eliminada&&esDeVSel(x.agente||x.agenteId)){
+        var f=x.fecha||x.fechaStr;
+        if(f) eventos.push({fecha:new Date(f),tipo:"visita",icon:"👋",color:"#3B82F6",desc:x.cliente||x.clienteNombre||"Visita",sub:x.resultado||x.notas||""});
+      }
+    });
+    (muestrasDB||[]).forEach(function(x){
+      if(!x.eliminada&&esDeVSel(x.agente)){
+        var f=x.fechaCreacion&&x.fechaCreacion.seconds?new Date(x.fechaCreacion.seconds*1000):x.fecha?new Date(x.fecha):null;
+        if(f) eventos.push({fecha:f,tipo:"muestra",icon:"📦",color:"#8B5CF6",desc:x.prod||x.producto||"Muestra",sub:x.clienteNombre||x.cliente||""});
+      }
+    });
+    (ofertasDB||[]).forEach(function(x){
+      if(!x.eliminada&&esDeVSel(x.agente)){
+        var f=x.fechaCreacion&&x.fechaCreacion.seconds?new Date(x.fechaCreacion.seconds*1000):x.fecha?new Date(x.fecha):null;
+        if(f){var ec=x.estado==="pedido"?"✅":x.estado==="caro"?"💸":"💰";eventos.push({fecha:f,tipo:"oferta",icon:ec,color:x.estado==="pedido"?"#22C55E":"#F59E0B",desc:x.cliente||"Oferta",sub:x.estado||""});}
+      }
+    });
+    (estrategiasDB||[]).forEach(function(x){
+      if(!x.eliminada&&esDeVSel(x.agente)){
+        var f=x.fechaCreacion&&x.fechaCreacion.seconds?new Date(x.fechaCreacion.seconds*1000):x.fecha?new Date(x.fecha):null;
+        if(f) eventos.push({fecha:f,tipo:"estrategia",icon:"🎯",color:"#10B981",desc:x.cliente||x.clienteNombre||"Estrategia",sub:x.texto||x.estado||""});
+      }
+    });
+    (oportunidadesDB||[]).forEach(function(x){
+      if(!x.eliminada&&esDeVSel(x.agente||x.agenteId)){
+        var f=x.fechaCreacion&&x.fechaCreacion.seconds?new Date(x.fechaCreacion.seconds*1000):x.creadaEn?new Date(x.creadaEn):null;
+        if(f) eventos.push({fecha:f,tipo:"oportunidad",icon:"💼",color:"#6366F1",desc:x.cliente||x.nombre||"Oportunidad",sub:x.estado||x.etapa||""});
+      }
+    });
+    (incidenciasDB||[]).forEach(function(x){
+      if(!x.eliminada&&esDeVSel(x.agente||x.autor)){
+        var f=x.fechaCreacion&&x.fechaCreacion.seconds?new Date(x.fechaCreacion.seconds*1000):x.fecha?new Date(x.fecha):null;
+        if(f) eventos.push({fecha:f,tipo:"incidencia",icon:x.estado==="cerrada"?"✅":"🚨",color:x.estado==="cerrada"?"#94A3B8":"#EF4444",desc:x.clienteNombre||x.cliente||"Incidencia",sub:x.tipo||x.descripcion||""});
+      }
+    });
+    eventos.sort(function(a,b){return b.fecha-a.fecha;});
+    var eventosFilt=eventos.filter(function(e){return e.fecha>=cutoff;});
+
+    return(
+      <div style={{paddingBottom:80}}>
+        {/* Header ficha */}
+        <div style={{background:"#fff",borderRadius:14,padding:"16px",marginBottom:12,
+          border:"1px solid "+T.border,boxShadow:"0 1px 4px rgba(0,0,0,.06)"}}>
+          <button onClick={function(){setVendedorSel(null);}} style={{background:"none",border:"none",
+            color:T.muted,fontSize:13,cursor:"pointer",padding:"0 0 10px",display:"flex",alignItems:"center",gap:4}}>
+            ← Volver al radar
+          </button>
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <div style={{width:48,height:48,borderRadius:14,background:vendedorSel.color+"20",
+              display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>
+              {vendedorSel.icon||"🧑‍💼"}
+            </div>
+            <div style={{flex:1}}>
+              <p style={{margin:0,fontSize:17,fontWeight:800}}>{vendedorSel.nombre}</p>
+              <p style={{margin:0,fontSize:12,color:T.muted}}>{vendedorSel.equipo||""}</p>
+            </div>
+            <div style={{textAlign:"right"}}>
+              <div style={{fontSize:22,fontWeight:900,color:COL[sv.semaforo||"ambar"]}}>{sv.score||0}</div>
+              <div style={{fontSize:10,color:T.muted}}>score</div>
+            </div>
+          </div>
+        </div>
+
+        {/* KPIs */}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:12}}>
+          {[
+            {l:"Visitas",v:sv.visitas||0,ic:"👋",c:"#3B82F6"},
+            {l:"Muestras",v:sv.muestras||0,ic:"📦",c:"#8B5CF6"},
+            {l:"Pedidos",v:sv.pedidos||0,ic:"✅",c:"#22C55E"},
+            {l:"Estrategias",v:sv.estrategias||0,ic:"🎯",c:"#10B981"},
+            {l:"Oportunidades",v:sv.opos||0,ic:"💼",c:"#6366F1"},
+            {l:"Incidencias",v:sv.incAbiertas||0,ic:"🚨",c:sv.incAbiertas>0?"#EF4444":T.muted},
+          ].map(function(k){return(
+            <div key={k.l} style={{background:"#fff",borderRadius:12,padding:"12px 10px",
+              border:"1px solid "+T.border,textAlign:"center"}}>
+              <div style={{fontSize:18}}>{k.ic}</div>
+              <div style={{fontSize:22,fontWeight:900,color:k.c}}>{k.v}</div>
+              <div style={{fontSize:10,color:T.muted,marginTop:2}}>{k.l}</div>
+            </div>
+          );})
+          }
+        </div>
+
+        {/* Alertas del vendedor */}
+        {(sv.diasSinAct>=3||sv.incViejas>0||sv.ofertasPend>3)&&(
+          <div style={{background:"#FFF7ED",border:"1px solid #FED7AA",borderRadius:12,padding:"12px 14px",marginBottom:12}}>
+            <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:"#C2410C",textTransform:"uppercase",letterSpacing:".06em"}}>⚡ Puntos de atención</p>
+            {sv.diasSinAct>=3&&<p style={{margin:"3px 0",fontSize:12,color:"#92400E"}}>• Sin actividad registrada hace {sv.diasSinAct} días</p>}
+            {sv.incViejas>0&&<p style={{margin:"3px 0",fontSize:12,color:"#92400E"}}>• {sv.incViejas} incidencia{sv.incViejas>1?"s":""} abierta{sv.incViejas>1?"s":""} más de 21 días</p>}
+            {sv.ofertasPend>3&&<p style={{margin:"3px 0",fontSize:12,color:"#92400E"}}>• {sv.ofertasPend} ofertas pendientes sin seguimiento</p>}
+            {sv.oposAbiertas>2&&<p style={{margin:"3px 0",fontSize:12,color:"#92400E"}}>• {sv.oposAbiertas} oportunidades abiertas sin cierre</p>}
+          </div>
+        )}
+
+        {/* Timeline */}
+        <p style={{margin:"0 0 10px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase",letterSpacing:".06em"}}>
+          🕐 Actividad últimos {periodo} días ({eventosFilt.length} eventos)
+        </p>
+        {eventosFilt.length===0&&<div style={{textAlign:"center",padding:"32px 0",color:T.muted,fontSize:13}}>Sin actividad en el período</div>}
+        {eventosFilt.map(function(ev,i){
+          var dStr=ev.fecha.toLocaleDateString("es-ES");
+          var showDate=i===0||eventosFilt[i-1].fecha.toLocaleDateString("es-ES")!==dStr;
+          return(
+            <React.Fragment key={i}>
+              {showDate&&<p style={{margin:"12px 0 6px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>{dStr}</p>}
+              <div style={{display:"flex",gap:10,alignItems:"flex-start",marginBottom:6,
+                background:"#fff",borderRadius:10,padding:"10px 12px",border:"1px solid "+T.border,
+                borderLeft:"3px solid "+ev.color}}>
+                <span style={{fontSize:16,flexShrink:0}}>{ev.icon}</span>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ev.desc}</p>
+                  {ev.sub&&<p style={{margin:"2px 0 0",fontSize:11,color:T.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ev.sub}</p>}
+                </div>
+                <span style={{fontSize:10,color:T.muted,flexShrink:0}}>{ev.fecha.toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"})}</span>
+              </div>
+            </React.Fragment>
+          );
+        })}
+      </div>
+    );
+  }
+
+  // ── VISTA RADAR ──────────────────────────────────────────────────
+  if(vista==="radar") return(
+    <div style={{paddingBottom:80}}>
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <div>
+          <h2 style={{margin:0,fontSize:20,fontWeight:900}}>🎯 Sala de Mandos</h2>
+          <p style={{margin:0,fontSize:12,color:T.muted}}>{vendedores.length} vendedores · {alertas.filter(function(a){return a.tipo==="rojo";}).length} alertas críticas</p>
+        </div>
+        {alertas.length>0&&(
+          <button onClick={function(){setVista("alertas");}} style={{background:"#FEF2F2",border:"1.5px solid #EF4444",
+            color:"#DC2626",borderRadius:99,padding:"6px 14px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+            🚨 {alertas.length}
+          </button>
+        )}
+      </div>
+
+      {/* Filtro periodo */}
+      <div style={{display:"flex",gap:6,marginBottom:16,overflowX:"auto",paddingBottom:2}}>
+        {[{v:7,l:"7 días"},{v:30,l:"30 días"},{v:90,l:"90 días"},{v:365,l:"Histórico"}].map(function(p){
+          return(
+            <button key={p.v} onClick={function(){setPeriodo(p.v);}}
+              style={{flexShrink:0,padding:"7px 14px",borderRadius:99,border:"1.5px solid "+(periodo===p.v?"#1E293B":T.border),
+                background:periodo===p.v?"#1E293B":"#fff",color:periodo===p.v?"#fff":T.muted,
+                fontSize:12,fontWeight:700,cursor:"pointer"}}>
+              {p.l}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Grid de tarjetas */}
+      {rankVendedores.map(function(v,idx){
+        var s=scores[v.id]||{score:0,semaforo:"rojo"};
+        var col=COL[s.semaforo];
+        var diasStr=s.diasSinAct>=999?"Sin datos":s.diasSinAct===0?"Hoy":s.diasSinAct===1?"Ayer":"Hace "+s.diasSinAct+"d";
+        return(
+          <div key={v.id} onClick={function(){setVendedorSel(v);}}
+            style={{background:"#fff",borderRadius:14,padding:"14px 16px",marginBottom:10,
+              cursor:"pointer",border:"1.5px solid "+T.border,borderLeft:"4px solid "+col,
+              boxShadow:"0 1px 3px rgba(0,0,0,.05)"}}>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              {/* Ranking + avatar */}
+              <div style={{flexShrink:0,textAlign:"center",width:32}}>
+                <div style={{fontSize:11,fontWeight:900,color:idx<3?col:T.muted}}>#{idx+1}</div>
+              </div>
+              <div style={{width:36,height:36,borderRadius:10,background:col+"18",
+                display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>
+                {v.icon||"🧑‍💼"}
+              </div>
+              <div style={{flex:1,minWidth:0}}>
+                <p style={{margin:0,fontSize:14,fontWeight:800}}>{v.nombre}</p>
+                {/* Mini KPIs */}
+                <div style={{display:"flex",gap:6,marginTop:4,flexWrap:"wrap"}}>
+                  <span style={{fontSize:10,color:"#3B82F6"}}>👋{s.visitas||0}</span>
+                  <span style={{fontSize:10,color:"#8B5CF6"}}>📦{s.muestras||0}</span>
+                  <span style={{fontSize:10,color:"#22C55E"}}>✅{s.pedidos||0}</span>
+                  <span style={{fontSize:10,color:"#6366F1"}}>💼{s.opos||0}</span>
+                  <span style={{fontSize:10,color:"#10B981"}}>🎯{s.estrategias||0}</span>
+                  {s.incAbiertas>0&&<span style={{fontSize:10,color:"#EF4444"}}>🚨{s.incAbiertas}</span>}
+                </div>
+              </div>
+              <div style={{textAlign:"right",flexShrink:0}}>
+                <div style={{fontSize:20,fontWeight:900,color:col}}>{s.score}</div>
+                <div style={{fontSize:9,color:T.muted}}>{diasStr}</div>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+
+  // ── VISTA ALERTAS ────────────────────────────────────────────────
+  return(
+    <div style={{paddingBottom:80}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16}}>
+        <button onClick={function(){setVista("radar");}} style={{background:"none",border:"none",
+          color:T.muted,fontSize:13,cursor:"pointer",padding:0}}>← Radar</button>
+        <h2 style={{margin:0,fontSize:18,fontWeight:900}}>🚨 Alertas del equipo</h2>
+      </div>
+      {alertas.length===0&&(
+        <div style={{textAlign:"center",padding:"48px 0",color:T.muted}}>
+          <div style={{fontSize:40}}>🎉</div>
+          <p style={{margin:"8px 0 0",fontSize:14,fontWeight:600}}>Sin alertas activas</p>
+          <p style={{margin:"4px 0 0",fontSize:12}}>El equipo está al día</p>
+        </div>
+      )}
+      {alertas.map(function(a,i){
+        var col=a.tipo==="rojo"?"#EF4444":"#F59E0B";
+        return(
+          <div key={i} onClick={function(){setVendedorSel(a.v);setVista("radar");}}
+            style={{background:"#fff",borderRadius:12,padding:"12px 14px",marginBottom:8,
+              cursor:"pointer",border:"1px solid "+T.border,borderLeft:"4px solid "+col}}>
+            <div style={{display:"flex",gap:10,alignItems:"center"}}>
+              <span style={{fontSize:20}}>{a.icon}</span>
+              <p style={{margin:0,fontSize:13,flex:1}}>{a.msg}</p>
+              <span style={{fontSize:12,color:T.muted}}>→</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function Reporting({usuario,muestrasDB,oportunidadesDB,incidenciasDB,estrategiasDB,clientesDB,misClientesFB}){
-  const esAgente=usuario.rol==="agente";
   const esJefe=usuario.rol==="jefe";
   const esDir=["director","ceo"].includes(usuario.rol);
   const miEquipo=usuario.equipo;
