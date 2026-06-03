@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.39.8";
-const CRM_BUILD = "03/06/2026-fix-tDZ-esRolAgente";
+const CRM_VERSION = "3.39.16";
+const CRM_BUILD = "03/06/2026-vc-banner-simple";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -5649,15 +5649,17 @@ function ClienteRow({nombre,visita,ops,onSave,clienteCodigo,clienteId,equipo,age
   // Opciones según tipo contacto (v3.38.5)
   const opsPorTipo={
     presencial:[
-      {k:"visita_pedido",     label:"✅ Hizo pedido",    color:"#22C55E"},
-      {k:"visita_sin_pedido", label:"👋 Sin pedido",      color:"#F59E0B"},
-      {k:"primera_visita",    label:"🆕 Primera visita",  color:"#8B5CF6"},
-      {k:"visita_no_estaba",  label:"🚫 No estaba",       color:"#94A3B8"},
+      {k:"visita_pedido",     label:"✅ Hizo pedido",     color:"#22C55E"},
+      {k:"visita_sin_pedido", label:"👋 Sin pedido",       color:"#F59E0B"},
+      {k:"primera_visita",    label:"🆕 Primera visita",   color:"#8B5CF6"},
+      {k:"visita_no_estaba",  label:"🚫 No estaba",        color:"#94A3B8"},
+      {k:"pide_estrategia",   label:"💰 Pide precio esp.", color:"#EF4444"},
     ],
     telefono:[
-      {k:"llamada_pedido",      label:"✅ Pedido por tfno",color:"#22C55E"},
-      {k:"llamada_contactada",  label:"💬 Contactado",     color:"#3B82F6"},
-      {k:"llamada_no_contesta", label:"📵 No contesta",    color:"#94A3B8"},
+      {k:"llamada_pedido",      label:"✅ Pedido por tfno", color:"#22C55E"},
+      {k:"llamada_contactada",  label:"💬 Contactado",      color:"#3B82F6"},
+      {k:"llamada_no_contesta", label:"📵 No contesta",     color:"#94A3B8"},
+      {k:"pide_estrategia",     label:"💰 Pide precio esp.", color:"#EF4444"},
     ],
   };
   // Retrocompat: mapear valores antiguos a tipo
@@ -6049,6 +6051,7 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
   const [rutaSel,setRutaSel]=useState(null);
   const [clienteSel,setClienteSel]=useState(null);
   const [formV,setFormV]=useState({tipoContacto:"",resultado:"",notas:""});
+  const [pideEstForm,setPideEstForm]=useState({articulo:"",precioActual:"",precioCliente:"",nota:""});
   // (v3.22.38) Sistema de ofertas dentro de la visita
   const [ofertasVisita,setOfertasVisita]=useState([]);
   const [showOfertaForm,setShowOfertaForm]=useState(false);
@@ -6280,6 +6283,68 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
     setFormV({tipoContacto:"",resultado:"",notas:""});
     setOfertasVisita([]); setShowOfertaForm(false);
     setOfertaForm({producto:"",calibre:"",precio:"",unidad:"€/kg",notas:""});
+
+    // (v3.39.14) Si el resultado es "pide_estrategia" → crear borrador de estrategia y notificar al jefe
+    if(formV.resultado==="pide_estrategia"){
+      var hoyStr3=new Date().toLocaleDateString("es-ES");
+      var draftEstId="est_sol_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
+      var dto=pideEstForm.precioActual&&pideEstForm.precioCliente&&parseFloat(pideEstForm.precioActual)>0
+        ?Math.round(((parseFloat(pideEstForm.precioActual)-parseFloat(pideEstForm.precioCliente))/parseFloat(pideEstForm.precioActual))*100):0;
+      var draftEst={
+        id:draftEstId,
+        cliente:clienteSel.nombre||"",
+        clienteId:clienteSel.id||"",
+        agente:idCanonico(usuario),
+        agenteNombre:usuario.nombre||"",
+        equipo:usuario.equipo||"",
+        texto:"Solicitud precio especial: "+pideEstForm.articulo,
+        descripcion:pideEstForm.nota||"Cliente solicita precio especial durante la visita",
+        estado:"solicitud_agente",
+        prioridad:"alta",
+        maxDescuento:dto,
+        ofertas:[{
+          nombre:pideEstForm.articulo,
+          precioActual:parseFloat(pideEstForm.precioActual)||0,
+          precioOferta:parseFloat(pideEstForm.precioCliente)||0,
+          precioCompetencia:parseFloat(pideEstForm.precioCliente)||0,
+          aprobada:null
+        }],
+        fechaCreacion:new Date().toISOString(),
+        fechaCreacionStr:hoyStr3,
+        creadoPor:idCanonico(usuario),
+        creadoPorNombre:usuario.nombre,
+        solicitudAgente:true,
+        seguimientos:[{accion:"💰 Solicitud precio especial — "+pideEstForm.articulo+" a "+pideEstForm.precioCliente+"€ (dto: "+dto+"%)",fecha:hoyStr3,por:usuario.nombre,nota:pideEstForm.nota||""}],
+        historialEscalado:[{accion:"💰 Solicitud de agente — dto: "+dto+"%",por:usuario.nombre,fecha:hoyStr3}]
+      };
+      fbEscribir("estrategias",draftEstId,draftEst);
+      // (v3.39.15) También guardar en vamos_caros
+      var vcIdEst="vc_est_"+draftEstId;
+      fbEscribir("vamos_caros",vcIdEst,{
+        id:vcIdEst,origen:"pide_estrategia",
+        cliente:clienteSel.nombre||"",clienteId:clienteSel.id||"",
+        agente:idCanonico(usuario),agenteNombre:usuario.nombre||"",equipo:usuario.equipo||"",
+        producto:pideEstForm.articulo,calibre:"",
+        precioNuestro:parseFloat(pideEstForm.precioActual||0),
+        precioPide:parseFloat(pideEstForm.precioCliente||0),
+        descuento:dto,
+        fecha:new Date().toISOString(),fechaStr:new Date().toLocaleDateString("es-ES"),
+        nota:pideEstForm.nota||"",
+        estado:"solicitud_agente",estrategiaId:draftEstId,
+        historial:[{accion:"💰 Solicitud de precio especial — visita",fecha:new Date().toLocaleDateString("es-ES"),
+          por:usuario.nombre,precioNuestro:parseFloat(pideEstForm.precioActual||0),
+          precioPide:parseFloat(pideEstForm.precioCliente||0),nota:pideEstForm.nota||""}]
+      });
+      var jefe=USUARIOS.find(function(u){return (u.rol==="jefe"||u.rol==="director"||u.rol==="ceo")&&u.equipo===usuario.equipo;});
+      if(jefe&&typeof despacharNotificacion==="function"){
+        despacharNotificacion({tipo:"estrategia",
+          titulo:"💰 "+usuario.nombre+" — precio especial para "+clienteSel.nombre,
+          mensaje:pideEstForm.articulo+" — pide "+pideEstForm.precioCliente+"€/kg (dto: "+dto+"%). "+pideEstForm.nota,
+          destinatarioId:jefe.id,prioridad:"alta",creadoPor:idCanonico(usuario)});
+      }
+      setPideEstForm({articulo:"",precioActual:"",precioCliente:"",nota:""});
+      alert("✅ Solicitud enviada al jefe.\n"+pideEstForm.articulo+" a "+pideEstForm.precioCliente+"€/kg (dto: "+dto+"%)");
+    }
 
     // (v3.27.5) Guardar precios competencia en colección inteligencia_mercado
     if(preciosCompVisita.length>0){
@@ -6748,17 +6813,56 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
                 )}
               </div>
 
-              <button onClick={guardarVisita}
-                disabled={!formV.tipoContacto||!formV.resultado}
-                style={{width:"100%",padding:"14px",borderRadius:12,border:"none",
-                  background:(!formV.tipoContacto||!formV.resultado)?T.border:T.navy,
-                  color:(!formV.tipoContacto||!formV.resultado)?T.muted:"#fff",
-                  fontWeight:700,fontSize:15,cursor:(!formV.tipoContacto||!formV.resultado)?"not-allowed":"pointer",
-                  marginBottom:16,transition:"all .2s"}}>
-                {!formV.tipoContacto?"Elige tipo de contacto primero":
-                 !formV.resultado?"Elige el resultado":
-                 "Guardar visita →"}
-              </button>
+              {/* Mini-formulario precio especial */}
+              {formV.resultado==="pide_estrategia"&&(
+                <div style={{background:"#FEF2F2",border:"2px solid #EF4444",borderRadius:12,padding:14,marginBottom:14}}>
+                  <p style={{margin:"0 0 10px",fontSize:12,fontWeight:800,color:"#EF4444"}}>💰 Detalle del precio especial solicitado</p>
+                  <div style={{marginBottom:8}}>
+                    <label style={{fontSize:11,fontWeight:700,color:"#374151",display:"block",marginBottom:4}}>Artículo *</label>
+                    <input value={pideEstForm.articulo} onChange={function(e){setPideEstForm(function(f){return{...f,articulo:e.target.value};});}}
+                      placeholder="Nombre del producto..." style={{width:"100%",padding:"9px 12px",borderRadius:8,
+                      border:"1.5px solid "+(pideEstForm.articulo?"#EF4444":"#E2E8F0"),fontSize:13,boxSizing:"border-box"}}/>
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+                    <div>
+                      <label style={{fontSize:11,fontWeight:700,color:"#374151",display:"block",marginBottom:4}}>Precio actual (€/kg)</label>
+                      <input type="number" value={pideEstForm.precioActual} onChange={function(e){setPideEstForm(function(f){return{...f,precioActual:e.target.value};});}}
+                        placeholder="0.00" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1.5px solid #E2E8F0",fontSize:13,boxSizing:"border-box"}}/>
+                    </div>
+                    <div>
+                      <label style={{fontSize:11,fontWeight:700,color:"#EF4444",display:"block",marginBottom:4}}>Precio que pide * (€/kg)</label>
+                      <input type="number" value={pideEstForm.precioCliente} onChange={function(e){setPideEstForm(function(f){return{...f,precioCliente:e.target.value};});}}
+                        placeholder="0.00" style={{width:"100%",padding:"9px 12px",borderRadius:8,
+                        border:"1.5px solid "+(pideEstForm.precioCliente?"#EF4444":"#E2E8F0"),fontSize:13,boxSizing:"border-box"}}/>
+                    </div>
+                  </div>
+                  {pideEstForm.precioActual&&pideEstForm.precioCliente&&parseFloat(pideEstForm.precioActual)>0&&(
+                    <div style={{background:"#fff",borderRadius:8,padding:"8px 12px",marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <span style={{fontSize:12,color:"#374151"}}>Descuento implícito:</span>
+                      <span style={{fontSize:16,fontWeight:900,color:"#EF4444"}}>
+                        {Math.round(((parseFloat(pideEstForm.precioActual)-parseFloat(pideEstForm.precioCliente))/parseFloat(pideEstForm.precioActual))*100)}%
+                      </span>
+                    </div>
+                  )}
+                  <textarea value={pideEstForm.nota} onChange={function(e){setPideEstForm(function(f){return{...f,nota:e.target.value};});}}
+                    placeholder="¿Qué argumenta el cliente? ¿Tiene oferta de competencia?" rows={2}
+                    style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1.5px solid #E2E8F0",fontSize:13,resize:"none",boxSizing:"border-box"}}/>
+                </div>
+              )}
+
+              {(function(){
+                var faltaEst=formV.resultado==="pide_estrategia"&&(!pideEstForm.articulo.trim()||!pideEstForm.precioCliente);
+                var disabled=!formV.tipoContacto||!formV.resultado||faltaEst;
+                var label=!formV.tipoContacto?"Elige tipo de contacto primero":
+                  !formV.resultado?"Elige el resultado":
+                  faltaEst?"Completa artículo y precio solicitado":
+                  "Guardar visita →";
+                return <button onClick={guardarVisita} disabled={disabled}
+                  style={{width:"100%",padding:"14px",borderRadius:12,border:"none",
+                    background:disabled?T.border:T.navy,color:disabled?T.muted:"#fff",
+                    fontWeight:700,fontSize:15,cursor:disabled?"not-allowed":"pointer",
+                    marginBottom:16,transition:"all .2s"}}>{label}</button>;
+              })()}
               {/* Histórico */}
               {hist.length>0&&(
                 <div>
@@ -8984,7 +9088,28 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
       historialEscalado:[...(x.historialEscalado||[]),entrada],
     }:x);
     setEstrategias(updated);
-    fbEscribir("estrategias",e.id,updated.find(x=>x.id===e.id));
+    const updatedEst=updated.find(x=>x.id===e.id);
+    fbEscribir("estrategias",e.id,updatedEst);
+    // (v3.39.11) Generar oferta automáticamente cuando se aprueba
+    if(!hayElevadas&&(tipoRes==="aprobada"||tipoRes==="aprobada_parcial")&&typeof setOfertasDB==="function"){
+      var ofAprobadas=(ofertasAct||[]).filter(function(o){return o.aprobada!==false;});
+      if(ofAprobadas.length>0){
+        var hoyStr2=new Date().toLocaleDateString("es-ES");
+        var plazoAuto=new Date(); plazoAuto.setDate(plazoAuto.getDate()+30);
+        var ofAutoId="oferta_est_"+e.id+"_"+Date.now();
+        var ofAuto={id:ofAutoId,clienteNombre:e.cliente||e.clienteNombre||"",clienteId:e.clienteId||"",
+          agente:e.agente||"",agenteNombre:e.agenteNombre||e.agente||"",equipo:e.equipo||"",
+          lineas:ofAprobadas.map(function(o){return{producto:o.nombre||o.producto||"",calibre:o.calibre||"",
+            precio:o.precioAprobado||o.precioOferta||o.precio||0,cantidad:o.cantidad||0,unidad:o.unidad||"kg"};}),
+          estado:"pendiente",desdeEstrategia:e.id,
+          fechaCreacion:new Date().toISOString(),fechaCreacionStr:hoyStr2,
+          fechaPlazo:plazoAuto.toISOString(),
+          notas:"Generada automáticamente al aprobar estrategia"+(nota?". "+nota:""),
+          seguimientos:[{accion:"📋 Oferta generada desde estrategia aprobada",fecha:hoyStr2,por:usuario.nombre,nota:nota||""}]};
+        fbEscribir("ofertas",ofAutoId,ofAuto);
+        setOfertasDB(function(prev){return[ofAuto,...(prev||[])];});
+      }
+    }
     // Notificar al agente que propuso la estrategia
     if(e.agente && e.agente !== usuario.id && !hayElevadas){
       const tipoLabel=tipoRes==="aprobada"?"✅ Aprobada":tipoRes==="rechazada"?"❌ Rechazada":"⚡ Aprobada parcialmente";
@@ -9050,8 +9175,8 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
       const orden={ceo:3,director:2,jefe:1,agente:0};
       if((orden[usuario.rol]||0)>=(orden[rolDest]||0)) return true;
     }
-    // Fallback legacy
-    if(!e.pendienteDe && esRolJefe && !e.escaladoA && deEquipo(e)) return true;
+    // (v3.39.12) Solicitudes de precio especial de agentes — el jefe las ve como pendientes
+    if(e.solicitudAgente&&esRolJefe&&deEquipo(e)) return true;
     if(!e.pendienteDe && e.escaladoA===usuario.id) return true;
     return false;
   });
@@ -9552,6 +9677,11 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
                     }]};
                   setEstrategias(prev=>prev.map(e=>e.id===sel.id?updated:e));
                   fbEscribir("estrategias",sel.id,updated);
+                  // Actualizar oferta vinculada con resultado pedido
+                  if(sel.desdeOferta&&typeof setOfertasDB==="function"){
+                    fbEscribir("ofertas",sel.desdeOferta,{estrategiaResultado:"pedido",estrategiaCierre:hoy,estrategiaNota:nota||""},true);
+                    setOfertasDB(function(prev){return prev.map(function(o){return o.id===sel.desdeOferta?{...o,estrategiaResultado:"pedido",estrategiaCierre:hoy}:o;});});
+                  }
                   setSel(updated);
                   alert("✅ Estrategia completada con PEDIDO");
                 }} style={{padding:"14px 10px",borderRadius:10,border:"none",
@@ -9559,26 +9689,52 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
                   ✅ Pedido
                 </button>
 
-                {/* KO */}
+                {/* KO con sub-opciones */}
                 <button onClick={()=>{
-                  const motivo=prompt("¿Por qué KO?\nIndica el motivo del rechazo:","");
-                  if(motivo===null) return;
+                  const opciones=["💸 Sigue caro","🚫 No le interesa","🏁 Ya compró a otro","📋 Otro motivo"];
+                  const mot=prompt("¿Por qué KO?\n\n1 - 💸 Sigue caro\n2 - 🚫 No le interesa\n3 - 🏁 Ya compró a otro\n4 - 📋 Otro motivo\n\nEscribe el número o el motivo:","");
+                  if(mot===null) return;
+                  const subTipo=mot==="1"||mot.includes("caro")?"sigue_caro":
+                    mot==="2"||mot.includes("interesa")?"no_interesa":
+                    mot==="3"||mot.includes("compr")?"compro_otro":"otro";
+                  const subLabel=subTipo==="sigue_caro"?"💸 Sigue caro":subTipo==="no_interesa"?"🚫 No le interesa":subTipo==="compro_otro"?"🏁 Ya compró a otro":"📋 "+mot;
                   const hoy=new Date().toLocaleDateString("es-ES");
                   const updated={...sel,
                     estado:"sin_exito",resultado:"sin_exito",
                     fechaCierre:new Date().toISOString(),
-                    cierreFinal:{por:usuario.nombre,fecha:hoy,resultado:"ko",nota:motivo||""},
-                    resolucion:{tipo:"ko",fecha:hoy,por:usuario.nombre,nota:motivo||""},
-                    seguimientos:[...(sel.seguimientos||[]),{
-                      accion:"❌ KO — sin éxito",fecha:hoy,por:usuario.nombre,nota:motivo||""
-                    }],
-                    historialEscalado:[...(sel.historialEscalado||[]),{
-                      accion:"❌ KO — sin éxito",por:usuario.nombre,fecha:hoy,nota:motivo||""
-                    }]};
+                    cierreFinal:{por:usuario.nombre,fecha:hoy,resultado:"ko",subTipo,nota:mot||""},
+                    resolucion:{tipo:"ko",subTipo,fecha:hoy,por:usuario.nombre,nota:mot||""},
+                    seguimientos:[...(sel.seguimientos||[]),{accion:"❌ KO — "+subLabel,fecha:hoy,por:usuario.nombre,nota:mot||""}],
+                    historialEscalado:[...(sel.historialEscalado||[]),{accion:"❌ KO — "+subLabel,por:usuario.nombre,fecha:hoy}]};
                   setEstrategias(prev=>prev.map(e=>e.id===sel.id?updated:e));
                   fbEscribir("estrategias",sel.id,updated);
+                  // Si sigue caro → actualizar oferta vinculada para que vuelva a Vamos Caros
+                  if(sel.desdeOferta&&typeof setOfertasDB==="function"){
+                    var resOp=subTipo==="sigue_caro"?"caro":"ko";
+                    fbEscribir("ofertas",sel.desdeOferta,{estrategiaResultado:subTipo==="sigue_caro"?"sigue_caro":"ko",estrategiaCierre:hoy,estrategiaNota:mot||""},true);
+                    setOfertasDB(function(prev){return prev.map(function(o){return o.id===sel.desdeOferta?{...o,estrategiaResultado:subTipo==="sigue_caro"?"sigue_caro":"ko"}:o;});});
+                  }
+                  // (v3.39.15) Guardar en vamos_caros si sigue caro
+                  if(subTipo==="sigue_caro"){
+                    var vcIdKo="vc_ko_"+sel.id+"_"+Date.now();
+                    var prod=(sel.ofertas&&sel.ofertas[0])||{};
+                    fbEscribir("vamos_caros",vcIdKo,{
+                      id:vcIdKo,origen:"estrategia_ko",
+                      cliente:sel.cliente||sel.clienteNombre||"",clienteId:sel.clienteId||"",
+                      agente:sel.agente||"",agenteNombre:sel.agenteNombre||"",equipo:sel.equipo||"",
+                      producto:prod.nombre||prod.producto||sel.texto||"",calibre:prod.calibre||"",
+                      precioNuestro:parseFloat(prod.precioActual||prod.precio||0),
+                      precioPide:parseFloat(prod.precioOferta||prod.precioCompetencia||0),
+                      descuento:sel.maxDescuento||0,
+                      fecha:new Date().toISOString(),fechaStr:hoy,
+                      nota:mot||"",estado:"sigue_caro",estrategiaId:sel.id,
+                      historial:[{accion:"💸 Estrategia cerrada — sigue caro",fecha:hoy,por:usuario.nombre,
+                        precioAprobado:parseFloat(prod.precioAprobado||prod.precioOferta||0),
+                        precioPide:parseFloat(prod.precioOferta||0),nota:mot||""}]
+                    });
+                  }
                   setSel(updated);
-                  alert("❌ Estrategia cerrada como KO");
+                  alert("❌ KO registrado: "+subLabel+(subTipo==="sigue_caro"?"\n\nLa oferta vuelve a aparecer en Vamos Caros":""));
                 }} style={{padding:"14px 10px",borderRadius:10,border:"none",
                   background:T.red,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>
                   ❌ KO
@@ -10194,8 +10350,13 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
             <div style={{display:"flex",gap:6,marginBottom:8,flexWrap:"wrap",alignItems:"center"}}>
               {ag&&<Badge label={"🧑‍💼 "+ag.nombre} color={ag.color||T.blue}/>}
               {sinCliente&&<Badge label="⚠️ SIN CLIENTE" color={T.amber}/>}
-              {yaApr?<Badge label={`✅ Aprobada${e.resolucion.por?" · "+e.resolucion.por:""}`} color={T.green}/>:
-                <Badge label="✅ Aprobada" color={T.blue}/>}
+              {(function(){
+                var res=e.resolucion||{};
+                if(res.tipo==="pedido") return <Badge label="🛒 Pedido confirmado" color={T.green}/>;
+                if(res.tipo==="ko") return <Badge label="❌ KO — sin pedido" color={T.red}/>;
+                if(res.tipo==="aprobada"||res.tipo==="aprobada_parcial") return <Badge label={"✅ Aprobada"+(e.resolucion.por?" · "+e.resolucion.por:"")} color={T.green}/>;
+                return <Badge label="✅ Aprobada" color={T.blue}/>;
+              })()}
             </div>
             {/* Cliente y texto */}
             <p style={{margin:"0 0 2px",fontSize:15,fontWeight:800,color:sinCliente?T.amber:T.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
@@ -10580,6 +10741,7 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
           ...(fEqEst(elevadasPorMi).length>0?[{k:"elevadas",l:"📤 Escaladas",n:fEqEst(elevadasPorMi).length,c:T.purple}]:[]),
           ...(fEqEst(misResueltasDir).length>0?[{k:"resueltas_dir",l:"📋 Resueltas",n:fEqEst(misResueltasDir).length,c:T.green}]:[]),
           ...((function(){var cerr=fEqEst(estrategias.filter(function(e){return !e.eliminada&&(!esRolJefe||deEquipo(e))&&(e.estado==="completada"||e.estado==="sin_exito"||e.estado==="rechazada");}));return cerr.length>0?[{k:"cerradas",l:"🔒 Cerradas",n:cerr.length,c:T.muted}]:[];})()),
+          {k:"pedidos_est",l:"🛒 Pedidos",n:fEqEst(estrategias.filter(e=>!e.eliminada&&(!esRolJefe||deEquipo(e))&&(e.resolucion||{}).tipo==="pedido")).length,c:T.green},
           {k:"todas",l:"Todas",n:fEqEst(estrategias.filter(e=>!e.eliminada&&(!esRolJefe||deEquipo(e)))).length,c:T.navy},
         ];
         if(tabs.length<=1) return null;
@@ -10600,6 +10762,19 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
             ))}
           </div>
         );
+      })()}
+
+      {/* 0b. PEDIDOS — estrategias que se convirtieron en pedido */}
+      {filtroSec==="pedidos_est"&&(function(){
+        var pedidos=fEqEst(estrategias.filter(function(e){return !e.eliminada&&(!esRolJefe||deEquipo(e))&&(e.resolucion||{}).tipo==="pedido";}));
+        if(pedidos.length===0) return <div style={{textAlign:"center",padding:40,color:T.muted,fontSize:13}}>No hay estrategias convertidas en pedido aún</div>;
+        return Bloque({titulo:"🛒 Estrategias → Pedido ("+pedidos.length+")",colorTitulo:T.green,
+          items:pedidos,renderItem:function(e){return(
+            <CardEst key={e.id} e={e} onClick={function(){setSel(e);}}>
+              <Badge label="🛒 Pedido" color={T.green}/>
+              {(e.resolucion||{}).nota&&<p style={{margin:"4px 0 0",fontSize:11,color:T.muted}}>💬 {e.resolucion.nota}</p>}
+            </CardEst>
+          );}});
       })()}
 
       {/* 1. PARA APROBAR — lo más urgente */}
@@ -10663,12 +10838,16 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
       {(filtroSec==="todas"||filtroSec==="resueltas_dir")&&fEqEst(misResueltasDir).length>0&&Bloque({
         titulo:"📋 Resueltas",colorTitulo:T.green,
         items:fEqEst(misResueltasDir),
-        renderItem:e=>(
-          <CardEst key={e.id} e={e} onClick={()=>setSel(e)}>
-            <Badge label={(e.resolucion||{}).tipo==="aprobada"?"✅ Aprobada":(e.resolucion||{}).tipo==="rechazada"?"❌ Rechazada":"📋 Resuelta"} 
-              color={(e.resolucion||{}).tipo==="aprobada"?T.green:(e.resolucion||{}).tipo==="rechazada"?T.red:T.muted}/>
-          </CardEst>
-        )
+        renderItem:e=>(function(){
+          var res=e.resolucion||{};
+          var label=res.tipo==="pedido"?"🛒 Pedido":res.tipo==="ko"?"❌ KO":
+            res.tipo==="aprobada"?"✅ Aprobada":res.tipo==="rechazada"?"❌ Rechazada":"📋 Resuelta";
+          var col=res.tipo==="pedido"?T.green:res.tipo==="ko"?T.red:
+            res.tipo==="aprobada"?T.green:res.tipo==="rechazada"?T.red:T.muted;
+          return <CardEst key={e.id} e={e} onClick={()=>setSel(e)}>
+            <Badge label={label} color={col}/>
+          </CardEst>;
+        })()
       })}
 
       {/* 8. CERRADAS (completadas + sin éxito) */}
@@ -11105,6 +11284,14 @@ function VamosCaros({usuario, ofertasDB, setOfertasDB, onBack}){
     }
   },[]);
 
+  // (v3.39.15) Cargar colección vamos_caros unificada
+  var _vcDB=React.useState([]); var vcDB=_vcDB[0],setVcDB=_vcDB[1];
+  React.useEffect(function(){
+    if(typeof fbLeer==="function"){
+      fbLeer("vamos_caros").then(function(arr){if(arr)setVcDB(arr);}).catch(function(){});
+    }
+  },[]);
+
   var _vista = React.useState("articulo"); var vista = _vista[0], setVista = _vista[1];
   // articulo | cliente | agente | tabla
   var _equipoF = React.useState(""); var equipoF = _equipoF[0], setEquipoF = _equipoF[1];
@@ -11300,8 +11487,34 @@ function VamosCaros({usuario, ofertasDB, setOfertasDB, onBack}){
     w.document.close();
   }
 
+  // (v3.39.15) Stats desde colección unificada vamos_caros
+  var vcAbiertos=vcDB.filter(function(v){return v.estado==="abierto"||v.estado==="solicitud_agente"||v.estado==="sigue_caro";}).length;
+  var vcResueltos=vcDB.filter(function(v){return v.estado==="resuelto_pedido";}).length;
+  var vcOrigenOfe=vcDB.filter(function(v){return v.origen==="oferta_caro";}).length;
+  var vcOrigenVis=vcDB.filter(function(v){return v.origen==="pide_estrategia";}).length;
+  var vcOrigenEst=vcDB.filter(function(v){return v.origen==="estrategia_ko";}).length;
+
   return (
     <div style={{padding:"16px",paddingBottom:80}}>
+      {vcDB.length>0&&(function(){
+        var total=vcDB.length;
+        var sumNuestro=0,sumPide=0,n=0;
+        vcDB.forEach(function(v){
+          if(v.precioNuestro>0&&v.precioPide>0){sumNuestro+=v.precioNuestro;sumPide+=v.precioPide;n++;}
+        });
+        var diffMedia=n>0?Math.round(((sumNuestro-sumPide)/sumNuestro)*100):0;
+        return <div style={{background:"#FEF2F2",border:"1px solid #FECACA",borderRadius:12,
+          padding:"12px 16px",marginBottom:14,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <p style={{margin:0,fontSize:11,color:"#DC2626",fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Operaciones perdidas</p>
+            <p style={{margin:0,fontSize:28,fontWeight:900,color:"#DC2626",lineHeight:1.1}}>{total}</p>
+          </div>
+          {n>0&&<div style={{textAlign:"right"}}>
+            <p style={{margin:0,fontSize:11,color:"#DC2626",fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Diferencia vs competencia</p>
+            <p style={{margin:0,fontSize:28,fontWeight:900,color:"#DC2626",lineHeight:1.1}}>+{diffMedia}%</p>
+          </div>}
+        </div>;
+      })()}
       {onBack && (
         <button onClick={onBack}
           style={{background:"#fff",border:"1.5px solid "+T.border,padding:"10px 16px",borderRadius:11,marginBottom:14,fontSize:13,fontWeight:700,color:T.text,cursor:"pointer"}}>
@@ -11735,6 +11948,32 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
       setOfertasDB(function(prev){return (prev||[]).map(function(x){return x.id===oferta.id?actualizada:x;});});
       setSel(estadoGlobal!=="pendiente" && !todasCerradas ? actualizada : null);
       setModal(null);
+      // (v3.39.15) Guardar en colección vamos_caros para panel unificado de Compras
+      if(nuevoEstado==="caro"){
+        var hoyISO=new Date().toISOString();
+        var lineasCarasVC=lineasActualizadas.filter(function(l){return l.estado==="caro";});
+        lineasCarasVC.forEach(function(l){
+          var vcId="vc_"+oferta.id+"_"+(l.id||l.producto).replace(/\s/g,"_");
+          var vcDoc={
+            id:vcId,
+            origen:"oferta_caro",
+            cliente:oferta.clienteNombre||"",clienteId:oferta.clienteId||"",
+            agente:oferta.agente||"",agenteNombre:oferta.agenteNombre||oferta.agente||"",
+            equipo:oferta.equipo||"",
+            producto:l.producto||"",calibre:l.calibre||"",
+            precioNuestro:parseFloat(l.precio||0),
+            precioPide:parseFloat(l.precioCompetencia||0),
+            descuento:l.precio&&l.precioCompetencia&&parseFloat(l.precio)>0?Math.round(((parseFloat(l.precio)-parseFloat(l.precioCompetencia))/parseFloat(l.precio))*100):0,
+            fecha:hoyISO,fechaStr:hoy,
+            nota:extras&&extras.nota?extras.nota:"",
+            estado:"abierto",ofertaId:oferta.id,
+            historial:[{accion:"💸 Marcado como caro",fecha:hoy,por:usuario.nombre,
+              precioNuestro:parseFloat(l.precio||0),precioPide:parseFloat(l.precioCompetencia||0),
+              nota:extras&&extras.nota?extras.nota:""}]
+          };
+          fbEscribir("vamos_caros",vcId,vcDoc);
+        });
+      }
       setPreciosComp({});
       setNotaCierre("");
       setLineasSelModal([]);
@@ -12034,9 +12273,15 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
           </button>
         )}
         {sel.estrategiaVinculada && (
-          <div style={{width:"100%",marginTop:12,padding:"12px 16px",border:"1.5px solid #BBF7D0",background:"#F0FDF4",color:"#15803D",
+          <div style={{width:"100%",marginTop:12,padding:"12px 16px",
+            border:"1.5px solid "+(sel.estrategiaResultado==="pedido"?"#BBF7D0":sel.estrategiaResultado==="ko"?"#FECACA":"#BBF7D0"),
+            background:sel.estrategiaResultado==="pedido"?"#F0FDF4":sel.estrategiaResultado==="ko"?"#FEF2F2":"#F0FDF4",
+            color:sel.estrategiaResultado==="pedido"?"#15803D":sel.estrategiaResultado==="ko"?"#DC2626":"#15803D",
             borderRadius:12,fontSize:12,fontWeight:600,textAlign:"center"}}>
-            ✅ Estrategia vinculada — ver en Estrategias
+            {sel.estrategiaResultado==="pedido"?"🛒 Estrategia → PEDIDO conseguido ✅":
+             sel.estrategiaResultado==="sigue_caro"?"💸 Estrategia → Sigue caro (revisar precio)":
+             sel.estrategiaResultado==="ko"?"❌ Estrategia → KO (sin pedido)":
+             "📋 Estrategia vinculada — pendiente resolución"}
           </div>
         )}
         {(function(){
@@ -22827,15 +23072,17 @@ function VisitaTab({cliente,act,usuario,resultados,onGuardar,onIrAPotencial}){
   const [tipoContactoV2,setTipoContactoV2]=useState("");
   const opsPorTipoV2={
     presencial:[
-      {k:"visita_pedido",     label:"✅ Hizo pedido",    color:"#22C55E"},
-      {k:"visita_sin_pedido", label:"👋 Sin pedido",      color:"#F59E0B"},
-      {k:"primera_visita",    label:"🆕 Primera visita",  color:"#8B5CF6"},
-      {k:"visita_no_estaba",  label:"🚫 No estaba",       color:"#94A3B8"},
+      {k:"visita_pedido",     label:"✅ Hizo pedido",     color:"#22C55E"},
+      {k:"visita_sin_pedido", label:"👋 Sin pedido",       color:"#F59E0B"},
+      {k:"primera_visita",    label:"🆕 Primera visita",   color:"#8B5CF6"},
+      {k:"visita_no_estaba",  label:"🚫 No estaba",        color:"#94A3B8"},
+      {k:"pide_estrategia",   label:"💰 Pide precio esp.", color:"#EF4444"},
     ],
     telefono:[
-      {k:"llamada_pedido",      label:"✅ Pedido por tfno",color:"#22C55E"},
-      {k:"llamada_contactada",  label:"💬 Contactado",     color:"#3B82F6"},
-      {k:"llamada_no_contesta", label:"📵 No contesta",    color:"#94A3B8"},
+      {k:"llamada_pedido",      label:"✅ Pedido por tfno", color:"#22C55E"},
+      {k:"llamada_contactada",  label:"💬 Contactado",      color:"#3B82F6"},
+      {k:"llamada_no_contesta", label:"📵 No contesta",     color:"#94A3B8"},
+      {k:"pide_estrategia",     label:"💰 Pide precio esp.", color:"#EF4444"},
     ],
   };
   const [nota,setNota]=useState("");
