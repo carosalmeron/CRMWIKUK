@@ -285,7 +285,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.39.31";
+const CRM_VERSION = "3.39.33";
 const CRM_BUILD = "03/06/2026-timeline-detalle-completo";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -26940,7 +26940,38 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
           var totalPts=desglose.reduce(function(s,d){return s+(d.pts!==null?d.pts:0);},0);
           var maxPts=desglose.reduce(function(s,d){return s+(d.pts!==null?d.pts:d.pts===null&&d.obj>0?d.pts:0);},0);
           var hayObjetivos=desglose.some(function(d){return d.obj>0;});
-          var pctGlobal=hayObjetivos?totalPts:null;
+
+          // ── Penalizaciones por abandono >5 días ──────────────────
+          var CORTE5=Date.now()-5*86400000;
+          var ofertasParadas=(ofertasDB||[]).filter(function(o){
+            if(o.eliminada||o.estado==="cerrada"||o.estado==="aceptada"||o.estado==="rechazada") return false;
+            if(!esDeVSel2(o.agente,o.agenteId)) return false;
+            var f=_parseFecha(o.fechaActualizacion||o.fechaCreacion||o.fecha);
+            return f&&f.getTime()<CORTE5;
+          }).length;
+          var opParadas=(oportunidadesDB||[]).filter(function(o){
+            if(o.eliminada||o.estado==="ganada"||o.estado==="perdida"||o.estado==="cerrada") return false;
+            if(!esDeVSel2(o.agente,o.agenteId)&&!esDeVSel(o.responsable)&&!esDeVSel(o.creadoPor)) return false;
+            var f=_parseFecha(o.fechaActualizacion||o.fechaCreacion||o.fecha);
+            return f&&f.getTime()<CORTE5;
+          }).length;
+          var estParadas=(estrategiasDB||[]).filter(function(e){
+            if(e.eliminada||e.estado==="aprobada"||e.estado==="rechazada"||e.estado==="ko") return false;
+            if(!esDeVSel2(e.agente,e.agenteId)&&!esDeVSel(e.creadoPor)) return false;
+            var f=_parseFecha(e.fechaActualizacion||e.fechaCreacion||e.fecha);
+            return f&&f.getTime()<CORTE5;
+          }).length;
+          var penOferta=Math.min(20,ofertasParadas*3);
+          var penOp=Math.min(15,opParadas*2);
+          var penEst=Math.min(15,estParadas*3);
+          var penTotal=penOferta+penOp+penEst;
+          var penalizaciones=[];
+          if(ofertasParadas>0) penalizaciones.push({ic:"💰",label:"Ofertas sin mover +5d",n:ofertasParadas,pen:penOferta,max:20});
+          if(opParadas>0)      penalizaciones.push({ic:"🎯",label:"Oportunidades sin gestión +5d",n:opParadas,pen:penOp,max:15});
+          if(estParadas>0)     penalizaciones.push({ic:"🏆",label:"Estrategias paradas +5d",n:estParadas,pen:penEst,max:15});
+          var scoreConPen=totalPts-penTotal;
+
+          var pctGlobal=hayObjetivos?scoreConPen:null;
           var colGlobal=pctGlobal>=80?"#22C55E":pctGlobal>=50?"#F59E0B":"#EF4444";
 
           if(!hayObjetivos&&(esDir||["crm_jefe","jefe"].includes(usuario.rol))){
@@ -26961,12 +26992,12 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
               <div style={{flex:1}}>
                 <div style={{fontSize:11,color:T.muted,fontWeight:600,marginBottom:4}}>SCORE TOTAL · {diasRango} días</div>
                 <div style={{height:8,background:"#E2E8F0",borderRadius:4,overflow:"hidden"}}>
-                  <div style={{height:"100%",width:Math.min(100,pctGlobal)+"%",background:colGlobal,
+                  <div style={{height:"100%",width:Math.min(100,Math.max(0,pctGlobal))+"%",background:colGlobal,
                     borderRadius:4,transition:"width .5s"}}/>
                 </div>
               </div>
               <div style={{textAlign:"right",flexShrink:0,cursor:"pointer"}} onClick={function(){setShowCriterios(true);}}>
-                <span style={{fontSize:28,fontWeight:900,color:colGlobal}}>{totalPts}</span>
+                <span style={{fontSize:28,fontWeight:900,color:colGlobal}}>{scoreConPen}</span>
                 <span style={{fontSize:14,color:T.muted,fontWeight:600}}>/100</span>
                 <div style={{fontSize:9,color:"#6366F1",fontWeight:700,marginTop:1}}>i criterios</div>
               </div>
@@ -27024,7 +27055,29 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
           </div>;
         })()}
 
-        {filtroTipoEv&&<div style={{display:"flex",alignItems:"center",gap:8,margin:"6px 0",
+        
+            {/* Filas de penalización */}
+            {penalizaciones.map(function(p){
+              return <div key={p.label} onClick={function(){setFiltroTipoEv(null);}}
+                style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",
+                  cursor:"default",borderBottom:"1px solid #FEE2E2",background:"#FFF5F5"}}>
+                <div style={{fontSize:20,flexShrink:0}}>{p.ic}</div>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:12,fontWeight:700,color:"#EF4444"}}>{p.label}</div>
+                  <div style={{fontSize:11,color:"#F87171"}}>{p.n} sin gestionar</div>
+                </div>
+                <div style={{textAlign:"right",flexShrink:0}}>
+                  <div style={{fontSize:16,fontWeight:900,color:"#EF4444"}}>-{p.pen}</div>
+                  <div style={{fontSize:9,color:"#F87171"}}>máx -{p.max}</div>
+                </div>
+              </div>;
+            })}
+            {penTotal>0&&<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+              padding:"6px 14px",background:"#FEF2F2",borderBottom:"2px solid #FECACA"}}>
+              <span style={{fontSize:11,color:"#B91C1C",fontWeight:700}}>⚠️ Penalización total</span>
+              <span style={{fontSize:15,fontWeight:900,color:"#B91C1C"}}>-{penTotal} pts</span>
+            </div>}
+            {filtroTipoEv&&<div style={{display:"flex",alignItems:"center",gap:8,margin:"6px 0",
           padding:"8px 12px",background:"#EEF2FF",borderRadius:8,border:"1px solid #C7D2FE"}}>
           <span style={{fontSize:12,color:"#4338CA",fontWeight:600,flex:1}}>
             Filtrando por {filtroTipoEv} - desliza abajo para ver la actividad
@@ -27309,6 +27362,29 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
           </p>
         )}
       </div>
+
+      {/* Alerta incidencias sin resolver — solo jefe/director (Opción A) */}
+      {(esDir||["crm_jefe","jefe"].includes(usuario.rol))&&(function(){
+        var CORTE5=Date.now()-5*86400000;
+        var incSinResolver=(incidenciasDB||[]).filter(function(i){
+          if(i.eliminada||i.estado==="resuelta"||i.estado==="cerrada") return false;
+          var f=_parseFecha(i.fechaActualizacion||i.fechaCreacion||i.fecha);
+          return f&&f.getTime()<CORTE5;
+        });
+        if(!incSinResolver.length) return null;
+        return <div style={{background:"#FFF1F2",border:"2px solid #FECDD3",borderRadius:12,
+          padding:"12px 16px",marginBottom:12,display:"flex",alignItems:"center",gap:12}}>
+          <div style={{fontSize:28,flexShrink:0}}>🚨</div>
+          <div style={{flex:1}}>
+            <p style={{margin:0,fontSize:13,fontWeight:800,color:"#BE123C"}}>
+              {incSinResolver.length} incidencia{incSinResolver.length>1?"s":""} sin resolver hace más de 5 días
+            </p>
+            <p style={{margin:"2px 0 0",fontSize:11,color:"#F43F5E"}}>
+              Clientes: {incSinResolver.slice(0,3).map(function(i){return i.cliente||i.clienteNombre||"Sin nombre";}).join(", ")}{incSinResolver.length>3?" y "+(incSinResolver.length-3)+" más":""}
+            </p>
+          </div>
+        </div>;
+      })()}
 
       {/* Grid de tarjetas */}
       {rankVendedores.map(function(v,idx){
