@@ -285,7 +285,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.39.37";
+const CRM_VERSION = "3.39.38";
 const CRM_BUILD = "03/06/2026-timeline-detalle-completo";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -26508,6 +26508,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
   const [vendedorSel,setVendedorSel]=React.useState(null);
   const [scoreExpandido,setScoreExpandido]=React.useState(true);
   const [showCriterios,setShowCriterios]=React.useState(false);
+  const [penExpandido,setPenExpandido]=React.useState(null); // tipo: "oferta"|"oportunidad"|"estrategia"
   const [evAbierto,setEvAbierto]=React.useState(null);
   const [filtroTipoEv,setFiltroTipoEv]=React.useState(null);
   const [vista,setVista]=React.useState("radar");
@@ -26804,29 +26805,43 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
     var svIds=resolverMisIds(vendedorSel);
     function esV(campo){return campo&&svIds.has(String(campo).toUpperCase());}
     function esV2(c1,c2){return esV(c1)||esV(c2);}
-    var nOf=(ofertasDB||[]).filter(function(o){
+    function diasParado(o){
+      var f=_parseFecha(o.fechaActualizacion||o.fechaCreacion||o.fecha);
+      return f?Math.floor((Date.now()-f.getTime())/86400000):0;
+    }
+    var rawOf=(ofertasDB||[]).filter(function(o){
       if(o.eliminada||o.estado==="cerrada"||o.estado==="aceptada"||o.estado==="rechazada") return false;
       if(!esV2(o.agente,o.agenteId)) return false;
       var f=_parseFecha(o.fechaActualizacion||o.fechaCreacion||o.fecha);
       return f&&f.getTime()<_CORTE5;
-    }).length;
-    var nOp=(oportunidadesDB||[]).filter(function(o){
+    });
+    var rawOp=(oportunidadesDB||[]).filter(function(o){
       if(o.eliminada||o.estado==="ganada"||o.estado==="perdida"||o.estado==="cerrada") return false;
       if(!esV2(o.agente,o.agenteId)&&!esV(o.responsable)&&!esV(o.creadoPor)) return false;
       var f=_parseFecha(o.fechaActualizacion||o.fechaCreacion||o.fecha);
       return f&&f.getTime()<_CORTE5;
-    }).length;
-    var nEst=(estrategiasDB||[]).filter(function(e){
+    });
+    var rawEst=(estrategiasDB||[]).filter(function(e){
       if(e.eliminada||e.estado==="aprobada"||e.estado==="rechazada"||e.estado==="ko") return false;
       if(!esV2(e.agente,e.agenteId)&&!esV(e.creadoPor)) return false;
       var f=_parseFecha(e.fechaActualizacion||e.fechaCreacion||e.fecha);
       return f&&f.getTime()<_CORTE5;
-    }).length;
-    var pOf=Math.min(20,nOf*3), pOp=Math.min(15,nOp*2), pEst=Math.min(15,nEst*3);
+    });
+    var pOf=Math.min(20,rawOf.length*3), pOp=Math.min(15,rawOp.length*2), pEst=Math.min(15,rawEst.length*3);
     var items=[];
-    if(nOf>0) items.push({ic:"💰",label:"Ofertas sin mover +5d",n:nOf,pen:pOf,max:20});
-    if(nOp>0) items.push({ic:"🎯",label:"Oportunidades sin gestion +5d",n:nOp,pen:pOp,max:15});
-    if(nEst>0) items.push({ic:"🏆",label:"Estrategias paradas +5d",n:nEst,pen:pEst,max:15});
+    if(rawOf.length>0) items.push({ic:"💰",label:"Ofertas sin mover +5d",n:rawOf.length,pen:pOf,max:20,tipo:"oferta",
+      registros:rawOf.map(function(o){return {id:o.id,cliente:o.cliente||o.clienteNombre||"Sin cliente",
+        desc:o.articulo||o.descripcion||o.titulo||"Oferta",importe:o.importe||o.precio||null,
+        dias:diasParado(o),estado:o.estado||"pendiente",raw:o};})});
+    if(rawOp.length>0) items.push({ic:"🎯",label:"Oportunidades sin gestion +5d",n:rawOp.length,pen:pOp,max:15,tipo:"oportunidad",
+      registros:rawOp.map(function(o){return {id:o.id,cliente:o.cliente||o.clienteNombre||o.empresa||"Sin cliente",
+        desc:o.titulo||o.descripcion||o.nombre||"Oportunidad",importe:o.importe||o.valor||null,
+        dias:diasParado(o),estado:o.estado||"abierta",raw:o};})});
+    if(rawEst.length>0) items.push({ic:"🏆",label:"Estrategias paradas +5d",n:rawEst.length,pen:pEst,max:15,tipo:"estrategia",
+      registros:rawEst.map(function(e){return {id:e.id,cliente:e.cliente||e.clienteNombre||"Sin cliente",
+        desc:(e.ofertas&&e.ofertas[0]&&e.ofertas[0].articulo)||e.descripcion||"Estrategia",
+        importe:e.ofertas&&e.ofertas[0]&&e.ofertas[0].precioActual||null,
+        dias:diasParado(e),estado:e.estado||"pendiente",raw:e};})});
     return {items,penTotal:pOf+pOp+pEst};
   },[vendedorSel,ofertasDB,oportunidadesDB,estrategiasDB]);
 
@@ -27123,20 +27138,49 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
         })()}
 
         
-            {/* Filas de penalización */}
+            {/* Filas de penalización — clickables */}
             {svPen.items.map(function(p){
-              return <div key={p.label}
-                style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",
-                  borderBottom:"1px solid #FEE2E2",background:"#FFF5F5"}}>
-                <div style={{fontSize:20,flexShrink:0}}>{p.ic}</div>
-                <div style={{flex:1}}>
-                  <div style={{fontSize:12,fontWeight:700,color:"#EF4444"}}>{p.label}</div>
-                  <div style={{fontSize:11,color:"#F87171"}}>{p.n} sin gestionar</div>
+              var abierto=penExpandido===p.tipo;
+              return <div key={p.label}>
+                <div onClick={function(){setPenExpandido(abierto?null:p.tipo);}}
+                  style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",
+                    cursor:"pointer",borderBottom:"1px solid #FEE2E2",background:abierto?"#FEF2F2":"#FFF5F5"}}>
+                  <div style={{fontSize:20,flexShrink:0}}>{p.ic}</div>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:12,fontWeight:700,color:"#EF4444"}}>{p.label}</div>
+                    <div style={{fontSize:11,color:"#F87171"}}>{p.n} sin gestionar · toca para ver</div>
+                  </div>
+                  <div style={{textAlign:"right",flexShrink:0}}>
+                    <div style={{fontSize:16,fontWeight:900,color:"#EF4444"}}>-{p.pen}</div>
+                    <div style={{fontSize:9,color:"#F87171"}}>max -{p.max}</div>
+                  </div>
+                  <div style={{fontSize:11,color:"#EF4444",marginLeft:4}}>{abierto?"▲":"▼"}</div>
                 </div>
-                <div style={{textAlign:"right",flexShrink:0}}>
-                  <div style={{fontSize:16,fontWeight:900,color:"#EF4444"}}>-{p.pen}</div>
-                  <div style={{fontSize:9,color:"#F87171"}}>max -{p.max}</div>
-                </div>
+                {abierto&&<div style={{background:"#FFF0F0",borderBottom:"1px solid #FEE2E2"}}>
+                  {p.registros.map(function(r,ri){
+                    return <div key={r.id||ri}
+                      style={{padding:"10px 16px",borderBottom:ri<p.registros.length-1?"1px solid #FEE2E2":"none",
+                        display:"flex",alignItems:"flex-start",gap:10}}>
+                      <div style={{flex:1}}>
+                        <div style={{fontSize:13,fontWeight:700,color:"#1E293B",marginBottom:2}}>{r.cliente}</div>
+                        <div style={{fontSize:11,color:"#64748B",marginBottom:3}}>{r.desc}</div>
+                        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                          <span style={{background:"#FEE2E2",color:"#B91C1C",padding:"2px 7px",
+                            borderRadius:99,fontSize:10,fontWeight:700}}>
+                            {r.dias}d sin mover
+                          </span>
+                          <span style={{background:"#F1F5F9",color:"#64748B",padding:"2px 7px",
+                            borderRadius:99,fontSize:10}}>
+                            {r.estado}
+                          </span>
+                          {r.importe&&<span style={{fontSize:11,color:"#15803D",fontWeight:700}}>
+                            {typeof r.importe==="number"?r.importe.toFixed(2)+"€":r.importe}
+                          </span>}
+                        </div>
+                      </div>
+                    </div>;
+                  })}
+                </div>}
               </div>;
             })}
             {svPen.penTotal>0&&<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
