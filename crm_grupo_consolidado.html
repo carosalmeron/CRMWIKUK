@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.39.42";
-const CRM_BUILD = "04/06/2026-dept-IT-fix-clientes-nuevos";
+const CRM_VERSION = "3.39.44";
+const CRM_BUILD = "04/06/2026-clientes-nuevos-en-scoring";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -453,7 +453,38 @@ function idCanonico(usuario){
   return usuario.id||"";
 }
 
-// ── Carga dinámica de USUARIOS desde Firebase ───────────────────
+// (v3.39.42) Helper: contar solo días laborables entre una fecha y hoy
+function diasLaborales(desde){
+  if(!desde) return 999;
+  var d = desde instanceof Date ? desde : new Date(desde);
+  if(isNaN(d.getTime())) return 999;
+  var hoy = new Date();
+  hoy.setHours(0,0,0,0);
+  d.setHours(0,0,0,0);
+  if(d >= hoy) return 0;
+  var count = 0;
+  var cur = new Date(d.getTime());
+  cur.setDate(cur.getDate() + 1); // empezar desde el día siguiente
+  while(cur <= hoy){
+    var dow = cur.getDay(); // 0=dom, 6=sab
+    if(dow !== 0 && dow !== 6) count++;
+    cur.setDate(cur.getDate() + 1);
+  }
+  return count;
+}
+
+// Helper: fecha de hace N días laborables
+function haceDiasLaborales(n){
+  var d = new Date();
+  d.setHours(0,0,0,0);
+  var count = 0;
+  while(count < n){
+    d.setDate(d.getDate() - 1);
+    var dow = d.getDay();
+    if(dow !== 0 && dow !== 6) count++;
+  }
+  return d.getTime();
+}
 // Si existen docs en la colección "usuarios", se fusionan con el seed:
 // - Firebase tiene prioridad (actualiza nombre, color, equipo, etc.)
 // - Usuarios nuevos en Firebase se añaden automáticamente
@@ -1410,7 +1441,7 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
       if(d && !isNaN(d.getTime()) && d.getTime()>maxTs) maxTs=d.getTime();
     });
     if(!maxTs) return 999;
-    return Math.floor((Date.now()-maxTs)/(1000*60*60*24));
+    return diasLaborales(new Date(maxTs));
   }
   var opsResueltasSem360 = (oportunidadesDB||[]).filter(function(o){
     if(o.eliminada) return false;
@@ -26552,10 +26583,11 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
     {k:"ofertasEnviadas",label:"Ofertas enviadas",      ic:"💰", pts:13, objKey:"ofertas"},
     {k:"muestras",      label:"Muestras enviadas",      ic:"📦", pts:9,  objKey:"muestras"},
     {k:"visitas",       label:"Visitas presenciales",   ic:"👋", pts:8,  objKey:"visitas"},
+    {k:"clientesNuevos",label:"Clientes nuevos",         ic:"🌱", pts:6,  objKey:"clientesNuevos"},
     {k:"llamadas",      label:"Llamadas",               ic:"📞", pts:4,  objKey:"llamadas"},
     {k:"aprobadas",     label:"Estrategias aprobadas",  ic:"🏆", pts:4,  objKey:"aprobadas"},
     {k:"potencialMix",  label:"Potencial cartera (clientes×líneas)", ic:"📈", pts:12, objKey:"_potencial_auto"},
-  ]; // suma = 100
+  ]; // suma = 106 (con clientes nuevos)
 
   // Objetivo proporcional al período
   function objProporcional(equipoId,campo){
@@ -26733,12 +26765,13 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
       (oportunidadesDB||[]).forEach(function(x){if(esDeV2(x.agente,x.agenteId)){var f=_parseFecha(x.fechaCreacion||x.creadaEn);if(f)ultimaFechas.push(f);}});
 
       var ultimaFecha=ultimaFechas.length?new Date(Math.max.apply(null,ultimaFechas)):null;
-      var diasSinAct=ultimaFecha?Math.floor((Date.now()-ultimaFecha.getTime())/86400000):999;
+      var diasSinAct=ultimaFecha?diasLaborales(ultimaFecha):999;
 
       var rawScore=
         visitas*3 + llamadas*1
         + muestrasPend*3 + muestrasOk*12 + muestrasKo*1
         + pedidos*15 + estrategias*2 + estrategiasAprobadas*12 + opos*5 + potencialMix*0.5
+        + clientesNuevos*8
         - incAbiertas*5 - incViejas*8
         - ofertasPend*1 - ofertasCaro*3
         - (diasSinAct>7?(diasSinAct-7)*2:0);
@@ -26753,7 +26786,14 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
         return esDeV(c.agente||c.agenteId)||esDeV(c.vendedor);
       }).length;
 
-      map[v.id]={nom:v.nombre,visitas,llamadas,muestras,muestrasOk,muestrasPend,muestrasKo,ofertasPend,ofertasAceptadas,ofertasCaro,ofertasEnviadas,pedidosVisita,pedidosOferta,pedidosEstrategia,pedidos,estrategias,estrategiasAprobadas,aprobadas:estrategiasAprobadas,opos,oposAbiertas,potenciales:potClientes,potencialMix,potClientes,potMediaLineas,nClientes,incAbiertas,incViejas,diasSinAct,rawScore,score:0,semaforo,ultimaFecha,v};
+      // (v3.39.43) Clientes nuevos en el periodo
+      var clientesNuevos=(clientesDB&&(clientesDB._todos||clientesDB)||[]).filter(function(c){
+        if(!c.esNuevo) return false;
+        if(!(esDeV(c.agente||c.agenteId)||esDeV(c.GRUPOAGENTE)||esDeV(c.vendedor))) return false;
+        return enPeriodo(c.fechaCreacion||c.fechaCreacionStr||c.creadoEn||c.fechaAlta);
+      }).length;
+
+      map[v.id]={nom:v.nombre,visitas,llamadas,muestras,muestrasOk,muestrasPend,muestrasKo,ofertasPend,ofertasAceptadas,ofertasCaro,ofertasEnviadas,pedidosVisita,pedidosOferta,pedidosEstrategia,pedidos,estrategias,estrategiasAprobadas,aprobadas:estrategiasAprobadas,opos,oposAbiertas,potenciales:potClientes,potencialMix,potClientes,potMediaLineas,nClientes,clientesNuevos,incAbiertas,incViejas,diasSinAct,rawScore,score:0,semaforo,ultimaFecha,v};
     });
     // (v3.34.6) Normalizar score contra el mejor del equipo → el top = 100
     var maxRaw=Object.values(map).reduce(function(mx,s){return Math.max(mx,s.rawScore);},1);
@@ -26810,7 +26850,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
   },[vendedores,scores,objetivosDB,ofertasDB,oportunidadesDB,estrategiasDB]);
 
   // ── Penalizaciones por abandono >5 días (pre-calculadas) ──────────────
-  var _CORTE5=Date.now()-5*86400000;
+  var _CORTE5=haceDiasLaborales(5);
   var svPen=React.useMemo(function(){
     if(!vendedorSel) return {items:[],penTotal:0};
     var svIds=resolverMisIds(vendedorSel);
@@ -26818,7 +26858,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
     function esV2(c1,c2){return esV(c1)||esV(c2);}
     function diasParado(o){
       var f=_parseFecha(o.fechaActualizacion||o.fechaCreacion||o.fecha);
-      return f?Math.floor((Date.now()-f.getTime())/86400000):0;
+      return f?diasLaborales(f):0;
     }
     var rawOf=(ofertasDB||[]).filter(function(o){
       if(o.eliminada||o.estado==="cerrada"||o.estado==="aceptada"||o.estado==="rechazada") return false;
@@ -27336,6 +27376,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
       {k:"ofertas",       l:"💰 Ofertas enviadas / mes        (13 pts)"},
       {k:"muestras",      l:"📦 Muestras enviadas / mes        (9 pts)"},
       {k:"visitas",       l:"👋 Visitas presenciales / mes     (8 pts)"},
+      {k:"clientesNuevos",l:"🌱 Clientes nuevos / mes          (6 pts)"},
       {k:"llamadas",      l:"📞 Llamadas / mes                 (4 pts)"},
       {k:"aprobadas",     l:"🏆 Estrategias aprobadas / mes   (4 pts)"},
       // Potencial (12 pts) se calcula automáticamente: clientes cartera × 5 líneas
@@ -27528,6 +27569,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
                   {(s.opos||0)>0&&<span style={{fontSize:10,color:"#6366F1"}}>💼{s.opos}</span>}
                   {(s.estrategias||0)>0&&<span style={{fontSize:10,color:"#10B981"}}>🎯{s.estrategias}</span>}
                   {(s.estrategiasAprobadas||0)>0&&<span style={{fontSize:10,color:"#F59E0B",fontWeight:700}}>🏆{s.estrategiasAprobadas}</span>}
+                  {(s.clientesNuevos||0)>0&&<span style={{fontSize:10,color:"#3B82F6",fontWeight:700}}>🌱{s.clientesNuevos}</span>}
                   {s.incAbiertas>0&&<span style={{fontSize:10,color:"#EF4444"}}>🚨{s.incAbiertas}</span>}
                 </div>
                 {/* Barra de objetivo si está configurado */}
