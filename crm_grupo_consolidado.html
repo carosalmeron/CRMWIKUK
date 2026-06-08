@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.39.85";
-const CRM_BUILD = "08/06/2026-planif-rapida-desde-visita";
+const CRM_VERSION = "3.39.87";
+const CRM_BUILD = "08/06/2026-planif-compras-visual";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -11524,12 +11524,11 @@ function PlanificacionTab({clienteId,clienteNombre,usuario}){
   </div>;
 }
 
-// (v3.39.79) Vista de planificación agrupada para Compras
+// (v3.39.86) Vista de planificación visual para Compras
 function PlanificacionCompras({usuario}){
   const [planes,setPlanes]=React.useState([]);
   const [cargando,setCargando]=React.useState(true);
-  const [filtroEstado,setFiltroEstado]=React.useState("planificado");
-  const [filtroSemana,setFiltroSemana]=React.useState("todas");
+  const [vista,setVista]=React.useState("productos"); // productos | timeline | clientes
 
   React.useEffect(function(){
     fbLeer("planificacion").then(function(d){
@@ -11538,120 +11537,217 @@ function PlanificacionCompras({usuario}){
     }).catch(function(){setCargando(false);});
   },[]);
 
-  var filtrados=planes.filter(function(p){
-    if(filtroEstado!=="todos"&&p.estado!==filtroEstado) return false;
-    if(filtroSemana!=="todas"&&String(p.semanaServicio)!==filtroSemana) return false;
-    return true;
-  });
+  function cambiarEstado(pid,nuevoEstado){
+    fbEscribir("planificacion",pid,{estado:nuevoEstado},true);
+    setPlanes(function(prev){return prev.map(function(p){return p.id===pid?Object.assign({},p,{estado:nuevoEstado}):p;});});
+  }
 
-  // Agrupar por fecha de servicio → producto
-  var porFecha={};
-  filtrados.forEach(function(p){
-    var f=p.fechaServicio||"sin fecha";
-    if(!porFecha[f]) porFecha[f]={fecha:f,productos:{},total:0};
-    var prod=p.producto||"?";
-    if(!porFecha[f].productos[prod]) porFecha[f].productos[prod]={producto:prod,calibre:p.calibre||"",metros:p.metros||"",cantidad:0,clientes:[]};
-    porFecha[f].productos[prod].cantidad+=Number(p.cantidad)||0;
-    porFecha[f].productos[prod].clientes.push({nombre:p.clienteNombre||"?",agente:p.agenteNombre||p.agente,cantidad:Number(p.cantidad)||0,estado:p.estado});
-    porFecha[f].total+=Number(p.cantidad)||0;
-  });
-  var fechasOrdenadas=Object.keys(porFecha).sort();
+  var activos=planes.filter(function(p){return p.estado!=="servido";});
+  var servidos=planes.filter(function(p){return p.estado==="servido";});
+  var hoy=new Date().toISOString().substring(0,10);
+  var en7d=(function(){var d=new Date();d.setDate(d.getDate()+7);return d.toISOString().substring(0,10);})();
+  var en14d=(function(){var d=new Date();d.setDate(d.getDate()+14);return d.toISOString().substring(0,10);})();
 
-  // Semanas disponibles
-  var semanasDisp=[];
-  var semanasSet={};
-  planes.forEach(function(p){if(p.semanaServicio&&!semanasSet[p.semanaServicio]){semanasSet[p.semanaServicio]=true;semanasDisp.push(p.semanaServicio);}});
-  semanasDisp.sort(function(a,b){return a-b;});
-
-  // Resumen por producto (totales)
+  // Agrupar activos por producto
   var porProducto={};
-  filtrados.forEach(function(p){
-    var prod=p.producto||"?";
-    if(!porProducto[prod]) porProducto[prod]={producto:prod,total:0,clientes:0};
-    porProducto[prod].total+=Number(p.cantidad)||0;
-    porProducto[prod].clientes++;
+  activos.forEach(function(p){
+    var k=p.producto||"?";
+    if(!porProducto[k]) porProducto[k]={producto:k,total:0,urgente:0,proximo:0,futuro:0,lineas:[],calibres:new Set(),clientes:new Set()};
+    var g=porProducto[k];
+    g.total+=Number(p.cantidad)||0;
+    g.lineas.push(p);
+    if(p.calibre) g.calibres.add(p.calibre);
+    g.clientes.add(p.clienteNombre||"?");
+    if(p.fechaServicio<=hoy) g.urgente+=Number(p.cantidad)||0;
+    else if(p.fechaServicio<=en7d) g.urgente+=Number(p.cantidad)||0;
+    else if(p.fechaServicio<=en14d) g.proximo+=Number(p.cantidad)||0;
+    else g.futuro+=Number(p.cantidad)||0;
   });
-  var productosList=Object.values(porProducto).sort(function(a,b){return b.total-a.total;});
+  var productos=Object.values(porProducto).sort(function(a,b){return b.urgente-a.urgente||b.total-a.total;});
 
-  var estadoColor={planificado:"#F59E0B",confirmado:"#3B82F6",servido:"#22C55E"};
+  // Timeline: próximas 8 semanas
+  var semanas=[];
+  for(var w=0;w<8;w++){
+    var lun=new Date();lun.setDate(lun.getDate()-lun.getDay()+1+w*7);
+    var dom=new Date(lun);dom.setDate(dom.getDate()+6);
+    var lunS=lun.toISOString().substring(0,10);
+    var domS=dom.toISOString().substring(0,10);
+    var enSem=activos.filter(function(p){return p.fechaServicio>=lunS&&p.fechaServicio<=domS;});
+    var totSem=enSem.reduce(function(s,p){return s+(Number(p.cantidad)||0);},0);
+    semanas.push({n:w,lun:lunS,dom:domS,label:lun.toLocaleDateString("es-ES",{day:"2-digit",month:"short"}),planes:enSem,total:totSem});
+  }
+
+  // Por cliente
+  var porCliente={};
+  activos.forEach(function(p){
+    var c=p.clienteNombre||"?";
+    if(!porCliente[c]) porCliente[c]={nombre:c,agente:p.agenteNombre||p.agente,total:0,lineas:[]};
+    porCliente[c].total+=Number(p.cantidad)||0;
+    porCliente[c].lineas.push(p);
+  });
+  var clientes=Object.values(porCliente).sort(function(a,b){return b.total-a.total;});
+
+  var totalUrgente=productos.reduce(function(s,p){return s+p.urgente;},0);
+  var totalActivo=activos.reduce(function(s,p){return s+(Number(p.cantidad)||0);},0);
 
   if(cargando) return <div style={{padding:40,textAlign:"center",color:T.muted}}>⏳ Cargando planificación...</div>;
 
   return <div style={{padding:16,paddingBottom:80}}>
-    <p style={{margin:"0 0 14px",fontSize:20,fontWeight:900,color:T.text}}>📋 Planificación de Compras</p>
+    <p style={{margin:"0 0 4px",fontSize:20,fontWeight:900,color:T.text}}>📋 Planificación de Compras</p>
+    <p style={{margin:"0 0 14px",fontSize:12,color:T.muted}}>{activos.length} líneas activas · {productos.length} productos · {clientes.length} clientes</p>
 
-    {/* Filtros */}
-    <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
-      {[{k:"planificado",l:"📋 Planificados"},{k:"confirmado",l:"✅ Confirmados"},{k:"servido",l:"📦 Servidos"},{k:"todos",l:"Todos"}].map(function(f){
-        var sel=filtroEstado===f.k;
-        return <button key={f.k} onClick={function(){setFiltroEstado(f.k);}}
-          style={{padding:"6px 12px",borderRadius:99,border:sel?"none":"1.5px solid "+T.border,
-            background:sel?T.navy:"#fff",color:sel?"#fff":T.text,fontSize:11,fontWeight:sel?700:500,cursor:"pointer",fontFamily:"inherit"}}>{f.l}</button>;
+    {/* ALERTAS urgentes */}
+    {totalUrgente>0&&<div style={{background:"#FEF2F2",borderRadius:12,padding:"12px 14px",marginBottom:14,border:"2px solid #FECACA"}}>
+      <p style={{margin:0,fontSize:14,fontWeight:800,color:"#DC2626"}}>🚨 {totalUrgente.toLocaleString("es-ES")} uds necesarias esta semana</p>
+      <div style={{marginTop:6}}>
+        {productos.filter(function(p){return p.urgente>0;}).map(function(p){
+          return <div key={p.producto} style={{display:"flex",justifyContent:"space-between",padding:"4px 0",fontSize:12}}>
+            <span style={{fontWeight:700,color:"#991B1B"}}>{p.producto}</span>
+            <span style={{fontWeight:800,color:"#DC2626"}}>{p.urgente.toLocaleString("es-ES")} uds</span>
+          </div>;
+        })}
+      </div>
+    </div>}
+
+    {/* KPIs */}
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
+      <div style={{background:"#FEF2F2",borderRadius:10,padding:"12px 10px",textAlign:"center",border:"1px solid #FECACA"}}>
+        <p style={{margin:0,fontSize:22,fontWeight:900,color:"#DC2626"}}>{totalUrgente.toLocaleString("es-ES")}</p>
+        <p style={{margin:0,fontSize:9,fontWeight:700,color:"#991B1B"}}>UDS URGENTES (≤7d)</p>
+      </div>
+      <div style={{background:"#FFFBEB",borderRadius:10,padding:"12px 10px",textAlign:"center",border:"1px solid #FDE68A"}}>
+        <p style={{margin:0,fontSize:22,fontWeight:900,color:"#F59E0B"}}>{productos.reduce(function(s,p){return s+p.proximo;},0).toLocaleString("es-ES")}</p>
+        <p style={{margin:0,fontSize:9,fontWeight:700,color:"#92400E"}}>UDS PRÓXIMAS (8-14d)</p>
+      </div>
+      <div style={{background:"#EFF6FF",borderRadius:10,padding:"12px 10px",textAlign:"center",border:"1px solid #BFDBFE"}}>
+        <p style={{margin:0,fontSize:22,fontWeight:900,color:"#3B82F6"}}>{totalActivo.toLocaleString("es-ES")}</p>
+        <p style={{margin:0,fontSize:9,fontWeight:700,color:"#1E40AF"}}>TOTAL PLANIFICADO</p>
+      </div>
+    </div>
+
+    {/* Tabs vista */}
+    <div style={{display:"flex",gap:4,marginBottom:14}}>
+      {[{k:"productos",l:"📦 Por producto"},{k:"timeline",l:"📅 Timeline"},{k:"clientes",l:"👥 Por cliente"}].map(function(t){
+        var sel=vista===t.k;
+        return <button key={t.k} onClick={function(){setVista(t.k);}}
+          style={{flex:1,padding:"8px 6px",borderRadius:99,border:sel?"none":"1.5px solid "+T.border,
+            background:sel?T.navy:"#fff",color:sel?"#fff":T.text,fontSize:11,fontWeight:sel?700:500,cursor:"pointer",fontFamily:"inherit"}}>{t.l}</button>;
       })}
     </div>
-    <div style={{marginBottom:14}}>
-      <select value={filtroSemana} onChange={function(e){setFiltroSemana(e.target.value);}}
-        style={{padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",background:"#fff"}}>
-        <option value="todas">Todas las semanas</option>
-        {semanasDisp.map(function(s){return <option key={s} value={String(s)}>Semana {s}</option>;})}
-      </select>
-    </div>
 
-    {/* KPIs resumen */}
-    <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}}>
-      <div style={{flex:1,minWidth:80,background:"#FFFBEB",borderRadius:10,padding:"10px 12px",textAlign:"center",border:"1px solid #FDE68A"}}>
-        <p style={{margin:0,fontSize:20,fontWeight:900,color:"#F59E0B"}}>{planes.filter(function(p){return p.estado==="planificado";}).length}</p>
-        <p style={{margin:0,fontSize:10,color:T.muted}}>Planificados</p>
-      </div>
-      <div style={{flex:1,minWidth:80,background:"#EFF6FF",borderRadius:10,padding:"10px 12px",textAlign:"center",border:"1px solid #BFDBFE"}}>
-        <p style={{margin:0,fontSize:20,fontWeight:900,color:"#3B82F6"}}>{planes.filter(function(p){return p.estado==="confirmado";}).length}</p>
-        <p style={{margin:0,fontSize:10,color:T.muted}}>Confirmados</p>
-      </div>
-      <div style={{flex:1,minWidth:80,background:"#F0FDF4",borderRadius:10,padding:"10px 12px",textAlign:"center",border:"1px solid #BBF7D0"}}>
-        <p style={{margin:0,fontSize:20,fontWeight:900,color:"#22C55E"}}>{planes.filter(function(p){return p.estado==="servido";}).length}</p>
-        <p style={{margin:0,fontSize:10,color:T.muted}}>Servidos</p>
-      </div>
-    </div>
+    {/* VISTA PRODUCTOS */}
+    {vista==="productos"&&productos.map(function(pr){
+      var pct=pr.urgente/Math.max(pr.total,1)*100;
+      return <div key={pr.producto} style={{background:"#fff",borderRadius:12,border:"1px solid "+T.border,marginBottom:10,overflow:"hidden",
+        borderLeft:pr.urgente>0?"4px solid #DC2626":pr.proximo>0?"4px solid #F59E0B":"4px solid #3B82F6"}}>
+        <div style={{padding:"12px 14px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <p style={{margin:0,fontSize:15,fontWeight:800,color:T.text}}>{pr.producto}</p>
+              <p style={{margin:"2px 0 0",fontSize:10,color:T.muted}}>
+                {Array.from(pr.calibres).join(", ")||"sin calibre"} · {pr.clientes.size} cliente{pr.clientes.size>1?"s":""}
+              </p>
+            </div>
+            <div style={{textAlign:"right"}}>
+              <p style={{margin:0,fontSize:20,fontWeight:900,color:T.navy}}>{pr.total.toLocaleString("es-ES")}</p>
+              <p style={{margin:0,fontSize:9,color:T.muted}}>UDS TOTAL</p>
+            </div>
+          </div>
+          {/* Barra visual urgencia */}
+          <div style={{marginTop:8,display:"flex",gap:2,height:6,borderRadius:99,overflow:"hidden",background:"#F1F5F9"}}>
+            {pr.urgente>0&&<div style={{width:pr.urgente/pr.total*100+"%",background:"#EF4444",borderRadius:99}}/>}
+            {pr.proximo>0&&<div style={{width:pr.proximo/pr.total*100+"%",background:"#F59E0B",borderRadius:99}}/>}
+            {pr.futuro>0&&<div style={{width:pr.futuro/pr.total*100+"%",background:"#3B82F6",borderRadius:99}}/>}
+          </div>
+          <div style={{display:"flex",gap:12,marginTop:4,fontSize:10}}>
+            {pr.urgente>0&&<span style={{color:"#DC2626",fontWeight:700}}>🔴 {pr.urgente} esta semana</span>}
+            {pr.proximo>0&&<span style={{color:"#F59E0B",fontWeight:600}}>🟡 {pr.proximo} en 2 sem</span>}
+            {pr.futuro>0&&<span style={{color:"#3B82F6"}}>🔵 {pr.futuro} después</span>}
+          </div>
+          {/* Desglose por cliente */}
+          <div style={{marginTop:8}}>
+            {pr.lineas.sort(function(a,b){return(a.fechaServicio||"z").localeCompare(b.fechaServicio||"z");}).map(function(l){
+              var vencida=l.fechaServicio<=hoy;
+              var pronto=l.fechaServicio<=en7d;
+              return <div key={l.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 8px",
+                marginBottom:2,borderRadius:6,fontSize:11,background:vencida?"#FEF2F2":pronto?"#FFFBEB":"#F8FAFC",
+                border:"1px solid "+(vencida?"#FECACA":pronto?"#FDE68A":"#E2E8F0")}}>
+                <div style={{flex:1}}>
+                  <span style={{fontWeight:600,color:T.text}}>{l.clienteNombre}</span>
+                  <span style={{color:T.muted,marginLeft:4}}>({l.agenteNombre||l.agente})</span>
+                </div>
+                <span style={{fontWeight:700,color:T.text,marginRight:8}}>{l.cantidad} uds</span>
+                <span style={{fontSize:10,color:vencida?"#DC2626":T.muted,fontWeight:vencida?700:400}}>📅 {l.fechaServicio}</span>
+                {l.estado==="planificado"&&<button onClick={function(){cambiarEstado(l.id,"confirmado");}}
+                  style={{marginLeft:6,padding:"2px 6px",fontSize:9,borderRadius:4,border:"1px solid #3B82F6",background:"#EFF6FF",color:"#3B82F6",cursor:"pointer",fontWeight:600}}>✅</button>}
+                {l.estado==="confirmado"&&<button onClick={function(){cambiarEstado(l.id,"servido");}}
+                  style={{marginLeft:6,padding:"2px 6px",fontSize:9,borderRadius:4,border:"1px solid #22C55E",background:"#F0FDF4",color:"#22C55E",cursor:"pointer",fontWeight:600}}>📦</button>}
+              </div>;
+            })}
+          </div>
+        </div>
+      </div>;
+    })}
 
-    {/* Top productos */}
-    {productosList.length>0&&<div style={{background:"#fff",borderRadius:12,border:"1px solid "+T.border,padding:14,marginBottom:16}}>
-      <p style={{margin:"0 0 8px",fontSize:13,fontWeight:800,color:T.text}}>📦 Resumen por producto</p>
-      {productosList.map(function(pr){
-        return <div key={pr.producto} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid #F1F5F9"}}>
-          <span style={{fontSize:12,fontWeight:600,color:T.text}}>{pr.producto}</span>
-          <span style={{fontSize:12,color:T.muted}}>{pr.total} uds · {pr.clientes} líneas</span>
+    {/* VISTA TIMELINE */}
+    {vista==="timeline"&&<div>
+      {semanas.map(function(sem){
+        var esEsta=sem.n===0;
+        return <div key={sem.n} style={{background:"#fff",borderRadius:12,border:"1px solid "+(esEsta?"#FECACA":T.border),marginBottom:8,
+          borderLeft:esEsta?"4px solid #DC2626":sem.total>0?"4px solid #3B82F6":"4px solid #E2E8F0"}}>
+          <div style={{padding:"10px 14px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <p style={{margin:0,fontSize:13,fontWeight:800,color:esEsta?"#DC2626":T.text}}>
+                {esEsta?"🔴 ESTA SEMANA":"📅 Sem "+sem.label}
+              </p>
+              <span style={{fontSize:14,fontWeight:900,color:sem.total>0?(esEsta?"#DC2626":"#3B82F6"):T.muted}}>{sem.total>0?sem.total.toLocaleString("es-ES")+" uds":"—"}</span>
+            </div>
+            {sem.planes.length>0&&<div style={{marginTop:6}}>
+              {sem.planes.map(function(p){
+                return <div key={p.id} style={{display:"flex",justifyContent:"space-between",padding:"3px 6px",fontSize:11,color:T.muted}}>
+                  <span><span style={{fontWeight:600,color:T.text}}>{p.producto}</span> · {p.clienteNombre}</span>
+                  <span style={{fontWeight:700,color:T.text}}>{p.cantidad} uds · {p.fechaServicio}</span>
+                </div>;
+              })}
+            </div>}
+          </div>
         </div>;
       })}
     </div>}
 
-    {/* Por fecha de servicio */}
-    {fechasOrdenadas.map(function(fecha){
-      var grupo=porFecha[fecha];
-      return <div key={fecha} style={{background:"#fff",borderRadius:12,border:"1px solid "+T.border,padding:14,marginBottom:12}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-          <p style={{margin:0,fontSize:14,fontWeight:800,color:T.navy}}>📅 {fecha}</p>
-          <span style={{fontSize:12,fontWeight:700,color:T.muted}}>{grupo.total} uds total</span>
+    {/* VISTA CLIENTES */}
+    {vista==="clientes"&&clientes.map(function(cl){
+      return <div key={cl.nombre} style={{background:"#fff",borderRadius:12,border:"1px solid "+T.border,marginBottom:8,padding:"12px 14px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+          <div>
+            <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>{cl.nombre}</p>
+            <p style={{margin:0,fontSize:10,color:T.muted}}>👤 {cl.agente}</p>
+          </div>
+          <p style={{margin:0,fontSize:16,fontWeight:900,color:T.navy}}>{cl.total.toLocaleString("es-ES")} uds</p>
         </div>
-        {Object.values(grupo.productos).map(function(prod){
-          return <div key={prod.producto} style={{marginBottom:8,padding:"8px 10px",background:"#F8FAFC",borderRadius:8,border:"1px solid #E2E8F0"}}>
-            <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
-              <span style={{fontSize:13,fontWeight:700,color:T.text}}>{prod.producto}</span>
-              <span style={{fontSize:13,fontWeight:800,color:T.navy}}>{prod.cantidad} uds</span>
-            </div>
-            {prod.calibre&&<span style={{fontSize:10,color:T.muted}}>Calibre: {prod.calibre} </span>}
-            {prod.metros&&<span style={{fontSize:10,color:T.muted}}>Metros: {prod.metros}</span>}
-            {prod.clientes.map(function(c,i){
-              return <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"2px 6px",fontSize:11,color:T.muted}}>
-                <span>{c.nombre} <span style={{color:"#94A3B8"}}>({c.agente})</span></span>
-                <span style={{fontWeight:600}}>{c.cantidad} uds <span style={{color:estadoColor[c.estado]||T.muted}}>●</span></span>
-              </div>;
-            })}
+        {cl.lineas.sort(function(a,b){return(a.fechaServicio||"").localeCompare(b.fechaServicio||"");}).map(function(l){
+          return <div key={l.id} style={{display:"flex",justifyContent:"space-between",padding:"3px 6px",fontSize:11,borderBottom:"1px solid #F1F5F9"}}>
+            <span style={{fontWeight:600}}>{l.producto}{l.calibre?" · "+l.calibre:""}</span>
+            <span>{l.cantidad} uds · 📅 {l.fechaServicio}</span>
           </div>;
         })}
       </div>;
     })}
 
-    {filtrados.length===0&&<p style={{textAlign:"center",color:T.muted,fontSize:13,padding:30}}>Sin líneas de planificación{filtroEstado!=="todos"?" en estado "+filtroEstado:""}.</p>}
+    {activos.length===0&&<p style={{textAlign:"center",color:T.muted,fontSize:14,padding:30}}>Sin planificación activa. Los agentes pueden crear líneas desde la ficha del cliente.</p>}
+
+    {/* Servidos */}
+    {servidos.length>0&&<details style={{marginTop:16}}>
+      <summary style={{cursor:"pointer",fontSize:12,color:T.muted,fontWeight:600}}>📦 {servidos.length} servidos (completados)</summary>
+      <div style={{marginTop:6}}>
+        {servidos.slice(0,20).map(function(p){
+          return <div key={p.id} style={{display:"flex",justifyContent:"space-between",padding:"4px 8px",fontSize:11,color:T.muted}}>
+            <span>{p.producto} · {p.clienteNombre}</span>
+            <span>{p.cantidad} uds · {p.fechaServicio}</span>
+          </div>;
+        })}
+      </div>
+    </details>}
   </div>;
 }
 
@@ -22232,7 +22328,6 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
       {id:"planif",   icon:"📋",label:"Planif."},
       {id:"muestras", icon:"📦",label:"Muestras"},
       {id:"ofertas",  icon:"💰",label:"Ofertas"},
-      {id:"mercado",  icon:"💸",label:"Mercado"},
       {id:"estrat",   icon:"🎯",label:"Estrategia"},
       {id:"incidencia",icon:"🚨",label:"Incidencia"},
       {id:"potencial",icon:"📈",label:"Potencial"},
