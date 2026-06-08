@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.39.73";
-const CRM_BUILD = "08/06/2026-mi-semana-solo-esta-semana";
+const CRM_VERSION = "3.39.76";
+const CRM_BUILD = "08/06/2026-sin-doble-aprobacion";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -9412,7 +9412,8 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
                 // Si es pendiente_final (vuelve del superior), siempre puede aprobar
                 const esFinalOK=(sel.cadenaAprobacion||[]).some(c=>c.id===usuario.id&&c.estado==="pendiente_final");
                 const esSuper=["director","ceo"].includes(usuario.rol);
-                const puedeAprobar=esFinalOK||dto<=miLimite||esSuper;
+                const esMiTurno=sel.pendienteDe===usuario.id||(sel.cadenaAprobacion||[]).some(c=>c.id===usuario.id&&(c.estado==="pendiente"||c.estado==="pendiente_final"||c.estado==="escalado"));
+                const puedeAprobar=(esFinalOK||dto<=miLimite||esSuper)&&esMiTurno;
                 const jefeVentas=USUARIOS.find(u=>u.rol==="director");
                 const ceoUser=USUARIOS.find(u=>u.rol==="ceo");
                 const superiorId=miLimite<=10?jefeVentas?.id:ceoUser?.id;
@@ -9427,17 +9428,9 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
                       const idx=cadena.findIndex(c=>c.id===usuario.id&&(c.estado==="pendiente"||c.estado==="pendiente_final"||c.estado==="escalado"));
                       if(idx>=0) cadena[idx]={...cadena[idx],estado:"aprobado",fecha:new Date().toLocaleDateString("es-ES")};
                       
-                      // Si soy superior (CEO/Jefe Ventas) y el Responsable había escalado,
-                      // el Responsable necesita dar último OK antes de que llegue al comercial
-                      const responsableEnCadena=cadena.find(c=>c.rol==="responsable");
-                      let siguiente;
-                      if(responsableEnCadena && responsableEnCadena.estado==="escalado" && usuario.rol!=="jefe"){
-                        // Volver al Responsable para último OK
-                        responsableEnCadena.estado="pendiente_final";
-                        siguiente=responsableEnCadena;
-                      } else {
-                        siguiente=cadena.find(c=>c.estado==="pendiente"||c.estado==="pendiente_final");
-                      }
+                      // Si soy superior (CEO/Jefe Ventas) y apruebo, la estrategia queda aprobada directamente
+                      let siguiente=cadena.find(c=>c.estado==="pendiente"&&c.id!==usuario.id);
+                      // Si no hay más pendientes en la cadena, está aprobada
                       
                       let nuevoEstado,nuevoPendienteDe,nuevoPendienteDeNombre;
                       if(siguiente){
@@ -25519,6 +25512,53 @@ function App(props){
   const _miEquipo=usuario?.equipo;
   const _appMisIds=usuario?resolverMisIds(usuario):new Set();
   const notificaciones=useMemo(()=>{
+
+  // (v3.39.73) Recordatorios automáticos para estrategias pendientes de aprobación
+  React.useEffect(function(){
+    if(!usuario||!estrategiasDB||estrategiasDB.length===0) return;
+    var pendientes=estrategiasDB.filter(function(e){
+      return e.pendienteDe===usuario.id && e.estado==="pendiente_aprobacion" && !e.eliminada;
+    });
+    if(pendientes.length===0) return;
+    var hoy=new Date();
+    pendientes.forEach(function(est){
+      // Fecha del último movimiento en la cadena de aprobación
+      var ultimaFecha=null;
+      if(Array.isArray(est.historialEscalado)&&est.historialEscalado.length>0){
+        var last=est.historialEscalado[est.historialEscalado.length-1];
+        if(last.fecha) ultimaFecha=new Date(last.fecha.indexOf("T")>=0?last.fecha:last.fecha.split("/").reverse().join("-"));
+      }
+      if(!ultimaFecha && est.fechaCreacion) ultimaFecha=new Date(est.fechaCreacion);
+      if(!ultimaFecha) return;
+
+      var diasPend=diasLaborales(ultimaFecha);
+      if(diasPend<3) return; // menos de 3 días laborables → no recordar
+
+      // Comprobar si ya se envió recordatorio recientemente
+      var ultimoRec=est.ultimoRecordatorio?new Date(est.ultimoRecordatorio):null;
+      if(ultimoRec){
+        var diasDesdeRec=diasLaborales(ultimoRec);
+        if(diasDesdeRec<3) return; // ya se recordó hace menos de 3 días laborables
+      }
+
+      var urgente=diasPend>=5;
+      console.log("[RECORDATORIO] Estrategia "+est.id+" pendiente de "+usuario.nombre+" hace "+diasPend+" días laborables"+(urgente?" — URGENTE":""));
+
+      despacharNotificacion({
+        tipo:"estrategia",
+        titulo:(urgente?"🚨 URGENTE: ":"⏰ Recordatorio: ")+"Estrategia pendiente — "+(est.cliente||""),
+        mensaje:"Llevas "+diasPend+" días laborables sin aprobar/rechazar esta estrategia de "+(est.agenteNombre||est.agente||"")+". Dto: "+(est.descuento||est.dto||"?")+"%. Cliente: "+(est.cliente||""),
+        destinatarioId:usuario.id,
+        prioridad:urgente?"urgente":"alta",
+        creadoPor:"sistema"
+      });
+
+      // Marcar fecha de recordatorio en Firebase
+      fbEscribir("estrategias",est.id,{ultimoRecordatorio:hoy.toISOString()},true);
+    });
+  },[estrategiasDB, usuario]);
+
+
     if(!usuario) return [];
     const notifs=[];
     const hoy=new Date();
