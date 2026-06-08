@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.39.77";
-const CRM_BUILD = "08/06/2026-fix-hook-fuera-useMemo";
+const CRM_VERSION = "3.39.80";
+const CRM_BUILD = "08/06/2026-planificacion-pedidos-compras";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -9364,7 +9364,7 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
         <BackBar label="Estrategias" onBack={()=>{if(volverSecEst&&onNavegar){onNavegar(volverSecEst);setVolverSecEst(null);return;}setSel(null);}}/>
         <div style={{padding:"16px"}}>
           {/* Panel de aprobación de descuento */}
-          {sel.estado==="pendiente_aprobacion"&&(sel.pendienteDe===usuario.id||(sel.cadenaAprobacion||[]).some(c=>c.id===usuario.id&&(c.estado==="pendiente"||c.estado==="pendiente_final"))||((["director","ceo"].includes(usuario.rol))))&&(
+          {sel.estado==="pendiente_aprobacion"&&(sel.pendienteDe===usuario.id||(sel.cadenaAprobacion||[]).some(c=>c.id===usuario.id&&(c.estado==="pendiente"||c.estado==="pendiente_final"||c.estado==="escalado")))&&(
             <div style={{background:"#FFFBEB",borderRadius:14,padding:16,marginBottom:16,
               border:`2px solid ${T.amber}`}}>
               <p style={{margin:"0 0 4px",fontSize:14,fontWeight:800,color:T.amber}}>
@@ -11367,6 +11367,137 @@ function IncidenciasCompras({usuario, incidenciasDB, setIncidenciasDB, clientesF
 }
 
 // ─── (v3.23.0) Módulo Vamos Caros — informe ejecutivo para Compras/CEO ───
+// (v3.39.79) Vista de planificación agrupada para Compras
+function PlanificacionCompras({usuario}){
+  const [planes,setPlanes]=React.useState([]);
+  const [cargando,setCargando]=React.useState(true);
+  const [filtroEstado,setFiltroEstado]=React.useState("planificado");
+  const [filtroSemana,setFiltroSemana]=React.useState("todas");
+
+  React.useEffect(function(){
+    fbLeer("planificacion").then(function(d){
+      setPlanes((d||[]).filter(function(p){return !p.eliminado;}));
+      setCargando(false);
+    }).catch(function(){setCargando(false);});
+  },[]);
+
+  var filtrados=planes.filter(function(p){
+    if(filtroEstado!=="todos"&&p.estado!==filtroEstado) return false;
+    if(filtroSemana!=="todas"&&String(p.semanaServicio)!==filtroSemana) return false;
+    return true;
+  });
+
+  // Agrupar por fecha de servicio → producto
+  var porFecha={};
+  filtrados.forEach(function(p){
+    var f=p.fechaServicio||"sin fecha";
+    if(!porFecha[f]) porFecha[f]={fecha:f,productos:{},total:0};
+    var prod=p.producto||"?";
+    if(!porFecha[f].productos[prod]) porFecha[f].productos[prod]={producto:prod,calibre:p.calibre||"",metros:p.metros||"",cantidad:0,clientes:[]};
+    porFecha[f].productos[prod].cantidad+=Number(p.cantidad)||0;
+    porFecha[f].productos[prod].clientes.push({nombre:p.clienteNombre||"?",agente:p.agenteNombre||p.agente,cantidad:Number(p.cantidad)||0,estado:p.estado});
+    porFecha[f].total+=Number(p.cantidad)||0;
+  });
+  var fechasOrdenadas=Object.keys(porFecha).sort();
+
+  // Semanas disponibles
+  var semanasDisp=[];
+  var semanasSet={};
+  planes.forEach(function(p){if(p.semanaServicio&&!semanasSet[p.semanaServicio]){semanasSet[p.semanaServicio]=true;semanasDisp.push(p.semanaServicio);}});
+  semanasDisp.sort(function(a,b){return a-b;});
+
+  // Resumen por producto (totales)
+  var porProducto={};
+  filtrados.forEach(function(p){
+    var prod=p.producto||"?";
+    if(!porProducto[prod]) porProducto[prod]={producto:prod,total:0,clientes:0};
+    porProducto[prod].total+=Number(p.cantidad)||0;
+    porProducto[prod].clientes++;
+  });
+  var productosList=Object.values(porProducto).sort(function(a,b){return b.total-a.total;});
+
+  var estadoColor={planificado:"#F59E0B",confirmado:"#3B82F6",servido:"#22C55E"};
+
+  if(cargando) return <div style={{padding:40,textAlign:"center",color:T.muted}}>⏳ Cargando planificación...</div>;
+
+  return <div style={{padding:16,paddingBottom:80}}>
+    <p style={{margin:"0 0 14px",fontSize:20,fontWeight:900,color:T.text}}>📋 Planificación de Compras</p>
+
+    {/* Filtros */}
+    <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+      {[{k:"planificado",l:"📋 Planificados"},{k:"confirmado",l:"✅ Confirmados"},{k:"servido",l:"📦 Servidos"},{k:"todos",l:"Todos"}].map(function(f){
+        var sel=filtroEstado===f.k;
+        return <button key={f.k} onClick={function(){setFiltroEstado(f.k);}}
+          style={{padding:"6px 12px",borderRadius:99,border:sel?"none":"1.5px solid "+T.border,
+            background:sel?T.navy:"#fff",color:sel?"#fff":T.text,fontSize:11,fontWeight:sel?700:500,cursor:"pointer",fontFamily:"inherit"}}>{f.l}</button>;
+      })}
+    </div>
+    <div style={{marginBottom:14}}>
+      <select value={filtroSemana} onChange={function(e){setFiltroSemana(e.target.value);}}
+        style={{padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",background:"#fff"}}>
+        <option value="todas">Todas las semanas</option>
+        {semanasDisp.map(function(s){return <option key={s} value={String(s)}>Semana {s}</option>;})}
+      </select>
+    </div>
+
+    {/* KPIs resumen */}
+    <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+      <div style={{flex:1,minWidth:80,background:"#FFFBEB",borderRadius:10,padding:"10px 12px",textAlign:"center",border:"1px solid #FDE68A"}}>
+        <p style={{margin:0,fontSize:20,fontWeight:900,color:"#F59E0B"}}>{planes.filter(function(p){return p.estado==="planificado";}).length}</p>
+        <p style={{margin:0,fontSize:10,color:T.muted}}>Planificados</p>
+      </div>
+      <div style={{flex:1,minWidth:80,background:"#EFF6FF",borderRadius:10,padding:"10px 12px",textAlign:"center",border:"1px solid #BFDBFE"}}>
+        <p style={{margin:0,fontSize:20,fontWeight:900,color:"#3B82F6"}}>{planes.filter(function(p){return p.estado==="confirmado";}).length}</p>
+        <p style={{margin:0,fontSize:10,color:T.muted}}>Confirmados</p>
+      </div>
+      <div style={{flex:1,minWidth:80,background:"#F0FDF4",borderRadius:10,padding:"10px 12px",textAlign:"center",border:"1px solid #BBF7D0"}}>
+        <p style={{margin:0,fontSize:20,fontWeight:900,color:"#22C55E"}}>{planes.filter(function(p){return p.estado==="servido";}).length}</p>
+        <p style={{margin:0,fontSize:10,color:T.muted}}>Servidos</p>
+      </div>
+    </div>
+
+    {/* Top productos */}
+    {productosList.length>0&&<div style={{background:"#fff",borderRadius:12,border:"1px solid "+T.border,padding:14,marginBottom:16}}>
+      <p style={{margin:"0 0 8px",fontSize:13,fontWeight:800,color:T.text}}>📦 Resumen por producto</p>
+      {productosList.map(function(pr){
+        return <div key={pr.producto} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid #F1F5F9"}}>
+          <span style={{fontSize:12,fontWeight:600,color:T.text}}>{pr.producto}</span>
+          <span style={{fontSize:12,color:T.muted}}>{pr.total} uds · {pr.clientes} líneas</span>
+        </div>;
+      })}
+    </div>}
+
+    {/* Por fecha de servicio */}
+    {fechasOrdenadas.map(function(fecha){
+      var grupo=porFecha[fecha];
+      return <div key={fecha} style={{background:"#fff",borderRadius:12,border:"1px solid "+T.border,padding:14,marginBottom:12}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <p style={{margin:0,fontSize:14,fontWeight:800,color:T.navy}}>📅 {fecha}</p>
+          <span style={{fontSize:12,fontWeight:700,color:T.muted}}>{grupo.total} uds total</span>
+        </div>
+        {Object.values(grupo.productos).map(function(prod){
+          return <div key={prod.producto} style={{marginBottom:8,padding:"8px 10px",background:"#F8FAFC",borderRadius:8,border:"1px solid #E2E8F0"}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+              <span style={{fontSize:13,fontWeight:700,color:T.text}}>{prod.producto}</span>
+              <span style={{fontSize:13,fontWeight:800,color:T.navy}}>{prod.cantidad} uds</span>
+            </div>
+            {prod.calibre&&<span style={{fontSize:10,color:T.muted}}>Calibre: {prod.calibre} </span>}
+            {prod.metros&&<span style={{fontSize:10,color:T.muted}}>Metros: {prod.metros}</span>}
+            {prod.clientes.map(function(c,i){
+              return <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"2px 6px",fontSize:11,color:T.muted}}>
+                <span>{c.nombre} <span style={{color:"#94A3B8"}}>({c.agente})</span></span>
+                <span style={{fontWeight:600}}>{c.cantidad} uds <span style={{color:estadoColor[c.estado]||T.muted}}>●</span></span>
+              </div>;
+            })}
+          </div>;
+        })}
+      </div>;
+    })}
+
+    {filtrados.length===0&&<p style={{textAlign:"center",color:T.muted,fontSize:13,padding:30}}>Sin líneas de planificación{filtroEstado!=="todos"?" en estado "+filtroEstado:""}.</p>}
+  </div>;
+}
+
 function VamosCaros({usuario, ofertasDB, setOfertasDB, onBack}){
   // Recargar ofertas al entrar
   React.useEffect(function(){
@@ -21941,6 +22072,7 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
     const TABS=[
       {id:"ficha360", icon:"📊",label:"360°"},
       {id:"visita",   icon:"👋",label:"Visita"},
+      {id:"planif",   icon:"📋",label:"Planif."},
       {id:"muestras", icon:"📦",label:"Muestras"},
       {id:"ofertas",  icon:"💰",label:"Ofertas"},
       {id:"mercado",  icon:"💸",label:"Mercado"},
@@ -22717,6 +22849,133 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
               }}
             />
           )}
+
+          {/* ── TAB PLANIFICACIÓN (v3.39.79) ── */}
+          {tabSel==="planif"&&(function(){
+            var _pl=React.useState([]);var planes=_pl[0],setPlanes=_pl[1];
+            var _plf=React.useState({producto:"",cantidad:"",calibre:"",metros:"",fechaServicio:"",notas:""});var formPl=_plf[0],setFormPl=_plf[1];
+            var _plShow=React.useState(false);var showFormPl=_plShow[0],setShowFormPl=_plShow[1];
+            var _plLoad=React.useState(false);var plLoaded=_plLoad[0],setPlLoaded=_plLoad[1];
+
+            React.useEffect(function(){
+              if(plLoaded) return;
+              fbLeer("planificacion").then(function(d){
+                var filtered=(d||[]).filter(function(p){return p.clienteId===cliId&&!p.eliminado;});
+                setPlanes(filtered.sort(function(a,b){return(a.fechaServicio||"").localeCompare(b.fechaServicio||"");}));
+                setPlLoaded(true);
+              }).catch(function(){setPlLoaded(true);});
+            },[plLoaded]);
+
+            function guardarPlan(){
+              if(!formPl.producto.trim()||!formPl.cantidad||!formPl.fechaServicio) return alert("Rellena producto, cantidad y fecha");
+              var id="plan_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
+              var doc={
+                id:id,clienteId:cliId,clienteNombre:cliNom,
+                producto:formPl.producto.trim(),cantidad:Number(formPl.cantidad)||0,
+                calibre:formPl.calibre,metros:formPl.metros,
+                fechaServicio:formPl.fechaServicio,notas:formPl.notas,
+                agente:idCanonico(usuario),agenteNombre:usuario.nombre,equipo:usuario.equipo||"",
+                estado:"planificado",fechaCreacion:new Date().toISOString(),
+                semanaServicio:(function(){var d=new Date(formPl.fechaServicio);var s=new Date(d.getFullYear(),0,1);return Math.ceil(((d-s)/86400000+s.getDay()+1)/7);})()
+              };
+              fbEscribir("planificacion",id,doc);
+              setPlanes(function(prev){return [doc].concat(prev).sort(function(a,b){return(a.fechaServicio||"").localeCompare(b.fechaServicio||"");});});
+              setFormPl({producto:"",cantidad:"",calibre:"",metros:"",fechaServicio:"",notas:""});
+              setShowFormPl(false);
+            }
+
+            function eliminarPlan(pid){
+              if(!confirm("¿Eliminar esta línea de planificación?")) return;
+              fbEscribir("planificacion",pid,{eliminado:true},true);
+              setPlanes(function(prev){return prev.filter(function(p){return p.id!==pid;});});
+            }
+
+            function cambiarEstado(pid,nuevoEstado){
+              fbEscribir("planificacion",pid,{estado:nuevoEstado},true);
+              setPlanes(function(prev){return prev.map(function(p){return p.id===pid?Object.assign({},p,{estado:nuevoEstado}):p;});});
+            }
+
+            var planificados=planes.filter(function(p){return p.estado==="planificado";});
+            var confirmados=planes.filter(function(p){return p.estado==="confirmado";});
+            var servidos=planes.filter(function(p){return p.estado==="servido";});
+
+            var estadoColor={planificado:"#F59E0B",confirmado:"#3B82F6",servido:"#22C55E"};
+            var estadoIcon={planificado:"📋",confirmado:"✅",servido:"📦"};
+
+            function renderPlan(p){
+              return <div key={p.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",
+                background:"#fff",borderRadius:10,border:"1px solid "+T.border,marginBottom:6,
+                borderLeft:"4px solid "+(estadoColor[p.estado]||T.muted)}}>
+                <div style={{flex:1}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{p.producto}</p>
+                  <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
+                    {p.cantidad} uds{p.calibre?" · "+p.calibre:""}{p.metros?" · "+p.metros+"m":""}
+                    {" · 📅 "}{p.fechaServicio}
+                  </p>
+                  {p.notas&&<p style={{margin:"2px 0 0",fontSize:10,color:"#64748B"}}>💬 {p.notas}</p>}
+                </div>
+                <div style={{display:"flex",gap:4}}>
+                  {p.estado==="planificado"&&<button onClick={function(){cambiarEstado(p.id,"confirmado");}}
+                    style={{padding:"4px 8px",fontSize:10,borderRadius:6,border:"1px solid #3B82F6",background:"#EFF6FF",color:"#3B82F6",cursor:"pointer",fontWeight:600}}>✅ Confirmar</button>}
+                  {p.estado==="confirmado"&&<button onClick={function(){cambiarEstado(p.id,"servido");}}
+                    style={{padding:"4px 8px",fontSize:10,borderRadius:6,border:"1px solid #22C55E",background:"#F0FDF4",color:"#22C55E",cursor:"pointer",fontWeight:600}}>📦 Servido</button>}
+                  <button onClick={function(){eliminarPlan(p.id);}}
+                    style={{padding:"4px 8px",fontSize:10,borderRadius:6,border:"1px solid #EF4444",background:"#FEF2F2",color:"#EF4444",cursor:"pointer"}}>🗑️</button>
+                </div>
+              </div>;
+            }
+
+            return <div style={{padding:16}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                <p style={{margin:0,fontSize:16,fontWeight:800,color:T.text}}>📋 Planificación de pedidos</p>
+                <button onClick={function(){setShowFormPl(!showFormPl);}}
+                  style={{padding:"8px 14px",background:T.navy,color:"#fff",border:"none",borderRadius:9,fontWeight:700,fontSize:12,cursor:"pointer"}}>{showFormPl?"✕ Cerrar":"+ Añadir"}</button>
+              </div>
+
+              {showFormPl&&<div style={{background:"#F0F9FF",borderRadius:12,padding:14,marginBottom:14,border:"1.5px solid #BFDBFE"}}>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+                  <div><p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Producto *</p>
+                    <input value={formPl.producto} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{producto:e.target.value});});}}
+                      placeholder="ej: B5.9K" style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
+                  <div><p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Cantidad *</p>
+                    <input type="number" value={formPl.cantidad} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{cantidad:e.target.value});});}}
+                      placeholder="uds" style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
+                  <div><p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Calibre</p>
+                    <input value={formPl.calibre} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{calibre:e.target.value});});}}
+                      placeholder="ej: 40/42" style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
+                  <div><p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Metros</p>
+                    <input value={formPl.metros} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{metros:e.target.value});});}}
+                      placeholder="ej: 50m" style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
+                  <div><p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Fecha servicio *</p>
+                    <input type="date" value={formPl.fechaServicio} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{fechaServicio:e.target.value});});}}
+                      style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
+                  <div><p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Notas</p>
+                    <input value={formPl.notas} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{notas:e.target.value});});}}
+                      placeholder="opcional" style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
+                </div>
+                <button onClick={guardarPlan} style={{width:"100%",padding:"10px",background:T.navy,color:"#fff",border:"none",borderRadius:9,fontWeight:700,fontSize:13,cursor:"pointer"}}>💾 Guardar línea</button>
+              </div>}
+
+              {!plLoaded&&<p style={{textAlign:"center",color:T.muted,fontSize:12}}>⏳ Cargando...</p>}
+
+              {planificados.length>0&&<div style={{marginBottom:12}}>
+                <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:"#F59E0B",textTransform:"uppercase"}}>📋 Planificados ({planificados.length})</p>
+                {planificados.map(renderPlan)}
+              </div>}
+
+              {confirmados.length>0&&<div style={{marginBottom:12}}>
+                <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:"#3B82F6",textTransform:"uppercase"}}>✅ Confirmados ({confirmados.length})</p>
+                {confirmados.map(renderPlan)}
+              </div>}
+
+              {servidos.length>0&&<div style={{marginBottom:12}}>
+                <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:"#22C55E",textTransform:"uppercase"}}>📦 Servidos ({servidos.length})</p>
+                {servidos.map(renderPlan)}
+              </div>}
+
+              {plLoaded&&planes.length===0&&<p style={{textAlign:"center",color:T.muted,fontSize:13,padding:20}}>Sin planificación. Pulsa "+ Añadir" para crear líneas de pedido.</p>}
+            </div>;
+          })()}
 
           {/* ── TAB POTENCIAL (v3.23.35/36/37) ── */}
           {tabSel==="potencial"&&(
@@ -25455,6 +25714,22 @@ function App(props){
         const filtered=estrategias.filter(e=>!e.eliminada);
         console.log("[ESTRATEGIAS] Cargadas desde Firebase:",filtered.length,"estrategias",filtered.map(e=>({id:e.id,cliente:e.cliente,agente:e.agente,equipo:e.equipo,estado:e.estado})));
         setEstrategiasDB(filtered);
+        // (v3.39.78) Auto-fix: estrategias atascadas en pendiente_final
+        filtered.forEach(function(est){
+          if(est.estado!=="pendiente_aprobacion") return;
+          var cadena=est.cadenaAprobacion;
+          if(!Array.isArray(cadena)||cadena.length===0) return;
+          // Si todos los superiores (director/ceo) están "aprobado" pero alguien está "pendiente_final" → aprobar
+          var todosSupAprobados=cadena.filter(function(c){return c.rol==="director"||c.rol==="ceo";}).every(function(c){return c.estado==="aprobado";});
+          var hayFinal=cadena.some(function(c){return c.estado==="pendiente_final";});
+          if(todosSupAprobados&&hayFinal){
+            console.log("[AUTO-FIX] Estrategia "+est.id+" atascada en pendiente_final → aprobada");
+            var fixedCadena=cadena.map(function(c){return c.estado==="pendiente_final"?Object.assign({},c,{estado:"aprobado",fecha:new Date().toLocaleDateString("es-ES")}):c;});
+            var fix={estado:"aprobada",pendienteDe:null,pendienteDeNombre:null,cadenaAprobacion:fixedCadena,
+              historialEscalado:[].concat(est.historialEscalado||[],[{accion:"✅ Auto-aprobada (cadena completa)",por:"Sistema",fecha:new Date().toLocaleDateString("es-ES")}])};
+            fbEscribir("estrategias",est.id,fix,true);
+          }
+        });
         GlobalStore.setEstrategias(filtered);
       }
       if(incidencias.length>0) setIncidenciasDB(incidencias.filter(i=>!i.eliminada));
@@ -25850,6 +26125,7 @@ function App(props){
     {id:"oportunidades",icon:"💼",label:"Ops",          color:T.navy,  badge:opsAbiertas},
     {id:"ofertas",      icon:"💰",label:"Ofertas",     color:T.amber, badge:ofertasPendCount},
     {id:"vamos_caros",  icon:"📊",label:"Caros",        color:"#DC2626"},
+    {id:"planif_compras",icon:"📋",label:"Planif.",      color:"#3B82F6"},
     {id:"incidencias",  icon:"🚨",label:"Incidencias",  color:T.red,   badge:incAbiertas},
     {id:"reporting",    icon:"📈",label:"Reporting",     color:T.navy},
     {id:"proyectos",    icon:"📁",label:"Proyectos",    color:T.purple},
@@ -25873,6 +26149,7 @@ function App(props){
   // (v3.23.0/3.23.1) Menú minimalista para rol Compras
   const NAV_COMPRAS=[
     {id:"vamos_caros",  icon:"📊",label:"Vamos caros", color:"#DC2626"},
+    {id:"planif_compras",icon:"📋",label:"Planificación",color:"#3B82F6"},
     {id:"inc_stock",    icon:"📦",label:"Stock",       color:"#EF4444", badge:incStockAb},
     {id:"inc_calidad",  icon:"⚠️",label:"Calidad",     color:"#F59E0B", badge:incCalidadAb},
   ];
@@ -26486,6 +26763,7 @@ function App(props){
         {section==="ofertas"&& <OfertasModule usuario={usuario} ofertasDB={ofertasDB} setOfertasDB={setOfertasDB} onBack={function(){setSection("dashboard");}} onNavegar={setSection} onVolverPotencial={function(){return volverAPotencialSiCorresponde(setSection, setClienteDirecto, usuario);}}/>}
         {/* (v3.23.0) Módulo Vamos Caros - informe ejecutivo */}
         {section==="vamos_caros"&& <VamosCaros usuario={usuario} ofertasDB={ofertasDB} setOfertasDB={setOfertasDB} onBack={function(){setSection(usuario.rol==="compras"?"vamos_caros":"dashboard");}}/>}
+        {section==="planif_compras"&& <PlanificacionCompras usuario={usuario}/>}
         {/* (v3.23.1) Incidencias Stock y Calidad - para Compras (sustituye Resp. Stock) */}
         {section==="inc_stock"&& <IncidenciasCompras usuario={usuario} incidenciasDB={incidenciasDB} setIncidenciasDB={setIncidenciasDB} clientesFB={misClientesFB} tipoFijo="stock" onBack={function(){setSection(usuario.rol==="compras"?"inc_stock":"dashboard");}}/>}
         {section==="inc_calidad"&& <IncidenciasCompras usuario={usuario} incidenciasDB={incidenciasDB} setIncidenciasDB={setIncidenciasDB} clientesFB={misClientesFB} tipoFijo="calidad" onBack={function(){setSection(usuario.rol==="compras"?"inc_calidad":"dashboard");}}/>}
