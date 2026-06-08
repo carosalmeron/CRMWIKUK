@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.39.80";
-const CRM_BUILD = "08/06/2026-planificacion-pedidos-compras";
+const CRM_VERSION = "3.39.84";
+const CRM_BUILD = "08/06/2026-planif-largo-plazo-sin-limite";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -11367,6 +11367,163 @@ function IncidenciasCompras({usuario, incidenciasDB, setIncidenciasDB, clientesF
 }
 
 // ─── (v3.23.0) Módulo Vamos Caros — informe ejecutivo para Compras/CEO ───
+// (v3.39.80) Pestaña Planificación en ficha 360
+function PlanificacionTab({clienteId,clienteNombre,usuario}){
+  var _pl=React.useState([]);var planes=_pl[0],setPlanes=_pl[1];
+  var _plf=React.useState({producto:"",cantidad:"",calibre:"",metros:"",fechaServicio:"",notas:"",recurrente:false,meses:6});var formPl=_plf[0],setFormPl=_plf[1];
+  var _plShow=React.useState(false);var showFormPl=_plShow[0],setShowFormPl=_plShow[1];
+  var _plLoad=React.useState(false);var plLoaded=_plLoad[0],setPlLoaded=_plLoad[1];
+
+  React.useEffect(function(){
+    if(plLoaded||!clienteId) return;
+    fbLeer("planificacion").then(function(d){
+      setPlanes((d||[]).filter(function(p){return p.clienteId===clienteId&&!p.eliminado;}).sort(function(a,b){return(a.fechaServicio||"").localeCompare(b.fechaServicio||"");}));
+      setPlLoaded(true);
+    }).catch(function(e){console.error("[PLANIF] Error cargando:",e);setPlLoaded(true);});
+  },[plLoaded,clienteId]);
+
+  function guardarPlan(){
+    if(!formPl.producto.trim()||!formPl.cantidad||!formPl.fechaServicio) return alert("Rellena producto, cantidad y fecha");
+    var fechas=[formPl.fechaServicio];
+    if(formPl.recurrente&&formPl.meses>1){
+      var base=new Date(formPl.fechaServicio);
+      for(var m=1;m<formPl.meses;m++){
+        var next=new Date(base);
+        next.setMonth(next.getMonth()+m);
+        fechas.push(next.toISOString().substring(0,10));
+      }
+    }
+    var nuevos=[];
+    fechas.forEach(function(fecha){
+      var id="plan_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
+      var doc={
+        id:id,clienteId:clienteId,clienteNombre:clienteNombre,
+        producto:formPl.producto.trim(),cantidad:Number(formPl.cantidad)||0,
+        calibre:formPl.calibre,metros:formPl.metros,
+        fechaServicio:fecha,notas:formPl.notas,
+        agente:idCanonico(usuario),agenteNombre:usuario.nombre,equipo:usuario.equipo||"",
+        estado:"planificado",fechaCreacion:new Date().toISOString(),
+        recurrente:formPl.recurrente||false,
+        semanaServicio:(function(){var d=new Date(fecha);var s=new Date(d.getFullYear(),0,1);return Math.ceil(((d-s)/86400000+s.getDay()+1)/7);})()
+      };
+      fbEscribir("planificacion",id,doc);
+      nuevos.push(doc);
+    });
+    setPlanes(function(prev){return nuevos.concat(prev).sort(function(a,b){return(a.fechaServicio||"").localeCompare(b.fechaServicio||"");});});
+    setFormPl({producto:"",cantidad:"",calibre:"",metros:"",fechaServicio:"",notas:"",recurrente:false,meses:6});
+    setShowFormPl(false);
+    if(fechas.length>1) alert("✅ "+fechas.length+" líneas creadas (mensual × "+fechas.length+" meses)");
+  }
+
+  function eliminarPlan(pid){
+    if(!confirm("¿Eliminar esta línea?")) return;
+    fbEscribir("planificacion",pid,{eliminado:true},true);
+    setPlanes(function(prev){return prev.filter(function(p){return p.id!==pid;});});
+  }
+
+  function cambiarEstado(pid,nuevoEstado){
+    fbEscribir("planificacion",pid,{estado:nuevoEstado},true);
+    setPlanes(function(prev){return prev.map(function(p){return p.id===pid?Object.assign({},p,{estado:nuevoEstado}):p;});});
+  }
+
+  var planificados=planes.filter(function(p){return p.estado==="planificado";});
+  var confirmados=planes.filter(function(p){return p.estado==="confirmado";});
+  var servidos=planes.filter(function(p){return p.estado==="servido";});
+  var estadoColor={planificado:"#F59E0B",confirmado:"#3B82F6",servido:"#22C55E"};
+
+  function renderPlan(p){
+    return <div key={p.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",
+      background:"#fff",borderRadius:10,border:"1px solid "+T.border,marginBottom:6,
+      borderLeft:"4px solid "+(estadoColor[p.estado]||T.muted)}}>
+      <div style={{flex:1}}>
+        <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{p.producto}
+          {p.recurrente&&<span style={{marginLeft:6,fontSize:10,color:"#3B82F6",fontWeight:600}}>🔄 mensual</span>}
+        </p>
+        <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
+          {p.cantidad} uds{p.calibre?" · "+p.calibre:""}{p.metros?" · "+p.metros+"m":""}
+          {" · 📅 "}{p.fechaServicio}
+        </p>
+        {p.notas&&<p style={{margin:"2px 0 0",fontSize:10,color:"#64748B"}}>💬 {p.notas}</p>}
+      </div>
+      <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+        {p.recurrente&&<button onClick={function(){fbEscribir("planificacion",p.id,{recurrente:false},true);setPlanes(function(prev){return prev.map(function(x){return x.id===p.id?Object.assign({},x,{recurrente:false}):x;});});}}
+          style={{padding:"4px 6px",fontSize:9,borderRadius:6,border:"1px solid #93C5FD",background:"#EFF6FF",color:"#3B82F6",cursor:"pointer"}}>Parar 🔄</button>}
+        {p.estado==="planificado"&&<button onClick={function(){cambiarEstado(p.id,"confirmado");}}
+          style={{padding:"4px 8px",fontSize:10,borderRadius:6,border:"1px solid #3B82F6",background:"#EFF6FF",color:"#3B82F6",cursor:"pointer",fontWeight:600}}>✅</button>}
+        {p.estado==="confirmado"&&<button onClick={function(){cambiarEstado(p.id,"servido");}}
+          style={{padding:"4px 8px",fontSize:10,borderRadius:6,border:"1px solid #22C55E",background:"#F0FDF4",color:"#22C55E",cursor:"pointer",fontWeight:600}}>📦</button>}
+        <button onClick={function(){eliminarPlan(p.id);}}
+          style={{padding:"4px 8px",fontSize:10,borderRadius:6,border:"1px solid #EF4444",background:"#FEF2F2",color:"#EF4444",cursor:"pointer"}}>🗑️</button>
+      </div>
+    </div>;
+  }
+
+  return <div style={{padding:16}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+      <p style={{margin:0,fontSize:16,fontWeight:800,color:T.text}}>📋 Planificación</p>
+      <button onClick={function(){setShowFormPl(!showFormPl);}}
+        style={{padding:"8px 14px",background:T.navy,color:"#fff",border:"none",borderRadius:9,fontWeight:700,fontSize:12,cursor:"pointer"}}>{showFormPl?"✕ Cerrar":"+ Añadir"}</button>
+    </div>
+
+    {showFormPl&&<div style={{background:"#F0F9FF",borderRadius:12,padding:14,marginBottom:14,border:"1.5px solid #BFDBFE"}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+        <div><p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Producto *</p>
+          <input value={formPl.producto} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{producto:e.target.value});});}}
+            placeholder="ej: B5.9K" style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
+        <div><p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Cantidad *</p>
+          <input type="number" value={formPl.cantidad} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{cantidad:e.target.value});});}}
+            placeholder="uds" style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
+        <div><p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Calibre</p>
+          <input value={formPl.calibre} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{calibre:e.target.value});});}}
+            placeholder="ej: 40/42" style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
+        <div><p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Metros</p>
+          <input value={formPl.metros} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{metros:e.target.value});});}}
+            placeholder="ej: 50m" style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
+        <div><p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Fecha servicio *</p>
+          <input type="date" value={formPl.fechaServicio} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{fechaServicio:e.target.value});});}}
+            style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
+        <div><p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Notas</p>
+          <input value={formPl.notas} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{notas:e.target.value});});}}
+            placeholder="opcional" style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
+      </div>
+      {/* Recurrencia mensual */}
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10,padding:"8px 10px",background:formPl.recurrente?"#DBEAFE":"#F8FAFC",borderRadius:8,border:"1px solid "+(formPl.recurrente?"#93C5FD":"#E2E8F0"),flexWrap:"wrap"}}>
+        <label style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer",fontSize:12,fontWeight:600,color:formPl.recurrente?T.navy:T.muted}}>
+          <input type="checkbox" checked={formPl.recurrente} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{recurrente:e.target.checked});});}}/>
+          🔄 Pedido mensual
+        </label>
+        {formPl.recurrente&&<div style={{display:"flex",alignItems:"center",gap:4}}>
+          <span style={{fontSize:11,color:T.muted}}>durante</span>
+          <input type="number" min="2" value={formPl.meses} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{meses:parseInt(e.target.value)||6});});}}
+            style={{width:45,padding:"4px 6px",borderRadius:6,border:"1px solid #93C5FD",fontSize:12,textAlign:"center",fontFamily:"inherit"}}/>
+          <span style={{fontSize:11,color:T.muted}}>meses</span>
+          <span style={{fontSize:10,color:"#3B82F6",marginLeft:4}}>→ {formPl.meses} líneas</span>
+        </div>}
+      </div>
+      <button onClick={guardarPlan} style={{width:"100%",padding:"10px",background:T.navy,color:"#fff",border:"none",borderRadius:9,fontWeight:700,fontSize:13,cursor:"pointer"}}>💾 Guardar línea</button>
+    </div>}
+
+    {!plLoaded&&<p style={{textAlign:"center",color:T.muted,fontSize:12}}>⏳ Cargando...</p>}
+
+    {planificados.length>0&&<div style={{marginBottom:12}}>
+      <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:"#F59E0B",textTransform:"uppercase"}}>📋 Planificados ({planificados.length})</p>
+      {planificados.map(renderPlan)}
+    </div>}
+
+    {confirmados.length>0&&<div style={{marginBottom:12}}>
+      <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:"#3B82F6",textTransform:"uppercase"}}>✅ Confirmados ({confirmados.length})</p>
+      {confirmados.map(renderPlan)}
+    </div>}
+
+    {servidos.length>0&&<div style={{marginBottom:12}}>
+      <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:"#22C55E",textTransform:"uppercase"}}>📦 Servidos ({servidos.length})</p>
+      {servidos.map(renderPlan)}
+    </div>}
+
+    {plLoaded&&planes.length===0&&<p style={{textAlign:"center",color:T.muted,fontSize:13,padding:20}}>Sin planificación. Pulsa "+ Añadir" para crear líneas de pedido.</p>}
+  </div>;
+}
+
 // (v3.39.79) Vista de planificación agrupada para Compras
 function PlanificacionCompras({usuario}){
   const [planes,setPlanes]=React.useState([]);
@@ -22851,131 +23008,7 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
           )}
 
           {/* ── TAB PLANIFICACIÓN (v3.39.79) ── */}
-          {tabSel==="planif"&&(function(){
-            var _pl=React.useState([]);var planes=_pl[0],setPlanes=_pl[1];
-            var _plf=React.useState({producto:"",cantidad:"",calibre:"",metros:"",fechaServicio:"",notas:""});var formPl=_plf[0],setFormPl=_plf[1];
-            var _plShow=React.useState(false);var showFormPl=_plShow[0],setShowFormPl=_plShow[1];
-            var _plLoad=React.useState(false);var plLoaded=_plLoad[0],setPlLoaded=_plLoad[1];
-
-            React.useEffect(function(){
-              if(plLoaded) return;
-              fbLeer("planificacion").then(function(d){
-                var filtered=(d||[]).filter(function(p){return p.clienteId===cliId&&!p.eliminado;});
-                setPlanes(filtered.sort(function(a,b){return(a.fechaServicio||"").localeCompare(b.fechaServicio||"");}));
-                setPlLoaded(true);
-              }).catch(function(){setPlLoaded(true);});
-            },[plLoaded]);
-
-            function guardarPlan(){
-              if(!formPl.producto.trim()||!formPl.cantidad||!formPl.fechaServicio) return alert("Rellena producto, cantidad y fecha");
-              var id="plan_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
-              var doc={
-                id:id,clienteId:cliId,clienteNombre:cliNom,
-                producto:formPl.producto.trim(),cantidad:Number(formPl.cantidad)||0,
-                calibre:formPl.calibre,metros:formPl.metros,
-                fechaServicio:formPl.fechaServicio,notas:formPl.notas,
-                agente:idCanonico(usuario),agenteNombre:usuario.nombre,equipo:usuario.equipo||"",
-                estado:"planificado",fechaCreacion:new Date().toISOString(),
-                semanaServicio:(function(){var d=new Date(formPl.fechaServicio);var s=new Date(d.getFullYear(),0,1);return Math.ceil(((d-s)/86400000+s.getDay()+1)/7);})()
-              };
-              fbEscribir("planificacion",id,doc);
-              setPlanes(function(prev){return [doc].concat(prev).sort(function(a,b){return(a.fechaServicio||"").localeCompare(b.fechaServicio||"");});});
-              setFormPl({producto:"",cantidad:"",calibre:"",metros:"",fechaServicio:"",notas:""});
-              setShowFormPl(false);
-            }
-
-            function eliminarPlan(pid){
-              if(!confirm("¿Eliminar esta línea de planificación?")) return;
-              fbEscribir("planificacion",pid,{eliminado:true},true);
-              setPlanes(function(prev){return prev.filter(function(p){return p.id!==pid;});});
-            }
-
-            function cambiarEstado(pid,nuevoEstado){
-              fbEscribir("planificacion",pid,{estado:nuevoEstado},true);
-              setPlanes(function(prev){return prev.map(function(p){return p.id===pid?Object.assign({},p,{estado:nuevoEstado}):p;});});
-            }
-
-            var planificados=planes.filter(function(p){return p.estado==="planificado";});
-            var confirmados=planes.filter(function(p){return p.estado==="confirmado";});
-            var servidos=planes.filter(function(p){return p.estado==="servido";});
-
-            var estadoColor={planificado:"#F59E0B",confirmado:"#3B82F6",servido:"#22C55E"};
-            var estadoIcon={planificado:"📋",confirmado:"✅",servido:"📦"};
-
-            function renderPlan(p){
-              return <div key={p.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",
-                background:"#fff",borderRadius:10,border:"1px solid "+T.border,marginBottom:6,
-                borderLeft:"4px solid "+(estadoColor[p.estado]||T.muted)}}>
-                <div style={{flex:1}}>
-                  <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{p.producto}</p>
-                  <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
-                    {p.cantidad} uds{p.calibre?" · "+p.calibre:""}{p.metros?" · "+p.metros+"m":""}
-                    {" · 📅 "}{p.fechaServicio}
-                  </p>
-                  {p.notas&&<p style={{margin:"2px 0 0",fontSize:10,color:"#64748B"}}>💬 {p.notas}</p>}
-                </div>
-                <div style={{display:"flex",gap:4}}>
-                  {p.estado==="planificado"&&<button onClick={function(){cambiarEstado(p.id,"confirmado");}}
-                    style={{padding:"4px 8px",fontSize:10,borderRadius:6,border:"1px solid #3B82F6",background:"#EFF6FF",color:"#3B82F6",cursor:"pointer",fontWeight:600}}>✅ Confirmar</button>}
-                  {p.estado==="confirmado"&&<button onClick={function(){cambiarEstado(p.id,"servido");}}
-                    style={{padding:"4px 8px",fontSize:10,borderRadius:6,border:"1px solid #22C55E",background:"#F0FDF4",color:"#22C55E",cursor:"pointer",fontWeight:600}}>📦 Servido</button>}
-                  <button onClick={function(){eliminarPlan(p.id);}}
-                    style={{padding:"4px 8px",fontSize:10,borderRadius:6,border:"1px solid #EF4444",background:"#FEF2F2",color:"#EF4444",cursor:"pointer"}}>🗑️</button>
-                </div>
-              </div>;
-            }
-
-            return <div style={{padding:16}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-                <p style={{margin:0,fontSize:16,fontWeight:800,color:T.text}}>📋 Planificación de pedidos</p>
-                <button onClick={function(){setShowFormPl(!showFormPl);}}
-                  style={{padding:"8px 14px",background:T.navy,color:"#fff",border:"none",borderRadius:9,fontWeight:700,fontSize:12,cursor:"pointer"}}>{showFormPl?"✕ Cerrar":"+ Añadir"}</button>
-              </div>
-
-              {showFormPl&&<div style={{background:"#F0F9FF",borderRadius:12,padding:14,marginBottom:14,border:"1.5px solid #BFDBFE"}}>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
-                  <div><p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Producto *</p>
-                    <input value={formPl.producto} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{producto:e.target.value});});}}
-                      placeholder="ej: B5.9K" style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
-                  <div><p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Cantidad *</p>
-                    <input type="number" value={formPl.cantidad} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{cantidad:e.target.value});});}}
-                      placeholder="uds" style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
-                  <div><p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Calibre</p>
-                    <input value={formPl.calibre} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{calibre:e.target.value});});}}
-                      placeholder="ej: 40/42" style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
-                  <div><p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Metros</p>
-                    <input value={formPl.metros} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{metros:e.target.value});});}}
-                      placeholder="ej: 50m" style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
-                  <div><p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Fecha servicio *</p>
-                    <input type="date" value={formPl.fechaServicio} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{fechaServicio:e.target.value});});}}
-                      style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
-                  <div><p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Notas</p>
-                    <input value={formPl.notas} onChange={function(e){setFormPl(function(f){return Object.assign({},f,{notas:e.target.value});});}}
-                      placeholder="opcional" style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
-                </div>
-                <button onClick={guardarPlan} style={{width:"100%",padding:"10px",background:T.navy,color:"#fff",border:"none",borderRadius:9,fontWeight:700,fontSize:13,cursor:"pointer"}}>💾 Guardar línea</button>
-              </div>}
-
-              {!plLoaded&&<p style={{textAlign:"center",color:T.muted,fontSize:12}}>⏳ Cargando...</p>}
-
-              {planificados.length>0&&<div style={{marginBottom:12}}>
-                <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:"#F59E0B",textTransform:"uppercase"}}>📋 Planificados ({planificados.length})</p>
-                {planificados.map(renderPlan)}
-              </div>}
-
-              {confirmados.length>0&&<div style={{marginBottom:12}}>
-                <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:"#3B82F6",textTransform:"uppercase"}}>✅ Confirmados ({confirmados.length})</p>
-                {confirmados.map(renderPlan)}
-              </div>}
-
-              {servidos.length>0&&<div style={{marginBottom:12}}>
-                <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:"#22C55E",textTransform:"uppercase"}}>📦 Servidos ({servidos.length})</p>
-                {servidos.map(renderPlan)}
-              </div>}
-
-              {plLoaded&&planes.length===0&&<p style={{textAlign:"center",color:T.muted,fontSize:13,padding:20}}>Sin planificación. Pulsa "+ Añadir" para crear líneas de pedido.</p>}
-            </div>;
-          })()}
+          {tabSel==="planif"&&<PlanificacionTab clienteId={cliId} clienteNombre={cliNom} usuario={usuario}/>}
 
           {/* ── TAB POTENCIAL (v3.23.35/36/37) ── */}
           {tabSel==="potencial"&&(
