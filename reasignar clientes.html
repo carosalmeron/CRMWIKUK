@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Reasignar Clientes Huérfanos</title>
+<style>
+*{box-sizing:border-box;}
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:700px;margin:40px auto;padding:16px;background:#F8FAFC;}
+h1{color:#1E293B;font-size:1.3rem;margin-bottom:4px;}
+.sub{color:#64748B;font-size:.85rem;margin-bottom:16px;}
+.card{background:#fff;border-radius:14px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,.06);margin-bottom:14px;border:1px solid #E2E8F0;}
+.btn{padding:12px 20px;font-size:.95rem;font-weight:700;border:none;border-radius:10px;cursor:pointer;font-family:inherit;}
+.btn-main{background:#7C3AED;color:#fff;width:100%;}
+.btn-main:hover{background:#6D28D9;}
+.btn-main:disabled{background:#CBD5E1;cursor:not-allowed;}
+.btn-sm{background:#1E293B;color:#fff;font-size:.8rem;padding:8px 14px;border-radius:8px;}
+.btn-green{background:#059669;color:#fff;}
+.btn-red{background:#DC2626;color:#fff;font-size:.8rem;padding:6px 12px;border-radius:6px;}
+.log{background:#1E293B;color:#4ADE80;font-family:monospace;font-size:.75rem;padding:12px;border-radius:8px;max-height:200px;overflow-y:auto;margin-top:10px;white-space:pre-wrap;}
+.stats{display:flex;gap:8px;margin:12px 0;flex-wrap:wrap;}
+.stat{flex:1;min-width:80px;text-align:center;background:#F1F5F9;border-radius:10px;padding:10px 8px;border:1px solid #E2E8F0;}
+.stat-n{font-size:1.4rem;font-weight:900;}
+.stat-l{font-size:.65rem;color:#64748B;text-transform:uppercase;}
+.orphan-card{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-radius:8px;margin-bottom:4px;border:1px solid #E2E8F0;background:#fff;font-size:.85rem;}
+.orphan-card:hover{background:#F8FAFC;}
+.agent-tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:.7rem;font-weight:700;background:#FEF2F2;color:#DC2626;border:1px solid #FECACA;}
+.agent-ok{background:#F0FDF4;color:#059669;border-color:#BBF7D0;}
+select{padding:8px;border-radius:8px;border:1.5px solid #E2E8F0;font-size:.85rem;font-family:inherit;}
+.group-header{padding:8px 0;font-size:.9rem;font-weight:800;color:#7C3AED;border-bottom:2px solid #EDE9FE;margin:12px 0 6px;}
+.search{width:100%;padding:10px 14px;border-radius:10px;border:1.5px solid #E2E8F0;font-size:.9rem;font-family:inherit;margin-bottom:10px;}
+.hidden{display:none;}
+.progress{margin-top:10px;}
+.bar-wrap{background:#E2E8F0;border-radius:99px;height:10px;overflow:hidden;}
+.bar{height:100%;background:#7C3AED;border-radius:99px;width:0%;transition:width .3s;}
+</style>
+</head>
+<body>
+<h1>🔄 Reasignar Clientes Huérfanos</h1>
+<p class="sub">Encuentra clientes asignados a agentes que no existen en el CRM y reasígnalos</p>
+
+<div class="card">
+  <button class="btn btn-main" onclick="cargarDatos()" id="btnCargar">📥 Cargar clientes desde Firebase</button>
+  <div id="logDiv" class="hidden">
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<div id="resultados" class="hidden">
+  <div class="stats" id="stats"></div>
+  
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+      <p style="margin:0;font-weight:800;color:#1E293B;">Clientes huérfanos</p>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <label style="font-size:.8rem;color:#64748B;">Reasignar seleccionados a:</label>
+        <select id="nuevoAgente"></select>
+        <button class="btn-sm btn-green" onclick="reasignarSeleccionados()">✅ Reasignar</button>
+      </div>
+    </div>
+    <input type="text" class="search" id="buscar" placeholder="🔍 Buscar cliente..." oninput="filtrar()"/>
+    <div style="margin-bottom:8px;display:flex;gap:8px;align-items:center;">
+      <label style="font-size:.8rem;"><input type="checkbox" id="checkAll" onchange="toggleAll()"/> Seleccionar todos</label>
+      <span id="selCount" style="font-size:.75rem;color:#7C3AED;font-weight:700;"></span>
+    </div>
+    <div id="lista" style="max-height:500px;overflow-y:auto;"></div>
+  </div>
+  
+  <div class="card">
+    <p style="margin:0 0 8px;font-weight:800;">📊 Agentes sin asignar (huérfanos)</p>
+    <div id="agentesHuerfanos"></div>
+  </div>
+  
+  <div id="progressDiv" class="hidden">
+    <div class="progress">
+      <p id="progressText" style="font-size:.85rem;"></p>
+      <div class="bar-wrap"><div class="bar" id="bar"></div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const FB = "https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+
+// Agentes activos del CRM
+const AGENTES_CRM = [
+  {id:"ceo",nombre:"CEO"},
+  {id:"jefe_ventas",nombre:"Director Comercial"},
+  {id:"resp_wk",nombre:"Resp. WIKUK"},
+  {id:"resp_ik",nombre:"Resp. INTERKEY"},
+  {id:"davidmag",nombre:"David Mag"},
+  {id:"veronica",nombre:"Verónica"},
+  {id:"silvia",nombre:"Silvia"},
+  {id:"ik1",nombre:"Carlos G."},
+  {id:"ricardo",nombre:"Ricardo"},
+  {id:"azarco",nombre:"Azarco"},
+  {id:"rpiedra",nombre:"R. Piedra"},
+  {id:"jlgarcia",nombre:"JL García"},
+  {id:"esther",nombre:"Esther"},
+  {id:"dvega",nombre:"D. Vega"},
+  {id:"barbela",nombre:"Barbela"},
+  {id:"acruz",nombre:"A. Cruz"},
+  {id:"rjesus",nombre:"R. Jesús"},
+  {id:"rpepe",nombre:"R. Pepe"},
+  {id:"miguel",nombre:"Miguel"},
+  {id:"julia",nombre:"Julia J."},
+  {id:"zafra",nombre:"Zafra JM"},
+  {id:"agustin",nombre:"Agustín"},
+  {id:"pacoveses",nombre:"Paco Veses"},
+];
+
+const AGENTES_IDS = new Set(AGENTES_CRM.map(a => a.id.toUpperCase()));
+// También mapear nombres comunes a IDs
+const ALIAS = {
+  "CARLOSG":"IK1","CARLOS G.":"IK1","CARLOS G":"IK1",
+  "RPIEDRA":"RPIEDRA","R. PIEDRA":"RPIEDRA","R.PIEDRA":"RPIEDRA",
+  "JLGARCIA":"JLGARCIA","JL":"JLGARCIA","JOSE LUIS":"JLGARCIA",
+  "DVEGA":"DVEGA","D. VEGA":"DVEGA","D.VEGA":"DVEGA",
+  "ESTHER":"ESTHER","EBAENA":"ESTHER",
+  "AZARCO":"AZARCO","ANTONIO ZARCO":"AZARCO",
+  "RICARDO":"RICARDO","RI":"RICARDO",
+  "DAVID":"DAVIDMAG","DAVIDMAG":"DAVIDMAG",
+  "VERONICA":"VERONICA","VEROLOPEZ":"VERONICA",
+  "SILVIA":"SILVIA",
+  "AGUSTIN":"AGUSTIN",
+  "MIGUEL":"MIGUEL",
+  "JULIA JIMENEZ":"JULIA","JULIA":"JULIA",
+  "ZAFRA JUANMA":"ZAFRA","ZAFRA":"ZAFRA",
+  "JPEREZ":"JULIA","J.PEREZ":"JULIA",
+  "R-JESUS":"RJESUS","R-PEPE":"RPEPE",
+  "ACRUZ":"ACRUZ","A. CRUZ":"ACRUZ",
+  "BARBELA":"BARBELA",
+  "PACOVESES":"PACOVESES","PACORAMIREZ":"PACOVESES",
+  "JBRAVO":"AGUSTIN",
+};
+
+let todosClientes = [];
+let huerfanos = [];
+let seleccionados = new Set();
+
+function log(msg) {
+  const el = document.getElementById("log");
+  el.textContent += msg + "\n";
+  el.scrollTop = el.scrollHeight;
+  document.getElementById("logDiv").classList.remove("hidden");
+}
+
+function resolverAgente(grupoAgente) {
+  if (!grupoAgente) return null;
+  const up = grupoAgente.toUpperCase().trim();
+  if (AGENTES_IDS.has(up)) return up.toLowerCase();
+  if (ALIAS[up]) return ALIAS[up].toLowerCase();
+  return null;
+}
+
+async function fbLeerPaginado(col) {
+  let all = [], pageToken = null;
+  for (let p = 0; p < 30; p++) {
+    let url = `${FB}/${col}?pageSize=300`;
+    if (pageToken) url += `&pageToken=${pageToken}`;
+    const r = await fetch(url);
+    const d = await r.json();
+    if (!d.documents) break;
+    d.documents.forEach(doc => {
+      const o = { id: doc.name.split("/").pop() };
+      if (doc.fields) Object.entries(doc.fields).forEach(([k, v]) => {
+        o[k] = v.stringValue || v.integerValue || v.doubleValue || v.booleanValue || v.nullValue || "";
+      });
+      all.push(o);
+    });
+    log(`  Página ${p + 1}: ${d.documents.length} docs (total: ${all.length})`);
+    pageToken = d.nextPageToken;
+    if (!pageToken) break;
+  }
+  return all;
+}
+
+async function cargarDatos() {
+  document.getElementById("btnCargar").disabled = true;
+  log("📥 Cargando clientes de Firebase...");
+  
+  try {
+    todosClientes = await fbLeerPaginado("clientes");
+    log(`✅ ${todosClientes.length} clientes cargados`);
+    
+    // Analizar huérfanos
+    let asignados = 0;
+    huerfanos = [];
+    const agenteCount = {};
+    
+    todosClientes.forEach(c => {
+      const ga = c.GRUPOAGENTE || c.grupoAgente || c.agente || "";
+      const resuelto = resolverAgente(ga);
+      if (!agenteCount[ga.toUpperCase()]) agenteCount[ga.toUpperCase()] = { nombre: ga, count: 0, resuelto: resuelto };
+      agenteCount[ga.toUpperCase()].count++;
+      
+      if (resuelto) {
+        asignados++;
+      } else if (ga && ga.trim()) {
+        huerfanos.push({ ...c, _agOriginal: ga, _nombre: c.NOMBRE || c.nombre || "?" });
+      }
+    });
+    
+    log(`📊 Asignados: ${asignados} | Huérfanos: ${huerfanos.length}`);
+    
+    // Stats
+    document.getElementById("stats").innerHTML = `
+      <div class="stat"><div class="stat-n" style="color:#059669">${asignados}</div><div class="stat-l">Asignados OK</div></div>
+      <div class="stat"><div class="stat-n" style="color:#DC2626">${huerfanos.length}</div><div class="stat-l">Huérfanos</div></div>
+      <div class="stat"><div class="stat-n" style="color:#3B82F6">${todosClientes.length}</div><div class="stat-l">Total</div></div>
+    `;
+    
+    // Populate agent selector
+    const sel = document.getElementById("nuevoAgente");
+    sel.innerHTML = '<option value="">-- Elegir --</option>' + 
+      AGENTES_CRM.filter(a => a.id !== "ceo" && a.id !== "jefe_ventas").map(a => 
+        `<option value="${a.id}">${a.nombre} (${a.id})</option>`
+      ).join("");
+    
+    // Show orphan agents
+    const huerfanosAgentes = Object.values(agenteCount).filter(a => !a.resuelto && a.nombre).sort((a, b) => b.count - a.count);
+    document.getElementById("agentesHuerfanos").innerHTML = huerfanosAgentes.map(a => 
+      `<div style="display:flex;justify-content:space-between;padding:4px 8px;font-size:.85rem;border-bottom:1px solid #F1F5F9;">
+        <span class="agent-tag">${a.nombre}</span>
+        <span style="font-weight:700;">${a.count} clientes</span>
+      </div>`
+    ).join("") || '<p style="color:#64748B;font-size:.85rem;">Todos los agentes están mapeados ✅</p>';
+    
+    renderLista();
+    document.getElementById("resultados").classList.remove("hidden");
+    
+  } catch (e) {
+    log("❌ Error: " + e.message);
+  }
+}
+
+function renderLista() {
+  const q = (document.getElementById("buscar").value || "").toUpperCase();
+  const filtrados = q ? huerfanos.filter(c => c._nombre.toUpperCase().includes(q) || (c._agOriginal || "").toUpperCase().includes(q)) : huerfanos;
+  
+  // Group by agent
+  const grupos = {};
+  filtrados.forEach(c => {
+    const ag = c._agOriginal || "SIN AGENTE";
+    if (!grupos[ag]) grupos[ag] = [];
+    grupos[ag].push(c);
+  });
+  
+  let html = "";
+  Object.keys(grupos).sort().forEach(ag => {
+    html += `<div class="group-header">${ag} (${grupos[ag].length})</div>`;
+    grupos[ag].forEach(c => {
+      const checked = seleccionados.has(c.id) ? "checked" : "";
+      html += `<div class="orphan-card">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="checkbox" ${checked} onchange="toggleSel('${c.id}')"/>
+          <div>
+            <div style="font-weight:600;">${c._nombre}</div>
+            <div style="font-size:.7rem;color:#94A3B8;">${c.CODIGO || c.codigo || ""} · ${c._agOriginal}</div>
+          </div>
+        </div>
+        <span class="agent-tag">${c._agOriginal}</span>
+      </div>`;
+    });
+  });
+  
+  document.getElementById("lista").innerHTML = html || '<p style="color:#94A3B8;text-align:center;padding:20px;">Sin resultados</p>';
+  document.getElementById("selCount").textContent = seleccionados.size > 0 ? seleccionados.size + " seleccionados" : "";
+}
+
+function filtrar() { renderLista(); }
+
+function toggleSel(id) {
+  if (seleccionados.has(id)) seleccionados.delete(id); else seleccionados.add(id);
+  document.getElementById("selCount").textContent = seleccionados.size > 0 ? seleccionados.size + " seleccionados" : "";
+}
+
+function toggleAll() {
+  const all = document.getElementById("checkAll").checked;
+  const q = (document.getElementById("buscar").value || "").toUpperCase();
+  const filtrados = q ? huerfanos.filter(c => c._nombre.toUpperCase().includes(q) || (c._agOriginal || "").toUpperCase().includes(q)) : huerfanos;
+  if (all) filtrados.forEach(c => seleccionados.add(c.id));
+  else seleccionados.clear();
+  renderLista();
+}
+
+async function reasignarSeleccionados() {
+  const nuevoAg = document.getElementById("nuevoAgente").value;
+  if (!nuevoAg) return alert("Selecciona un agente destino");
+  if (seleccionados.size === 0) return alert("Selecciona al menos un cliente");
+  
+  const agNombre = AGENTES_CRM.find(a => a.id === nuevoAg)?.nombre || nuevoAg;
+  if (!confirm(`¿Reasignar ${seleccionados.size} clientes a ${agNombre} (${nuevoAg})?`)) return;
+  
+  document.getElementById("progressDiv").classList.remove("hidden");
+  let done = 0, errors = 0;
+  const total = seleccionados.size;
+  const ids = [...seleccionados];
+  
+  for (const id of ids) {
+    try {
+      const url = `${FB}/clientes/${id}?updateMask.fieldPaths=GRUPOAGENTE&updateMask.fieldPaths=agente&updateMask.fieldPaths=reasignadoPor&updateMask.fieldPaths=fechaReasignacion`;
+      await fetch(url, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fields: {
+            GRUPOAGENTE: { stringValue: nuevoAg.toUpperCase() },
+            agente: { stringValue: nuevoAg },
+            reasignadoPor: { stringValue: "admin" },
+            fechaReasignacion: { stringValue: new Date().toISOString() }
+          }
+        })
+      });
+      done++;
+    } catch (e) {
+      errors++;
+    }
+    document.getElementById("bar").style.width = Math.round((done + errors) / total * 100) + "%";
+    document.getElementById("progressText").textContent = `Procesando ${done + errors}/${total}... (${done} OK, ${errors} errores)`;
+  }
+  
+  log(`✅ Reasignados: ${done} | Errores: ${errors}`);
+  alert(`✅ ${done} clientes reasignados a ${agNombre}`);
+  
+  // Remove reassigned from orphans
+  huerfanos = huerfanos.filter(c => !seleccionados.has(c.id));
+  seleccionados.clear();
+  renderLista();
+}
+</script>
+</body>
+</html>
