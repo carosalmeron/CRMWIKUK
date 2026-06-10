@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.40.4";
-const CRM_BUILD = "10/06/2026-potencial-seccion-barra-fix";
+const CRM_VERSION = "3.40.5";
+const CRM_BUILD = "10/06/2026-potencial-filtro-dia-barra-firebase";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -1213,19 +1213,19 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
   var _s11=React.useState({});var clientesNuevosMap=_s11[0],setClientesNuevosMap=_s11[1];
   var _potSem=React.useState([]);var potencialesSem=_potSem[0],setPotencialesSem=_potSem[1];
   var _potAll=React.useState({});var potencialesPorCliente=_potAll[0],setPotencialesPorCliente=_potAll[1];
+  var _potClis=React.useState(new Set());var cliVisitadosSem=_potClis[0],setCliVisitadosSem=_potClis[1];
   React.useEffect(function(){
+    var sem=getSemanaISO();
+    // 1. Cargar potenciales
     fbLeer("potenciales").then(function(arr){
       if(!arr) return;
-      var sem=getSemanaISO();
       var lineas=[];
       var porCli={};
       arr.forEach(function(p){
         var nLineas=(p.lineas||[]).length;
-        // Guardar por nombre Y por clienteId
         var cliKey=(p.clienteNombre||p.cliente||"").toUpperCase();
         if(cliKey) porCli[cliKey]=nLineas;
         if(p.clienteId) porCli[p.clienteId]=nLineas;
-        // Actividad esta semana
         (p.actividad||[]).forEach(function(a){
           if(a.fecha){
             var fs=a.fecha.split("/");
@@ -1243,6 +1243,16 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
       });
       setPotencialesSem(lineas);
       setPotencialesPorCliente(porCli);
+    }).catch(function(){});
+    // 2. Cargar clientes visitados esta semana desde Firebase
+    fbLeer("visitas").then(function(vis){
+      if(!vis) return;
+      var clis=new Set();
+      (vis||[]).forEach(function(v){
+        if(Number(v.semana)===sem && v.clienteId) clis.add(v.clienteId);
+        if(Number(v.semana)===sem && v.clienteNombre) clis.add(v.clienteNombre.toUpperCase());
+      });
+      setCliVisitadosSem(clis);
     }).catch(function(){});
   },[]);
   var appMisIds=resolverMisIds(usuario);
@@ -3070,24 +3080,16 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
               {/* (v3.40.1) Barra de cumplimiento potencial — 5 líneas por cliente visitado */}
               {(function(){
                 var OBJETIVO_LINEAS=5;
-                var nVisitados=totalVisitasDet||0;
-                if(nVisitados===0) return null;
-                // Clientes visitados (únicos) - de actividad prop
-                var cVisitados=new Set();
-                Object.keys(actividad||{}).forEach(function(cid){
-                  var a=(actividad||{})[cid];
-                  if(a&&(a.visitas||[]).length>0) cVisitados.add(cid);
-                });
-                var nClis=cVisitados.size||1;
+                var nClis=cliVisitadosSem.size;
+                if(nClis===0) return null;
                 var objetivo=nClis*OBJETIVO_LINEAS;
                 var totalLineas=0;var conPotencial=0;var sinPotencial=0;
-                cVisitados.forEach(function(cid){
-                  var cli=(clientesFB||[]).find(function(c){return c.id===cid;});
-                  var cliNom=cli?(cli.nombre||cli.NOMBRE||"").toUpperCase():"";
-                  var lineas=potencialesPorCliente[cid]||potencialesPorCliente[cliNom]||0;
+                cliVisitadosSem.forEach(function(cid){
+                  var lineas=potencialesPorCliente[cid]||0;
                   totalLineas+=Math.min(lineas,OBJETIVO_LINEAS);
                   if(lineas>0) conPotencial++; else sinPotencial++;
                 });
+                // Deduplicate (some clients tracked by both ID and name)
                 var pct=objetivo>0?Math.round(totalLineas/objetivo*100):0;
                 var color=pct>=80?"#22C55E":pct>=50?"#F59E0B":"#EF4444";
                 return <div style={{background:"#fff",borderRadius:12,padding:"12px 14px",marginBottom:14,border:"1.5px solid "+color+"33"}}>
@@ -3099,7 +3101,7 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
                     <div style={{height:"100%",width:Math.min(pct,100)+"%",background:color,borderRadius:99,transition:"width .3s"}}/>
                   </div>
                   <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:T.muted}}>
-                    <span>{totalLineas}/{objetivo} líneas (obj: {OBJETIVO_LINEAS}/cli)</span>
+                    <span>{totalLineas}/{objetivo} líneas (obj: {OBJETIVO_LINEAS}/cli · {nClis} clis)</span>
                     <span style={{color:"#22C55E",fontWeight:600}}>{conPotencial} ✅</span>
                     {sinPotencial>0&&<span style={{color:"#EF4444",fontWeight:600}}>{sinPotencial} sin datos</span>}
                   </div>
@@ -3747,17 +3749,30 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
               )}
 
               {/* (v3.40.3) Sección Potenciales de la semana */}
-              {(!tipoFiltroMS||tipoFiltroMS==="potencial")&&potencialesSem.length>0&&(
-                <div style={{background:"#fff",borderRadius:16,padding:18,marginBottom:14,borderLeft:"4px solid #0891B2",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
+              {(!tipoFiltroMS||tipoFiltroMS==="potencial")&&potencialesSem.length>0&&(function(){
+                var items=potencialesSem;
+                if(diaFiltroMS){
+                  items=items.filter(function(p){
+                    if(!p.fecha) return false;
+                    var fs=p.fecha.split("/");
+                    if(fs.length!==3) return false;
+                    var yr=fs[2].length===2?"20"+fs[2]:fs[2];
+                    var d=new Date(yr+"-"+fs[1]+"-"+fs[0]);
+                    var dias=["domingo","lunes","martes","miércoles","jueves","viernes","sábado"];
+                    return dias[d.getDay()]===diaFiltroMS;
+                  });
+                }
+                if(items.length===0) return null;
+                return <div style={{background:"#fff",borderRadius:16,padding:18,marginBottom:14,borderLeft:"4px solid #0891B2",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
                   <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
                     <div style={{width:40,height:40,borderRadius:12,background:"#ECFEFF",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>📈</div>
                     <div>
                       <p style={{margin:0,fontSize:15,fontWeight:800,color:T.navy}}>Potenciales registrados</p>
-                      <p style={{margin:0,fontSize:11,color:T.muted}}>{potencialesSem.length} línea{potencialesSem.length>1?"s":""} esta semana</p>
+                      <p style={{margin:0,fontSize:11,color:T.muted}}>{items.length} línea{items.length>1?"s":""}{diaFiltroMS?" ("+diaFiltroMS+")":""}</p>
                     </div>
                   </div>
-                  {potencialesSem.map(function(p,i){
-                    return <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"6px 10px",fontSize:12,borderBottom:i<potencialesSem.length-1?"1px solid #F1F5F9":"none"}}>
+                  {items.map(function(p,i){
+                    return <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"6px 10px",fontSize:12,borderBottom:i<items.length-1?"1px solid #F1F5F9":"none"}}>
                       <div>
                         <span style={{fontWeight:700,color:T.text}}>{p.cliente}</span>
                         {p.detalle&&<span style={{color:T.muted,marginLeft:6}}>{p.detalle}</span>}
@@ -3768,8 +3783,8 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
                       </div>
                     </div>;
                   })}
-                </div>
-              )}
+                </div>;
+              })()}
 
 
             </div>
