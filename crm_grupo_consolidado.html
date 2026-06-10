@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.40.0";
-const CRM_BUILD = "10/06/2026-fix-tabSel-before-init";
+const CRM_VERSION = "3.40.2";
+const CRM_BUILD = "10/06/2026-barra-potencial-cumplimiento";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -1211,6 +1211,35 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
   var _s8=React.useState("");var busqLibre=_s8[0],setBusqLibre=_s8[1];
   var _s9=React.useState(false);var showNuevoMS=_s9[0],setShowNuevoMS=_s9[1];
   var _s11=React.useState({});var clientesNuevosMap=_s11[0],setClientesNuevosMap=_s11[1];
+  var _potSem=React.useState([]);var potencialesSem=_potSem[0],setPotencialesSem=_potSem[1];
+  var _potAll=React.useState({});var potencialesPorCliente=_potAll[0],setPotencialesPorCliente=_potAll[1];
+  React.useEffect(function(){
+    fbLeer("potenciales").then(function(arr){
+      if(!arr) return;
+      var sem=getSemanaISO();
+      var lineas=[];
+      var porCli={};
+      arr.forEach(function(p){
+        // Líneas por cliente (para barra de progreso)
+        var cliKey=(p.clienteNombre||p.cliente||"").toUpperCase();
+        if(cliKey) porCli[cliKey]=(p.lineas||[]).length;
+        // Actividad esta semana
+        (p.actividad||[]).forEach(function(a){
+          if(a.fecha){
+            var fs=a.fecha.split("/");
+            if(fs.length===3){
+              var d=new Date("20"+fs[2]+"-"+fs[1]+"-"+fs[0]);
+              var sSem=new Date(d.getFullYear(),0,1);
+              var wk=Math.ceil(((d-sSem)/86400000+sSem.getDay()+1)/7);
+              if(wk===sem) lineas.push({cliente:p.clienteNombre||p.cliente||"?",accion:a.accion,detalle:a.detalle,fecha:a.fecha,por:a.por});
+            }
+          }
+        });
+      });
+      setPotencialesSem(lineas);
+      setPotencialesPorCliente(porCli);
+    }).catch(function(){});
+  },[]);
   var appMisIds=resolverMisIds(usuario);
 
   var esAgenteMS=usuario.rol==="crm_agente"||usuario.rol==="agente";
@@ -3016,7 +3045,8 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
                   {k:"ofertas",n:_ofSem.filter(pasaFiltroDiaItem).length,l:"Ofertas",c:"#F59E0B"},
                   {k:"hitos",n:misHitos.length,l:"Hitos",c:"#14B8A6"},
                   {k:"tareas",n:misTareas.filter(pasaFiltroDiaItem).length,l:"Tareas",c:"#EF4444"},
-                  {k:"inc",n:misIncFiltradas.length,l:"Incid.",c:"#DC2626"}
+                  {k:"inc",n:misIncFiltradas.length,l:"Incid.",c:"#DC2626"},
+                  {k:"potencial",n:potencialesSem.length,l:"Potenc.",c:"#0891B2"}
                   ];
                 })().map(function(kpi,i){
                   var sel = tipoFiltroMS===kpi.k;
@@ -3031,6 +3061,49 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
                   <button onClick={function(){setTipoFiltroMS(null);}} style={{padding:"6px 14px",borderRadius:99,border:"1.5px solid "+T.border,background:"#fff",color:T.muted,fontSize:11,fontWeight:600,cursor:"pointer"}}>✕ Quitar filtro de tipo</button>
                 </div>
               )}
+
+              {/* (v3.40.1) Barra de cumplimiento potencial — 5 líneas por cliente visitado */}
+              {(function(){
+                var OBJETIVO_LINEAS=5;
+                // Clientes visitados esta semana (únicos)
+                var cVisitados=new Set();
+                Object.keys(actividadSemana||{}).forEach(function(cid){
+                  var a=actividadSemana[cid];
+                  if(a&&(a.visitas||[]).length>0) cVisitados.add(cid);
+                });
+                // También desde clientesSemana
+                (clientesSemana||[]).forEach(function(c){
+                  if(c&&(c.id||c.nombre)) cVisitados.add(c.id||c.nombre);
+                });
+                var nVisitados=cVisitados.size;
+                if(nVisitados===0) return null;
+                var objetivo=nVisitados*OBJETIVO_LINEAS;
+                // Contar líneas existentes para clientes visitados
+                var totalLineas=0;var conPotencial=0;var sinPotencial=0;
+                cVisitados.forEach(function(cid){
+                  var cli=clientesFB.find(function(c){return c.id===cid;});
+                  var cliNom=cli?(cli.nombre||cli.NOMBRE||"").toUpperCase():"";
+                  var lineas=potencialesPorCliente[cliNom]||0;
+                  totalLineas+=Math.min(lineas,OBJETIVO_LINEAS); // cap a 5 por cliente
+                  if(lineas>0) conPotencial++; else sinPotencial++;
+                });
+                var pct=objetivo>0?Math.round(totalLineas/objetivo*100):0;
+                var color=pct>=80?"#22C55E":pct>=50?"#F59E0B":"#EF4444";
+                return <div style={{background:"#fff",borderRadius:12,padding:"12px 14px",marginBottom:14,border:"1.5px solid "+color+"33"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                    <p style={{margin:0,fontSize:12,fontWeight:800,color:T.text}}>📈 Potencial de clientes visitados</p>
+                    <span style={{fontSize:14,fontWeight:900,color:color}}>{pct}%</span>
+                  </div>
+                  <div style={{height:10,background:"#F1F5F9",borderRadius:99,overflow:"hidden",marginBottom:6}}>
+                    <div style={{height:"100%",width:Math.min(pct,100)+"%",background:color,borderRadius:99,transition:"width .3s"}}/>
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:T.muted}}>
+                    <span>{totalLineas}/{objetivo} líneas (obj: {OBJETIVO_LINEAS}/cliente)</span>
+                    <span style={{color:"#22C55E",fontWeight:600}}>{conPotencial} con datos</span>
+                    {sinPotencial>0&&<span style={{color:"#EF4444",fontWeight:600}}>{sinPotencial} sin datos</span>}
+                  </div>
+                </div>;
+              })()}
 
               {/* ═══ Sección Visitas detalladas (v3.10.0) ═══ */}
               {(!tipoFiltroMS||tipoFiltroMS==="visitas")&&totalVisitasDet>0&&(
