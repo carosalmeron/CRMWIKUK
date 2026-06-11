@@ -64,8 +64,14 @@
 // ── Extraer hooks de React global ──────────────────────────────────
 const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
-// ── Anthropic API Key para OCR de tarjetas ──
-const ANTHROPIC_API_KEY="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";
+// ── Anthropic API Key ──
+// ⚠️ NUNCA hardcodear la clave aquí. Se lee de sessionStorage ("ant_key"),
+// donde la guarda el usuario al conectarse en el módulo IA.
+const getAnthropicKey = () => {
+  const k = sessionStorage.getItem("ant_key") || "";
+  if(!k) alert("⚠️ No hay clave API configurada. Ve al módulo 🤖 IA e introduce tu clave (sk-ant-...) para usar las funciones de inteligencia artificial.");
+  return k;
+};
 
 // ── Comprimir imagen para OCR (max 1024px, JPEG 80%) ──
 function comprimirImagen(dataUrl, maxSize=1024){
@@ -4559,7 +4565,53 @@ function DashTipologia({usuario, onNav, incidenciasDB}){
 // ─── PANEL DE SEGUIMIENTO ACTIVO ─────────────────────────────────
 // (v3.24.0) Calcula envejecimiento de todos los módulos y muestra
 // los elementos que llevan demasiado tiempo sin actividad
-function PanelSeguimiento({usuario, oportunidadesDB, muestrasDB, estrategiasDB, incidenciasDB, onNav}){
+// ── 📌 Tarjeta reutilizable de Próxima Acción (muestras / ofertas / estrategias) ──
+function ProximaAccionCard({obj, cerrada, onGuardar}){
+  const [acc,setAcc]=React.useState((obj&&obj.proximaAccion)||"");
+  const [fch,setFch]=React.useState((obj&&obj.proximaAccionFecha)||"");
+  React.useEffect(function(){setAcc((obj&&obj.proximaAccion)||"");setFch((obj&&obj.proximaAccionFecha)||"");},[obj&&obj.id,obj&&obj.proximaAccion,obj&&obj.proximaAccionFecha]);
+  if(!obj||cerrada) return null;
+  var estado=(function(){
+    if(!(obj.proximaAccion&&((""+obj.proximaAccion).trim()))) return "sin";
+    if(obj.proximaAccionFecha){
+      var hoy=new Date();hoy.setHours(0,0,0,0);
+      var f=new Date(obj.proximaAccionFecha);f.setHours(0,0,0,0);
+      if(!isNaN(f.getTime())&&f<hoy) return "vencida";
+    }
+    return "ok";
+  })();
+  return(
+    <div style={{borderRadius:16,padding:"14px 16px",marginBottom:14,
+      border:"2px solid "+(estado==="vencida"?"#FCA5A5":estado==="sin"?"#FCD34D":"#BFDBFE"),
+      background:estado==="vencida"?"#FEF2F2":estado==="sin"?"#FFFBEB":"#EFF6FF"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+        <p style={{margin:0,fontSize:12,fontWeight:800,color:estado==="vencida"?"#DC2626":estado==="sin"?"#B45309":"#1D4ED8"}}>
+          {estado==="vencida"?"⏰ PRÓXIMA ACCIÓN VENCIDA":estado==="sin"?"❓ SIN PRÓXIMA ACCIÓN — defínela ahora":"📌 PRÓXIMA ACCIÓN"}
+        </p>
+        {obj.proximaAccionFecha&&estado!=="sin"&&(
+          <span style={{fontSize:11,fontWeight:700,color:estado==="vencida"?"#DC2626":"#1D4ED8"}}>
+            {new Date(obj.proximaAccionFecha).toLocaleDateString("es-ES")}
+          </span>
+        )}
+      </div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+        <input value={acc} onChange={function(e){setAcc(e.target.value);}} placeholder="¿Cuál es el siguiente paso?"
+          style={{flex:2,minWidth:160,padding:"10px 12px",borderRadius:9,border:"1.5px solid #CBD5E1",fontSize:13,outline:"none",boxSizing:"border-box",background:"#fff"}}/>
+        <input type="date" value={fch} onChange={function(e){setFch(e.target.value);}}
+          style={{flex:1,minWidth:130,padding:"10px 12px",borderRadius:9,border:"1.5px solid #CBD5E1",fontSize:13,outline:"none",boxSizing:"border-box",background:"#fff"}}/>
+        <button onClick={function(){if(!acc.trim()||!fch){alert("Indica la próxima acción y su fecha");return;}onGuardar(acc.trim(),fch);}}
+          disabled={!acc.trim()||!fch}
+          style={{padding:"10px 16px",borderRadius:9,border:"none",fontSize:13,fontWeight:700,cursor:"pointer",
+            background:(acc.trim()&&fch)?(estado==="ok"?"#1E3A5F":"#DC2626"):"#E2E8F0",
+            color:(acc.trim()&&fch)?"#fff":"#94A3B8"}}>
+          {obj.proximaAccion?"Actualizar":"Guardar"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PanelSeguimiento({usuario, oportunidadesDB, muestrasDB, estrategiasDB, incidenciasDB, ofertasDB, onNav}){
   var esAgente=usuario.rol==="agente";
   var esJefe=["jefe","director","ceo"].includes(usuario.rol);
   var miEquipo=usuario.equipo;
@@ -4604,6 +4656,7 @@ function PanelSeguimiento({usuario, oportunidadesDB, muestrasDB, estrategiasDB, 
   var UMBRAL={
     oportunidad:7,
     muestra:10,
+    oferta:5,
     incidencia_urgente:2,
     incidencia_alta:3,
     incidencia_media:5,
@@ -4611,49 +4664,84 @@ function PanelSeguimiento({usuario, oportunidadesDB, muestrasDB, estrategiasDB, 
     estrategia:5,
   };
 
-  // ── 1. Oportunidades sin avance ──
+  // Helper común: ¿tiene la próxima acción vencida? → {dias, texto} | null
+  var _hoyMid=new Date(); _hoyMid.setHours(0,0,0,0);
+  function proxVencida(obj){
+    if(!obj||!obj.proximaAccionFecha) return null;
+    var pf=parseAnyDate(obj.proximaAccionFecha);
+    if(!pf||isNaN(pf.getTime())) return null;
+    pf.setHours(0,0,0,0);
+    var d=Math.floor((_hoyMid-pf)/(1000*60*60*24));
+    if(d<=0) return null;
+    return {dias:d, texto:"⏰ Acción vencida: "+((obj.proximaAccion||"")+"").slice(0,60)};
+  }
+
+  // ── 1. Oportunidades que requieren acción ──
+  // Prioridad: 1) próxima acción VENCIDA  2) SIN próxima acción definida  3) sin avance +7d
   var opsDB=oportunidadesDB||[];
-  var opsVencidas=opsDB.filter(function(o){
-    var cerrada=["ganada","perdida","cerrada_ganada","cerrada_perdida"].some(function(e){return o.etapa===e||o.estado===e;});
-    if(cerrada) return false;
-    if(esAgente&&!esDelUsuario(o.agente,appMisIds)&&!esDelUsuario(o.agenteId,appMisIds)) return false;
+  var hoyMid=new Date(); hoyMid.setHours(0,0,0,0);
+  var opsVencidas=opsDB.map(function(o){
+    var cerrada=["ganada","perdida","cerrada_ganada","cerrada_perdida","cerrada"].some(function(e){return o.etapa===e||o.estado===e;});
+    if(cerrada||o.eliminada) return null;
+    if(esAgente&&!esDelUsuario(o.agente,appMisIds)&&!esDelUsuario(o.agenteId,appMisIds)) return null;
     if(!esAgente&&usuario.rol==="jefe"){
       var ag=USUARIOS.find(function(u){return u.id===(o.agenteId||o.agente);});
-      if(!ag||ag.equipo!==miEquipo) return false;
+      if(!ag||ag.equipo!==miEquipo) return null;
     }
     var acts=o.actividad||[];
     var ultAct=acts.length>0?(acts[acts.length-1]||{}).fecha:null;
-    var fechaRef=ultAct||o.fecha||o.creadaEn;
-    if(!fechaRef) return false; // sin fecha = no podemos calcular
-    return diasDesde(fechaRef)>=UMBRAL.oportunidad;
-  }).map(function(o){
-    var acts=o.actividad||[];
-    var ultAct=acts.length>0?(acts[acts.length-1]||{}).fecha:null;
-    var fechaRef=ultAct||o.fecha||o.creadaEn;
+    var fechaRef=ultAct||o.fecha||o.creadaEn||o.fechaCreacion;
+    var diasSinAct=fechaRef?diasDesde(fechaRef):null;
+    var motivo=null, dias=0;
+    // 1) Próxima acción vencida
+    if(o.proximaAccionFecha){
+      var pf=parseAnyDate(o.proximaAccionFecha);
+      if(pf&&!isNaN(pf.getTime())){
+        pf.setHours(0,0,0,0);
+        var diasVenc=Math.floor((hoyMid-pf)/(1000*60*60*24));
+        if(diasVenc>0){motivo="⏰ Acción vencida: "+(o.proximaAccion||"");dias=diasVenc;}
+      }
+    }
+    // 2) Sin próxima acción definida
+    if(!motivo&&!(o.proximaAccion&&(""+o.proximaAccion).trim())){
+      motivo="❓ Sin próxima acción definida";
+      dias=diasSinAct!==null&&diasSinAct<999?diasSinAct:0;
+    }
+    // 3) Sin avance (regla clásica)
+    if(!motivo&&diasSinAct!==null&&diasSinAct<999&&diasSinAct>=UMBRAL.oportunidad){
+      motivo="⏸ Sin avance";dias=diasSinAct;
+    }
+    if(!motivo) return null;
     return {tipo:"oportunidad",icon:"\uD83D\uDCBC",color:"#3B82F6",bg:"#EFF6FF",
-      titulo:o.prod||o.cliente||"Oportunidad",sub:o.prod?o.cliente:"",
-      dias:diasDesde(fechaRef),etapa:o.etapa||"",valor:o.valor||0,
+      titulo:o.prod||o.nombre||o.cliente||"Oportunidad",
+      sub:motivo+(o.cliente&&(o.prod||o.nombre)?" · "+o.cliente:""),
+      dias:dias,etapa:o.etapa||"",valor:o.valor||0,
       nav:"oportunidades",id:o.id};
-  });
+  }).filter(Boolean);
 
-  // ── 2. Muestras pendientes de feedback ──
+  // ── 2. Muestras pendientes de feedback / acción vencida ──
   var mDB=muestrasDB||[];
-  var muestrasVencidas=mDB.filter(function(m){
-    if(m.estado!=="pendiente") return false;
-    if(m.eliminada) return false;
-    if(esAgente&&!esDelUsuario(m.agente,appMisIds)) return false;
+  var muestrasVencidas=mDB.map(function(m){
+    var abierta=["pendiente","enviada","en_curso"].includes(m.estado);
+    if(!abierta||m.eliminada) return null;
+    if(esAgente&&!esDelUsuario(m.agente,appMisIds)) return null;
     if(!esAgente&&usuario.rol==="jefe"){
       var ag=USUARIOS.find(function(u){return u.id===m.agente;});
-      if(!ag||ag.equipo!==miEquipo) return false;
+      if(!ag||ag.equipo!==miEquipo) return null;
     }
-    var fechaRef=m.fecha||semanaAFecha(m.semana);
-    return diasDesde(fechaRef)>=UMBRAL.muestra;
-  }).map(function(m){
-    var fechaRef=m.fecha||semanaAFecha(m.semana);
+    var pv=proxVencida(m);
+    var motivo=null,dias=0;
+    if(pv){motivo=pv.texto;dias=pv.dias;}
+    else{
+      var fechaRef=m.fecha||semanaAFecha(m.semana);
+      var d=diasDesde(fechaRef);
+      if(d<999&&d>=UMBRAL.muestra){motivo="⏸ Sin feedback";dias=d;}
+    }
+    if(!motivo) return null;
     return {tipo:"muestra",icon:"\uD83D\uDCE6",color:"#7C3AED",bg:"#F5F3FF",
-      titulo:m.prod||m.prodNombre||"Muestra",sub:m.cliente||m.clienteNombre||"",
-      dias:diasDesde(fechaRef),nav:"muestras",id:m.id};
-  });
+      titulo:m.prod||m.prodNombre||"Muestra",sub:motivo+" · "+(m.cliente||m.clienteNombre||""),
+      dias:dias,nav:"muestras",id:m.id};
+  }).filter(Boolean);
 
   // ── 3. Incidencias abiertas envejecidas ──
   var iDB=incidenciasDB||[];
@@ -4673,27 +4761,57 @@ function PanelSeguimiento({usuario, oportunidadesDB, muestrasDB, estrategiasDB, 
       prioridad:inc.prioridad||"media",nav:"incidencias",id:inc.id};
   });
 
-  // ── 4. Estrategias pendientes de aprobación ──
+  // ── 4. Estrategias: pendientes de aprobación + activas con acción vencida ──
   var eDB=estrategiasDB||[];
-  var estVencidas=eDB.filter(function(e){
-    if(e.estado!=="pendiente_aprobacion") return false;
-    if(e.eliminada) return false;
-    if(esAgente&&!esDelUsuario(e.agente,appMisIds)) return false;
+  var estVencidas=eDB.map(function(e){
+    if(e.eliminada) return null;
+    if(esAgente&&!esDelUsuario(e.agente,appMisIds)) return null;
     if(!esAgente&&usuario.rol==="jefe"){
       var ag=USUARIOS.find(function(u){return u.id===e.agente;});
-      if(!ag||ag.equipo!==miEquipo) return false;
+      if(!ag||ag.equipo!==miEquipo) return null;
     }
-    var fechaRef=e.fecha||semanaAFecha(e.semana);
-    return diasDesde(fechaRef)>=UMBRAL.estrategia;
-  }).map(function(e){
-    var fechaRef=e.fecha||semanaAFecha(e.semana);
+    var motivo=null,dias=0;
+    if(["pendiente_aprobacion","pendiente_jefe","pendiente_dir","pendiente_final"].includes(e.estado)){
+      var fechaRef=e.fecha||semanaAFecha(e.semana);
+      var d=diasDesde(fechaRef);
+      if(d<999&&d>=UMBRAL.estrategia){motivo="⏳ Pendiente de aprobación";dias=d;}
+    } else if(["aprobada","activa","en_curso"].includes(e.estado)){
+      var pv=proxVencida(e);
+      if(pv){motivo=pv.texto;dias=pv.dias;}
+    }
+    if(!motivo) return null;
     return {tipo:"estrategia",icon:"\uD83C\uDFAF",color:"#3B82F6",bg:"#EFF6FF",
-      titulo:e.estrategia||(e.clienteNombre||"Estrategia"),sub:e.clienteNombre||e.cliente||"",
-      dias:diasDesde(fechaRef),nav:"estrategias",id:e.id};
-  });
+      titulo:e.estrategia||(e.clienteNombre||"Estrategia"),sub:motivo+" · "+(e.clienteNombre||e.cliente||""),
+      dias:dias,nav:"estrategias",id:e.id};
+  }).filter(Boolean);
+
+  // ── 5. Ofertas sin respuesta / acción vencida ──
+  var ofDB=ofertasDB||[];
+  var ofVencidas=ofDB.map(function(of){
+    var cerradaOf=["pedido","ganada","cerrada","perdida","rechazada","caro"].includes(of.estado);
+    if(cerradaOf||of.eliminada) return null;
+    var ofAg=of.agente||of.agenteId||of.autor;
+    if(esAgente&&!esDelUsuario(ofAg,appMisIds)) return null;
+    if(!esAgente&&usuario.rol==="jefe"){
+      var ag=USUARIOS.find(function(u){return u.id===ofAg;});
+      if(!ag||ag.equipo!==miEquipo) return null;
+    }
+    var pv=proxVencida(of);
+    var motivo=null,dias=0;
+    if(pv){motivo=pv.texto;dias=pv.dias;}
+    else{
+      var d=diasDesde(of.fecha||of.fechaCreacion);
+      if(d<999&&d>=UMBRAL.oferta){motivo=of.estado==="no_responde"?"📵 Cliente no responde":"⏸ Oferta sin respuesta";dias=d;}
+    }
+    if(!motivo) return null;
+    return {tipo:"oferta",icon:"\uD83D\uDCC4",color:"#F59E0B",bg:"#FFFBEB",
+      titulo:of.prod||of.prodNombre||of.producto||"Oferta",
+      sub:motivo+" · "+(of.cliente||of.clienteNombre||""),
+      dias:dias,valor:of.precioFinal||of.valor||0,nav:"ofertas",id:of.id};
+  }).filter(Boolean);
 
   // Combinar y ordenar
-  var todos=[].concat(opsVencidas,muestrasVencidas,incVencidas,estVencidas);
+  var todos=[].concat(opsVencidas,muestrasVencidas,incVencidas,estVencidas,ofVencidas);
   todos.sort(function(a,b){return b.dias-a.dias;});
 
   if(todos.length===0){
@@ -4729,7 +4847,7 @@ function PanelSeguimiento({usuario, oportunidadesDB, muestrasDB, estrategiasDB, 
             <div>
               <p style={{margin:0,fontSize:14,fontWeight:800,color:"#0F172A"}}>Requiere tu atención</p>
               <p style={{margin:"2px 0 0",fontSize:11,color:"#64748B"}}>
-                {todos.length} elemento{todos.length!==1?"s":""} sin actividad reciente
+                {todos.length} elemento{todos.length!==1?"s":""} que requieren acción
               </p>
             </div>
           </div>
@@ -4791,7 +4909,7 @@ function PanelSeguimiento({usuario, oportunidadesDB, muestrasDB, estrategiasDB, 
   );
 }
 
-function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, estrategiasDB, incidenciasDB, calendarioDB, actividad, _ver}){
+function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, estrategiasDB, incidenciasDB, ofertasDB, calendarioDB, actividad, _ver}){
   const {id,equipo,color}=usuario;
   const opsBD=oportunidadesDB||OPORTUNIDADES_SEED;
   const misClientes=clientesFB&&clientesFB.length>0 ? clientesFB : (CLIENTES_POR_AGENTE[id]||[]);
@@ -5049,7 +5167,7 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, es
         {/* ── PANEL SEGUIMIENTO ACTIVO (v3.24.0) ── */}
         <PanelSeguimiento usuario={usuario} oportunidadesDB={oportunidadesDB}
           muestrasDB={muestrasDB} estrategiasDB={estrategiasDB}
-          incidenciasDB={incidenciasDB} onNav={onNav}/>
+          incidenciasDB={incidenciasDB} ofertasDB={ofertasDB} onNav={onNav}/>
 
         {/* ── Mis clientes ── */}
         <div onClick={()=>onNav("clientes")}
@@ -8150,6 +8268,17 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
           setSel(null);setEditandoMuestra(false);setEditForm({});setShowResp(false);setShowEnviar(false);
         }}/>
 
+        {/* 📌 Próxima acción de la muestra */}
+        <ProximaAccionCard obj={sel}
+          cerrada={["pedido","positivo","ko","cerrada","rechazada","completada","negativo","proyecto"].includes(sel.estado)}
+          onGuardar={function(acc,fch){
+            var updated=Object.assign({},sel,{proximaAccion:acc,proximaAccionFecha:fch});
+            fbEscribir("muestras",sel.id,updated).then(function(){
+              setSel(updated);
+              setMuestras(function(prev){return prev.map(function(m){return m.id===sel.id?updated:m;});});
+            }).catch(function(e){alert("Error: "+e.message);});
+          }}/>
+
         {/* (v3.23.88) Sistema de seguimiento bidireccional — responsables + enviar al cliente */}
         <Card style={{marginBottom:14,padding:"14px 16px",border:"1.5px solid "+T.border}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
@@ -9608,6 +9737,17 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
       <div style={{paddingBottom:100}}>
         <BackBar label="Estrategias" onBack={()=>{if(volverSecEst&&onNavegar){onNavegar(volverSecEst);setVolverSecEst(null);return;}setSel(null);}}/>
         <div style={{padding:"16px"}}>
+          {/* 📌 Próxima acción de la estrategia */}
+          <ProximaAccionCard obj={sel}
+            cerrada={["completada","sin_exito","rechazada","ko","cerrada"].includes(sel.estado)}
+            onGuardar={function(acc,fch){
+              var hoy=new Date().toLocaleDateString("es-ES");
+              var updated=Object.assign({},sel,{proximaAccion:acc,proximaAccionFecha:fch,
+                seguimientos:[].concat(sel.seguimientos||[],[{accion:"📌 Próxima acción: "+acc,fecha:hoy,por:usuario.nombre}])});
+              setEstrategias(function(prev){return prev.map(function(x){return x.id===sel.id?updated:x;});});
+              fbEscribir("estrategias",sel.id,updated);
+              setSel(updated);
+            }}/>
           {/* Panel de aprobación de descuento */}
           {sel.estado==="pendiente_aprobacion"&&(sel.pendienteDe===usuario.id||(sel.cadenaAprobacion||[]).some(c=>c.id===usuario.id&&(c.estado==="pendiente"||c.estado==="pendiente_final"||c.estado==="escalado")))&&(
             <div style={{background:"#FFFBEB",borderRadius:14,padding:16,marginBottom:16,
@@ -13501,6 +13641,17 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
           ← Volver
         </button>
 
+        {/* 📌 Próxima acción de la oferta */}
+        <ProximaAccionCard obj={sel}
+          cerrada={["pedido","ganada","cerrada","perdida","rechazada","caro"].includes(sel.estado)}
+          onGuardar={function(acc,fch){
+            var actualizada=Object.assign({},sel,{proximaAccion:acc,proximaAccionFecha:fch});
+            fbEscribir("ofertas",sel.id,actualizada).then(function(){
+              setSel(actualizada);
+              setOfertasDB(function(prev){return (prev||[]).map(function(o){return o.id===sel.id?actualizada:o;});});
+            }).catch(function(e){alert("Error: "+e.message);});
+          }}/>
+
         {/* Cabecera */}
         <Card style={{marginBottom:14}}>
           <p style={{margin:0,fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Cliente</p>
@@ -14440,6 +14591,8 @@ function SinAsignarView({usuario, clientesFB, ventasDB, onAbrirCliente, onNav}){
         fechaCreacion: fechaStr,
         fecha: fechaStr,
         prioridad: "media",
+        proximaAccion: "Primera visita / contacto de captación",
+        proximaAccionFecha: (function(){var f=new Date();f.setDate(f.getDate()+5);return f.toISOString().slice(0,10);})(),
         seguimientos: [{accion:"Oportunidad creada por "+usuario.nombre, fecha:fechaStr, por:usuario.nombre}]
       };
       return fbEscribir("oportunidades", op.id, op);
@@ -18098,6 +18251,30 @@ function serializeToFirestore(datos){
 // Escritura genérica — crea o sobreescribe documento
 // (v3.22.23) Añadido parámetro `parcial` para usar updateMask y NO borrar campos no enviados
 async function fbEscribir(coleccion, id, datos, parcial){
+  // 📌 Próxima acción por defecto (muestras / ofertas / estrategias)
+  // Garantiza que todo registro abierto tenga seguimiento programado, se cree desde donde se cree.
+  try{
+    if(!parcial && datos && typeof datos==="object" && ["muestras","ofertas","estrategias"].includes(coleccion)){
+      var _cerrados={
+        muestras:["pedido","positivo","ko","cerrada","rechazada","completada","negativo"],
+        ofertas:["pedido","ganada","cerrada","perdida","rechazada","caro"],
+        estrategias:["completada","sin_exito","rechazada","ko","cerrada"]
+      }[coleccion];
+      var _estado=(datos.estado||"")+"";
+      if(datos.eliminada||(_estado&&_cerrados.indexOf(_estado)>=0)){
+        // Al cerrar: limpiar para no generar alertas falsas
+        if(datos.proximaAccion===undefined) datos.proximaAccion="";
+        if(datos.proximaAccionFecha===undefined) datos.proximaAccionFecha="";
+      } else if(datos.proximaAccion===undefined&&datos.proximaAccionFecha===undefined){
+        var _dias=coleccion==="muestras"?7:5;
+        var _f=new Date(); _f.setDate(_f.getDate()+_dias);
+        datos.proximaAccion=coleccion==="muestras"?"Pedir feedback de la muestra"
+          :coleccion==="ofertas"?"Seguimiento de la oferta enviada"
+          :"Siguiente paso de la estrategia";
+        datos.proximaAccionFecha=_f.toISOString().slice(0,10);
+      }
+    }
+  }catch(e){}
   // Actualizar caché local inmediatamente (para que la UI refleje el cambio)
   try{
     const cached=cacheLeer(coleccion);
@@ -19384,7 +19561,7 @@ function CentroPendientes({usuario, onBack, onNav, muestrasDB, ofertasDB, incide
 
 // ─── ESCÁNER DE TARJETA DE VISITA ────────────────────────────────
 
-function DashDirector({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasDB, incidenciasDB}){
+function DashDirector({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasDB, incidenciasDB, ofertasDB}){
   // Legacy EQUIPO_DATA eliminado — se usa AGENTES_DATA top-level
   const opsActivas=OPORTUNIDADES_SEED.filter(o=>!o.etapa.includes("cerrada"));
   const valPipeline=opsActivas.reduce((s,o)=>s+o.valor,0);
@@ -19431,7 +19608,7 @@ function DashDirector({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasD
       {/* ── PANEL SEGUIMIENTO ACTIVO (v3.24.0) ── */}
       <PanelSeguimiento usuario={usuario} oportunidadesDB={oportunidadesDB}
         muestrasDB={muestrasDB} estrategiasDB={estrategiasDB}
-        incidenciasDB={incidenciasDB} onNav={onNav}/>
+        incidenciasDB={incidenciasDB} ofertasDB={ofertasDB} onNav={onNav}/>
 
       {/* ══ 1. VENTAS — selector período + tarjeta consolidada ══ */}
       <div style={{display:"flex",gap:6,marginBottom:12}}>
@@ -19846,6 +20023,8 @@ function Wizard({usuario,datosEscaneados,opoEditar,onSave,onClose}){
   const [prob,setProb]=useState(opoEditar?.prob||50);
   const [etapa,setEtapa]=useState(opoEditar?.etapa||"propuesta");
   const [fecha,setFecha]=useState(opoEditar?.fecha||"");
+  const [proxAccion,setProxAccion]=useState(opoEditar?.proximaAccion||"");
+  const [proxFecha,setProxFecha]=useState(opoEditar?.proximaAccionFecha||"");
   const [grabando,setGrabando]=useState(false);
   const [scanLoading,setScanLoading]=useState(false);
   const [fotoTarjeta,setFotoTarjeta]=useState(null);
@@ -19866,7 +20045,7 @@ function Wizard({usuario,datosEscaneados,opoEditar,onSave,onClose}){
       const base64=compressed.split(",")[1];
       const resp=await fetch("https://api.anthropic.com/v1/messages",{
         method:"POST",
-        headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+        headers:{"Content-Type":"application/json","x-api-key":getAnthropicKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
         body:JSON.stringify({
           model:"claude-sonnet-4-20250514",max_tokens:500,
           messages:[{role:"user",content:[
@@ -19968,6 +20147,8 @@ function Wizard({usuario,datosEscaneados,opoEditar,onSave,onClose}){
       notas:desc,descripcion:desc,
       valor:Number(valor)||0,prob:Number(prob)||50,
       etapa,fecha,
+      proximaAccion:proxAccion.trim(),
+      proximaAccionFecha:proxFecha,
       agente:asignado||usuario.id,
       agenteId:asignado||usuario.id,
       agenteNombre:(USUARIOS.find(u=>u.id===(asignado||usuario.id))||{}).nombre||usuario.nombre,
@@ -19984,7 +20165,7 @@ function Wizard({usuario,datosEscaneados,opoEditar,onSave,onClose}){
   const canNext=()=>{
     if(step===0) return !!tipo;
     if(step===1) return !!cli.nombre.trim();
-    if(step===3) return (typeof desc==="string"?desc:"").trim().length>=10;
+    if(step===3) return (typeof desc==="string"?desc:"").trim().length>=10&&!!proxAccion.trim()&&!!proxFecha;
     return true;
   };
 
@@ -20081,7 +20262,7 @@ function Wizard({usuario,datosEscaneados,opoEditar,onSave,onClose}){
                         const base64=compressed.split(",")[1];
                         const resp=await fetch("https://api.anthropic.com/v1/messages",{
                           method:"POST",
-                          headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+                          headers:{"Content-Type":"application/json","x-api-key":getAnthropicKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
                           body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:500,
                             messages:[{role:"user",content:[
                               {type:"image",source:{type:"base64",media_type:"image/jpeg",data:base64}},
@@ -20335,6 +20516,31 @@ function Wizard({usuario,datosEscaneados,opoEditar,onSave,onClose}){
                     style={{width:"100%",padding:"10px 12px",borderRadius:9,border:`1.5px solid ${T.border}`,fontSize:14,outline:"none",boxSizing:"border-box"}}/>
                 </div>
               </div>
+
+              {/* Próxima acción — OBLIGATORIA */}
+              <div style={{marginTop:16,background:"#EFF6FF",border:"1.5px solid #BFDBFE",borderRadius:12,padding:"14px"}}>
+                <p style={{margin:"0 0 4px",fontSize:12,fontWeight:800,color:"#1D4ED8"}}>📌 Próxima acción *</p>
+                <p style={{margin:"0 0 10px",fontSize:11,color:"#3B82F6"}}>Ninguna oportunidad sin un siguiente paso con fecha. Aparecerá en tus alertas si vence.</p>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+                  {["Llamar para seguimiento","Enviar muestra","Enviar oferta","Visita presencial","Reunión de cierre"].map(s=>(
+                    <button key={s} onClick={()=>setProxAccion(s)}
+                      style={{padding:"5px 10px",borderRadius:99,border:`1px solid ${proxAccion===s?"#1D4ED8":"#BFDBFE"}`,
+                        background:proxAccion===s?"#1D4ED8":"#fff",color:proxAccion===s?"#fff":"#1D4ED8",
+                        fontSize:11,fontWeight:600,cursor:"pointer"}}>{s}</button>
+                  ))}
+                </div>
+                <input value={proxAccion} onChange={e=>setProxAccion(e.target.value)} placeholder="¿Qué harás a continuación?"
+                  style={{width:"100%",padding:"10px 12px",borderRadius:9,border:`1.5px solid ${proxAccion.trim()?"#93C5FD":T.red}`,fontSize:14,outline:"none",boxSizing:"border-box",marginBottom:8,background:"#fff"}}/>
+                <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+                  <input type="date" value={proxFecha} onChange={e=>setProxFecha(e.target.value)}
+                    style={{flex:1,minWidth:140,padding:"10px 12px",borderRadius:9,border:`1.5px solid ${proxFecha?"#93C5FD":T.red}`,fontSize:14,outline:"none",boxSizing:"border-box",background:"#fff"}}/>
+                  {[["Mañana",1],["+3 días",3],["+1 sem",7]].map(([lbl,d])=>(
+                    <button key={lbl} onClick={()=>{const f=new Date();f.setDate(f.getDate()+d);setProxFecha(f.toISOString().slice(0,10));}}
+                      style={{padding:"8px 10px",borderRadius:9,border:"1px solid #BFDBFE",background:"#fff",color:"#1D4ED8",fontSize:11,fontWeight:600,cursor:"pointer"}}>{lbl}</button>
+                  ))}
+                </div>
+                {(!proxAccion.trim()||!proxFecha)&&<p style={{margin:"8px 0 0",fontSize:11,color:T.red,fontWeight:600}}>⚠️ Indica la próxima acción y su fecha para continuar</p>}
+              </div>
             </div>
           )}
 
@@ -20474,6 +20680,27 @@ function Wizard({usuario,datosEscaneados,opoEditar,onSave,onClose}){
 
 function Detalle({opo,usuario,onClose,onUpdate,onEdit,onDel,onAbrirCliente,onConvertirCliente}){
   const [nota,setNota]=useState("");
+  const [proxAcc,setProxAcc]=useState(opo.proximaAccion||"");
+  const [proxFch,setProxFch]=useState(opo.proximaAccionFecha||"");
+  React.useEffect(function(){setProxAcc(opo.proximaAccion||"");setProxFch(opo.proximaAccionFecha||"");},[opo.id,opo.proximaAccion,opo.proximaAccionFecha]);
+  // Estado de la próxima acción: "vencida" | "sin" | "ok"
+  const opoCerrada=["ganada","perdida","cerrada_ganada","cerrada_perdida","cerrada"].some(e=>opo.etapa===e||opo.estado===e);
+  const proxEstado=(function(){
+    if(opoCerrada) return "ok";
+    if(!(opo.proximaAccion&&(""+opo.proximaAccion).trim())) return "sin";
+    if(opo.proximaAccionFecha){
+      var hoy=new Date();hoy.setHours(0,0,0,0);
+      var f=new Date(opo.proximaAccionFecha);f.setHours(0,0,0,0);
+      if(!isNaN(f.getTime())&&f<hoy) return "vencida";
+    }
+    return "ok";
+  })();
+  const guardarProx=function(){
+    if(!proxAcc.trim()||!proxFch){alert("Indica la próxima acción y su fecha");return;}
+    var hoy=new Date().toLocaleDateString("es-ES");
+    onUpdate(Object.assign({},opo,{proximaAccion:proxAcc.trim(),proximaAccionFecha:proxFch,
+      actividad:[].concat(opo.actividad||[],[{tipo:"nota",texto:"📌 Próxima acción: "+proxAcc.trim()+" (para el "+new Date(proxFch).toLocaleDateString("es-ES")+")",fecha:hoy,autor:usuario.nombre}])}));
+  };
   const [nuevaEtapa,setNuevaEtapa]=useState("");
   const [motivoPerdida,setMotivoPerdida]=useState("");
   const [showCambioEtapa,setShowCambioEtapa]=useState(false);
@@ -20524,7 +20751,9 @@ function Detalle({opo,usuario,onClose,onUpdate,onEdit,onDel,onAbrirCliente,onCon
     if((nuevaEtapa==="cerrada_perdida"||nuevaEtapa==="perdida")&&!motivoPerdida){alert("Selecciona el motivo");return;}
     const hoy=new Date().toLocaleDateString("es-ES");
     const etapaLabel=(ESTADOS[nuevaEtapa]||{}).label||nuevaEtapa;
+    const _cierra=["ganada","perdida","cerrada_ganada","cerrada_perdida","cerrada"].includes(nuevaEtapa);
     onUpdate({...opo, etapa:nuevaEtapa, estado:nuevaEtapa,
+      ...(_cierra?{proximaAccion:"",proximaAccionFecha:""}:{}),
       motivoPerdida:(nuevaEtapa==="cerrada_perdida"||nuevaEtapa==="perdida")?motivoPerdida:"",
       actividad:[...(opo.actividad||[]),{tipo:"etapa",texto:"Cambio de etapa: "+etapaLabel+(motivoPerdida?" | Motivo: "+motivoPerdida:""),fecha:hoy,autor:usuario.nombre}]});
     setShowCambioEtapa(false);setNuevaEtapa("");setMotivoPerdida("");
@@ -20612,6 +20841,36 @@ function Detalle({opo,usuario,onClose,onUpdate,onEdit,onDel,onAbrirCliente,onCon
         </div>
 
         {/* Descripcion de la oportunidad */}
+        {/* 📌 PRÓXIMA ACCIÓN */}
+        {!opoCerrada&&(
+          <div style={Object.assign({},S.section,{
+            border:"2px solid "+(proxEstado==="vencida"?"#FCA5A5":proxEstado==="sin"?"#FCD34D":"#BFDBFE"),
+            background:proxEstado==="vencida"?"#FEF2F2":proxEstado==="sin"?"#FFFBEB":"#EFF6FF"})}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <p style={{margin:0,fontSize:12,fontWeight:800,color:proxEstado==="vencida"?"#DC2626":proxEstado==="sin"?"#B45309":"#1D4ED8"}}>
+                {proxEstado==="vencida"?"⏰ PRÓXIMA ACCIÓN VENCIDA":proxEstado==="sin"?"❓ SIN PRÓXIMA ACCIÓN — defínela ahora":"📌 PRÓXIMA ACCIÓN"}
+              </p>
+              {opo.proximaAccionFecha&&proxEstado!=="sin"&&(
+                <span style={{fontSize:11,fontWeight:700,color:proxEstado==="vencida"?"#DC2626":"#1D4ED8"}}>
+                  {new Date(opo.proximaAccionFecha).toLocaleDateString("es-ES")}
+                </span>
+              )}
+            </div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+              <input value={proxAcc} onChange={e=>setProxAcc(e.target.value)} placeholder="¿Cuál es el siguiente paso?"
+                style={{flex:2,minWidth:160,padding:"10px 12px",borderRadius:9,border:"1.5px solid #CBD5E1",fontSize:13,outline:"none",boxSizing:"border-box",background:"#fff"}}/>
+              <input type="date" value={proxFch} onChange={e=>setProxFch(e.target.value)}
+                style={{flex:1,minWidth:130,padding:"10px 12px",borderRadius:9,border:"1.5px solid #CBD5E1",fontSize:13,outline:"none",boxSizing:"border-box",background:"#fff"}}/>
+              <button onClick={guardarProx} disabled={!proxAcc.trim()||!proxFch}
+                style={{padding:"10px 16px",borderRadius:9,border:"none",fontSize:13,fontWeight:700,cursor:"pointer",
+                  background:(proxAcc.trim()&&proxFch)?(proxEstado==="ok"?T.navy:"#DC2626"):"#E2E8F0",
+                  color:(proxAcc.trim()&&proxFch)?"#fff":"#94A3B8"}}>
+                {opo.proximaAccion?"Actualizar":"Guardar"}
+              </button>
+            </div>
+          </div>
+        )}
+
         {(opo.descripcion||opo.notas)&&(
           <div style={S.section}>
             <p style={S.label}>Descripcion de la oportunidad</p>
@@ -27824,7 +28083,7 @@ function App(props){
           {/* ── PANEL SEGUIMIENTO ACTIVO (v3.24.0) ── */}
           <PanelSeguimiento usuario={usuario} oportunidadesDB={oportunidadesDB}
             muestrasDB={muestrasDB} estrategiasDB={estrategiasDB}
-            incidenciasDB={incidenciasDB} onNav={setSection}/>
+            incidenciasDB={incidenciasDB} ofertasDB={ofertasDB} onNav={setSection}/>
 
           {/* 3 · Pendientes */}
           {MODS.length>0&&(
@@ -28215,7 +28474,7 @@ function App(props){
         )}
 
         {/* AGENTE */}
-        {esAgente&&section==="dashboard"&&  <DashAgente usuario={usuario} onNav={setSection} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} incidenciasDB={incidenciasDB} calendarioDB={calendarioDB} actividad={actividadSemana} _ver={objVer}/>}
+        {esAgente&&section==="dashboard"&&  <DashAgente usuario={usuario} onNav={setSection} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} incidenciasDB={incidenciasDB} ofertasDB={ofertasDB} calendarioDB={calendarioDB} actividad={actividadSemana} _ver={objVer}/>}
         {esAgente&&section==="clientes"&&   <GestorClientes usuario={usuario} actividad={actividadSemana} onActividad={onActividad} onBack={function(){setHideNav(false);setClienteDirecto(null);setSection(prevSectionRef.current||"dashboard");}} clientesFB={misClientesFB} muestrasDB={muestrasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} estrategiasDB={estrategiasDB} ofertasDB={ofertasDB} clienteDirecto={clienteDirecto} onClienteDirectoUsado={()=>setClienteDirecto(null)} onNewIncidencia={function(inc){setIncidenciasDB(function(prev){return [inc].concat(prev);});}} onNewMuestra={function(m){setMuestrasDB(function(prev){return [m].concat(prev);});}} onNewEstrategia={function(e){setEstrategiasDB(function(prev){return [e].concat(prev);});}} onNewOferta={function(o){setOfertasDB(function(prev){return [o].concat(prev||[]);});}} onNavegar={setSection}/> }
         {esAgente&&section==="plan_semanal"&& <MiSemana usuario={usuario} clientesFB={misClientesFB} todosClientesFB={(clientesDB&&clientesDB._todos)||misClientesFB} onBack={null} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} muestrasDB={muestrasDB} ofertasDB={ofertasDB} setOfertasDB={setOfertasDB} portalUsersDB={portalUsersDB} actividad={actividadSemana} onAbrirCliente={function(data){var obj=typeof data==="string"?{nombre:data,ts:Date.now()}:Object.assign({},data,{ts:Date.now()});setClienteDirecto(obj);setHideNav(true);setSection("clientes");}} onAbrirProyecto={function(nombre){setProyectoDirecto({nombre:nombre,ts:Date.now()});setSection("proyectos");}} onNewCliente={function(nuevo){setClientesDB(function(prev){if(!prev||!prev._todos)return prev;return Object.assign({},prev,{_todos:[nuevo].concat(prev._todos)});});}} onAbrirOportunidad={function(opo){setOpoDirecta(Object.assign({},opo,{ts:Date.now()}));setSection("oportunidades");}}/>}
         {!esAgente&&section==="plan_semanal"&& <MiSemana usuario={usuario} clientesFB={misClientesFB} todosClientesFB={(clientesDB&&clientesDB._todos)||misClientesFB} onBack={null} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} muestrasDB={muestrasDB} ofertasDB={ofertasDB} setOfertasDB={setOfertasDB} portalUsersDB={portalUsersDB} actividad={actividadSemana} onAbrirCliente={function(data){var obj=typeof data==="string"?{nombre:data,ts:Date.now()}:Object.assign({},data,{ts:Date.now()});setClienteDirecto(obj);setHideNav(true);setSection(esJefeOmas?"clientes_eq":"clientes");}} onAbrirProyecto={function(nombre){setProyectoDirecto({nombre:nombre,ts:Date.now()});setSection("proyectos");}} onNewCliente={function(nuevo){setClientesDB(function(prev){if(!prev||!prev._todos)return prev;return Object.assign({},prev,{_todos:[nuevo].concat(prev._todos)});});}} onAbrirOportunidad={function(opo){setOpoDirecta(Object.assign({},opo,{ts:Date.now()}));setSection("oportunidades");}}/>}
@@ -28281,7 +28540,7 @@ function App(props){
         {esJefeOmas&&section==="clientes_eq"&& <GestorClientes usuario={usuario} actividad={actividadSemana} onActividad={onActividad} onBack={function(){setHideNav(false);setClienteDirecto(null);setSection(prevSectionRef.current||"dashboard");}} clientesFB={misClientesFB} muestrasDB={muestrasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} estrategiasDB={estrategiasDB} ofertasDB={ofertasDB} clienteDirecto={clienteDirecto} onClienteDirectoUsado={()=>setClienteDirecto(null)} onNewIncidencia={function(inc){setIncidenciasDB(function(prev){return [inc].concat(prev);});}} onNewMuestra={function(m){setMuestrasDB(function(prev){return [m].concat(prev);});}} onNewEstrategia={function(e){setEstrategiasDB(function(prev){return [e].concat(prev);});}} onNewOferta={function(o){setOfertasDB(function(prev){return [o].concat(prev||[]);});}} onNavegar={setSection}/>}
 
         {/* DIRECTOR / CEO — dashboard global */}
-        {esDir&&section==="dashboard"&&     <DashDirector usuario={usuario} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} muestrasDB={muestrasDB} incidenciasDB={incidenciasDB}/>}
+        {esDir&&section==="dashboard"&&     <DashDirector usuario={usuario} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} muestrasDB={muestrasDB} incidenciasDB={incidenciasDB} ofertasDB={ofertasDB}/>}
 
         {/* (v3.23.91) RESPONSABLE TIPOLOGÍA — dashboard de pendientes de su departamento */}
         {esTipologia&&section==="dashboard"&& <DashTipologia usuario={usuario} onNav={setSection} incidenciasDB={incidenciasDB}/>}
@@ -31937,7 +32196,7 @@ function AsistenteIA({ usuario, clientesFB, oportunidadesDB }) {
         method:"POST",
         headers:{
           "Content-Type":"application/json",
-          "x-api-key": ANTHROPIC_API_KEY,
+          "x-api-key": getAnthropicKey(),
           "anthropic-version":"2023-06-01",
           "anthropic-dangerous-direct-browser-access":"true",
           "anthropic-dangerous-direct-browser-access":"true",
