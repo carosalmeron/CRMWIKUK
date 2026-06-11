@@ -285,8 +285,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.40.22";
-const CRM_BUILD = "10/06/2026-fix-agentes-nombres-equipos";
+const CRM_VERSION = "3.40.24";
+const CRM_BUILD = "10/06/2026-actividad-cargar-mas";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -22744,12 +22744,11 @@ function ActividadComercial({usuario,clientesFB,muestrasDB,estrategiasDB,ofertas
   // Equipos y agentes para filtros
   var equiposSet=new Set();var agentesMap={};
   (clientesFB||[]).forEach(function(c){
-    var eq=c.equipo||"";
     var agRaw=(c.agente||c.GRUPOAGENTE||"").toLowerCase();
     var resolved=resolveAgent(agRaw);
-    if(!eq&&resolved.equipo) eq=resolved.equipo;
+    var eq=resolved.equipo||(c.equipo||"");
     if(eq)equiposSet.add(eq);
-    if(agRaw&&!agentesMap[agRaw]) agentesMap[agRaw]={id:agRaw,nombre:resolved.nombre,equipo:eq||resolved.equipo};
+    if(agRaw&&!agentesMap[agRaw]) agentesMap[agRaw]={id:agRaw,nombre:resolved.nombre,equipo:eq};
   });
   var equipos=Array.from(equiposSet).sort();
   var agentes=Object.values(agentesMap).sort(function(a,b){return a.nombre.localeCompare(b.nombre);});
@@ -22770,40 +22769,40 @@ function ActividadComercial({usuario,clientesFB,muestrasDB,estrategiasDB,ofertas
   function enPeriodoISO(iso){if(!iso||periodo==="all")return true;return new Date(iso)>=corte;}
 
   // Build client activity map
-  var actMap={};
-  var esAgente=usuario.rol==="agente"||usuario.rol==="comercial"||usuario.rol==="crm_agente";
-  var misIds=resolverMisIds(usuario);
+  var actMap={};var nombreIdx={};
 
   (clientesFB||[]).forEach(function(c){
     var ag=(c.agente||c.GRUPOAGENTE||"").toLowerCase();
     if(esAgente&&!misIds.has(ag)) return;
-    if(equipoF&&equipoF!=="todos"&&(c.equipo||"")!==equipoF) return;
+    var resolved=resolveAgent(ag);
+    var eq=resolved.equipo||(c.equipo||"");
+    if(equipoF&&equipoF!=="todos"&&eq!==equipoF) return;
     if(agenteF){
       var agUser=USUARIOS.find(function(u){return u.nombre===agenteF;});
-      var agId=agUser?agUser.id:agenteF.toLowerCase();
-      if(ag!==agId&&ag!==agenteF.toLowerCase()) return;
+      var agId=agUser?agUser.id:"";var agGrupo=agUser?(agUser.grupoAgente||"").toLowerCase():"";
+      if(ag!==agenteF.toLowerCase()&&ag!==agId&&ag!==agGrupo&&resolved.nombre!==agenteF) return;
     }
     var nom=(c.nombre||c.NOMBRE||"").toUpperCase();
     if(busq&&nom.indexOf(busq.toUpperCase())<0) return;
-    actMap[c.id]={cli:c,nombre:c.nombre||c.NOMBRE,
-      agente:resolveAgent(c.agente||c.GRUPOAGENTE||"").nombre,
+    actMap[c.id]={cli:c,nombre:c.nombre||c.NOMBRE,agente:resolved.nombre,equipo:eq,
       visitas:[],muestras:[],muestrasPend:[],estrategias:[],estratActivas:[],ofertas:[],ofertasPend:[],incidencias:[],incPend:[],ops:[],opsPend:[],potLineas:0,ultVisita:null,ultComentario:null,pendientes:0};
+    nombreIdx[nom]=c.id;
   });
+  function findCli(id,nombre){if(id&&actMap[id])return id;if(nombre){var n=(nombre+"").toUpperCase();if(nombreIdx[n])return nombreIdx[n];}return null;}
 
   visitasAll.forEach(function(v){
-    var a=actMap[v.clienteId];
+    var cid=findCli(v.clienteId,v.clienteNombre||v.cliente);var a=cid?actMap[cid]:null;
     if(a&&enPeriodo(v.fecha)){a.visitas.push(v);if(!a.ultVisita||v.fecha>a.ultVisita)a.ultVisita=v.fecha;
       if(v.comentarios&&(!a.ultComentario||v.fecha>a.ultComentario.fecha))a.ultComentario={texto:v.comentarios,fecha:v.fecha};}
   });
-  (muestrasDB||[]).forEach(function(m){var a=actMap[m.clienteId];if(a&&enPeriodo(m.fecha)){a.muestras.push(m);if(!m.resultado||m.resultado==="pendiente")a.muestrasPend.push(m);}});
+  (muestrasDB||[]).forEach(function(m){var cid=findCli(m.clienteId,m.cliente||m.clienteNombre);var a=cid?actMap[cid]:null;if(a&&enPeriodo(m.fecha)){a.muestras.push(m);if(!m.resultado||m.resultado==="pendiente")a.muestrasPend.push(m);}});
   (estrategiasDB||[]).forEach(function(e){
-    var cId=e.clienteId;if(!cId){var cNom=(e.cliente||e.clienteNombre||"").toUpperCase();
-      Object.keys(actMap).forEach(function(k){if((actMap[k].nombre||"").toUpperCase()===cNom)cId=k;});}
+    var cId=findCli(e.clienteId,e.cliente||e.clienteNombre);
     if(cId&&actMap[cId]&&(enPeriodo(e.fecha)||e.estado==="activa"||e.estado==="aprobada")){actMap[cId].estrategias.push(e);if(e.estado==="activa"||e.estado==="aprobada"||e.estado==="pendiente"||e.estado==="pendiente_jefe"||e.estado==="pendiente_dir")actMap[cId].estratActivas.push(e);}
   });
-  (ofertasDB||[]).forEach(function(o){var a=actMap[o.clienteId];if(a&&enPeriodoISO(o.fechaCreacion)){a.ofertas.push(o);if(o.estado==="pendiente"||o.estado==="enviada")a.ofertasPend.push(o);}});
-  (incidenciasDB||[]).forEach(function(i){var a=actMap[i.clienteId];if(a&&enPeriodo(i.fecha)){a.incidencias.push(i);if(!i.cerrada&&i.estado!=="cerrada"&&i.estado!=="resuelta")a.incPend.push(i);}});
-  (oportunidadesDB||[]).forEach(function(o){var a=actMap[o.clienteId];if(a){a.ops.push(o);if(o.estado!=="ganada"&&o.estado!=="perdida"&&o.estado!=="cerrada")a.opsPend.push(o);}});
+  (ofertasDB||[]).forEach(function(o){var cid=findCli(o.clienteId,o.clienteNombre);var a=cid?actMap[cid]:null;if(a&&enPeriodoISO(o.fechaCreacion)){a.ofertas.push(o);if(o.estado==="pendiente"||o.estado==="enviada")a.ofertasPend.push(o);}});
+  (incidenciasDB||[]).forEach(function(i){var cid=findCli(i.clienteId,i.clienteNombre||i.cliente);var a=cid?actMap[cid]:null;if(a&&enPeriodo(i.fecha)){a.incidencias.push(i);if(!i.cerrada&&i.estado!=="cerrada"&&i.estado!=="resuelta")a.incPend.push(i);}});
+  (oportunidadesDB||[]).forEach(function(o){var cid=findCli(o.clienteId,o.clienteNombre||o.cliente);var a=cid?actMap[cid]:null;if(a){a.ops.push(o);if(o.estado!=="ganada"&&o.estado!=="perdida"&&o.estado!=="cerrada")a.opsPend.push(o);}});
   potAll.forEach(function(p){
     var cId=p.clienteId;if(!cId){var cNom=(p.clienteNombre||p.cliente||"").toUpperCase();
       Object.keys(actMap).forEach(function(k){if((actMap[k].nombre||"").toUpperCase()===cNom)cId=k;});}
@@ -22819,6 +22818,7 @@ function ActividadComercial({usuario,clientesFB,muestrasDB,estrategiasDB,ofertas
 
   var totalAct=lista.length;var totalVis=lista.reduce(function(s,a){return s+a.visitas.length;},0);
   var totalPend=lista.reduce(function(s,a){return s+a.pendientes;},0);
+  var _limit=React.useState(50);var limite=_limit[0],setLimite=_limit[1];
 
   return <div style={{padding:"0 4px"}}>
     <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>
@@ -22903,7 +22903,7 @@ function ActividadComercial({usuario,clientesFB,muestrasDB,estrategiasDB,ofertas
       {totalPend>0&&<span style={{fontSize:11,fontWeight:700,color:"#DC2626"}}>{totalPend} pendientes</span>}
     </div>
 
-    {lista.slice(0,100).map(function(a){
+    {lista.slice(0,limite).map(function(a){
       var nTotal=a.visitas.length+a.muestras.length+a.estrategias.length+a.ofertas.length+a.incidencias.length;
       var estActiva=a.estrategias.find(function(e){return e.estado==="activa"||e.estado==="aprobada";});
       return <div key={a.cli.id} onClick={function(){if(onAbrirCliente)onAbrirCliente(a.cli);}}
@@ -22931,7 +22931,11 @@ function ActividadComercial({usuario,clientesFB,muestrasDB,estrategiasDB,ofertas
       </div>;
     })}
     {lista.length===0&&<p style={{textAlign:"center",color:T.muted,padding:30}}>Sin clientes con actividad en este periodo</p>}
-    {lista.length>100&&<p style={{textAlign:"center",color:T.muted,fontSize:11,padding:10}}>Mostrando 100 de {lista.length} clientes</p>}
+    {lista.length>limite&&<button onClick={function(){setLimite(limite+50);}}
+      style={{width:"100%",padding:"14px",background:"#6366F1",color:"#fff",border:"none",borderRadius:12,fontWeight:800,fontSize:13,cursor:"pointer",marginBottom:10,fontFamily:"inherit"}}>
+      Cargar más ({lista.length-limite} restantes)
+    </button>}
+    {lista.length>0&&<p style={{textAlign:"center",color:T.muted,fontSize:10,padding:4}}>Mostrando {Math.min(limite,lista.length)} de {lista.length}</p>}
   </div>;
 }
 
