@@ -333,8 +333,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.40.47";
-const CRM_BUILD = "10/06/2026-ceo-incluido-estrategias-config";
+const CRM_VERSION = "3.40.48";
+const CRM_BUILD = "10/06/2026-fix-incidencia-crear-1-email-por-persona";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -15711,31 +15711,35 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB,
     fbEscribir("incidencias",nueva.id,nueva).then(ok=>{
       console.log("[INC] Firebase:",ok?"✅ Guardada":"❌ Error al guardar");
     });
-    // (v3.23.92) Notificar por email al responsable de tipología
-    notificarNuevaIncidencia(nueva.id);
-    // (v3.40.34) CC a dirección al crear
+    // (v3.40.47) Notificaciones al crear — UNA sola por persona, según config
     (function(){
-      var _asCC="[CRM] 🚨 Nueva incidencia: "+(nueva.tipo||"")+" — "+(nueva.clienteNombre||"");
-      var _htCC='<div style="font-family:sans-serif;max-width:500px;margin:auto"><div style="background:#DC2626;color:#fff;padding:16px 20px;border-radius:16px 16px 0 0"><p style="margin:0;font-size:18px;font-weight:800">🚨 Nueva incidencia</p></div>'
+      var enviados=new Set();enviados.add(usuario.id); // no enviar al creador
+      var asuntoInc="[CRM] 🚨 Nueva incidencia: "+(nueva.tipo||"")+" — "+(nueva.clienteNombre||"");
+      var htmlInc='<div style="font-family:sans-serif;max-width:500px;margin:auto"><div style="background:#DC2626;color:#fff;padding:16px 20px;border-radius:16px 16px 0 0"><p style="margin:0;font-size:18px;font-weight:800">🚨 Nueva incidencia</p></div>'
         +'<div style="padding:20px;border:1px solid #E2E8F0;border-top:none"><p><b>Tipo:</b> '+(nueva.tipo||"")+'</p><p><b>Cliente:</b> '+(nueva.clienteNombre||"")+'</p><p><b>Creada por:</b> '+usuario.nombre+'</p><p><b>Descripción:</b> '+(nueva.descripcion||"").substring(0,200)+'</p>'
         +'<a href="https://crmwikuk.vercel.app" style="display:inline-block;background:#DC2626;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:700;margin-top:10px">Abrir CRM</a></div></div>';
-      emailCCDireccion(_asCC,_htCC,usuario.id,usuario.id,"incidencias","crear");
-    })();
-    // Notificar al jefe del equipo
-    const jefe=USUARIOS.find(u=>(u.rol==="jefe"||u.rol==="director")&&(u.equipo===usuario.equipo||u.equipo===null));
-    if(jefe&&jefe.id!==usuario.id&&debeNotificar("incidencias","crear","jefe_equipo")){
-      notificarAsignacion("incidencia",{...nueva,agente:jefe.id},usuario.id);
-      // Email al jefe
-      var jefeEmail=buscarEmailUsuario(jefe.id)||buscarEmailUsuario(jefe.nombre);
-      if(jefeEmail){
-        var asuntoNueva="[CRM] 🚨 Nueva incidencia: "+(nueva.tipo||"")+" — "+(nueva.clienteNombre||"");
-        var htmlNueva='<div style="font-family:sans-serif;max-width:500px;margin:auto"><div style="background:#DC2626;color:#fff;padding:16px 20px;border-radius:16px 16px 0 0"><p style="margin:0;font-size:18px;font-weight:800">🚨 Nueva incidencia</p></div>'
-          +'<div style="padding:20px;border:1px solid #E2E8F0;border-top:none"><p><b>Tipo:</b> '+(nueva.tipo||"")+'</p><p><b>Cliente:</b> '+(nueva.clienteNombre||"")+'</p><p><b>Creada por:</b> '+usuario.nombre+'</p><p><b>Descripción:</b> '+(nueva.descripcion||"").substring(0,200)+'</p>'
-          +'<a href="https://crmwikuk.vercel.app" style="display:inline-block;background:#DC2626;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:700;margin-top:10px">Abrir CRM</a></div></div>';
-        fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({to:jefeEmail.email,subject:asuntoNueva,html:htmlNueva})}).catch(function(){});
+      
+      function enviarSiConfig(destU,rolConfig){
+        if(!destU||enviados.has(destU.id)) return;
+        if(!debeNotificar("incidencias","crear",rolConfig)) return;
+        enviados.add(destU.id);
+        var em=buscarEmailUsuario(destU.id)||buscarEmailUsuario(destU.nombre);
+        if(em&&em.email) fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({to:em.email,subject:asuntoInc,html:htmlInc})}).catch(function(){});
       }
-    }
+      
+      // Jefe de equipo
+      var _jefe=USUARIOS.find(function(u){return u.rol==="jefe"&&u.equipo===usuario.equipo;});
+      enviarSiConfig(_jefe,"jefe_equipo");
+      // Director comercial
+      var _dir=USUARIOS.find(function(u){return u.rol==="director"||u.id==="jefe_ventas";});
+      enviarSiConfig(_dir,"director");
+      // CEO
+      var _ceo=USUARIOS.find(function(u){return u.rol==="ceo";});
+      enviarSiConfig(_ceo,"ceo");
+      // Resp. tipología
+      enviarSiConfig(null,"resp_tipologia"); // via API separada
+      if(debeNotificar("incidencias","crear","resp_tipologia")) notificarNuevaIncidencia(nueva.id);
+    })();
     setForm({tipo:"",subtipo:"",prioridad:"media",clienteNombre:"",clienteId:"",productoNombre:"",productoCodigo:"",lote:"",descripcion:"",fotos:[]});
     setShowForm(false);
   };
