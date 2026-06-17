@@ -339,8 +339,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.47.3";
-const CRM_BUILD = "17/06/2026-fix-guardado-hilo-visita";
+const CRM_VERSION = "3.48.1";
+const CRM_BUILD = "17/06/2026-fix-email-respuesta-hilo";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -4396,7 +4396,14 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
       {/* 💬 Modal hilo de instrucciones de visita (v3.46.0) */}
       {visitaHilo&&<ModalHiloVisita visita={visitaHilo} usuario={usuario}
         onClose={function(){setVisitaHilo(null);}}
-        onGuardado={function(actualizada){ setVisitaHilo(actualizada); }}/>}
+        onGuardado={function(actualizada){
+          setVisitaHilo(actualizada);
+          setVisitasDB(function(prev){
+            var arr=prev||[];
+            var existe=arr.some(function(x){return x.id===actualizada.id;});
+            return existe?arr.map(function(x){return x.id===actualizada.id?actualizada:x;}):[actualizada].concat(arr);
+          });
+        }}/>}
     </div>
   );
 }
@@ -4854,19 +4861,23 @@ function ModalHiloVisita({visita, usuario, onClose, onGuardado}){
       setComents(nuevos); setTexto(""); setEnviando(false);
       if(onGuardado) onGuardado(actualizada);
       try{
-        var soyJefe=["jefe","director","ceo"].includes(usuario.rol);
         var comercialId=(visita.agente||visita.agenteId||"");
-        var destinatarios=[];
-        if(soyJefe){
-          // Jefe escribe → avisar al comercial de la visita
-          var com=USUARIOS.find(function(u){return u.id===comercialId||(u.id||"").toUpperCase()===(comercialId||"").toUpperCase();});
-          if(com&&com.email) destinatarios.push(com);
-        } else {
-          // Comercial escribe → avisar a su jefe (mismo equipo)
+        var destMap={}; // email → usuario (evita duplicados)
+        function addDest(u){ if(u&&u.email&&u.id!==usuario.id){ destMap[u.email]=u; } }
+        // 1) El comercial dueño de la visita
+        addDest(USUARIOS.find(function(u){return (u.id||"").toUpperCase()===(comercialId||"").toUpperCase();}));
+        // 2) Todos los que ya participaron en el hilo (para que el CEO/jefe que inició se entere de la respuesta)
+        coments.forEach(function(c){
+          if(c.autorId){ addDest(USUARIOS.find(function(u){return u.id===c.autorId;})); }
+        });
+        // 3) Si escribe el comercial, avisar también a sus responsables (jefe de su equipo + dirección/CEO)
+        var soyComercial=!["jefe","director","ceo"].includes(usuario.rol);
+        if(soyComercial){
           USUARIOS.forEach(function(u){
-            if(u.rol==="jefe"&&u.equipo===usuario.equipo&&u.email) destinatarios.push(u);
+            if((u.rol==="jefe"&&u.equipo===usuario.equipo)||u.rol==="director"||u.rol==="ceo") addDest(u);
           });
         }
+        var destinatarios=Object.keys(destMap).map(function(k){return destMap[k];});
         if(destinatarios.length>0){
           var cli=visita.clienteNombre||visita.cliente||"";
           var asunto="💬 Instrucción de visita · "+cli;
@@ -4964,15 +4975,19 @@ function crearTareaProxAccion(origenTipo, registro, accion, fechaISO, usuario){
     var t={
       id:tareaId,
       titulo:(ICON[origenTipo]||"📌")+" "+accion,
+      descripcion:"Recordatorio de "+(LABEL[origenTipo]||"acción")+(cliente?" · Cliente: "+cliente:"")+(prod?" · "+prod:""),
       texto:"Recordatorio de "+(LABEL[origenTipo]||"acción")+(cliente?" · Cliente: "+cliente:"")+(prod?" · "+prod:""),
+      cliente:cliente,
       clienteNombre:cliente,
       clienteCodigo:registro.clienteCodigo||registro.codigo||"",
       agente:ag, agenteId:ag,
       equipo:registro.equipo||usuario.equipo||"",
-      creadoPor:usuario.id, creadoPorNombre:usuario.nombre,
+      creadaPor:usuario.id, creadoPor:usuario.id, creadaPorNombre:usuario.nombre, creadoPorNombre:usuario.nombre,
       prioridad:"normal",
+      tipo:"contacto",
       estado:"pendiente",
       vence:(""+fechaISO).slice(0,10),
+      creadaEn:hoy.toLocaleDateString("es-ES"),
       fechaCreacion:hoy.toLocaleDateString("es-ES"),
       origen:"proxima_accion",
       origenTipo:origenTipo,
@@ -14324,15 +14339,15 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
                 setNuevoComentarioOf("");
                 // (v3.47.0) Notificar por email a los afectados
                 try{
-                  var soyJefeOf=["jefe","director","ceo"].includes(usuario.rol);
                   var agOf=sel.agente||sel.agenteId||sel.autor||"";
-                  var destOf=[];
-                  if(soyJefeOf){
-                    var comOf=USUARIOS.find(function(u){return (u.id||"").toUpperCase()===(agOf||"").toUpperCase();});
-                    if(comOf&&comOf.email) destOf.push(comOf);
-                  } else {
-                    USUARIOS.forEach(function(u){if(u.rol==="jefe"&&u.equipo===usuario.equipo&&u.email)destOf.push(u);});
+                  var destMapOf={};
+                  function addOf(u){ if(u&&u.email&&u.id!==usuario.id){ destMapOf[u.email]=u; } }
+                  addOf(USUARIOS.find(function(u){return (u.id||"").toUpperCase()===(agOf||"").toUpperCase();}));
+                  (sel.comentarios||[]).forEach(function(c){ if(c.autorId) addOf(USUARIOS.find(function(u){return u.id===c.autorId;})); });
+                  if(!["jefe","director","ceo"].includes(usuario.rol)){
+                    USUARIOS.forEach(function(u){if((u.rol==="jefe"&&u.equipo===usuario.equipo)||u.rol==="director"||u.rol==="ceo")addOf(u);});
                   }
+                  var destOf=Object.keys(destMapOf).map(function(k){return destMapOf[k];});
                   if(destOf.length>0){
                     var escO=function(s){return (s||"").replace(/</g,"&lt;").replace(/>/g,"&gt;");};
                     var asuntoOf="💬 Comentario en oferta · "+(sel.clienteNombre||sel.cliente||"");
@@ -18203,7 +18218,14 @@ function GestorTareas({ usuario, clientesFB }) {
       : agFiltro.startsWith("eq_") ? (USUARIOS.find(u=>u.id===(t.agente||""))||{}).equipo===agFiltro.replace("eq_","")
       : (t.agente||"").toUpperCase()===(agFiltro||"").toUpperCase()
         || USUARIOS.find(u=>u.id===agFiltro)?.grupoAgente===(t.agente||""))
-    .sort((a,b) => ({urgente:0,alta:1,normal:2}[a.prioridad]||2) - ({urgente:0,alta:1,normal:2}[b.prioridad]||2));
+    .sort((a,b) => {
+      // (v3.48.0) Orden por fecha de vencimiento ascendente (las más próximas/vencidas primero)
+      var fa=a.vence?new Date(a.vence).getTime():Infinity;
+      var fb=b.vence?new Date(b.vence).getTime():Infinity;
+      if(fa!==fb) return fa-fb;
+      // A igualdad de fecha, por prioridad
+      return ({urgente:0,alta:1,normal:2}[a.prioridad]||2) - ({urgente:0,alta:1,normal:2}[b.prioridad]||2);
+    });
 
   const inp = {width:"100%",border:`1.5px solid ${T.border}`,borderRadius:9,padding:"10px 12px",
     fontSize:13,outline:"none",boxSizing:"border-box",fontFamily:"inherit"};
@@ -18512,7 +18534,7 @@ function GestorTareas({ usuario, clientesFB }) {
                     {t.descripcion&&<p style={{margin:"0 0 5px",fontSize:12,color:"#475569",lineHeight:1.5}}>{t.descripcion}</p>}
                     <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
                       {t.vence&&<span style={{fontSize:11,color:cfg.color,fontWeight:600}}>📅 {t.vence}</span>}
-                      {t.creadaEn&&<span style={{fontSize:11,color:T.muted}}>Creada: {t.creadaEn}</span>}
+                      {t.creadaEn&&<span style={{fontSize:11,color:T.muted}}>Creada: {t.creadaEn}{(function(){try{var p=(""+t.creadaEn).split("/");if(p.length!==3)return"";var yy=parseInt(p[2]);if(yy<100)yy+=2000;var fc=new Date(yy,parseInt(p[1])-1,parseInt(p[0]));var d=Math.floor((Date.now()-fc.getTime())/86400000);return d>0&&d<9000?" · hace "+d+"d":"";}catch(e){return"";}})()}</span>}
                       {t.asignadoPor&&<span style={{fontSize:11,color:T.muted}}>Asignada por: {t.asignadoPor}</span>}
                       {t.hechaEn&&<span style={{fontSize:11,color:T.green,fontWeight:600}}>✅ {t.hechaEn}</span>}
                     </div>
@@ -18809,14 +18831,9 @@ async function fbEscribir(coleccion, id, datos, parcial){
         // Al cerrar: limpiar para no generar alertas falsas
         if(datos.proximaAccion===undefined) datos.proximaAccion="";
         if(datos.proximaAccionFecha===undefined) datos.proximaAccionFecha="";
-      } else if(datos.proximaAccion===undefined&&datos.proximaAccionFecha===undefined){
-        var _dias=coleccion==="muestras"?7:5;
-        var _f=new Date(); _f.setDate(_f.getDate()+_dias);
-        datos.proximaAccion=coleccion==="muestras"?"Pedir feedback de la muestra"
-          :coleccion==="ofertas"?"Seguimiento de la oferta enviada"
-          :"Siguiente paso de la estrategia";
-        datos.proximaAccionFecha=_f.toISOString().slice(0,10);
       }
+      // (v3.48.0) Ya NO autocompletamos texto de próxima acción: el campo nace vacío
+      // y lo rellena el usuario manualmente cuando corresponda.
     }
   }catch(e){}
   // Actualizar caché local inmediatamente (para que la UI refleje el cambio)
