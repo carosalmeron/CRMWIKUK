@@ -339,8 +339,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.47.2";
-const CRM_BUILD = "17/06/2026-editar-tipo-muestra-3tipos";
+const CRM_VERSION = "3.47.3";
+const CRM_BUILD = "17/06/2026-fix-guardado-hilo-visita";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -4818,6 +4818,24 @@ function ModalHiloVisita({visita, usuario, onClose, onGuardado}){
   const [texto,setTexto]=React.useState("");
   const [coments,setComents]=React.useState((visita&&visita.comentarios)||[]);
   const [enviando,setEnviando]=React.useState(false);
+  // (v3.47.3) Releer la visita real de Firebase al abrir, por si los comentarios cambiaron en otro dispositivo
+  React.useEffect(function(){
+    if(!visita||!visita.id) return;
+    fetch(FB_BASE+"/visitas/"+encodeURIComponent(visita.id)).then(function(r){return r.ok?r.json():null;}).then(function(doc){
+      if(doc&&doc.fields&&doc.fields.comentarios){
+        try{
+          var arr=(doc.fields.comentarios.arrayValue&&doc.fields.comentarios.arrayValue.values)||[];
+          var parsed=arr.map(function(it){
+            var f=(it.mapValue&&it.mapValue.fields)||{};
+            return {texto:(f.texto&&f.texto.stringValue)||"",autor:(f.autor&&f.autor.stringValue)||"",
+              autorId:(f.autorId&&f.autorId.stringValue)||"",rol:(f.rol&&f.rol.stringValue)||"",
+              fecha:(f.fecha&&f.fecha.stringValue)||""};
+          });
+          setComents(parsed);
+        }catch(e){}
+      }
+    }).catch(function(){});
+  },[visita&&visita.id]);
   if(!visita) return null;
   var nota=visita.notas||visita.nota||"";
   var cliente=visita.clienteNombre||visita.cliente||"—";
@@ -4829,10 +4847,12 @@ function ModalHiloVisita({visita, usuario, onClose, onGuardado}){
       fecha:new Date().toLocaleDateString("es-ES")+" "+new Date().toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"})};
     var nuevos=[].concat(coments,[nuevo]);
     var actualizada=Object.assign({},visita,{comentarios:nuevos});
-    fbEscribir("visitas", visita.id, {comentarios:nuevos}, true).then(function(){
+    // (v3.47.3) Escritura COMPLETA del documento: si la visita no existía como doc, lo crea.
+    // El guardado parcial con updateMask fallaba en silencio cuando el doc no existía aún.
+    fbEscribir("visitas", visita.id, actualizada).then(function(ok){
+      if(ok===false){ setEnviando(false); alert("⚠️ No se pudo guardar la instrucción. Revisa tu conexión e inténtalo de nuevo."); return; }
       setComents(nuevos); setTexto(""); setEnviando(false);
       if(onGuardado) onGuardado(actualizada);
-      // (v3.47.0) Notificar por email a los afectados (mismo sistema que incidencias)
       try{
         var soyJefe=["jefe","director","ceo"].includes(usuario.rol);
         var comercialId=(visita.agente||visita.agenteId||"");
