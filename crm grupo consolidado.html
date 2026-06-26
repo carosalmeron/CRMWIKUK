@@ -339,8 +339,8 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.51.4";
-const CRM_BUILD = "26/06/2026-potenciales-filtro-por-id";
+const CRM_VERSION = "3.52.0";
+const CRM_BUILD = "26/06/2026-emails-jefes-equipo";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
   green:"#22C55E", greenL:"#F0FDF4", greenD:"#15803D",
@@ -596,7 +596,17 @@ async function cargarUsuariosFB(){
       }
     });
 
-    // (v3.26.4) Merge portal_users que son agentes pero no están en USUARIOS
+    // (v3.52.0) Merge portal_users: propagar email a usuarios existentes (jefes, directores, CEO incluidos)
+    (portalUsers||[]).forEach(pu=>{
+      if(!pu.nombre||!pu.email) return;
+      var idx2=merged.findIndex(u=>
+        u.id===(pu.id||pu.username)||
+        (u.nombre||"").toUpperCase()===(pu.nombre||"").toUpperCase()||
+        (u.grupoAgente&&pu.catalogoVendedor&&u.grupoAgente.toUpperCase()===pu.catalogoVendedor.toUpperCase())
+      );
+      if(idx2>=0&&!merged[idx2].email) merged[idx2].email=pu.email;
+    });
+    // Añadir agentes del portal que no están en USUARIOS
     (portalUsers||[]).forEach(pu=>{
       if(!pu.nombre) return;
       var rolPU=(pu.rol||"").toLowerCase();
@@ -16882,14 +16892,35 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB,
     return null;
   }
 
-  // (v3.40.36) Enviar email a Director en copia — respeta config
-  function emailCCDireccion(asunto,html,excluirId,incAutor,categoria,fase){
-    USUARIOS.filter(function(u){
+  // ── (v3.52.0) Helper: obtener emails de los jefes de un equipo ──────────
+  function emailsJefesEquipo(equipo, excluirId){
+    return USUARIOS.filter(function(u){
+      if(!u.email) return false;
+      if(u.id===excluirId) return false;
+      if(u.rol!=="jefe") return false;
+      if(equipo) return (u.equipo||"").toUpperCase()===(equipo||"").toUpperCase();
+      return true; // sin equipo → todos los jefes
+    });
+  }
+
+  // (v3.40.36) Enviar email a Director y Jefe de equipo en copia — respeta config
+  function emailCCDireccion(asunto,html,excluirId,incAutor,categoria,fase,equipoOrigen){
+    // Resolver el equipo si no se pasa directamente
+    var _eq=equipoOrigen||(function(){
+      var a=incAutor?USUARIOS.find(function(u){return u.id===incAutor;}):null;
+      return a?a.equipo:"";
+    })();
+    var notificar=USUARIOS.filter(function(u){
       if(u.id===excluirId||!u.email) return false;
-      if(u.rol==="director"||u.rol==="jefe_ventas"){return debeNotificar(categoria||"incidencias",fase||"responder","director");}
-      if(u.rol==="ceo"&&incAutor&&u.id===incAutor){return debeNotificar(categoria||"incidencias",fase||"responder","ceo");}
+      if(u.rol==="director"||u.rol==="jefe_ventas") return debeNotificar(categoria||"incidencias",fase||"responder","director");
+      if(u.rol==="ceo") return debeNotificar(categoria||"incidencias",fase||"responder","ceo");
+      // (v3.52.0) Jefes del equipo de origen
+      if(u.rol==="jefe"&&_eq&&(u.equipo||"").toUpperCase()===(_eq||"").toUpperCase()){
+        return debeNotificar(categoria||"incidencias",fase||"responder","jefe_equipo");
+      }
       return false;
-    }).forEach(function(u){
+    });
+    notificar.forEach(function(u){
       fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({to:u.email,subject:asunto,html:html})
       }).then(function(r){
@@ -16962,19 +16993,6 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB,
     }
     // (v3.24.10) CC a CEO y Director siempre
     emailCCDireccion(asunto,emailHtml,usuario.id,inc.autor,"incidencias","responder");
-    // (v3.40.33) CC al jefe de equipo del creador
-    (function(){
-      var _autorU=USUARIOS.find(function(u){return u.id===inc.autor;});
-      var _jefeU=_autorU?USUARIOS.find(function(u){return(u.rol==="jefe")&&u.equipo===(_autorU.equipo||"");}):null;
-      if(!_jefeU) _jefeU=USUARIOS.find(function(u){return u.rol==="jefe";});
-      if(_jefeU&&_jefeU.id!==usuario.id&&debeNotificar("incidencias","responder","jefe_equipo")){
-        var _jefeE=buscarEmailUsuario(_jefeU.id)||buscarEmailUsuario(_jefeU.nombre);
-        if(_jefeE){
-          fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},
-            body:JSON.stringify({to:_jefeE.email,subject:asunto,html:emailHtml})}).catch(function(){});
-        }
-      }
-    })();
     // También notificar a quienes están informados
     (inc.informadoA||[]).forEach(infId=>{
       if(infId!==usuario.id){
