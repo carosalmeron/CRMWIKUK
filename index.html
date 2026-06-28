@@ -132,7 +132,7 @@ input,button,select{font-family:inherit;}
 <!-- ENTRY -->
 <div id="entry" class="screen active">
   <div class="entry-logo">GRUPO <span>CONSOLIDADO</span></div>
-  <div class="entry-tag">PORTAL DE GESTIÓN · v3.40.53</div>
+  <div class="entry-tag">PORTAL DE GESTIÓN · v3.40.54</div>
   <div class="entry-cards">
     <div class="entry-card" onclick="showLogin()">
       <div class="entry-card-icon" style="background:#EDF4F0">🔐</div>
@@ -209,7 +209,7 @@ input,button,select{font-family:inherit;}
       Volver
     </button>
     <span class="admin-title">Zona Administrador</span>
-    <span class="admin-fb" style="opacity:.5">v3.40.53</span>
+    <span class="admin-fb" style="opacity:.5">v3.40.54</span>
     <span class="admin-fb fb-status" id="admin-fb-status"></span>
   </div>
   <div class="admin-tabs">
@@ -438,6 +438,7 @@ function doLogin(){
     for(var i=0;i<users.length;i++){
       var uu=users[i];
       if((uu.id===u||(uu.username||'').toLowerCase()===u||uu.nombre.toLowerCase()===u)&&matchCredencial(uu,p,pHash)){
+        if(uu.bloqueado){showLoginError('Usuario bloqueado. Contacta con el administrador.');return;}
         return uu;
       }
     }
@@ -950,7 +951,7 @@ function renderUsuarios(){
       +'<div class="user-card-head" onclick="toggleCard(\''+u.id+'\')">'
       +'<div class="user-avatar" style="background:'+(u.color||'#8A8078')+'">'+u.icon+'</div>'
       +'<div style="flex:1;min-width:0">'
-      +'<div class="user-name">'+u.nombre+'</div>'
+      +'<div class="user-name">'+u.nombre+(u.bloqueado?' <span style="color:#DC2626;font-size:.7rem">🚫 BLOQUEADO</span>':'')+'</div>'
       +'<div class="user-role">'+rolLabel(u)+'</div>'
       +'<div class="user-badges">'
       +(u.crmId?'<span class="badge-sm" style="background:#EBF2F8;color:#1E5A8A">CRM:'+u.crmId+'</span>':'')
@@ -1132,9 +1133,13 @@ function renderUsuarios(){
       });
       html+='</div>';
 
-      // Delete (non-default only)
+      // Block / Delete
       if(!isDefault){
-        html+='<button class="del-btn" onclick="deleteUser(\''+u.id+'\')">🗑 Eliminar usuario</button>';
+        var isBloq=u.bloqueado;
+        html+='<div style="display:flex;gap:8px;margin-top:4px">';
+        html+='<button style="flex:1;padding:10px;border-radius:10px;font-weight:700;font-size:.82rem;cursor:pointer;font-family:inherit;border:1.5px solid '+(isBloq?'#2E6B42':'#F59E0B')+';background:'+(isBloq?'#EDF4F0':'#FFFBEB')+';color:'+(isBloq?'#2E6B42':'#92400E')+'" onclick="bloquearUser(\''+u.id+'\')">'+(isBloq?'✅ Desbloquear':'🚫 Bloquear')+'</button>';
+        html+='<button class="del-btn" onclick="deleteUser(\''+u.id+'\')">🗑 Eliminar</button>';
+        html+='</div>';
       }
 
       html+='</div>';
@@ -1343,9 +1348,40 @@ function toggleAcceso(uid,mod){
   });renderAdminBody();
 }
 function deleteUser(uid){
-  if(!window.confirm('Eliminar este usuario?')) return;
-  adminUsers=adminUsers.filter(function(u){return u.id!==uid;});
-  saveUsersLocal(adminUsers);deleteUserFB(uid);renderAdminBody();
+  // Verificar si tiene datos antes de eliminar
+  var colecciones=["visitas","muestras","ofertas","estrategias","incidencias"];
+  var checking=Promise.all(colecciones.map(function(col){
+    return fetch(PORTAL_FB+"/"+col+"?pageSize=5").then(function(r){return r.json();}).then(function(d){
+      if(!d.documents) return 0;
+      var count=0;
+      d.documents.forEach(function(doc){
+        var fields=doc.fields||{};
+        var agente=(fields.agente||{}).stringValue||"";
+        var autor=(fields.autor||{}).stringValue||"";
+        var creadoPor=(fields.creadoPor||{}).stringValue||"";
+        if(agente===uid||autor===uid||creadoPor===uid) count++;
+      });
+      return count;
+    }).catch(function(){return 0;});
+  }));
+  checking.then(function(results){
+    var total=results.reduce(function(s,n){return s+n;},0);
+    if(total>0){
+      alert("⚠️ Este usuario tiene datos asociados (visitas, muestras, ofertas...).\n\nNo se puede eliminar. Usa 'Bloquear' para desactivarlo sin perder sus datos.");
+      return;
+    }
+    if(!window.confirm("¿Eliminar este usuario?\n\nSolo se permite porque NO tiene datos asociados.")) return;
+    adminUsers=adminUsers.filter(function(u){return u.id!==uid;});
+    saveUsersLocal(adminUsers);deleteUserFB(uid);renderAdminBody();
+  });
+}
+function bloquearUser(uid){
+  var u=adminUsers.find(function(u){return u.id===uid;});
+  if(!u) return;
+  var nuevo=!u.bloqueado;
+  if(nuevo&&!window.confirm("¿Bloquear a "+u.nombre+"?\n\nNo podrá acceder al CRM pero sus datos se conservan.")) return;
+  updateUser(uid,function(u){u.bloqueado=nuevo;});
+  renderAdminBody();
 }
 function updateUser(uid,fn){
   adminUsers=adminUsers.map(function(u){if(u.id===uid){fn(u);}return u;});
