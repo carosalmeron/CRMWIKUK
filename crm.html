@@ -1149,7 +1149,7 @@ function SearchInput({value, onChange, placeholder, suggestions=[], onSelect, on
       if(d&&d.type==="WK_PRODUCTO"&&d.producto){
         const p=d.producto;
         if(typeof onPick==="function"){
-          onPick({codigo:p.codigo||"", nombre:p.nombre||"", formato:p.formato||"", precio:p.precio||"", precioBase:p.precioBase||"", dto:(p.dto!=null?p.dto:""), dtoTotal:(p.dtoTotal!=null?p.dtoTotal:""), requiereAprobacion:!!p.requiereAprobacion, dtoTarifaCliente:(p.dtoTarifaCliente!=null?p.dtoTarifaCliente:null), descripcion:p.descripcion||""});
+          onPick({codigo:p.codigo||"", nombre:p.nombre||"", formato:p.formato||"", precio:p.precio||"", precioConDto:(p.precioConDto!=null?p.precioConDto:""), precioBase:p.precioBase||"", dto:(p.dto!=null?p.dto:""), dtoTotal:(p.dtoTotal!=null?p.dtoTotal:""), requiereAprobacion:!!p.requiereAprobacion, dtoTarifaCliente:(p.dtoTarifaCliente!=null?p.dtoTarifaCliente:null), extrasImporte:(p.extrasImporte!=null?p.extrasImporte:""), extras:p.extras||"", composicion:p.composicion||"", descripcion:p.descripcion||""});
         } else if(typeof onSelect==="function"){
           onSelect({label:p.nombre||p.codigo||"", sub:(p.codigo||"")+(p.formato?" · "+p.formato:""), tipo:"producto",
             obj:{codigo:p.codigo||"", nombre:p.nombre||"", formato:p.formato||"", precio:p.precio||""}});
@@ -5554,12 +5554,13 @@ function RecuperacionStep({estrategias,onBack,onNext,color,uid,todosClientes}){
   },[qProd]);
 
   const precioFinal=useMemo(()=>{
+    if(formOf.precioFinalCat!=null&&formOf.precioFinalCat!=="") return String(formOf.precioFinalCat);
     if(!formOf.precioBase) return "";
     const base=parseFloat(formOf.precioBase.replace(",","."));
     if(isNaN(base)) return "";
     if(formOf.dto){const dto=parseFloat(formOf.dto);return isNaN(dto)?base.toFixed(2):(base*(1-dto/100)).toFixed(2);}
     return base.toFixed(2);
-  },[formOf.precioBase,formOf.dto]);
+  },[formOf.precioBase,formOf.dto,formOf.precioFinalCat]);
 
   const RESULTADO_OPS=[
     {k:"contactado", label:"📞 Contactado",      color:T.blue},
@@ -5700,11 +5701,17 @@ function RecuperacionStep({estrategias,onBack,onNext,color,uid,todosClientes}){
                   .filter(p=>formOf.nombre.length>=2&&((p.nombre||"").toLowerCase().includes(formOf.nombre.toLowerCase())||(p.codigo||"").toLowerCase().includes(formOf.nombre.toLowerCase())))
                   .slice(0,8).map(p=>({label:p.nombre,sub:p.codigo+" · "+p.precio+"€/kg",tipo:"producto",obj:p}))}
                 onSelect={s=>setFormOf(f=>({...f,nombre:s.label,codigo:s.obj.codigo,precioBase:s.obj.precio}))}
-                onPick={p=>setFormOf(f=>({...f,nombre:p.nombre,codigo:p.codigo,precioBase:p.precioBase||p.precio||f.precioBase,dto:(p.dto!=null&&p.dto!=="")?p.dto:f.dto,descripcion:p.descripcion||f.descripcion}))}
-                style={{flex:1}}
-              />
-            </div>
-            {formOf.codigo&&<p style={{margin:"0 0 6px",fontSize:10,color:ac,fontWeight:700,fontFamily:"monospace"}}>{formOf.codigo}</p>}
+                onPick={p=>{
+                  var precioFinal=(p.precio!=null&&p.precio!=="")?p.precio:f.precioBase;
+                  var dtoUsar=(p.dtoTotal!=null&&p.dtoTotal!=="")?p.dtoTotal:((p.dto!=null&&p.dto!=="")?p.dto:"");
+                  setFormOf(f=>({...f,nombre:p.nombre,codigo:p.codigo,
+                    precioBase:p.precioBase||p.precio||f.precioBase,
+                    dto:dtoUsar||f.dto,
+                    precioFinalCat:precioFinal,
+                    descripcion:p.composicion||p.descripcion||f.descripcion,
+                    _requiereAprobacion:!!p.requiereAprobacion}));
+                  if(p.requiereAprobacion){ alert("⚠️ El descuento elegido ("+(p.dtoTotal||"")+"% total) supera tu margen para este cliente.\nAl guardar se enviará a aprobación."); }
+                }}
 
             {/* Dropdown resultados */}
             {showProd&&(
@@ -5744,13 +5751,13 @@ function RecuperacionStep({estrategias,onBack,onNext,color,uid,todosClientes}){
               <div style={{flex:1}}>
                 <p style={{margin:"0 0 4px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Precio tarifa €/kg</p>
                 <input value={formOf.precioBase}
-                  onChange={e=>setFormOf(f=>({...f,precioBase:e.target.value}))}
+                  onChange={e=>setFormOf(f=>({...f,precioBase:e.target.value,precioFinalCat:""}))}
                   placeholder="0,00" style={{...ISt,padding:"10px 12px"}}/>
               </div>
               <div style={{flex:1}}>
                 <p style={{margin:"0 0 4px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Descuento %</p>
                 <input type="number" value={formOf.dto}
-                  onChange={e=>setFormOf(f=>({...f,dto:e.target.value}))}
+                  onChange={e=>setFormOf(f=>({...f,dto:e.target.value,precioFinalCat:""}))}
                   placeholder="0" style={{...ISt,padding:"10px 12px"}}/>
               </div>
             </div>
@@ -6076,6 +6083,29 @@ function ClienteRow({nombre,visita,ops,onSave,clienteCodigo,clienteId,equipo,age
     if(!ofertaForm.producto.trim()||!ofertaForm.precio){alert("Producto y precio son obligatorios");return;}
     const precio=parseFloat((ofertaForm.precio+"").replace(",","."));
     if(isNaN(precio)){alert("Precio inválido");return;}
+    // (v3.41) Requiere aprobación si viene del catálogo marcado, o si el precio tecleado supera el margen
+    var _requiere=!!ofertaForm._requiereAprobacion;
+    var _dtoCalc=ofertaForm.dto||"";
+    if(!_requiere && ofertaForm.precioBase){
+      var _cli=(window._clientesFB||[]).find(function(c){return c.id===clienteId;})||null;
+      var _u0=(typeof window!=="undefined"&&window._usuarioActual)||null;
+      var _ev=evaluarPrecioManual(precio, ofertaForm.precioBase, _cli, _u0);
+      if(_ev.calculable){ _dtoCalc=_ev.dtoTotal; _requiere=_ev.requiereAprobacion; }
+    }
+    if(_requiere){
+      if(confirm("⚠️ Ese precio implica un descuento ("+(_dtoCalc||"")+"% total) que supera tu margen para este cliente.\n\n¿Crear una estrategia para pedir aprobación?\n\nEl producto se añadirá cuando se apruebe.")){
+        var _u=(typeof window!=="undefined"&&window._usuarioActual)||{nombre:agenteNombre||"",equipo:equipo||"",id:agente||""};
+        var r=crearEstrategiaAprobacion({
+          clienteNombre:nombre||"",clienteId:clienteId||"",equipo:equipo||"",
+          producto:ofertaForm.producto.trim(),codigo:ofertaForm.codigo||"",
+          precioBase:ofertaForm.precioBase||"",precioOferta:precio,
+          dtoTotal:_dtoCalc||"",composicion:ofertaForm.descripcion||""
+        },_u);
+        if(r&&r.ok){ alert("✅ Estrategia creada y enviada a "+r.aprobNombre+" para aprobar.\nEl producto se añadirá cuando se apruebe."); }
+        else{ alert("No se pudo crear la estrategia. Inténtalo de nuevo."); }
+      }
+      return;
+    }
     setOfertas(p=>[...p,{
       id:"l"+Date.now()+"_"+Math.random().toString(36).slice(2,5),
       producto:ofertaForm.producto.trim(),
@@ -6261,7 +6291,7 @@ function ClienteRow({nombre,visita,ops,onSave,clienteCodigo,clienteId,equipo,age
                   <input value={ofertaForm.metros} onChange={e=>setOfertaForm(f=>({...f,metros:e.target.value}))}
                     placeholder="Metros"
                     style={{width:70, padding:"7px 9px", border:"1px solid "+T.border, borderRadius:6, fontSize:12, boxSizing:"border-box", fontFamily:"inherit"}}/>
-                  <input value={ofertaForm.precio} onChange={e=>setOfertaForm(f=>({...f,precio:e.target.value}))}
+                  <input value={ofertaForm.precio} onChange={e=>setOfertaForm(f=>({...f,precio:e.target.value,precioFinalCat:""}))}
                     placeholder="Precio" type="text" inputMode="decimal"
                     style={{width:70, padding:"7px 9px", border:"1px solid "+T.border, borderRadius:6, fontSize:12, boxSizing:"border-box", fontFamily:"inherit"}}/>
                   <select value={ofertaForm.unidad} onChange={e=>setOfertaForm(f=>({...f,unidad:e.target.value}))}
@@ -7172,17 +7202,20 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
                           calibre: f.calibre || (s.obj.formato||"")
                         }));
                       }}
-                      onPick={p=>setOfertaForm(f=>({...f,
-                        producto:p.codigo+" — "+p.nombre,
-                        calibre:p.formato||f.calibre,
-                        precio:p.precio||f.precio,
-                        descripcion:p.descripcion||f.descripcion
-                      }))}/>
+                      onPick={p=>{
+                        setOfertaForm(f=>({...f,
+                          producto:p.codigo+" — "+p.nombre,
+                          calibre:p.formato||f.calibre,
+                          precio:(p.precio!=null&&p.precio!=="")?p.precio:f.precio,
+                          descripcion:p.composicion||p.descripcion||f.descripcion,
+                          _requiereAprobacion:!!p.requiereAprobacion}));
+                        if(p.requiereAprobacion){ alert("⚠️ El descuento elegido ("+(p.dtoTotal||"")+"% total) supera tu margen para este cliente.\nAl guardar se enviará a aprobación."); }
+                      }}/>
                     <div style={{display:"flex", gap:6, marginBottom:6}}>
                       <input value={ofertaForm.calibre} onChange={e=>setOfertaForm(f=>({...f,calibre:e.target.value}))}
                         placeholder="Calibre"
                         style={{flex:1, padding:"8px 10px", border:"1px solid "+T.border, borderRadius:7, fontSize:13, boxSizing:"border-box", fontFamily:"inherit"}}/>
-                      <input value={ofertaForm.precio} onChange={e=>setOfertaForm(f=>({...f,precio:e.target.value}))}
+                      <input value={ofertaForm.precio} onChange={e=>setOfertaForm(f=>({...f,precio:e.target.value,precioFinalCat:""}))}
                         placeholder="Precio" type="text" inputMode="decimal"
                         style={{width:90, padding:"8px 10px", border:"1px solid "+T.border, borderRadius:7, fontSize:13, boxSizing:"border-box", fontFamily:"inherit"}}/>
                       <select value={ofertaForm.unidad} onChange={e=>setOfertaForm(f=>({...f,unidad:e.target.value}))}
@@ -11338,7 +11371,9 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
             const of=formEst.ofActual||{nombre:"",codigo:"",precioBase:"",dto:""};
             const base=parseFloat((of.precioBase||"").replace(",","."));
             const dto=parseFloat(of.dto||"0");
-            const pFinal=(!isNaN(base)&&base>0)?(base*(1-dto/100)).toFixed(2):"";
+            // (v3.41) Si viene precio final del catálogo (con extras), usarlo; si no, calcular
+            const pFinal=(of.precioFinalCat!=null&&of.precioFinalCat!=="")?String(of.precioFinalCat)
+              :((!isNaN(base)&&base>0)?(base*(1-dto/100)).toFixed(2):"");
             return(
             <div style={{background:T.bg,borderRadius:10,padding:12,border:`1.5px dashed ${T.amber}66`,marginBottom:14}}>
               <SearchInput value={of.nombre}
@@ -11348,7 +11383,22 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
                   .filter(p=>of.nombre.length>=2&&((p.nombre||"").toLowerCase().includes(of.nombre.toLowerCase())||(p.codigo||"").toLowerCase().includes(of.nombre.toLowerCase())))
                   .slice(0,8).map(p=>({label:p.nombre,sub:p.codigo+" · "+p.precio+"€/kg",tipo:"producto",obj:p}))}
                 onSelect={s=>setFormEst(f=>({...f,ofActual:{...(f.ofActual||{}),nombre:s.label,codigo:s.obj.codigo,precioBase:s.obj.precio}}))}
-                onPick={p=>setFormEst(f=>({...f,ofActual:{...(f.ofActual||{}),nombre:p.nombre,codigo:p.codigo,precioBase:p.precioBase||p.precio||"",dto:(p.dto!=null&&p.dto!=="")?p.dto:((f.ofActual||{}).dto||""),descripcion:p.descripcion||((f.ofActual||{}).descripcion||"")}}))}
+                onPick={p=>{
+                  // (v3.41) Opción B: precio FINAL ya calculado por el catálogo (incluye dto + extras)
+                  var precioFinal=(p.precio!=null&&p.precio!=="")?p.precio:"";
+                  var dtoUsar=(p.dtoTotal!=null&&p.dtoTotal!=="")?p.dtoTotal:((p.dto!=null&&p.dto!=="")?p.dto:"");
+                  var desc=p.composicion||p.descripcion||((f.ofActual||{})||{}).descripcion||"";
+                  setFormEst(f=>({...f,ofActual:{...(f.ofActual||{}),
+                    nombre:p.nombre,codigo:p.codigo,
+                    precioBase:p.precioBase||"",
+                    dto:dtoUsar,
+                    precioFinalCat:precioFinal,
+                    descripcion:p.composicion||p.descripcion||((f.ofActual||{}).descripcion||""),
+                    _requiereAprobacion:!!p.requiereAprobacion}}));
+                  if(p.requiereAprobacion){
+                    alert("⚠️ El descuento elegido ("+(p.dtoTotal||"")+"% total) supera tu margen para este cliente.\nAl guardar la estrategia se enviará a aprobación.");
+                  }
+                }}
                 style={{marginBottom:8}}/>
               {of.codigo&&<p style={{margin:"0 0 6px",fontSize:10,color:T.amber,fontWeight:700,fontFamily:"monospace"}}>{of.codigo}</p>}
               <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Descripción (la ve el cliente)</p>
@@ -11358,12 +11408,12 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
               <div style={{display:"flex",gap:8,marginBottom:8}}>
                 <div style={{flex:1}}>
                   <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Precio tarifa €/kg</p>
-                  <input value={of.precioBase||""} onChange={e=>setFormEst(f=>({...f,ofActual:{...(f.ofActual||{}),precioBase:e.target.value}}))}
+                  <input value={of.precioBase||""} onChange={e=>setFormEst(f=>({...f,ofActual:{...(f.ofActual||{}),precioBase:e.target.value,precioFinalCat:""}}))}
                     placeholder="0,00" style={{width:"100%",border:`1.5px solid ${T.border}`,borderRadius:8,padding:"8px 10px",fontSize:13,outline:"none",boxSizing:"border-box"}}/>
                 </div>
                 <div style={{flex:1}}>
                   <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Dto. %</p>
-                  <input type="number" value={of.dto||""} onChange={e=>setFormEst(f=>({...f,ofActual:{...(f.ofActual||{}),dto:e.target.value}}))}
+                  <input type="number" value={of.dto||""} onChange={e=>setFormEst(f=>({...f,ofActual:{...(f.ofActual||{}),dto:e.target.value,precioFinalCat:""}}))}
                     placeholder="0" style={{width:"100%",border:`1.5px solid ${T.border}`,borderRadius:8,padding:"8px 10px",fontSize:13,outline:"none",boxSizing:"border-box"}}/>
                 </div>
               </div>
@@ -14266,8 +14316,8 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
               <div style={{display:"flex",gap:8,marginTop:10}}>
                 <div style={{flex:1}}>
                   <p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:T.muted}}>Precio:</p>
-                  <input value={formOf.precio||""} onChange={function(e){setFormOf(Object.assign({},formOf,{precio:e.target.value}));}}
-                    type="number" step="0.01" placeholder="0.00"
+                  <input value={formOf.precio||""} onChange={function(e){setFormOf(Object.assign({},formOf,{precio:e.target.value,precioFinalCat:""}));}}
+                    type="number" step="0.01" placeholder="0.00 (o elige en catálogo 📖)"
                     style={{width:"100%",padding:"10px 12px",borderRadius:10,border:"1px solid "+T.border,fontSize:13,boxSizing:"border-box"}}/>
                 </div>
                 <div style={{flex:1}}>
@@ -14289,6 +14339,36 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
                   }
                   var pr=parseFloat((formOf.precio+"").replace(",","."));
                   if(isNaN(pr)){alert("Precio inválido");return;}
+                  // (v3.41) Determinar si requiere aprobación:
+                  // opcion a: viene marcado del catálogo, o b: precio tecleado a mano supera el margen
+                  var requiere=!!formOf._requiereAprobacion;
+                  var dtoCalc=formOf.dto||"";
+                  if(!requiere && formOf.precioBase){
+                    var _cli=(window._clientesFB||[]).find(function(c){return c.id===formOf.clienteId;})||null;
+                    var ev=evaluarPrecioManual(pr, formOf.precioBase, _cli, usuario);
+                    if(ev.calculable){
+                      dtoCalc=ev.dtoTotal;
+                      requiere=ev.requiereAprobacion;
+                    }
+                  }
+                  if(requiere){
+                    if(confirm("⚠️ Ese precio implica un descuento ("+(dtoCalc||"")+"% total) que supera tu margen para este cliente.\n\n¿Crear una estrategia para pedir aprobación?\n\nEl producto se añadirá a la oferta cuando se apruebe.")){
+                      var r=crearEstrategiaAprobacion({
+                        clienteNombre:formOf.clienteNombre||"",
+                        clienteId:formOf.clienteId||"",
+                        equipo:(usuario&&usuario.equipo)||"",
+                        producto:formOf.producto.trim(),
+                        codigo:formOf.codigo||"",
+                        precioBase:formOf.precioBase||"",
+                        precioOferta:pr,
+                        dtoTotal:dtoCalc||"",
+                        composicion:formOf.descripcion||""
+                      },usuario);
+                      if(r&&r.ok){ alert("✅ Estrategia creada y enviada a "+r.aprobNombre+" para aprobar.\nEl producto se añadirá a la oferta cuando se apruebe."); }
+                      else{ alert("No se pudo crear la estrategia. Inténtalo de nuevo."); }
+                    }
+                    return;
+                  }
                   setLineasOf(function(p){return p.concat([{
                     id:"l"+Date.now()+"_"+Math.random().toString(36).slice(2,5),
                     producto:formOf.producto.trim(),
@@ -14300,7 +14380,7 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
                     notas:""
                   }]);});
                   // limpiar la línea en construcción, mantener cliente
-                  setFormOf(Object.assign({},formOf,{producto:"",descripcion:"",calibre:"",metros:"",precio:""}));
+                  setFormOf(Object.assign({},formOf,{producto:"",descripcion:"",calibre:"",metros:"",precio:"",precioFinalCat:"",_requiereAprobacion:false}));
                 }}
                 style={{width:"100%",marginTop:10,padding:"10px",border:"none",background:T.amber,
                   color:"#fff",fontWeight:700,fontSize:13,borderRadius:9,cursor:"pointer"}}>
@@ -18406,6 +18486,98 @@ function margenDtoDisponible(cliente, usuario){
 function dtoTotalAcumulado(cliente, dtoExtra){
   var extra=parseFloat(dtoExtra)||0;
   return dtoTarifaCliente(cliente)+extra;
+}
+
+// (v3.41) Calcula el descuento TOTAL (%) que implica un precio tecleado vs el precio base de tarifa.
+// precioBaseTarifa = precio del producto a tarifa 0 (precio de catálogo sin descuento).
+// Devuelve {dtoTotal, requiereAprobacion} comparando con el margen del vendedor para ese cliente.
+function evaluarPrecioManual(precioTecleado, precioBaseTarifa, cliente, usuario){
+  var precio=parseFloat(String(precioTecleado).replace(",","."));
+  var base=parseFloat(String(precioBaseTarifa).replace(",","."));
+  if(isNaN(precio)||isNaN(base)||base<=0) return {dtoTotal:0, requiereAprobacion:false, calculable:false};
+  var dtoTotal=Math.round((1-precio/base)*1000)/10; // % con 1 decimal
+  if(dtoTotal<0) dtoTotal=0;
+  // Margen del vendedor (acumulado) + descuento estándar de la categoría
+  var cat=cliente&&cliente.categoriaCliente;
+  var estandar=(cat&&DTO_ESTANDAR_CAT[cat]!=null)?DTO_ESTANDAR_CAT[cat]:0;
+  var cfg=(typeof window!=="undefined"&&window._configDto)||{agente:4,jefe:10,director:15};
+  var rol=(usuario&&usuario.rol)||"agente";
+  var tope;
+  if(rol==="ceo") tope=100;
+  else if(rol==="director"||rol==="crm_director") tope=cfg.director;
+  else if(rol==="jefe"||rol==="crm_jefe") tope=cfg.jefe;
+  else tope=cfg.agente;
+  // dto máximo total que puede dar sin aprobación = estándar + tope
+  var dtoMaxSinAprob=estandar+tope;
+  return {dtoTotal:dtoTotal, requiereAprobacion:(dtoTotal>dtoMaxSinAprob+0.05), calculable:true, dtoMaxSinAprob:dtoMaxSinAprob};
+}
+
+// (v3.41) Crea automáticamente una estrategia de aprobación de precio.
+// datos: {clienteNombre, clienteId, equipo, producto, codigo, precioBase, precioOferta, dtoTotal, composicion, nota}
+function crearEstrategiaAprobacion(datos, usuario){
+  try{
+    var hoy=new Date().toLocaleDateString("es-ES");
+    var dtoT=parseFloat(datos.dtoTotal)||0;
+    var equipo=datos.equipo||(usuario&&usuario.equipo)||"";
+    var draftId="est_aprob_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
+    var aprobId=(typeof resolverEscaladoEstrategia==="function")?resolverEscaladoEstrategia(dtoT,equipo):null;
+    var aprobU=(typeof USUARIOS!=="undefined"?USUARIOS:[]).find(function(u){return u.id===aprobId;});
+    var draft={
+      id:draftId,
+      cliente:datos.clienteNombre||"",
+      clienteId:datos.clienteId||"",
+      agente:idCanonico(usuario),
+      agenteNombre:usuario.nombre||"",
+      equipo:equipo,
+      texto:"Solicitud de precio: "+(datos.producto||""),
+      descripcion:datos.composicion||datos.nota||"Precio que supera el margen del vendedor",
+      estado:"solicitud_agente",
+      prioridad:"alta",
+      maxDescuento:dtoT,
+      pendienteDe:aprobId||null,
+      pendienteDeNombre:aprobU?aprobU.nombre:"",
+      ofertas:[{
+        nombre:datos.producto||"",
+        codigo:datos.codigo||"",
+        precioActual:parseFloat(datos.precioBase)||0,
+        precioOferta:parseFloat(datos.precioOferta)||0,
+        dto:dtoT,
+        aprobada:null
+      }],
+      origenAprobacionPrecio:true,
+      fechaCreacion:new Date().toISOString(),
+      fechaCreacionStr:hoy,
+      creadoPor:idCanonico(usuario),
+      creadoPorNombre:usuario.nombre,
+      solicitudAgente:true,
+      seguimientos:[{accion:"💰 Solicitud de precio — "+(datos.producto||"")+" a "+(datos.precioOferta||"")+"€ (dto total: "+dtoT+"%)",fecha:hoy,por:usuario.nombre,nota:datos.composicion||""}],
+      historialEscalado:[{accion:"💰 Solicitud de agente — dto total: "+dtoT+"%",por:usuario.nombre,fecha:hoy}]
+    };
+    fbEscribir("estrategias",draftId,draft);
+    var vcId="vc_"+draftId;
+    fbEscribir("vamos_caros",vcId,{
+      id:vcId,origen:"aprobacion_precio",
+      cliente:datos.clienteNombre||"",clienteId:datos.clienteId||"",
+      agente:idCanonico(usuario),agenteNombre:usuario.nombre||"",equipo:equipo,
+      producto:datos.producto||"",calibre:datos.codigo||"",
+      precioNuestro:parseFloat(datos.precioBase)||0,
+      precioPide:parseFloat(datos.precioOferta)||0,
+      descuento:dtoT,
+      fecha:new Date().toISOString(),fechaStr:hoy,
+      nota:datos.composicion||datos.nota||"",
+      estado:"solicitud_agente",estrategiaId:draftId,
+      historial:[{accion:"💰 Solicitud de precio (supera margen)",fecha:hoy,por:usuario.nombre,
+        precioNuestro:parseFloat(datos.precioBase)||0,precioPide:parseFloat(datos.precioOferta)||0,nota:datos.composicion||""}]
+    });
+    if(aprobId&&typeof despacharNotificacion==="function"){
+      despacharNotificacion({tipo:"estrategia",
+        titulo:"💰 "+usuario.nombre+" — precio especial para "+(datos.clienteNombre||""),
+        mensaje:(datos.producto||"")+" — "+(datos.precioOferta||"")+"€ (dto total: "+dtoT+"%). "+(datos.composicion||""),
+        destinatarioId:aprobId,prioridad:"alta",creadoPor:idCanonico(usuario),
+        datos:{estrategiaId:draftId,clienteId:datos.clienteId||""}});
+    }
+    return {ok:true, aprobNombre:aprobU?aprobU.nombre:"tu superior", estrategiaId:draftId};
+  }catch(e){ return {ok:false, error:String(e)}; }
 }
 
 
@@ -25448,12 +25620,15 @@ function VisitaTab({cliente,act,usuario,resultados,onGuardar,onIrAPotencial}){
                   calibre: f.calibre || (s.obj.formato||"")
                 }));
               }}
-              onPick={p=>setOfertaForm(f=>({...f,
-                producto:p.codigo+" — "+p.nombre,
-                calibre:p.formato||f.calibre,
-                precio:p.precio||f.precio,
-                descripcion:p.descripcion||f.descripcion
-              }))}/>
+              onPick={p=>{
+                setOfertaForm(f=>({...f,
+                  producto:p.codigo+" — "+p.nombre,
+                  calibre:p.formato||f.calibre,
+                  precio:(p.precio!=null&&p.precio!=="")?p.precio:f.precio,
+                  descripcion:p.composicion||p.descripcion||f.descripcion,
+                  _requiereAprobacion:!!p.requiereAprobacion}));
+                if(p.requiereAprobacion){ alert("⚠️ El descuento elegido ("+(p.dtoTotal||"")+"% total) supera tu margen para este cliente.\nAl guardar se enviará a aprobación."); }
+              }}/>
             <input value={ofertaForm.descripcion||""} onChange={e=>setOfertaForm(f=>({...f,descripcion:e.target.value}))}
               placeholder="Descripción (visible para el cliente)"
               style={{width:"100%", padding:"8px 10px", border:"1px solid "+T.border, borderRadius:7, fontSize:13, marginBottom:6, boxSizing:"border-box", fontFamily:"inherit"}}/>
@@ -25464,7 +25639,7 @@ function VisitaTab({cliente,act,usuario,resultados,onGuardar,onIrAPotencial}){
               <input value={ofertaForm.metros||""} onChange={e=>setOfertaForm(f=>({...f,metros:e.target.value}))}
                 placeholder="Metros"
                 style={{width:80, padding:"8px 10px", border:"1px solid "+T.border, borderRadius:7, fontSize:13, boxSizing:"border-box", fontFamily:"inherit"}}/>
-              <input value={ofertaForm.precio} onChange={e=>setOfertaForm(f=>({...f,precio:e.target.value}))}
+              <input value={ofertaForm.precio} onChange={e=>setOfertaForm(f=>({...f,precio:e.target.value,precioFinalCat:""}))}
                 placeholder="Precio" type="text" inputMode="decimal"
                 style={{width:80, padding:"8px 10px", border:"1px solid "+T.border, borderRadius:7, fontSize:13, boxSizing:"border-box", fontFamily:"inherit"}}/>
               <select value={ofertaForm.unidad} onChange={e=>setOfertaForm(f=>({...f,unidad:e.target.value}))}
@@ -25725,12 +25900,13 @@ function EstrategiaTab({estrategia,clienteNombre,onGuardar,onBorrar,usuario,onRe
   },[qProd]);
 
   const precioFinal=useMemo(()=>{
+    if(formOf.precioFinalCat!=null&&formOf.precioFinalCat!=="") return String(formOf.precioFinalCat);
     if(!formOf.precioBase) return "";
     const base=parseFloat(formOf.precioBase.replace(",","."));
     if(isNaN(base)) return "";
     if(formOf.dto){const dto=parseFloat(formOf.dto);return isNaN(dto)?base.toFixed(2):(base*(1-dto/100)).toFixed(2);}
     return base.toFixed(2);
-  },[formOf.precioBase,formOf.dto]);
+  },[formOf.precioBase,formOf.dto,formOf.precioFinalCat]);
 
   const addOferta=()=>{
     if(!formOf.nombre.trim()) return;
@@ -25969,7 +26145,17 @@ function EstrategiaTab({estrategia,clienteNombre,onGuardar,onBorrar,usuario,onRe
                 .filter(p=>formOf.nombre.length>=2&&((p.nombre||"").toLowerCase().includes(formOf.nombre.toLowerCase())||(p.codigo||"").toLowerCase().includes(formOf.nombre.toLowerCase())))
                 .slice(0,8).map(p=>({label:p.nombre,sub:p.codigo+" · "+p.precio+"€/kg",tipo:"producto",obj:p}))}
               onSelect={s=>setFormOf(f=>({...f,nombre:s.label,codigo:s.obj.codigo,precioBase:s.obj.precio}))}
-              onPick={p=>setFormOf(f=>({...f,nombre:p.nombre,codigo:p.codigo,precioBase:p.precioBase||p.precio||f.precioBase,dto:(p.dto!=null&&p.dto!=="")?p.dto:f.dto,descripcion:p.descripcion||f.descripcion}))}
+              onPick={p=>{
+                var precioFinal=(p.precio!=null&&p.precio!=="")?p.precio:f.precioBase;
+                var dtoUsar=(p.dtoTotal!=null&&p.dtoTotal!=="")?p.dtoTotal:((p.dto!=null&&p.dto!=="")?p.dto:"");
+                setFormOf(f=>({...f,nombre:p.nombre,codigo:p.codigo,
+                  precioBase:p.precioBase||p.precio||f.precioBase,
+                  dto:dtoUsar||f.dto,
+                  precioFinalCat:precioFinal,
+                  descripcion:p.composicion||p.descripcion||f.descripcion,
+                  _requiereAprobacion:!!p.requiereAprobacion}));
+                if(p.requiereAprobacion){ alert("⚠️ El descuento elegido ("+(p.dtoTotal||"")+"% total) supera tu margen para este cliente.\nAl guardar se enviará a aprobación."); }
+              }}
               style={{flex:1}}
             />
           </div>
@@ -26011,12 +26197,12 @@ function EstrategiaTab({estrategia,clienteNombre,onGuardar,onBorrar,usuario,onRe
           <div style={{display:"flex",gap:8,marginBottom:8}}>
             <div style={{flex:1}}>
               <p style={{margin:"0 0 4px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Precio tarifa €/kg</p>
-              <input value={formOf.precioBase} onChange={e=>setFormOf(f=>({...f,precioBase:e.target.value}))}
+              <input value={formOf.precioBase} onChange={e=>setFormOf(f=>({...f,precioBase:e.target.value,precioFinalCat:""}))}
                 placeholder="0,00" style={{...ISt,padding:"10px 12px"}}/>
             </div>
             <div style={{flex:1}}>
               <p style={{margin:"0 0 4px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Dto. solicitado %</p>
-              <input type="number" value={formOf.dto} onChange={e=>setFormOf(f=>({...f,dto:e.target.value}))}
+              <input type="number" value={formOf.dto} onChange={e=>setFormOf(f=>({...f,dto:e.target.value,precioFinalCat:""}))}
                 placeholder="0" style={{...ISt,padding:"10px 12px"}}/>
             </div>
           </div>
