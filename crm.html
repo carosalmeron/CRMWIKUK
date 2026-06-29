@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.59.0";
+const CRM_VERSION = "3.60.0";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -6228,16 +6228,20 @@ function ClienteRow({nombre,visita,ops,onSave,clienteCodigo,clienteId,equipo,age
       if(_ev.calculable){ _dtoCalc=_ev.dtoTotal; _requiere=_ev.requiereAprobacion; }
     }
     if(_requiere){
-      if(confirm("⚠️ Ese precio implica un descuento ("+(_dtoCalc||"")+"% total) que supera tu margen para este cliente.\n\n¿Crear una estrategia para pedir aprobación?\n\nEl producto se añadirá cuando se apruebe.")){
-        var _u=(typeof window!=="undefined"&&window._usuarioActual)||{nombre:agenteNombre||"",equipo:equipo||"",id:agente||""};
-        var r=crearEstrategiaAprobacion({
+      // (v3.60) Supera el margen: abrir el formulario de Estrategia precargado y NO crear la oferta
+      if(typeof window!=="undefined" && typeof window._abrirEstrategiaDesdeOferta==="function"){
+        window._abrirEstrategiaDesdeOferta({
           clienteNombre:nombre||"",clienteId:clienteId||"",equipo:equipo||"",
           producto:ofertaForm.producto.trim(),codigo:ofertaForm.codigo||"",
           precioBase:ofertaForm.precioBase||"",precioOferta:precio,
-          dtoTotal:_dtoCalc||"",composicion:ofertaForm.descripcion||""
-        },_u);
-        if(r&&r.ok){ alert("✅ Estrategia creada y enviada a "+r.aprobNombre+" para aprobar.\nEl producto se añadirá cuando se apruebe."); }
-        else{ alert("No se pudo crear la estrategia. Inténtalo de nuevo."); }
+          dtoTotal:_dtoCalc||"",calibre:ofertaForm.calibre||"",metros:ofertaForm.metros||"",
+          composicion:ofertaForm.composicion||ofertaForm.descripcion||""
+        });
+        // Cerrar el formulario de oferta y limpiar (no se crea ninguna línea/oferta)
+        setShowOfertaForm(false);
+        setOfertaForm({producto:"",descripcion:"",calibre:"",metros:"",precio:"",unidad:ofertaForm.unidad,notas:"",composicion:"",precioBase:"",dto:"",extrasImporte:"",extras:""});
+      } else {
+        alert("⚠️ Ese precio supera tu margen. Ve a Estrategias para solicitar la aprobación.");
       }
       return;
     }
@@ -9598,6 +9602,36 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
     return items.filter(function(e){return !e.eliminada&&pasaFiltroGeneral(e,periodoEF,equipoEF,agenteEF);});
   };
   const [formEst,setFormEst]=useState({cliente:"",objetivo:"",texto:"",tipoEst:"precio"});
+  // (v3.60) Si venimos de un formulario de oferta con un descuento que supera margen, precargar la estrategia
+  React.useEffect(function(){
+    var raw=null;
+    try{ raw=sessionStorage.getItem("estrategiaPrecargada"); }catch(e){}
+    if(!raw) return;
+    try{ sessionStorage.removeItem("estrategiaPrecargada"); }catch(e){}
+    var d={};
+    try{ d=JSON.parse(raw)||{}; }catch(e){ d={}; }
+    var _comp="";
+    var _bN=parseFloat(String(d.precioBase||"").replace(",","."));
+    var _pO=parseFloat(String(d.precioOferta||"").replace(",","."));
+    if(!isNaN(_bN)&&_bN>0&&!isNaN(_pO)){var _f=function(n){return (parseFloat(n)||0).toFixed(2).replace(".",",")+"€";};_comp="Base "+_f(_bN)+" − "+(d.dtoTotal||"")+"% = "+_f(_pO);}
+    setFormEst(function(f){return Object.assign({},f,{
+      tipoEst:"precio",
+      cliente:d.clienteNombre||"",
+      clienteId:d.clienteId||"",
+      objetivo:"Solicitud de precio especial",
+      texto:"Solicito aprobar "+(d.producto||"el producto")+" a "+(d.precioOferta||"")+"€ (dto total "+(d.dtoTotal||"")+"%).",
+      ofActual:{
+        nombre:d.producto||"",codigo:d.codigo||"",
+        precioBase:d.precioBase||"",dto:d.dtoTotal||"",
+        precioFinalCat:d.precioOferta!=null?String(d.precioOferta):"",
+        calibre:d.calibre||"",metros:d.metros||"",
+        descripcion:_comp,
+        composicion:_comp
+      }
+    });});
+    setShowNuevaEst(true);
+    setTimeout(function(){ try{ window.scrollTo(0,0); }catch(e){} },50);
+  },[]);
   const [editEst,setEditEst]=useState(null);
   const [reparEst,setReparEst]=useState(null);
 
@@ -14662,8 +14696,9 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
                     }
                   }
                   if(requiere){
-                    if(confirm("⚠️ Ese precio implica un descuento ("+(dtoCalc||"")+"% total) que supera tu margen para este cliente.\n\n¿Crear una estrategia para pedir aprobación?\n\nEl producto se añadirá a la oferta cuando se apruebe.")){
-                      var r=crearEstrategiaAprobacion({
+                    // (v3.60) Supera margen: abrir Estrategia precargada y NO añadir la línea
+                    if(typeof window!=="undefined" && typeof window._abrirEstrategiaDesdeOferta==="function"){
+                      window._abrirEstrategiaDesdeOferta({
                         clienteNombre:formOf.clienteNombre||"",
                         clienteId:formOf.clienteId||"",
                         equipo:(usuario&&usuario.equipo)||"",
@@ -14672,10 +14707,13 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
                         precioBase:formOf.precioBase||"",
                         precioOferta:pr,
                         dtoTotal:dtoCalc||"",
-                        composicion:formOf.descripcion||""
-                      },usuario);
-                      if(r&&r.ok){ alert("✅ Estrategia creada y enviada a "+r.aprobNombre+" para aprobar.\nEl producto se añadirá a la oferta cuando se apruebe."); }
-                      else{ alert("No se pudo crear la estrategia. Inténtalo de nuevo."); }
+                        calibre:formOf.calibre||"",metros:formOf.metros||"",
+                        composicion:formOf.composicion||formOf.descripcion||""
+                      });
+                      // limpiar la línea en construcción (no se añade nada)
+                      setFormOf(Object.assign({},formOf,{producto:"",descripcion:"",calibre:"",metros:"",precio:"",dto:"",composicion:"",precioFinalCat:"",_requiereAprobacion:false}));
+                    } else {
+                      alert("⚠️ Ese precio supera tu margen. Ve a Estrategias para solicitar la aprobación.");
                     }
                     return;
                   }
@@ -27793,6 +27831,14 @@ function App(props){
   };
 
   const setSection=function(s){prevSectionRef.current=section;setSection_(s);if(s==="dashboard")setHideNav(false);if(s==="plan_semanal")refreshDBs();if(s==="informe"){var ss=sessionStorage.getItem("semanaInforme");if(ss)setSemanaParaInforme(parseInt(ss));}};
+  // (v3.60) Puente global: abrir Estrategias con un borrador precargado desde un formulario de oferta
+  React.useEffect(function(){
+    window._abrirEstrategiaDesdeOferta=function(datos){
+      try{ sessionStorage.setItem("estrategiaPrecargada", JSON.stringify(datos||{})); }catch(e){}
+      setSection("estrategias");
+    };
+    return function(){ try{ delete window._abrirEstrategiaDesdeOferta; }catch(e){} };
+  },[section]);
   const [semanaParaInforme,setSemanaParaInforme]=useState(null);
   const [adminOpen,setAdminOpen]=useState(false);
   const [busquedaGlobal,setBusquedaGlobal]=useState(false);
