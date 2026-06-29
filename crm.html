@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.63.0";
+const CRM_VERSION = "3.66.0";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -2150,6 +2150,7 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
     if(!appMisIds.has(agId)&&esAgenteRol) return;
     if(!pasaFiltroEq(v)) return;
     if(parseInt(v.semana||0)!==semana) return;
+    if(v.fecha){var _pv=(v.fecha+"").split("/");if(_pv.length===3){var _vy=parseInt(_pv[2]);if(_vy<100)_vy+=2000;if(_vy!==new Date().getFullYear())return;}}
     var cliN=v.clienteNombre||v.cliente||"";
     var _r=v.resultado||"";var ic=(_r==="pedido"||_r==="visita_pedido")?"✅":(_r==="llamada"||_r==="llamada_contactada"||_r==="llamada_pedido")?"📞":(_r==="no_contesta"||_r==="llamada_no_contesta")?"📵":"👋";
     var lb=(_r==="pedido"||_r==="visita_pedido")?"Pedido":(_r==="llamada"||_r==="llamada_contactada")?"Llamada":_r==="llamada_pedido"?"Pedido tfno":(_r==="no_contesta"||_r==="llamada_no_contesta")?"No contesta":"Visita";
@@ -2169,7 +2170,10 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
       var yy=parseInt(p[2]);if(yy<100)yy+=2000;
       dt=new Date(yy,parseInt(p[1])-1,parseInt(p[0]));
     }else{dt=new Date(fechaStr);}
-    return dt&&!isNaN(dt.getTime())&&semDeFecha(dt)===semana;
+    if(!dt||isNaN(dt.getTime()))return false;
+    // (v3.65) Comprobar también el AÑO: la semana 27 de 2025 no es la 27 de 2026
+    if(dt.getFullYear()!==new Date().getFullYear())return false;
+    return semDeFecha(dt)===semana;
   };
   (oportunidadesDB||[]).forEach(function(o){
     if(o.eliminada) return;
@@ -2200,17 +2204,50 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
       }
     }
   });
-  // Muestras
+  // Muestras (v3.64) — un evento por cada CAMBIO de estado que caiga en la semana, además del de creación
   (muestrasDB||[]).forEach(function(m){
     if(m.eliminada) return;
     if(!appMisIds.has((m.agente||"").toUpperCase())&&esAgenteRol) return;
     if(!pasaFiltroEq(m)) return;
+    var _cli=m.cliente||m.clienteNombre||"";
+    var _prod=m.prod||m.producto||"";
+    var _emoji=function(est){return est==="positivo"?"✅":est==="ko"?"❌":est==="pedido"?"🛒":est==="proyecto"?"📁":"⏳";};
+    var _puestos={}; // evitar duplicar el mismo día+estado
+    // 1) Evento de creación (estado actual) en su fecha/semana original
     var mSem=parseInt(m.semana||0);
     var fechaOk=false;
     if(!mSem&&m.fecha){fechaOk=fechaEnSem(m.fecha);}
-    if(mSem!==semana&&!fechaOk) return;
-    var est=m.estado==="positivo"?"✅":m.estado==="ko"?"❌":m.estado==="pedido"?"🛒":"⏳";
-    addActividad(parseDiaKey(m.fecha),m.cliente||m.clienteNombre||"","📦",(m.prod||m.producto||"")+" "+est,"#7C3AED");
+    // (v3.65) Si la muestra tiene fecha, su año debe ser el actual (evita muestras de 2025 en semanas de 2026)
+    var _anioOk=true;
+    if(m.fecha){
+      var _pf=(m.fecha+"").split("/");
+      if(_pf.length===3){var _yy=parseInt(_pf[2]);if(_yy<100)_yy+=2000;_anioOk=(_yy===new Date().getFullYear());}
+    }
+    if(_anioOk && (mSem===semana||fechaOk)){
+      var _dk=parseDiaKey(m.fecha);
+      addActividad(_dk,_cli,"📦",_prod+" "+_emoji(m.estado),"#7C3AED");
+      _puestos[_dk+"|"+(m.estado||"")]=true;
+    }
+    // 2) Un evento por cada cambio del historial que caiga en la semana
+    var _hist=Array.isArray(m.historialEstado)?m.historialEstado:[];
+    _hist.forEach(function(h){
+      if(!h||!h.fecha) return;
+      if(!fechaEnSem(h.fecha)) return;
+      var _dk=parseDiaKey(h.fecha);
+      var _key=_dk+"|"+(h.estado||"");
+      if(_puestos[_key]) return;
+      _puestos[_key]=true;
+      addActividad(_dk,_cli,"📦",_prod+" → "+_emoji(h.estado)+" "+(h.estado||"cambio"),"#7C3AED");
+    });
+    // 3) Respaldo: si hubo feedback (positiva/ko/pedido) con su propia fecha y no está ya puesto
+    if(m.fechaFeedback && fechaEnSem(m.fechaFeedback)){
+      var _dkf=parseDiaKey(m.fechaFeedback);
+      var _keyf=_dkf+"|"+(m.estado||"");
+      if(!_puestos[_keyf]){
+        _puestos[_keyf]=true;
+        addActividad(_dkf,_cli,"📦",_prod+" "+_emoji(m.estado),"#7C3AED");
+      }
+    }
   });
   // Estrategias
   (estrategiasDB||[]).forEach(function(e){
@@ -2326,6 +2363,7 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
   (visitasDB||[]).forEach(function(v){
     if(v.eliminada) return;
     if(parseInt(v.semana||0)!==semana) return;
+    if(v.fecha){var _pvs=(v.fecha+"").split("/");if(_pvs.length===3){var _vys=parseInt(_pvs[2]);if(_vys<100)_vys+=2000;if(_vys!==new Date().getFullYear())return;}}
     var agId=(v.agenteId||v.agente||"").toUpperCase();
     if(!esAgenteRol||appMisIds.has(agId)){
       // Aplicar filtro de día
@@ -2696,6 +2734,9 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
     if(!pasaFiltroDia(m.fecha||m.fechaCreacion)) return false;
     if(m.eliminada) return false;
     if(parseInt(m.semana||0)!==semana) return false;
+    // (v3.65) El año de la muestra debe ser el actual (evita muestras de 2025 en semanas de 2026)
+    var _fM=m.fecha||m.fechaCreacion||"";
+    if(_fM){var _pM=(_fM+"").split("/");if(_pM.length===3){var _yM=parseInt(_pM[2]);if(_yM<100)_yM+=2000;if(_yM!==new Date().getFullYear())return false;}}
     if(!pasaFiltroEq(m)) return false;
     if(!appMisIds.has((m.agente||"").toUpperCase())&&esAgenteRol) return false;
     return true;
@@ -8288,7 +8329,9 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
         fecha:new Date().toISOString(),
         tipo:"transicion"
       }]);
-      const updatedM={...sel,estado:"proyecto",nota,fechaFeedback:hoy,proyectoId:proyId};
+      const _histPr=(Array.isArray(sel.historialEstado)?sel.historialEstado.slice():[]);
+      _histPr.push({estado:"proyecto",fecha:new Date().toISOString(),por:usuario.nombre||"Comercial",fuente:"proyecto"});
+      const updatedM={...sel,estado:"proyecto",nota,fechaFeedback:hoy,proyectoId:proyId,historialEstado:_histPr};
       setMuestras(mm=>mm.map(m=>m.id===sel.id?updatedM:m));
       fbEscribir("muestras",sel.id,updatedM);
       const p={id:proyId,nombre:proyForm.nombre||(sel.prod+" — "+(sel.cliente||"")),
@@ -8319,7 +8362,9 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
       setSel(null);setNota("");setFb("");setProyForm({nombre:"",deptos:[],nota:""});
       return;
     }
-    const updated={...sel,estado:fb,nota,motivo:motivo||"",fechaFeedback:new Date().toLocaleDateString("es-ES")};
+    const _histFb=(Array.isArray(sel.historialEstado)?sel.historialEstado.slice():[]);
+    _histFb.push({estado:fb,fecha:new Date().toISOString(),por:usuario.nombre||"Comercial",fuente:"feedback"});
+    const updated={...sel,estado:fb,nota,motivo:motivo||"",fechaFeedback:new Date().toLocaleDateString("es-ES"),historialEstado:_histFb};
     setMuestras(mm=>mm.map(m=>m.id===sel.id?updated:m));
     fbEscribir("muestras",sel.id,updated);
     // Notificar resultado positivo al jefe
@@ -26984,8 +27029,18 @@ function HistorialTab({visitas,muestras,estrategia,incidencias=[],resultados,his
 
   // Muestras
   (muestras||[]).forEach(function(m){
-    var est=m.estado==="pedido"?"🛒 Pedido":m.estado==="positivo"?"✅ Positivo":m.estado==="ko"?"❌ KO":"⏳ Pendiente";
-    timeline.push({ts:parseFecha(m.fecha),icon:"📦",color:T.purple,titulo:(m.prodNombre||m.prod||m.producto||"Muestra")+" — "+est,sub:(m.tipo||"")+(m.cantidad?" · "+m.cantidad+" uds":""),fecha:m.fecha||"",tipo:"muestra",autor:m.agente||""});
+    var _emEst=function(e){return e==="pedido"?"🛒 Pedido":e==="positivo"?"✅ Positivo":e==="ko"?"❌ KO":e==="proyecto"?"📁 Proyecto":"⏳ Pendiente";};
+    var est=_emEst(m.estado);
+    var _nom=(m.prodNombre||m.prod||m.producto||"Muestra");
+    // Evento de creación / estado actual
+    timeline.push({ts:parseFecha(m.fecha),icon:"📦",color:T.purple,titulo:_nom+" — "+est,sub:(m.tipo||"")+(m.cantidad?" · "+m.cantidad+" uds":""),fecha:m.fecha||"",tipo:"muestra",autor:m.agente||""});
+    // (v3.64) Un evento por cada cambio de estado del historial
+    var _h=Array.isArray(m.historialEstado)?m.historialEstado:[];
+    _h.forEach(function(c){
+      if(!c||!c.fecha) return;
+      var _f=parseFecha(c.fecha);
+      timeline.push({ts:_f,icon:"📦",color:T.purple,titulo:_nom+" → "+_emEst(c.estado),sub:"Cambio de estado"+(c.por?" · "+c.por:"")+(c.fuente?" ("+c.fuente+")":""),fecha:(typeof c.fecha==="string"&&c.fecha.indexOf("T")>-1)?new Date(c.fecha).toLocaleDateString("es-ES"):(c.fecha||""),tipo:"muestra",autor:c.por||m.agente||""});
+    });
   });
 
   // Estrategia local
