@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.52.0";
+const CRM_VERSION = "3.56.0";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -3495,7 +3495,8 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
                         </p>
                         {(of.lineas||[]).slice(0,3).map(function(l,j){
                           return (
-                            <div key={j} style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",fontSize:11,padding:"2px 0",color:T.muted}}>
+                            <div key={j} style={{padding:"2px 0"}}>
+                              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",fontSize:11,color:T.muted}}>
                               <span style={{whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flex:1,marginRight:8}}>
                                 {l.producto}{l.calibre?" · "+l.calibre:""}
                               </span>
@@ -3505,6 +3506,8 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
                                   (comp: {Number(l.precioCompetencia).toFixed(2).replace(".",",")})
                                 </span>}
                               </span>
+                              </div>
+                              {l.composicion&&<div style={{fontSize:10,color:T.green,marginTop:1}}>{l.composicion}</div>}
                             </div>
                           );
                         })}
@@ -5213,6 +5216,63 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, es
 // ─── INFORME SEMANAL ──────────────────────────────────────────────
 var PRODUCTOS_LOCAL=[];
 
+// (v3.54) Helpers reutilizables: resolver datos completos de un producto para cualquier formulario
+// Devuelve {codigo,nombre,calibre,metros,precioBase,precioAnterior,dto,extrasImporte,extras,precio,composicion,requiereAprobacion}
+function resolverProductoLupa(s, clienteNombre, clienteId){
+  var o=s.obj||{};
+  var _base=(o.precio!=null?String(o.precio):"");
+  var _baseN=parseFloat(String(_base).replace(",","."));
+  var _dto=_dtoClienteResolver(clienteNombre, clienteId);
+  var _precioConDto=(!isNaN(_baseN)&&_baseN>0)?(_baseN*(1-_dto/100)):NaN;
+  var _comp="";
+  if(!isNaN(_baseN)&&_baseN>0){var _f=function(n){return (parseFloat(n)||0).toFixed(2).replace(".",",")+"€";};_comp="Base "+_f(_baseN)+" − "+_dto+"% = "+_f(_precioConDto);}
+  return {
+    codigo:o.codigo||"", nombre:s.label||o.nombre||"",
+    calibre:o.calibre||o.formato||"", metros:o.metros||"",
+    precioBase:_base, precioAnterior:o.precioAnterior||"",
+    dto:(_dto?String(_dto):""), extrasImporte:"", extras:"",
+    precio:(!isNaN(_precioConDto)?_precioConDto.toFixed(2):""),
+    composicion:_comp, requiereAprobacion:false
+  };
+}
+function resolverProductoCatalogo(p, clienteNombre, clienteId){
+  var _loc=null;
+  try{ var _cod=(p.codigo||"").trim(); _loc=PRODUCTOS_LOCAL.find(function(x){return (x.codigo||"").trim()===_cod;})||null; }catch(e){}
+  var _base=(_loc&&_loc.precio)||p.precioBase||"";
+  var _baseN=parseFloat(String(_base||"").replace(",","."));
+  var _dtoCli=_dtoClienteResolver(clienteNombre, clienteId);
+  var _dtoCat=(p.dtoTotal!=null&&p.dtoTotal!=="")?parseFloat(p.dtoTotal):NaN;
+  var _dto=(!isNaN(_dtoCat)&&_dtoCat>0)?_dtoCat:_dtoCli;
+  if(isNaN(_dto))_dto=0;
+  var _extras=parseFloat(String(p.extrasImporte||"0").replace(",","."))||0;
+  var _precioConDto=(!isNaN(_baseN)&&_baseN>0)?(_baseN*(1-_dto/100)):NaN;
+  var _precioFinal;
+  if(!isNaN(_precioConDto)){ _precioFinal=(_precioConDto+_extras).toFixed(2); }
+  else if(p.precio!=null&&p.precio!==""){ _precioFinal=p.precio; }
+  else { _precioFinal=""; }
+  var _comp=p.composicion||"";
+  if(!_comp&&!isNaN(_baseN)&&_baseN>0){var _f=function(n){return (parseFloat(n)||0).toFixed(2).replace(".",",")+"€";};_comp="Base "+_f(_baseN)+" − "+_dto+"% = "+_f(_precioConDto);if(_extras>0)_comp+=" + extras ("+(p.extras||"")+") "+_f(_extras)+" = "+_f(_precioConDto+_extras);}
+  return {
+    codigo:p.codigo||"", nombre:p.nombre||"",
+    calibre:(_loc&&(_loc.calibre||_loc.formato))||p.calibre||p.formato||"", metros:(_loc&&_loc.metros)||p.metros||"",
+    precioBase:_base||"", precioAnterior:(_loc&&_loc.precioAnterior)||"",
+    dto:(_dto?String(_dto):""), extrasImporte:(p.extrasImporte!=null?p.extrasImporte:""), extras:p.extras||"",
+    precio:_precioFinal, composicion:_comp, requiereAprobacion:!!p.requiereAprobacion
+  };
+}
+// Resolver dto de tarifa del cliente por nombre/id (con respaldo a _clienteCatalogo)
+function _dtoClienteResolver(clienteNombre, clienteId){
+  try{
+    var _cc=(typeof window!=="undefined"&&window._clienteCatalogo)||null;
+    if(_cc&&_cc.dto!=null){var d=parseFloat(_cc.dto);if(!isNaN(d))return d;}
+    var nom=(clienteNombre||"").toUpperCase();
+    var lst=(typeof clientes!=="undefined"&&clientes)?clientes:[];
+    var obj=lst.find(function(c){return (c.nombre||c.NOMBRE||"").toUpperCase()===nom||((c.id&&clienteId)&&c.id===clienteId);});
+    if(obj&&typeof dtoTarifaCliente==="function"){var d2=parseFloat(dtoTarifaCliente(obj));if(!isNaN(d2))return d2;}
+  }catch(e){}
+  return 0;
+}
+
 // (v3.45) Flecha ↑/↓ con precio anterior tachado (lee precio y precioAnterior de Firebase)
 function priceArrow(precio, precioAnterior){
   var cur=parseFloat(String(precio==null?"":precio).replace(",","."));
@@ -5739,6 +5799,7 @@ function RecuperacionStep({estrategias,onBack,onNext,color,uid,todosClientes}){
                   {!o.dto&&o.precioFinal&&<span style={{fontSize:13,fontWeight:700,color:T.green}}>{o.precioFinal}€/kg</span>}
                 </div>
                 {o.nota&&<p style={{margin:"3px 0 0",fontSize:11,color:T.muted,fontStyle:"italic"}}>{o.nota}</p>}
+                {o.composicion&&<p style={{margin:"3px 0 0",fontSize:10,color:T.green}}>{o.composicion}</p>}
               </div>
               <button onClick={()=>setOfertas(p=>p.filter(x=>x.id!==o.id))}
                 style={{background:"none",border:"none",cursor:"pointer",color:T.red,fontSize:18,flexShrink:0}}>🗑</button>
@@ -5756,15 +5817,20 @@ function RecuperacionStep({estrategias,onBack,onNext,color,uid,todosClientes}){
                 suggestions={PRODUCTOS_LOCAL
                   .filter(p=>formOf.nombre.length>=2&&((p.nombre||"").toLowerCase().includes(formOf.nombre.toLowerCase())||(p.codigo||"").toLowerCase().includes(formOf.nombre.toLowerCase())))
                   .slice(0,8).map(p=>({label:p.nombre,sub:p.codigo+" · "+p.precio+"€/kg",tipo:"producto",obj:p}))}
-                onSelect={s=>setFormOf(f=>({...f,nombre:s.label,codigo:s.obj.codigo,precioBase:s.obj.precio}))}
+                onSelect={s=>{var r=resolverProductoLupa(s, clienteNombre, clienteId);setFormOf(f=>({...f,nombre:r.nombre,codigo:r.codigo,precioBase:r.precioBase,precioAnterior:r.precioAnterior,calibre:r.calibre||f.calibre,metros:r.metros||f.metros,dto:r.dto||f.dto,precio:r.precio||f.precio,composicion:r.composicion||"",extrasImporte:"",extras:""}));}}
                 onPick={p=>{
-                  var dtoUsar=(p.dtoTotal!=null&&p.dtoTotal!=="")?p.dtoTotal:((p.dto!=null&&p.dto!=="")?p.dto:"");
-                  setFormOf(f=>({...f,nombre:p.nombre,codigo:p.codigo,
-                    precioBase:p.precioBase||p.precio||f.precioBase,
-                    dto:dtoUsar||f.dto,
-                    precioFinalCat:(p.precio!=null&&p.precio!=="")?p.precio:"",
-                    descripcion:p.composicion||p.descripcion||f.descripcion,
-                    _requiereAprobacion:!!p.requiereAprobacion}));
+                  var r=resolverProductoCatalogo(p, clienteNombre, clienteId);
+                  setFormOf(f=>({...f,nombre:r.nombre,codigo:r.codigo,
+                    precioBase:r.precioBase||f.precioBase,
+                    precioAnterior:r.precioAnterior,
+                    calibre:r.calibre||f.calibre, metros:r.metros||f.metros,
+                    dto:r.dto||f.dto,
+                    precio:r.precio||f.precio,
+                    extrasImporte:r.extrasImporte, extras:r.extras,
+                    precioFinalCat:r.precio||"",
+                    composicion:r.composicion,
+                    descripcion:r.extras||p.descripcion||f.descripcion,
+                    _requiereAprobacion:r.requiereAprobacion}));
                   if(p.requiereAprobacion){ alert("⚠️ El descuento elegido ("+(p.dtoTotal||"")+"% total) supera tu margen para este cliente.\nAl guardar se enviará a aprobación."); }
                 }}
                 style={{flex:1}}
@@ -6173,9 +6239,15 @@ function ClienteRow({nombre,visita,ops,onSave,clienteCodigo,clienteId,equipo,age
       metros:ofertaForm.metros.trim(),
       precio:precio,
       unidad:ofertaForm.unidad,
-      notas:ofertaForm.notas.trim()
+      notas:ofertaForm.notas.trim(),
+      // (v3.53) Guardar composición y desglose para verlos al reabrir
+      composicion:ofertaForm.composicion||"",
+      precioBase:ofertaForm.precioBase||"",
+      dto:_dtoCalc||ofertaForm.dto||"",
+      extrasImporte:ofertaForm.extrasImporte||"",
+      extras:ofertaForm.extras||""
     }]);
-    setOfertaForm({producto:"",descripcion:"",calibre:"",metros:"",precio:"",unidad:ofertaForm.unidad,notas:""});
+    setOfertaForm({producto:"",descripcion:"",calibre:"",metros:"",precio:"",unidad:ofertaForm.unidad,notas:"",composicion:"",precioBase:"",dto:"",extrasImporte:"",extras:""});
   };
 
   const quitarLinea=(id)=>{setOfertas(p=>p.filter(l=>l.id!==id));};
@@ -6328,6 +6400,7 @@ function ClienteRow({nombre,visita,ops,onSave,clienteCodigo,clienteId,equipo,age
                   <p style={{margin:0, color:T.muted, fontSize:10}}>
                     {l.precio.toFixed(2).replace(".",",")} {l.unidad}{l.notas?" · "+l.notas:""}
                   </p>
+                  {l.composicion&&<p style={{margin:"2px 0 0", color:T.green, fontSize:10}}>{l.composicion}</p>}
                 </div>
                 <button onClick={()=>quitarLinea(l.id)} style={{background:"none", border:"none", color:T.red,
                   cursor:"pointer", fontSize:14, padding:"2px 4px"}}>✕</button>
@@ -7236,6 +7309,7 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
                           <strong style={{color:T.amber}}>{Number(l.precio).toFixed(2).replace(".",",")} {l.unidad}</strong>
                           {l.notas?" · "+l.notas:""}
                         </p>
+                        {l.composicion&&<p style={{margin:"2px 0 0", color:T.green, fontSize:10}}>{l.composicion}</p>}
                       </div>
                       <button onClick={function(){setOfertasVisita(p=>p.filter(x=>x.id!==l.id));}}
                         style={{background:"none", border:"none", color:T.red, cursor:"pointer", fontSize:16, padding:"2px 6px"}}>✕</button>
@@ -7256,18 +7330,31 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
                         })
                         .slice(0,10).map(p=>({label:p.codigo+" — "+p.nombre,sub:p.formato||"",tipo:"producto",obj:p})) : []}
                       onSelect={s=>{
+                        var r=resolverProductoLupa(s, (clienteSel&&clienteSel.nombre)||"", (clienteSel&&clienteSel.id)||"");
                         setOfertaForm(f=>({...f,
-                          producto:s.obj.codigo+" — "+s.obj.nombre,
-                          calibre: f.calibre || (s.obj.formato||"")
+                          producto:r.codigo+" — "+r.nombre,
+                          calibre: r.calibre || f.calibre,
+                          metros: r.metros || f.metros,
+                          precio: r.precio || f.precio,
+                          dto: r.dto || f.dto,
+                          composicion: r.composicion || "",
+                          precioBase: r.precioBase || f.precioBase
                         }));
                       }}
                       onPick={p=>{
+                        var r=resolverProductoCatalogo(p, (clienteSel&&clienteSel.nombre)||"", (clienteSel&&clienteSel.id)||"");
                         setOfertaForm(f=>({...f,
-                          producto:p.codigo+" — "+p.nombre,
-                          calibre:p.formato||f.calibre,
-                          precio:(p.precio!=null&&p.precio!=="")?p.precio:f.precio,
-                          descripcion:p.composicion||p.descripcion||f.descripcion,
-                          _requiereAprobacion:!!p.requiereAprobacion}));
+                          producto:r.codigo+" — "+r.nombre,
+                          calibre:r.calibre||f.calibre,
+                          metros:r.metros||f.metros,
+                          precio:r.precio||f.precio,
+                          dto:r.dto||f.dto,
+                          precioBase:r.precioBase||f.precioBase,
+                          extrasImporte:r.extrasImporte, extras:r.extras,
+                          precioFinalCat:r.precio||"",
+                          composicion:r.composicion,
+                          descripcion:r.composicion||p.descripcion||f.descripcion,
+                          _requiereAprobacion:r.requiereAprobacion}));
                         if(p.requiereAprobacion){ alert("⚠️ El descuento elegido ("+(p.dtoTotal||"")+"% total) supera tu margen para este cliente.\nAl guardar se enviará a aprobación."); }
                       }}/>
                     <div style={{display:"flex", gap:6, marginBottom:6}}>
@@ -7297,11 +7384,15 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
                         id:"l"+Date.now()+"_"+Math.random().toString(36).slice(2,5),
                         producto:ofertaForm.producto.trim(),
                         calibre:ofertaForm.calibre.trim(),
+                        metros:(ofertaForm.metros||"").trim(),
                         precio:precio,
                         unidad:ofertaForm.unidad,
-                        notas:ofertaForm.notas.trim()
+                        notas:ofertaForm.notas.trim(),
+                        composicion:ofertaForm.composicion||"",
+                        precioBase:ofertaForm.precioBase||"",
+                        dto:ofertaForm.dto||""
                       }]);
-                      setOfertaForm({producto:"",calibre:"",precio:"",unidad:ofertaForm.unidad,notas:""});
+                      setOfertaForm({producto:"",calibre:"",metros:"",precio:"",unidad:ofertaForm.unidad,notas:"",composicion:"",precioBase:"",dto:""});
                     }}
                       style={{width:"100%", padding:"9px", border:"none", background:T.amber, color:"#fff",
                         fontWeight:700, fontSize:13, borderRadius:8, cursor:"pointer"}}>
@@ -9925,6 +10016,44 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
                             :`${usuario.nombre} ha aprobado. Falta tu OK.\nCliente: ${sel.cliente}\nDescuento: ${dto}%`,
                           destinatarioId:siguiente.id,prioridad:"alta",creadoPor:usuario.id});
                       } else {
+                        // (v3.56) Si es una estrategia de aprobación de precio, crear la oferta automáticamente
+                        try{
+                          if(sel.origenAprobacionPrecio && (sel.ofertas||[]).length>0){
+                            var _o=sel.ofertas[0]||{};
+                            var _baseN=parseFloat(_o.precioActual)||0;
+                            var _pOferta=parseFloat(_o.precioOferta)||0;
+                            var _dtoO=parseFloat(_o.dto)||dto||0;
+                            var _f=function(n){return (parseFloat(n)||0).toFixed(2).replace(".",",")+"€";};
+                            var _comp=(_baseN>0)?("Base "+_f(_baseN)+" − "+_dtoO+"% = "+_f(_pOferta)+" (aprobado)"):"";
+                            var _ofId="oferta_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
+                            var _hoy=new Date(); var _fStr=_hoy.toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
+                            var _ofDoc={
+                              id:_ofId,
+                              clienteNombre:sel.cliente||sel.clienteNombre||"",
+                              clienteId:sel.clienteId||"",
+                              agente:sel.agente||"",agenteNombre:sel.agenteNombre||"",equipo:sel.equipo||"",
+                              lineas:[{
+                                id:"l"+Date.now()+"_"+Math.random().toString(36).slice(2,5),
+                                producto:_o.nombre||"",codigo:_o.codigo||"",
+                                descripcion:"",calibre:_o.calibre||"",metros:_o.metros||"",
+                                precio:_pOferta,unidad:"€/kg",notas:"",
+                                composicion:_comp,precioBase:_baseN?String(_baseN):"",dto:String(_dtoO),
+                                extrasImporte:"",extras:""
+                              }],
+                              estado:"pendiente",
+                              fechaCreacion:_hoy.toISOString(),fechaCreacionStr:_fStr,
+                              fechaPlazo:new Date(_hoy.getTime()+5*24*60*60*1000).toISOString(),
+                              notaInicial:"",notas:"Oferta generada al aprobar la solicitud de precio",
+                              origenEstrategiaId:sel.id,
+                              seguimientos:[{accion:"Oferta creada al aprobar el precio", fecha:_fStr, por:usuario.nombre, nota:_comp}]
+                            };
+                            if(typeof fbEscribir==="function") fbEscribir("ofertas",_ofId,_ofDoc);
+                            if(typeof setOfertasDB==="function") setOfertasDB(function(prev){return [...(prev||[]),_ofDoc];});
+                            despacharNotificacion({tipo:"oferta",titulo:"🧾 Oferta lista: "+(sel.cliente||""),
+                              mensaje:"Se ha creado la oferta con "+(_o.nombre||"el producto")+" al precio aprobado ("+_f(_pOferta)+").",
+                              destinatarioId:sel.agente,prioridad:"alta",creadoPor:usuario.id});
+                          }
+                        }catch(_e){ console.warn("[APROBACION] No se pudo crear la oferta:",_e); }
                         if(sel.agente!==usuario.id) despacharNotificacion({tipo:"estrategia",titulo:`✅ Estrategia aprobada: ${sel.cliente}`,
                           mensaje:`Aprobada. Dto: ${dto}%. Ya puedes ejecutarla.`,
                           destinatarioId:sel.agente,prioridad:"alta",creadoPor:usuario.id});
@@ -11441,19 +11570,20 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
                 suggestions={PRODUCTOS_LOCAL
                   .filter(p=>of.nombre.length>=2&&((p.nombre||"").toLowerCase().includes(of.nombre.toLowerCase())||(p.codigo||"").toLowerCase().includes(of.nombre.toLowerCase())))
                   .slice(0,8).map(p=>({label:p.nombre,sub:p.codigo+" · "+p.precio+"€/kg",tipo:"producto",obj:p}))}
-                onSelect={s=>setFormEst(f=>({...f,ofActual:{...(f.ofActual||{}),nombre:s.label,codigo:s.obj.codigo,precioBase:s.obj.precio}}))}
+                onSelect={s=>{var r=resolverProductoLupa(s, formEst.cliente, formEst.clienteId);setFormEst(f=>({...f,ofActual:{...(f.ofActual||{}),nombre:r.nombre,codigo:r.codigo,precioBase:r.precioBase,precioAnterior:r.precioAnterior,calibre:r.calibre||((f.ofActual||{}).calibre||""),metros:r.metros||((f.ofActual||{}).metros||""),dto:r.dto,precioFinalCat:r.precio,descripcion:r.composicion||((f.ofActual||{}).descripcion||"")}}));}}
                 onPick={p=>{
-                  // (v3.41) Opción B: precio FINAL ya calculado por el catálogo (incluye dto + extras)
-                  var precioFinal=(p.precio!=null&&p.precio!=="")?p.precio:"";
-                  var dtoUsar=(p.dtoTotal!=null&&p.dtoTotal!=="")?p.dtoTotal:((p.dto!=null&&p.dto!=="")?p.dto:"");
-                  var desc=p.composicion||p.descripcion||((f.ofActual||{})||{}).descripcion||"";
+                  var r=resolverProductoCatalogo(p, formEst.cliente, formEst.clienteId);
                   setFormEst(f=>({...f,ofActual:{...(f.ofActual||{}),
-                    nombre:p.nombre,codigo:p.codigo,
-                    precioBase:p.precioBase||"",
-                    dto:dtoUsar,
-                    precioFinalCat:precioFinal,
-                    descripcion:p.composicion||p.descripcion||((f.ofActual||{}).descripcion||""),
-                    _requiereAprobacion:!!p.requiereAprobacion}}));
+                    nombre:r.nombre,codigo:r.codigo,
+                    precioBase:r.precioBase||((f.ofActual||{}).precioBase||""),
+                    precioAnterior:r.precioAnterior,
+                    calibre:r.calibre||((f.ofActual||{}).calibre||""),
+                    metros:r.metros||((f.ofActual||{}).metros||""),
+                    dto:r.dto,
+                    precioFinalCat:r.precio,
+                    extrasImporte:r.extrasImporte, extras:r.extras,
+                    descripcion:r.composicion||p.descripcion||((f.ofActual||{}).descripcion||""),
+                    _requiereAprobacion:r.requiereAprobacion}}));
                   if(p.requiereAprobacion){
                     alert("⚠️ El descuento elegido ("+(p.dtoTotal||"")+"% total) supera tu margen para este cliente.\nAl guardar la estrategia se enviará a aprobación.");
                   }
@@ -25763,6 +25893,7 @@ function VisitaTab({cliente,act,usuario,resultados,onGuardar,onIrAPotencial}){
                   <strong style={{color:T.amber}}>{Number(l.precio).toFixed(2).replace(".",",")} {l.unidad}</strong>
                   {l.notas?" · "+l.notas:""}
                 </p>
+                {l.composicion&&<p style={{margin:"2px 0 0", color:T.green, fontSize:10}}>{l.composicion}</p>}
               </div>
               <button onClick={function(){setOfertasVisita(p=>p.filter(x=>x.id!==l.id));}}
                 style={{background:"none", border:"none", color:T.red, cursor:"pointer", fontSize:16, padding:"2px 6px"}}>✕</button>
@@ -25783,18 +25914,31 @@ function VisitaTab({cliente,act,usuario,resultados,onGuardar,onIrAPotencial}){
                 })
                 .slice(0,10).map(p=>({label:p.codigo+" — "+p.nombre,sub:p.formato||"",tipo:"producto",obj:p})) : []}
               onSelect={s=>{
+                var r=resolverProductoLupa(s, (typeof cliente!=="undefined"&&cliente&&cliente.nombre)||"", (typeof cliente!=="undefined"&&cliente&&cliente.id)||"");
                 setOfertaForm(f=>({...f,
-                  producto:s.obj.codigo+" — "+s.obj.nombre,
-                  calibre: f.calibre || (s.obj.formato||"")
+                  producto:r.codigo+" — "+r.nombre,
+                  calibre: r.calibre || f.calibre,
+                  metros: r.metros || f.metros,
+                  precio: r.precio || f.precio,
+                  dto: r.dto || f.dto,
+                  composicion: r.composicion || "",
+                  precioBase: r.precioBase || f.precioBase
                 }));
               }}
               onPick={p=>{
+                var r=resolverProductoCatalogo(p, (typeof cliente!=="undefined"&&cliente&&cliente.nombre)||"", (typeof cliente!=="undefined"&&cliente&&cliente.id)||"");
                 setOfertaForm(f=>({...f,
-                  producto:p.codigo+" — "+p.nombre,
-                  calibre:p.formato||f.calibre,
-                  precio:(p.precio!=null&&p.precio!=="")?p.precio:f.precio,
-                  descripcion:p.composicion||p.descripcion||f.descripcion,
-                  _requiereAprobacion:!!p.requiereAprobacion}));
+                  producto:r.codigo+" — "+r.nombre,
+                  calibre:r.calibre||f.calibre,
+                  metros:r.metros||f.metros,
+                  precio:r.precio||f.precio,
+                  dto:r.dto||f.dto,
+                  precioBase:r.precioBase||f.precioBase,
+                  extrasImporte:r.extrasImporte, extras:r.extras,
+                  precioFinalCat:r.precio||"",
+                  composicion:r.composicion,
+                  descripcion:r.composicion||p.descripcion||f.descripcion,
+                  _requiereAprobacion:r.requiereAprobacion}));
                 if(p.requiereAprobacion){ alert("⚠️ El descuento elegido ("+(p.dtoTotal||"")+"% total) supera tu margen para este cliente.\nAl guardar se enviará a aprobación."); }
               }}/>
             <input value={ofertaForm.descripcion||""} onChange={e=>setOfertaForm(f=>({...f,descripcion:e.target.value}))}
@@ -25834,9 +25978,12 @@ function VisitaTab({cliente,act,usuario,resultados,onGuardar,onIrAPotencial}){
                 metros:(ofertaForm.metros||"").trim(),
                 precio:precio,
                 unidad:ofertaForm.unidad,
-                notas:ofertaForm.notas.trim()
+                notas:ofertaForm.notas.trim(),
+                composicion:ofertaForm.composicion||"",
+                precioBase:ofertaForm.precioBase||"",
+                dto:ofertaForm.dto||""
               }]);
-              setOfertaForm({producto:"",descripcion:"",calibre:"",metros:"",precio:"",unidad:ofertaForm.unidad,notas:""});
+              setOfertaForm({producto:"",descripcion:"",calibre:"",metros:"",precio:"",unidad:ofertaForm.unidad,notas:"",composicion:"",precioBase:"",dto:""});
             }}
               style={{width:"100%", padding:"9px", border:"none", background:T.amber, color:"#fff",
                 fontWeight:700, fontSize:13, borderRadius:8, cursor:"pointer"}}>
@@ -26312,16 +26459,20 @@ function EstrategiaTab({estrategia,clienteNombre,onGuardar,onBorrar,usuario,onRe
               suggestions={PRODUCTOS_LOCAL
                 .filter(p=>formOf.nombre.length>=2&&((p.nombre||"").toLowerCase().includes(formOf.nombre.toLowerCase())||(p.codigo||"").toLowerCase().includes(formOf.nombre.toLowerCase())))
                 .slice(0,8).map(p=>({label:p.nombre,sub:p.codigo+" · "+p.precio+"€/kg",tipo:"producto",obj:p}))}
-              onSelect={s=>setFormOf(f=>({...f,nombre:s.label,codigo:s.obj.codigo,precioBase:s.obj.precio}))}
+              onSelect={s=>{var r=resolverProductoLupa(s, typeof clienteNombre!=="undefined"?clienteNombre:"", typeof clienteId!=="undefined"?clienteId:"");setFormOf(f=>({...f,nombre:r.nombre,codigo:r.codigo,precioBase:r.precioBase,precioAnterior:r.precioAnterior,calibre:r.calibre||f.calibre,metros:r.metros||f.metros,dto:r.dto||f.dto,precio:r.precio||f.precio,composicion:r.composicion||"",precioFinalCat:r.precio||""}));}}
               onPick={p=>{
-                var precioFinal=(p.precio!=null&&p.precio!=="")?p.precio:f.precioBase;
-                var dtoUsar=(p.dtoTotal!=null&&p.dtoTotal!=="")?p.dtoTotal:((p.dto!=null&&p.dto!=="")?p.dto:"");
-                setFormOf(f=>({...f,nombre:p.nombre,codigo:p.codigo,
-                  precioBase:p.precioBase||p.precio||f.precioBase,
-                  dto:dtoUsar||f.dto,
-                  precioFinalCat:precioFinal,
-                  descripcion:p.composicion||p.descripcion||f.descripcion,
-                  _requiereAprobacion:!!p.requiereAprobacion}));
+                var r=resolverProductoCatalogo(p, typeof clienteNombre!=="undefined"?clienteNombre:"", typeof clienteId!=="undefined"?clienteId:"");
+                setFormOf(f=>({...f,nombre:r.nombre,codigo:r.codigo,
+                  precioBase:r.precioBase||f.precioBase,
+                  precioAnterior:r.precioAnterior,
+                  calibre:r.calibre||f.calibre, metros:r.metros||f.metros,
+                  dto:r.dto||f.dto,
+                  precioFinalCat:r.precio,
+                  precio:r.precio||f.precio,
+                  extrasImporte:r.extrasImporte, extras:r.extras,
+                  composicion:r.composicion,
+                  descripcion:r.composicion||p.descripcion||f.descripcion,
+                  _requiereAprobacion:r.requiereAprobacion}));
                 if(p.requiereAprobacion){ alert("⚠️ El descuento elegido ("+(p.dtoTotal||"")+"% total) supera tu margen para este cliente.\nAl guardar se enviará a aprobación."); }
               }}
               style={{flex:1}}
