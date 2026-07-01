@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.68.0";
+const CRM_VERSION = "3.69.1";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -1310,6 +1310,145 @@ function AvisoPlanSemanal({usuario,semana,onNav}){
 // ═══════════════════════════════════════════════════════════════
 // MI SEMANA — 360° + Acceso a clientes
 // ═══════════════════════════════════════════════════════════════
+// (v3.69) RECUPERADO de v3.56.2: hilo de instrucciones/comentarios de la visita
+function ModalHiloVisita({visita, usuario, onClose, onGuardado}){
+  const [texto,setTexto]=React.useState("");
+  const [coments,setComents]=React.useState((visita&&visita.comentarios)||[]);
+  const [enviando,setEnviando]=React.useState(false);
+  // (v3.47.3) Releer la visita real de Firebase al abrir, por si los comentarios cambiaron en otro dispositivo
+  React.useEffect(function(){
+    if(!visita||!visita.id) return;
+    fetch(FB_BASE+"/visitas/"+encodeURIComponent(visita.id)).then(function(r){return r.ok?r.json():null;}).then(function(doc){
+      if(doc&&doc.fields&&doc.fields.comentarios){
+        try{
+          var arr=(doc.fields.comentarios.arrayValue&&doc.fields.comentarios.arrayValue.values)||[];
+          var parsed=arr.map(function(it){
+            var f=(it.mapValue&&it.mapValue.fields)||{};
+            return {texto:(f.texto&&f.texto.stringValue)||"",autor:(f.autor&&f.autor.stringValue)||"",
+              autorId:(f.autorId&&f.autorId.stringValue)||"",rol:(f.rol&&f.rol.stringValue)||"",
+              fecha:(f.fecha&&f.fecha.stringValue)||""};
+          });
+          setComents(parsed);
+        }catch(e){}
+      }
+    }).catch(function(){});
+  },[visita&&visita.id]);
+  if(!visita) return null;
+  var nota=visita.notas||visita.nota||"";
+  var cliente=visita.clienteNombre||visita.cliente||"—";
+  var rolLbl=usuario.rol==="ceo"?"CEO":usuario.rol==="director"?"Dirección":usuario.rol==="jefe"?"Jefe":"Comercial";
+  function enviar(){
+    if(!texto.trim()||enviando) return;
+    setEnviando(true);
+    var nuevo={texto:texto.trim(),autor:usuario.nombre,autorId:usuario.id,rol:rolLbl,
+      fecha:new Date().toLocaleDateString("es-ES")+" "+new Date().toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"})};
+    var nuevos=[].concat(coments,[nuevo]);
+    var actualizada=Object.assign({},visita,{comentarios:nuevos});
+    // (v3.47.3) Escritura COMPLETA del documento: si la visita no existía como doc, lo crea.
+    // El guardado parcial con updateMask fallaba en silencio cuando el doc no existía aún.
+    fbEscribir("visitas", visita.id, actualizada).then(function(ok){
+      if(ok===false){ setEnviando(false); alert("⚠️ No se pudo guardar la instrucción. Revisa tu conexión e inténtalo de nuevo."); return; }
+      setComents(nuevos); setTexto(""); setEnviando(false);
+      if(onGuardado) onGuardado(actualizada);
+      try{
+        var comercialId=(visita.agente||visita.agenteId||"");
+        var destMap={}; // email → usuario (evita duplicados)
+        function addDest(u){ if(u&&u.email&&u.id!==usuario.id){ destMap[u.email]=u; } }
+        // 1) El comercial dueño de la visita
+        addDest(USUARIOS.find(function(u){return (u.id||"").toUpperCase()===(comercialId||"").toUpperCase();}));
+        // 2) Todos los que ya participaron en el hilo (para que el CEO/jefe que inició se entere de la respuesta)
+        coments.forEach(function(c){
+          if(c.autorId){ addDest(USUARIOS.find(function(u){return u.id===c.autorId;})); }
+        });
+        // 3) Si escribe el comercial, avisar también a sus responsables (jefe de su equipo + dirección/CEO)
+        var soyComercial=!["jefe","director","ceo"].includes(usuario.rol);
+        if(soyComercial){
+          USUARIOS.forEach(function(u){
+            if((u.rol==="jefe"&&u.equipo===usuario.equipo)||u.rol==="director"||u.rol==="ceo") addDest(u);
+          });
+        }
+        var destinatarios=Object.keys(destMap).map(function(k){return destMap[k];});
+        if(destinatarios.length>0){
+          var cli=visita.clienteNombre||visita.cliente||"";
+          var asunto="💬 Instrucción de visita · "+cli;
+          var esc=function(s){return (s||"").replace(/</g,"&lt;").replace(/>/g,"&gt;");};
+          var html='<div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto">'
+            +'<div style="background:#1E3A5F;color:#fff;padding:16px 20px;border-radius:12px 12px 0 0">'
+            +'<h2 style="margin:0;font-size:17px">💬 Nueva instrucción de visita</h2></div>'
+            +'<div style="border:1px solid #E2E8F0;border-top:none;padding:18px 20px;border-radius:0 0 12px 12px">'
+            +'<p style="margin:0 0 6px;font-size:14px"><b>Cliente:</b> '+esc(cli)+'</p>'
+            +'<p style="margin:0 0 6px;font-size:13px;color:#64748B"><b>Fecha visita:</b> '+esc(visita.fecha||"")+(visita.hora?" "+esc(visita.hora):"")+'</p>'
+            +'<div style="background:#EFF6FF;border-left:3px solid #1D4ED8;padding:12px 14px;border-radius:8px;margin:14px 0">'
+            +'<p style="margin:0;font-size:14px;line-height:1.5">'+esc(nuevo.texto)+'</p></div>'
+            +'<p style="margin:0;font-size:12px;color:#94A3B8">De: '+esc(nuevo.autor)+' ('+esc(nuevo.rol)+') · '+esc(nuevo.fecha)+'</p>'
+            +'</div></div>';
+          destinatarios.forEach(function(u){
+            fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},
+              body:JSON.stringify({to:u.email,subject:asunto,html:html})
+            }).then(function(r){if(r.ok)console.log("✅ Email instrucción enviado a "+u.nombre);}).catch(function(){});
+          });
+        }
+      }catch(e){ console.warn("[hilo visita email]",e); }
+    }).catch(function(e){ setEnviando(false); alert("Error al guardar: "+e.message); });
+  }
+  return(
+    <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:9998,
+      display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+      <div onClick={function(e){e.stopPropagation();}} style={{background:"#fff",borderRadius:"18px 18px 0 0",
+        width:"100%",maxWidth:560,maxHeight:"85vh",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        {/* Cabecera */}
+        <div style={{padding:"16px 18px",borderBottom:"1px solid #E2E8F0"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+            <div style={{flex:1,minWidth:0}}>
+              <p style={{margin:0,fontSize:15,fontWeight:800,color:"#0F172A"}}>{cliente}</p>
+              <p style={{margin:"2px 0 0",fontSize:11,color:"#94A3B8"}}>
+                {visita.fecha||""}{visita.hora?" · "+visita.hora:""}
+              </p>
+            </div>
+            <button onClick={onClose} style={{background:"none",border:"none",fontSize:22,color:"#94A3B8",cursor:"pointer",lineHeight:1}}>✕</button>
+          </div>
+          {nota&&<p style={{margin:"10px 0 0",fontSize:13,color:"#1F2937",lineHeight:1.4,padding:"8px 12px",
+            background:"#F8FAFC",borderRadius:9,borderLeft:"3px solid #22C55E",whiteSpace:"pre-wrap"}}>💬 {nota}</p>}
+        </div>
+        {/* Hilo */}
+        <div style={{flex:1,overflowY:"auto",padding:"14px 18px",background:"#FAFAFA"}}>
+          <p style={{margin:"0 0 10px",fontSize:11,fontWeight:800,color:"#64748B",textTransform:"uppercase",letterSpacing:.4}}>Instrucciones y seguimiento</p>
+          {coments.length===0?(
+            <p style={{margin:0,fontSize:12,color:"#94A3B8"}}>Sin instrucciones aún. Escribe la primera para que le llegue al comercial.</p>
+          ):(
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {coments.map(function(c,i){
+                var esMio=(c.autorId||"")===usuario.id;
+                return(
+                  <div key={i} style={{alignSelf:esMio?"flex-end":"flex-start",maxWidth:"85%",
+                    background:esMio?"#1E3A5F":"#fff",color:esMio?"#fff":"#0F172A",
+                    borderRadius:12,padding:"8px 12px",border:esMio?"none":"1px solid #E2E8F0"}}>
+                    <p style={{margin:0,fontSize:13,lineHeight:1.4,whiteSpace:"pre-wrap"}}>{c.texto}</p>
+                    <p style={{margin:"4px 0 0",fontSize:10,opacity:.7}}>{c.autor}{c.rol?" · "+c.rol:""} · {c.fecha}</p>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        {/* Input */}
+        <div style={{padding:"12px 18px",borderTop:"1px solid #E2E8F0",display:"flex",gap:6,alignItems:"flex-end"}}>
+          <textarea value={texto} onChange={function(e){setTexto(e.target.value);}} rows={1}
+            placeholder="Escribe una instrucción…"
+            style={{flex:1,padding:"10px 12px",borderRadius:10,border:"1.5px solid #CBD5E1",fontSize:13,
+              outline:"none",resize:"none",fontFamily:"inherit",boxSizing:"border-box",maxHeight:100}}/>
+          <button onClick={enviar} disabled={!texto.trim()||enviando}
+            style={{padding:"10px 16px",borderRadius:10,border:"none",fontSize:13,fontWeight:700,cursor:"pointer",
+              background:texto.trim()&&!enviando?"#1E3A5F":"#E2E8F0",color:texto.trim()&&!enviando?"#fff":"#94A3B8"}}>
+            {enviando?"…":"Enviar"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB,oportunidadesDB,incidenciasDB,muestrasDB,ofertasDB,setOfertasDB,portalUsersDB,actividad,onAbrirCliente,onAbrirProyecto,onNewCliente,onAbrirOportunidad}){
   var semActual=getSemanaISO();
   // (v3.22.50) Recargar ofertas al entrar a Mi Semana
@@ -1328,6 +1467,8 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
   var _s4=React.useState("360");var tab=_s4[0],setTab=_s4[1];
   var _s8=React.useState("");var busqLibre=_s8[0],setBusqLibre=_s8[1];
   var _s9=React.useState(false);var showNuevoMS=_s9[0],setShowNuevoMS=_s9[1];
+  // (v3.69) Recuperado: hilo de comentarios/instrucciones de la visita
+  var _vhilo=React.useState(null);var visitaHilo=_vhilo[0],setVisitaHilo=_vhilo[1];
   var _s11=React.useState({});var clientesNuevosMap=_s11[0],setClientesNuevosMap=_s11[1];
   var _potSem=React.useState([]);var potencialesSem=_potSem[0],setPotencialesSem=_potSem[1];
   var _potAll=React.useState({});var potencialesPorCliente=_potAll[0],setPotencialesPorCliente=_potAll[1];
@@ -3337,11 +3478,7 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
                             var ic=visIcon(v.resultado);
                             var lb=visLabel(v.resultado);
                             return (
-                              <div key={v.id} onClick={function(){
-                                var cli=(clientesFB||[]).find(function(x){return (x.nombre||x.NOMBRE||"").toUpperCase()===(v.clienteNombre||v.cliente||"").toUpperCase();});
-                                if(cli&&onAbrirCliente) onAbrirCliente(cli);
-                                else if(onAbrirCliente) onAbrirCliente(v.clienteNombre||v.cliente);
-                              }} style={{padding:"10px 12px",borderRadius:10,marginBottom:6,cursor:"pointer",
+                              <div key={v.id} onClick={function(){setVisitaHilo(v);}} style={{padding:"10px 12px",borderRadius:10,marginBottom:6,cursor:"pointer",
                                 background:"#FAFAFA",borderLeft:"3px solid "+c}}>
                                 <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>
                                   {v.clienteNombre||v.cliente||"—"}
@@ -3351,6 +3488,7 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
                                   {!esAgenteRol&&(v.gps&&(v.gps.lat||v.gps.latitude)?<a href={"https://www.google.com/maps?q="+(v.gps.lat||v.gps.latitude)+","+(v.gps.lng||v.gps.longitude)} target="_blank" rel="noopener" onClick={function(e){e.stopPropagation();}} style={{marginLeft:6,verticalAlign:"middle",display:"inline-block"}}><svg width="20" height="20" viewBox="0 0 92 92" fill="none"><rect x="0" y="14" width="64" height="64" rx="8" fill="#34A853" transform="rotate(-2 32 46)"/><polygon points="0,78 32,46 64,78" fill="#1A73E8"/><polygon points="0,14 32,46 0,78" fill="#FBBC04"/><polygon points="64,14 32,46 64,78" fill="#4285F4"/><polygon points="0,14 32,46 64,14" fill="#34A853"/><circle cx="28" cy="44" r="10" fill="#fff"/><text x="28" y="49" textAnchor="middle" fill="#4285F4" fontSize="16" fontWeight="bold" fontFamily="Arial">G</text><path d="M62 8C55.4 8 50 13.4 50 20c0 9 12 22 12 22s12-13 12-22c0-6.6-5.4-12-12-12z" fill="#EA4335"/><circle cx="62" cy="20" r="4.5" fill="#B31412"/></svg></a>:<span style={{marginLeft:6,verticalAlign:"middle",display:"inline-block",opacity:.3}}><svg width="20" height="20" viewBox="0 0 92 92" fill="none"><rect x="0" y="14" width="64" height="64" rx="8" fill="#CBD5E1" transform="rotate(-2 32 46)"/><polygon points="0,78 32,46 64,78" fill="#94A3B8"/><polygon points="0,14 32,46 0,78" fill="#CBD5E1"/><polygon points="64,14 32,46 64,78" fill="#94A3B8"/><polygon points="0,14 32,46 64,14" fill="#CBD5E1"/><path d="M62 8C55.4 8 50 13.4 50 20c0 9 12 22 12 22s12-13 12-22c0-6.6-5.4-12-12-12z" fill="#94A3B8"/><circle cx="62" cy="20" r="4.5" fill="#64748B"/></svg></span>)}
                                 </p>
                                 {nota?<p style={{margin:"4px 0 0",fontSize:12,color:"#1F2937",lineHeight:1.4,padding:"5px 10px",background:"rgba(255,255,255,.7)",borderRadius:7,border:"1px solid rgba(0,0,0,.06)",whiteSpace:"pre-wrap"}}>💬 {nota}</p>:null}
+                                {(v.comentarios||[]).length>0?<p style={{margin:"4px 0 0",fontSize:11,fontWeight:700,color:"#1D4ED8"}}>💬 {(v.comentarios||[]).length} instrucci{(v.comentarios||[]).length===1?"ón":"ones"} · toca para ver</p>:<p style={{margin:"4px 0 0",fontSize:10,color:"#94A3B8"}}>toca para dar instrucciones</p>}
 
                               </div>
                             );
@@ -3380,17 +3518,14 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
                           var agName=!esAgenteRol&&(v.agente||v.agenteId)?(nombreAgenteId(v.agente||v.agenteId)||v.agente||v.agenteId):"";
                           var opCli=null;
                           return (
-                            <div key={v.id} onClick={function(){
-                              var cli=(clientesFB||[]).find(function(x){return (x.nombre||x.NOMBRE||"").toUpperCase()===(v.clienteNombre||v.cliente||"").toUpperCase();});
-                              if(cli&&onAbrirCliente) onAbrirCliente(cli);
-                              else if(onAbrirCliente) onAbrirCliente(v.clienteNombre||v.cliente);
-                            }} style={{padding:"10px 12px",borderRadius:10,marginBottom:6,cursor:"pointer",
+                            <div key={v.id} onClick={function(){setVisitaHilo(v);}} style={{padding:"10px 12px",borderRadius:10,marginBottom:6,cursor:"pointer",
                               background:"#FAFAFA",borderLeft:"3px solid "+c}}>
                               <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{v.clienteNombre||v.cliente||"—"}{!esAgenteRol&&agName?<span style={{color:T.muted,fontWeight:500,fontSize:11}}> ({agName})</span>:null}</p>
                               <p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>{v.fecha||""}{v.hora?" · "+v.hora:""} · {ic} <span style={{color:c,fontWeight:600}}>{lb}</span>
                                 {!esAgenteRol&&(v.gps&&(v.gps.lat||v.gps.latitude)?<a href={"https://www.google.com/maps?q="+(v.gps.lat||v.gps.latitude)+","+(v.gps.lng||v.gps.longitude)} target="_blank" rel="noopener" onClick={function(e){e.stopPropagation();}} style={{marginLeft:6,verticalAlign:"middle",display:"inline-block"}}><svg width="20" height="20" viewBox="0 0 92 92" fill="none"><rect x="0" y="14" width="64" height="64" rx="8" fill="#34A853" transform="rotate(-2 32 46)"/><polygon points="0,78 32,46 64,78" fill="#1A73E8"/><polygon points="0,14 32,46 0,78" fill="#FBBC04"/><polygon points="64,14 32,46 64,78" fill="#4285F4"/><polygon points="0,14 32,46 64,14" fill="#34A853"/><circle cx="28" cy="44" r="10" fill="#fff"/><text x="28" y="49" textAnchor="middle" fill="#4285F4" fontSize="16" fontWeight="bold" fontFamily="Arial">G</text><path d="M62 8C55.4 8 50 13.4 50 20c0 9 12 22 12 22s12-13 12-22c0-6.6-5.4-12-12-12z" fill="#EA4335"/><circle cx="62" cy="20" r="4.5" fill="#B31412"/></svg></a>:<span style={{marginLeft:6,verticalAlign:"middle",display:"inline-block",opacity:.3}}><svg width="20" height="20" viewBox="0 0 92 92" fill="none"><rect x="0" y="14" width="64" height="64" rx="8" fill="#CBD5E1" transform="rotate(-2 32 46)"/><polygon points="0,78 32,46 64,78" fill="#94A3B8"/><polygon points="0,14 32,46 0,78" fill="#CBD5E1"/><polygon points="64,14 32,46 64,78" fill="#94A3B8"/><polygon points="0,14 32,46 64,14" fill="#CBD5E1"/><path d="M62 8C55.4 8 50 13.4 50 20c0 9 12 22 12 22s12-13 12-22c0-6.6-5.4-12-12-12z" fill="#94A3B8"/><circle cx="62" cy="20" r="4.5" fill="#64748B"/></svg></span>)}
                               </p>
                               {nota?<p style={{margin:"4px 0 0",fontSize:12,color:"#1F2937",lineHeight:1.4,padding:"5px 10px",background:"rgba(255,255,255,.7)",borderRadius:7,border:"1px solid rgba(0,0,0,.06)",whiteSpace:"pre-wrap"}}>💬 {nota}</p>:null}
+                              {(v.comentarios||[]).length>0?<p style={{margin:"4px 0 0",fontSize:11,fontWeight:700,color:"#1D4ED8"}}>💬 {(v.comentarios||[]).length} instrucci{(v.comentarios||[]).length===1?"ón":"ones"} · toca para ver</p>:<p style={{margin:"4px 0 0",fontSize:10,color:"#94A3B8"}}>toca para dar instrucciones</p>}
 
                             </div>
                           );
@@ -4482,6 +4617,17 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
           </div>
         </div>
       )}
+      {/* (v3.69) RECUPERADO: Modal hilo de instrucciones de visita */}
+      {visitaHilo&&<ModalHiloVisita visita={visitaHilo} usuario={usuario}
+        onClose={function(){setVisitaHilo(null);}}
+        onGuardado={function(actualizada){
+          setVisitaHilo(actualizada);
+          setVisitasDB(function(prev){
+            var arr=prev||[];
+            var existe=arr.some(function(x){return x.id===actualizada.id;});
+            return existe?arr.map(function(x){return x.id===actualizada.id?actualizada:x;}):[actualizada].concat(arr);
+          });
+        }}/>}
     </div>
   );
 }
