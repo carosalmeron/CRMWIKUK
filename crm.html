@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.81.0";
+const CRM_VERSION = "3.83.0";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -13310,40 +13310,54 @@ function AnalisisEstrategias({usuario, estrategiasDB, ofertasDB, portalUsersDB, 
      return b.veces-a.veces;
    }).slice(0,15);
 
-  // (v3.81) Lanzamiento por lanzamiento: se guardan como estrategias-hijas que comparten lanzamientoNombre.
-  // Agrupamos por nombre de campaña y contamos clientes (cada estrategia-hija = 1 cliente ofrecido).
+  // (v3.83) Lanzamiento por lanzamiento: EMBUDO ofrecido → con oferta → con pedido
   var ofs=(ofertasDB||[]).filter(function(o){return !o.eliminada;});
   var lanzGrupos={};
   ests.forEach(function(e){
     var nom=e.lanzamientoNombre||(esLanzamiento(e)?(e.nombreCampana||(e.productosCampana||[]).join(", ")):null);
     if(!nom) return;
-    // solo cuentan las que son parte de un lanzamiento (tienen lanzamientoNombre) o son el lanzamiento madre
     var esParte=!!e.lanzamientoNombre||esLanzamiento(e);
     if(!esParte) return;
-    if(!lanzGrupos[nom]) lanzGrupos[nom]={nombre:nom,ofrecidos:0,aceptaron:0,pedidos:0,productos:"",com:"",fecha:""};
+    if(!lanzGrupos[nom]) lanzGrupos[nom]={nombre:nom,ofrecidos:0,conOferta:0,pedidos:0,productos:"",com:"",fecha:"",_ids:[]};
     var g=lanzGrupos[nom];
-    // cada estrategia-hija representa un cliente al que se ofreció
     if(e.lanzamientoNombre){
       g.ofrecidos++;
+      g._ids.push(e.id);
       var r=resultadoEst(e);
-      if(r==="pedido"){g.aceptaron++;g.pedidos++;}
-      else if(r==="curso"){g.aceptaron++;} // aprobada/en curso = el cliente lo cogió
+      // con pedido = la estrategia acabó en pedido
+      if(r==="pedido") g.pedidos++;
     } else {
-      // estrategia madre con lista propia de clientes (por si acaso)
       var lc=(e.clientesLanzamiento||[]).length;
       if(lc>g.ofrecidos) g.ofrecidos=lc;
+      g._ids.push(e.id);
     }
     if(!g.productos) g.productos=(e.productosCampana||[]).join(", ")||"";
     if(!g.com) g.com=nomCom(e);
     if(!g.fecha) g.fecha=e.fecha||e.fechaCreacion||"";
-    // cruzar con ofertas generadas
-    var ofsDeEst=ofs.filter(function(o){return (o.estrategiaId===e.id)||(o.desdeEstrategia===e.id);});
-    ofsDeEst.forEach(function(o){ if(o.estado==="pedido") g.pedidos++; });
+  });
+  // cruzar con ofertas: cuántos clientes tienen oferta generada, y cuántas en pedido
+  Object.keys(lanzGrupos).forEach(function(nom){
+    var g=lanzGrupos[nom];
+    var clientesConOferta={}, clientesConPedido={};
+    ofs.forEach(function(o){
+      var deEste=(g._ids.indexOf(o.estrategiaId)>=0)||(g._ids.indexOf(o.desdeEstrategia)>=0)||(o.lanzamientoNombre===nom);
+      if(!deEste) return;
+      var cli=o.clienteId||o.clienteNombre||o.id;
+      if(cli){clientesConOferta[cli]=true; if(o.estado==="pedido")clientesConPedido[cli]=true;}
+    });
+    var nOferta=Object.keys(clientesConOferta).length;
+    var nPedidoOf=Object.keys(clientesConPedido).length;
+    if(nOferta>g.conOferta) g.conOferta=nOferta;
+    // los pedidos: máximo entre los de estrategia y los de oferta
+    if(nPedidoOf>g.pedidos) g.pedidos=nPedidoOf;
+    // con oferta no puede ser menor que pedidos
+    if(g.conOferta<g.pedidos) g.conOferta=g.pedidos;
   });
   var lanzArr=Object.keys(lanzGrupos).map(function(k){
     var g=lanzGrupos[k];
-    var tasa=g.ofrecidos>0?Math.round(g.aceptaron/g.ofrecidos*100):null;
-    return {nombre:g.nombre,productos:g.productos,ofrecidos:g.ofrecidos,aceptaron:g.aceptaron,pedidos:g.pedidos,tasa:tasa,com:g.com,fecha:g.fecha};
+    var tasaPed=g.ofrecidos>0?Math.round(g.pedidos/g.ofrecidos*100):null;
+    var tasaOf=g.ofrecidos>0?Math.round(g.conOferta/g.ofrecidos*100):null;
+    return {nombre:g.nombre,productos:g.productos,ofrecidos:g.ofrecidos,conOferta:g.conOferta,pedidos:g.pedidos,tasa:tasaPed,tasaOf:tasaOf,com:g.com,fecha:g.fecha};
   }).sort(function(a,b){
     if(a.tasa==null&&b.tasa==null)return b.ofrecidos-a.ofrecidos;
     if(a.tasa==null)return 1;if(b.tasa==null)return -1;
@@ -13354,20 +13368,35 @@ function AnalisisEstrategias({usuario, estrategiasDB, ofertasDB, portalUsersDB, 
   var comMap={};
   ests.forEach(function(e){
     var c=nomCom(e);var r=resultadoEst(e);
-    if(!comMap[c]) comMap[c]={total:0,pedido:0,ko:0,curso:0,pend:0,lanz:0,indiv:0};
+    if(!comMap[c]) comMap[c]={total:0,pedido:0,ko:0,curso:0,pend:0,lanz:0,indiv:0,abandonadas:0,bienForm:0};
     comMap[c].total++;
     if(esLanzamiento(e))comMap[c].lanz++;else comMap[c].indiv++;
     if(r==="pedido")comMap[c].pedido++;else if(r==="ko")comMap[c].ko++;else if(r==="curso")comMap[c].curso++;else comMap[c].pend++;
+    // (v3.82) estrategia bien planteada: tiene producto identificado
+    var _tp=(e.productosCampana&&e.productosCampana.length)||e.producto||(e.ofActual&&e.ofActual.nombre)||(e.ofertas&&e.ofertas.length);
+    if(_tp) comMap[c].bienForm++;
+    // (v3.82) abandonada: en curso o pendiente con +30 días sin cerrar
+    if(r==="curso"||r==="pendiente"){
+      var dd=diasDesde(e.fecha||e.fechaCreacion);
+      if(dd!=null&&dd>30) comMap[c].abandonadas++;
+    }
   });
   var comArr=Object.keys(comMap).map(function(k){
     var d=comMap[k];var cerr=d.pedido+d.ko;
+    var conv=cerr>0?Math.round(d.pedido/cerr*100):null;
+    // (v3.82) PUNTUACIÓN MIXTA (igual que ofertas): actividad + ventas + eficiencia − abandono
+    var pAct=d.bienForm;
+    var pVol=d.pedido*10;
+    var fiab=Math.min(cerr,8)/8;
+    var pEfic=cerr>0?Math.round((d.pedido/cerr*100)*0.4*fiab):0;
+    var penal=d.abandonadas*3;
+    var score=pAct+pVol+pEfic-penal;
     return {com:k,total:d.total,pedido:d.pedido,ko:d.ko,curso:d.curso,pend:d.pend,lanz:d.lanz,indiv:d.indiv,
-      conv:cerr>0?Math.round(d.pedido/cerr*100):null};
+      abandonadas:d.abandonadas,conv:conv,score:score};
   }).sort(function(a,b){
-    if(a.conv==null&&b.conv==null)return b.total-a.total;
-    if(a.conv==null)return 1; if(b.conv==null)return -1;
-    if(b.conv!==a.conv)return b.conv-a.conv;
-    return b.pedido-a.pedido;
+    if(b.score!==a.score)return b.score-a.score;
+    if(b.pedido!==a.pedido)return b.pedido-a.pedido;
+    return (b.conv||0)-(a.conv||0);
   });
 
   function kpi(n,label,color,bg){
@@ -13442,9 +13471,9 @@ function AnalisisEstrategias({usuario, estrategiasDB, ofertasDB, portalUsersDB, 
     vista==="lanzamientos"&&React.createElement("div",null,
       lanzArr.length===0?React.createElement("p",{style:{color:T2.muted,fontSize:13,textAlign:"center",padding:20}},"No hay lanzamientos en este periodo."):
       React.createElement("div",null,
-        React.createElement("p",{style:{margin:"0 0 10px",fontSize:12,color:T2.muted}},"Cada lanzamiento con su tasa de aceptación (clientes que lo cogieron ÷ clientes a los que se ofreció). Mejor campaña arriba:"),
+        React.createElement("p",{style:{margin:"0 0 10px",fontSize:12,color:T2.muted}},"Embudo de cada lanzamiento: a cuántos se ofreció → cuántos recibieron oferta → cuántos hicieron pedido. Mejor tasa a pedido arriba:"),
         lanzArr.map(function(l,i){
-          var col=l.tasa==null?"#94A3B8":l.tasa>=50?"#22C55E":l.tasa>=25?"#F59E0B":"#DC2626";
+          var col=l.tasa==null?"#94A3B8":l.tasa>=30?"#22C55E":l.tasa>=15?"#F59E0B":"#DC2626";
           var med=i===0?"🥇":i===1?"🥈":i===2?"🥉":(i+1)+"º";
           return React.createElement("div",{key:i,style:{background:"#fff",border:"1.5px solid "+T2.border,borderLeft:"5px solid "+col,borderRadius:12,padding:"14px",marginBottom:10}},
             React.createElement("div",{style:{display:"flex",alignItems:"flex-start",gap:10,marginBottom:10}},
@@ -13454,15 +13483,17 @@ function AnalisisEstrategias({usuario, estrategiasDB, ofertasDB, portalUsersDB, 
                 React.createElement("div",{style:{fontSize:10.5,color:T2.muted,marginTop:2}},(l.productos||"—")+(l.com?" · "+l.com:""))),
               React.createElement("div",{style:{textAlign:"right"}},
                 React.createElement("div",{style:{fontWeight:900,fontSize:24,color:col,lineHeight:1}},l.tasa!=null?l.tasa+"%":"—"),
-                React.createElement("div",{style:{fontSize:8,fontWeight:700,color:T2.muted,textTransform:"uppercase"}},"aceptación"))),
-            // barra
-            React.createElement("div",{style:{height:8,background:"#F1F5F9",borderRadius:5,overflow:"hidden",marginBottom:10}},
-              React.createElement("div",{style:{height:"100%",width:(l.tasa||0)+"%",background:col,borderRadius:5}})),
-            React.createElement("div",{style:{display:"flex",gap:6}},
-              [["👥",l.ofrecidos,"Ofrecido",T2.navy,"#F8FAFC"],["🤝",l.aceptaron,"Aceptaron","#0891B2","#ECFEFF"],["✅",l.pedidos,"Pedidos","#22C55E","#F0FDF4"]].map(function(b,j){
-                return React.createElement("div",{key:j,style:{flex:1,background:b[4],border:"1px solid "+b[3]+"30",borderRadius:8,padding:"8px 4px",textAlign:"center"}},
-                  React.createElement("div",{style:{fontSize:17,fontWeight:900,color:b[3],lineHeight:1}},b[1]),
-                  React.createElement("div",{style:{fontSize:8,fontWeight:700,color:T2.muted,marginTop:3,textTransform:"uppercase"}},b[2]));
+                React.createElement("div",{style:{fontSize:8,fontWeight:700,color:T2.muted,textTransform:"uppercase"}},"a pedido"))),
+            // Embudo con barras proporcionales
+            React.createElement("div",{style:{marginBottom:6}},
+              [["👥 Ofrecido",l.ofrecidos,T2.navy],["📄 Con oferta",l.conOferta,"#0891B2"],["✅ Con pedido",l.pedidos,"#22C55E"]].map(function(f,j){
+                var pct=l.ofrecidos>0?Math.round(f[1]/l.ofrecidos*100):0;
+                return React.createElement("div",{key:j,style:{marginBottom:6}},
+                  React.createElement("div",{style:{display:"flex",justifyContent:"space-between",fontSize:11.5,marginBottom:2}},
+                    React.createElement("span",{style:{fontWeight:600,color:T2.text}},f[0]),
+                    React.createElement("span",{style:{fontWeight:800,color:f[2]}},f[1]+(j>0?" · "+pct+"%":""))),
+                  React.createElement("div",{style:{height:7,background:"#F1F5F9",borderRadius:4,overflow:"hidden"}},
+                    React.createElement("div",{style:{height:"100%",width:pct+"%",background:f[2],borderRadius:4}})));
               })));
         }))),
 
@@ -13486,19 +13517,26 @@ function AnalisisEstrategias({usuario, estrategiasDB, ofertasDB, portalUsersDB, 
 
     // COMERCIAL
     vista==="comercial"&&React.createElement("div",null,
+      React.createElement("div",{style:{background:"#F8FAFC",border:"1px solid "+T2.border,borderRadius:9,padding:"9px 12px",marginBottom:12,fontSize:11,color:T2.muted,lineHeight:1.5}},
+        "🏆 ",React.createElement("b",{style:{color:T2.text}},"Puntos = actividad + ventas + eficiencia − abandono."),
+        " +1 por estrategia planteada, +10 por pedido ganado, bonus por buena conversión (con volumen), −3 por estrategia con +30 días sin cerrar."),
       comArr.length===0?React.createElement("p",{style:{color:T2.muted,fontSize:13,textAlign:"center",padding:20}},"Sin datos."):
       comArr.map(function(c,i){
         var col=c.conv!=null?(c.conv>=50?"#22C55E":c.conv>=30?"#F59E0B":"#DC2626"):"#94A3B8";
         var med=i===0?"🥇":i===1?"🥈":i===2?"🥉":(i+1)+"º";
-        return React.createElement("div",{key:i,style:{background:"#fff",border:"1.5px solid "+T2.border,borderLeft:"5px solid "+col,borderRadius:12,padding:"14px",marginBottom:10}},
+        return React.createElement("div",{key:i,style:{background:"#fff",border:"1.5px solid "+T2.border,borderLeft:"5px solid "+(i===0?"#EAB308":i===1?"#94A3B8":i===2?"#B45309":T2.border),borderRadius:12,padding:"14px",marginBottom:10}},
           React.createElement("div",{style:{display:"flex",alignItems:"center",gap:10,marginBottom:10}},
             React.createElement("span",{style:{fontSize:i<3?20:14,fontWeight:900,color:T2.muted,minWidth:28,textAlign:"center"}},med),
             React.createElement("div",{style:{flex:1}},
               React.createElement("div",{style:{fontWeight:800,fontSize:15,lineHeight:1.1}},c.com),
-              React.createElement("div",{style:{fontSize:10.5,color:T2.muted,marginTop:2}},"🎯 "+c.indiv+" indiv · 🚀 "+c.lanz+" lanz")),
+              React.createElement("div",{style:{fontSize:10.5,color:T2.muted,marginTop:2}},"🎯 "+c.indiv+" indiv · 🚀 "+c.lanz+" lanz"+(c.abandonadas>0?" · ⚠️ "+c.abandonadas+" abandonadas":""))),
             React.createElement("div",{style:{textAlign:"right"}},
-              React.createElement("div",{style:{fontWeight:900,fontSize:24,color:col,lineHeight:1}},c.conv!=null?c.conv+"%":"—"),
-              React.createElement("div",{style:{fontSize:8.5,fontWeight:700,color:T2.muted,textTransform:"uppercase"}},"conversión"))),
+              React.createElement("div",{style:{fontWeight:900,fontSize:24,color:T2.navy,lineHeight:1}},c.score),
+              React.createElement("div",{style:{fontSize:8.5,fontWeight:700,color:T2.muted,textTransform:"uppercase"}},"puntos"))),
+          React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8,marginBottom:10}},
+            React.createElement("div",{style:{flex:1,height:8,background:"#F1F5F9",borderRadius:5,overflow:"hidden"}},
+              React.createElement("div",{style:{height:"100%",width:(c.conv||0)+"%",background:col,borderRadius:5}})),
+            React.createElement("span",{style:{fontSize:11,fontWeight:800,color:col,minWidth:38,textAlign:"right"}},c.conv!=null?c.conv+"%":"—")),
           React.createElement("div",{style:{display:"flex",gap:6}},
             [["✅",c.pedido,"Pedidos","#22C55E","#F0FDF4"],["❌",c.ko,"KO","#DC2626","#FEF2F2"],["⚡",c.curso,"Curso","#1F5FA8","#EFF6FF"],["📊",c.total,"Total",T2.navy,"#F8FAFC"]].map(function(b,j){
               return React.createElement("div",{key:j,style:{flex:1,background:b[4],border:"1px solid "+b[3]+"30",borderRadius:8,padding:"8px 4px",textAlign:"center"}},
