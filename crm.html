@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.76.0";
+const CRM_VERSION = "3.77.0";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -11649,6 +11649,10 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
           </p>
         </div>
         <div style={{display:"flex",gap:8}}>
+          {typeof onNavegar==="function"&&<button onClick={function(){onNavegar("analisis_estrategias");}}
+            style={{background:"#fff",color:T.navy,border:"1.5px solid "+T.navy,borderRadius:9,padding:"9px 12px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+            📈 Análisis
+          </button>}
           <button onClick={()=>{
               const cerrando = showNuevaEst;
               setShowNuevaEst(v=>!v);
@@ -13217,6 +13221,223 @@ function PlanificacionCompras({usuario}){
       </div>
     </details>}
   </div>;
+}
+
+// (v3.77) Panel de Análisis de Estrategias — tipo, conversión, artículos problemáticos, por comercial
+function AnalisisEstrategias({usuario, estrategiasDB, portalUsersDB, onBack}){
+  var _pr=React.useState("90");var periodo=_pr[0],setPeriodo=_pr[1];
+  var _vw=React.useState("resumen");var vista=_vw[0],setVista=_vw[1];
+  var T2=(typeof T!=="undefined")?T:{navy:"#0F172A",amber:"#C2660C",muted:"#64748B",border:"#E2E8F0",text:"#0F172A"};
+  var hoy=new Date();
+
+  function diasDesde(fstr){
+    if(!fstr) return null;
+    var d;
+    if((fstr+"").includes("/")){var p=(fstr+"").split("/");if(p.length!==3)return null;var yy=parseInt(p[2]);if(yy<100)yy+=2000;d=new Date(yy,parseInt(p[1])-1,parseInt(p[0]));}
+    else d=new Date(fstr);
+    if(!d||isNaN(d.getTime()))return null;
+    return Math.floor((hoy-d)/86400000);
+  }
+  function nomCom(e){
+    if(e.agenteNombre) return e.agenteNombre;
+    if(typeof USUARIOS!=="undefined"){var u=USUARIOS.find(function(x){return x.id===e.agente;});if(u)return u.nombre;}
+    return e.agente||e.creadoPorNombre||"—";
+  }
+  function esLanzamiento(e){
+    return e.tipoEst==="lanzamiento"||e.tipo==="lanzamiento"||(e.productosCampana&&e.productosCampana.length>0)||(e.clientesLanzamiento&&e.clientesLanzamiento.length>0);
+  }
+  // resultado final de una estrategia: 'pedido' | 'ko' | 'curso' | 'pendiente'
+  function resultadoEst(e){
+    var cf=e.cierreFinal&&e.cierreFinal.resultado;
+    if(cf==="pedido") return "pedido";
+    if(cf==="ko") return "ko";
+    var r=e.resolucion&&e.resolucion.tipo;
+    if(e.estado==="pedido") return "pedido";
+    if(e.estado==="rechazada"||r==="rechazada") return "ko";
+    if(e.estado==="aprobada"||e.estado==="activa"||r==="aprobada") return "curso";
+    return "pendiente";
+  }
+
+  var ests=(estrategiasDB||[]).filter(function(e){
+    if(e.eliminada) return false;
+    if(periodo==="todo") return true;
+    var dd=diasDesde(e.fecha||e.fechaCreacion||e.createdAt);
+    if(dd==null) return true;
+    return dd<=parseInt(periodo);
+  });
+
+  // Clasificación por tipo
+  var indiv=ests.filter(function(e){return !esLanzamiento(e);});
+  var lanz=ests.filter(function(e){return esLanzamiento(e);});
+  function stats(arr){
+    var ped=0,ko=0,curso=0,pend=0;
+    arr.forEach(function(e){var r=resultadoEst(e);if(r==="pedido")ped++;else if(r==="ko")ko++;else if(r==="curso")curso++;else pend++;});
+    var cerr=ped+ko;
+    return {total:arr.length,pedido:ped,ko:ko,curso:curso,pend:pend,cerr:cerr,conv:cerr>0?Math.round(ped/cerr*100):null};
+  }
+  var sInd=stats(indiv), sLan=stats(lanz), sAll=stats(ests);
+
+  // Artículos problemáticos: producto en varias estrategias, con mala conversión / caros
+  var prodMap={};
+  ests.forEach(function(e){
+    var prods=[];
+    if(e.productosCampana&&e.productosCampana.length) prods=e.productosCampana.slice();
+    else if(e.ofertas&&e.ofertas.length){ e.ofertas.forEach(function(o){ if(o.producto||o.nombre) prods.push(o.producto||o.nombre); }); }
+    else if(e.producto) prods=[e.producto];
+    else if(e.ofActual&&e.ofActual.nombre) prods=[e.ofActual.nombre];
+    var r=resultadoEst(e);
+    var com=nomCom(e);
+    prods.forEach(function(pn){
+      pn=(pn+"").trim(); if(!pn) return;
+      if(!prodMap[pn]) prodMap[pn]={n:0,pedido:0,ko:0,coms:{}};
+      prodMap[pn].n++;
+      if(r==="pedido")prodMap[pn].pedido++;
+      if(r==="ko")prodMap[pn].ko++;
+      prodMap[pn].coms[com]=(prodMap[pn].coms[com]||0)+1;
+    });
+  });
+  var prodArr=Object.keys(prodMap).map(function(k){
+    var d=prodMap[k];var cerr=d.pedido+d.ko;
+    return {producto:k,veces:d.n,pedido:d.pedido,ko:d.ko,
+      conv:cerr>0?Math.round(d.pedido/cerr*100):null,
+      nComerciales:Object.keys(d.coms).length};
+  }).filter(function(p){return p.veces>=2;}) // al menos 2 estrategias
+   .sort(function(a,b){
+     // problemáticos primero: los que tienen KO y baja conversión, y aparecen con varios comerciales
+     var ap=(a.conv!=null?a.conv:100), bp=(b.conv!=null?b.conv:100);
+     if(ap!==bp) return ap-bp; // peor conversión arriba
+     return b.veces-a.veces;
+   }).slice(0,15);
+
+  // Por comercial
+  var comMap={};
+  ests.forEach(function(e){
+    var c=nomCom(e);var r=resultadoEst(e);
+    if(!comMap[c]) comMap[c]={total:0,pedido:0,ko:0,curso:0,pend:0,lanz:0,indiv:0};
+    comMap[c].total++;
+    if(esLanzamiento(e))comMap[c].lanz++;else comMap[c].indiv++;
+    if(r==="pedido")comMap[c].pedido++;else if(r==="ko")comMap[c].ko++;else if(r==="curso")comMap[c].curso++;else comMap[c].pend++;
+  });
+  var comArr=Object.keys(comMap).map(function(k){
+    var d=comMap[k];var cerr=d.pedido+d.ko;
+    return {com:k,total:d.total,pedido:d.pedido,ko:d.ko,curso:d.curso,pend:d.pend,lanz:d.lanz,indiv:d.indiv,
+      conv:cerr>0?Math.round(d.pedido/cerr*100):null};
+  }).sort(function(a,b){
+    if(a.conv==null&&b.conv==null)return b.total-a.total;
+    if(a.conv==null)return 1; if(b.conv==null)return -1;
+    if(b.conv!==a.conv)return b.conv-a.conv;
+    return b.pedido-a.pedido;
+  });
+
+  function kpi(n,label,color,bg){
+    return React.createElement("div",{style:{flex:1,background:bg,border:"1.5px solid "+color+"40",borderRadius:10,padding:"12px 8px",textAlign:"center"}},
+      React.createElement("div",{style:{fontSize:23,fontWeight:900,color:color,lineHeight:1}},n),
+      React.createElement("div",{style:{fontSize:9,fontWeight:700,color:T2.muted,marginTop:4,textTransform:"uppercase",letterSpacing:".02em"}},label));
+  }
+  function tipoBox(titulo,emoji,s,color){
+    return React.createElement("div",{style:{flex:1,background:"#fff",border:"1.5px solid "+T2.border,borderTop:"4px solid "+color,borderRadius:10,padding:"12px 10px"}},
+      React.createElement("div",{style:{fontSize:12,fontWeight:800,marginBottom:8}},emoji+" "+titulo),
+      React.createElement("div",{style:{fontSize:28,fontWeight:900,color:color,lineHeight:1}},s.conv!=null?s.conv+"%":"—"),
+      React.createElement("div",{style:{fontSize:9.5,color:T2.muted,marginBottom:8}},"conversión"),
+      React.createElement("div",{style:{fontSize:10.5,color:T2.muted,lineHeight:1.5}},
+        "Total: "+s.total,React.createElement("br"),
+        "✅ "+s.pedido+" · ❌ "+s.ko+" · ⚡ "+s.curso));
+  }
+
+  var tabs=[["resumen","📊 Resumen"],["tipo","🎯 Tipo"],["articulos","📦 Artículos"],["comercial","👤 Comercial"]];
+
+  return React.createElement("div",{style:{padding:"0 0 40px"}},
+    React.createElement("button",{onClick:onBack,style:{margin:"0 0 14px",padding:"8px 16px",background:T2.navy,color:"#fff",border:"none",borderRadius:9,fontWeight:700,fontSize:13,cursor:"pointer"}},"← Volver"),
+    React.createElement("p",{style:{margin:"0 0 4px",fontSize:20,fontWeight:900,color:T2.text}},"📈 Análisis de Estrategias"),
+    React.createElement("p",{style:{margin:"0 0 12px",fontSize:12,color:T2.muted}},sAll.total+" estrategias · "+lanz.length+" lanzamientos · "+indiv.length+" individuales"),
+
+    React.createElement("div",{style:{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}},
+      [["30","30 días"],["90","90 días"],["365","1 año"],["todo","Histórico"]].map(function(p){
+        return React.createElement("button",{key:p[0],onClick:function(){setPeriodo(p[0]);},
+          style:{padding:"6px 12px",borderRadius:20,border:"1.5px solid "+(periodo===p[0]?T2.navy:T2.border),
+            background:periodo===p[0]?T2.navy:"#fff",color:periodo===p[0]?"#fff":T2.muted,fontSize:12,fontWeight:700,cursor:"pointer"}},p[1]);
+      })),
+
+    React.createElement("div",{style:{display:"flex",gap:6,marginBottom:16,overflowX:"auto",paddingBottom:4}},
+      tabs.map(function(t){
+        return React.createElement("button",{key:t[0],onClick:function(){setVista(t[0]);},
+          style:{padding:"8px 14px",borderRadius:9,border:"1.5px solid "+(vista===t[0]?T2.amber:T2.border),whiteSpace:"nowrap",
+            background:vista===t[0]?"#FEF3C7":"#fff",color:vista===t[0]?T2.amber:T2.muted,fontSize:12.5,fontWeight:700,cursor:"pointer"}},t[1]);
+      })),
+
+    // RESUMEN
+    vista==="resumen"&&React.createElement("div",null,
+      React.createElement("div",{style:{display:"flex",gap:8,marginBottom:12}},
+        kpi(sAll.conv!=null?sAll.conv+"%":"—","Conversión global","#22C55E","#F0FDF4"),
+        kpi(sAll.curso,"En curso","#1F5FA8","#EFF6FF"),
+        kpi(sAll.ko,"KO / perdidas","#DC2626","#FEF2F2")),
+      React.createElement("div",{style:{background:"#fff",border:"1.5px solid "+T2.border,borderRadius:10,padding:14,marginBottom:12}},
+        React.createElement("p",{style:{margin:"0 0 10px",fontSize:11,fontWeight:800,color:T2.muted,textTransform:"uppercase",letterSpacing:".04em"}},"Desglose de resultados"),
+        [["✅ Pedidos",sAll.pedido,"#22C55E"],["❌ KO",sAll.ko,"#DC2626"],["⚡ En curso",sAll.curso,"#1F5FA8"],["⏳ Pendientes aprob.",sAll.pend,"#F59E0B"]].map(function(r,i){
+          var pct=sAll.total>0?Math.round(r[1]/sAll.total*100):0;
+          return React.createElement("div",{key:i,style:{marginBottom:10}},
+            React.createElement("div",{style:{display:"flex",justifyContent:"space-between",fontSize:13}},
+              React.createElement("span",{style:{fontWeight:600}},r[0]),
+              React.createElement("span",{style:{fontWeight:800,color:r[2]}},r[1]+" · "+pct+"%")),
+            React.createElement("div",{style:{height:6,background:"#F1F5F9",borderRadius:4,overflow:"hidden",marginTop:4}},
+              React.createElement("div",{style:{height:"100%",width:pct+"%",background:r[2],borderRadius:4}})));
+        }))),
+
+    // TIPO
+    vista==="tipo"&&React.createElement("div",null,
+      React.createElement("div",{style:{display:"flex",gap:8,marginBottom:12}},
+        tipoBox("Individual","🎯",sInd,"#7C3AED"),
+        tipoBox("Lanzamiento","🚀",sLan,"#0891B2")),
+      React.createElement("div",{style:{background:"#FFFBEB",border:"1.5px solid #FDE68A",borderRadius:10,padding:14}},
+        React.createElement("p",{style:{margin:0,fontSize:12.5,color:"#92400E",lineHeight:1.5}},
+          "💡 ",
+          sInd.conv!=null&&sLan.conv!=null?
+            (sInd.conv>sLan.conv?"Las estrategias individuales convierten mejor ("+sInd.conv+"% vs "+sLan.conv+"%).":
+             sLan.conv>sInd.conv?"Los lanzamientos convierten mejor ("+sLan.conv+"% vs "+sInd.conv+"%).":
+             "Individuales y lanzamientos convierten parecido."):
+            "Aún faltan cierres para comparar bien los dos tipos."))),
+
+    // ARTÍCULOS
+    vista==="articulos"&&React.createElement("div",null,
+      prodArr.length===0?React.createElement("p",{style:{color:T2.muted,fontSize:13,textAlign:"center",padding:20}},"No hay productos con 2+ estrategias en este periodo."):
+      React.createElement("div",null,
+        React.createElement("p",{style:{margin:"0 0 10px",fontSize:12,color:T2.muted}},"Productos en 2+ estrategias, peor conversión arriba. Si va mal con varios comerciales, el problema es el producto/precio, no el vendedor:"),
+        prodArr.map(function(p,i){
+          var col=p.conv==null?"#94A3B8":p.conv>=50?"#22C55E":p.conv>=30?"#F59E0B":"#DC2626";
+          var alerta=p.nComerciales>=2&&p.conv!=null&&p.conv<40;
+          return React.createElement("div",{key:i,style:{background:"#fff",border:"1.5px solid "+T2.border,borderLeft:"4px solid "+col,borderRadius:8,padding:"10px 12px",marginBottom:8}},
+            React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}},
+              React.createElement("span",{style:{fontWeight:800,fontSize:13.5,flex:1}},p.producto),
+              React.createElement("span",{style:{fontWeight:900,fontSize:15,color:col,marginLeft:8}},p.conv!=null?p.conv+"%":"—")),
+            React.createElement("div",{style:{fontSize:11,color:T2.muted,marginTop:3}},
+              p.veces+" estrategias · ✅ "+p.pedido+" · ❌ "+p.ko+" · "+p.nComerciales+" comercial"+(p.nComerciales!==1?"es":"")),
+            alerta&&React.createElement("div",{style:{fontSize:11,fontWeight:700,color:"#DC2626",marginTop:5,background:"#FEF2F2",padding:"4px 8px",borderRadius:6}},
+              "⚠️ Va mal con "+p.nComerciales+" comerciales → revisar precio/producto"));
+        }))),
+
+    // COMERCIAL
+    vista==="comercial"&&React.createElement("div",null,
+      comArr.length===0?React.createElement("p",{style:{color:T2.muted,fontSize:13,textAlign:"center",padding:20}},"Sin datos."):
+      comArr.map(function(c,i){
+        var col=c.conv!=null?(c.conv>=50?"#22C55E":c.conv>=30?"#F59E0B":"#DC2626"):"#94A3B8";
+        var med=i===0?"🥇":i===1?"🥈":i===2?"🥉":(i+1)+"º";
+        return React.createElement("div",{key:i,style:{background:"#fff",border:"1.5px solid "+T2.border,borderLeft:"5px solid "+col,borderRadius:12,padding:"14px",marginBottom:10}},
+          React.createElement("div",{style:{display:"flex",alignItems:"center",gap:10,marginBottom:10}},
+            React.createElement("span",{style:{fontSize:i<3?20:14,fontWeight:900,color:T2.muted,minWidth:28,textAlign:"center"}},med),
+            React.createElement("div",{style:{flex:1}},
+              React.createElement("div",{style:{fontWeight:800,fontSize:15,lineHeight:1.1}},c.com),
+              React.createElement("div",{style:{fontSize:10.5,color:T2.muted,marginTop:2}},"🎯 "+c.indiv+" indiv · 🚀 "+c.lanz+" lanz")),
+            React.createElement("div",{style:{textAlign:"right"}},
+              React.createElement("div",{style:{fontWeight:900,fontSize:24,color:col,lineHeight:1}},c.conv!=null?c.conv+"%":"—"),
+              React.createElement("div",{style:{fontSize:8.5,fontWeight:700,color:T2.muted,textTransform:"uppercase"}},"conversión"))),
+          React.createElement("div",{style:{display:"flex",gap:6}},
+            [["✅",c.pedido,"Pedidos","#22C55E","#F0FDF4"],["❌",c.ko,"KO","#DC2626","#FEF2F2"],["⚡",c.curso,"Curso","#1F5FA8","#EFF6FF"],["📊",c.total,"Total",T2.navy,"#F8FAFC"]].map(function(b,j){
+              return React.createElement("div",{key:j,style:{flex:1,background:b[4],border:"1px solid "+b[3]+"30",borderRadius:8,padding:"8px 4px",textAlign:"center"}},
+                React.createElement("div",{style:{fontSize:17,fontWeight:900,color:b[3],lineHeight:1}},b[1]),
+                React.createElement("div",{style:{fontSize:8,fontWeight:700,color:T2.muted,marginTop:3,textTransform:"uppercase"}},b[2]));
+            })));
+      }))
+  );
 }
 
 // (v3.73) Panel de Análisis de Ofertas — conversión, caros, estancadas, por comercial
@@ -29802,6 +30023,7 @@ function App(props){
         {/* (v3.23.0) Módulo Vamos Caros - informe ejecutivo */}
         {section==="vamos_caros"&& <VamosCaros usuario={usuario} ofertasDB={ofertasDB} setOfertasDB={setOfertasDB} onBack={function(){setSection(usuario.rol==="compras"?"vamos_caros":"dashboard");}}/>}
         {section==="analisis_ofertas"&& <AnalisisOfertas usuario={usuario} ofertasDB={ofertasDB} portalUsersDB={portalUsersDB} onBack={function(){setSection("dashboard");}}/>}
+        {section==="analisis_estrategias"&& <AnalisisEstrategias usuario={usuario} estrategiasDB={estrategiasDB} portalUsersDB={portalUsersDB} onBack={function(){setSection("estrategias");}}/>}
         {section==="config_notif"&& <ConfigNotificaciones usuario={usuario}/>}
         {section==="actividad"&& <ActividadComercial usuario={usuario} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} ofertasDB={ofertasDB} incidenciasDB={incidenciasDB} oportunidadesDB={oportunidadesDB} portalUsersDB={portalUsersDB} onAbrirCliente={function(c){setClienteDirecto({id:c.id,nombre:c.nombre||c.NOMBRE,ts:Date.now()});setSection(esAgente?"clientes":"clientes_eq");}}/>}
         {section==="planif_compras"&& <PlanificacionCompras usuario={usuario}/>}
