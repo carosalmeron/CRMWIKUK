@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.72.0";
+const CRM_VERSION = "3.73.0";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -13219,6 +13219,196 @@ function PlanificacionCompras({usuario}){
   </div>;
 }
 
+// (v3.73) Panel de Análisis de Ofertas — conversión, caros, estancadas, por comercial
+function AnalisisOfertas({usuario, ofertasDB, portalUsersDB, onBack}){
+  var _pr=React.useState("90");var periodo=_pr[0],setPeriodo=_pr[1];
+  var _vw=React.useState("resumen");var vista=_vw[0],setVista=_vw[1];
+
+  var T2=(typeof T!=="undefined")?T:{navy:"#0F172A",amber:"#C2660C",muted:"#64748B",border:"#E2E8F0",text:"#0F172A"};
+  var hoy=new Date();
+
+  function diasDesde(fstr){
+    if(!fstr) return null;
+    var d;
+    if((fstr+"").includes("/")){var p=(fstr+"").split("/");if(p.length!==3)return null;var yy=parseInt(p[2]);if(yy<100)yy+=2000;d=new Date(yy,parseInt(p[1])-1,parseInt(p[0]));}
+    else d=new Date(fstr);
+    if(!d||isNaN(d.getTime()))return null;
+    return Math.floor((hoy-d)/86400000);
+  }
+  function nomComercial(o){
+    return o.agenteNombre||o.agente||o.creadoPorNombre||o.vendedor||"—";
+  }
+
+  // Filtrar por periodo (según fecha de creación)
+  var ofertas=(ofertasDB||[]).filter(function(o){
+    if(o.eliminada) return false;
+    if(periodo==="todo") return true;
+    var dd=diasDesde(o.fecha||o.fechaCreacion||o.createdAt);
+    if(dd==null) return true;
+    return dd<=parseInt(periodo);
+  });
+
+  // Clasificar
+  var total=ofertas.length;
+  var pedidos=ofertas.filter(function(o){return o.estado==="pedido";});
+  var caros=ofertas.filter(function(o){return o.estado==="caro";});
+  var noResp=ofertas.filter(function(o){return o.estado==="no_responde";});
+  var pend=ofertas.filter(function(o){return !o.estado||o.estado==="pendiente";});
+  var cerradas=pedidos.length+caros.length+noResp.length;
+  var tasaConv=cerradas>0?Math.round(pedidos.length/cerradas*100):0;
+  var tasaCaro=cerradas>0?Math.round(caros.length/cerradas*100):0;
+
+  // Tiempo medio de cierre (pedidos con fechaCierre)
+  var tiempos=pedidos.map(function(o){
+    var dc=diasDesde(o.fecha||o.fechaCreacion);var df=diasDesde(o.fechaCierre);
+    if(dc==null||df==null)return null;return dc-df;
+  }).filter(function(x){return x!=null&&x>=0;});
+  var tMedio=tiempos.length>0?Math.round(tiempos.reduce(function(a,b){return a+b;},0)/tiempos.length):null;
+
+  // Estancadas: pendientes con muchos días
+  var estancadas=pend.map(function(o){return {o:o,dias:diasDesde(o.fecha||o.fechaCreacion)||0};})
+    .filter(function(x){return x.dias>=14;}).sort(function(a,b){return b.dias-a.dias;});
+
+  // Productos donde vamos caros (de líneas de ofertas 'caro')
+  var caroProd={};
+  caros.forEach(function(o){
+    (o.lineas||[]).forEach(function(l){
+      if(l.estado==="caro"||l.precioCompetencia!=null){
+        var nom=l.producto||l.nombre||"(sin nombre)";
+        if(!caroProd[nom]) caroProd[nom]={n:0,difSum:0,difN:0,comp:{}};
+        caroProd[nom].n++;
+        var pn=parseFloat(l.precio||l.precioFinal||0), pc=parseFloat(l.precioCompetencia||0);
+        if(pn>0&&pc>0){caroProd[nom].difSum+=(pn-pc)/pc*100;caroProd[nom].difN++;}
+        var comp=o.competidor||l.competidor;
+        if(comp){caroProd[nom].comp[comp]=(caroProd[nom].comp[comp]||0)+1;}
+      }
+    });
+  });
+  var caroProdArr=Object.keys(caroProd).map(function(k){
+    var d=caroProd[k];
+    var compTop=Object.keys(d.comp).sort(function(a,b){return d.comp[b]-d.comp[a];})[0]||null;
+    return {producto:k,veces:d.n,difMedia:d.difN>0?Math.round(d.difSum/d.difN):null,competidor:compTop};
+  }).sort(function(a,b){return b.veces-a.veces;}).slice(0,12);
+
+  // Por comercial
+  var porCom={};
+  ofertas.forEach(function(o){
+    var c=nomComercial(o);
+    if(!porCom[c]) porCom[c]={total:0,pedido:0,caro:0,pend:0,noResp:0};
+    porCom[c].total++;
+    if(o.estado==="pedido")porCom[c].pedido++;
+    else if(o.estado==="caro")porCom[c].caro++;
+    else if(o.estado==="no_responde")porCom[c].noResp++;
+    else porCom[c].pend++;
+  });
+  var porComArr=Object.keys(porCom).map(function(k){
+    var d=porCom[k];var cerr=d.pedido+d.caro+d.noResp;
+    return {com:k,total:d.total,pedido:d.pedido,caro:d.caro,pend:d.pend,
+      conv:cerr>0?Math.round(d.pedido/cerr*100):null};
+  }).sort(function(a,b){return b.total-a.total;});
+
+  function kpi(n,label,color,bg){
+    return React.createElement("div",{style:{flex:1,background:bg,border:"1.5px solid "+color+"40",borderRadius:10,padding:"12px 8px",textAlign:"center"}},
+      React.createElement("div",{style:{fontSize:24,fontWeight:900,color:color,lineHeight:1}},n),
+      React.createElement("div",{style:{fontSize:9.5,fontWeight:700,color:T2.muted,marginTop:4,textTransform:"uppercase",letterSpacing:".02em"}},label));
+  }
+  function barra(pct,color){
+    return React.createElement("div",{style:{height:6,background:"#F1F5F9",borderRadius:4,overflow:"hidden",marginTop:4}},
+      React.createElement("div",{style:{height:"100%",width:Math.max(0,Math.min(100,pct))+"%",background:color,borderRadius:4}}));
+  }
+
+  var tabs=[["resumen","📊 Resumen"],["caros","💸 Dónde voy caro"],["comercial","👤 Por comercial"],["estancadas","⏳ Estancadas"]];
+
+  return React.createElement("div",{style:{padding:"0 0 40px"}},
+    React.createElement("button",{onClick:onBack,style:{margin:"0 0 14px",padding:"8px 16px",background:T2.navy,color:"#fff",border:"none",borderRadius:9,fontWeight:700,fontSize:13,cursor:"pointer"}},"← Volver"),
+    React.createElement("p",{style:{margin:"0 0 4px",fontSize:20,fontWeight:900,color:T2.text}},"📈 Análisis de Ofertas"),
+    React.createElement("p",{style:{margin:"0 0 12px",fontSize:12,color:T2.muted}},total+" ofertas · "+cerradas+" cerradas · "+pend.length+" abiertas"),
+
+    // Selector periodo
+    React.createElement("div",{style:{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}},
+      [["30","30 días"],["90","90 días"],["365","1 año"],["todo","Histórico"]].map(function(p){
+        return React.createElement("button",{key:p[0],onClick:function(){setPeriodo(p[0]);},
+          style:{padding:"6px 12px",borderRadius:20,border:"1.5px solid "+(periodo===p[0]?T2.navy:T2.border),
+            background:periodo===p[0]?T2.navy:"#fff",color:periodo===p[0]?"#fff":T2.muted,fontSize:12,fontWeight:700,cursor:"pointer"}},p[1]);
+      })),
+
+    // Tabs
+    React.createElement("div",{style:{display:"flex",gap:6,marginBottom:16,overflowX:"auto",paddingBottom:4}},
+      tabs.map(function(t){
+        return React.createElement("button",{key:t[0],onClick:function(){setVista(t[0]);},
+          style:{padding:"8px 14px",borderRadius:9,border:"1.5px solid "+(vista===t[0]?T2.amber:T2.border),whiteSpace:"nowrap",
+            background:vista===t[0]?"#FEF3C7":"#fff",color:vista===t[0]?T2.amber:T2.muted,fontSize:12.5,fontWeight:700,cursor:"pointer"}},t[1]);
+      })),
+
+    // RESUMEN
+    vista==="resumen"&&React.createElement("div",null,
+      React.createElement("div",{style:{display:"flex",gap:8,marginBottom:12}},
+        kpi(tasaConv+"%","Conversión","#22C55E","#F0FDF4"),
+        kpi(tasaCaro+"%","Perdidas x caro","#DC2626","#FEF2F2"),
+        kpi(tMedio!=null?tMedio+"d":"—","Cierre medio","#1F5FA8","#EFF6FF")),
+      React.createElement("div",{style:{background:"#fff",border:"1.5px solid "+T2.border,borderRadius:10,padding:14,marginBottom:12}},
+        React.createElement("p",{style:{margin:"0 0 10px",fontSize:11,fontWeight:800,color:T2.muted,textTransform:"uppercase",letterSpacing:".04em"}},"Desglose de resultados"),
+        [["✅ Pedidos",pedidos.length,"#22C55E"],["💸 Caros",caros.length,"#DC2626"],["🔇 No responde",noResp.length,"#94A3B8"],["⏳ Pendientes",pend.length,"#F59E0B"]].map(function(r,i){
+          var pct=total>0?Math.round(r[1]/total*100):0;
+          return React.createElement("div",{key:i,style:{marginBottom:10}},
+            React.createElement("div",{style:{display:"flex",justifyContent:"space-between",fontSize:13}},
+              React.createElement("span",{style:{fontWeight:600}},r[0]),
+              React.createElement("span",{style:{fontWeight:800,color:r[2]}},r[1]+" · "+pct+"%")),
+            barra(pct,r[2]));
+        })),
+      React.createElement("div",{style:{background:"#FFFBEB",border:"1.5px solid #FDE68A",borderRadius:10,padding:14}},
+        React.createElement("p",{style:{margin:0,fontSize:12.5,color:"#92400E",lineHeight:1.5}},
+          "💡 De cada 100 ofertas cerradas, ",React.createElement("b",null,tasaConv+" acaban en pedido"),
+          " y ",React.createElement("b",null,tasaCaro+" se pierden por precio"),
+          tMedio!=null?". Cierras un pedido en "+tMedio+" días de media.":"."))),
+
+    // CAROS
+    vista==="caros"&&React.createElement("div",null,
+      caroProdArr.length===0?React.createElement("p",{style:{color:T2.muted,fontSize:13,textAlign:"center",padding:20}},"No hay ofertas marcadas como caras en este periodo."):
+      React.createElement("div",null,
+        React.createElement("p",{style:{margin:"0 0 10px",fontSize:12,color:T2.muted}},"Productos donde más pierdes por precio, con la diferencia media sobre la competencia:"),
+        caroProdArr.map(function(p,i){
+          return React.createElement("div",{key:i,style:{background:"#fff",border:"1.5px solid "+T2.border,borderLeft:"4px solid #DC2626",borderRadius:8,padding:"10px 12px",marginBottom:8}},
+            React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}},
+              React.createElement("span",{style:{fontWeight:800,fontSize:13.5,flex:1}},p.producto),
+              React.createElement("span",{style:{fontWeight:900,fontSize:13,color:"#DC2626",whiteSpace:"nowrap",marginLeft:8}},p.veces+"×")),
+            React.createElement("div",{style:{fontSize:11,color:T2.muted,marginTop:3}},
+              p.difMedia!=null?"⚠️ "+p.difMedia+"% por encima de la competencia":"sin dato de diferencia",
+              p.competidor?" · vs "+p.competidor:""));
+        }))),
+
+    // POR COMERCIAL
+    vista==="comercial"&&React.createElement("div",null,
+      porComArr.length===0?React.createElement("p",{style:{color:T2.muted,fontSize:13,textAlign:"center",padding:20}},"Sin datos."):
+      porComArr.map(function(c,i){
+        return React.createElement("div",{key:i,style:{background:"#fff",border:"1.5px solid "+T2.border,borderRadius:10,padding:"12px 14px",marginBottom:8}},
+          React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}},
+            React.createElement("span",{style:{fontWeight:800,fontSize:14}},c.com),
+            React.createElement("span",{style:{fontWeight:900,fontSize:15,color:c.conv!=null?(c.conv>=50?"#22C55E":c.conv>=30?"#F59E0B":"#DC2626"):T2.muted}},
+              c.conv!=null?c.conv+"%":"—")),
+          React.createElement("div",{style:{display:"flex",gap:10,fontSize:11,color:T2.muted}},
+            React.createElement("span",null,"Total: "+c.total),
+            React.createElement("span",{style:{color:"#22C55E",fontWeight:700}},"✅ "+c.pedido),
+            React.createElement("span",{style:{color:"#DC2626",fontWeight:700}},"💸 "+c.caro),
+            React.createElement("span",{style:{color:"#F59E0B",fontWeight:700}},"⏳ "+c.pend)));
+      })),
+
+    // ESTANCADAS
+    vista==="estancadas"&&React.createElement("div",null,
+      estancadas.length===0?React.createElement("p",{style:{color:T2.muted,fontSize:13,textAlign:"center",padding:20}},"✅ Ninguna oferta lleva más de 14 días sin cerrar. ¡Buen seguimiento!"):
+      React.createElement("div",null,
+        React.createElement("p",{style:{margin:"0 0 10px",fontSize:12,color:T2.muted}},estancadas.length+" ofertas llevan 14+ días abiertas (las más antiguas primero):"),
+        estancadas.slice(0,30).map(function(x,i){
+          var o=x.o;
+          return React.createElement("div",{key:i,style:{background:"#fff",border:"1.5px solid "+T2.border,borderLeft:"4px solid "+(x.dias>=30?"#DC2626":"#F59E0B"),borderRadius:8,padding:"10px 12px",marginBottom:8}},
+            React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}},
+              React.createElement("span",{style:{fontWeight:800,fontSize:13,flex:1}},o.clienteNombre||o.cliente||"—"),
+              React.createElement("span",{style:{fontWeight:900,fontSize:12,color:x.dias>=30?"#DC2626":"#F59E0B",whiteSpace:"nowrap",marginLeft:8}},x.dias+"d")),
+            React.createElement("div",{style:{fontSize:11,color:T2.muted,marginTop:3}},nomComercial(o)+((o.lineas||[]).length?" · "+(o.lineas||[]).length+" líneas":"")));
+        })))
+  );
+}
+
 function VamosCaros({usuario, ofertasDB, setOfertasDB, onBack}){
   // Recargar ofertas al entrar
   React.useEffect(function(){
@@ -14685,10 +14875,16 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
 
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
         <p style={{margin:0,fontSize:22,fontWeight:800,color:T.text}}>💰 Ofertas</p>
-        <button onClick={function(){setShowNuevaOf(true);}}
-          style={{padding:"8px 14px",background:T.navy,color:"#fff",border:"none",borderRadius:9,fontWeight:700,fontSize:13,cursor:"pointer"}}>
-          + Nueva
-        </button>
+        <div style={{display:"flex",gap:8}}>
+          {typeof onNavegar==="function"&&<button onClick={function(){onNavegar("analisis_ofertas");}}
+            style={{padding:"8px 12px",background:"#fff",color:T.navy,border:"1.5px solid "+T.navy,borderRadius:9,fontWeight:700,fontSize:13,cursor:"pointer"}}>
+            📈 Análisis
+          </button>}
+          <button onClick={function(){setShowNuevaOf(true);}}
+            style={{padding:"8px 14px",background:T.navy,color:"#fff",border:"none",borderRadius:9,fontWeight:700,fontSize:13,cursor:"pointer"}}>
+            + Nueva
+          </button>
+        </div>
       </div>
 
       {/* (v3.23.37) Modal nueva oferta (también prerrellenado desde Potencial) */}
@@ -29558,6 +29754,7 @@ function App(props){
         {section==="ofertas"&& <OfertasModule usuario={usuario} ofertasDB={ofertasDB} setOfertasDB={setOfertasDB} onBack={function(){setSection("dashboard");}} onNavegar={setSection} onVolverPotencial={function(){return volverAPotencialSiCorresponde(setSection, setClienteDirecto, usuario);}}/>}
         {/* (v3.23.0) Módulo Vamos Caros - informe ejecutivo */}
         {section==="vamos_caros"&& <VamosCaros usuario={usuario} ofertasDB={ofertasDB} setOfertasDB={setOfertasDB} onBack={function(){setSection(usuario.rol==="compras"?"vamos_caros":"dashboard");}}/>}
+        {section==="analisis_ofertas"&& <AnalisisOfertas usuario={usuario} ofertasDB={ofertasDB} portalUsersDB={portalUsersDB} onBack={function(){setSection("dashboard");}}/>}
         {section==="config_notif"&& <ConfigNotificaciones usuario={usuario}/>}
         {section==="actividad"&& <ActividadComercial usuario={usuario} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} ofertasDB={ofertasDB} incidenciasDB={incidenciasDB} oportunidadesDB={oportunidadesDB} portalUsersDB={portalUsersDB} onAbrirCliente={function(c){setClienteDirecto({id:c.id,nombre:c.nombre||c.NOMBRE,ts:Date.now()});setSection(esAgente?"clientes":"clientes_eq");}}/>}
         {section==="planif_compras"&& <PlanificacionCompras usuario={usuario}/>}
