@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.74.0";
+const CRM_VERSION = "3.76.0";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -13294,24 +13294,46 @@ function AnalisisOfertas({usuario, ofertasDB, portalUsersDB, onBack}){
   var porCom={};
   ofertas.forEach(function(o){
     var c=nomComercial(o);
-    if(!porCom[c]) porCom[c]={total:0,pedido:0,caro:0,pend:0,noResp:0};
+    if(!porCom[c]) porCom[c]={total:0,pedido:0,caro:0,pend:0,noResp:0,abandonadas:0,bienHechas:0};
     porCom[c].total++;
+    // (v3.75) oferta "bien hecha": al menos una línea con producto y precio > 0
+    var _lin=o.lineas||[];
+    var _ok=_lin.length>0&&_lin.some(function(l){
+      var pr=parseFloat(l.precio||l.precioFinal||l.precioFinalCat||0);
+      return (l.producto||l.nombre)&&pr>0;
+    });
+    if(_ok) porCom[c].bienHechas++;
     if(o.estado==="pedido")porCom[c].pedido++;
     else if(o.estado==="caro")porCom[c].caro++;
     else if(o.estado==="no_responde")porCom[c].noResp++;
-    else porCom[c].pend++;
+    else {
+      porCom[c].pend++;
+      // (v3.75) abandonada = pendiente con más de 30 días sin cerrar
+      var dd=diasDesde(o.fecha||o.fechaCreacion);
+      if(dd!=null&&dd>30) porCom[c].abandonadas++;
+    }
   });
   var porComArr=Object.keys(porCom).map(function(k){
     var d=porCom[k];var cerr=d.pedido+d.caro+d.noResp;
-    return {com:k,total:d.total,pedido:d.pedido,caro:d.caro,pend:d.pend,noResp:d.noResp,cerradas:cerr,
-      conv:cerr>0?Math.round(d.pedido/cerr*100):null};
+    var conv=cerr>0?Math.round(d.pedido/cerr*100):null;
+    // (v3.75) PUNTUACIÓN MIXTA: actividad + volumen + eficiencia − abandono
+    // +1 por oferta bien hecha (con líneas y precio) → reconoce actividad comercial
+    var puntosActividad=d.bienHechas||0;
+    // +10 por pedido ganado (vender es lo que más pesa)
+    var puntosVolumen=d.pedido*10;
+    // bonus eficiencia: conversión × factor de fiabilidad (crece con nº de cierres, tope a 8)
+    var fiabilidad=Math.min(cerr,8)/8; // 0 a 1
+    var puntosEficiencia=cerr>0?Math.round((d.pedido/cerr*100)*0.4*fiabilidad):0;
+    // penalización por ofertas viejas sin cerrar
+    var penalizacion=d.abandonadas*3;
+    var score=puntosActividad+puntosVolumen+puntosEficiencia-penalizacion;
+    return {com:k,total:d.total,pedido:d.pedido,caro:d.caro,pend:d.pend,noResp:d.noResp,
+      cerradas:cerr,abandonadas:d.abandonadas,bienHechas:d.bienHechas||0,conv:conv,score:score};
   }).sort(function(a,b){
-    // (v3.74) Ranking por conversión desc; los sin cierres al final; a igualdad, más pedidos
-    if(a.conv==null&&b.conv==null) return b.total-a.total;
-    if(a.conv==null) return 1;
-    if(b.conv==null) return -1;
-    if(b.conv!==a.conv) return b.conv-a.conv;
-    return b.pedido-a.pedido;
+    // (v3.75) Ranking por PUNTUACIÓN mixta desc; a igualdad, más pedidos, luego mejor conversión
+    if(b.score!==a.score) return b.score-a.score;
+    if(b.pedido!==a.pedido) return b.pedido-a.pedido;
+    return (b.conv||0)-(a.conv||0);
   });
 
   function kpi(n,label,color,bg){
@@ -13386,23 +13408,29 @@ function AnalisisOfertas({usuario, ofertasDB, portalUsersDB, onBack}){
 
     // POR COMERCIAL
     vista==="comercial"&&React.createElement("div",null,
+      React.createElement("div",{style:{background:"#F8FAFC",border:"1px solid "+T2.border,borderRadius:9,padding:"9px 12px",marginBottom:12,fontSize:11,color:T2.muted,lineHeight:1.5}},
+        "🏆 ",React.createElement("b",{style:{color:T2.text}},"Puntos = actividad + ventas + eficiencia − abandono."),
+        " +1 por oferta bien hecha, +10 por pedido ganado, bonus por buena conversión (si hay volumen), −3 por cada oferta con +30 días sin cerrar."),
       porComArr.length===0?React.createElement("p",{style:{color:T2.muted,fontSize:13,textAlign:"center",padding:20}},"Sin datos."):
       porComArr.map(function(c,i){
         var convColor=c.conv!=null?(c.conv>=50?"#22C55E":c.conv>=30?"#F59E0B":"#DC2626"):"#94A3B8";
         var medalla=i===0?"🥇":i===1?"🥈":i===2?"🥉":(i+1)+"º";
-        return React.createElement("div",{key:i,style:{background:"#fff",border:"1.5px solid "+T2.border,borderLeft:"5px solid "+convColor,borderRadius:12,padding:"14px",marginBottom:10}},
-          // Cabecera: ranking + nombre + conversión grande
+        return React.createElement("div",{key:i,style:{background:"#fff",border:"1.5px solid "+T2.border,borderLeft:"5px solid "+(i===0?"#EAB308":i===1?"#94A3B8":i===2?"#B45309":T2.border),borderRadius:12,padding:"14px",marginBottom:10}},
+          // Cabecera: ranking + nombre + PUNTOS grande
           React.createElement("div",{style:{display:"flex",alignItems:"center",gap:10,marginBottom:12}},
-            React.createElement("span",{style:{fontSize:i<3?20:14,fontWeight:900,color:T2.muted,minWidth:28,textAlign:"center"}},medalla),
+            React.createElement("span",{style:{fontSize:i<3?22:15,fontWeight:900,color:T2.muted,minWidth:30,textAlign:"center"}},medalla),
             React.createElement("div",{style:{flex:1}},
               React.createElement("div",{style:{fontWeight:800,fontSize:16,lineHeight:1.1}},c.com),
-              React.createElement("div",{style:{fontSize:10.5,color:T2.muted,marginTop:2}},c.total+" ofertas · "+c.cerradas+" cerradas")),
+              React.createElement("div",{style:{fontSize:10.5,color:T2.muted,marginTop:2}},
+                c.pedido+" ventas · "+(c.conv!=null?c.conv+"% conv":"sin cierres")+(c.abandonadas>0?" · ⚠️ "+c.abandonadas+" abandonadas":""))),
             React.createElement("div",{style:{textAlign:"right"}},
-              React.createElement("div",{style:{fontWeight:900,fontSize:26,color:convColor,lineHeight:1}},c.conv!=null?c.conv+"%":"—"),
-              React.createElement("div",{style:{fontSize:8.5,fontWeight:700,color:T2.muted,textTransform:"uppercase",letterSpacing:".03em"}},"conversión"))),
-          // Barra de conversión
-          React.createElement("div",{style:{height:8,background:"#F1F5F9",borderRadius:5,overflow:"hidden",marginBottom:12}},
-            React.createElement("div",{style:{height:"100%",width:(c.conv||0)+"%",background:convColor,borderRadius:5,transition:"width .3s"}})),
+              React.createElement("div",{style:{fontWeight:900,fontSize:26,color:T2.navy,lineHeight:1}},c.score),
+              React.createElement("div",{style:{fontSize:8.5,fontWeight:700,color:T2.muted,textTransform:"uppercase",letterSpacing:".03em"}},"puntos"))),
+          // Barra de conversión (referencia de eficiencia)
+          React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8,marginBottom:12}},
+            React.createElement("div",{style:{flex:1,height:8,background:"#F1F5F9",borderRadius:5,overflow:"hidden"}},
+              React.createElement("div",{style:{height:"100%",width:(c.conv||0)+"%",background:convColor,borderRadius:5,transition:"width .3s"}})),
+            React.createElement("span",{style:{fontSize:11,fontWeight:800,color:convColor,minWidth:38,textAlign:"right"}},c.conv!=null?c.conv+"%":"—")),
           // Números grandes en cajas
           React.createElement("div",{style:{display:"flex",gap:6}},
             [["✅",c.pedido,"Pedidos","#22C55E","#F0FDF4"],["💸",c.caro,"Caros","#DC2626","#FEF2F2"],["⏳",c.pend,"Abiertas","#F59E0B","#FFFBEB"],["📊",c.total,"Total",T2.navy,"#F8FAFC"]].map(function(b,j){
