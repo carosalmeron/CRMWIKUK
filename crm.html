@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.80.0";
+const CRM_VERSION = "3.81.0";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -13245,7 +13245,7 @@ function AnalisisEstrategias({usuario, estrategiasDB, ofertasDB, portalUsersDB, 
     return e.agente||e.creadoPorNombre||"—";
   }
   function esLanzamiento(e){
-    return e.tipoEst==="lanzamiento"||e.tipo==="lanzamiento"||(e.productosCampana&&e.productosCampana.length>0)||(e.clientesLanzamiento&&e.clientesLanzamiento.length>0);
+    return e.tipoEst==="lanzamiento"||e.tipo==="lanzamiento"||!!e.lanzamientoNombre||(e.productosCampana&&e.productosCampana.length>0)||(e.clientesLanzamiento&&e.clientesLanzamiento.length>0);
   }
   // resultado final de una estrategia: 'pedido' | 'ko' | 'curso' | 'pendiente'
   function resultadoEst(e){
@@ -13310,28 +13310,40 @@ function AnalisisEstrategias({usuario, estrategiasDB, ofertasDB, portalUsersDB, 
      return b.veces-a.veces;
    }).slice(0,15);
 
-  // (v3.78) Lanzamiento por lanzamiento: tasa de aceptación (clientes que lo cogieron / a los que se ofreció)
+  // (v3.81) Lanzamiento por lanzamiento: se guardan como estrategias-hijas que comparten lanzamientoNombre.
+  // Agrupamos por nombre de campaña y contamos clientes (cada estrategia-hija = 1 cliente ofrecido).
   var ofs=(ofertasDB||[]).filter(function(o){return !o.eliminada;});
-  var lanzArr=lanz.map(function(e){
-    var ofrecidos=(e.clientesLanzamiento||[]).length;
-    // clientes que aceptaron = ofertas generadas desde esta estrategia (o clientes con resultado positivo)
-    var ofsDeEst=ofs.filter(function(o){return (o.estrategiaId===e.id)||(o.desdeEstrategia===e.id)||(o.lanzamientoNombre&&e.nombreCampana&&o.lanzamientoNombre===e.nombreCampana);});
-    var clientesConOferta={};
-    ofsDeEst.forEach(function(o){var c=o.clienteId||o.clienteNombre;if(c)clientesConOferta[c]=o.estado;});
-    var aceptaron=Object.keys(clientesConOferta).length;
-    var pedidos=ofsDeEst.filter(function(o){return o.estado==="pedido";}).length;
-    // si no hay ofertas cruzadas, usar clientesLanzamiento con resultado marcado
-    if(aceptaron===0&&ofrecidos>0){
-      (e.clientesLanzamiento||[]).forEach(function(c){if(c.resultado==="pedido"||c.acepto||c.resultado==="aceptado")aceptaron++;});
+  var lanzGrupos={};
+  ests.forEach(function(e){
+    var nom=e.lanzamientoNombre||(esLanzamiento(e)?(e.nombreCampana||(e.productosCampana||[]).join(", ")):null);
+    if(!nom) return;
+    // solo cuentan las que son parte de un lanzamiento (tienen lanzamientoNombre) o son el lanzamiento madre
+    var esParte=!!e.lanzamientoNombre||esLanzamiento(e);
+    if(!esParte) return;
+    if(!lanzGrupos[nom]) lanzGrupos[nom]={nombre:nom,ofrecidos:0,aceptaron:0,pedidos:0,productos:"",com:"",fecha:""};
+    var g=lanzGrupos[nom];
+    // cada estrategia-hija representa un cliente al que se ofreció
+    if(e.lanzamientoNombre){
+      g.ofrecidos++;
+      var r=resultadoEst(e);
+      if(r==="pedido"){g.aceptaron++;g.pedidos++;}
+      else if(r==="curso"){g.aceptaron++;} // aprobada/en curso = el cliente lo cogió
+    } else {
+      // estrategia madre con lista propia de clientes (por si acaso)
+      var lc=(e.clientesLanzamiento||[]).length;
+      if(lc>g.ofrecidos) g.ofrecidos=lc;
     }
-    var tasa=ofrecidos>0?Math.round(aceptaron/ofrecidos*100):null;
-    return {
-      id:e.id,
-      nombre:e.nombreCampana||(e.productosCampana||[]).join(", ")||"Lanzamiento sin nombre",
-      productos:(e.productosCampana||[]).join(", "),
-      ofrecidos:ofrecidos,aceptaron:aceptaron,pedidos:pedidos,tasa:tasa,
-      fecha:e.fecha||e.fechaCreacion||"",com:nomCom(e)
-    };
+    if(!g.productos) g.productos=(e.productosCampana||[]).join(", ")||"";
+    if(!g.com) g.com=nomCom(e);
+    if(!g.fecha) g.fecha=e.fecha||e.fechaCreacion||"";
+    // cruzar con ofertas generadas
+    var ofsDeEst=ofs.filter(function(o){return (o.estrategiaId===e.id)||(o.desdeEstrategia===e.id);});
+    ofsDeEst.forEach(function(o){ if(o.estado==="pedido") g.pedidos++; });
+  });
+  var lanzArr=Object.keys(lanzGrupos).map(function(k){
+    var g=lanzGrupos[k];
+    var tasa=g.ofrecidos>0?Math.round(g.aceptaron/g.ofrecidos*100):null;
+    return {nombre:g.nombre,productos:g.productos,ofrecidos:g.ofrecidos,aceptaron:g.aceptaron,pedidos:g.pedidos,tasa:tasa,com:g.com,fecha:g.fecha};
   }).sort(function(a,b){
     if(a.tasa==null&&b.tasa==null)return b.ofrecidos-a.ofrecidos;
     if(a.tasa==null)return 1;if(b.tasa==null)return -1;
