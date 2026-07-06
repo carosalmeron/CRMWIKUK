@@ -147,32 +147,45 @@ const STOCK_CHUNK=1200;              // artículos por documento (evita el lími
 function todayStr(){return new Date().toLocaleDateString('es-ES');}
 // Guarda el stock en Firebase: un resumen ligero + el detalle troceado
 async function saveStockFB(rows){
+  // Helpers de coerción: el Excel puede traer códigos numéricos o stock como texto
+  var S=function(v){return (v===null||v===undefined)?"":String(v);};
+  var N=function(v){var n=(typeof v==='number')?v:parseFloat(String(v==null?"":v).replace(',','.').replace(/[^0-9.\-]/g,''));return isFinite(n)?n:0;};
+  var r2=function(v){return Math.round(v*100)/100;};
   const exact={},base={};
-  rows.forEach(r=>{const c=r.cod.toUpperCase();exact[c]=[Math.round(r.stock*100)/100,Math.round(r.llegadas*100)/100];
-    const b=(r.base||r.cod).toUpperCase();const x=base[b]||(base[b]=[0,0]);x[0]+=r.stock;x[1]+=r.llegadas;});
-  Object.keys(base).forEach(b=>{base[b]=[Math.round(base[b][0]*100)/100,Math.round(base[b][1]*100)/100];});
+  rows.forEach(function(r){
+    var c=S(r.cod).trim().toUpperCase(); if(!c)return;
+    var st=N(r.stock), lg=N(r.llegadas);
+    exact[c]=[r2(st),r2(lg)];
+    var b=(S(r.base).trim()||c).toUpperCase();
+    var x=base[b]||(base[b]=[0,0]); x[0]+=st; x[1]+=lg;
+  });
+  Object.keys(base).forEach(function(b){base[b]=[r2(base[b][0]),r2(base[b][1])];});
   const fecha=todayStr(),ts=Date.now();
+  // fetch que comprueba el resultado y, si falla, explica el motivo
+  async function put(path,mask,fields){
+    var res=await fetch(FB+"/"+path+"?"+mask,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:fields})});
+    if(!res.ok){
+      var txt=""; try{txt=await res.text();}catch(e){}
+      var motivo=res.status===403?"permiso denegado (reglas de Firestore)":(res.status===400?"documento demasiado grande o datos inválidos":("HTTP "+res.status));
+      throw new Error("Firebase "+path+": "+motivo+(txt?(" · "+txt.slice(0,160)):""));
+    }
+    return res;
+  }
   // 1) Resumen ligero para el catálogo (código → [stock, entradas])
-  await fetch(FB+"/stock_sap/resumen?updateMask.fieldPaths=fecha&updateMask.fieldPaths=ts&updateMask.fieldPaths=exact&updateMask.fieldPaths=base",
-    {method:"PATCH",headers:{"Content-Type":"application/json"},
-     body:JSON.stringify({fields:{fecha:{stringValue:fecha},ts:{integerValue:String(ts)},
-       exact:{stringValue:JSON.stringify(exact)},base:{stringValue:JSON.stringify(base)}}})});
+  await put("stock_sap/resumen","updateMask.fieldPaths=fecha&updateMask.fieldPaths=ts&updateMask.fieldPaths=exact&updateMask.fieldPaths=base",
+    {fecha:{stringValue:fecha},ts:{integerValue:String(ts)},exact:{stringValue:JSON.stringify(exact)},base:{stringValue:JSON.stringify(base)}});
   // 2) Detalle completo, troceado en documentos chunk_0, chunk_1…
   const nch=Math.ceil(rows.length/STOCK_CHUNK);
   for(let i=0;i<nch;i++){
     const slice=rows.slice(i*STOCK_CHUNK,(i+1)*STOCK_CHUNK);
-    await fetch(FB+"/stock_sap_detalle/chunk_"+i+"?updateMask.fieldPaths=fecha&updateMask.fieldPaths=ts&updateMask.fieldPaths=rows",
-      {method:"PATCH",headers:{"Content-Type":"application/json"},
-       body:JSON.stringify({fields:{fecha:{stringValue:fecha},ts:{integerValue:String(ts)},
-         rows:{stringValue:JSON.stringify(slice)}}})});
+    await put("stock_sap_detalle/chunk_"+i,"updateMask.fieldPaths=fecha&updateMask.fieldPaths=ts&updateMask.fieldPaths=rows",
+      {fecha:{stringValue:fecha},ts:{integerValue:String(ts)},rows:{stringValue:JSON.stringify(slice)}});
   }
   // 3) Metadatos: nº de chunks y fecha (para saber cuántos leer/limpiar)
-  await fetch(FB+"/stock_sap/meta?updateMask.fieldPaths=fecha&updateMask.fieldPaths=ts&updateMask.fieldPaths=chunks&updateMask.fieldPaths=total",
-    {method:"PATCH",headers:{"Content-Type":"application/json"},
-     body:JSON.stringify({fields:{fecha:{stringValue:fecha},ts:{integerValue:String(ts)},
-       chunks:{integerValue:String(nch)},total:{integerValue:String(rows.length)}}})});
+  await put("stock_sap/meta","updateMask.fieldPaths=fecha&updateMask.fieldPaths=ts&updateMask.fieldPaths=chunks&updateMask.fieldPaths=total",
+    {fecha:{stringValue:fecha},ts:{integerValue:String(ts)},chunks:{integerValue:String(nch)},total:{integerValue:String(rows.length)}});
   // 4) Borrar chunks sobrantes de una carga anterior más grande
-  for(let i=nch;i<nch+12;i++){fetch(FB+"/stock_sap_detalle/chunk_"+i,{method:"DELETE"}).catch(()=>{});}
+  for(let i=nch;i<nch+12;i++){fetch(FB+"/stock_sap_detalle/chunk_"+i,{method:"DELETE"}).catch(function(){});}
   return{fecha:fecha,chunks:nch,total:rows.length};
 }
 // Lee el detalle completo desde Firebase (todos los chunks)
@@ -232,7 +245,10 @@ function loadRows(rows,fn){
     toast('☁️ Guardado en Firebase ('+res.total+' arts.)');
   }).catch(function(err){
     document.getElementById('loading').classList.remove('show');
-    toast('⚠️ Cargado en local, pero falló Firebase');
+    var motivo=(err&&err.message)?err.message:'error desconocido';
+    console.error('saveStockFB falló:',err);
+    toast('⚠️ Cargado en local · Firebase: '+motivo);
+    alert('No se pudo guardar en Firebase.\n\nMotivo: '+motivo+'\n\nEl stock sigue disponible en local en esta página, pero el catálogo no lo verá hasta que se guarde en Firebase.');
   });
 }
 
