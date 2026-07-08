@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.86.1";
+const CRM_VERSION = "3.86.2";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -1258,7 +1258,7 @@ function SearchInput({value, onChange, placeholder, suggestions=[], onSelect, on
                 }
               }catch(err){}
             }}
-            src={(function(){var secs="";try{var pu=JSON.parse(localStorage.getItem("gc_portal_user")||"{}");var ceo=pu.id==="ceo"||pu.id==="dir"||pu.rol==="admin"||pu.rol==="crm_director";if(!ceo&&Array.isArray(pu.catalogoSecciones))secs=pu.catalogoSecciones.join(",");}catch(e){}var cliP="";try{var cc=window._clienteCatalogo;if(cc&&cc.dto!=null){cliP="&cli=1&cliCat="+encodeURIComponent(cc.cat||"")+"&cliDto="+encodeURIComponent(cc.dto)+"&cliMargen="+encodeURIComponent(cc.margen!=null?cc.margen:0)+"&cliNom="+encodeURIComponent(cc.nombre||"");}}catch(e){}return "https://wikukcatalogo.vercel.app/?seleccion=1&portal=1"+(secs?"&secciones="+encodeURIComponent(secs):"")+(ceo?"&stock=1":"")+cliP;})()}
+            src={(function(){var secs="";try{var pu=JSON.parse(localStorage.getItem("gc_portal_user")||"{}");var ceo=pu.id==="ceo"||pu.id==="dir"||pu.rol==="admin"||pu.rol==="crm_director";if(!ceo&&Array.isArray(pu.catalogoSecciones))secs=pu.catalogoSecciones.join(",");}catch(e){}var cliP="";try{var cc=window._clienteCatalogo;if(cc&&cc.dto!=null){cliP="&cli=1&cliCat="+encodeURIComponent(cc.cat||"")+"&cliDto="+encodeURIComponent(cc.dto)+"&cliMargen="+encodeURIComponent(cc.margen!=null?cc.margen:0)+"&cliNom="+encodeURIComponent(cc.nombre||"");}}catch(e){}return "https://wikukcatalogo.vercel.app/?seleccion=1&portal=1"+(secs?"&secciones="+encodeURIComponent(secs):"")+((ceo||(pu&&(pu.rol==="crm_jefe"||(Array.isArray(pu.accesos)&&pu.accesos.includes("stock")))))?"&stock=1":"")+cliP;})()}
             style={{flex:1,width:"100%",border:"none",background:"#fff"}}/>
         </div>
       )}
@@ -7025,8 +7025,7 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
     const fecha=new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
     const tieneOferta = ofertasVisita.length>0;
     // (v3.24.8) Capturar GPS
-    const gps=await captureGPS();
-    if(!gps) console.warn("⚠️ GPS no capturado — permiso denegado o timeout");
+    const gpsPromise=captureGPS(); // (fix) GPS en segundo plano: no bloquea el guardado
     const visitaDoc={
       clienteId:clienteSel.id,
       clienteNombre:clienteSel.nombre,
@@ -7038,14 +7037,15 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
       agente:idCanonico(usuario),
       equipo:usuario.equipo||"",
       tieneOferta:tieneOferta,
-      gps:gps||null,
+      gps:null, // (fix) se rellena luego en segundo plano
     };
     // Guardar visita en Firebase (v3.85) SIEMPRE con la semana ISO real de hoy,
     // no con la 'semana' del estado (que puede venir de un informe consultado)
     const semanaHoy=getSemanaISO();
     visitaDoc.semana=semanaHoy;
-    const _vDocId=((usuario&&usuario.id)||idCanonico(usuario)||"user")+"_"+clienteSel.id+"_sem"+semanaHoy;
+    const _vDocId=((usuario&&usuario.id)||idCanonico(usuario)||"user")+"_"+clienteSel.id+"_sem"+semanaHoy+"_"+Date.now(); // (fix) id único: permite varias visitas al mismo cliente/semana
     const _vOK=await fbEscribir("visitas", _vDocId, visitaDoc);
+    gpsPromise.then(function(g){ if(g && _vOK){ try{ fetch(`${FB_BASE}/visitas/${_vDocId}?updateMask.fieldPaths=gps`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(serializeToFirestore({gps:g}))}).catch(function(){}); }catch(e){} } }); // (fix) añade el GPS en segundo plano, solo si la visita ya se guardó, sin tocar la cola
     if(_vOK===false){ alert("⚠️ La visita NO se ha guardado en Firebase (posible problema de conexión o de permisos).\n\nVuelve a intentarlo. Si sigue fallando, abre la consola (F12 → Console) al pulsar guardar y dime el mensaje en rojo."); }
 
     // (v3.22.38) Si hay ofertas, crear documento separado en colección "ofertas"
@@ -19434,12 +19434,15 @@ function cacheLeer(coleccion){
     return datos;
   }catch(e){return null;}
 }
-function colaAñadir(coleccion,id,datos){
+function colaAñadir(coleccion,id,datos,parcial){
   try{
     const cola=JSON.parse(localStorage.getItem(COLA_KEY)||"[]");
     // Reemplazar si ya existe el mismo doc
     const idx=cola.findIndex(c=>c.coleccion===coleccion&&c.id===id);
-    const item={coleccion,id,datos,ts:Date.now()};
+    const _prev=idx>=0?cola[idx]:null;
+    const _datos=_prev?{..._prev.datos,...datos}:datos;                           // (fix) fusionar: no perder campos ya en cola
+    const _parcial=_prev?((_prev.parcial===true)&&(parcial===true)):(parcial===true); // (fix) completo si alguno lo era
+    const item={coleccion,id,datos:_datos,parcial:_parcial,ts:Date.now()};
     if(idx>=0) cola[idx]=item; else cola.push(item);
     localStorage.setItem(COLA_KEY,JSON.stringify(cola));
     console.log(`📴 Offline: ${coleccion}/${id} guardado en cola (${cola.length} pendientes)`);
@@ -19456,33 +19459,31 @@ let _crmOnline=navigator.onLine;
 let _colaPendiente=colaLeer().length;
 window.addEventListener("online",()=>{_crmOnline=true;console.log("🟢 Online — sincronizando...");sincronizarCola();});
 window.addEventListener("offline",()=>{_crmOnline=false;console.log("🔴 Offline — escrituras se guardarán localmente");});
+// (fix) Reintentos extra: la cola se vaciaba solo con el evento "online". Con señal floja
+// ese evento no siempre salta, así que reintentamos también cada 30s y al volver a la app.
+try{ setInterval(function(){ if(navigator.onLine && colaLeer().length>0) sincronizarCola(); }, 30000); }catch(e){}
+try{ document.addEventListener("visibilitychange", function(){ if(!document.hidden && navigator.onLine && colaLeer().length>0) sincronizarCola(); }); }catch(e){}
 
 async function sincronizarCola(){
   const cola=colaLeer();
   if(cola.length===0) return 0;
   console.log(`🔄 Sincronizando ${cola.length} escrituras pendientes...`);
-  let ok=0,err=0;
+  let ok=0; const pendientes=[]; // (fix) conservar SOLO las que fallan de verdad
   for(const item of cola){
     try{
-      const r=await fetch(`${FB_BASE}/${item.coleccion}/${item.id}`,{
+      let _u=`${FB_BASE}/${item.coleccion}/${item.id}`;
+      if(item.parcial){ _u+="?"+Object.keys(item.datos).map(function(k){return "updateMask.fieldPaths="+encodeURIComponent(k);}).join("&"); } // (fix) respetar escritura parcial: no borrar otros campos
+      const r=await fetch(_u,{
         method:"PATCH",
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify(serializeToFirestore(item.datos))
       });
-      if(r.ok){ok++;} else{err++;}
-    }catch(e){err++;}
+      if(r.ok){ok++;} else{pendientes.push(item);}
+    }catch(e){pendientes.push(item);}
   }
-  if(err===0){
-    colaLimpiar();
-    _colaPendiente=0;
-    console.log(`✅ Sincronización completa: ${ok} documentos subidos`);
-  }else{
-    // Dejar en cola solo los que fallaron
-    const nuevaCola=colaLeer().slice(ok);
-    localStorage.setItem(COLA_KEY,JSON.stringify(nuevaCola));
-    _colaPendiente=nuevaCola.length;
-    console.log(`⚠️ Sincronización parcial: ${ok} ok, ${err} pendientes`);
-  }
+  localStorage.setItem(COLA_KEY,JSON.stringify(pendientes));
+  _colaPendiente=pendientes.length;
+  console.log(pendientes.length===0?`✅ Sincronización completa: ${ok} subidos`:`⚠️ Sincronización parcial: ${ok} ok, ${pendientes.length} pendientes`);
   return ok;
 }
 
@@ -19617,14 +19618,14 @@ async function fbEscribir(coleccion, id, datos, parcial){
       }
       // Si es error de red/servidor, guardar en cola
       if(r.status>=500||r.status===0){
-        colaAñadir(coleccion,id,datos);
+        colaAñadir(coleccion,id,datos,parcial);
         _colaPendiente=colaLeer().length;
       }
     }
     return r.ok;
   }catch(e){
     console.warn("📴 Offline — guardando en cola:", coleccion+"/"+id);
-    colaAñadir(coleccion,id,datos);
+    colaAñadir(coleccion,id,datos,parcial);
     _colaPendiente=colaLeer().length;
     return false;
   }
@@ -29846,8 +29847,9 @@ function App(props){
               var esCeoDir=pu.id==="ceo"||pu.id==="dir"||pu.rol==="admin"||pu.rol==="crm_director";
               if(!esCeoDir&&Array.isArray(pu.catalogoSecciones)) secs=pu.catalogoSecciones.join(",");
             }catch(e){}
-            var url="https://wikukcatalogo.vercel.app/?portal=1"+(secs?"&secciones="+encodeURIComponent(secs):"")+(esCeoDir?"&stock=1":"");
-            window.open(url,"_blank");
+            var verStock=esCeoDir||(pu&&(pu.rol==="crm_jefe"||(Array.isArray(pu.accesos)&&pu.accesos.includes("stock"))));
+            var url="https://wikukcatalogo.vercel.app/?portal=1"+(secs?"&secciones="+encodeURIComponent(secs):"")+(verStock?"&stock=1":"");
+            window.location.href=url;
           }}
           title="Catálogo"
           style={{background:"none",border:`1px solid ${T.border}`,borderRadius:8,padding:"7px 10px",color:T.muted,fontSize:14,cursor:"pointer"}}>
@@ -33182,7 +33184,7 @@ function HistorialSemanal({ usuario }) {
     if(!formVis.clienteNombre.trim()) return;
     const hoy = new Date().toLocaleDateString("es-ES");
     const id  = "vis_"+Date.now();
-    const gps = await captureGPS();
+    const gpsPromise = captureGPS(); // (fix) GPS en segundo plano: no bloquea el guardado
     const doc = {
       id,
       clienteNombre: formVis.clienteNombre,
@@ -33199,12 +33201,13 @@ function HistorialSemanal({ usuario }) {
       fecha:         hoy,
       tipo:          "visita_director",
       hora:          new Date().toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}),
-      gps:           gps||null,
+      gps:           null,
     };
-    fbEscribir("visitas", id, doc).then(()=>{
+    fbEscribir("visitas", id, doc).then((ok)=>{
       setVisitas(prev=>[...prev, doc]);
       setShowFormVis(false);
       setFormVis({clienteNombre:"",ciudad:"",contacto:"",resultado:"seguimiento",nota:"",agenteId:"",urgente:false});
+      gpsPromise.then(function(g){ if(g && ok!==false){ try{ fetch(`${FB_BASE}/visitas/${id}?updateMask.fieldPaths=gps`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(serializeToFirestore({gps:g}))}).catch(function(){}); }catch(e){} } }); // (fix) GPS en segundo plano, solo si ya se guardó
     });
   };
 
