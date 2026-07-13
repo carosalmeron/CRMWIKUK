@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.86.9";
+const CRM_VERSION = "3.87.2";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -1518,7 +1518,7 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
       setPotencialesPorCliente(porCli);
     }).catch(function(){});
     // 2. Cargar clientes visitados esta semana desde Firebase (con fechas para filtro día)
-    fbLeer("visitas").then(function(vis){
+    fbLeerVisitasRecientes(12).then(function(vis){
       if(!vis) return;
       var clis=[];
       (vis||[]).forEach(function(v){
@@ -1971,7 +1971,12 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
   // Cargar visitas reales de Firebase para esta semana
   var _s10=React.useState([]);var visitasDB=_s10[0],setVisitasDB=_s10[1];
   React.useEffect(function(){
-    var _recargar=function(){ fbLeer("visitas").then(function(d){setVisitasDB(d||[]);}); };
+    // (v3.87) Pedimos visitas de las últimas N semanas. N se adapta a la semana que
+    // se está viendo: si retrocedes con la flecha < a semanas antiguas, ampliamos el
+    // rango para cubrir hasta esa semana (con 4 de colchón). Así ves cualquier semana
+    // pasada sin descargar TODA la colección.
+    var _nSem=Math.max(12, (semActual-(semana||semActual))+4);
+    var _recargar=function(){ fbLeerVisitasRecientes(_nSem).then(function(d){setVisitasDB(d||[]);}); };
     _recargar();
     // (fix) Antes solo se cargaba una vez al entrar: una visita grabada después no
     // aparecía hasta recargar la app. Ahora refrescamos cuando se graba una visita,
@@ -6795,7 +6800,7 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
   var appMisIds=resolverMisIds(usuario);
   var _vdb=React.useState([]);var visitasDB=_vdb[0],setVisitasDB=_vdb[1];
   React.useEffect(function(){
-    fbLeer("visitas").then(function(d){
+    fbLeerVisitasRecientes(12).then(function(d){
       setVisitasDB(d||[]);
       // Merge into visitas state for pre-populating forms
       var misSem=(d||[]).filter(function(v){
@@ -19589,6 +19594,60 @@ async function fbQueryGrupoAgente(grupoAgente){
   }catch(e){console.warn("FB query:",e.message);return [];}
 }
 
+// (v3.87) Solución de raíz al problema de las 3000 visitas:
+// en lugar de descargar TODAS las visitas y filtrar en el navegador (que dejaba
+// fuera las recientes cuando la colección superaba el tope de páginas), pedimos
+// a Firebase SOLO las visitas de las últimas N semanas mediante una query por el
+// campo "semana". Esto es más rápido y no se rompe por muchas visitas que haya.
+// Los informes/históricos siguen usando fbLeer("visitas") (traen todo).
+async function fbLeerVisitasRecientes(nSemanas){
+  nSemanas = nSemanas || 8;
+  try{
+    var semActual = (typeof getSemanaISO==="function") ? getSemanaISO() : 0;
+    var semDesde = semActual - nSemanas;
+    var project="grupo-consolidado-crm";
+    var url="https://firestore.googleapis.com/v1/projects/"+project+"/databases/(default)/documents:runQuery";
+    // Si semDesde es válido (>0) filtramos por semana>=semDesde. Cerca de año nuevo
+    // (semActual pequeña) el filtro por abajo podría perder semanas del año anterior,
+    // así que en ese caso pedimos semana>= (semActual) O semana>= (52+semDesde) vía dos consultas.
+    async function _consulta(op, val){
+      var body={ structuredQuery:{
+        from:[{collectionId:"visitas"}],
+        where:{fieldFilter:{field:{fieldPath:"semana"},op:op,value:{doubleValue:val}}},
+        limit:5000
+      }};
+      var r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      if(!r.ok) return null; // señal de fallo
+      var data=await r.json();
+      return data.filter(function(d){return d.document;}).map(function(d){return fromFirestore(d.document);});
+    }
+    var res;
+    if(semDesde>0){
+      res=await _consulta("GREATER_THAN_OR_EQUAL", semDesde);
+    } else {
+      // Estamos al principio del año: traemos las semanas altas del año pasado + las bajas de este
+      var altas=await _consulta("GREATER_THAN_OR_EQUAL", 52+semDesde);
+      var bajas=await _consulta("GREATER_THAN_OR_EQUAL", 1);
+      if(altas===null||bajas===null){ res=null; }
+      else {
+        var vistos={}; res=[];
+        altas.concat(bajas).forEach(function(v){ if(v.id&&!vistos[v.id]){vistos[v.id]=1;res.push(v);} });
+      }
+    }
+    if(res===null){
+      // La query falló (sin índice, permisos, offline...): caemos al método antiguo
+      console.warn("visitas: query por semana no disponible, usando fbLeer completo");
+      return await fbLeer("visitas");
+    }
+    // Guardar en la misma caché que usa fbLeer, para modo offline
+    try{ if(typeof cacheGuardar==="function") cacheGuardar("visitas", res); }catch(e){}
+    return res;
+  }catch(e){
+    console.warn("fbLeerVisitasRecientes:",e.message);
+    return await fbLeer("visitas");
+  }
+}
+
 
 // ── Serializar a formato Firestore ────────────────────────────────
 function serializeToFirestore(datos){
@@ -24850,7 +24909,7 @@ function ActividadComercial({usuario,clientesFB,muestrasDB,estrategiasDB,ofertas
   var _vis=React.useState([]);var visitasAll=_vis[0],setVisitasAll=_vis[1];
   var _pot=React.useState([]);var potAll=_pot[0],setPotAll=_pot[1];
   React.useEffect(function(){
-    fbLeer("visitas").then(function(v){setVisitasAll((v||[]).filter(function(x){return !x.eliminada;}));}).catch(function(){});
+    fbLeer("visitas").then(function(v){setVisitasAll((v||[]).filter(function(x){return !x.eliminada;}));}).catch(function(){});  // histórico completo: el filtro de período (7d/30d/90d/all) se aplica en el componente
     fbLeer("potenciales").then(function(p){setPotAll(p||[]);}).catch(function(){});
   },[]);
 
@@ -25183,7 +25242,7 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
       });
       setProyectosCli(del);
     });
-    fbLeer("visitas").then(function(todas){
+    fbLeer("visitas").then(function(todas){  // histórico completo del cliente (sin límite de semanas)
       var del=(todas||[]).filter(function(v){
         if(v.eliminada) return false;
         var vCli=(v.clienteNombre||v.cliente||"").toUpperCase();
@@ -25347,7 +25406,7 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
     var changed=false;
     
     // Visitas de Firebase
-    fbLeer("visitas").then(function(todas){
+    fbLeer("visitas").then(function(todas){  // histórico completo del cliente (sin límite de semanas)
       var delCliente=(todas||[]).filter(function(v){
         return v.clienteId===cid||(v.clienteNombre||v.cliente||"").toUpperCase()===nombre;
       });
@@ -30392,7 +30451,7 @@ function SalaMandos({usuario,clientesDB,muestrasDB,estrategiasDB,oportunidadesDB
 
   React.useEffect(function(){
     if(visitasDBProp&&visitasDBProp.length>0){setVisitasDB(visitasDBProp);}
-    else{fbLeer("visitas").then(function(d){setVisitasDB(d||[]);}).catch(function(){});}
+    else{fbLeerVisitasRecientes(12).then(function(d){setVisitasDB(d||[]);}).catch(function(){});}
     fbLeer("potenciales").then(function(d){setPotencialesDB((d||[]).filter(function(x){return !x.eliminada;}));}).catch(function(){});
     // Cargar objetivos por equipo
     fbLeer("objetivos_equipo").then(function(d){
