@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.88.0";
+const CRM_VERSION = "3.89.0";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -10318,7 +10318,21 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
                       if(idx>=0) cadena[idx]={...cadena[idx],estado:"aprobado",fecha:new Date().toLocaleDateString("es-ES")};
                       
                       // Si soy superior (CEO/Jefe Ventas) y apruebo, la estrategia queda aprobada directamente
-                      let siguiente=cadena.find(c=>c.estado==="pendiente"&&c.id!==usuario.id);
+                      // (v3.89) BUG: antes buscaba cualquier eslabon inferior aun "pendiente" y dejaba la
+                      // estrategia esperandolo, aunque el CEO ya la hubiera aprobado. Si quien aprueba tiene
+                      // autoridad para el descuento solicitado (dto<=miLimite) o es CEO, los eslabones
+                      // inferiores pendientes se dan por cubiertos por la autoridad superior.
+                      let siguiente;
+                      if(usuario.rol==="ceo" || dto<=miLimite){
+                        for(var _k=0;_k<cadena.length;_k++){
+                          if(cadena[_k].estado==="pendiente"||cadena[_k].estado==="escalado"){
+                            cadena[_k]=Object.assign({},cadena[_k],{estado:"aprobado",fecha:new Date().toLocaleDateString("es-ES"),porSuperior:true});
+                          }
+                        }
+                        siguiente=null;
+                      } else {
+                        siguiente=cadena.find(c=>c.estado==="pendiente"&&c.id!==usuario.id);
+                      }
                       // Si no hay más pendientes en la cadena, está aprobada
                       
                       let nuevoEstado,nuevoPendienteDe,nuevoPendienteDeNombre;
@@ -29211,6 +29225,18 @@ function App(props){
           // Si todos los superiores (director/ceo) están "aprobado" pero alguien está "pendiente_final" → aprobar
           var todosSupAprobados=cadena.filter(function(c){return c.rol==="director"||c.rol==="ceo";}).every(function(c){return c.estado==="aprobado";});
           var hayFinal=cadena.some(function(c){return c.estado==="pendiente_final";});
+          // (v3.89) Caso 2: un SUPERIOR (CEO/director) ya aprobo, pero quedan responsables
+          // de rango inferior en "pendiente" -> la autoridad superior los cubre; aprobar.
+          var supAprobo=cadena.some(function(c){return (c.rol==="ceo"||c.rol==="director")&&c.estado==="aprobado";});
+          var quedanInferiores=cadena.some(function(c){return (c.rol!=="ceo"&&c.rol!=="director")&&(c.estado==="pendiente"||c.estado==="escalado");});
+          if(supAprobo&&quedanInferiores&&!hayFinal){
+            console.log("[AUTO-FIX] Estrategia "+est.id+": aprobada por superior, se saltan inferiores pendientes");
+            var fixedCad2=cadena.map(function(c){return ((c.rol!=="ceo"&&c.rol!=="director")&&(c.estado==="pendiente"||c.estado==="escalado"))?Object.assign({},c,{estado:"aprobado",fecha:new Date().toLocaleDateString("es-ES"),porSuperior:true}):c;});
+            var fix2={estado:"aprobada",pendienteDe:null,pendienteDeNombre:null,cadenaAprobacion:fixedCad2,
+              historialEscalado:[].concat(est.historialEscalado||[],[{accion:"Auto-aprobada (aprobada por superior)",por:"Sistema",fecha:new Date().toLocaleDateString("es-ES")}])};
+            fbEscribir("estrategias",est.id,fix2,true);
+            return;
+          }
           if(todosSupAprobados&&hayFinal){
             console.log("[AUTO-FIX] Estrategia "+est.id+" atascada en pendiente_final → aprobada");
             var fixedCadena=cadena.map(function(c){return c.estado==="pendiente_final"?Object.assign({},c,{estado:"aprobado",fecha:new Date().toLocaleDateString("es-ES")}):c;});
