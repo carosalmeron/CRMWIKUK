@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.86.7";
+const CRM_VERSION = "3.86.8";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -1971,8 +1971,31 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
   // Cargar visitas reales de Firebase para esta semana
   var _s10=React.useState([]);var visitasDB=_s10[0],setVisitasDB=_s10[1];
   React.useEffect(function(){
-    fbLeer("visitas").then(function(d){setVisitasDB(d||[]);});
-  },[]);
+    var _recargar=function(){ fbLeer("visitas").then(function(d){setVisitasDB(d||[]);}); };
+    _recargar();
+    // (fix) Antes solo se cargaba una vez al entrar: una visita grabada después no
+    // aparecía hasta recargar la app. Ahora refrescamos cuando se graba una visita,
+    // al volver a la pestaña, y periódicamente.
+    var _onVisita=function(ev){
+      try{
+        var nueva=ev&&ev.detail&&ev.detail.doc;
+        if(nueva){ setVisitasDB(function(prev){
+          var sinDup=(prev||[]).filter(function(x){return (x.id||"")!==(ev.detail.id||"");});
+          return sinDup.concat([Object.assign({id:ev.detail.id},nueva)]);
+        }); }
+      }catch(e){}
+      _recargar(); // y confirmamos con Firebase
+    };
+    var _onVis=function(){ if(!document.hidden) _recargar(); };
+    window.addEventListener("crm_visita_guardada",_onVisita);
+    document.addEventListener("visibilitychange",_onVis);
+    var _iv=setInterval(_recargar,60000);
+    return function(){
+      window.removeEventListener("crm_visita_guardada",_onVisita);
+      document.removeEventListener("visibilitychange",_onVis);
+      clearInterval(_iv);
+    };
+  },[semana]);
 
   // ════════════════════════════════════════════════════════════════════
   // REVISIÓN JERÁRQUICA — v3.5.3 / 4 (revisión parcial)
@@ -7049,6 +7072,10 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
     visitaDoc.semana=semanaHoy;
     const _vDocId=((usuario&&usuario.id)||idCanonico(usuario)||"user")+"_"+clienteSel.id+"_sem"+semanaHoy+"_"+Date.now(); // (fix) id único: permite varias visitas al mismo cliente/semana
     const _vOK=await fbEscribir("visitas", _vDocId, visitaDoc);
+    // (fix) Avisar a otras vistas (p.ej. Mi Semana) de que hay una visita nueva,
+    // para que refresquen sin tener que recargar la app. Incluimos el doc para
+    // que puedan mostrarla al instante aunque Firebase tarde en propagar.
+    try{ window.dispatchEvent(new CustomEvent("crm_visita_guardada",{detail:{doc:visitaDoc,id:_vDocId}})); }catch(e){}
     gpsPromise.then(function(g){ if(g && _vOK){ try{ fetch(`${FB_BASE}/visitas/${_vDocId}?updateMask.fieldPaths=gps`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(serializeToFirestore({gps:g}))}).catch(function(){}); }catch(e){} } }); // (fix) añade el GPS en segundo plano, solo si la visita ya se guardó, sin tocar la cola
     if(_vOK===false){ alert("⚠️ La visita NO se ha guardado en Firebase (posible problema de conexión o de permisos).\n\nVuelve a intentarlo. Si sigue fallando, abre la consola (F12 → Console) al pulsar guardar y dime el mensaje en rojo."); }
 
