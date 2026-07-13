@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.87.2";
+const CRM_VERSION = "3.88.0";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -19516,7 +19516,41 @@ async function sincronizarCola(){
   return ok;
 }
 
+// (v3.88) Cache en memoria de corta duracion para fbLeer.
+// PROBLEMA: cada componente pedia la coleccion ENTERA a Firestore cada vez que se
+// montaba (al navegar) o refrescaba, generando millones de lecturas al dia
+// (p.ej. 6,9M el 13/07). fbLeer guardaba en localStorage solo como respaldo offline.
+// SOLUCION: si la misma coleccion se pidio hace menos de _TTL ms, se devuelve la copia
+// en memoria sin tocar Firestore. Las escrituras invalidan la cache (fbInvalidarCache).
+var _FBMEM = {};
+var _FBMEM_TTL = {
+  visitas:20000, muestras:20000, ofertas:20000, oportunidades:20000,
+  estrategias:30000, incidencias:30000, informes:60000, ventas:120000,
+  ventas_anuales:300000, portal_users:300000, usuarios:300000,
+  configuracion:300000, clientes:120000, planes_semanales:60000,
+  _default:45000
+};
+function _fbTtl(c){ return _FBMEM_TTL[c]!=null ? _FBMEM_TTL[c] : _FBMEM_TTL._default; }
+function fbInvalidarCache(coleccion){
+  try{ if(coleccion){ delete _FBMEM[coleccion]; } else { _FBMEM={}; } }catch(e){}
+}
+
 async function fbLeer(coleccion, pageSize=200){
+  try{
+    var _c=_FBMEM[coleccion];
+    if(_c){
+      if(_c.data && (Date.now()-_c.ts) < _fbTtl(coleccion)) return _c.data;
+      if(_c.promesa && (Date.now()-_c.ts) < _fbTtl(coleccion)) return await _c.promesa;
+    }
+  }catch(e){}
+  var _prom = _fbLeerReal(coleccion, pageSize);
+  _FBMEM[coleccion] = {ts:Date.now(), data:null, promesa:_prom};
+  var _res = await _prom;
+  try{ if(_res && _res.length>=0) _FBMEM[coleccion] = {ts:Date.now(), data:_res, promesa:null}; }catch(e){}
+  return _res;
+}
+
+async function _fbLeerReal(coleccion, pageSize=200){
   // (fix) La colección "visitas" superó los 3000 docs (10 páginas × 300) y las visitas
   // recientes quedaban fuera del corte, así que no aparecían en "Mi semana" aunque
   // estuvieran bien guardadas. Subimos el tope de páginas para las colecciones grandes.
@@ -19681,6 +19715,15 @@ async function fbEscribir(coleccion, id, datos, parcial){
       const idx=cached.findIndex(d=>d.id===id);
       if(idx>=0) cached[idx]={...cached[idx],...datos}; else cached.push({...datos,id});
       cacheGuardar(coleccion,cached);
+    }
+  }catch(e){}
+  // (v3.88) Mantener sincronizada la cache en memoria de fbLeer: aplicamos el cambio
+  // al vuelo en vez de invalidar, para no forzar una relectura completa de la coleccion.
+  try{
+    if(_FBMEM[coleccion] && _FBMEM[coleccion].data){
+      var _arr=_FBMEM[coleccion].data;
+      var _ix=_arr.findIndex(function(d){return d.id===id;});
+      if(_ix>=0) _arr[_ix]=Object.assign({},_arr[_ix],datos); else _arr.push(Object.assign({},datos,{id:id}));
     }
   }catch(e){}
 
@@ -19993,6 +20036,7 @@ async function fbCargar() {
 async function fbEliminar(id) {
   try {
     await fetch(`${FB_BASE}/oportunidades/${id}`, {method: "DELETE"});
+    try{ fbInvalidarCache("oportunidades"); }catch(e){}
     return true;
   } catch(e) { return false; }
 }
