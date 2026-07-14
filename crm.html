@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.91.0";
+const CRM_VERSION = "3.92.0";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -8464,6 +8464,7 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
   const [motivo,setMotivo]=useState("");
   const [comentario,setComentario]=useState("");
   const [filtro,setFiltro]=useState("pendiente");
+  const [showInsights,setShowInsights]=useState(false); // (v3.92) vista de análisis OK/KO por producto
   const [filtroAgente,setFiltroAgente]=useState("todos");
   const [filtroGama,setFiltroGama]=useState("todas");
   const [filtroEquipoMue,setFiltroEquipoMue]=useState("todos");
@@ -9267,12 +9268,95 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
     <div style={{padding:"20px 16px 100px"}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
         <p style={{margin:0,fontSize:20,fontWeight:900,color:T.text}}>📦 Mis muestras</p>
-        <button onClick={()=>setShowNueva(v=>!v)}
-          style={{background:showNueva?"#E2E8F0":T.navy,color:showNueva?T.muted:"#fff",
-            border:"none",borderRadius:10,padding:"8px 14px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={()=>setShowInsights(v=>!v)}
+            style={{background:showInsights?"#7C3AED":"#F3E8FF",color:showInsights?"#fff":"#7C3AED",
+              border:"none",borderRadius:10,padding:"8px 12px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+            📊 Insights
+          </button>
+          <button onClick={()=>setShowNueva(v=>!v)}
+            style={{background:showNueva?"#E2E8F0":T.navy,color:showNueva?T.muted:"#fff",
+              border:"none",borderRadius:10,padding:"8px 14px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
           {showNueva?"× Cancelar":"+ Nueva muestra"}
         </button>
+        </div>
       </div>
+
+      {/* (v3.92) VISTA INSIGHTS: OK/KO agrupados por producto */}
+      {showInsights&&(function(){
+        var base=(muestras||[]).filter(function(m){return !m.eliminada;});
+        function agrupa(pred){
+          var g={};
+          base.filter(pred).forEach(function(m){
+            var k=(m.prod||"(sin producto)").trim();
+            if(!g[k]) g[k]={prod:k,items:[]};
+            g[k].items.push(m);
+          });
+          return Object.values(g).sort(function(a,b){return b.items.length-a.items.length;});
+        }
+        var okGrupos=agrupa(function(m){return m.estado==="positivo"||m.estado==="pedido";});
+        var koGrupos=agrupa(function(m){return m.estado==="ko";});
+        function fechaCorta(m){var f=m.fecha||m.fechaFeedback||"";if(f&&f.indexOf("T")>0)f=f.substring(0,10);return f;}
+        function textoGrupo(g,tipo){
+          var lin=[tipo+" — "+g.prod+" ("+g.items.length+" muestras)",""];
+          g.items.forEach(function(m){
+            lin.push("• "+(m.cliente||"?")+" — "+(m.agenteNombre||m.agente||"?")+" — "+fechaCorta(m));
+            if(m.nota) lin.push("   \""+m.nota+"\"");
+          });
+          return lin.join("\n");
+        }
+        function copiar(txt){
+          try{ if(navigator.clipboard){ navigator.clipboard.writeText(txt); alert("Copiado al portapapeles"); } else { prompt("Copia el texto:",txt); } }catch(e){ prompt("Copia el texto:",txt); }
+        }
+        function crearIncidenciaID(g){
+          var txt=textoGrupo(g,"KO");
+          var id="inc_"+Date.now()+"_"+Math.random().toString(36).slice(2,6);
+          var doc={id:id,tipo:"muestra_ko",tipologia:"I+D",area:"I+D",titulo:"Muestras KO: "+g.prod,cliente:g.items.length+" clientes",clienteNombre:g.prod,
+            descripcion:"Producto con "+g.items.length+" muestras rechazadas. Se solicita a I+D analizar y proponer soluciones.\n\n"+txt,
+            producto:g.prod, estado:"abierta", prioridad:"normal",
+            creadoPor:idCanonico(usuario), creadoPorNombre:usuario.nombre||"", equipo:usuario.equipo||"",
+            fecha:new Date().toISOString(), fechaCreacion:new Date().toISOString(), origen:"insights_muestras"};
+          fbEscribir("incidencias",id,doc).then(function(){
+            alert("✅ Incidencia creada para I+D sobre "+g.prod+" ("+g.items.length+" muestras KO)");
+          }).catch(function(){ alert("No se pudo crear la incidencia."); });
+        }
+        function Card(g,tipo){
+          var esKO=tipo==="KO";
+          return <div key={tipo+g.prod} style={{background:"#fff",borderRadius:12,border:"1px solid "+T.border,marginBottom:10,padding:"12px 14px",borderLeft:"4px solid "+(esKO?"#DC2626":"#16A34A")}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <p style={{margin:0,fontSize:15,fontWeight:800,color:T.text}}>{g.prod}</p>
+              <span style={{fontSize:12,fontWeight:800,color:esKO?"#DC2626":"#16A34A"}}>{g.items.length} {esKO?"KO":"OK"}</span>
+            </div>
+            {g.items.map(function(m,idx){
+              return <div key={idx} style={{padding:"6px 0",borderTop:idx>0?"1px solid #F1F5F9":"none"}}>
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:12}}>
+                  <span style={{fontWeight:700,color:T.text}}>{m.cliente||"?"}</span>
+                  <span style={{color:T.muted,fontSize:11}}>{(m.agenteNombre||m.agente||"?")+" · "+fechaCorta(m)}</span>
+                </div>
+                {m.nota?<p style={{margin:"3px 0 0",fontSize:12,color:T.muted,fontStyle:"italic"}}>"{m.nota}"</p>
+                       :<p style={{margin:"3px 0 0",fontSize:11,color:"#CBD5E1"}}>(sin comentario)</p>}
+              </div>;
+            })}
+            <div style={{display:"flex",gap:8,marginTop:10}}>
+              <button onClick={function(){copiar(textoGrupo(g,tipo));}}
+                style={{flex:1,background:"#F1F5F9",border:"none",borderRadius:8,padding:"8px",fontSize:12,fontWeight:700,color:T.text,cursor:"pointer"}}>
+                📋 Copiar / compartir
+              </button>
+              {esKO&&<button onClick={function(){crearIncidenciaID(g);}}
+                style={{flex:1,background:"#DC2626",border:"none",borderRadius:8,padding:"8px",fontSize:12,fontWeight:700,color:"#fff",cursor:"pointer"}}>
+                🔬 Enviar a I+D
+              </button>}
+            </div>
+          </div>;
+        }
+        return <div style={{marginBottom:20}}>
+          <p style={{margin:"0 0 4px",fontSize:12,color:T.muted}}>Análisis de resultados agrupados por producto. Úsalo para replicar los aciertos y mandar los fallos a I+D.</p>
+          <p style={{margin:"14px 0 8px",fontSize:14,fontWeight:900,color:"#16A34A"}}>✅ Positivas ({okGrupos.reduce(function(s,g){return s+g.items.length;},0)})</p>
+          {okGrupos.length? okGrupos.map(function(g){return Card(g,"OK");}) : <p style={{fontSize:12,color:T.muted}}>Sin muestras positivas en este periodo.</p>}
+          <p style={{margin:"18px 0 8px",fontSize:14,fontWeight:900,color:"#DC2626"}}>❌ Negativas / KO ({koGrupos.reduce(function(s,g){return s+g.items.length;},0)})</p>
+          {koGrupos.length? koGrupos.map(function(g){return Card(g,"KO");}) : <p style={{fontSize:12,color:T.muted}}>Sin muestras KO en este periodo.</p>}
+        </div>;
+      })()}
 
       {showNueva&&(
         <div style={{background:"#fff",borderRadius:14,padding:16,marginBottom:20,border:"1.5px solid "+T.navy}}>
