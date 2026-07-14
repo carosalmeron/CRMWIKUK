@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.89.0";
+const CRM_VERSION = "3.90.0";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -12882,7 +12882,7 @@ function IncidenciasCompras({usuario, incidenciasDB, setIncidenciasDB, clientesF
 // (v3.39.80) Pestaña Planificación en ficha 360
 function PlanificacionTab({clienteId,clienteNombre,usuario}){
   var _pl=React.useState([]);var planes=_pl[0],setPlanes=_pl[1];
-  var _plf=React.useState({producto:"",cantidad:"",calibre:"",metros:"",fechaServicio:"",notas:"",recurrente:false,meses:6});var formPl=_plf[0],setFormPl=_plf[1];
+  var _plf=React.useState({producto:"",codigoProducto:"",cantidad:"",calibre:"",metros:"",fechaServicio:"",notas:"",recurrente:false,meses:6});var formPl=_plf[0],setFormPl=_plf[1];
   var _plShow=React.useState(false);var showFormPl=_plShow[0],setShowFormPl=_plShow[1];
   var _plLoad=React.useState(false);var plLoaded=_plLoad[0],setPlLoaded=_plLoad[1];
 
@@ -12910,7 +12910,7 @@ function PlanificacionTab({clienteId,clienteNombre,usuario}){
       var id="plan_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
       var doc={
         id:id,clienteId:clienteId,clienteNombre:clienteNombre,
-        producto:formPl.producto.trim(),cantidad:Number(formPl.cantidad)||0,
+        producto:formPl.producto.trim(),codigoProducto:(formPl.codigoProducto||"").trim(),cantidad:Number(formPl.cantidad)||0,
         calibre:formPl.calibre,metros:formPl.metros,
         fechaServicio:fecha,notas:formPl.notas,
         agente:idCanonico(usuario),agenteNombre:usuario.nombre,equipo:usuario.equipo||"",
@@ -12928,7 +12928,7 @@ function PlanificacionTab({clienteId,clienteNombre,usuario}){
       titulo:"📋 Nueva planificación: "+(formPl.producto||"")+" — "+clienteNombre,
       mensaje:usuario.nombre+" ha planificado "+(nuevos.length>1?nuevos.length+" líneas":"1 línea")+": "+formPl.producto+" × "+(formPl.cantidad||0)+" uds"+(formPl.recurrente?" (mensual ×"+formPl.meses+")":""),
       destinatarioId:_destCompras.id,prioridad:"normal",creadoPor:idCanonico(usuario)});
-    setFormPl({producto:"",cantidad:"",calibre:"",metros:"",fechaServicio:"",notas:"",recurrente:false,meses:6});
+    setFormPl({producto:"",codigoProducto:"",cantidad:"",calibre:"",metros:"",fechaServicio:"",notas:"",recurrente:false,meses:6});
     setShowFormPl(false);
     if(fechas.length>1) alert("✅ "+fechas.length+" líneas creadas (mensual × "+fechas.length+" meses)");
   }
@@ -12993,7 +12993,7 @@ function PlanificacionTab({clienteId,clienteNombre,usuario}){
           suggestions={PRODUCTOS_LOCAL
             .filter(function(p){return formPl.producto.length>=2&&(((p.nombre||"").toLowerCase().includes(formPl.producto.toLowerCase()))||((p.codigo||"").toLowerCase().includes(formPl.producto.toLowerCase())));})
             .slice(0,8).map(function(p){return {label:p.nombre,sub:p.codigo+(p.formato?" · "+p.formato:""),tipo:"producto",obj:p};})}
-          onSelect={function(s){var o=(s&&s.obj)||{};setFormPl(function(f){return Object.assign({},f,{producto:o.nombre||s.label||f.producto,calibre:o.calibre||f.calibre,metros:o.metros||f.metros});});}}
+          onSelect={function(s){var o=(s&&s.obj)||{};setFormPl(function(f){return Object.assign({},f,{producto:o.nombre||s.label||f.producto,codigoProducto:o.codigo||f.codigoProducto,calibre:o.calibre||f.calibre,metros:o.metros||f.metros});});}}
           onPick={function(p){var _pl=PRODUCTOS_LOCAL.find(function(x){return (x.codigo||"")===(p.codigo||"");})||{};setFormPl(function(f){return Object.assign({},f,{producto:p.nombre||_pl.nombre||f.producto,calibre:_pl.calibre||p.formato||f.calibre,metros:_pl.metros||f.metros});});}}
         />
       </div>
@@ -13057,6 +13057,8 @@ function PlanificacionCompras({usuario}){
   const [planes,setPlanes]=React.useState([]);
   const [cargando,setCargando]=React.useState(true);
   const [vista,setVista]=React.useState("productos"); // productos | timeline | clientes
+  // (v3.90) Stock SAP para cruzar lo planificado con las existencias reales.
+  const [stockMap,setStockMap]=React.useState(null); // { CODIGO: {stock, entradas, comprometido} }
 
   React.useEffect(function(){
     fbLeer("planificacion").then(function(d){
@@ -13064,6 +13066,50 @@ function PlanificacionCompras({usuario}){
       setCargando(false);
     }).catch(function(){setCargando(false);});
   },[]);
+
+  // Cargar el stock (mismo origen que el catálogo: stock_sap/resumen, campo exact
+  // = JSON { codigo: [stock, llegadas/entradas, comprometido] }).
+  React.useEffect(function(){
+    try{
+      var FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+      fetch(FB+"/stock_sap/resumen").then(function(r){return r.ok?r.json():null;}).then(function(j){
+        if(!j||!j.fields||!j.fields.exact){ setStockMap({}); return; }
+        var raw=j.fields.exact.stringValue||"{}";
+        var obj=JSON.parse(raw);
+        var m={};
+        Object.keys(obj).forEach(function(cod){
+          var a=obj[cod]||[];
+          m[String(cod).toUpperCase()]={stock:Number(a[0])||0, entradas:Number(a[1])||0, comprometido:Number(a[2])||0};
+        });
+        setStockMap(m);
+      }).catch(function(){ setStockMap({}); });
+    }catch(e){ setStockMap({}); }
+  },[]);
+
+  // Dado un grupo de producto planificado, resolver su código (el guardado en la
+  // planificación si existe, o vía catálogo por nombre) y sumar el stock de todos
+  // los envases que empiezan por ese código (prefijo).
+  function _stockDe(grupo){
+    if(!stockMap) return null;
+    var nombreProducto = (grupo && grupo.producto) || "";
+    var codGuardado = (grupo && grupo.codigoProducto) || "";
+    var cod = String(codGuardado||"").toUpperCase();
+    if(!cod){
+      var prod=(PRODUCTOS_LOCAL||[]).find(function(x){
+        return String(x.nombre||"").trim().toUpperCase()===String(nombreProducto||"").trim().toUpperCase();
+      });
+      cod = prod ? String(prod.codigo||"").toUpperCase() : "";
+    }
+    var res={stock:0, entradas:0, comprometido:0, cod:cod, encontrado:false};
+    if(!cod) return res;
+    Object.keys(stockMap).forEach(function(k){
+      if(k===cod || k.indexOf(cod+".")===0){ // el propio código y sus envases (COD.XX)
+        res.stock+=stockMap[k].stock; res.entradas+=stockMap[k].entradas; res.comprometido+=stockMap[k].comprometido;
+        res.encontrado=true;
+      }
+    });
+    return res;
+  }
 
   function cambiarEstado(pid,nuevoEstado){
     fbEscribir("planificacion",pid,{estado:nuevoEstado},true);
@@ -13084,6 +13130,7 @@ function PlanificacionCompras({usuario}){
     var g=porProducto[k];
     g.total+=Number(p.cantidad)||0;
     g.lineas.push(p);
+    if(!g.codigoProducto && p.codigoProducto) g.codigoProducto=p.codigoProducto;
     if(p.calibre) g.calibres.add(p.calibre);
     g.clientes.add(p.clienteNombre||"?");
     if(p.fechaServicio<=hoy) g.urgente+=Number(p.cantidad)||0;
@@ -13092,6 +13139,19 @@ function PlanificacionCompras({usuario}){
     else g.futuro+=Number(p.cantidad)||0;
   });
   var productos=Object.values(porProducto).sort(function(a,b){return b.urgente-a.urgente||b.total-a.total;});
+  // (v3.90) Cruzar cada producto con el stock: diferencia = (stock + entradas) - planificado.
+  // Positivo = sobra; negativo = falta por comprar.
+  productos.forEach(function(g){
+    var s=_stockDe(g);
+    if(s){
+      g.stock=s.stock; g.entradas=s.entradas; g.comprometido=s.comprometido;
+      g.stockEncontrado=s.encontrado; g.codStock=s.cod;
+      g.disponible=s.stock+s.entradas;              // stock + entradas previstas
+      g.diferencia=(s.stock+s.entradas)-g.total;    // lo que sobra (+) o falta (-)
+    } else {
+      g.stock=null; g.disponible=null; g.diferencia=null; g.stockEncontrado=false;
+    }
+  });
 
   // Timeline: próximas 8 semanas
   var semanas=[];
@@ -13117,12 +13177,46 @@ function PlanificacionCompras({usuario}){
 
   var totalUrgente=productos.reduce(function(s,p){return s+p.urgente;},0);
   var totalActivo=activos.reduce(function(s,p){return s+(Number(p.cantidad)||0);},0);
+  // (v3.90) Totales globales del cruce con stock.
+  var totStockDisp=0, totPlanConStock=0, totDeficit=0, prodSinStock=0;
+  productos.forEach(function(g){
+    if(g.disponible!=null){
+      totStockDisp+=g.disponible;
+      totPlanConStock+=g.total;
+      if(g.diferencia<0) totDeficit+=(-g.diferencia); // suma de lo que falta
+    } else { prodSinStock++; }
+  });
 
   if(cargando) return <div style={{padding:40,textAlign:"center",color:T.muted}}>⏳ Cargando planificación...</div>;
 
   return <div style={{padding:16,paddingBottom:80}}>
     <p style={{margin:"0 0 4px",fontSize:20,fontWeight:900,color:T.text}}>📋 Planificación de Compras</p>
     <p style={{margin:"0 0 14px",fontSize:12,color:T.muted}}>{activos.length} líneas activas · {productos.length} productos · {clientes.length} clientes</p>
+
+    {/* (v3.90) RESUMEN: Planificado vs Stock */}
+    {stockMap===null
+      ? <div style={{background:"#F1F5F9",borderRadius:12,padding:"10px 14px",marginBottom:14,fontSize:12,color:T.muted}}>Cargando stock para el cruce...</div>
+      : <div style={{background:"#0F172A",borderRadius:14,padding:"14px 16px",marginBottom:16}}>
+          <p style={{margin:"0 0 10px",fontSize:13,fontWeight:800,color:"#fff"}}>Planificado vs Stock (total)</p>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+            <div style={{background:"rgba(255,255,255,.08)",borderRadius:10,padding:"10px 8px",textAlign:"center"}}>
+              <p style={{margin:0,fontSize:20,fontWeight:900,color:"#F59E0B"}}>{totalActivo.toLocaleString("es-ES")}</p>
+              <p style={{margin:0,fontSize:10,color:"#94A3B8"}}>Planificado (uds)</p>
+            </div>
+            <div style={{background:"rgba(255,255,255,.08)",borderRadius:10,padding:"10px 8px",textAlign:"center"}}>
+              <p style={{margin:0,fontSize:20,fontWeight:900,color:"#38BDF8"}}>{totStockDisp.toLocaleString("es-ES")}</p>
+              <p style={{margin:0,fontSize:10,color:"#94A3B8"}}>Stock + entradas</p>
+            </div>
+            <div style={{background:"rgba(255,255,255,.08)",borderRadius:10,padding:"10px 8px",textAlign:"center"}}>
+              <p style={{margin:0,fontSize:20,fontWeight:900,color:totDeficit>0?"#F87171":"#34D399"}}>{totDeficit>0?"-"+totDeficit.toLocaleString("es-ES"):"0"}</p>
+              <p style={{margin:0,fontSize:10,color:"#94A3B8"}}>Falta por comprar</p>
+            </div>
+          </div>
+          <p style={{margin:"10px 0 0",fontSize:11,color:"#94A3B8"}}>
+            Diferencia por producto = (stock + entradas) - planificado. En rojo, lo que hay que comprar.
+            {prodSinStock>0 ? " · "+prodSinStock+" producto(s) sin stock localizado (nombre no cruzado con catalogo)." : ""}
+          </p>
+        </div>}
 
     {/* ALERTAS urgentes */}
     {totalUrgente>0&&<div style={{background:"#FEF2F2",borderRadius:12,padding:"12px 14px",marginBottom:14,border:"2px solid #FECACA"}}>
@@ -13192,6 +13286,23 @@ function PlanificacionCompras({usuario}){
             {pr.proximo>0&&<span style={{color:"#F59E0B",fontWeight:600}}>🟡 {pr.proximo} en 2 sem</span>}
             {pr.futuro>0&&<span style={{color:"#3B82F6"}}>🔵 {pr.futuro} después</span>}
           </div>
+          {/* (v3.90) Cruce con stock del producto */}
+          {pr.disponible!=null
+            ? <div style={{marginTop:8,display:"flex",gap:6,alignItems:"stretch",fontSize:11}}>
+                <div style={{flex:1,background:"#F0F9FF",borderRadius:8,padding:"6px 8px",textAlign:"center",border:"1px solid #BAE6FD"}}>
+                  <p style={{margin:0,fontSize:14,fontWeight:800,color:"#0369A1"}}>{pr.stock.toLocaleString("es-ES")}</p>
+                  <p style={{margin:0,fontSize:9,color:"#64748B"}}>stock</p>
+                </div>
+                <div style={{flex:1,background:"#F0F9FF",borderRadius:8,padding:"6px 8px",textAlign:"center",border:"1px solid #BAE6FD"}}>
+                  <p style={{margin:0,fontSize:14,fontWeight:800,color:"#0369A1"}}>{pr.entradas.toLocaleString("es-ES")}</p>
+                  <p style={{margin:0,fontSize:9,color:"#64748B"}}>entradas</p>
+                </div>
+                <div style={{flex:1,background:pr.diferencia<0?"#FEF2F2":"#F0FDF4",borderRadius:8,padding:"6px 8px",textAlign:"center",border:"1px solid "+(pr.diferencia<0?"#FECACA":"#BBF7D0")}}>
+                  <p style={{margin:0,fontSize:14,fontWeight:900,color:pr.diferencia<0?"#DC2626":"#16A34A"}}>{pr.diferencia<0?pr.diferencia.toLocaleString("es-ES"):"+"+pr.diferencia.toLocaleString("es-ES")}</p>
+                  <p style={{margin:0,fontSize:9,color:"#64748B"}}>{pr.diferencia<0?"falta comprar":"sobra"}</p>
+                </div>
+              </div>
+            : <div style={{marginTop:8,fontSize:10,color:T.muted,fontStyle:"italic"}}>Sin stock localizado (nombre no cruzado con el catalogo)</div>}
           {/* Desglose por cliente */}
           <div style={{marginTop:8}}>
             {pr.lineas.sort(function(a,b){return(a.fechaServicio||"z").localeCompare(b.fechaServicio||"z");}).map(function(l){
