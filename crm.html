@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.90.0";
+const CRM_VERSION = "3.91.0";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -13153,6 +13153,48 @@ function PlanificacionCompras({usuario}){
     }
   });
 
+  // (v3.91) PROYECCIÓN MENSUAL ACUMULADA.
+  // El stock es un número actual; vamos restando lo planificado mes a mes para ver
+  // cuándo (en qué mes) el saldo se vuelve negativo (se rompe el stock).
+  function _mesDe(fecha){ return (fecha||"").substring(0,7); } // "2026-07"
+  // Todos los meses que tienen alguna planificación, ordenados.
+  var mesesSet={};
+  activos.forEach(function(p){ var m=_mesDe(p.fechaServicio); if(m) mesesSet[m]=true; });
+  var mesesLista=Object.keys(mesesSet).sort();
+  function _mesLabel(m){
+    var pp=m.split("-"); if(pp.length<2) return m;
+    var nm=["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
+    return nm[parseInt(pp[1])-1]+" "+pp[0];
+  }
+  // Para cada producto: cuánto planificado cae en cada mes + saldo acumulado.
+  productos.forEach(function(g){
+    g.porMes={};        // { "2026-07": planificadoDeEseMes }
+    g.lineas.forEach(function(l){
+      var m=_mesDe(l.fechaServicio);
+      if(m) g.porMes[m]=(g.porMes[m]||0)+(Number(l.cantidad)||0);
+    });
+    // Proyección de saldo: parte de (stock+entradas) y resta mes a mes.
+    g.saldoMes={}; g.mesRuptura=null; g.faltaEnRuptura=0;
+    if(g.disponible!=null){
+      var saldo=g.disponible;
+      mesesLista.forEach(function(m){
+        var consumo=g.porMes[m]||0;
+        saldo-=consumo;
+        g.saldoMes[m]=saldo;
+        if(saldo<0 && !g.mesRuptura){ g.mesRuptura=m; g.faltaEnRuptura=-saldo; }
+      });
+    }
+  });
+  // Resumen por mes (total planificado del mes y en cuántos productos se rompe stock ese mes).
+  var resumenMeses=mesesLista.map(function(m){
+    var totalMes=0, rupturasMes=0, faltaMes=0;
+    productos.forEach(function(g){
+      totalMes+=(g.porMes[m]||0);
+      if(g.mesRuptura===m){ rupturasMes++; faltaMes+=g.faltaEnRuptura; }
+    });
+    return {mes:m, label:_mesLabel(m), total:totalMes, rupturas:rupturasMes, falta:faltaMes};
+  });
+
   // Timeline: próximas 8 semanas
   var semanas=[];
   for(var w=0;w<8;w++){
@@ -13249,7 +13291,7 @@ function PlanificacionCompras({usuario}){
 
     {/* Tabs vista */}
     <div style={{display:"flex",gap:4,marginBottom:14}}>
-      {[{k:"productos",l:"📦 Por producto"},{k:"timeline",l:"📅 Timeline"},{k:"clientes",l:"👥 Por cliente"}].map(function(t){
+      {[{k:"productos",l:"📦 Por producto"},{k:"timeline",l:"📅 Timeline"},{k:"mes",l:"📆 Por mes"},{k:"clientes",l:"👥 Por cliente"}].map(function(t){
         var sel=vista===t.k;
         return <button key={t.k} onClick={function(){setVista(t.k);}}
           style={{flex:1,padding:"8px 6px",borderRadius:99,border:sel?"none":"1.5px solid "+T.border,
@@ -13303,7 +13345,10 @@ function PlanificacionCompras({usuario}){
                 </div>
               </div>
             : <div style={{marginTop:8,fontSize:10,color:T.muted,fontStyle:"italic"}}>Sin stock localizado (nombre no cruzado con el catalogo)</div>}
-          {/* Desglose por cliente */}
+          {/* (v3.91) Aviso del mes en que se rompe el stock */}
+          {pr.mesRuptura&&<div style={{marginTop:6,padding:"6px 10px",borderRadius:8,background:"#FEF2F2",border:"1px solid #FECACA",fontSize:11,fontWeight:700,color:"#DC2626"}}>
+            ⚠️ Rompe stock en {_mesLabel(pr.mesRuptura)} · faltarán {pr.faltaEnRuptura.toLocaleString("es-ES")} uds
+          </div>}
           <div style={{marginTop:8}}>
             {pr.lineas.sort(function(a,b){return(a.fechaServicio||"z").localeCompare(b.fechaServicio||"z");}).map(function(l){
               var vencida=l.fechaServicio<=hoy;
@@ -13355,6 +13400,74 @@ function PlanificacionCompras({usuario}){
     </div>}
 
     {/* VISTA CLIENTES */}
+    {/* (v3.91) VISTA POR MES: resumen mensual + matriz producto x mes (saldo acumulado) */}
+    {vista==="mes"&&(function(){
+      if(stockMap===null) return <div style={{padding:30,textAlign:"center",color:T.muted}}>Cargando stock...</div>;
+      if(mesesLista.length===0) return <div style={{padding:30,textAlign:"center",color:T.muted}}>No hay planificación con fechas.</div>;
+      var prodsConStock=productos.filter(function(g){return g.disponible!=null;});
+      return <div>
+        {/* Resumen por mes */}
+        <p style={{margin:"0 0 8px",fontSize:12,fontWeight:800,color:T.text,textTransform:"uppercase"}}>Resumen mensual</p>
+        {resumenMeses.map(function(rm){
+          return <div key={rm.mes} style={{background:"#fff",borderRadius:12,border:"1px solid "+T.border,marginBottom:8,padding:"12px 14px",
+            borderLeft:rm.rupturas>0?"4px solid #DC2626":"4px solid #22C55E"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <p style={{margin:0,fontSize:15,fontWeight:800,color:T.text,textTransform:"capitalize"}}>{rm.label}</p>
+                <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{rm.total.toLocaleString("es-ES")} uds planificadas</p>
+              </div>
+              <div style={{textAlign:"right"}}>
+                {rm.rupturas>0
+                  ? <div>
+                      <p style={{margin:0,fontSize:16,fontWeight:900,color:"#DC2626"}}>{rm.rupturas} producto{rm.rupturas>1?"s":""}</p>
+                      <p style={{margin:0,fontSize:10,color:"#DC2626"}}>rompe stock · faltan {rm.falta.toLocaleString("es-ES")}</p>
+                    </div>
+                  : <p style={{margin:0,fontSize:13,fontWeight:700,color:"#16A34A"}}>✓ stock cubre</p>}
+              </div>
+            </div>
+          </div>;
+        })}
+
+        {/* Matriz producto x mes (saldo acumulado) */}
+        <p style={{margin:"18px 0 8px",fontSize:12,fontWeight:800,color:T.text,textTransform:"uppercase"}}>Saldo acumulado por producto</p>
+        <p style={{margin:"0 0 8px",fontSize:10,color:T.muted}}>Cada celda = stock restante tras servir lo planificado hasta ese mes. En rojo = negativo (hay que comprar).</p>
+        <div style={{overflowX:"auto",border:"1px solid "+T.border,borderRadius:12}}>
+          <table style={{borderCollapse:"collapse",fontSize:11,minWidth:"100%"}}>
+            <thead>
+              <tr style={{background:"#F8FAFC"}}>
+                <th style={{padding:"8px 10px",textAlign:"left",position:"sticky",left:0,background:"#F8FAFC",fontWeight:800,color:T.text,borderBottom:"1px solid "+T.border}}>Producto</th>
+                <th style={{padding:"8px 8px",textAlign:"right",fontWeight:700,color:T.muted,borderBottom:"1px solid "+T.border}}>disp.</th>
+                {mesesLista.map(function(m){
+                  return <th key={m} style={{padding:"8px 8px",textAlign:"right",fontWeight:700,color:T.muted,borderBottom:"1px solid "+T.border,textTransform:"capitalize",whiteSpace:"nowrap"}}>{_mesLabel(m)}</th>;
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              {prodsConStock.map(function(g){
+                return <tr key={g.producto} style={{borderBottom:"1px solid #F1F5F9"}}>
+                  <td style={{padding:"8px 10px",fontWeight:700,color:T.text,position:"sticky",left:0,background:"#fff",whiteSpace:"nowrap"}}>{g.producto}</td>
+                  <td style={{padding:"8px 8px",textAlign:"right",color:"#0369A1",fontWeight:700}}>{g.disponible.toLocaleString("es-ES")}</td>
+                  {mesesLista.map(function(m){
+                    var saldo=g.saldoMes[m];
+                    var neg=saldo<0;
+                    var esRuptura=(g.mesRuptura===m);
+                    return <td key={m} style={{padding:"8px 8px",textAlign:"right",fontWeight:neg?800:500,
+                      color:neg?"#DC2626":T.text,background:esRuptura?"#FEE2E2":(neg?"#FEF2F2":"transparent"),whiteSpace:"nowrap"}}>
+                      {saldo.toLocaleString("es-ES")}{esRuptura?" ⚠️":""}
+                    </td>;
+                  })}
+                </tr>;
+              })}
+            </tbody>
+          </table>
+        </div>
+        {productos.some(function(g){return g.disponible==null;})&&
+          <p style={{margin:"10px 0 0",fontSize:10,color:T.muted,fontStyle:"italic"}}>
+            {productos.filter(function(g){return g.disponible==null;}).length} producto(s) sin stock localizado no aparecen en la matriz.
+          </p>}
+      </div>;
+    })()}
+
     {vista==="clientes"&&clientes.map(function(cl){
       return <div key={cl.nombre} style={{background:"#fff",borderRadius:12,border:"1px solid "+T.border,marginBottom:8,padding:"12px 14px"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
