@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.94.0";
+const CRM_VERSION = "3.95.0";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -5443,6 +5443,33 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, es
 
 // ─── INFORME SEMANAL ──────────────────────────────────────────────
 var PRODUCTOS_LOCAL=[];
+
+// (v3.95) En planificacion el campo "producto" es texto libre: unos guardaron el CODIGO
+// (CX50.9KF3), otros la DESCRIPCION (MAD.CERDO P.CK A XXL) y otros nada. Eso mezclaba la
+// vista y partia el mismo articulo en varios grupos. Este helper resuelve siempre las dos
+// cosas contra el catalogo, venga como venga guardado.
+// Devuelve {codigo, nombre, label}  ->  label = "CODIGO - Descripcion"
+function prodCodNom(txt, codigoGuardado){
+  var t=String(txt==null?"":txt).trim();
+  var cg=String(codigoGuardado==null?"":codigoGuardado).trim();
+  var lista=PRODUCTOS_LOCAL||[];
+  var hit=null;
+  // 1) Si la linea guardo el codigo, mandan sus datos
+  if(cg){ hit=lista.find(function(x){return String(x.codigo||"").toUpperCase()===cg.toUpperCase();}); }
+  // 2) Si no, probar si el texto ES un codigo
+  if(!hit&&t){ hit=lista.find(function(x){return String(x.codigo||"").toUpperCase()===t.toUpperCase();}); }
+  // 3) Si no, probar si el texto ES una descripcion
+  if(!hit&&t){ hit=lista.find(function(x){return String(x.nombre||"").trim().toUpperCase()===t.toUpperCase();}); }
+  var codigo = hit ? String(hit.codigo||"") : (cg||"");
+  var nombre = hit ? String(hit.nombre||"") : "";
+  // Sin cruce en el catalogo: conservamos lo que haya escrito el comercial
+  if(!hit){
+    if(cg && t && t.toUpperCase()!==cg.toUpperCase()) nombre=t;   // texto = descripcion
+    else if(!cg) nombre=t;                                        // solo tenemos el texto
+  }
+  var label = codigo ? (nombre ? codigo+" - "+nombre : codigo) : (nombre||"(sin producto)");
+  return {codigo:codigo, nombre:nombre, label:label};
+}
 
 // (v3.54) Helpers reutilizables: resolver datos completos de un producto para cualquier formulario
 // Devuelve {codigo,nombre,calibre,metros,precioBase,precioAnterior,dto,extrasImporte,extras,precio,composicion,requiereAprobacion}
@@ -13065,7 +13092,7 @@ function PlanificacionTab({clienteId,clienteNombre,usuario}){
       background:"#fff",borderRadius:10,border:"1px solid "+T.border,marginBottom:6,
       borderLeft:"4px solid "+(estadoColor[p.estado]||T.muted)}}>
       <div style={{flex:1}}>
-        <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{p.producto}
+        <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{prodCodNom(p.producto,p.codigoProducto).label}
           {p.recurrente&&<span style={{marginLeft:6,fontSize:10,color:"#3B82F6",fontWeight:600}}>🔄 mensual</span>}
         </p>
         <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
@@ -13202,25 +13229,19 @@ function PlanificacionCompras({usuario}){
   // los envases que empiezan por ese código (prefijo).
   function _stockDe(grupo){
     if(!stockMap) return null;
-    var nombreProducto = (grupo && grupo.producto) || "";
-    var codGuardado = (grupo && grupo.codigoProducto) || "";
-    var cod = String(codGuardado||"").toUpperCase();
-    if(!cod){
-      var prod=(PRODUCTOS_LOCAL||[]).find(function(x){
-        return String(x.nombre||"").trim().toUpperCase()===String(nombreProducto||"").trim().toUpperCase();
-      });
-      cod = prod ? String(prod.codigo||"").toUpperCase() : "";
-    }
+    // (v3.95) El codigo ya viene resuelto por prodCodNom al agrupar.
+    var cod = String((grupo&&(grupo.codigo||grupo.codigoProducto))||"").toUpperCase();
     var res={stock:0, entradas:0, comprometido:0, cod:cod, encontrado:false};
     if(!cod) return res;
     Object.keys(stockMap).forEach(function(k){
-      if(k===cod || k.indexOf(cod+".")===0){ // el propio código y sus envases (COD.XX)
+      if(k===cod || k.indexOf(cod+".")===0){ // el propio codigo y sus envases (COD.XX)
         res.stock+=stockMap[k].stock; res.entradas+=stockMap[k].entradas; res.comprometido+=stockMap[k].comprometido;
         res.encontrado=true;
       }
     });
     return res;
   }
+
 
   function cambiarEstado(pid,nuevoEstado){
     fbEscribir("planificacion",pid,{estado:nuevoEstado},true);
@@ -13236,12 +13257,15 @@ function PlanificacionCompras({usuario}){
   // Agrupar activos por producto
   var porProducto={};
   activos.forEach(function(p){
-    var k=p.producto||"?";
-    if(!porProducto[k]) porProducto[k]={producto:k,total:0,urgente:0,proximo:0,futuro:0,lineas:[],calibres:new Set(),clientes:new Set()};
+    // (v3.95) Agrupar por CODIGO resuelto (no por el texto libre): antes el mismo articulo
+    // se partia en varios grupos segun lo hubiera escrito cada comercial.
+    var _pi=prodCodNom(p.producto,p.codigoProducto);
+    var k=_pi.codigo||_pi.label;
+    if(!porProducto[k]) porProducto[k]={producto:_pi.label,codigo:_pi.codigo,nombre:_pi.nombre,total:0,urgente:0,proximo:0,futuro:0,lineas:[],calibres:new Set(),clientes:new Set()};
     var g=porProducto[k];
     g.total+=Number(p.cantidad)||0;
     g.lineas.push(p);
-    if(!g.codigoProducto && p.codigoProducto) g.codigoProducto=p.codigoProducto;
+    if(!g.codigoProducto && _pi.codigo) g.codigoProducto=_pi.codigo;
     if(p.calibre) g.calibres.add(p.calibre);
     g.clientes.add(p.clienteNombre||"?");
     if(p.fechaServicio<=hoy) g.urgente+=Number(p.cantidad)||0;
@@ -13383,7 +13407,7 @@ function PlanificacionCompras({usuario}){
       <div style={{marginTop:6}}>
         {productos.filter(function(p){return p.urgente>0;}).map(function(p){
           return <div key={p.producto} style={{display:"flex",justifyContent:"space-between",padding:"4px 0",fontSize:12}}>
-            <span style={{fontWeight:700,color:"#991B1B"}}>{p.producto}</span>
+            <span style={{fontWeight:700,color:"#991B1B"}}>{prodCodNom(p.producto,p.codigoProducto).label}</span>
             <span style={{fontWeight:800,color:"#DC2626"}}>{p.urgente.toLocaleString("es-ES")} uds</span>
           </div>;
         })}
@@ -13515,7 +13539,7 @@ function PlanificacionCompras({usuario}){
             {sem.planes.length>0&&<div style={{marginTop:6}}>
               {sem.planes.map(function(p){
                 return <div key={p.id} style={{display:"flex",justifyContent:"space-between",padding:"3px 6px",fontSize:11,color:T.muted}}>
-                  <span><span style={{fontWeight:600,color:T.text}}>{p.producto}</span> · {p.clienteNombre}</span>
+                  <span><span style={{fontWeight:600,color:T.text}}>{prodCodNom(p.producto,p.codigoProducto).label}</span> · {p.clienteNombre}</span>
                   <span style={{fontWeight:700,color:T.text}}>{p.cantidad} uds · {p.fechaServicio}</span>
                 </div>;
               })}
@@ -13620,7 +13644,7 @@ function PlanificacionCompras({usuario}){
       <div style={{marginTop:6}}>
         {servidos.slice(0,20).map(function(p){
           return <div key={p.id} style={{display:"flex",justifyContent:"space-between",padding:"4px 8px",fontSize:11,color:T.muted}}>
-            <span>{p.producto} · {p.clienteNombre}</span>
+            <span>{prodCodNom(p.producto,p.codigoProducto).label} · {p.clienteNombre}</span>
             <span>{p.cantidad} uds · {p.fechaServicio}</span>
           </div>;
         })}
