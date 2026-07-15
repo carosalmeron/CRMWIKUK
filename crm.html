@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "3.95.0";
+const CRM_VERSION = "3.96.0";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -5469,6 +5469,14 @@ function prodCodNom(txt, codigoGuardado){
   }
   var label = codigo ? (nombre ? codigo+" - "+nombre : codigo) : (nombre||"(sin producto)");
   return {codigo:codigo, nombre:nombre, label:label};
+}
+
+// (v3.96) Fecha "2026-07-01" -> "01/07/2026". Se parte el string en vez de usar new Date(),
+// que interpreta la fecha como UTC y puede restar un dia segun la zona horaria.
+function _fechaES(f){
+  var t=String(f==null?"":f); var pp=t.split("-");
+  if(pp.length!==3) return t;
+  return pp[2].substring(0,2)+"/"+pp[1]+"/"+pp[0];
 }
 
 // (v3.54) Helpers reutilizables: resolver datos completos de un producto para cualquier formulario
@@ -13097,7 +13105,7 @@ function PlanificacionTab({clienteId,clienteNombre,usuario}){
         </p>
         <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
           {p.cantidad} uds{p.calibre?" · "+p.calibre:""}{p.metros?" · "+p.metros+"m":""}
-          {" · 📅 "}{p.fechaServicio}
+          {" · 📅 "}{_fechaES(p.fechaServicio)}
         </p>
         {p.notas&&<p style={{margin:"2px 0 0",fontSize:10,color:"#64748B"}}>💬 {p.notas}</p>}
       </div>
@@ -13197,6 +13205,9 @@ function PlanificacionCompras({usuario}){
   const [vista,setVista]=React.useState("productos"); // productos | timeline | clientes
   // (v3.90) Stock SAP para cruzar lo planificado con las existencias reales.
   const [stockMap,setStockMap]=React.useState(null); // { CODIGO: {stock, entradas, comprometido} }
+  // (v3.96) Meses desplegados en el desglose de cada producto: { "CODIGO|2026-07": true }
+  const [mesAbierto,setMesAbierto]=React.useState({});
+  function toggleMes(k){ setMesAbierto(function(m){var n=Object.assign({},m); if(n[k]) delete n[k]; else n[k]=true; return n;}); }
 
   React.useEffect(function(){
     fbLeer("planificacion").then(function(d){
@@ -13499,10 +13510,40 @@ function PlanificacionCompras({usuario}){
           {pr.mesRuptura&&<div style={{marginTop:6,padding:"6px 10px",borderRadius:8,background:"#FEF2F2",border:"1px solid #FECACA",fontSize:11,fontWeight:700,color:"#DC2626"}}>
             ⚠️ Rompe stock en {_mesLabel(pr.mesRuptura)} · faltarán {pr.faltaEnRuptura.toLocaleString("es-ES")} uds
           </div>}
+          {/* (v3.96) Desglose agrupado por MES, plegable. La fecha va en formato es-ES. */}
           <div style={{marginTop:8}}>
-            {pr.lineas.sort(function(a,b){return(a.fechaServicio||"z").localeCompare(b.fechaServicio||"z");}).map(function(l){
-              var vencida=l.fechaServicio<=hoy;
-              var pronto=l.fechaServicio<=en7d;
+            {(function(){
+              var porMesL={};
+              pr.lineas.forEach(function(l){
+                var mk=_mesDe(l.fechaServicio)||"?";
+                if(!porMesL[mk]) porMesL[mk]={mes:mk,total:0,lineas:[]};
+                porMesL[mk].total+=Number(l.cantidad)||0;
+                porMesL[mk].lineas.push(l);
+              });
+              return Object.keys(porMesL).sort().map(function(mk){
+                var gm=porMesL[mk];
+                var kAcc=(pr.codigo||pr.producto)+"|"+mk;
+                var abierto=!!mesAbierto[kAcc];
+                var saldo=(pr.saldoMes&&pr.saldoMes[mk]!=null)?pr.saldoMes[mk]:null;
+                var esRup=(pr.mesRuptura===mk);
+                return <div key={mk} style={{marginBottom:4}}>
+                  <div onClick={function(){toggleMes(kAcc);}}
+                    style={{cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",
+                      padding:"6px 8px",borderRadius:6,background:esRup?"#FEE2E2":"#F1F5F9",
+                      border:"1px solid "+(esRup?"#FECACA":"#E2E8F0")}}>
+                    <span style={{fontSize:11,fontWeight:700,color:esRup?"#DC2626":T.text,textTransform:"capitalize"}}>
+                      {abierto?"\u25BE":"\u25B8"} {mk==="?"?"sin fecha":_mesLabel(mk)}
+                      <span style={{fontWeight:400,color:T.muted,textTransform:"none"}}> \u00b7 {gm.lineas.length} l\u00ednea{gm.lineas.length>1?"s":""}</span>
+                    </span>
+                    <span style={{fontSize:11,fontWeight:800,color:T.text}}>
+                      {gm.total.toLocaleString("es-ES")} uds
+                      {saldo!=null&&<span style={{marginLeft:6,fontWeight:700,color:saldo<0?"#DC2626":"#16A34A"}}>saldo {saldo.toLocaleString("es-ES")}</span>}
+                    </span>
+                  </div>
+                  {abierto&&<div style={{marginTop:3}}>
+                    {gm.lineas.sort(function(a,b){return(a.fechaServicio||"z").localeCompare(b.fechaServicio||"z");}).map(function(l){
+                      var vencida=l.fechaServicio<=hoy;
+                      var pronto=l.fechaServicio<=en7d;
               return <div key={l.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 8px",
                 marginBottom:2,borderRadius:6,fontSize:11,background:vencida?"#FEF2F2":pronto?"#FFFBEB":"#F8FAFC",
                 border:"1px solid "+(vencida?"#FECACA":pronto?"#FDE68A":"#E2E8F0")}}>
@@ -13511,13 +13552,17 @@ function PlanificacionCompras({usuario}){
                   <span style={{color:T.muted,marginLeft:4}}>({l.agenteNombre||l.agente})</span>
                 </div>
                 <span style={{fontWeight:700,color:T.text,marginRight:8}}>{l.cantidad} uds</span>
-                <span style={{fontSize:10,color:vencida?"#DC2626":T.muted,fontWeight:vencida?700:400}}>📅 {l.fechaServicio}</span>
+                <span style={{fontSize:10,color:vencida?"#DC2626":T.muted,fontWeight:vencida?700:400}}>📅 {_fechaES(l.fechaServicio)}</span>
                 {l.estado==="planificado"&&<button onClick={function(){cambiarEstado(l.id,"confirmado");}}
                   style={{marginLeft:6,padding:"2px 6px",fontSize:9,borderRadius:4,border:"1px solid #3B82F6",background:"#EFF6FF",color:"#3B82F6",cursor:"pointer",fontWeight:600}}>✅</button>}
                 {l.estado==="confirmado"&&<button onClick={function(){cambiarEstado(l.id,"servido");}}
                   style={{marginLeft:6,padding:"2px 6px",fontSize:9,borderRadius:4,border:"1px solid #22C55E",background:"#F0FDF4",color:"#22C55E",cursor:"pointer",fontWeight:600}}>📦</button>}
               </div>;
-            })}
+                    })}
+                  </div>}
+                </div>;
+              });
+            })()}
           </div>
         </div>
       </div>;
@@ -13540,7 +13585,7 @@ function PlanificacionCompras({usuario}){
               {sem.planes.map(function(p){
                 return <div key={p.id} style={{display:"flex",justifyContent:"space-between",padding:"3px 6px",fontSize:11,color:T.muted}}>
                   <span><span style={{fontWeight:600,color:T.text}}>{prodCodNom(p.producto,p.codigoProducto).label}</span> · {p.clienteNombre}</span>
-                  <span style={{fontWeight:700,color:T.text}}>{p.cantidad} uds · {p.fechaServicio}</span>
+                  <span style={{fontWeight:700,color:T.text}}>{p.cantidad} uds · {_fechaES(p.fechaServicio)}</span>
                 </div>;
               })}
             </div>}
@@ -13630,7 +13675,7 @@ function PlanificacionCompras({usuario}){
         {cl.lineas.sort(function(a,b){return(a.fechaServicio||"").localeCompare(b.fechaServicio||"");}).map(function(l){
           return <div key={l.id} style={{display:"flex",justifyContent:"space-between",padding:"3px 6px",fontSize:11,borderBottom:"1px solid #F1F5F9"}}>
             <span style={{fontWeight:600}}>{l.producto}{l.calibre?" · "+l.calibre:""}</span>
-            <span>{l.cantidad} uds · 📅 {l.fechaServicio}</span>
+            <span>{l.cantidad} uds · 📅 {_fechaES(l.fechaServicio)}</span>
           </div>;
         })}
       </div>;
@@ -13645,7 +13690,7 @@ function PlanificacionCompras({usuario}){
         {servidos.slice(0,20).map(function(p){
           return <div key={p.id} style={{display:"flex",justifyContent:"space-between",padding:"4px 8px",fontSize:11,color:T.muted}}>
             <span>{prodCodNom(p.producto,p.codigoProducto).label} · {p.clienteNombre}</span>
-            <span>{p.cantidad} uds · {p.fechaServicio}</span>
+            <span>{p.cantidad} uds · {_fechaES(p.fechaServicio)}</span>
           </div>;
         })}
       </div>
