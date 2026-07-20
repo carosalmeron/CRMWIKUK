@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.02.0";
+const CRM_VERSION = "4.03.0";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -9387,45 +9387,33 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
             </div>
           </div>;
         }
-        // (v4.01) Tabla por producto para el informe PDF: OK, KO, pendientes y % de acierto.
-        // "base" ya viene filtrada por tipologia; aqui respetamos ademas el filtro de resultado.
-        function _statsPorProducto(){
+        // (v4.03) Informe agrupado por TIPOLOGIA. Para cada tipologia: los grandes
+        // motivos (por que gustan / por que se rechazan) como protagonista, y debajo
+        // una tabla compacta de productos. Reduce el ruido de tener muchas lineas sueltas.
+        function _statsProd(muestras){
           var map={};
-          base.forEach(function(m){
+          muestras.forEach(function(m){
             var k=(m.prod||"(sin producto)").trim();
-            if(!map[k]) map[k]={prod:k,ok:0,ko:0,pend:0,total:0,motOk:{},motKo:{}};
+            if(!map[k]) map[k]={prod:k,ok:0,ko:0,pend:0,total:0};
             var e=m.estado;
-            if(e==="positivo"||e==="pedido"){ map[k].ok++; var mo=(m.motivo||"").trim()||"Sin especificar"; map[k].motOk[mo]=(map[k].motOk[mo]||0)+1; }
-            else if(e==="ko"){ map[k].ko++; var mk=(m.motivo||"").trim()||"Sin especificar"; map[k].motKo[mk]=(map[k].motKo[mk]||0)+1; }
-            else map[k].pend++;   // pendiente u otros estados abiertos
+            if(e==="positivo"||e==="pedido") map[k].ok++;
+            else if(e==="ko") map[k].ko++;
+            else map[k].pend++;
             map[k].total++;
           });
-          var arr=Object.values(map).map(function(r){
-            var cerradas=r.ok+r.ko;
-            r.acierto = cerradas>0 ? Math.round(r.ok*100/cerradas) : null; // % sobre lo ya resuelto
-            return r;
-          });
-          // filtro de resultado activo
-          if(insResultado==="ok") arr=arr.filter(function(r){return r.ok>0;});
-          else if(insResultado==="ko") arr=arr.filter(function(r){return r.ko>0;});
-          // ordenar: mas KO primero (lo que necesita atencion), luego por volumen
-          arr.sort(function(a,b){ return b.ko-a.ko || b.total-a.total; });
-          return arr;
+          return Object.values(map).map(function(r){
+            var cerr=r.ok+r.ko; r.acierto=cerr>0?Math.round(r.ok*100/cerr):null; return r;
+          }).sort(function(a,b){return b.ko-a.ko||b.total-a.total;});
         }
-        // (v4.02) Convierte {motivo:conteo} en texto ordenado "Motivo (n), Motivo (n)"
-        function _motTxt(obj){
-          var arr=Object.keys(obj||{}).map(function(k){return {m:k,n:obj[k]};}).sort(function(a,b){return b.n-a.n;});
-          if(!arr.length) return "";
-          return arr.map(function(x){return x.m+" ("+x.n+")";}).join(", ");
-        }
-        // (v4.02) Totales globales de motivos, para el resumen del informe
-        function _motivosGlobales(rows){
-          var gOk={}, gKo={};
-          rows.forEach(function(r){
-            Object.keys(r.motOk).forEach(function(k){gOk[k]=(gOk[k]||0)+r.motOk[k];});
-            Object.keys(r.motKo).forEach(function(k){gKo[k]=(gKo[k]||0)+r.motKo[k];});
+        function _motivos(muestras){
+          var ok={}, ko={};
+          muestras.forEach(function(m){
+            var mo=(m.motivo||"").trim()||"Sin especificar";
+            if(m.estado==="positivo"||m.estado==="pedido") ok[mo]=(ok[mo]||0)+1;
+            else if(m.estado==="ko") ko[mo]=(ko[mo]||0)+1;
           });
-          return {ok:gOk, ko:gKo};
+          function lista(o){return Object.keys(o).map(function(k){return {m:k,n:o[k]};}).sort(function(a,b){return b.n-a.n;});}
+          return {ok:lista(ok), ko:lista(ko)};
         }
         function _labelGama(){
           var g=(GAMAS||[]).find(function(x){return x.k===filtroGama;});
@@ -9433,82 +9421,90 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
         }
         function generarInformeMuestras(){
           try{
-            var rows=_statsPorProducto();
-            var tot={ok:0,ko:0,pend:0,total:0};
-            rows.forEach(function(r){tot.ok+=r.ok;tot.ko+=r.ko;tot.pend+=r.pend;tot.total+=r.total;});
-            var totCerradas=tot.ok+tot.ko;
-            var acGlobal= totCerradas>0 ? Math.round(tot.ok*100/totCerradas) : null;
             var w=window.open("","_blank");
             if(!w){ alert("El navegador ha bloqueado la ventana. Permite las ventanas emergentes para generar el PDF."); return; }
             var nf=function(n){return (Number(n)||0).toLocaleString("es-ES");};
+            // Agrupar la base (ya filtrada por tipologia+resultado en pantalla) por tipologia.
+            var porTipo={};
+            base.forEach(function(m){
+              var t=_normGama(m)||"Otros";
+              if(!porTipo[t]) porTipo[t]=[];
+              porTipo[t].push(m);
+            });
+            var tipos=Object.keys(porTipo).sort(function(a,b){return porTipo[b].length-porTipo[a].length;});
             var resLabel = insResultado==="ok"?"Solo positivas":insResultado==="ko"?"Solo KO":"Todas";
+            // total global
+            var G={ok:0,ko:0,pend:0,total:0};
+            base.forEach(function(m){var e=m.estado; if(e==="positivo"||e==="pedido")G.ok++; else if(e==="ko")G.ko++; else G.pend++; G.total++;});
+            var acG=(G.ok+G.ko)>0?Math.round(G.ok*100/(G.ok+G.ko)):null;
+
             var h="<html><head><meta charset='utf-8'><title>Informe de muestras</title><style>"+
               "@page{size:A4 portrait;margin:14mm}"+
               "body{font-family:Arial,Helvetica,sans-serif;color:#111;margin:0}"+
               "h1{font-size:18px;margin:0 0 2px}"+
-              ".sub{color:#555;font-size:11px;margin-bottom:10px}"+
-              ".guia{border:1px solid #CBD5E1;border-radius:6px;padding:8px 10px;margin-bottom:10px;background:#F8FAFC}"+
-              ".guia-t{font-size:11px;font-weight:bold;text-transform:uppercase;color:#1E293B;margin-bottom:3px}"+
-              ".guia-p{font-size:11px;margin:0 0 6px;color:#334155}"+
-              ".accion{margin-top:4px;background:#EFF6FF;border-left:3px solid #3B82F6;padding:5px 8px;font-size:11px;color:#1E3A8A;border-radius:3px}"+
-              "table{width:100%;border-collapse:collapse;font-size:11px}"+
-              "th{background:#1E293B;color:#fff;padding:6px;text-align:center;font-size:10px;border:1px solid #334155}"+
-              "th.prod{text-align:left}"+
-              "td{padding:5px 6px;border:1px solid #E2E8F0;text-align:center}"+
-              "td.prod{text-align:left;font-weight:bold}"+
-              ".ok{color:#16A34A;font-weight:bold}.ko{color:#DC2626;font-weight:bold}.pend{color:#B45309}"+
-              ".ac{font-weight:bold}.ac-alto{color:#16A34A}.ac-bajo{color:#DC2626}.ac-medio{color:#B45309}"+
-              "tr.tot td{background:#F1F5F9;font-weight:bold;border-top:2px solid #94A3B8}"+
-              ".pq{text-align:left;font-size:9px;line-height:1.4}"+
-              ".pq-ok{color:#166534}.pq-ko{color:#991B1B}"+
-              ".motblock{display:flex;gap:10px;margin-top:12px}"+
-              ".motcol{flex:1;border:1px solid #E2E8F0;border-radius:6px;overflow:hidden}"+
-              ".moth{padding:5px 8px;font-size:11px;font-weight:bold;color:#fff}"+
+              ".sub{color:#555;font-size:11px;margin-bottom:12px}"+
+              ".guia{border:1px solid #CBD5E1;border-radius:6px;padding:8px 10px;margin-bottom:14px;background:#F8FAFC;font-size:11px;color:#334155}"+
+              ".kpis{display:flex;gap:8px;margin-bottom:16px}"+
+              ".kpi{flex:1;border:1px solid #E2E8F0;border-radius:8px;padding:8px;text-align:center}"+
+              ".kpi b{display:block;font-size:20px}.kpi span{font-size:9px;color:#666;text-transform:uppercase}"+
+              ".tipo{margin-bottom:20px;break-inside:avoid}"+
+              ".tipo-h{background:#1E293B;color:#fff;padding:7px 10px;border-radius:6px 6px 0 0;font-size:13px;font-weight:bold;display:flex;justify-content:space-between}"+
+              ".tipo-b{border:1px solid #E2E8F0;border-top:none;border-radius:0 0 6px 6px;padding:10px}"+
+              ".mot2{display:flex;gap:10px;margin-bottom:10px}"+
+              ".motcol{flex:1}"+
+              ".moth{font-size:11px;font-weight:bold;padding:4px 6px;border-radius:4px;color:#fff;margin-bottom:4px}"+
               ".moth.ok{background:#16A34A}.moth.ko{background:#DC2626}"+
-              ".motrow{display:flex;justify-content:space-between;padding:4px 8px;font-size:10px;border-top:1px solid #F1F5F9}"+
-              ".motrow b{color:#111}"+
+              ".bar{display:flex;align-items:center;gap:6px;margin-bottom:3px;font-size:10px}"+
+              ".bar .lbl{flex:1;color:#334155}.bar .n{font-weight:bold;color:#111}"+
+              ".bar .track{width:70px;height:8px;background:#F1F5F9;border-radius:4px;overflow:hidden}"+
+              ".bar .fill{height:100%}.fill.ok{background:#16A34A}.fill.ko{background:#DC2626}"+
+              "table{width:100%;border-collapse:collapse;font-size:10px;margin-top:4px}"+
+              "th{background:#F1F5F9;color:#334155;padding:4px 6px;text-align:center;font-size:9px;border-bottom:1px solid #CBD5E1}"+
+              "th.prod{text-align:left}td{padding:3px 6px;border-bottom:1px solid #F1F5F9;text-align:center}"+
+              "td.prod{text-align:left}.ok{color:#16A34A;font-weight:bold}.ko{color:#DC2626;font-weight:bold}.pend{color:#B45309}"+
+              ".ac-alto{color:#16A34A;font-weight:bold}.ac-bajo{color:#DC2626;font-weight:bold}.ac-medio{color:#B45309;font-weight:bold}"+
               ".pie{margin-top:10px;font-size:9px;color:#666}"+
               "</style></head><body>";
             h+="<h1>Informe de muestras</h1>";
-            h+="<div class='sub'>Generado el "+new Date().toLocaleDateString("es-ES")+" &middot; "+(usuario.nombre||"")+" &middot; Filtros: "+resLabel+" / "+_labelGama()+" &middot; "+nf(tot.total)+" muestras</div>";
-            h+="<div class='guia'><div class='guia-t'>Qu\u00e9 dice este informe</div>"+
-              "<p class='guia-p'>Cada fila es un <b>producto</b> que hemos dado a probar. Vemos cu\u00e1ntas muestras <b>gustaron</b> (positivas), cu\u00e1ntas se <b>rechazaron</b> (KO), cu\u00e1ntas siguen <b>sin respuesta</b>, y sobre todo <b>por qu\u00e9</b>. El <b>% de acierto</b> es, de las ya resueltas, cu\u00e1ntas salieron bien.</p>"+
-              "<div class='accion'><b>C\u00d3MO USARLO:</b> mira la columna <b>Por qu\u00e9</b>. Si gustan por calidad, ese es tu argumento de venta. Si se rechazan por precio, es tema comercial; si es por calidad o proceso, es para <b>I+D</b>.</div></div>";
-            h+="<table><thead><tr><th class='prod'>Producto</th><th>Positivas</th><th>KO</th><th>Pend.</th><th>% acierto</th><th class='prod'>Por qu\u00e9</th></tr></thead><tbody>";
-            rows.forEach(function(r){
-              var acCls = r.acierto==null?"":(r.acierto>=70?"ac-alto":(r.acierto>=40?"ac-medio":"ac-bajo"));
-              var porque="";
-              var tOk=_motTxt(r.motOk), tKo=_motTxt(r.motKo);
-              if(tOk) porque+="<div class='pq-ok'>\u2714 "+tOk+"</div>";
-              if(tKo) porque+="<div class='pq-ko'>\u2716 "+tKo+"</div>";
-              if(!porque) porque="<span style='color:#94A3B8'>\u2014</span>";
-              h+="<tr><td class='prod'>"+r.prod+"</td>"+
-                 "<td class='ok'>"+nf(r.ok)+"</td>"+
-                 "<td class='ko'>"+nf(r.ko)+"</td>"+
-                 "<td class='pend'>"+nf(r.pend)+"</td>"+
-                 "<td class='ac "+acCls+"'>"+(r.acierto==null?"\u2014":r.acierto+"%")+"</td>"+
-                 "<td class='pq'>"+porque+"</td></tr>";
-            });
-            h+="<tr class='tot'><td>TOTAL ("+rows.length+" productos)</td><td class='ok'>"+nf(tot.ok)+"</td><td class='ko'>"+nf(tot.ko)+"</td><td class='pend'>"+nf(tot.pend)+"</td><td>"+(acGlobal==null?"\u2014":acGlobal+"%")+"</td><td></td></tr>";
-            h+="</tbody></table>";
-            // (v4.02) Resumen global de motivos: los grandes porques del periodo
-            var mg=_motivosGlobales(rows);
-            var okList=Object.keys(mg.ok).map(function(k){return {m:k,n:mg.ok[k]};}).sort(function(a,b){return b.n-a.n;});
-            var koList=Object.keys(mg.ko).map(function(k){return {m:k,n:mg.ko[k]};}).sort(function(a,b){return b.n-a.n;});
-            if(okList.length||koList.length){
-              h+="<div class='motblock'>";
-              if(okList.length){
-                h+="<div class='motcol'><div class='moth ok'>Por qu\u00e9 gustan</div>";
-                okList.forEach(function(x){ h+="<div class='motrow'><span>"+x.m+"</span><b>"+x.n+"</b></div>"; });
-                h+="</div>";
-              }
-              if(koList.length){
-                h+="<div class='motcol'><div class='moth ko'>Por qu\u00e9 se rechazan</div>";
-                koList.forEach(function(x){ h+="<div class='motrow'><span>"+x.m+"</span><b>"+x.n+"</b></div>"; });
-                h+="</div>";
-              }
+            h+="<div class='sub'>Generado el "+new Date().toLocaleDateString("es-ES")+" &middot; "+(usuario.nombre||"")+" &middot; Filtros: "+resLabel+" / "+_labelGama()+"</div>";
+            h+="<div class='kpis'>"+
+               "<div class='kpi'><b class='ok'>"+nf(G.ok)+"</b><span>Positivas</span></div>"+
+               "<div class='kpi'><b class='ko'>"+nf(G.ko)+"</b><span>KO</span></div>"+
+               "<div class='kpi'><b class='pend'>"+nf(G.pend)+"</b><span>Pendientes</span></div>"+
+               "<div class='kpi'><b>"+(acG==null?"&mdash;":acG+"%")+"</b><span>Acierto</span></div>"+
+               "</div>";
+            h+="<div class='guia'><b>C\u00d3MO LEERLO:</b> el informe est\u00e1 dividido por <b>tipo de producto</b>. En cada bloque, primero <b>por qu\u00e9 gustan</b> y <b>por qu\u00e9 se rechazan</b> (los motivos m\u00e1s repetidos), y debajo el detalle por producto. Fija la vista en los motivos: ah\u00ed est\u00e1 la conclusi\u00f3n.</div>";
+
+            tipos.forEach(function(t){
+              var ms=porTipo[t];
+              var st={ok:0,ko:0,pend:0,total:0};
+              ms.forEach(function(m){var e=m.estado; if(e==="positivo"||e==="pedido")st.ok++; else if(e==="ko")st.ko++; else st.pend++; st.total++;});
+              var mot=_motivos(ms);
+              var maxOk=mot.ok.length?mot.ok[0].n:1, maxKo=mot.ko.length?mot.ko[0].n:1;
+              h+="<div class='tipo'>";
+              h+="<div class='tipo-h'><span>"+t+"</span><span>"+nf(st.ok)+" OK &middot; "+nf(st.ko)+" KO &middot; "+nf(st.pend)+" pend.</span></div>";
+              h+="<div class='tipo-b'>";
+              // motivos protagonistas
+              h+="<div class='mot2'>";
+              h+="<div class='motcol'><div class='moth ok'>Por qu\u00e9 gustan</div>";
+              if(mot.ok.length) mot.ok.forEach(function(x){ h+="<div class='bar'><span class='lbl'>"+x.m+"</span><span class='track'><span class='fill ok' style='width:"+Math.round(x.n*100/maxOk)+"%'></span></span><span class='n'>"+x.n+"</span></div>"; });
+              else h+="<div style='font-size:10px;color:#94A3B8'>Sin positivas</div>";
               h+="</div>";
-            }
+              h+="<div class='motcol'><div class='moth ko'>Por qu\u00e9 se rechazan</div>";
+              if(mot.ko.length) mot.ko.forEach(function(x){ h+="<div class='bar'><span class='lbl'>"+x.m+"</span><span class='track'><span class='fill ko' style='width:"+Math.round(x.n*100/maxKo)+"%'></span></span><span class='n'>"+x.n+"</span></div>"; });
+              else h+="<div style='font-size:10px;color:#94A3B8'>Sin rechazos</div>";
+              h+="</div>";
+              h+="</div>";
+              // tabla compacta de productos
+              var rows=_statsProd(ms);
+              h+="<table><thead><tr><th class='prod'>Producto</th><th>OK</th><th>KO</th><th>Pend.</th><th>% acierto</th></tr></thead><tbody>";
+              rows.forEach(function(r){
+                var ac=r.acierto==null?"":(r.acierto>=70?"ac-alto":(r.acierto>=40?"ac-medio":"ac-bajo"));
+                h+="<tr><td class='prod'>"+r.prod+"</td><td class='ok'>"+nf(r.ok)+"</td><td class='ko'>"+nf(r.ko)+"</td><td class='pend'>"+nf(r.pend)+"</td><td class='"+ac+"'>"+(r.acierto==null?"&mdash;":r.acierto+"%")+"</td></tr>";
+              });
+              h+="</tbody></table>";
+              h+="</div></div>";
+            });
             h+="<div class='pie'>% acierto = positivas / (positivas + KO). Las pendientes no cuentan. El \"por qu\u00e9\" es el motivo que marca el comercial al cerrar cada muestra.</div>";
             h+="</body></html>";
             w.document.write(h); w.document.close(); w.focus();
