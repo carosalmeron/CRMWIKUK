@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.14.0";
+const CRM_VERSION = "4.15.0";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -13395,7 +13395,7 @@ function PlanificacionTab({clienteId,clienteNombre,usuario}){
 }
 
 // (v3.39.86) Vista de planificación visual para Compras
-function PlanificacionCompras({usuario}){
+function PlanificacionCompras({usuario, clientesFB}){
   const [planes,setPlanes]=React.useState([]);
   const [cargando,setCargando]=React.useState(true);
   const [vista,setVista]=React.useState("productos"); // productos | timeline | clientes
@@ -13404,6 +13404,51 @@ function PlanificacionCompras({usuario}){
   const [stockMap,setStockMap]=React.useState(null); // { CODIGO: {stock, entradas, comprometido} }
   // (v3.96) Meses desplegados en el desglose de cada producto: { "CODIGO|2026-07": true }
   const [mesAbierto,setMesAbierto]=React.useState({});
+  // (v4.15) Alta y baja de lineas de planificacion desde el propio modulo de compras.
+  const [showNuevo,setShowNuevo]=React.useState(false);
+  const _FORM0={clienteId:"",clienteNombre:"",producto:"",codigoProducto:"",cantidad:"",calibre:"",metros:"",fechaServicio:"",notas:"",recurrente:false,meses:6};
+  const [formN,setFormN]=React.useState(_FORM0);
+  function _setF(campo,valor){ setFormN(function(f){var n=Object.assign({},f); n[campo]=valor; return n;}); }
+
+  function eliminarLinea(pid){
+    if(!confirm("¿Eliminar esta línea de planificación?")) return;
+    fbEscribir("planificacion",pid,{eliminado:true},true);
+    setPlanes(function(prev){return prev.filter(function(p){return p.id!==pid;});});
+  }
+
+  function guardarNuevo(){
+    if(!formN.clienteId) return alert("Elige un cliente");
+    if(!formN.producto.trim()||!formN.cantidad||!formN.fechaServicio) return alert("Rellena producto, cantidad y fecha");
+    // Misma logica que la ficha del cliente: la recurrencia se expande en N lineas.
+    var fechas=[formN.fechaServicio];
+    if(formN.recurrente&&formN.meses>1){
+      var base=new Date(formN.fechaServicio);
+      for(var m=1;m<formN.meses;m++){
+        var next=new Date(base); next.setMonth(next.getMonth()+m);
+        fechas.push(next.toISOString().substring(0,10));
+      }
+    }
+    var nuevos=[];
+    fechas.forEach(function(fecha){
+      var id="plan_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
+      var doc={
+        id:id,clienteId:formN.clienteId,clienteNombre:formN.clienteNombre,
+        producto:formN.producto.trim(),codigoProducto:(formN.codigoProducto||"").trim(),
+        cantidad:Number(formN.cantidad)||0,calibre:formN.calibre,metros:formN.metros,
+        fechaServicio:fecha,notas:formN.notas,
+        agente:idCanonico(usuario),agenteNombre:usuario.nombre,equipo:usuario.equipo||"",
+        estado:"planificado",fechaCreacion:new Date().toISOString(),
+        recurrente:formN.recurrente||false,
+        semanaServicio:(function(){var d=new Date(fecha);var y=new Date(d.getFullYear(),0,1);return Math.ceil(((d-y)/86400000+y.getDay()+1)/7);})()
+      };
+      fbEscribir("planificacion",id,doc);
+      nuevos.push(doc);
+    });
+    setPlanes(function(prev){return prev.concat(nuevos);});
+    setFormN(_FORM0); setShowNuevo(false);
+    alert("✅ "+nuevos.length+" línea"+(nuevos.length>1?"s":"")+" de planificación creada"+(nuevos.length>1?"s":""));
+  }
+
   function toggleMes(k){ setMesAbierto(function(m){var n=Object.assign({},m); if(n[k]) delete n[k]; else n[k]=true; return n;}); }
 
   React.useEffect(function(){
@@ -13770,6 +13815,94 @@ function PlanificacionCompras({usuario}){
       </div>
     </div>
 
+    {/* (v4.15) Alta de nueva linea de planificacion */}
+    <button onClick={function(){setShowNuevo(function(v){return !v;});}}
+      style={{width:"100%",marginBottom:10,padding:"10px",borderRadius:10,border:"none",
+        background:showNuevo?"#E2E8F0":"#16A34A",color:showNuevo?T.muted:"#fff",fontSize:13,fontWeight:800,cursor:"pointer"}}>
+      {showNuevo?"× Cancelar":"+ Nueva línea de planificación"}
+    </button>
+
+    {showNuevo&&<div style={{background:"#fff",borderRadius:12,border:"1.5px solid "+T.navy,padding:14,marginBottom:14}}>
+      <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Cliente *</p>
+      <SearchInput
+        value={formN.clienteNombre}
+        onChange={function(v){setFormN(function(f){return Object.assign({},f,{clienteNombre:v,clienteId:""});});}}
+        placeholder="Buscar cliente..."
+        suggestions={(clientesFB||[])
+          .filter(function(c){var n=(c.nombre||c.NOMBRE||"");return formN.clienteNombre.length>=2&&n.toLowerCase().includes(formN.clienteNombre.toLowerCase());})
+          .slice(0,8).map(function(c){return {label:(c.nombre||c.NOMBRE||""),sub:(c.id||c.CODIGO||""),tipo:"cliente",obj:c};})}
+        onSelect={function(sug){var o=(sug&&sug.obj)||{};setFormN(function(f){return Object.assign({},f,{clienteNombre:o.nombre||o.NOMBRE||sug.label||"",clienteId:o.id||o.CODIGO||""});});}}
+      />
+
+      <p style={{margin:"10px 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Producto * (del catálogo)</p>
+      <SearchInput
+        value={formN.producto}
+        onChange={function(v){setFormN(function(f){return Object.assign({},f,{producto:v});});}}
+        placeholder="Buscar producto o código..."
+        suggestions={(PRODUCTOS_LOCAL||[])
+          .filter(function(pr){
+            var q=formN.producto.toLowerCase();
+            return q.length>=2 && (((pr.nombre||"").toLowerCase().includes(q))||((pr.codigo||"").toLowerCase().includes(q)));
+          })
+          .slice(0,8).map(function(pr){return {label:pr.nombre,sub:pr.codigo+(pr.formato?" · "+pr.formato:""),tipo:"producto",obj:pr};})}
+        onSelect={function(sug){
+          var o=(sug&&sug.obj)||{};
+          setFormN(function(f){return Object.assign({},f,{
+            producto:o.nombre||sug.label||f.producto,
+            codigoProducto:o.codigo||f.codigoProducto,
+            calibre:o.calibre||f.calibre,
+            metros:o.metros||f.metros
+          });});
+        }}
+      />
+      {formN.codigoProducto&&<p style={{margin:"4px 0 0",fontSize:10,color:"#16A34A",fontWeight:700}}>✓ {formN.codigoProducto} — {formN.producto}</p>}
+
+      <div style={{display:"flex",gap:8,marginTop:10}}>
+        <div style={{flex:1}}>
+          <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Calibre</p>
+          <input value={formN.calibre} onChange={function(e){_setF("calibre",e.target.value);}}
+            style={{width:"100%",padding:"8px",borderRadius:8,border:"1px solid "+T.border,fontSize:13,boxSizing:"border-box"}}/>
+        </div>
+        <div style={{flex:1}}>
+          <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Metros</p>
+          <input value={formN.metros} onChange={function(e){_setF("metros",e.target.value);}}
+            style={{width:"100%",padding:"8px",borderRadius:8,border:"1px solid "+T.border,fontSize:13,boxSizing:"border-box"}}/>
+        </div>
+      </div>
+
+      <div style={{display:"flex",gap:8,marginTop:10}}>
+        <div style={{flex:1}}>
+          <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Cantidad (uds) *</p>
+          <input type="number" value={formN.cantidad} onChange={function(e){_setF("cantidad",e.target.value);}}
+            style={{width:"100%",padding:"8px",borderRadius:8,border:"1px solid "+T.border,fontSize:13,boxSizing:"border-box"}}/>
+        </div>
+        <div style={{flex:1}}>
+          <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Fecha servicio *</p>
+          <input type="date" value={formN.fechaServicio} onChange={function(e){_setF("fechaServicio",e.target.value);}}
+            style={{width:"100%",padding:"8px",borderRadius:8,border:"1px solid "+T.border,fontSize:13,boxSizing:"border-box"}}/>
+        </div>
+      </div>
+
+      <div style={{display:"flex",alignItems:"center",gap:8,marginTop:10}}>
+        <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:T.text,cursor:"pointer"}}>
+          <input type="checkbox" checked={!!formN.recurrente} onChange={function(e){_setF("recurrente",e.target.checked);}}/>
+          Recurrente mensual
+        </label>
+        {formN.recurrente&&<span style={{fontSize:12,color:T.muted}}>
+          durante
+          <input type="number" min="2" max="24" value={formN.meses} onChange={function(e){_setF("meses",Number(e.target.value)||1);}}
+            style={{width:52,margin:"0 5px",padding:"5px",borderRadius:6,border:"1px solid "+T.border,fontSize:12}}/>
+          meses
+        </span>}
+      </div>
+      {formN.recurrente&&<p style={{margin:"5px 0 0",fontSize:10,color:T.muted}}>Se crearán {formN.meses} líneas, una por mes.</p>}
+
+      <button onClick={guardarNuevo}
+        style={{width:"100%",marginTop:12,padding:"10px",borderRadius:10,border:"none",background:T.navy,color:"#fff",fontSize:13,fontWeight:800,cursor:"pointer"}}>
+        Guardar planificación
+      </button>
+    </div>}
+
     {/* (v4.05) Filtro por tipologia: usa la categoria real del catalogo */}
     <div style={{display:"flex",gap:6,marginBottom:10,overflowX:"auto",paddingBottom:2}}>
       {[{k:"todas",l:"Todas"},{k:"natural",l:"Tripas naturales"},{k:"deshidratado",l:"Deshidratadas"},{k:"otros",l:"Otros"}].map(function(t){
@@ -13912,6 +14045,8 @@ function PlanificacionCompras({usuario}){
                   style={{marginLeft:6,padding:"2px 6px",fontSize:9,borderRadius:4,border:"1px solid #3B82F6",background:"#EFF6FF",color:"#3B82F6",cursor:"pointer",fontWeight:600}}>✅</button>}
                 {l.estado==="confirmado"&&<button onClick={function(){cambiarEstado(l.id,"servido");}}
                   style={{marginLeft:6,padding:"2px 6px",fontSize:9,borderRadius:4,border:"1px solid #22C55E",background:"#F0FDF4",color:"#22C55E",cursor:"pointer",fontWeight:600}}>📦</button>}
+                <button onClick={function(){eliminarLinea(l.id);}} title="Eliminar linea"
+                  style={{marginLeft:6,padding:"2px 6px",fontSize:9,borderRadius:4,border:"1px solid #EF4444",background:"#FEF2F2",color:"#EF4444",cursor:"pointer",fontWeight:700}}>🗑</button>
               </div>;
                     })}
                   </div>}
@@ -31087,7 +31222,7 @@ function App(props){
         {section==="analisis_estrategias"&& <AnalisisEstrategias usuario={usuario} estrategiasDB={estrategiasDB} ofertasDB={ofertasDB} portalUsersDB={portalUsersDB} onBack={function(){setSection("estrategias");}}/>}
         {section==="config_notif"&& <ConfigNotificaciones usuario={usuario}/>}
         {section==="actividad"&& <ActividadComercial usuario={usuario} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} ofertasDB={ofertasDB} incidenciasDB={incidenciasDB} oportunidadesDB={oportunidadesDB} portalUsersDB={portalUsersDB} onAbrirCliente={function(c){setClienteDirecto({id:c.id,nombre:c.nombre||c.NOMBRE,ts:Date.now()});setSection(esAgente?"clientes":"clientes_eq");}}/>}
-        {section==="planif_compras"&& <PlanificacionCompras usuario={usuario}/>}
+        {section==="planif_compras"&& <PlanificacionCompras usuario={usuario} clientesFB={misClientesFB}/>}
         {/* (v3.23.1) Incidencias Stock y Calidad - para Compras (sustituye Resp. Stock) */}
         {section==="inc_stock"&& <IncidenciasCompras usuario={usuario} incidenciasDB={incidenciasDB} setIncidenciasDB={setIncidenciasDB} clientesFB={misClientesFB} tipoFijo="stock" onBack={function(){setSection(usuario.rol==="compras"?"inc_stock":"dashboard");}}/>}
         {section==="inc_calidad"&& <IncidenciasCompras usuario={usuario} incidenciasDB={incidenciasDB} setIncidenciasDB={setIncidenciasDB} clientesFB={misClientesFB} tipoFijo="calidad" onBack={function(){setSection(usuario.rol==="compras"?"inc_calidad":"dashboard");}}/>}
