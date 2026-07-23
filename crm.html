@@ -333,7 +333,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.16.0";
+const CRM_VERSION = "4.17.0";
 const CRM_BUILD = "10/06/2026-resumen-prod-pro-expandible";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -9381,19 +9381,32 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
         function agrupa(pred){
           var g={};
           base.filter(pred).forEach(function(m){
-            var k=(m.prod||"(sin producto)").trim();
-            if(!g[k]) g[k]={prod:k,items:[]};
+            // (v4.17) Agrupar por CODIGO resuelto contra el catalogo (igual que en planificacion),
+            // para que el mismo articulo no se parta segun como lo escribiera cada comercial.
+            var _pi=prodCodNom(m.prod,m.codigoProducto||m.prodCodigo);
+            var k=_pi.codigo||_pi.label||(m.prod||"(sin producto)").trim();
+            if(!g[k]) g[k]={prod:m.prod||_pi.label,codigoProducto:_pi.codigo,items:[],_cal:{},_met:{}};
             g[k].items.push(m);
+            if(m.calibre) g[k]._cal[String(m.calibre).trim()]=1;
+            if(m.metros)  g[k]._met[String(m.metros).trim()]=1;
           });
-          return Object.values(g).sort(function(a,b){return b.items.length-a.items.length;});
+          return Object.values(g).map(function(x){
+            x.calibres=Object.keys(x._cal); x.metros=Object.keys(x._met); return x;
+          }).sort(function(a,b){return b.items.length-a.items.length;});
         }
         var okGrupos=agrupa(function(m){return m.estado==="positivo"||m.estado==="pedido";});
         var koGrupos=agrupa(function(m){return m.estado==="ko";});
         function fechaCorta(m){var f=m.fecha||m.fechaFeedback||"";if(f&&f.indexOf("T")>0)f=f.substring(0,10);return f;}
         function textoGrupo(g,tipo){
-          var lin=[tipo+" — "+g.prod+" ("+g.items.length+" muestras)",""];
+          var lin=[tipo+" — "+prodCodNom(g.prod,g.codigoProducto).label+" ("+g.items.length+" muestras)"];
+          if(g.calibres&&g.calibres.length) lin.push("Calibre: "+g.calibres.join(", "));
+          if(g.metros&&g.metros.length) lin.push("Metros: "+g.metros.join(", "));
+          lin.push("");
           g.items.forEach(function(m){
-            lin.push("• "+(m.cliente||"?")+" — "+(m.agenteNombre||m.agente||"?")+" — "+fechaCorta(m));
+            var ext=[];
+            if(m.calibre) ext.push("cal "+m.calibre);
+            if(m.metros) ext.push(m.metros+" m");
+            lin.push("• "+(m.cliente||"?")+" — "+(m.agenteNombre||m.agente||"?")+" — "+fechaCorta(m)+(ext.length?" ("+ext.join(", ")+")":""));
             if(m.nota) lin.push("   \""+m.nota+"\"");
           });
           return lin.join("\n");
@@ -9417,7 +9430,16 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
           var esKO=tipo==="KO";
           return <div key={tipo+g.prod} style={{background:"#fff",borderRadius:12,border:"1px solid "+T.border,marginBottom:10,padding:"12px 14px",borderLeft:"4px solid "+(esKO?"#DC2626":"#16A34A")}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-              <p style={{margin:0,fontSize:15,fontWeight:800,color:T.text}}>{g.prod}</p>
+              <div style={{flex:1,minWidth:0}}>
+                <p style={{margin:0,fontSize:15,fontWeight:800,color:T.text}}>{prodCodNom(g.prod,g.codigoProducto).label}</p>
+                {/* (v4.17) Calibres y metros del grupo (los que traigan sus muestras) */}
+                {(g.calibres.length>0||g.metros.length>0)&&
+                  <p style={{margin:"2px 0 0",fontSize:10,color:T.muted}}>
+                    {g.calibres.length>0?"Calibre: "+g.calibres.join(", "):""}
+                    {(g.calibres.length>0&&g.metros.length>0)?" · ":""}
+                    {g.metros.length>0?"Metros: "+g.metros.join(", "):""}
+                  </p>}
+              </div>
               <span style={{fontSize:12,fontWeight:800,color:esKO?"#DC2626":"#16A34A"}}>{g.items.length} {esKO?"KO":"OK"}</span>
             </div>
             {g.items.map(function(m,idx){
@@ -9426,6 +9448,9 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
                   <span style={{fontWeight:700,color:T.text}}>{m.cliente||"?"}</span>
                   <span style={{color:T.muted,fontSize:11}}>{(m.agenteNombre||m.agente||"?")+" · "+fechaCorta(m)}</span>
                 </div>
+                {(m.calibre||m.metros)&&<p style={{margin:"2px 0 0",fontSize:10,color:"#64748B"}}>
+                  {m.calibre?"⌀ "+m.calibre:""}{(m.calibre&&m.metros)?" · ":""}{m.metros?"↔ "+m.metros:""}
+                </p>}
                 {m.nota?<p style={{margin:"3px 0 0",fontSize:12,color:T.muted,fontStyle:"italic"}}>"{m.nota}"</p>
                        :<p style={{margin:"3px 0 0",fontSize:11,color:"#CBD5E1"}}>(sin comentario)</p>}
               </div>;
@@ -9448,16 +9473,22 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
         function _statsProd(muestras){
           var map={};
           muestras.forEach(function(m){
-            var k=(m.prod||"(sin producto)").trim();
-            if(!map[k]) map[k]={prod:k,ok:0,ko:0,pend:0,total:0};
+            // (v4.17) Agrupar por codigo resuelto y recopilar calibres/metros para el informe.
+            var _pi=prodCodNom(m.prod,m.codigoProducto||m.prodCodigo);
+            var k=_pi.codigo||_pi.label||(m.prod||"(sin producto)").trim();
+            if(!map[k]) map[k]={prod:_pi.label||m.prod||k,codigo:_pi.codigo||"",nombre:_pi.nombre||"",ok:0,ko:0,pend:0,total:0,_cal:{},_met:{}};
             var e=m.estado;
             if(e==="positivo"||e==="pedido") map[k].ok++;
             else if(e==="ko") map[k].ko++;
             else map[k].pend++;
             map[k].total++;
+            if(m.calibre) map[k]._cal[String(m.calibre).trim()]=1;
+            if(m.metros)  map[k]._met[String(m.metros).trim()]=1;
           });
           return Object.values(map).map(function(r){
-            var cerr=r.ok+r.ko; r.acierto=cerr>0?Math.round(r.ok*100/cerr):null; return r;
+            var cerr=r.ok+r.ko; r.acierto=cerr>0?Math.round(r.ok*100/cerr):null;
+            r.calibres=Object.keys(r._cal); r.metros=Object.keys(r._met);
+            return r;
           }).sort(function(a,b){return b.ko-a.ko||b.total-a.total;});
         }
         function _motivos(muestras){
@@ -9516,6 +9547,8 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
               "table{width:100%;border-collapse:collapse;font-size:10px;margin-top:4px}"+
               "th{background:#F1F5F9;color:#334155;padding:4px 6px;text-align:center;font-size:9px;border-bottom:1px solid #CBD5E1}"+
               "th.prod{text-align:left}td{padding:3px 6px;border-bottom:1px solid #F1F5F9;text-align:center}"+
+              "td.cal{font-size:9px;color:#334155;max-width:52px;word-break:break-word}"+
+              "td.met{font-size:9px;color:#334155;white-space:nowrap}"+
               "td.prod{text-align:left}.ok{color:#16A34A;font-weight:bold}.ko{color:#DC2626;font-weight:bold}.pend{color:#B45309}"+
               ".ac-alto{color:#16A34A;font-weight:bold}.ac-bajo{color:#DC2626;font-weight:bold}.ac-medio{color:#B45309;font-weight:bold}"+
               ".pie{margin-top:10px;font-size:9px;color:#666}"+
@@ -9552,10 +9585,13 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
               h+="</div>";
               // tabla compacta de productos
               var rows=_statsProd(ms);
-              h+="<table><thead><tr><th class='prod'>Producto</th><th>OK</th><th>KO</th><th>Pend.</th><th>% acierto</th></tr></thead><tbody>";
+              h+="<table><thead><tr><th class='prod'>Producto</th><th>Calibre</th><th>Metros</th><th>OK</th><th>KO</th><th>Pend.</th><th>% acierto</th></tr></thead><tbody>";
               rows.forEach(function(r){
                 var ac=r.acierto==null?"":(r.acierto>=70?"ac-alto":(r.acierto>=40?"ac-medio":"ac-bajo"));
-                h+="<tr><td class='prod'>"+r.prod+"</td><td class='ok'>"+nf(r.ok)+"</td><td class='ko'>"+nf(r.ko)+"</td><td class='pend'>"+nf(r.pend)+"</td><td class='"+ac+"'>"+(r.acierto==null?"&mdash;":r.acierto+"%")+"</td></tr>";
+                h+="<tr><td class='prod'>"+r.prod+"</td>"+
+                   "<td class='cal'>"+(r.calibres.length?r.calibres.join(", "):"&mdash;")+"</td>"+
+                   "<td class='met'>"+(r.metros.length?r.metros.join(", "):"&mdash;")+"</td>"+
+                   "<td class='ok'>"+nf(r.ok)+"</td><td class='ko'>"+nf(r.ko)+"</td><td class='pend'>"+nf(r.pend)+"</td><td class='"+ac+"'>"+(r.acierto==null?"&mdash;":r.acierto+"%")+"</td></tr>";
               });
               h+="</tbody></table>";
               h+="</div></div>";
