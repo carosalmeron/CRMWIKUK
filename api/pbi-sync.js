@@ -615,6 +615,22 @@ export default async function handler(req, res) {
         stock:     M.stock,
         clientes:  M.clientes,
       };
+      // ?peek=1&codigos=C03509,U433509 → ficha completa de esos clientes
+      // en la tabla de clientes, con TODAS las columnas incluidas las
+      // vacias. Sirve para buscar un campo que enlace codigo viejo y nuevo.
+      if (req.query.codigos) {
+        const lista = String(req.query.codigos)
+          .split(",").map((c) => c.trim().replace(/"/g, "")).filter(Boolean);
+        try {
+          out.fichasCliente = await pbiQuery(token, `
+EVALUATE
+  FILTER(${M.clientes}, ${M.clientes}[CODIGO] IN {${lista.map((c) => `"${c}"`).join(", ")}})`,
+            true);
+        } catch (e) {
+          out.fichasCliente = { error: e.message.slice(0, 250) };
+        }
+      }
+
       for (const [k, tabla] of Object.entries(tablas)) {
         try {
           const filas = await pbiQuery(token, `EVALUATE TOPN(1, ${tabla})`, true);
@@ -695,6 +711,33 @@ EVALUATE
   )`, true);
       }
 
+      // C 0) Lineas crudas de una familia de articulos, con TODAS las
+      // columnas de coste una al lado de otra. Sirve para decidir si
+      // COSTOLINEAL es el coste bueno en los productos por metros.
+      //   ?audit=1&articulo=MX255
+      const pref = String(req.query.articulo || "MX255").replace(/"/g, "");
+      out.familiaAnalizada = pref;
+      out.lineasFamilia = await pbiQuery(token, `
+EVALUATE
+  TOPN(
+    15,
+    SELECTCOLUMNS(
+      FILTER(${T}, LEFT(${T}[CODIGO], ${pref.length}) = "${pref}"),
+      "Articulo",      ${T}[CODIGO],
+      "Fecha",         ${T}[FECHA],
+      "Uni",           ${T}[UNI],
+      "Metros",        ${T}[METROS],
+      "MetrosTotales", ${T}[Metros Totales],
+      "Calibre",       ${T}[CALIBRE],
+      "Precio",        ${T}[PRECIO],
+      "Base",          ${M.vBase},
+      "CosteRefUnit",  ${T}[COSTOREFERENCIA],
+      "CosteRefLinea", ${M.vCoste},
+      "CosteLineal",   ${T}[COSTOLINEAL]
+    ),
+    [Fecha], DESC
+  )`, true);
+
       // C bis) Articulos con coste de referencia incoherente.
       // Compara precio medio de venta contra coste medio del maestro.
       // Un ratio de 3x o mas es un error de maestro, no un producto
@@ -757,6 +800,85 @@ EVALUATE
       out.error = e.message;
     }
     return res.status(200).json(out);
+  }
+
+  // ?ver=RPIEDRA → ficha de ventas de un comercial, leida de Firestore.
+  // No toca Power BI: consulta lo ya sincronizado, asi que es instantanea.
+  if (req.query.ver) {
+    const id = String(req.query.ver).trim().toUpperCase();
+    try {
+      const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+      const key = ENV.FB_API_KEY ? `?key=${ENV.FB_API_KEY}` : "";
+
+      const resumen = await fbLeerDocumento("pbi_resumen_agente", docId(id));
+
+      // Sin orderBy para no exigir indice compuesto en Firestore:
+      // se ordena despues en JavaScript.
+      const r = await fetch(`https://firestore.googleapis.com/v1/${base}:runQuery${key}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          structuredQuery: {
+            from: [{ collectionId: "pbi_ventas_cliente" }],
+            where: { fieldFilter: {
+              field: { fieldPath: "agente" },
+              op: "EQUAL",
+              value: { stringValue: id },
+            }},
+            limit: 500,
+          },
+        }),
+      });
+      const filas = await r.json();
+      const clientes = (Array.isArray(filas) ? filas : [])
+        .filter((f) => f.document)
+        .map((f) => {
+          const o = { _id: f.document.name.split("/").pop() };
+          for (const [k, v] of Object.entries(f.document.fields || {})) {
+            o[k] = v.doubleValue !== undefined ? Number(v.doubleValue)
+                 : v.integerValue !== undefined ? Number(v.integerValue)
+                 : v.stringValue ?? v.booleanValue ?? null;
+          }
+          return o;
+        })
+        .sort((a, b) => (b.ventasAct || 0) - (a.ventasAct || 0));
+
+      const eur = (n) => Number(n || 0).toLocaleString("es-ES",
+        { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
+
+      return res.status(200).json({
+        ok: true,
+        agente: id,
+        resumen: resumen ? {
+          ventas2025completo: eur(resumen.ventasAntFull),
+          ventas2025mismoPeriodo: eur(resumen.ventasAntYTD),
+          ventas2026: eur(resumen.ventasAct),
+          variacion: resumen.variacionPct !== null ? `${resumen.variacionPct} %` : "—",
+          margen2026: resumen.margenPctAct !== null ? `${resumen.margenPctAct} %` : "—",
+          margen2025: resumen.margenPctAntYTD !== null ? `${resumen.margenPctAntYTD} %` : "—",
+          ventasMesActual: eur(resumen.ventasMes),
+          clientes: resumen.clientes,
+          clientesConVentaEsteMes: resumen.clientesConVentaMes,
+          coberturaMargen: `${resumen.coberturaAct} %`,
+        } : "sin datos: lanza primero una sincronizacion real",
+        totalClientes: clientes.length,
+        top20: clientes.slice(0, 20).map((c) => ({
+          codigo: c.cliente,
+          nombre: c.nombre,
+          poblacion: c.poblacion,
+          v2026: eur(c.ventasAct),
+          v2025: eur(c.ventasAntFull),
+          variacion: c.variacionPct !== null && c.variacionPct !== undefined
+            ? `${c.variacionPct} %` : "—",
+          margen: c.margenPctAct !== null && c.margenPctAct !== undefined
+            ? `${c.margenPctAct} %` : "—",
+          ultimaVenta: (c.ultimaVenta || "").slice(0, 10),
+        })),
+        sinVentaEsteAno: clientes.filter((c) => !c.ventasAct).length,
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: e.message });
+    }
   }
 
   const dry = req.query.dry === "1"; // ?dry=1 → consulta pero NO escribe
@@ -952,13 +1074,25 @@ EVALUATE
         }
 
         const porAgente = new Map();
-        let sinAsignar = 0, ventaSinAsignar = 0;
+        let sinAsignar = 0, ventaSinAsignar = 0, ventaSinAsignarAnt = 0;
+        const huerfanos = [];
 
         for (const d of universo) {
           if (d.intercompany) continue;            // fuera traspasos internos
           const agente = asignacion.get(String(d.cliente).trim())
             || (d.codconta ? asignacion.get("CC:" + d.codconta) : null);
-          if (!agente) { sinAsignar++; ventaSinAsignar += d.ventasAct; continue; }
+          if (!agente) {
+            sinAsignar++;
+            ventaSinAsignar += d.ventasAct;
+            ventaSinAsignarAnt += d.ventasAntYTD;
+            // Se guardan los mayores para poder darlos de alta en el CRM
+            if (d.ventasAct > 0) huerfanos.push({
+              codigo: d.cliente, nombre: d.nombre, empresa: d.empresa,
+              vendedor: d.vendedor, ventas2026: d.ventasAct,
+              ventas2025: d.ventasAntFull,
+            });
+            continue;
+          }
           if (!porAgente.has(agente)) {
             porAgente.set(agente, {
               _id: docId(agente), agente, anoAnterior: anoAnt, anoActual: anoAct,
@@ -968,6 +1102,7 @@ EVALUATE
               ventasMes: 0, clientes: 0, clientesConVentaMes: 0,
             });
           }
+          d.agente = agente;   // se persiste: permite filtrar por comercial
           const a = porAgente.get(agente);
           a.ventasAntFull += d.ventasAntFull; a.margenAntFull += d.margenAntFull;
           a.ventasAntYTD  += d.ventasAntYTD;  a.margenAntYTD  += d.margenAntYTD;
@@ -1026,6 +1161,22 @@ EVALUATE
         log.agentes = resumen.length - 1;
         log.clientesSinAgente = sinAsignar;
         log.ventaSinAsignar = num(ventaSinAsignar);
+        log.ventaSinAsignarAnt = num(ventaSinAsignarAnt);
+        // Comparacion honesta: si el ano anterior casi todo estaba asignado
+        // y este ano falta mucho, la caida del -35% es un espejismo
+        log.ventaTotalReal = {
+          ant: num(ventaSinAsignarAnt + [...porAgente.values()]
+                 .reduce((t, a) => t + a.ventasAntYTD, 0)),
+          act: num(ventaSinAsignar + [...porAgente.values()]
+                 .reduce((t, a) => t + a.ventasAct, 0)),
+        };
+        log.ventaTotalReal.variacionPct = log.ventaTotalReal.ant
+          ? num(100 * (log.ventaTotalReal.act - log.ventaTotalReal.ant) / log.ventaTotalReal.ant)
+          : null;
+        log.topSinAsignar = huerfanos
+          .sort((a, b) => b.ventas2026 - a.ventas2026)
+          .slice(0, 25)
+          .map((h) => ({ ...h, ventas2026: num(h.ventas2026), ventas2025: num(h.ventas2025) }));
         log.resumenAgentes = dry
           ? resumen
           : await fbCommit("pbi_resumen_agente", resumen);
