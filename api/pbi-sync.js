@@ -93,7 +93,19 @@ function env(nombre) {
 const ENV = new Proxy({}, { get: (_, k) => env(k) });
 
 // ─────────────── Consultas DAX ───────────────
-function dax() {
+function dax(desde) {
+  // Modo incremental: solo se recalculan los clientes que han tenido
+  // movimiento desde la ultima sincronizacion. El resto conserva en
+  // Firestore los valores del dia anterior, que no han cambiado.
+  //
+  // El filtro va como argumento de SUMMARIZECOLUMNS y no envolviendolo
+  // en CALCULATETABLE, porque DAX no permite SUMMARIZECOLUMNS dentro de
+  // un CALCULATETABLE que modifique el contexto de filtro.
+  const filtroIncremental = desde
+    ? `FILTER(VALUES(${M.vCliente}),
+         CALCULATE(COUNTROWS(${M.ventas}),
+           FILTER(${M.ventas}, ${M.vFecha} >= DATE(${desde.getFullYear()}, ${desde.getMonth() + 1}, ${desde.getDate()}))) > 0),`
+    : "";
   return {
     // 1) Ventas, coste y margen por cliente: 12 meses + mes en curso.
     //    Se intenta primero enriqueciendo con nombre y poblacion desde
@@ -102,10 +114,11 @@ function dax() {
     ventas: `
 DEFINE
   VAR _hoy = TODAY()
-  VAR _12m = _hoy - ${DIAS_HISTORICO}
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
   VAR _iniMes = DATE(YEAR(_hoy), MONTH(_hoy), 1)
-  VAR _iniAno = DATE(YEAR(_hoy), 1, 1)
-  VAR _iniSem = _hoy - WEEKDAY(_hoy, 2) + 1
+  // Mismo dia del ano pasado, para comparar periodos equivalentes
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
 EVALUATE
   SUMMARIZECOLUMNS(
     ${M.vCliente},
@@ -115,56 +128,42 @@ EVALUATE
     ${M.cPoblacion},
     ${M.cProvincia},
     ${M.cBloqueado},
+    ${filtroIncremental}
 
-    // ── Ventas: todas las lineas. El importe facturado es fiable. ──
-    "VentaSem", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniSem && ${M.vFecha} <= _hoy),
+    // ── Ano anterior COMPLETO: dato de referencia que se guarda ──
+    "VentaAntFull", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAnt)),
+    "VentaAntFullOk", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAnt &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+    "CosteAntFullOk", CALCULATE(SUM(${M.vCoste}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAnt &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+
+    // ── Ano anterior MISMO PERIODO: base de la comparativa ──
+    "VentaAntYTD", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAnt && ${M.vFecha} <= _corteAnt)),
+    "VentaAntYTDOk", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAnt && ${M.vFecha} <= _corteAnt &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+    "CosteAntYTDOk", CALCULATE(SUM(${M.vCoste}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAnt && ${M.vFecha} <= _corteAnt &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+
+    // ── Ano en curso ──
+    "VentaAct", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAct)),
+    "VentaActOk", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAct &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+    "CosteActOk", CALCULATE(SUM(${M.vCoste}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAct &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+
     "VentaMes", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
-    "VentaYTD", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniAno && ${M.vFecha} <= _hoy),
-    "Venta12m", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _12m    && ${M.vFecha} <= _hoy),
-
-    // ── Margen: SOLO lineas con coste creible. ──
-    // Se descartan dos errores de maestro de articulos:
-    //   1) coste vacio  -> daria 100% de margen
-    //   2) coste absurdo -> ej. articulo a 0,58 EUR con coste 400,40 EUR,
-    //      que genera margenes de -68.000%
-    // El umbral de 3x el importe deja pasar ventas a perdida reales
-    // y corta solo los errores evidentes.
-    "VentaMesOk", CALCULATE(SUM(${M.vBase}),
-      FILTER(${M.ventas},
-        ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy &&
-        NOT ISBLANK(${M.vCoste}) &&
-        ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
-    "CosteMesOk", CALCULATE(SUM(${M.vCoste}),
-      FILTER(${M.ventas},
-        ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy &&
-        NOT ISBLANK(${M.vCoste}) &&
-        ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
-
-    "VentaYTDOk", CALCULATE(SUM(${M.vBase}),
-      FILTER(${M.ventas},
-        ${M.vFecha} >= _iniAno && ${M.vFecha} <= _hoy &&
-        NOT ISBLANK(${M.vCoste}) &&
-        ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
-    "CosteYTDOk", CALCULATE(SUM(${M.vCoste}),
-      FILTER(${M.ventas},
-        ${M.vFecha} >= _iniAno && ${M.vFecha} <= _hoy &&
-        NOT ISBLANK(${M.vCoste}) &&
-        ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
-
-    "Venta12mOk", CALCULATE(SUM(${M.vBase}),
-      FILTER(${M.ventas},
-        ${M.vFecha} >= _12m && ${M.vFecha} <= _hoy &&
-        NOT ISBLANK(${M.vCoste}) &&
-        ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
-    "Coste12mOk", CALCULATE(SUM(${M.vCoste}),
-      FILTER(${M.ventas},
-        ${M.vFecha} >= _12m && ${M.vFecha} <= _hoy &&
-        NOT ISBLANK(${M.vCoste}) &&
-        ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
-
     "UltimaVenta", CALCULATE(MAX(${M.vFecha}))
   )
-  ORDER BY [Venta12m] DESC`,
+  ORDER BY [VentaAct] DESC`,
 
     // Variante de respaldo: sin datos de la tabla de clientes.
     ventasSimple: `
@@ -423,6 +422,49 @@ async function fbLeerClientes() {
   return mapa;
 }
 
+// Lee todos los documentos de una coleccion. Se usa para recalcular el
+// resumen por comercial: las lecturas son mucho mas baratas que las
+// escrituras, asi que compensa releer y escribir solo los ~55 agregados.
+async function fbLeerDocumento(coleccion, id) {
+  const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+  const key = ENV.FB_API_KEY ? `?key=${ENV.FB_API_KEY}` : "";
+  const r = await fetch(`https://firestore.googleapis.com/v1/${base}/${coleccion}/${id}${key}`);
+  if (!r.ok) return null;
+  const j = await r.json();
+  const o = {};
+  for (const [k, v] of Object.entries(j.fields || {})) {
+    o[k] = v.stringValue ?? v.doubleValue ?? v.integerValue ?? v.booleanValue ?? null;
+  }
+  return o;
+}
+
+async function fbLeerColeccion(coleccion) {
+  const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+  const key = ENV.FB_API_KEY ? `&key=${ENV.FB_API_KEY}` : "";
+  const docs = [];
+  let pageToken = null, vueltas = 0;
+  do {
+    const url = `https://firestore.googleapis.com/v1/${base}/${coleccion}` +
+                `?pageSize=300${pageToken ? `&pageToken=${pageToken}` : ""}${key}`;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`leer ${coleccion}: HTTP ${r.status}`);
+    const j = await r.json();
+    for (const d of j.documents || []) {
+      const o = { _id: d.name.split("/").pop() };
+      for (const [k, v] of Object.entries(d.fields || {})) {
+        o[k] = v.doubleValue ?? v.integerValue ?? v.stringValue ??
+               v.booleanValue ?? null;
+        if (o[k] !== null && v.integerValue !== undefined) o[k] = Number(o[k]);
+        if (v.doubleValue !== undefined) o[k] = Number(v.doubleValue);
+      }
+      docs.push(o);
+    }
+    pageToken = j.nextPageToken || null;
+    vueltas++;
+  } while (pageToken && vueltas < 60);
+  return docs;
+}
+
 // Limpia el código para usarlo como id de documento
 const docId = (v) => String(v || "").trim().replace(/[/#?\[\]*]/g, "_") || "SIN_CODIGO";
 
@@ -677,6 +719,19 @@ EVALUATE
     "LineasTotal", COUNTROWS(${T})
   )`);
 
+      // C quater) Rango temporal real de la tabla de hechos.
+      // Necesario para saber sobre que periodo se esta calculando todo.
+      out.porAno = await pbiQuery(token, `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${T}[ANO],
+    "Venta",  SUM(${M.vBase}),
+    "Lineas", COUNTROWS(${T}),
+    "Desde",  MIN(${M.vFecha}),
+    "Hasta",  MAX(${M.vFecha})
+  )
+  ORDER BY ${T}[ANO]`);
+
       // C) Comparacion global: lo que suma el modelo frente a lo que sumo yo
       out.totales = await pbiQuery(token, `
 EVALUATE
@@ -703,10 +758,42 @@ EVALUATE
   try {
     const { token, modo } = await getToken(req);
     log.modoAuth = modo;
-    const Q = dax();
+
+    // ── Decidir si toca sincronizacion completa o incremental ──
+    // Se fuerza completa cuando:
+    //   - se pide con ?full=1
+    //   - no hay sincronizacion previa registrada
+    //   - es dia 1 de mes (cambian los acumulados del mes)
+    //   - han pasado mas de 7 dias (por si fallo el cron algun dia)
+    //   - estamos en enero (cambio de ejercicio: se recalcula todo)
+    let desde = null;
+    if (req.query.full !== "1") {
+      try {
+        const meta = await fbLeerDocumento("pbi_meta", "estado");
+        const ultima = meta?.ultimaSync ? new Date(meta.ultimaSync) : null;
+        const hoy = new Date();
+        const dias = ultima ? (hoy - ultima) / 86400000 : 999;
+        const forzar = !ultima || dias > 7 || hoy.getDate() === 1 || hoy.getMonth() === 0;
+        if (!forzar) {
+          // Margen de 3 dias hacia atras: recoge facturas grabadas con
+          // retraso o rectificaciones sobre dias ya sincronizados.
+          desde = new Date(ultima.getTime() - 3 * 86400000);
+        }
+      } catch (e) {
+        log.avisoIncremental = `sin metadatos previos, se hace completa (${e.message})`;
+      }
+    }
+    log.tipoSync = desde ? "incremental" : "completa";
+    if (desde) log.desde = desde.toISOString().slice(0, 10);
+
+    const Q = dax(desde);
 
     // ── 1. Ventas y margen por cliente ──
     try {
+      const anoAct = new Date().getFullYear();
+      const anoAnt = anoAct - 1;
+      log.ejercicios = { actual: anoAct, anterior: anoAnt };
+
       let filas, enriquecido = true;
       try {
         filas = await pbiQuery(token, Q.ventas);
@@ -718,24 +805,28 @@ EVALUATE
         filas = await pbiQuery(token, Q.ventasSimple);
       }
       log.ventasEnriquecido = enriquecido;
+      const anoAct = new Date().getFullYear();
+      const anoAnt = anoAct - 1;
+      log.ejercicios = { actual: anoAct, anterior: anoAnt };
+
       const docs = filas.map((r) => {
         const cliente = pick(r, "CLIENTE");
-        const vSem = num(pick(r, "VentaSem"));
-        const vMes = num(pick(r, "VentaMes"));
-        const vYTD = num(pick(r, "VentaYTD"));
-        const v12m = num(pick(r, "Venta12m"));
 
-        // Base "limpia" para el margen: solo lineas con coste creible
-        const vMesOk = num(pick(r, "VentaMesOk"));
-        const vYTDOk = num(pick(r, "VentaYTDOk"));
-        const v12mOk = num(pick(r, "Venta12mOk"));
-        const mMes = num(vMesOk - num(pick(r, "CosteMesOk")));
-        const mYTD = num(vYTDOk - num(pick(r, "CosteYTDOk")));
-        const m12m = num(v12mOk - num(pick(r, "Coste12mOk")));
+        const vAntFull = num(pick(r, "VentaAntFull"));
+        const vAntYTD  = num(pick(r, "VentaAntYTD"));
+        const vAct     = num(pick(r, "VentaAct"));
+        const vMes     = num(pick(r, "VentaMes"));
 
-        // Porcentaje de la venta que tiene coste fiable. Si es bajo,
-        // el margen de ese cliente no es representativo.
-        const cob = (ok, tot) => (tot ? num((100 * ok) / tot) : 0);
+        // Bases limpias (lineas con coste creible) para cada ventana
+        const bAntFull = num(pick(r, "VentaAntFullOk"));
+        const bAntYTD  = num(pick(r, "VentaAntYTDOk"));
+        const bAct     = num(pick(r, "VentaActOk"));
+        const mAntFull = num(bAntFull - num(pick(r, "CosteAntFullOk")));
+        const mAntYTD  = num(bAntYTD  - num(pick(r, "CosteAntYTDOk")));
+        const mAct     = num(bAct     - num(pick(r, "CosteActOk")));
+
+        const p = (m, b) => (b ? num((100 * m) / b) : null);
+        const cob = (b, v) => (v ? num((100 * b) / v) : 0);
 
         return {
           _id: docId(cliente),
@@ -748,21 +839,34 @@ EVALUATE
           vendedor: pick(r, "VENDEDOR"),
           empresa: pick(r, "EMPRESA"),
 
-          ventasSem: vSem,
+          anoAnterior: anoAnt,
+          anoActual: anoAct,
+
+          // Referencia: ano anterior cerrado
+          ventasAntFull: vAntFull,
+          margenAntFull: mAntFull,
+          margenPctAntFull: p(mAntFull, bAntFull),
+
+          // Comparativa homogenea: mismo periodo de ambos anos
+          ventasAntYTD: vAntYTD,
+          margenAntYTD: mAntYTD,
+          margenPctAntYTD: p(mAntYTD, bAntYTD),
+
+          ventasAct: vAct,
+          margenAct: mAct,
+          margenPctAct: p(mAct, bAct),
+
           ventasMes: vMes,
-          ventasYTD: vYTD,
-          ventasAno: v12m,
 
-          margenMes: mMes,
-          margenYTD: mYTD,
-          margenAno: m12m,
-          margenPctMes: vMesOk ? num((100 * mMes) / vMesOk) : null,
-          margenPctYTD: vYTDOk ? num((100 * mYTD) / vYTDOk) : null,
-          margenPctAno: v12mOk ? num((100 * m12m) / v12mOk) : null,
+          // Variacion sobre el mismo periodo, no sobre el ano cerrado
+          variacionPct: vAntYTD ? num((100 * (vAct - vAntYTD)) / vAntYTD) : null,
+          variacionMargenPts:
+            (p(mAct, bAct) !== null && p(mAntYTD, bAntYTD) !== null)
+              ? num(p(mAct, bAct) - p(mAntYTD, bAntYTD)) : null,
 
-          coberturaMes: cob(vMesOk, vMes),
-          coberturaYTD: cob(vYTDOk, vYTD),
-          coberturaAno: cob(v12mOk, v12m),
+          coberturaAntFull: cob(bAntFull, vAntFull),
+          coberturaAntYTD: cob(bAntYTD, vAntYTD),
+          coberturaAct: cob(bAct, vAct),
 
           ultimaVenta: pick(r, "UltimaVenta"),
           actualizado: new Date().toISOString(),
@@ -772,84 +876,101 @@ EVALUATE
       log.intercompanyMarcados = docs.filter((d) => d.intercompany).length;
 
       // ── Resumen por comercial, para el dashboard ──
-      // Se cruza cada cliente con su grupoAgente segun el CRM y se suman
-      // las cuatro ventanas. Asi el dashboard lee 10 documentos en vez de
-      // los 6.589 de clientes.
+      // Se cruza cada cliente con su grupoAgente segun el CRM, porque el
+      // codigo de vendedor de Power BI ("1201") no coincide con los
+      // agentes del CRM (AZARCO, CARLOSG...).
       try {
         const asignacion = await fbLeerClientes();
         log.clientesCrmLeidos = asignacion.size;
 
-        const porAgente = new Map();
-        let sinAsignar = 0;
+        // En modo incremental, "docs" solo trae los clientes con movimiento.
+        // El resumen por comercial necesita la cartera completa, asi que se
+        // relee de Firestore y se fusiona: los recien calculados mandan.
+        let universo = docs;
+        if (desde && !dry) {
+          const guardados = await fbLeerColeccion("pbi_ventas_cliente");
+          const nuevos = new Map(docs.map((d) => [d._id, d]));
+          universo = guardados.map((g) => nuevos.get(g._id) || g);
+          for (const [id, d] of nuevos) {
+            if (!guardados.some((g) => g._id === id)) universo.push(d);
+          }
+          log.universoResumen = universo.length;
+        }
 
-        for (const d of docs) {
-          if (d.intercompany) continue;           // fuera traspasos internos
+        const porAgente = new Map();
+        let sinAsignar = 0, ventaSinAsignar = 0;
+
+        for (const d of universo) {
+          if (d.intercompany) continue;            // fuera traspasos internos
           const agente = asignacion.get(String(d.cliente).trim());
-          if (!agente) { sinAsignar++; continue; }
+          if (!agente) { sinAsignar++; ventaSinAsignar += d.ventasAct; continue; }
           if (!porAgente.has(agente)) {
             porAgente.set(agente, {
-              _id: docId(agente), agente,
-              ventasSem: 0,
-              ventasMes: 0, margenMes: 0, baseMes: 0,
-              ventasYTD: 0, margenYTD: 0, baseYTD: 0,
-              ventasAno: 0, margenAno: 0, baseAno: 0,
-              clientes: 0, clientesConVentaMes: 0,
+              _id: docId(agente), agente, anoAnterior: anoAnt, anoActual: anoAct,
+              ventasAntFull: 0, margenAntFull: 0, baseAntFull: 0,
+              ventasAntYTD: 0, margenAntYTD: 0, baseAntYTD: 0,
+              ventasAct: 0, margenAct: 0, baseAct: 0,
+              ventasMes: 0, clientes: 0, clientesConVentaMes: 0,
             });
           }
           const a = porAgente.get(agente);
-          a.ventasSem += d.ventasSem;
-          a.ventasMes += d.ventasMes; a.margenMes += d.margenMes;
-          a.ventasYTD += d.ventasYTD; a.margenYTD += d.margenYTD;
-          a.ventasAno += d.ventasAno; a.margenAno += d.margenAno;
-          // base limpia = venta con coste fiable, reconstruida desde cobertura
-          a.baseMes += d.ventasMes * (d.coberturaMes / 100);
-          a.baseYTD += d.ventasYTD * (d.coberturaYTD / 100);
-          a.baseAno += d.ventasAno * (d.coberturaAno / 100);
+          a.ventasAntFull += d.ventasAntFull; a.margenAntFull += d.margenAntFull;
+          a.ventasAntYTD  += d.ventasAntYTD;  a.margenAntYTD  += d.margenAntYTD;
+          a.ventasAct     += d.ventasAct;     a.margenAct     += d.margenAct;
+          a.ventasMes     += d.ventasMes;
+          a.baseAntFull += d.ventasAntFull * (d.coberturaAntFull / 100);
+          a.baseAntYTD  += d.ventasAntYTD  * (d.coberturaAntYTD / 100);
+          a.baseAct     += d.ventasAct     * (d.coberturaAct / 100);
           a.clientes++;
           if (d.ventasMes > 0) a.clientesConVentaMes++;
         }
 
-        const resumen = [...porAgente.values()].map((a) => {
-          const p = (m, v) => (v ? num((100 * m) / v) : null);
+        const cerrar = (a) => {
+          const p = (m, b) => (b ? num((100 * m) / b) : null);
+          const cob = (b, v) => (v ? num((100 * b) / v) : 0);
+          const pctAct = p(a.margenAct, a.baseAct);
+          const pctAntYTD = p(a.margenAntYTD, a.baseAntYTD);
           return {
             ...a,
-            ventasSem: num(a.ventasSem),
-            ventasMes: num(a.ventasMes), margenMes: num(a.margenMes),
-            ventasYTD: num(a.ventasYTD), margenYTD: num(a.margenYTD),
-            ventasAno: num(a.ventasAno), margenAno: num(a.margenAno),
+            ventasAntFull: num(a.ventasAntFull), margenAntFull: num(a.margenAntFull),
+            ventasAntYTD: num(a.ventasAntYTD),   margenAntYTD: num(a.margenAntYTD),
+            ventasAct: num(a.ventasAct),         margenAct: num(a.margenAct),
+            ventasMes: num(a.ventasMes),
             // El % se calcula sobre la venta con coste fiable, no sobre
-            // la venta total. Si no, saldria diluido.
-            margenPctMes: p(a.margenMes, a.baseMes),
-            margenPctYTD: p(a.margenYTD, a.baseYTD),
-            margenPctAno: p(a.margenAno, a.baseAno),
-            coberturaMes: a.ventasMes ? num(100 * a.baseMes / a.ventasMes) : 0,
-            coberturaYTD: a.ventasYTD ? num(100 * a.baseYTD / a.ventasYTD) : 0,
-            coberturaAno: a.ventasAno ? num(100 * a.baseAno / a.ventasAno) : 0,
-            baseMes: num(a.baseMes), baseYTD: num(a.baseYTD), baseAno: num(a.baseAno),
+            // la venta total, o saldria diluido.
+            margenPctAntFull: p(a.margenAntFull, a.baseAntFull),
+            margenPctAntYTD: pctAntYTD,
+            margenPctAct: pctAct,
+            variacionPct: a.ventasAntYTD
+              ? num((100 * (a.ventasAct - a.ventasAntYTD)) / a.ventasAntYTD) : null,
+            variacionMargenPts: (pctAct !== null && pctAntYTD !== null)
+              ? num(pctAct - pctAntYTD) : null,
+            coberturaAntFull: cob(a.baseAntFull, a.ventasAntFull),
+            coberturaAntYTD: cob(a.baseAntYTD, a.ventasAntYTD),
+            coberturaAct: cob(a.baseAct, a.ventasAct),
+            baseAntFull: num(a.baseAntFull), baseAntYTD: num(a.baseAntYTD),
+            baseAct: num(a.baseAct),
           };
-        });
+        };
 
-        // Fila total, para los KPI de cabecera del dashboard
-        const tot = resumen.reduce((t, a) => {
-          for (const k of ["ventasSem","ventasMes","margenMes","baseMes",
-                           "ventasYTD","margenYTD","baseYTD",
-                           "ventasAno","margenAno","baseAno",
+        const resumen = [...porAgente.values()].map(cerrar);
+
+        const tot = [...porAgente.values()].reduce((t, a) => {
+          for (const k of ["ventasAntFull","margenAntFull","baseAntFull",
+                           "ventasAntYTD","margenAntYTD","baseAntYTD",
+                           "ventasAct","margenAct","baseAct","ventasMes",
                            "clientes","clientesConVentaMes"]) t[k] += a[k];
           return t;
-        }, { _id: "_TOTAL", agente: "_TOTAL", ventasSem:0,
-             ventasMes:0, margenMes:0, baseMes:0,
-             ventasYTD:0, margenYTD:0, baseYTD:0,
-             ventasAno:0, margenAno:0, baseAno:0,
+        }, { _id: "_TOTAL", agente: "_TOTAL", anoAnterior: anoAnt, anoActual: anoAct,
+             ventasAntFull:0, margenAntFull:0, baseAntFull:0,
+             ventasAntYTD:0, margenAntYTD:0, baseAntYTD:0,
+             ventasAct:0, margenAct:0, baseAct:0, ventasMes:0,
              clientes:0, clientesConVentaMes:0 });
-        const p = (m, v) => (v ? num((100 * m) / v) : null);
-        tot.margenPctMes = p(tot.margenMes, tot.baseMes);
-        tot.margenPctYTD = p(tot.margenYTD, tot.baseYTD);
-        tot.margenPctAno = p(tot.margenAno, tot.baseAno);
-        tot.coberturaAno = tot.ventasAno ? num(100 * tot.baseAno / tot.ventasAno) : 0;
-        resumen.push(tot);
+        resumen.push(cerrar(tot));
 
         log.agentes = resumen.length - 1;
         log.clientesSinAgente = sinAsignar;
+        log.ventaSinAsignar = num(ventaSinAsignar);
         log.resumenAgentes = dry
           ? resumen
           : await fbCommit("pbi_resumen_agente", resumen);
