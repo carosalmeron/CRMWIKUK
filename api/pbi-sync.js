@@ -26,23 +26,21 @@
 //  Si un nombre no coincide exactamente, el DAX devuelve error 400.
 // ══════════════════════════════════════════════════════════════
 const M = {
-  clientes:   "'00 Clientes Global'",
+  // ── VERIFICADO en el catálogo de OneLake (27/07/2026) ──
+  // La tabla de hechos ya contiene cliente, vendedor, empresa y fecha,
+  // así que no hace falta cruzar con dimensiones ni con Lk_tiempo.
   ventas:     "'00 Ventas Mercancias Global'",
+  vCodigo:    "'00 Ventas Mercancias Global'[CODIGO]",
+  vCliente:   "'00 Ventas Mercancias Global'[CLIENTE]",
+  vVendedor:  "'00 Ventas Mercancias Global'[VENDEDOR]",
+  vEmpresa:   "'00 Ventas Mercancias Global'[EMPRESA]",
+  vFecha:     "'00 Ventas Mercancias Global'[FECHA]",
+  vBase:      "'00 Ventas Mercancias Global'[BASE]",    // importe
+  vMargen:    "'00 Ventas Mercancias Global'[Margen]",
+
+  // ── SIN VERIFICAR: pendientes de que despliegues estas dos tablas ──
   pendiente:  "'00 Stock Pendiente de Servir Global'",
   stock:      "'00 Stock'",
-  tiempo:     "'Lk_tiempo'",
-
-  colCodigo:  "'00 Clientes Global'[CODIGO]",
-  colNombre:  "'00 Clientes Global'[NOMBRE]",
-  colAgente:  "'00 Clientes Global'[GRUPOAGENTE]",
-  colEmpresa: "'00 Clientes Global'[Empresa]",
-  colFecha:   "'Lk_tiempo'[Date]",
-
-  // Medidas ya existentes en el modelo (tabla "Medidas Ventas" /
-  // "Medidas Global"). Si no existen, sustituye por SUM(...) directo.
-  medVentas:  "[Ventas]",
-  medMargen:  "[Margen Bruto]",
-  medMargenP: "[% Margen]",
 };
 
 const DIAS_HISTORICO = 365;
@@ -68,15 +66,14 @@ DEFINE
   VAR _iniMes = DATE(YEAR(_hoy), MONTH(_hoy), 1)
 EVALUATE
   SUMMARIZECOLUMNS(
-    ${M.colCodigo},
-    ${M.colNombre},
-    ${M.colAgente},
-    ${M.colEmpresa},
-    "VentasAno",  CALCULATE(${M.medVentas},  ${M.colFecha} >= _desde  && ${M.colFecha} <= _hoy),
-    "MargenAno",  CALCULATE(${M.medMargen},  ${M.colFecha} >= _desde  && ${M.colFecha} <= _hoy),
-    "VentasMes",  CALCULATE(${M.medVentas},  ${M.colFecha} >= _iniMes && ${M.colFecha} <= _hoy),
-    "MargenMes",  CALCULATE(${M.medMargen},  ${M.colFecha} >= _iniMes && ${M.colFecha} <= _hoy),
-    "MargenPct",  CALCULATE(${M.medMargenP}, ${M.colFecha} >= _iniMes && ${M.colFecha} <= _hoy)
+    ${M.vCodigo},
+    ${M.vCliente},
+    ${M.vVendedor},
+    ${M.vEmpresa},
+    "VentasAno", CALCULATE(SUM(${M.vBase}),   ${M.vFecha} >= _desde  && ${M.vFecha} <= _hoy),
+    "MargenAno", CALCULATE(SUM(${M.vMargen}), ${M.vFecha} >= _desde  && ${M.vFecha} <= _hoy),
+    "VentasMes", CALCULATE(SUM(${M.vBase}),   ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
+    "MargenMes", CALCULATE(SUM(${M.vMargen}), ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy)
   )
   ORDER BY [VentasAno] DESC`,
 
@@ -275,6 +272,32 @@ export default async function handler(req, res) {
     }
   }
 
+  // ?schema=1 → pregunta al propio modelo como se llama todo.
+  // Elimina el adivinar nombres: devuelve la lista real de medidas y
+  // columnas segun el motor. Usar en cuanto haya permisos.
+  if (req.query.schema === "1") {
+    const out = { ok: true };
+    try {
+      const { token, modo } = await getToken(req);
+      out.modoAuth = modo;
+      const consultas = {
+        medidas: 'EVALUATE SELECTCOLUMNS(INFO.MEASURES(), "medida", [Name], "expresion", [Expression])',
+        tablas:  'EVALUATE SELECTCOLUMNS(INFO.TABLES(), "tabla", [Name])',
+        columnas:'EVALUATE SELECTCOLUMNS(INFO.COLUMNS(), "columna", [ExplicitName], "tablaId", [TableID])',
+      };
+      for (const [k, q] of Object.entries(consultas)) {
+        try {
+          out[k] = await pbiQuery(token, q);
+        } catch (e) {
+          out[k] = `ERROR: ${e.message}`;
+        }
+      }
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: e.message });
+    }
+    return res.status(200).json(out);
+  }
+
   const dry = req.query.dry === "1"; // ?dry=1 → consulta pero NO escribe
   const t0 = Date.now();
   const log = { dry, ventas: 0, pendiente: 0, stock: 0, errores: [] };
@@ -290,14 +313,17 @@ export default async function handler(req, res) {
       const docs = filas.map((r) => ({
         _id: docId(pick(r, "CODIGO")),
         codigo: pick(r, "CODIGO"),
-        nombre: pick(r, "NOMBRE"),
-        grupoAgente: pick(r, "GRUPOAGENTE"),
-        empresa: pick(r, "Empresa"),
+        nombre: pick(r, "CLIENTE"),
+        vendedor: pick(r, "VENDEDOR"),
+        empresa: pick(r, "EMPRESA"),
         ventasAno: num(pick(r, "VentasAno")),
         margenAno: num(pick(r, "MargenAno")),
         ventasMes: num(pick(r, "VentasMes")),
         margenMes: num(pick(r, "MargenMes")),
-        margenPct: num(pick(r, "MargenPct")),
+        // El % se calcula aqui en vez de en DAX: una division menos que
+        // pueda fallar en el modelo, y evita divisiones por cero.
+        margenPctAno: num(pick(r, "VentasAno")) ? num(100 * num(pick(r, "MargenAno")) / num(pick(r, "VentasAno"))) : 0,
+        margenPctMes: num(pick(r, "VentasMes")) ? num(100 * num(pick(r, "MargenMes")) / num(pick(r, "VentasMes"))) : 0,
         actualizado: new Date().toISOString(),
       }));
       log.ventas = dry ? docs.length : await fbCommit("pbi_ventas_cliente", docs);
