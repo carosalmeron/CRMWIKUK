@@ -427,7 +427,13 @@ async function fbLeerClientes() {
       const agente = val("GRUPOAGENTE") || val("grupoAgente") || val("agente");
       const conta = val("CODCONTA") || val("codconta");
       if (!agente) continue;
-      if (codigo) mapa.set(String(codigo).trim(), String(agente).trim());
+      if (codigo) {
+        const cod = String(codigo).trim();
+        mapa.set(cod, String(agente).trim());
+        // El CRM guarda los codigos antiguos; Power BI ya usa los nuevos.
+        const can = canonico(cod);
+        if (can !== cod && !mapa.has(can)) mapa.set(can, String(agente).trim());
+      }
       // Segundo indice por codigo contable: en 2026 se recodificaron
       // clientes (serie U4... -> C0...) y el codigo nuevo no esta en el
       // CRM, pero el contable no cambia.
@@ -481,6 +487,16 @@ async function fbLeerColeccion(coleccion) {
     vueltas++;
   } while (pageToken && vueltas < 60);
   return docs;
+}
+
+// Recodificacion de 2026: los codigos U43+4digitos pasaron a U43+0+esos
+// 4 digitos. Verificado cruzando nombres (U433509 -> U4303509 WIKUK EASY,
+// U434210 -> U4304210 LORIENTE PIQUERAS, U431880 -> U4301880 MANACOR).
+// El historico de ventas y el CRM conservan el codigo viejo.
+function canonico(cod) {
+  const c = String(cod || "").trim().toUpperCase();
+  const m = /^U43(\d{4})$/.exec(c);
+  return m ? "U430" + m[1] : c;
 }
 
 // Normaliza el nombre comercial para poder emparejar el mismo cliente
@@ -1087,18 +1103,6 @@ EVALUATE
       const modoFusion = String(req.query.fusion || "si").toLowerCase();
       log.modoFusion = modoFusion;
 
-      // Recodificacion de 2026: los codigos U43+4digitos pasaron a
-      // U43+0+esos 4 digitos. Verificado cruzando nombres:
-      //   U433509 -> U4303509  (WIKUK EASY R)
-      //   U434210 -> U4304210  (LORIENTE PIQUERAS)
-      //   U431880 -> U4301880  (PRODUCTOS CARNICOS DE MANACOR)
-      // El historico de ventas conserva el codigo viejo, asi que sin
-      // esta equivalencia se pierde el 68% de la venta de 2025.
-      const canonico = (cod) => {
-        const c = String(cod || "").trim().toUpperCase();
-        const m = /^U43(\d{4})$/.exec(c);
-        return m ? "U430" + m[1] : c;
-      };
       let recodificados = 0;
       for (const d of docs) {
         const can = canonico(d.cliente);
@@ -1146,6 +1150,25 @@ EVALUATE
         principal.ventasAct     = num(suma("ventasAct"));
         principal.margenAct     = num(suma("margenAct"));
         principal.ventasMes     = num(suma("ventasMes"));
+        // Recalcular bases limpias y porcentajes: sumar importes no basta,
+        // los % y la cobertura hay que rehacerlos sobre el grupo entero.
+        const base = (k, cob) => grupo.reduce(
+          (t, d) => t + (d[k] || 0) * ((d[cob] || 0) / 100), 0);
+        const bAntFull = base("ventasAntFull", "coberturaAntFull");
+        const bAntYTD  = base("ventasAntYTD", "coberturaAntYTD");
+        const bAct     = base("ventasAct", "coberturaAct");
+        const pct = (m, b) => (b ? num((100 * m) / b) : null);
+        const cob = (b, v) => (v ? num((100 * b) / v) : 0);
+
+        principal.margenPctAntFull = pct(principal.margenAntFull, bAntFull);
+        principal.margenPctAntYTD  = pct(principal.margenAntYTD, bAntYTD);
+        principal.margenPctAct     = pct(principal.margenAct, bAct);
+        principal.coberturaAntFull = cob(bAntFull, principal.ventasAntFull);
+        principal.coberturaAntYTD  = cob(bAntYTD, principal.ventasAntYTD);
+        principal.coberturaAct     = cob(bAct, principal.ventasAct);
+        principal.variacionMargenPts =
+          (principal.margenPctAct !== null && principal.margenPctAntYTD !== null)
+            ? num(principal.margenPctAct - principal.margenPctAntYTD) : null;
         principal.variacionPct  = principal.ventasAntYTD
           ? num((100 * (principal.ventasAct - principal.ventasAntYTD)) / principal.ventasAntYTD)
           : null;
@@ -1158,6 +1181,9 @@ EVALUATE
           d.ventasAntYTD = 0;  d.margenAntYTD = 0;
           d.ventasAct = 0;     d.margenAct = 0;
           d.ventasMes = 0;     d.variacionPct = null;
+          d.margenPctAntFull = null; d.margenPctAntYTD = null; d.margenPctAct = null;
+          d.coberturaAntFull = 0; d.coberturaAntYTD = 0; d.coberturaAct = 0;
+          d.variacionMargenPts = null;
           fusionados++;
         }
       }
