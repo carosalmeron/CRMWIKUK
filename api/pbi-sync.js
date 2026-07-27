@@ -50,9 +50,20 @@ const M = {
   stock:      "'00 Stock'",
 
   clientes:   "'00 Clientes Global'",
+  cNombre:    "'00 Clientes Global'[NOMBRE]",
+  cPoblacion: "'00 Clientes Global'[POBLACION]",
+  cProvincia: "'00 Clientes Global'[PROVINCIA]",
+  cBloqueado: "'00 Clientes Global'[BLQ]",
 };
 
 const DIAS_HISTORICO = 365;
+
+// Bloques que se sincronizan de verdad. "stock" queda fuera a proposito:
+// la tabla '00 Stock' no tiene columna de cantidad, asi que ahora mismo
+// solo devolveria un recuento de registros (13.666 filas sin valor).
+// Reactivar cuando sistemas indique donde vive el stock disponible.
+const ACTIVOS = ["ventas"];
+const activo = (b) => ACTIVOS.includes(b) || false;
 
 // ─────────────── Lectura defensiva de variables de entorno ───────────────
 // Al copiar IDs de un email o un chat es facil arrastrar tabuladores,
@@ -67,8 +78,34 @@ const ENV = new Proxy({}, { get: (_, k) => env(k) });
 // ─────────────── Consultas DAX ───────────────
 function dax() {
   return {
-    // 1) Ventas, coste y margen por cliente: 12 meses + mes en curso
+    // 1) Ventas, coste y margen por cliente: 12 meses + mes en curso.
+    //    Se intenta primero enriqueciendo con nombre y poblacion desde
+    //    '00 Clientes Global'. Si no existe relacion en el modelo, la
+    //    consulta falla y se reintenta con la version simple (ventasSimple).
     ventas: `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _desde = _hoy - ${DIAS_HISTORICO}
+  VAR _iniMes = DATE(YEAR(_hoy), MONTH(_hoy), 1)
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${M.vCliente},
+    ${M.vVendedor},
+    ${M.vEmpresa},
+    ${M.cNombre},
+    ${M.cPoblacion},
+    ${M.cProvincia},
+    ${M.cBloqueado},
+    "VentasAno", CALCULATE(SUM(${M.vBase}),  ${M.vFecha} >= _desde  && ${M.vFecha} <= _hoy),
+    "CosteAno",  CALCULATE(SUM(${M.vCoste}), ${M.vFecha} >= _desde  && ${M.vFecha} <= _hoy),
+    "VentasMes", CALCULATE(SUM(${M.vBase}),  ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
+    "CosteMes",  CALCULATE(SUM(${M.vCoste}), ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
+    "UltimaVenta", CALCULATE(MAX(${M.vFecha}))
+  )
+  ORDER BY [VentasAno] DESC`,
+
+    // Variante de respaldo: sin datos de la tabla de clientes.
+    ventasSimple: `
 DEFINE
   VAR _hoy = TODAY()
   VAR _desde = _hoy - ${DIAS_HISTORICO}
@@ -466,7 +503,17 @@ export default async function handler(req, res) {
 
     // ── 1. Ventas y margen por cliente ──
     try {
-      const filas = await pbiQuery(token, Q.ventas);
+      let filas, enriquecido = true;
+      try {
+        filas = await pbiQuery(token, Q.ventas);
+      } catch (e) {
+        // Sin relacion entre ventas y clientes en el modelo: se cae a la
+        // version sin nombre en lugar de perder el bloque entero.
+        log.avisoVentas = `sin datos de cliente (${e.message.slice(0, 120)})`;
+        enriquecido = false;
+        filas = await pbiQuery(token, Q.ventasSimple);
+      }
+      log.ventasEnriquecido = enriquecido;
       const docs = filas.map((r) => {
         const vAno = num(pick(r, "VentasAno"));
         const vMes = num(pick(r, "VentasMes"));
@@ -478,6 +525,10 @@ export default async function handler(req, res) {
         return {
           _id: docId(cliente),
           cliente,
+          nombre: pick(r, "NOMBRE") || cliente,
+          poblacion: pick(r, "POBLACION"),
+          provincia: pick(r, "PROVINCIA"),
+          bloqueado: pick(r, "BLQ") === "SI",
           vendedor: pick(r, "VENDEDOR"),
           empresa: pick(r, "EMPRESA"),
           ventasAno: vAno,
@@ -498,8 +549,8 @@ export default async function handler(req, res) {
       log.errores.push(`ventas: ${e.message}`);
     }
 
-    // ── 2. Pedidos pendientes de servir ──
-    try {
+    // ── 2. Pendiente de servir (desactivado, ver ACTIVOS) ──
+    if (activo("pendiente")) try {
       const filas = await pbiQuery(token, Q.pendiente);
       const docs = filas.map((r) => ({
         _id: docId(pick(r, "CODIGO")) + "_" + docId(pick(r, "ESTADO")),
@@ -514,9 +565,10 @@ export default async function handler(req, res) {
     } catch (e) {
       log.errores.push(`pendiente: ${e.message}`);
     }
+    else log.pendiente = "desactivado";
 
-    // ── 3. Stock por referencia ──
-    try {
+    // ── 3. Stock por referencia (desactivado, ver ACTIVOS) ──
+    if (activo("stock")) try {
       const filas = await pbiQuery(token, Q.stock);
       const docs = filas.map((r) => ({
         _id: docId(pick(r, "CODIGO")) + "_" + docId(pick(r, "ALMACEN")),
@@ -530,6 +582,7 @@ export default async function handler(req, res) {
     } catch (e) {
       log.errores.push(`stock: ${e.message}`);
     }
+    else log.stock = "desactivado";
 
     // ── 4. Sello de sincronización (lo lee el CRM para avisar si va viejo) ──
     log.segundos = Math.round((Date.now() - t0) / 1000);
