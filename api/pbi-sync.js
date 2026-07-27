@@ -805,9 +805,6 @@ EVALUATE
         filas = await pbiQuery(token, Q.ventasSimple);
       }
       log.ventasEnriquecido = enriquecido;
-      const anoAct = new Date().getFullYear();
-      const anoAnt = anoAct - 1;
-      log.ejercicios = { actual: anoAct, anterior: anoAnt };
 
       const docs = filas.map((r) => {
         const cliente = pick(r, "CLIENTE");
