@@ -545,6 +545,84 @@ export default async function handler(req, res) {
     return res.status(200).json(out);
   }
 
+  // ?audit=1 → busca las filas que rompen el margen.
+  //   &agente=DAVIDMAG  limita a los clientes de ese comercial (opcional)
+  //   &cliente=B430088  salta directo al detalle de linea de ese cliente
+  //
+  // Existe porque el margen calculado como BASE - Costo Referencia da
+  // valores imposibles en algunos comerciales, mientras que en otros
+  // cuadra al decimal. La causa tiene que estar en filas concretas.
+  if (req.query.audit === "1") {
+    const out = { ok: true };
+    try {
+      const { token } = await getToken(req);
+      const T = M.ventas;
+
+      // A) Los 15 clientes con el coste mas desproporcionado respecto a venta
+      out.peoresClientes = await pbiQuery(token, `
+EVALUATE
+  TOPN(
+    15,
+    FILTER(
+      SUMMARIZECOLUMNS(
+        ${M.vCliente},
+        ${M.cNombre},
+        "Venta",  SUM(${M.vBase}),
+        "Coste",  SUM(${M.vCoste}),
+        "Unidades", SUM(${T}[UNI]),
+        "Metros",   SUM(${T}[METROS]),
+        "Lineas",   COUNTROWS(${T})
+      ),
+      [Coste] > [Venta] * 1.5
+    ),
+    [Coste] - [Venta], DESC
+  )`);
+
+      // B) Detalle de linea del cliente indicado, o del peor de la lista
+      const cli = req.query.cliente ||
+        (out.peoresClientes?.[0] ? pick(out.peoresClientes[0], "CLIENTE") : null);
+      out.clienteAnalizado = cli;
+
+      if (cli) {
+        out.lineas = await pbiQuery(token, `
+EVALUATE
+  TOPN(
+    20,
+    SELECTCOLUMNS(
+      FILTER(${T}, ${M.vCliente} = "${String(cli).replace(/"/g, "")}"),
+      "Articulo", ${T}[CODIGO],
+      "Fecha",    ${T}[FECHA],
+      "Uni",      ${T}[UNI],
+      "Metros",   ${T}[METROS],
+      "Precio",   ${T}[PRECIO],
+      "Base",     ${M.vBase},
+      "CosteUnit",${T}[COSTOREFERENCIA],
+      "CosteLinea", ${M.vCoste},
+      "MargenPctFila", ${T}[Margen Referencia por fila]
+    ),
+    [CosteLinea] - [Base], DESC
+  )`);
+      }
+
+      // C) Comparacion global: lo que suma el modelo frente a lo que sumo yo
+      out.totales = await pbiQuery(token, `
+EVALUATE
+  ROW(
+    "VentaTotal",  SUM(${M.vBase}),
+    "CosteTotal",  SUM(${M.vCoste}),
+    "MargenCalc",  SUM(${M.vBase}) - SUM(${M.vCoste}),
+    "MargenPctCalc", DIVIDE(SUM(${M.vBase}) - SUM(${M.vCoste}), SUM(${M.vBase})) * 100,
+    "MargenPctFilaProm", AVERAGE(${T}[Margen Referencia por fila]),
+    "Lineas", COUNTROWS(${T})
+  )`);
+
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
   const dry = req.query.dry === "1"; // ?dry=1 → consulta pero NO escribe
   const t0 = Date.now();
   const log = { dry, ventas: 0, pendiente: 0, stock: 0, errores: [] };
