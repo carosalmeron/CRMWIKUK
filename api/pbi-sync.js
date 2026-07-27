@@ -175,10 +175,32 @@ async function pbiQuery(token, query) {
       serializerSettings: { includeNulls: false },
     }),
   });
-  const j = await r.json();
+
+  const bruto = await r.text();
+  let j = null;
+  try { j = JSON.parse(bruto); } catch { /* respuesta no JSON */ }
+
   if (!r.ok) {
-    const det = j.error?.["pbi.error"]?.details?.[0]?.detail?.value || j.error?.message;
-    throw new Error(`Power BI: ${det || r.status}`);
+    // Power BI devuelve el motivo real en cabeceras propias, no en el cuerpo.
+    // Sin esto solo se ve "401" y es imposible saber si falta un permiso,
+    // si el tenant lo bloquea o si el modelo tiene RLS.
+    const pistas = {
+      status: r.status,
+      errorInfo: r.headers.get("x-powerbi-error-info"),
+      wwwAuth: r.headers.get("www-authenticate"),
+      requestId: r.headers.get("requestid") || r.headers.get("x-ms-request-id"),
+      codigo: j?.error?.code || j?.error?.["pbi.error"]?.code,
+      detalle: j?.error?.["pbi.error"]?.details?.[0]?.detail?.value || j?.error?.message,
+      cuerpo: j ? undefined : bruto.slice(0, 300),
+    };
+    const e = new Error(
+      Object.entries(pistas)
+        .filter(([, v]) => v !== null && v !== undefined)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(" | ")
+    );
+    e.pistas = pistas;
+    throw e;
   }
   return j.results[0].tables[0].rows || [];
 }
