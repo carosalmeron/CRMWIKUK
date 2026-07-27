@@ -47,6 +47,16 @@ const M = {
 
 const DIAS_HISTORICO = 365;
 
+// ─────────────── Lectura defensiva de variables de entorno ───────────────
+// Al copiar IDs de un email o un chat es facil arrastrar tabuladores,
+// espacios o saltos de linea invisibles. Azure y Power BI los rechazan
+// sin explicar por que, asi que se limpian aqui de una vez.
+function env(nombre) {
+  const v = process.env[nombre];
+  return v === undefined ? undefined : String(v).trim();
+}
+const ENV = new Proxy({}, { get: (_, k) => env(k) });
+
 // ─────────────── Consultas DAX ───────────────
 function dax() {
   return {
@@ -111,17 +121,17 @@ function oidcToken(req) {
 }
 
 async function getToken(req) {
-  const url = `https://login.microsoftonline.com/${process.env.PBI_TENANT_ID}/oauth2/v2.0/token`;
+  const url = `https://login.microsoftonline.com/${ENV.PBI_TENANT_ID}/oauth2/v2.0/token`;
   const base = {
     grant_type: "client_credentials",
-    client_id: process.env.PBI_CLIENT_ID,
+    client_id: ENV.PBI_CLIENT_ID,
     scope: "https://analysis.windows.net/powerbi/api/.default",
   };
 
   let body, modo;
-  if (process.env.PBI_CLIENT_SECRET) {
+  if (ENV.PBI_CLIENT_SECRET) {
     modo = "secreto";
-    body = new URLSearchParams({ ...base, client_secret: process.env.PBI_CLIENT_SECRET });
+    body = new URLSearchParams({ ...base, client_secret: ENV.PBI_CLIENT_SECRET });
   } else {
     const assertion = oidcToken(req);
     if (!assertion) {
@@ -155,8 +165,8 @@ async function getToken(req) {
 // Por eso siempre se agrega en DAX, nunca se piden filas crudas.
 async function pbiQuery(token, query) {
   const url =
-    `https://api.powerbi.com/v1.0/myorg/groups/${process.env.PBI_GROUP_ID}` +
-    `/datasets/${process.env.PBI_DATASET_ID}/executeQueries`;
+    `https://api.powerbi.com/v1.0/myorg/groups/${ENV.PBI_GROUP_ID}` +
+    `/datasets/${ENV.PBI_DATASET_ID}/executeQueries`;
   const r = await fetch(url, {
     method: "POST",
     headers: {
@@ -197,10 +207,10 @@ function toFields(obj) {
 }
 
 async function fbCommit(coleccion, docs) {
-  const base = `projects/${process.env.FB_PROJECT_ID}/databases/(default)/documents`;
+  const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
   // El CRM accede a Firestore sin clave (reglas abiertas). Si algún día se
   // cierran las reglas, basta con definir FB_API_KEY en Vercel.
-  const q = process.env.FB_API_KEY ? `?key=${process.env.FB_API_KEY}` : "";
+  const q = ENV.FB_API_KEY ? `?key=${ENV.FB_API_KEY}` : "";
   const url = `https://firestore.googleapis.com/v1/${base}:commit${q}`;
   let escritos = 0;
 
@@ -233,7 +243,7 @@ export default async function handler(req, res) {
   // Solo el cron de Vercel (o tú con el secreto) puede lanzarlo
   const auth = req.headers.authorization || "";
   const secreto = req.query.secret || auth.replace("Bearer ", "");
-  if (process.env.CRON_SECRET && secreto !== process.env.CRON_SECRET) {
+  if (ENV.CRON_SECRET && secreto !== ENV.CRON_SECRET) {
     return res.status(401).json({ error: "no autorizado" });
   }
 
@@ -252,11 +262,11 @@ export default async function handler(req, res) {
         modoAuth: modo,
         workspacesVisibles: ws.length,
         workspaces: ws,
-        buscado: process.env.PBI_GROUP_ID,
-        encontrado: ws.some((g) => g.id === process.env.PBI_GROUP_ID),
+        buscado: ENV.PBI_GROUP_ID,
+        encontrado: ws.some((g) => g.id === ENV.PBI_GROUP_ID),
         diagnostico: ws.length === 0
           ? "El service principal no ve NINGUN workspace. Falta el ajuste de tenant o el grupo de seguridad."
-          : ws.some((g) => g.id === process.env.PBI_GROUP_ID)
+          : ws.some((g) => g.id === ENV.PBI_GROUP_ID)
             ? "Acceso al workspace OK. Si executeQueries falla, falta permiso Build o el ajuste de Execute Queries."
             : "El SP ve workspaces pero NO el de UNITED. Falta anadirlo a ese workspace.",
       });
