@@ -1087,7 +1087,29 @@ EVALUATE
       const modoFusion = String(req.query.fusion || "si").toLowerCase();
       log.modoFusion = modoFusion;
 
+      // Recodificacion de 2026: los codigos U43+4digitos pasaron a
+      // U43+0+esos 4 digitos. Verificado cruzando nombres:
+      //   U433509 -> U4303509  (WIKUK EASY R)
+      //   U434210 -> U4304210  (LORIENTE PIQUERAS)
+      //   U431880 -> U4301880  (PRODUCTOS CARNICOS DE MANACOR)
+      // El historico de ventas conserva el codigo viejo, asi que sin
+      // esta equivalencia se pierde el 68% de la venta de 2025.
+      const canonico = (cod) => {
+        const c = String(cod || "").trim().toUpperCase();
+        const m = /^U43(\d{4})$/.exec(c);
+        return m ? "U430" + m[1] : c;
+      };
+      let recodificados = 0;
+      for (const d of docs) {
+        const can = canonico(d.cliente);
+        if (can !== d.cliente) { d.canonico = can; recodificados++; }
+      }
+      log.codigosRecodificados = recodificados;
+
       const claveGrupo = (d) => {
+        // La equivalencia de codigo manda sobre cualquier otra regla
+        if (d.canonico) return "CAN:" + d.canonico;
+        if (docs.some((x) => x.canonico === d.cliente)) return "CAN:" + d.cliente;
         if (modoFusion === "off") return null;
         if (d.codconta) return "CC:" + d.codconta;
         if (modoFusion === "no") return null;
@@ -1110,8 +1132,11 @@ EVALUATE
         if (grupo.length < 2) continue;
         // Principal = el que mas ha vendido este ano; si ninguno vende,
         // el que tenga mas historico.
-        const principal = grupo.slice().sort((a, b) =>
-          (b.ventasAct - a.ventasAct) || (b.ventasAntFull - a.ventasAntFull))[0];
+        // En grupos por equivalencia de codigo, el principal es siempre
+        // el codigo NUEVO (el que sigue existiendo en el maestro).
+        const principal = grupo.find((d) => !d.canonico && !d.huerfano)
+          || grupo.slice().sort((a, b) =>
+               (b.ventasAct - a.ventasAct) || (b.ventasAntFull - a.ventasAntFull))[0];
 
         const suma = (k) => grupo.reduce((t, d) => t + (d[k] || 0), 0);
         principal.ventasAntFull = num(suma("ventasAntFull"));
