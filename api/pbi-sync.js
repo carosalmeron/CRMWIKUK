@@ -54,6 +54,7 @@ const M = {
   cPoblacion: "'00 Clientes Global'[POBLACION]",
   cProvincia: "'00 Clientes Global'[PROVINCIA]",
   cBloqueado: "'00 Clientes Global'[BLQ]",
+  cCodconta:  "'00 Clientes Global'[CODCONTA]",
 };
 
 const DIAS_HISTORICO = 365;
@@ -128,6 +129,7 @@ EVALUATE
     ${M.cPoblacion},
     ${M.cProvincia},
     ${M.cBloqueado},
+    ${M.cCodconta},
     ${filtroIncremental}
 
     // ── Ano anterior COMPLETO: dato de referencia que se guarda ──
@@ -413,7 +415,13 @@ async function fbLeerClientes() {
       const val = (k) => f[k]?.stringValue ?? f[k]?.integerValue ?? null;
       const codigo = val("CODIGO") || val("codigo") || d.name.split("/").pop();
       const agente = val("GRUPOAGENTE") || val("grupoAgente") || val("agente");
-      if (codigo && agente) mapa.set(String(codigo).trim(), String(agente).trim());
+      const conta = val("CODCONTA") || val("codconta");
+      if (!agente) continue;
+      if (codigo) mapa.set(String(codigo).trim(), String(agente).trim());
+      // Segundo indice por codigo contable: en 2026 se recodificaron
+      // clientes (serie U4... -> C0...) y el codigo nuevo no esta en el
+      // CRM, pero el contable no cambia.
+      if (conta) mapa.set("CC:" + String(conta).trim(), String(agente).trim());
     }
     pageToken = j.nextPageToken || null;
     vueltas++;
@@ -833,6 +841,7 @@ EVALUATE
           poblacion: pick(r, "POBLACION"),
           provincia: pick(r, "PROVINCIA"),
           bloqueado: pick(r, "BLQ") === "SI",
+          codconta: String(pick(r, "CODCONTA") || "").trim() || null,
           vendedor: pick(r, "VENDEDOR"),
           empresa: pick(r, "EMPRESA"),
 
@@ -870,6 +879,54 @@ EVALUATE
         };
       });
 
+      // ── Consolidar clientes recodificados ──
+      // En 2026 se cambio la codificacion (U4... -> C0...). El codigo
+      // viejo conserva el historico y el nuevo solo tiene ventas de este
+      // ano, asi que la comparativa interanual sale rota en ambos.
+      // Se agrupan por CODCONTA y el codigo con mas venta actual pasa a
+      // ser el principal, heredando el historico del grupo.
+      const porConta = new Map();
+      for (const d of docs) {
+        if (!d.codconta) continue;
+        if (!porConta.has(d.codconta)) porConta.set(d.codconta, []);
+        porConta.get(d.codconta).push(d);
+      }
+
+      let fusionados = 0;
+      for (const [conta, grupo] of porConta) {
+        if (grupo.length < 2) continue;
+        // Principal = el que mas ha vendido este ano; si ninguno vende,
+        // el que tenga mas historico.
+        const principal = grupo.slice().sort((a, b) =>
+          (b.ventasAct - a.ventasAct) || (b.ventasAntFull - a.ventasAntFull))[0];
+
+        const suma = (k) => grupo.reduce((t, d) => t + (d[k] || 0), 0);
+        principal.ventasAntFull = num(suma("ventasAntFull"));
+        principal.margenAntFull = num(suma("margenAntFull"));
+        principal.ventasAntYTD  = num(suma("ventasAntYTD"));
+        principal.margenAntYTD  = num(suma("margenAntYTD"));
+        principal.ventasAct     = num(suma("ventasAct"));
+        principal.margenAct     = num(suma("margenAct"));
+        principal.ventasMes     = num(suma("ventasMes"));
+        principal.variacionPct  = principal.ventasAntYTD
+          ? num((100 * (principal.ventasAct - principal.ventasAntYTD)) / principal.ventasAntYTD)
+          : null;
+        principal.codigosFusionados = grupo.map((d) => d.cliente).join(", ");
+
+        for (const d of grupo) {
+          if (d === principal) continue;
+          d.fusionadoEn = principal.cliente;   // el CRM puede redirigir aqui
+          d.ventasAntFull = 0; d.margenAntFull = 0;
+          d.ventasAntYTD = 0;  d.margenAntYTD = 0;
+          d.ventasAct = 0;     d.margenAct = 0;
+          d.ventasMes = 0;     d.variacionPct = null;
+          fusionados++;
+        }
+      }
+      log.codigosFusionados = fusionados;
+      log.gruposConta = [...porConta.values()].filter((g) => g.length > 1).length;
+      log.sinCodconta = docs.filter((d) => !d.codconta).length;
+
       log.intercompanyMarcados = docs.filter((d) => d.intercompany).length;
 
       // ── Resumen por comercial, para el dashboard ──
@@ -899,7 +956,8 @@ EVALUATE
 
         for (const d of universo) {
           if (d.intercompany) continue;            // fuera traspasos internos
-          const agente = asignacion.get(String(d.cliente).trim());
+          const agente = asignacion.get(String(d.cliente).trim())
+            || (d.codconta ? asignacion.get("CC:" + d.codconta) : null);
           if (!agente) { sinAsignar++; ventaSinAsignar += d.ventasAct; continue; }
           if (!porAgente.has(agente)) {
             porAgente.set(agente, {
