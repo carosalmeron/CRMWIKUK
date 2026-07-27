@@ -867,9 +867,12 @@ EVALUATE
           nombre: c.nombre,
           poblacion: c.poblacion,
           v2026: eur(c.ventasAct),
-          v2025: eur(c.ventasAntFull),
+          // Las dos cifras de 2025: la comparable y la del ano cerrado.
+          // La variacion se calcula SIEMPRE contra el mismo periodo.
+          v2025mismoPeriodo: eur(c.ventasAntYTD),
+          v2025completo: eur(c.ventasAntFull),
           variacion: c.variacionPct !== null && c.variacionPct !== undefined
-            ? `${c.variacionPct} %` : "—",
+            ? `${c.variacionPct} %` : "sin venta en ese periodo",
           margen: c.margenPctAct !== null && c.margenPctAct !== undefined
             ? `${c.margenPctAct} %` : "—",
           ultimaVenta: (c.ultimaVenta || "").slice(0, 10),
