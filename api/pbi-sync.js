@@ -237,6 +237,34 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: "no autorizado" });
   }
 
+  // ?diag=1 → lista lo que el service principal REALMENTE ve.
+  // Sirve para demostrar a sistemas si el acceso al workspace está dado.
+  if (req.query.diag === "1") {
+    try {
+      const { token, modo } = await getToken(req);
+      const r = await fetch("https://api.powerbi.com/v1.0/myorg/groups", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const j = await r.json();
+      const ws = (j.value || []).map((g) => ({ id: g.id, nombre: g.name }));
+      return res.status(200).json({
+        ok: true,
+        modoAuth: modo,
+        workspacesVisibles: ws.length,
+        workspaces: ws,
+        buscado: process.env.PBI_GROUP_ID,
+        encontrado: ws.some((g) => g.id === process.env.PBI_GROUP_ID),
+        diagnostico: ws.length === 0
+          ? "El service principal no ve NINGUN workspace. Falta el ajuste de tenant o el grupo de seguridad."
+          : ws.some((g) => g.id === process.env.PBI_GROUP_ID)
+            ? "Acceso al workspace OK. Si executeQueries falla, falta permiso Build o el ajuste de Execute Queries."
+            : "El SP ve workspaces pero NO el de UNITED. Falta anadirlo a ese workspace.",
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: e.message });
+    }
+  }
+
   const dry = req.query.dry === "1"; // ?dry=1 → consulta pero NO escribe
   const t0 = Date.now();
   const log = { dry, ventas: 0, pendiente: 0, stock: 0, errores: [] };
