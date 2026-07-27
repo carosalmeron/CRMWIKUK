@@ -63,6 +63,23 @@ const DIAS_HISTORICO = 365;
 // solo devolveria un recuento de registros (13.666 filas sin valor).
 // Reactivar cuando sistemas indique donde vive el stock disponible.
 const ACTIVOS = ["ventas"];
+
+// Ventas intercompania: traspasos entre empresas del propio grupo, no
+// clientes reales. En los informes de Power BI ya se excluyen con el
+// filtro "GRUPONIVEL1 es No Intercompany". Aqui no se borran (el dato
+// es correcto y puede interesar a direccion), se marcan con el campo
+// "intercompany" para que el CRM decida si los muestra.
+// Ampliable sin tocar codigo con la variable INTERCOMPANY en Vercel,
+// separando patrones por comas.
+const PATRONES_INTERCOMPANY = (env("INTERCOMPANY") || "WIKUK,INTERKEY,UNITED CARO,DISCOB,JBOSCH")
+  .split(",")
+  .map((x) => x.trim().toUpperCase())
+  .filter(Boolean);
+
+const esIntercompany = (nombre) => {
+  const n = String(nombre || "").toUpperCase();
+  return PATRONES_INTERCOMPANY.some((pat) => n.includes(pat));
+};
 const activo = (b) => ACTIVOS.includes(b) || false;
 
 // ─────────────── Lectura defensiva de variables de entorno ───────────────
@@ -85,8 +102,10 @@ function dax() {
     ventas: `
 DEFINE
   VAR _hoy = TODAY()
-  VAR _desde = _hoy - ${DIAS_HISTORICO}
+  VAR _12m = _hoy - ${DIAS_HISTORICO}
   VAR _iniMes = DATE(YEAR(_hoy), MONTH(_hoy), 1)
+  VAR _iniAno = DATE(YEAR(_hoy), 1, 1)
+  VAR _iniSem = _hoy - WEEKDAY(_hoy, 2) + 1
 EVALUATE
   SUMMARIZECOLUMNS(
     ${M.vCliente},
@@ -96,10 +115,14 @@ EVALUATE
     ${M.cPoblacion},
     ${M.cProvincia},
     ${M.cBloqueado},
-    "VentasAno", CALCULATE(SUM(${M.vBase}),  ${M.vFecha} >= _desde  && ${M.vFecha} <= _hoy),
-    "CosteAno",  CALCULATE(SUM(${M.vCoste}), ${M.vFecha} >= _desde  && ${M.vFecha} <= _hoy),
+    "VentasAno", CALCULATE(SUM(${M.vBase}),  ${M.vFecha} >= _12m    && ${M.vFecha} <= _hoy),
+    "CosteAno",  CALCULATE(SUM(${M.vCoste}), ${M.vFecha} >= _12m    && ${M.vFecha} <= _hoy),
     "VentasMes", CALCULATE(SUM(${M.vBase}),  ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
     "CosteMes",  CALCULATE(SUM(${M.vCoste}), ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
+    "VentasSem", CALCULATE(SUM(${M.vBase}),  ${M.vFecha} >= _iniSem && ${M.vFecha} <= _hoy),
+    "CosteSem",  CALCULATE(SUM(${M.vCoste}), ${M.vFecha} >= _iniSem && ${M.vFecha} <= _hoy),
+    "VentasYTD", CALCULATE(SUM(${M.vBase}),  ${M.vFecha} >= _iniAno && ${M.vFecha} <= _hoy),
+    "CosteYTD",  CALCULATE(SUM(${M.vCoste}), ${M.vFecha} >= _iniAno && ${M.vFecha} <= _hoy),
     "UltimaVenta", CALCULATE(MAX(${M.vFecha}))
   )
   ORDER BY [VentasAno] DESC`,
@@ -328,6 +351,36 @@ async function fbCommit(coleccion, docs) {
   return escritos;
 }
 
+// Lee la coleccion "clientes" del CRM para saber que comercial tiene
+// asignado cada cliente. Es la unica fuente fiable: el codigo de vendedor
+// que trae Power BI ("1201", "6668") no se corresponde con los agentes
+// del CRM (AZARCO, CARLOSG...).
+async function fbLeerClientes() {
+  const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+  const key = ENV.FB_API_KEY ? `&key=${ENV.FB_API_KEY}` : "";
+  const mapa = new Map();
+  let pageToken = null, vueltas = 0;
+
+  do {
+    const url = `https://firestore.googleapis.com/v1/${base}/clientes` +
+                `?pageSize=300${pageToken ? `&pageToken=${pageToken}` : ""}${key}`;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`leer clientes: HTTP ${r.status}`);
+    const j = await r.json();
+    for (const d of j.documents || []) {
+      const f = d.fields || {};
+      const val = (k) => f[k]?.stringValue ?? f[k]?.integerValue ?? null;
+      const codigo = val("CODIGO") || val("codigo") || d.name.split("/").pop();
+      const agente = val("GRUPOAGENTE") || val("grupoAgente") || val("agente");
+      if (codigo && agente) mapa.set(String(codigo).trim(), String(agente).trim());
+    }
+    pageToken = j.nextPageToken || null;
+    vueltas++;
+  } while (pageToken && vueltas < 60);
+
+  return mapa;
+}
+
 // Limpia el código para usarlo como id de documento
 const docId = (v) => String(v || "").trim().replace(/[/#?\[\]*]/g, "_") || "SIN_CODIGO";
 
@@ -519,13 +572,18 @@ export default async function handler(req, res) {
         const vMes = num(pick(r, "VentasMes"));
         const cAno = num(pick(r, "CosteAno"));
         const cMes = num(pick(r, "CosteMes"));
+        const vSem = num(pick(r, "VentasSem"));
+        const vYTD = num(pick(r, "VentasYTD"));
         const mAno = num(vAno - cAno);
         const mMes = num(vMes - cMes);
+        const mSem = num(vSem - num(pick(r, "CosteSem")));
+        const mYTD = num(vYTD - num(pick(r, "CosteYTD")));
         const cliente = pick(r, "CLIENTE");
         return {
           _id: docId(cliente),
           cliente,
           nombre: pick(r, "NOMBRE") || cliente,
+          intercompany: esIntercompany(pick(r, "NOMBRE")),
           poblacion: pick(r, "POBLACION"),
           provincia: pick(r, "PROVINCIA"),
           bloqueado: pick(r, "BLQ") === "SI",
@@ -539,10 +597,92 @@ export default async function handler(req, res) {
           costeMes: cMes,
           margenMes: mMes,
           margenPctMes: vMes ? num((100 * mMes) / vMes) : 0,
+          ventasSem: vSem,
+          margenSem: mSem,
+          margenPctSem: vSem ? num((100 * mSem) / vSem) : 0,
+          ventasYTD: vYTD,
+          margenYTD: mYTD,
+          margenPctYTD: vYTD ? num((100 * mYTD) / vYTD) : 0,
           ultimaVenta: pick(r, "UltimaVenta"),
           actualizado: new Date().toISOString(),
         };
       });
+      log.intercompanyMarcados = docs.filter((d) => d.intercompany).length;
+
+      // ── Resumen por comercial, para el dashboard ──
+      // Se cruza cada cliente con su grupoAgente segun el CRM y se suman
+      // las cuatro ventanas. Asi el dashboard lee 10 documentos en vez de
+      // los 6.589 de clientes.
+      try {
+        const asignacion = await fbLeerClientes();
+        log.clientesCrmLeidos = asignacion.size;
+
+        const porAgente = new Map();
+        let sinAsignar = 0;
+
+        for (const d of docs) {
+          if (d.intercompany) continue;           // fuera traspasos internos
+          const agente = asignacion.get(String(d.cliente).trim());
+          if (!agente) { sinAsignar++; continue; }
+          if (!porAgente.has(agente)) {
+            porAgente.set(agente, {
+              _id: docId(agente), agente,
+              ventasSem: 0, margenSem: 0,
+              ventasMes: 0, margenMes: 0,
+              ventasYTD: 0, margenYTD: 0,
+              ventasAno: 0, margenAno: 0,
+              clientes: 0, clientesConVentaMes: 0,
+            });
+          }
+          const a = porAgente.get(agente);
+          a.ventasSem += d.ventasSem; a.margenSem += d.margenSem;
+          a.ventasMes += d.ventasMes; a.margenMes += d.margenMes;
+          a.ventasYTD += d.ventasYTD; a.margenYTD += d.margenYTD;
+          a.ventasAno += d.ventasAno; a.margenAno += d.margenAno;
+          a.clientes++;
+          if (d.ventasMes > 0) a.clientesConVentaMes++;
+        }
+
+        const resumen = [...porAgente.values()].map((a) => {
+          const p = (m, v) => (v ? num((100 * m) / v) : 0);
+          return {
+            ...a,
+            ventasSem: num(a.ventasSem), margenSem: num(a.margenSem),
+            ventasMes: num(a.ventasMes), margenMes: num(a.margenMes),
+            ventasYTD: num(a.ventasYTD), margenYTD: num(a.margenYTD),
+            ventasAno: num(a.ventasAno), margenAno: num(a.margenAno),
+            margenPctSem: p(a.margenSem, a.ventasSem),
+            margenPctMes: p(a.margenMes, a.ventasMes),
+            margenPctYTD: p(a.margenYTD, a.ventasYTD),
+            margenPctAno: p(a.margenAno, a.ventasAno),
+          };
+        });
+
+        // Fila total, para los KPI de cabecera del dashboard
+        const tot = resumen.reduce((t, a) => {
+          for (const k of ["ventasSem","margenSem","ventasMes","margenMes",
+                           "ventasYTD","margenYTD","ventasAno","margenAno",
+                           "clientes","clientesConVentaMes"]) t[k] += a[k];
+          return t;
+        }, { _id: "_TOTAL", agente: "_TOTAL", ventasSem:0, margenSem:0,
+             ventasMes:0, margenMes:0, ventasYTD:0, margenYTD:0,
+             ventasAno:0, margenAno:0, clientes:0, clientesConVentaMes:0 });
+        const p = (m, v) => (v ? num((100 * m) / v) : 0);
+        tot.margenPctSem = p(tot.margenSem, tot.ventasSem);
+        tot.margenPctMes = p(tot.margenMes, tot.ventasMes);
+        tot.margenPctYTD = p(tot.margenYTD, tot.ventasYTD);
+        tot.margenPctAno = p(tot.margenAno, tot.ventasAno);
+        resumen.push(tot);
+
+        log.agentes = resumen.length - 1;
+        log.clientesSinAgente = sinAsignar;
+        log.resumenAgentes = dry
+          ? resumen
+          : await fbCommit("pbi_resumen_agente", resumen);
+      } catch (e) {
+        log.errores.push(`resumen: ${e.message}`);
+      }
+
       log.ventas = dry ? docs.length : await fbCommit("pbi_ventas_cliente", docs);
       if (dry) log.muestraVentas = docs.slice(0, 3);
     } catch (e) {
