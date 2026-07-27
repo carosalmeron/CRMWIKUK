@@ -253,7 +253,7 @@ async function getToken(req) {
 // ─────────────── Power BI: executeQueries ───────────────
 // Límites de la API: 100.000 filas y 15 MB por consulta.
 // Por eso siempre se agrega en DAX, nunca se piden filas crudas.
-async function pbiQuery(token, query) {
+async function pbiQuery(token, query, incluirNulos = false) {
   const url =
     `https://api.powerbi.com/v1.0/myorg/groups/${ENV.PBI_GROUP_ID}` +
     `/datasets/${ENV.PBI_DATASET_ID}/executeQueries`;
@@ -265,7 +265,10 @@ async function pbiQuery(token, query) {
     },
     body: JSON.stringify({
       queries: [{ query }],
-      serializerSettings: { includeNulls: false },
+      // Con includeNulls a false, las columnas vacias en una fila
+      // desaparecen del JSON y parece que no existen en el modelo.
+      // Para inspeccionar esquema hay que pedirlas todas.
+      serializerSettings: { includeNulls: incluirNulos },
     }),
   });
 
@@ -525,7 +528,7 @@ export default async function handler(req, res) {
       };
       for (const [k, tabla] of Object.entries(tablas)) {
         try {
-          const filas = await pbiQuery(token, `EVALUATE TOPN(1, ${tabla})`);
+          const filas = await pbiQuery(token, `EVALUATE TOPN(1, ${tabla})`, true);
           const fila = filas[0] || {};
           out[k] = {
             tabla,
@@ -570,7 +573,6 @@ EVALUATE
         "Venta",  SUM(${M.vBase}),
         "Coste",  SUM(${M.vCoste}),
         "Unidades", SUM(${T}[UNI]),
-        "Metros",   SUM(${T}[METROS]),
         "Lineas",   COUNTROWS(${T})
       ),
       [Coste] > [Venta] * 1.5
@@ -593,7 +595,7 @@ EVALUATE
       "Articulo", ${T}[CODIGO],
       "Fecha",    ${T}[FECHA],
       "Uni",      ${T}[UNI],
-      "Metros",   ${T}[METROS],
+      "MetrosTexto", ${T}[METROS],
       "Precio",   ${T}[PRECIO],
       "Base",     ${M.vBase},
       "CosteUnit",${T}[COSTOREFERENCIA],
@@ -601,7 +603,7 @@ EVALUATE
       "MargenPctFila", ${T}[Margen Referencia por fila]
     ),
     [CosteLinea] - [Base], DESC
-  )`);
+  )`, true);
       }
 
       // C) Comparacion global: lo que suma el modelo frente a lo que sumo yo
