@@ -120,15 +120,34 @@ function oidcToken(req) {
 async function getToken(req) {
   const url = `https://login.microsoftonline.com/${ENV.PBI_TENANT_ID}/oauth2/v2.0/token`;
   const base = {
-    grant_type: "client_credentials",
     client_id: ENV.PBI_CLIENT_ID,
     scope: "https://analysis.windows.net/powerbi/api/.default",
   };
 
   let body, modo;
-  if (ENV.PBI_CLIENT_SECRET) {
+  if (ENV.PBI_USER && ENV.PBI_PASS) {
+    // MODO USUARIO (ROPC). Se autentica como persona, no como aplicacion.
+    // Necesario porque los service principals no pueden consultar modelos
+    // con RLS. Al usuario, si es Miembro/Admin del workspace, el RLS no
+    // se le aplica y ve el total.
+    //
+    // AVISO: flujo deprecado por Microsoft. No funciona si la cuenta
+    // tiene MFA, acceso condicional, ADFS o inicio sin contrasena.
+    modo = "usuario";
+    body = new URLSearchParams({
+      ...base,
+      grant_type: "password",
+      username: ENV.PBI_USER,
+      password: ENV.PBI_PASS,
+      ...(ENV.PBI_CLIENT_SECRET ? { client_secret: ENV.PBI_CLIENT_SECRET } : {}),
+    });
+  } else if (ENV.PBI_CLIENT_SECRET) {
     modo = "secreto";
-    body = new URLSearchParams({ ...base, client_secret: ENV.PBI_CLIENT_SECRET });
+    body = new URLSearchParams({
+      ...base,
+      grant_type: "client_credentials",
+      client_secret: ENV.PBI_CLIENT_SECRET,
+    });
   } else {
     const assertion = oidcToken(req);
     if (!assertion) {
@@ -140,6 +159,7 @@ async function getToken(req) {
     modo = "oidc";
     body = new URLSearchParams({
       ...base,
+      grant_type: "client_credentials",
       client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
       client_assertion: assertion,
     });
@@ -191,6 +211,10 @@ async function pbiQuery(token, query) {
       requestId: r.headers.get("requestid") || r.headers.get("x-ms-request-id"),
       codigo: j?.error?.code || j?.error?.["pbi.error"]?.code,
       detalle: j?.error?.["pbi.error"]?.details?.[0]?.detail?.value || j?.error?.message,
+      // El motivo real (nombre de columna mal, medida inexistente...) suele
+      // venir mas abajo, en un detalle anidado que es facil pasar por alto.
+      detalleDax: JSON.stringify(j?.error?.["pbi.error"]?.details || j?.error?.details || "")
+        .slice(0, 600) || undefined,
       cuerpo: j ? undefined : bruto.slice(0, 300),
     };
     const e = new Error(
@@ -344,16 +368,71 @@ export default async function handler(req, res) {
     try {
       const { token, modo } = await getToken(req);
       out.modoAuth = modo;
-      const consultas = {
-        medidas: 'EVALUATE SELECTCOLUMNS(INFO.MEASURES(), "medida", [Name], "expresion", [Expression])',
-        tablas:  'EVALUATE SELECTCOLUMNS(INFO.TABLES(), "tabla", [Name])',
-        columnas:'EVALUATE SELECTCOLUMNS(INFO.COLUMNS(), "columna", [ExplicitName], "tablaId", [TableID])',
+      // Varias formas de preguntar lo mismo. Los modelos antiguos no
+      // tienen INFO.*, y los de Fabric a veces solo INFO.VIEW.*.
+      // Se prueban en orden y se queda la primera que responda.
+      const variantes = {
+        medidas: [
+          "EVALUATE INFO.VIEW.MEASURES()",
+          "EVALUATE INFO.MEASURES()",
+          'EVALUATE SELECTCOLUMNS(INFO.MEASURES(), "medida", [Name])',
+        ],
+        tablas: [
+          "EVALUATE INFO.VIEW.TABLES()",
+          "EVALUATE INFO.TABLES()",
+        ],
+        columnas: [
+          "EVALUATE INFO.VIEW.COLUMNS()",
+          "EVALUATE INFO.COLUMNS()",
+        ],
       };
-      for (const [k, q] of Object.entries(consultas)) {
+      for (const [k, lista] of Object.entries(variantes)) {
+        const fallos = [];
+        for (const q of lista) {
+          try {
+            const filas = await pbiQuery(token, q);
+            out[k] = { consultaQueFunciono: q, filas: filas.slice(0, 400) };
+            break;
+          } catch (e) {
+            fallos.push(`${q.slice(0, 40)} -> ${e.message.slice(0, 120)}`);
+          }
+        }
+        if (!out[k]) out[k] = { error: "ninguna variante funciono", intentos: fallos };
+      }
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: e.message });
+    }
+    return res.status(200).json(out);
+  }
+
+  // ?peek=1 → trae UNA fila de cada tabla.
+  // Truco que no depende de las funciones INFO.*: la respuesta incluye
+  // todas las columnas como claves, y un valor de ejemplo de cada una,
+  // asi que revela nombres exactos Y tipos de dato de golpe.
+  if (req.query.peek === "1") {
+    const out = { ok: true };
+    try {
+      const { token, modo } = await getToken(req);
+      out.modoAuth = modo;
+      const tablas = {
+        ventas:    M.ventas,
+        pendiente: M.pendiente,
+        stock:     M.stock,
+      };
+      for (const [k, tabla] of Object.entries(tablas)) {
         try {
-          out[k] = await pbiQuery(token, q);
+          const filas = await pbiQuery(token, `EVALUATE TOPN(1, ${tabla})`);
+          const fila = filas[0] || {};
+          out[k] = {
+            tabla,
+            columnas: Object.keys(fila).map((c) => ({
+              nombre: c,
+              ejemplo: fila[c],
+              tipo: typeof fila[c],
+            })),
+          };
         } catch (e) {
-          out[k] = `ERROR: ${e.message}`;
+          out[k] = { tabla, error: e.message.slice(0, 250) };
         }
       }
     } catch (e) {
