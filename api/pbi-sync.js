@@ -125,11 +125,6 @@ EVALUATE
     ${M.vCliente},
     ${M.vVendedor},
     ${M.vEmpresa},
-    ${M.cNombre},
-    ${M.cPoblacion},
-    ${M.cProvincia},
-    ${M.cBloqueado},
-    ${M.cCodconta},
     ${filtroIncremental}
 
     // ── Ano anterior COMPLETO: dato de referencia que se guarda ──
@@ -166,6 +161,21 @@ EVALUATE
     "UltimaVenta", CALCULATE(MAX(${M.vFecha}))
   )
   ORDER BY [VentaAct] DESC`,
+
+    // Dimension de clientes en consulta SEPARADA.
+    // Antes iba dentro del SUMMARIZECOLUMNS de ventas, pero la tabla
+    // tiene codigos repetidos (una fila por sociedad) y eso multiplicaba
+    // las filas de resultado. Aqui se trae una vez y se cruza en JS.
+    clientes: `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${M.clientes}[CODIGO],
+    ${M.cNombre},
+    ${M.cPoblacion},
+    ${M.cProvincia},
+    ${M.cBloqueado},
+    ${M.cCodconta}
+  )`,
 
     // Variante de respaldo: sin datos de la tabla de clientes.
     ventasSimple: `
@@ -623,6 +633,26 @@ export default async function handler(req, res) {
     try {
       const { token, modo } = await getToken(req);
       out.modoAuth = modo;
+      // ?peek=1&tabla=06 Clientes United SAP  → inspecciona cualquier tabla
+      // del modelo, no solo las cuatro habituales.
+      if (req.query.tabla) {
+        const t = `'${String(req.query.tabla).replace(/'/g, "")}'`;
+        try {
+          const filas = await pbiQuery(token, `EVALUATE TOPN(3, ${t})`, true);
+          out.tablaSolicitada = {
+            tabla: t,
+            filas: filas.length,
+            columnas: Object.keys(filas[0] || {}).map((c) => ({
+              nombre: c,
+              ejemplos: filas.map((f) => f[c]),
+            })),
+          };
+        } catch (e) {
+          out.tablaSolicitada = { tabla: t, error: e.message.slice(0, 300) };
+        }
+        return res.status(200).json(out);
+      }
+
       const tablas = {
         ventas:    M.ventas,
         pendiente: M.pendiente,
@@ -688,8 +718,7 @@ EVALUATE
     FILTER(
       SUMMARIZECOLUMNS(
         ${M.vCliente},
-        ${M.cNombre},
-        "Venta",  SUM(${M.vBase}),
+            "Venta",  SUM(${M.vBase}),
         "Coste",  SUM(${M.vCoste}),
         "Unidades", SUM(${T}[UNI]),
         "Lineas",   COUNTROWS(${T})
@@ -953,8 +982,28 @@ EVALUATE
       }
       log.ventasEnriquecido = enriquecido;
 
+      // Ficha de cliente: primera aparicion de cada codigo
+      const fichas = new Map();
+      try {
+        for (const c of await pbiQuery(token, Q.clientes)) {
+          const cod = String(pick(c, "CODIGO") || "").trim();
+          if (!cod || fichas.has(cod)) continue;
+          fichas.set(cod, {
+            nombre: pick(c, "NOMBRE"),
+            poblacion: pick(c, "POBLACION"),
+            provincia: pick(c, "PROVINCIA"),
+            bloqueado: pick(c, "BLQ") === "SI",
+            codconta: String(pick(c, "CODCONTA") || "").trim() || null,
+          });
+        }
+        log.fichasCliente = fichas.size;
+      } catch (e) {
+        log.errores.push(`clientes: ${e.message}`);
+      }
+
       const docs = filas.map((r) => {
         const cliente = pick(r, "CLIENTE");
+        const ficha = fichas.get(String(cliente).trim()) || {};
 
         const vAntFull = num(pick(r, "VentaAntFull"));
         const vAntYTD  = num(pick(r, "VentaAntYTD"));
@@ -975,12 +1024,15 @@ EVALUATE
         return {
           _id: docId(cliente),
           cliente,
-          nombre: pick(r, "NOMBRE") || cliente,
-          intercompany: esIntercompany(pick(r, "NOMBRE")),
-          poblacion: pick(r, "POBLACION"),
-          provincia: pick(r, "PROVINCIA"),
-          bloqueado: pick(r, "BLQ") === "SI",
-          codconta: String(pick(r, "CODCONTA") || "").trim() || null,
+          nombre: ficha.nombre || cliente,
+          // Sin ficha = codigo que ya no existe en el maestro: historico
+          // que quedo huerfano tras la recodificacion de 2026.
+          huerfano: !ficha.nombre,
+          intercompany: esIntercompany(ficha.nombre),
+          poblacion: ficha.poblacion,
+          provincia: ficha.provincia,
+          bloqueado: ficha.bloqueado === true,
+          codconta: ficha.codconta || null,
           vendedor: pick(r, "VENDEDOR"),
           empresa: pick(r, "EMPRESA"),
 
@@ -1028,8 +1080,17 @@ EVALUATE
       // nombre normalizado + poblacion. Los codigos nuevos creados en la
       // migracion de sociedad de marzo de 2026 no llevan CODCONTA, asi
       // que el nombre es la unica via para reconstruir su historico.
+      // ?fusion=no  -> solo agrupa por codigo contable
+      // ?fusion=off -> no agrupa nada, cada codigo es un cliente
+      // Tras corregir los codigos en Power BI (julio 2026) la fusion por
+      // nombre deberia sobrar. Se conserva por si reaparecen duplicados.
+      const modoFusion = String(req.query.fusion || "si").toLowerCase();
+      log.modoFusion = modoFusion;
+
       const claveGrupo = (d) => {
+        if (modoFusion === "off") return null;
         if (d.codconta) return "CC:" + d.codconta;
+        if (modoFusion === "no") return null;
         const n = normNombre(d.nombre);
         if (!n || n === String(d.cliente).toUpperCase()) return null;
         return "NP:" + n + "|" + String(d.poblacion || "").toUpperCase().trim();
@@ -1091,6 +1152,9 @@ EVALUATE
         }));
 
       log.intercompanyMarcados = docs.filter((d) => d.intercompany).length;
+      log.codigosHuerfanos = docs.filter((d) => d.huerfano).length;
+      log.ventaEnHuerfanos = num(docs.filter((d) => d.huerfano)
+        .reduce((t, d) => t + d.ventasAntFull, 0));
 
       // ── Resumen por comercial, para el dashboard ──
       // Se cruza cada cliente con su grupoAgente segun el CRM, porque el
