@@ -473,6 +473,20 @@ async function fbLeerColeccion(coleccion) {
   return docs;
 }
 
+// Normaliza el nombre comercial para poder emparejar el mismo cliente
+// dado de alta con codigos distintos en varias sociedades del grupo.
+// Quita acentos, formas juridicas y puntuacion.
+function normNombre(n) {
+  return String(n || "")
+    .toUpperCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")   // acentos
+    .replace(/[.,'"`&\-\/]/g, " ")
+    .replace(/\b(S\s?L\s?U|S\s?L|S\s?A\s?U|S\s?A|SLNE|SCP|SCCL|CB|SC|LDA|GMBH|SRL|CO\s?KG|E\s?I)\b/g, " ")
+    .replace(/\bE\s+HIJOS\b|\bY\s+HIJOS\b|\bHNOS\b|\bHERMANOS\b/g, " HNOS ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 // Limpia el código para usarlo como id de documento
 const docId = (v) => String(v || "").trim().replace(/[/#?\[\]*]/g, "_") || "SIN_CODIGO";
 
@@ -1010,11 +1024,24 @@ EVALUATE
       // ano, asi que la comparativa interanual sale rota en ambos.
       // Se agrupan por CODCONTA y el codigo con mas venta actual pasa a
       // ser el principal, heredando el historico del grupo.
+      // Clave de agrupacion: codigo contable si existe, y si no,
+      // nombre normalizado + poblacion. Los codigos nuevos creados en la
+      // migracion de sociedad de marzo de 2026 no llevan CODCONTA, asi
+      // que el nombre es la unica via para reconstruir su historico.
+      const claveGrupo = (d) => {
+        if (d.codconta) return "CC:" + d.codconta;
+        const n = normNombre(d.nombre);
+        if (!n || n === String(d.cliente).toUpperCase()) return null;
+        return "NP:" + n + "|" + String(d.poblacion || "").toUpperCase().trim();
+      };
+
       const porConta = new Map();
       for (const d of docs) {
-        if (!d.codconta) continue;
-        if (!porConta.has(d.codconta)) porConta.set(d.codconta, []);
-        porConta.get(d.codconta).push(d);
+        const k = claveGrupo(d);
+        if (!k) continue;
+        d._clave = k;
+        if (!porConta.has(k)) porConta.set(k, []);
+        porConta.get(k).push(d);
       }
 
       let fusionados = 0;
@@ -1049,8 +1076,19 @@ EVALUATE
         }
       }
       log.codigosFusionados = fusionados;
-      log.gruposConta = [...porConta.values()].filter((g) => g.length > 1).length;
+      const multi = [...porConta.entries()].filter(([, g]) => g.length > 1);
+      log.gruposPorContable = multi.filter(([k]) => k.startsWith("CC:")).length;
+      log.gruposPorNombre = multi.filter(([k]) => k.startsWith("NP:")).length;
       log.sinCodconta = docs.filter((d) => !d.codconta).length;
+      // Muestra para revisar a ojo que no se estan fusionando clientes
+      // distintos que se llaman parecido
+      log.ejemplosFusionPorNombre = multi
+        .filter(([k]) => k.startsWith("NP:"))
+        .slice(0, 12)
+        .map(([k, g]) => ({
+          clave: k.slice(3),
+          codigos: g.map((d) => `${d.cliente} (${num(d.ventasAct)}€)`).join(" + "),
+        }));
 
       log.intercompanyMarcados = docs.filter((d) => d.intercompany).length;
 
