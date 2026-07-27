@@ -115,17 +115,56 @@ EVALUATE
     ${M.cPoblacion},
     ${M.cProvincia},
     ${M.cBloqueado},
-    "VentasAno", CALCULATE(SUM(${M.vBase}),  ${M.vFecha} >= _12m    && ${M.vFecha} <= _hoy),
-    "CosteAno",  CALCULATE(SUM(${M.vCoste}), ${M.vFecha} >= _12m    && ${M.vFecha} <= _hoy),
-    "VentasMes", CALCULATE(SUM(${M.vBase}),  ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
-    "CosteMes",  CALCULATE(SUM(${M.vCoste}), ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
-    "VentasSem", CALCULATE(SUM(${M.vBase}),  ${M.vFecha} >= _iniSem && ${M.vFecha} <= _hoy),
-    "CosteSem",  CALCULATE(SUM(${M.vCoste}), ${M.vFecha} >= _iniSem && ${M.vFecha} <= _hoy),
-    "VentasYTD", CALCULATE(SUM(${M.vBase}),  ${M.vFecha} >= _iniAno && ${M.vFecha} <= _hoy),
-    "CosteYTD",  CALCULATE(SUM(${M.vCoste}), ${M.vFecha} >= _iniAno && ${M.vFecha} <= _hoy),
+
+    // ── Ventas: todas las lineas. El importe facturado es fiable. ──
+    "VentaSem", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniSem && ${M.vFecha} <= _hoy),
+    "VentaMes", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
+    "VentaYTD", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniAno && ${M.vFecha} <= _hoy),
+    "Venta12m", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _12m    && ${M.vFecha} <= _hoy),
+
+    // ── Margen: SOLO lineas con coste creible. ──
+    // Se descartan dos errores de maestro de articulos:
+    //   1) coste vacio  -> daria 100% de margen
+    //   2) coste absurdo -> ej. articulo a 0,58 EUR con coste 400,40 EUR,
+    //      que genera margenes de -68.000%
+    // El umbral de 3x el importe deja pasar ventas a perdida reales
+    // y corta solo los errores evidentes.
+    "VentaMesOk", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas},
+        ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy &&
+        NOT ISBLANK(${M.vCoste}) &&
+        ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+    "CosteMesOk", CALCULATE(SUM(${M.vCoste}),
+      FILTER(${M.ventas},
+        ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy &&
+        NOT ISBLANK(${M.vCoste}) &&
+        ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+
+    "VentaYTDOk", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas},
+        ${M.vFecha} >= _iniAno && ${M.vFecha} <= _hoy &&
+        NOT ISBLANK(${M.vCoste}) &&
+        ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+    "CosteYTDOk", CALCULATE(SUM(${M.vCoste}),
+      FILTER(${M.ventas},
+        ${M.vFecha} >= _iniAno && ${M.vFecha} <= _hoy &&
+        NOT ISBLANK(${M.vCoste}) &&
+        ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+
+    "Venta12mOk", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas},
+        ${M.vFecha} >= _12m && ${M.vFecha} <= _hoy &&
+        NOT ISBLANK(${M.vCoste}) &&
+        ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+    "Coste12mOk", CALCULATE(SUM(${M.vCoste}),
+      FILTER(${M.ventas},
+        ${M.vFecha} >= _12m && ${M.vFecha} <= _hoy &&
+        NOT ISBLANK(${M.vCoste}) &&
+        ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+
     "UltimaVenta", CALCULATE(MAX(${M.vFecha}))
   )
-  ORDER BY [VentasAno] DESC`,
+  ORDER BY [Venta12m] DESC`,
 
     // Variante de respaldo: sin datos de la tabla de clientes.
     ventasSimple: `
@@ -606,6 +645,38 @@ EVALUATE
   )`, true);
       }
 
+      // C bis) Articulos con coste de referencia incoherente.
+      // Compara precio medio de venta contra coste medio del maestro.
+      // Un ratio de 3x o mas es un error de maestro, no un producto
+      // vendido a perdida. Esta lista es la que hay que pasar a sistemas.
+      out.articulosDefectuosos = await pbiQuery(token, `
+EVALUATE
+  TOPN(
+    40,
+    FILTER(
+      SUMMARIZECOLUMNS(
+        ${T}[CODIGO],
+        "PrecioMedio", AVERAGE(${T}[PRECIO]),
+        "CosteMedio",  AVERAGE(${T}[COSTOREFERENCIA]),
+        "Lineas",      COUNTROWS(${T}),
+        "VentaTotal",  SUM(${M.vBase}),
+        "CosteTotal",  SUM(${M.vCoste})
+      ),
+      [PrecioMedio] > 0 && [CosteMedio] > [PrecioMedio] * 3
+    ),
+    [CosteTotal], DESC
+  )`);
+
+      // C ter) Cuanta venta no tiene coste de referencia asignado
+      out.sinCoste = await pbiQuery(token, `
+EVALUATE
+  ROW(
+    "VentaSinCoste", CALCULATE(SUM(${M.vBase}), FILTER(${T}, ISBLANK(${M.vCoste}))),
+    "LineasSinCoste", CALCULATE(COUNTROWS(${T}), FILTER(${T}, ISBLANK(${M.vCoste}))),
+    "VentaTotal", SUM(${M.vBase}),
+    "LineasTotal", COUNTROWS(${T})
+  )`);
+
       // C) Comparacion global: lo que suma el modelo frente a lo que sumo yo
       out.totales = await pbiQuery(token, `
 EVALUATE
@@ -648,17 +719,24 @@ EVALUATE
       }
       log.ventasEnriquecido = enriquecido;
       const docs = filas.map((r) => {
-        const vAno = num(pick(r, "VentasAno"));
-        const vMes = num(pick(r, "VentasMes"));
-        const cAno = num(pick(r, "CosteAno"));
-        const cMes = num(pick(r, "CosteMes"));
-        const vSem = num(pick(r, "VentasSem"));
-        const vYTD = num(pick(r, "VentasYTD"));
-        const mAno = num(vAno - cAno);
-        const mMes = num(vMes - cMes);
-        const mSem = num(vSem - num(pick(r, "CosteSem")));
-        const mYTD = num(vYTD - num(pick(r, "CosteYTD")));
         const cliente = pick(r, "CLIENTE");
+        const vSem = num(pick(r, "VentaSem"));
+        const vMes = num(pick(r, "VentaMes"));
+        const vYTD = num(pick(r, "VentaYTD"));
+        const v12m = num(pick(r, "Venta12m"));
+
+        // Base "limpia" para el margen: solo lineas con coste creible
+        const vMesOk = num(pick(r, "VentaMesOk"));
+        const vYTDOk = num(pick(r, "VentaYTDOk"));
+        const v12mOk = num(pick(r, "Venta12mOk"));
+        const mMes = num(vMesOk - num(pick(r, "CosteMesOk")));
+        const mYTD = num(vYTDOk - num(pick(r, "CosteYTDOk")));
+        const m12m = num(v12mOk - num(pick(r, "Coste12mOk")));
+
+        // Porcentaje de la venta que tiene coste fiable. Si es bajo,
+        // el margen de ese cliente no es representativo.
+        const cob = (ok, tot) => (tot ? num((100 * ok) / tot) : 0);
+
         return {
           _id: docId(cliente),
           cliente,
@@ -669,24 +747,28 @@ EVALUATE
           bloqueado: pick(r, "BLQ") === "SI",
           vendedor: pick(r, "VENDEDOR"),
           empresa: pick(r, "EMPRESA"),
-          ventasAno: vAno,
-          costeAno: cAno,
-          margenAno: mAno,
-          margenPctAno: vAno ? num((100 * mAno) / vAno) : 0,
-          ventasMes: vMes,
-          costeMes: cMes,
-          margenMes: mMes,
-          margenPctMes: vMes ? num((100 * mMes) / vMes) : 0,
+
           ventasSem: vSem,
-          margenSem: mSem,
-          margenPctSem: vSem ? num((100 * mSem) / vSem) : 0,
+          ventasMes: vMes,
           ventasYTD: vYTD,
+          ventasAno: v12m,
+
+          margenMes: mMes,
           margenYTD: mYTD,
-          margenPctYTD: vYTD ? num((100 * mYTD) / vYTD) : 0,
+          margenAno: m12m,
+          margenPctMes: vMesOk ? num((100 * mMes) / vMesOk) : null,
+          margenPctYTD: vYTDOk ? num((100 * mYTD) / vYTDOk) : null,
+          margenPctAno: v12mOk ? num((100 * m12m) / v12mOk) : null,
+
+          coberturaMes: cob(vMesOk, vMes),
+          coberturaYTD: cob(vYTDOk, vYTD),
+          coberturaAno: cob(v12mOk, v12m),
+
           ultimaVenta: pick(r, "UltimaVenta"),
           actualizado: new Date().toISOString(),
         };
       });
+
       log.intercompanyMarcados = docs.filter((d) => d.intercompany).length;
 
       // ── Resumen por comercial, para el dashboard ──
@@ -707,51 +789,63 @@ EVALUATE
           if (!porAgente.has(agente)) {
             porAgente.set(agente, {
               _id: docId(agente), agente,
-              ventasSem: 0, margenSem: 0,
-              ventasMes: 0, margenMes: 0,
-              ventasYTD: 0, margenYTD: 0,
-              ventasAno: 0, margenAno: 0,
+              ventasSem: 0,
+              ventasMes: 0, margenMes: 0, baseMes: 0,
+              ventasYTD: 0, margenYTD: 0, baseYTD: 0,
+              ventasAno: 0, margenAno: 0, baseAno: 0,
               clientes: 0, clientesConVentaMes: 0,
             });
           }
           const a = porAgente.get(agente);
-          a.ventasSem += d.ventasSem; a.margenSem += d.margenSem;
+          a.ventasSem += d.ventasSem;
           a.ventasMes += d.ventasMes; a.margenMes += d.margenMes;
           a.ventasYTD += d.ventasYTD; a.margenYTD += d.margenYTD;
           a.ventasAno += d.ventasAno; a.margenAno += d.margenAno;
+          // base limpia = venta con coste fiable, reconstruida desde cobertura
+          a.baseMes += d.ventasMes * (d.coberturaMes / 100);
+          a.baseYTD += d.ventasYTD * (d.coberturaYTD / 100);
+          a.baseAno += d.ventasAno * (d.coberturaAno / 100);
           a.clientes++;
           if (d.ventasMes > 0) a.clientesConVentaMes++;
         }
 
         const resumen = [...porAgente.values()].map((a) => {
-          const p = (m, v) => (v ? num((100 * m) / v) : 0);
+          const p = (m, v) => (v ? num((100 * m) / v) : null);
           return {
             ...a,
-            ventasSem: num(a.ventasSem), margenSem: num(a.margenSem),
+            ventasSem: num(a.ventasSem),
             ventasMes: num(a.ventasMes), margenMes: num(a.margenMes),
             ventasYTD: num(a.ventasYTD), margenYTD: num(a.margenYTD),
             ventasAno: num(a.ventasAno), margenAno: num(a.margenAno),
-            margenPctSem: p(a.margenSem, a.ventasSem),
-            margenPctMes: p(a.margenMes, a.ventasMes),
-            margenPctYTD: p(a.margenYTD, a.ventasYTD),
-            margenPctAno: p(a.margenAno, a.ventasAno),
+            // El % se calcula sobre la venta con coste fiable, no sobre
+            // la venta total. Si no, saldria diluido.
+            margenPctMes: p(a.margenMes, a.baseMes),
+            margenPctYTD: p(a.margenYTD, a.baseYTD),
+            margenPctAno: p(a.margenAno, a.baseAno),
+            coberturaMes: a.ventasMes ? num(100 * a.baseMes / a.ventasMes) : 0,
+            coberturaYTD: a.ventasYTD ? num(100 * a.baseYTD / a.ventasYTD) : 0,
+            coberturaAno: a.ventasAno ? num(100 * a.baseAno / a.ventasAno) : 0,
+            baseMes: num(a.baseMes), baseYTD: num(a.baseYTD), baseAno: num(a.baseAno),
           };
         });
 
         // Fila total, para los KPI de cabecera del dashboard
         const tot = resumen.reduce((t, a) => {
-          for (const k of ["ventasSem","margenSem","ventasMes","margenMes",
-                           "ventasYTD","margenYTD","ventasAno","margenAno",
+          for (const k of ["ventasSem","ventasMes","margenMes","baseMes",
+                           "ventasYTD","margenYTD","baseYTD",
+                           "ventasAno","margenAno","baseAno",
                            "clientes","clientesConVentaMes"]) t[k] += a[k];
           return t;
-        }, { _id: "_TOTAL", agente: "_TOTAL", ventasSem:0, margenSem:0,
-             ventasMes:0, margenMes:0, ventasYTD:0, margenYTD:0,
-             ventasAno:0, margenAno:0, clientes:0, clientesConVentaMes:0 });
-        const p = (m, v) => (v ? num((100 * m) / v) : 0);
-        tot.margenPctSem = p(tot.margenSem, tot.ventasSem);
-        tot.margenPctMes = p(tot.margenMes, tot.ventasMes);
-        tot.margenPctYTD = p(tot.margenYTD, tot.ventasYTD);
-        tot.margenPctAno = p(tot.margenAno, tot.ventasAno);
+        }, { _id: "_TOTAL", agente: "_TOTAL", ventasSem:0,
+             ventasMes:0, margenMes:0, baseMes:0,
+             ventasYTD:0, margenYTD:0, baseYTD:0,
+             ventasAno:0, margenAno:0, baseAno:0,
+             clientes:0, clientesConVentaMes:0 });
+        const p = (m, v) => (v ? num((100 * m) / v) : null);
+        tot.margenPctMes = p(tot.margenMes, tot.baseMes);
+        tot.margenPctYTD = p(tot.margenYTD, tot.baseYTD);
+        tot.margenPctAno = p(tot.margenAno, tot.baseAno);
+        tot.coberturaAno = tot.ventasAno ? num(100 * tot.baseAno / tot.ventasAno) : 0;
         resumen.push(tot);
 
         log.agentes = resumen.length - 1;
