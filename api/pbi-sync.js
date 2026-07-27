@@ -26,21 +26,30 @@
 //  Si un nombre no coincide exactamente, el DAX devuelve error 400.
 // ══════════════════════════════════════════════════════════════
 const M = {
-  // ── VERIFICADO en el catálogo de OneLake (27/07/2026) ──
-  // La tabla de hechos ya contiene cliente, vendedor, empresa y fecha,
-  // así que no hace falta cruzar con dimensiones ni con Lk_tiempo.
+  // ══ VERIFICADO con ?peek=1 el 27/07/2026 ══
+  // OJO: en esta tabla CODIGO es el ARTICULO, no el cliente.
+  // El cliente es la columna CLIENTE ("DELABORI", "BARBELA"...).
   ventas:     "'00 Ventas Mercancias Global'",
-  vCodigo:    "'00 Ventas Mercancias Global'[CODIGO]",
   vCliente:   "'00 Ventas Mercancias Global'[CLIENTE]",
   vVendedor:  "'00 Ventas Mercancias Global'[VENDEDOR]",
   vEmpresa:   "'00 Ventas Mercancias Global'[EMPRESA]",
   vFecha:     "'00 Ventas Mercancias Global'[FECHA]",
-  vBase:      "'00 Ventas Mercancias Global'[BASE]",    // importe
-  vMargen:    "'00 Ventas Mercancias Global'[Margen]",
+  vBase:      "'00 Ventas Mercancias Global'[BASE]",             // importe, numerico
+  vCoste:     "'00 Ventas Mercancias Global'[Costo Referencia]", // coste, numerico
+  // NO usar [Margen]: es texto con coma decimal ("22,4360695652174").
+  // El margen se deriva de BASE - Coste, que da el mismo resultado.
 
-  // ── SIN VERIFICAR: pendientes de que despliegues estas dos tablas ──
+  // Pendiente de servir: solo articulo y unidades, sin importe ni cliente.
   pendiente:  "'00 Stock Pendiente de Servir Global'",
+  pCodigo:    "'00 Stock Pendiente de Servir Global'[CODIGO]",
+  pUni:       "'00 Stock Pendiente de Servir Global'[UNI]",
+  pEstado:    "'00 Stock Pendiente de Servir Global'[ESTADO]",
+
+  // 00 Stock no tiene columna de cantidad. Pendiente de averiguar
+  // donde vive el stock disponible antes de sincronizarlo.
   stock:      "'00 Stock'",
+
+  clientes:   "'00 Clientes Global'",
 };
 
 const DIAS_HISTORICO = 365;
@@ -58,7 +67,7 @@ const ENV = new Proxy({}, { get: (_, k) => env(k) });
 // ─────────────── Consultas DAX ───────────────
 function dax() {
   return {
-    // 1) Ventas y margen por cliente: total 12 meses + mes en curso
+    // 1) Ventas, coste y margen por cliente: 12 meses + mes en curso
     ventas: `
 DEFINE
   VAR _hoy = TODAY()
@@ -66,33 +75,37 @@ DEFINE
   VAR _iniMes = DATE(YEAR(_hoy), MONTH(_hoy), 1)
 EVALUATE
   SUMMARIZECOLUMNS(
-    ${M.vCodigo},
     ${M.vCliente},
     ${M.vVendedor},
     ${M.vEmpresa},
-    "VentasAno", CALCULATE(SUM(${M.vBase}),   ${M.vFecha} >= _desde  && ${M.vFecha} <= _hoy),
-    "MargenAno", CALCULATE(SUM(${M.vMargen}), ${M.vFecha} >= _desde  && ${M.vFecha} <= _hoy),
-    "VentasMes", CALCULATE(SUM(${M.vBase}),   ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
-    "MargenMes", CALCULATE(SUM(${M.vMargen}), ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy)
+    "VentasAno", CALCULATE(SUM(${M.vBase}),  ${M.vFecha} >= _desde  && ${M.vFecha} <= _hoy),
+    "CosteAno",  CALCULATE(SUM(${M.vCoste}), ${M.vFecha} >= _desde  && ${M.vFecha} <= _hoy),
+    "VentasMes", CALCULATE(SUM(${M.vBase}),  ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
+    "CosteMes",  CALCULATE(SUM(${M.vCoste}), ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
+    "UltimaVenta", CALCULATE(MAX(${M.vFecha}))
   )
   ORDER BY [VentasAno] DESC`,
 
-    // 2) Pedidos pendientes de servir, agrupados por cliente
+    // 2) Pendiente de servir: por ARTICULO y unidades.
+    //    Esta tabla no tiene cliente ni importe.
     pendiente: `
 EVALUATE
   SUMMARIZECOLUMNS(
-    ${M.pendiente}[CODIGO],
-    "Importe", SUM(${M.pendiente}[IMPORTE]),
-    "Lineas",  COUNTROWS(${M.pendiente})
+    ${M.pCodigo},
+    ${M.pEstado},
+    "Unidades", SUM(${M.pUni}),
+    "Lineas",   COUNTROWS(${M.pendiente})
   )`,
 
-    // 3) Stock disponible por referencia
+    // 3) Stock: DESACTIVADO. La tabla '00 Stock' no tiene columna de
+    //    cantidad (solo CODIGO, ALMACEN, FECHA, Empresa), asi que de
+    //    momento solo se cuentan registros por articulo y almacen.
     stock: `
 EVALUATE
   SUMMARIZECOLUMNS(
-    ${M.stock}[REFERENCIA],
-    ${M.stock}[DESCRIPCION],
-    "Unidades", SUM(${M.stock}[STOCK])
+    '00 Stock'[CODIGO],
+    '00 Stock'[ALMACEN],
+    "Registros", COUNTROWS('00 Stock')
   )`,
   };
 }
@@ -418,6 +431,7 @@ export default async function handler(req, res) {
         ventas:    M.ventas,
         pendiente: M.pendiente,
         stock:     M.stock,
+        clientes:  M.clientes,
       };
       for (const [k, tabla] of Object.entries(tablas)) {
         try {
@@ -453,22 +467,31 @@ export default async function handler(req, res) {
     // ── 1. Ventas y margen por cliente ──
     try {
       const filas = await pbiQuery(token, Q.ventas);
-      const docs = filas.map((r) => ({
-        _id: docId(pick(r, "CODIGO")),
-        codigo: pick(r, "CODIGO"),
-        nombre: pick(r, "CLIENTE"),
-        vendedor: pick(r, "VENDEDOR"),
-        empresa: pick(r, "EMPRESA"),
-        ventasAno: num(pick(r, "VentasAno")),
-        margenAno: num(pick(r, "MargenAno")),
-        ventasMes: num(pick(r, "VentasMes")),
-        margenMes: num(pick(r, "MargenMes")),
-        // El % se calcula aqui en vez de en DAX: una division menos que
-        // pueda fallar en el modelo, y evita divisiones por cero.
-        margenPctAno: num(pick(r, "VentasAno")) ? num(100 * num(pick(r, "MargenAno")) / num(pick(r, "VentasAno"))) : 0,
-        margenPctMes: num(pick(r, "VentasMes")) ? num(100 * num(pick(r, "MargenMes")) / num(pick(r, "VentasMes"))) : 0,
-        actualizado: new Date().toISOString(),
-      }));
+      const docs = filas.map((r) => {
+        const vAno = num(pick(r, "VentasAno"));
+        const vMes = num(pick(r, "VentasMes"));
+        const cAno = num(pick(r, "CosteAno"));
+        const cMes = num(pick(r, "CosteMes"));
+        const mAno = num(vAno - cAno);
+        const mMes = num(vMes - cMes);
+        const cliente = pick(r, "CLIENTE");
+        return {
+          _id: docId(cliente),
+          cliente,
+          vendedor: pick(r, "VENDEDOR"),
+          empresa: pick(r, "EMPRESA"),
+          ventasAno: vAno,
+          costeAno: cAno,
+          margenAno: mAno,
+          margenPctAno: vAno ? num((100 * mAno) / vAno) : 0,
+          ventasMes: vMes,
+          costeMes: cMes,
+          margenMes: mMes,
+          margenPctMes: vMes ? num((100 * mMes) / vMes) : 0,
+          ultimaVenta: pick(r, "UltimaVenta"),
+          actualizado: new Date().toISOString(),
+        };
+      });
       log.ventas = dry ? docs.length : await fbCommit("pbi_ventas_cliente", docs);
       if (dry) log.muestraVentas = docs.slice(0, 3);
     } catch (e) {
@@ -479,9 +502,10 @@ export default async function handler(req, res) {
     try {
       const filas = await pbiQuery(token, Q.pendiente);
       const docs = filas.map((r) => ({
-        _id: docId(pick(r, "CODIGO")),
-        codigo: pick(r, "CODIGO"),
-        importePendiente: num(pick(r, "Importe")),
+        _id: docId(pick(r, "CODIGO")) + "_" + docId(pick(r, "ESTADO")),
+        articulo: pick(r, "CODIGO"),
+        estado: pick(r, "ESTADO"),
+        unidades: num(pick(r, "Unidades")),
         lineas: num(pick(r, "Lineas")),
         actualizado: new Date().toISOString(),
       }));
@@ -495,10 +519,10 @@ export default async function handler(req, res) {
     try {
       const filas = await pbiQuery(token, Q.stock);
       const docs = filas.map((r) => ({
-        _id: docId(pick(r, "REFERENCIA")),
-        referencia: pick(r, "REFERENCIA"),
-        descripcion: pick(r, "DESCRIPCION"),
-        unidades: num(pick(r, "Unidades")),
+        _id: docId(pick(r, "CODIGO")) + "_" + docId(pick(r, "ALMACEN")),
+        articulo: pick(r, "CODIGO"),
+        almacen: pick(r, "ALMACEN"),
+        registros: num(pick(r, "Registros")),
         actualizado: new Date().toISOString(),
       }));
       log.stock = dry ? docs.length : await fbCommit("pbi_stock", docs);
