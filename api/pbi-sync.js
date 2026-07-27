@@ -254,18 +254,60 @@ export default async function handler(req, res) {
       });
       const j = await r.json();
       const ws = (j.value || []).map((g) => ({ id: g.id, nombre: g.name }));
+      const enWs = ws.some((g) => g.id === ENV.PBI_GROUP_ID);
+
+      // Segunda comprobacion: que modelos semanticos hay DENTRO del
+      // workspace, y si el dataset que buscamos esta realmente ahi.
+      // Si el modelo vive en otro workspace y solo esta compartido,
+      // executeQueries devuelve 401 aunque el workspace se vea bien.
+      let ds = null, dsError = null;
+      if (enWs) {
+        try {
+          const r2 = await fetch(
+            `https://api.powerbi.com/v1.0/myorg/groups/${ENV.PBI_GROUP_ID}/datasets`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          const j2 = await r2.json();
+          if (!r2.ok) throw new Error(j2.error?.message || `HTTP ${r2.status}`);
+          ds = (j2.value || []).map((d) => ({
+            id: d.id,
+            nombre: d.name,
+            permisoQuery: d.queryScaleOutSettings === undefined ? undefined : undefined,
+          }));
+        } catch (e) {
+          dsError = e.message;
+        }
+      }
+
+      const dsEncontrado = ds ? ds.some((d) => d.id === ENV.PBI_DATASET_ID) : null;
+
+      let diagnostico;
+      if (ws.length === 0) {
+        diagnostico = "El service principal no ve NINGUN workspace. Falta el ajuste de tenant o el grupo de seguridad.";
+      } else if (!enWs) {
+        diagnostico = "El SP ve workspaces pero NO el de UNITED. Falta anadirlo a ese workspace.";
+      } else if (dsError) {
+        diagnostico = `Workspace OK, pero no se pueden listar sus modelos: ${dsError}`;
+      } else if (dsEncontrado === false) {
+        diagnostico = "AQUI ESTA EL PROBLEMA: el dataset buscado NO esta en este workspace. " +
+                      "Mira la lista 'datasetsEnWorkspace' y usa el id correcto, o el modelo vive en otro workspace.";
+      } else if (dsEncontrado === true) {
+        diagnostico = "Workspace y dataset correctos. Si executeQueries da 401, falta permiso Build " +
+                      "sobre el modelo (rol Viewer no basta) o el ajuste de Execute Queries no ha propagado.";
+      }
+
       return res.status(200).json({
         ok: true,
         modoAuth: modo,
         workspacesVisibles: ws.length,
         workspaces: ws,
         buscado: ENV.PBI_GROUP_ID,
-        encontrado: ws.some((g) => g.id === ENV.PBI_GROUP_ID),
-        diagnostico: ws.length === 0
-          ? "El service principal no ve NINGUN workspace. Falta el ajuste de tenant o el grupo de seguridad."
-          : ws.some((g) => g.id === ENV.PBI_GROUP_ID)
-            ? "Acceso al workspace OK. Si executeQueries falla, falta permiso Build o el ajuste de Execute Queries."
-            : "El SP ve workspaces pero NO el de UNITED. Falta anadirlo a ese workspace.",
+        encontrado: enWs,
+        datasetBuscado: ENV.PBI_DATASET_ID,
+        datasetEncontrado: dsEncontrado,
+        datasetsEnWorkspace: ds,
+        datasetsError: dsError,
+        diagnostico,
       });
     } catch (e) {
       return res.status(500).json({ ok: false, error: e.message });
