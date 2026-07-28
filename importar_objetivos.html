@@ -88,13 +88,41 @@ let FICHEROS=[];  // lo leido de los Excel
 function estado(t,c){ const e=$("estado"); e.textContent=t; e.className="estado"+(c?" "+c:""); }
 function log(t){ const l=$("log"); l.hidden=false; l.textContent+=t+"\n"; l.scrollTop=l.scrollHeight; }
 
-// Los nombres de los Excel no coinciden con los de Power BI. Estos son los
-// casos que no resuelve la comparación directa.
-const ALIAS={
-  RAMON:"RPIEDRA", ZARCO:"AZARCO", VESES:"PACOVESES", VERO:"VERONICA",
-  JESUS:"R-JESUS", PEPE:"R-PEPE", DAVIDMAG:"DAVIDMAG", JOSEP:"JOSEPMARIA",
-  LLUIS:"LLVILA", GERHARD:"JLGARCIA", BOSCH:"JBOSCH", MIGUEL:"MIGUEL",
-};
+// Equivalencias entre el nombre del Excel y el comercial de Power BI.
+// Viven en Firestore (pbi_config/mapeo) para poder corregirlas sin tocar
+// el codigo: cada emparejamiento que arregles a mano se guarda alli.
+let ALIAS={};
+
+async function cargarAlias(){
+  try{
+    const r=await fetch(`${BASE}/pbi_config/mapeo`);
+    if(r.ok){
+      const j=await r.json();
+      for(const [k,v] of Object.entries(j.fields||{})){
+        if(k.startsWith("alias_") && v.stringValue)
+          ALIAS[k.slice(6).toUpperCase()]=v.stringValue.toUpperCase();
+      }
+    }
+  }catch(e){}
+  return Object.keys(ALIAS).length;
+}
+
+// Guarda las correcciones manuales para que la proxima vez sean automaticas
+async function guardarAlias(){
+  const campos={actualizadoEl:{stringValue:new Date().toISOString()}};
+  for(const f of FICHEROS){
+    if(!f.destino||!f.agenteExcel) continue;
+    if(norm(f.agenteExcel)===norm(f.destino)) continue;   // no hace falta alias
+    campos["alias_"+norm(f.agenteExcel)]={stringValue:f.destino};
+  }
+  try{
+    await fetch(`${BASE}/pbi_config/mapeo`,{
+      method:"PATCH", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({fields:campos}),
+    });
+    log(`  · equivalencias guardadas en pbi_config/mapeo`);
+  }catch(e){ log(`  ✗ no se han podido guardar las equivalencias: ${e.message}`); }
+}
 
 function emparejar(nombreExcel){
   const n=norm(nombreExcel);
@@ -111,6 +139,7 @@ function emparejar(nombreExcel){
 
 async function cargarAgentes(){
   try{
+    const nAlias=await cargarAlias();
     const r=await fetch(`${BASE}/pbi_resumen_agente?pageSize=300`);
     if(!r.ok) throw new Error("HTTP "+r.status);
     const j=await r.json();
@@ -119,7 +148,9 @@ async function cargarAgentes(){
       for(const [k,v] of Object.entries(d.fields||{})) o[k]=val(v);
       return o;
     }).filter(a=>a._id!=="_TOTAL");
-    estado(`${AGENTES.length} comerciales encontrados en Power BI. Ya puedes cargar los Excel.`);
+    estado(`${AGENTES.length} comerciales en Power BI`
+      +(nAlias?` · ${nAlias} equivalencias guardadas`:"")
+      +`. Ya puedes cargar los Excel.`);
   }catch(e){
     estado("No se ha podido leer pbi_resumen_agente: "+e.message,"err");
   }
@@ -257,6 +288,7 @@ function aFields(o){
 async function guardar(){
   const btn=$("guardar"); btn.disabled=true; btn.textContent="Guardando…";
   log(`— Guardando objetivos ${ANIO} —`);
+  await guardarAlias();
   let ok=0, mal=0;
 
   for(const f of FICHEROS){

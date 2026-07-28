@@ -157,7 +157,9 @@ const CLAVE_INICIAL = "1234";
 // Wikuk e Interkey vienen de Power BI (Agentes[GRUPONIVEL4]). Los comerciales
 // franceses de Discob no traen ese campo, así que caen en Francia por defecto.
 // Francia y Portugal cuelgan de Interkey, según lo acordado.
-const EQUIPOS = {
+// Definicion de ramas. Se lee de pbi_config/equipos si existe; lo de aqui
+// es solo el valor inicial para la primera vez.
+let EQUIPOS = {
   _EXCLUIR:     {nombre:"Sin incluir",      color:"var(--tenue)",    padre:null, oculta:true},
   WIKUK:        {nombre:"WIKUK",            color:"var(--wikuk)",    padre:null},
   INTERKEY:     {nombre:"INTERKEY",         color:"var(--interkey)", padre:null},
@@ -167,8 +169,8 @@ const EQUIPOS = {
 
 // Portugal deja de ser una rama: toda su venta se atribuye a Miguel, que es
 // quien figura en Power BI como responsable del mercado, y queda en Interkey.
-const PORTUGAL_EN = "MIGUEL";
-const EQUIPO_DE_MIGUEL = "INTERKEY";
+let PORTUGAL_EN = "MIGUEL";
+let EQUIPO_DE_MIGUEL = "INTERKEY";
 
 
 const $ = (id) => document.getElementById(id);
@@ -274,8 +276,57 @@ function equipoDe(ag){
   return "FRANCIA";   // sin GRUPONIVEL4 = comerciales de Discob
 }
 
+// Configuracion editable sin tocar codigo
+async function cargarConfig(){
+  try{
+    const r=await fetch(`${BASE}/pbi_config/equipos`);
+    if(!r.ok) return false;
+    const j=await r.json();
+    const f=j.fields||{};
+    if(f.portugalEn?.stringValue) PORTUGAL_EN=f.portugalEn.stringValue.toUpperCase();
+    if(f.equipoDeMiguel?.stringValue) EQUIPO_DE_MIGUEL=f.equipoDeMiguel.stringValue.toUpperCase();
+    // Ramas: campos rama_CLAVE = "Nombre visible"
+    const ramas={};
+    for(const [k,v] of Object.entries(f)){
+      if(k.startsWith("rama_") && v.stringValue)
+        ramas[k.slice(5).toUpperCase()]=v.stringValue;
+    }
+    if(Object.keys(ramas).length){
+      const nuevo={_EXCLUIR:EQUIPOS._EXCLUIR};
+      const colores=["var(--wikuk)","var(--interkey)","var(--francia)","var(--distrib)",
+                     "var(--portugal)","var(--tenue)"];
+      let i=0;
+      for(const [k,nombre] of Object.entries(ramas))
+        nuevo[k]={nombre, color:colores[i++%colores.length], padre:null};
+      EQUIPOS=nuevo;
+    }
+    return true;
+  }catch(e){ return false; }
+}
+
+// Deja la configuracion en Firestore la primera vez, para que sea editable
+async function sembrarConfig(){
+  const campos={
+    portugalEn:{stringValue:PORTUGAL_EN},
+    equipoDeMiguel:{stringValue:EQUIPO_DE_MIGUEL},
+    actualizadoEl:{stringValue:new Date().toISOString()},
+  };
+  for(const [k,v] of Object.entries(EQUIPOS)){
+    if(k==="_EXCLUIR") continue;
+    campos["rama_"+k]={stringValue:v.nombre};
+  }
+  try{
+    await fetch(`${BASE}/pbi_config/equipos`,{
+      method:"PATCH", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({fields:campos}),
+    });
+  }catch(e){}
+}
+
 async function cargar(){
   try{
+    const habia=await cargarConfig();
+    if(!habia) await sembrarConfig();
     const [resumen, usuarios, portal, ajustes] = await Promise.all([
       leerColeccion("pbi_resumen_agente"),
       leerColeccion("usuarios"),
