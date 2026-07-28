@@ -578,6 +578,29 @@ function normNombre(n) {
     .trim();
 }
 
+// Borra documentos por id. Firestore admite hasta 500 operaciones por
+// llamada, asi que se trocea igual que en la escritura.
+async function fbBorrar(coleccion, ids) {
+  if (!ids || !ids.length) return 0;
+  const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+  const q = ENV.FB_API_KEY ? `?key=${ENV.FB_API_KEY}` : "";
+  const url = `https://firestore.googleapis.com/v1/${base}:commit${q}`;
+  let borrados = 0;
+  for (let i = 0; i < ids.length; i += 400) {
+    const lote = ids.slice(i, i + 400).map((id) => ({
+      delete: `${base}/${coleccion}/${id}`,
+    }));
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ writes: lote }),
+    });
+    if (!r.ok) throw new Error(`borrar ${coleccion}: HTTP ${r.status}`);
+    borrados += lote.length;
+  }
+  return borrados;
+}
+
 // Limpia el código para usarlo como id de documento
 const docId = (v) => String(v || "").trim().replace(/[/#?\[\]*]/g, "_") || "SIN_CODIGO";
 
@@ -1491,11 +1514,30 @@ EVALUATE
         if (desde && !dry) {
           const guardados = await fbLeerColeccion("pbi_ventas_cliente");
           const nuevos = new Map(docs.map((d) => [d._id, d]));
-          universo = guardados.map((g) => nuevos.get(g._id) || g);
+
+          // Documentos obsoletos: los que quedaron con el codigo antiguo
+          // (U43XXXX) cuando su venta ya vive bajo el nuevo (U430XXXX).
+          // Si se dejan, la sincronizacion incremental los vuelve a sumar
+          // y el total sale inflado. Se descartan y se borran.
+          const obsoletos = guardados.filter((g) => {
+            const can = canonico(g._id);
+            return can !== g._id && (nuevos.has(can) ||
+              guardados.some((x) => x._id === can));
+          });
+
+          const fuera = new Set(obsoletos.map((o) => o._id));
+          universo = guardados
+            .filter((g) => !fuera.has(g._id))
+            .map((g) => nuevos.get(g._id) || g);
           for (const [id, d] of nuevos) {
             if (!guardados.some((g) => g._id === id)) universo.push(d);
           }
+
           log.universoResumen = universo.length;
+          log.obsoletosPurgados = obsoletos.length;
+          if (obsoletos.length) {
+            await fbBorrar("pbi_ventas_cliente", obsoletos.map((o) => o._id));
+          }
         }
 
         const porAgente = new Map();
@@ -1671,6 +1713,22 @@ EVALUATE
       }).filter((d) => d.cliente && d.fecha);
 
       log.pedidos = dry ? docs.length : await fbCommit("pbi_pedidos", docs);
+
+      // Los pedidos ya servidos deben desaparecer: si no, el comercial
+      // acabaria viendo entregas de la semana pasada mezcladas con las suyas.
+      if (!dry) {
+        try {
+          const hoyISO = new Date().toISOString().slice(0, 10);
+          const guardados = await fbLeerColeccion("pbi_pedidos");
+          const caducados = guardados
+            .filter((g) => !g.fecha || String(g.fecha) < hoyISO)
+            .map((g) => g._id);
+          log.pedidosCaducados = caducados.length;
+          if (caducados.length) await fbBorrar("pbi_pedidos", caducados);
+        } catch (e) {
+          log.errores.push(`purga pedidos: ${e.message}`);
+        }
+      }
       log.pedidosImporte = num(docs.reduce((t, d) => t + d.importe, 0));
       if (dry) log.muestraPedidos = docs.slice(0, 3);
     } catch (e) {
