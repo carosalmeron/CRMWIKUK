@@ -146,6 +146,7 @@ const CLAVE_INICIAL = "1234";
 // franceses de Discob no traen ese campo, así que caen en Francia por defecto.
 // Francia y Portugal cuelgan de Interkey, según lo acordado.
 const EQUIPOS = {
+  _EXCLUIR:     {nombre:"Sin incluir",      color:"var(--tenue)",    padre:null, oculta:true},
   WIKUK:        {nombre:"WIKUK",            color:"var(--wikuk)",    padre:null},
   INTERKEY:     {nombre:"INTERKEY",         color:"var(--interkey)", padre:null},
   FRANCIA:      {nombre:"FRANCIA (Discob)", color:"var(--francia)",  padre:null},
@@ -174,6 +175,7 @@ const norm = (s) => String(s||"").toUpperCase().trim()
 let AGENTES = [];    // los que vienen de Power BI
 let USUARIOS = [];   // los que ya existen en el CRM
 let FALTAN = [];     // los que hay que crear
+let CRM_USUARIOS = [];  // usuarios del CRM, para poder reasignar a mano
 
 function estado(msg, tipo){
   const e=$("estado");
@@ -286,15 +288,22 @@ async function cargar(){
 
     USUARIOS = usuarios;
 
-    // Un agente está creado si alguna de sus claves coincide
-    const creadas = new Set();
+    // Emparejar cada vendedor de Power BI con su usuario del CRM.
+    // Se guarda cual es, no solo si existe, para poder corregirlo a mano.
+    const porClave = new Map();
     for(const u of [...usuarios, ...portal]){
       for(const c of [u.grupoAgente,u.catalogoVendedor,u.username,u.user,u._id,u.id,u.nombre]){
-        if(c) creadas.add(norm(c));
+        if(c && !porClave.has(norm(c))) porClave.set(norm(c), u);
       }
     }
-    for(const a of AGENTES) a.creado = creadas.has(a.clave);
-    FALTAN = AGENTES.filter(a => !a.creado);
+    CRM_USUARIOS = usuarios.filter(u => u.rol==="agente" || u.rol==="crm_agente" || !u.rol);
+    for(const a of AGENTES){
+      const u = porClave.get(a.clave);
+      a.creado = !!u;
+      a.usuarioCRM = u ? (u._id||u.id) : null;
+      a.usuarioNombre = u ? (u.nombre||u._id) : null;
+    }
+    FALTAN = AGENTES.filter(a => !a.creado && a.equipo!=="_EXCLUIR");
 
     const totalPBI = AGENTES.reduce((t,a)=>t+a.ventasAct,0);
     const enCRM = AGENTES.filter(a=>a.creado).reduce((t,a)=>t+a.ventasAct,0);
@@ -356,32 +365,47 @@ function pintarArbol(){
 
     html+=`<details class="detalle"><summary>Ver los ${todos.length} vendedores</summary>
       <table><thead><tr>
-        <th>Vendedor</th><th>Grupo</th><th class="n">2026</th>
-        <th class="n">Var.</th><th class="n">Margen</th><th>Usuario</th>
+        <th>Vendedor Power BI</th><th class="n">2026</th><th>Usuario del CRM</th><th>Rama</th>
       </tr></thead><tbody>`;
     for(const a of todos.sort((x,y)=>y.ventasAct-x.ventasAct)){
+      const i=AGENTES.indexOf(a);
       html+=`<tr>
-        <td>${a.nombre}</td>
-        <td style="color:var(--tenue)">${EQUIPOS[a.equipo].nombre}</td>
-        <td class="n">${eur(a.ventasAct)}</td>
-        <td class="n ${a.variacion<0?"neg":"pos"}">${a.variacion!=null?a.variacion.toFixed(1)+" %":"—"}</td>
-        <td class="n">${a.margen!=null?a.margen.toFixed(1)+" %":"—"}</td>
-        <td>${a.creado?"sí":"<strong>falta</strong>"}${
-          a.fusiona&&a.fusiona.length
-            ? `<br><span style="color:var(--tenue);font-size:11px">incluye ${a.fusiona.join(", ")}</span>`
-            : ""}</td>
+        <td><strong>${a.nombre}</strong><br>
+          <span style="color:var(--tenue);font-size:11px">
+            ${a.creado?"con usuario":"<span style='color:var(--alerta)'>sin usuario</span>"}
+            ${a.margen!=null?" · "+a.margen.toFixed(1)+" % mg":""}
+            ${a.fusiona&&a.fusiona.length?"<br>incluye "+a.fusiona.join(", "):""}
+          </span></td>
+        <td class="n">${eur(a.ventasAct)}<br>
+          <span style="color:var(--tenue);font-size:11px" class="${a.variacion<0?"neg":"pos"}">
+            ${a.variacion!=null?(a.variacion>0?"+":"")+a.variacion.toFixed(1)+" %":"—"}</span></td>
+        <td><select data-u="${i}" onchange="reasignar(this)">
+          <option value="">— Crear usuario nuevo —</option>
+          ${CRM_USUARIOS.map(u=>{
+            const uid=u._id||u.id;
+            return `<option value="${uid}"${a.usuarioCRM===uid?" selected":""}>${u.nombre||uid}</option>`;
+          }).join("")}
+        </select>${a.reasignado?`<br><span style="color:var(--alerta);font-size:11px">sin guardar</span>`:""}</td>
+        <td><select data-a="${i}" onchange="moverRama(this)">
+          ${Object.keys(EQUIPOS).map(k=>
+            `<option value="${k}"${a.equipo===k?" selected":""}>${EQUIPOS[k].nombre}</option>`).join("")}
+          <option value="_EXCLUIR"${a.equipo==="_EXCLUIR"?" selected":""}>— No incluir —</option>
+        </select></td>
       </tr>`;
     }
     html+=`</tbody></table></details></div>`;
     return html;
   };
 
-  cont.innerHTML = Object.keys(EQUIPOS).map(bloque).join("");
+  cont.innerHTML = Object.keys(EQUIPOS)
+    .filter(k=>!EQUIPOS[k].oculta).map(bloque).join("")
+    + bloque("_EXCLUIR");
   const huerfanos=AGENTES.filter(a=>!EQUIPOS[a.equipo]);
   if(huerfanos.length) cont.innerHTML+=`<div class="aviso">${huerfanos.length} vendedores sin equipo reconocible.</div>`;
 }
 
 function pintarFaltantes(){
+  FALTAN = AGENTES.filter(a => !a.creado && a.equipo!=="_EXCLUIR");
   const cont=$("faltantes");
   if(!FALTAN.length){
     cont.innerHTML=`<div class="rama"><p class="vacio">Todos los vendedores con ventas tienen usuario en el CRM.</p></div>`;
@@ -414,9 +438,41 @@ function pintarFaltantes(){
   html+=`</tbody></table></div>
   <div class="acciones">
     <button id="crear" onclick="crearUsuarios()">Crear ${FALTAN.length} usuarios</button>
+    <button class="sec" id="guardar" onclick="guardarRamas()">Guardar asignaciones</button>
     <button class="sec" onclick="location.reload()">Recargar</button>
   </div>`;
   cont.innerHTML=html;
+}
+
+function reasignar(sel){
+  const a=AGENTES[+sel.dataset.u];
+  if(!a) return;
+  const uid=sel.value||null;
+  // Aviso si ese usuario ya esta enganchado a otro vendedor de Power BI:
+  // dos vendedores apuntando al mismo usuario sumarian mal.
+  const otro = uid && AGENTES.find(x=>x!==a && x.usuarioCRM===uid);
+  if(otro && !confirm(
+      `${otro.usuarioNombre} ya está asignado a ${otro.nombre}.\n`+
+      `Si continúas, ${otro.nombre} se quedará sin usuario. ¿Seguir?`)){
+    pintarArbol(); return;
+  }
+  if(otro){ otro.usuarioCRM=null; otro.usuarioNombre=null; otro.creado=false; otro.reasignado=true; }
+  const u=CRM_USUARIOS.find(x=>(x._id||x.id)===uid);
+  a.usuarioCRM=uid;
+  a.usuarioNombre=u?(u.nombre||uid):null;
+  a.creado=!!uid;
+  a.reasignado=true;
+  pintarArbol();
+  pintarFaltantes();
+}
+
+function moverRama(sel){
+  const a=AGENTES[+sel.dataset.a];
+  if(!a) return;
+  a.equipo=sel.value;
+  if(a.creado) a.pendiente=true;   // hay que guardarlo en su ficha de usuario
+  pintarArbol();
+  pintarFaltantes();
 }
 
 function cambiarEquipo(sel){
@@ -433,6 +489,35 @@ function aFields(o){
     else f[k]={stringValue:String(v)};
   }
   return {fields:f};
+}
+
+// Los agentes que YA tienen usuario y se han movido de rama hay que
+// actualizarlos en su ficha, no crearlos de nuevo.
+async function guardarRamas(){
+  const cambiados=AGENTES.filter(a=>(a.pendiente||a.reasignado) && a.usuarioCRM);
+  if(!cambiados.length){ estado("No hay cambios pendientes de guardar."); return; }
+  const btn=$("guardar"); if(btn){btn.disabled=true; btn.textContent="Guardando…";}
+  log(`— Guardando ${cambiados.length} asignaciones —`);
+  let ok=0;
+  for(const a of cambiados){
+    const uid=a.usuarioCRM;
+    try{
+      // Se guarda el equipo y, sobre todo, el grupoAgente: es el campo por el
+      // que el CRM engancha las ventas de Power BI con cada usuario.
+      const campos=["equipo","grupoAgente","catalogoVendedor"];
+      const r=await fetch(
+        `${BASE}/usuarios/${uid}?`+campos.map(c=>`updateMask.fieldPaths=${c}`).join("&"),{
+        method:"PATCH", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify(aFields({
+          equipo:a.equipo, grupoAgente:a.clave, catalogoVendedor:a.clave})),
+      });
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      a.pendiente=false; a.reasignado=false; ok++;
+      log(`  ✓ ${a.nombre} → ${a.usuarioNombre} · ${EQUIPOS[a.equipo].nombre}`);
+    }catch(e){ log(`  ✗ ${a.nombre}: ${e.message}`); }
+  }
+  if(btn){btn.disabled=false; btn.textContent="Guardar asignaciones";}
+  estado(`${ok} asignaciones guardadas.`, ok?"ok":"error");
 }
 
 async function crearUsuarios(){
