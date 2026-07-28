@@ -186,7 +186,9 @@ EVALUATE
     'Agentes'[CODIGO],
     'Agentes'[GRUPOAGENTE],
     'Agentes'[GRUPONIVEL1],
-    'Agentes'[MARGEN OBJETIVO]
+    'Agentes'[GRUPONIVEL2],
+    'Agentes'[GRUPONIVEL3],
+    'Agentes'[MB]
   )`,
 
     // Variante de respaldo: sin datos de la tabla de clientes.
@@ -1072,7 +1074,11 @@ EVALUATE
           agentes.set(cod, {
             grupo: String(pick(a, "GRUPOAGENTE") || "").trim() || null,
             nivel1: String(pick(a, "GRUPONIVEL1") || "").trim() || null,
-            objetivo: pick(a, "MARGEN OBJETIVO"),
+            ambito: String(pick(a, "GRUPONIVEL2") || "").trim() || null,
+            tipo: String(pick(a, "GRUPONIVEL3") || "").trim() || null,
+            // MB es el objetivo de margen (0,26 = 26%). El campo
+            // "MARGEN OBJETIVO" esta casi vacio; el bueno es este.
+            objetivoMargen: pick(a, "MB") ? num(100 * Number(pick(a, "MB"))) : null,
           });
         }
         log.agentesMapeados = agentes.size;
@@ -1131,6 +1137,9 @@ EVALUATE
           intercompany: (agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.nivel1
                           === "Intercompany") || esIntercompany(ficha.nombre),
           agente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.grupo || null,
+          tipoAgente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.tipo || null,
+          ambitoAgente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.ambito || null,
+          objetivoMargen: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.objetivoMargen ?? null,
           poblacion: ficha.poblacion,
           provincia: ficha.provincia,
           bloqueado: ficha.bloqueado === true,
@@ -1346,6 +1355,9 @@ EVALUATE
           if (!porAgente.has(agente)) {
             porAgente.set(agente, {
               _id: docId(agente), agente, anoAnterior: anoAnt, anoActual: anoAct,
+              tipo: d.tipoAgente || null,
+              ambito: d.ambitoAgente || null,
+              objetivoMargen: d.objetivoMargen ?? null,
               ventasAntFull: 0, margenAntFull: 0, baseAntFull: 0,
               ventasAntYTD: 0, margenAntYTD: 0, baseAntYTD: 0,
               ventasAct: 0, margenAct: 0, baseAct: 0,
@@ -1383,6 +1395,9 @@ EVALUATE
             margenPctAct: pctAct,
             variacionPct: a.ventasAntYTD
               ? num((100 * (a.ventasAct - a.ventasAntYTD)) / a.ventasAntYTD) : null,
+            // Puntos por encima o por debajo del objetivo de margen
+            desviacionObjetivo: (pctAct !== null && a.objetivoMargen)
+              ? num(pctAct - a.objetivoMargen) : null,
             variacionMargenPts: (pctAct !== null && pctAntYTD !== null)
               ? num(pctAct - pctAntYTD) : null,
             coberturaAntFull: cob(a.baseAntFull, a.ventasAntFull),
