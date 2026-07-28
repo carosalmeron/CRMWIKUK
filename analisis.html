@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Análisis · Grupo Consolidado</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --tinta:#0E1626; --papel:#F6F7F9; --blanco:#fff;
+    --linea:#E2E6EC; --texto:#0E1626; --tenue:#69737F;
+    --sube:#12794A; --baja:#B4232A; --aviso:#8A5A00;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--papel);color:var(--texto);
+    font:15px/1.55 Inter,ui-sans-serif,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  header{background:var(--tinta);color:#fff;padding:18px 18px 22px}
+  .volver{display:inline-block;color:#93A1B5;text-decoration:none;font-size:13px;margin-bottom:12px}
+  .quien{font-size:12px;color:#93A1B5;letter-spacing:.04em;text-transform:uppercase;font-weight:600}
+  h1{margin:3px 0 0;font-size:21px;font-weight:800;letter-spacing:-.015em}
+  main{padding:16px 14px 50px;max-width:760px;margin:0 auto}
+
+  /* ── El veredicto: lo primero y lo único grande ── */
+  .veredicto{
+    background:var(--blanco);border:1px solid var(--linea);border-radius:14px;
+    padding:18px 18px 16px;margin-bottom:14px;
+  }
+  .veredicto .titular{font-size:15px;font-weight:700;line-height:1.35;margin:0 0 12px}
+  .cifras{display:flex;gap:18px;flex-wrap:wrap}
+  .cifra .v{font-size:26px;font-weight:800;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+  .cifra .e{font-size:11px;color:var(--tenue);text-transform:uppercase;letter-spacing:.05em;font-weight:600}
+  .sube{color:var(--sube)} .baja{color:var(--baja)} .aviso{color:var(--aviso)}
+
+  h2{font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--tenue);
+     margin:24px 0 9px;font-weight:700}
+  .grupo{background:var(--blanco);border:1px solid var(--linea);border-radius:14px;overflow:hidden}
+  .fila{display:flex;align-items:center;gap:12px;padding:12px 15px;border-top:1px solid #EEF1F4}
+  .fila:first-child{border-top:none}
+  .fila .nom{font-weight:700;font-size:14px}
+  .fila .det{font-size:11.5px;color:var(--tenue);margin-top:1px}
+  .fila .der{margin-left:auto;text-align:right;font-variant-numeric:tabular-nums}
+  .fila .imp{font-weight:700;font-size:14px}
+  .fila .pct{font-size:12px;font-weight:700}
+  .barra{height:3px;border-radius:2px;background:#EEF1F4;margin-top:5px;overflow:hidden}
+  .barra i{display:block;height:100%}
+  .vacio{padding:18px 15px;color:var(--tenue);font-size:13px;text-align:center}
+  .pie{margin-top:22px;font-size:11.5px;color:var(--tenue);text-align:center}
+  .cargando{padding:40px 0;text-align:center;color:var(--tenue);font-size:14px}
+  .err{background:#FDF3F3;border:1px solid #F0C2C4;color:var(--baja);
+       padding:12px 14px;border-radius:11px;font-size:13px}
+</style>
+</head>
+<body>
+
+<header>
+  <a class="volver" href="index.html">← Hub</a>
+  <div class="quien" id="quien">Cargando</div>
+  <h1 id="ambito">Análisis</h1>
+</header>
+
+<main id="app"><div class="cargando">Leyendo datos de ventas…</div></main>
+
+<script>
+const PROY="grupo-consolidado-crm";
+const BASE=`https://firestore.googleapis.com/v1/projects/${PROY}/databases/(default)/documents`;
+
+const $=(id)=>document.getElementById(id);
+const eur=(n)=>Math.round(n||0).toLocaleString("es-ES")+" €";
+const pct=(n)=>(n>0?"+":"")+Number(n||0).toFixed(1)+" %";
+const norm=(s)=>String(s||"").toUpperCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+const val=(f)=>!f?null:
+  f.doubleValue!==undefined?Number(f.doubleValue):
+  f.integerValue!==undefined?Number(f.integerValue):
+  f.stringValue!==undefined?f.stringValue:
+  f.booleanValue!==undefined?f.booleanValue:null;
+
+async function leer(col){
+  const out=[]; let tk=null,v=0;
+  do{
+    const r=await fetch(`${BASE}/${col}?pageSize=300${tk?`&pageToken=${tk}`:""}`);
+    if(!r.ok) throw new Error(`${col}: HTTP ${r.status}`);
+    const j=await r.json();
+    for(const d of (j.documents||[])){
+      const o={_id:d.name.split("/").pop()};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      out.push(o);
+    }
+    tk=j.nextPageToken||null;
+  }while(tk && ++v<30);
+  return out;
+}
+
+function sesion(){
+  try{ return JSON.parse(localStorage.getItem("gc_portal_user")||"{}"); }
+  catch(e){ return {}; }
+}
+
+// Qué ve cada quien: dirección lo ve todo, un responsable su equipo,
+// y un comercial solo lo suyo.
+function alcance(u, agentes, usuarios){
+  const rol=String(u.rol||"").toLowerCase();
+  if(rol.includes("director")||rol==="admin"||rol==="ceo")
+    return {tipo:"grupo", titulo:"Todo el grupo", lista:agentes};
+
+  const ficha=usuarios.find(x=>(x._id||x.id)===u.crmId
+    || norm(x.username)===norm(u.username) || norm(x.nombre)===norm(u.nombre));
+  const clave=norm(ficha?.grupoAgente||ficha?.catalogoVendedor||u.username);
+
+  if(rol.includes("jefe")){
+    const eq=norm(ficha?.equipo||"");
+    const mios=agentes.filter(a=>norm(a.equipo)===eq);
+    if(mios.length) return {tipo:"equipo", titulo:ficha.equipo, lista:mios};
+  }
+  const yo=agentes.filter(a=>norm(a._id)===clave);
+  if(yo.length) return {tipo:"agente", titulo:yo[0].agente, lista:yo, clave};
+  return {tipo:"grupo", titulo:"Todo el grupo", lista:agentes};
+}
+
+function totales(lista){
+  const t=lista.reduce((s,a)=>({
+    act:s.act+(a.ventasAct||0), ant:s.ant+(a.ventasAntYTD||0),
+    mes:s.mes+(a.ventasMes||0), mg:s.mg+(a.margenAct||0),
+    base:s.base+((a.ventasAct||0)*((a.coberturaAct||0)/100)),
+    cli:s.cli+(a.clientes||0), act1:s.act1+(a.clientesConVentaMes||0),
+  }),{act:0,ant:0,mes:0,mg:0,base:0,cli:0,act1:0});
+  t.varPct = t.ant ? (t.act-t.ant)/t.ant*100 : null;
+  t.margenPct = t.base ? t.mg/t.base*100 : null;
+  return t;
+}
+
+function titular(t, alc){
+  const v=t.varPct;
+  const quien = alc.tipo==="agente" ? "Vas" : alc.tipo==="equipo" ? "El equipo va" : "El grupo va";
+  if(v===null) return `${quien} con ${eur(t.act)} facturados este año.`;
+  const dif=Math.abs(t.act-t.ant);
+  if(v>=3)  return `${quien} por delante del año pasado: ${eur(dif)} más a estas alturas.`;
+  if(v<=-3) return `${quien} por detrás del año pasado: faltan ${eur(dif)} para igualarlo.`;
+  return `${quien} en línea con el año pasado, con una diferencia de ${eur(dif)}.`;
+}
+
+function filaAgente(a, extra){
+  const v=a.variacionPct;
+  const color = v===null?"":v<0?"baja":"sube";
+  const ancho = Math.min(100, Math.abs(v||0));
+  return `<div class="fila">
+    <div>
+      <div class="nom">${a.agente||a._id}</div>
+      <div class="det">${extra||""}</div>
+    </div>
+    <div class="der">
+      <div class="imp">${eur(a.ventasAct)}</div>
+      <div class="pct ${color}">${v!==null?pct(v):"—"}</div>
+    </div>
+  </div>
+  <div style="padding:0 15px 9px"><div class="barra">
+    <i style="width:${ancho}%;background:${v<0?"#B4232A":"#12794A"}"></i></div></div>`;
+}
+
+async function arrancar(){
+  const u=sesion();
+  $("quien").textContent = u.nombre || u.username || "Sin identificar";
+
+  try{
+    const [agentesRaw, usuarios, meta] = await Promise.all([
+      leer("pbi_resumen_agente"),
+      leer("usuarios").catch(()=>[]),
+      fetch(`${BASE}/pbi_meta/estado`).then(r=>r.ok?r.json():null).catch(()=>null),
+    ]);
+
+    const agentes = agentesRaw
+      .filter(a=>a._id!=="_TOTAL")
+      .filter(a=>(a.ventasAct||0)>0 || (a.ventasAntYTD||0)>0);
+
+    const alc = alcance(u, agentes, usuarios);
+    $("ambito").textContent = alc.titulo;
+
+    const t = totales(alc.lista);
+    const sync = meta?.fields?.ultimaSync?.stringValue;
+    const dias = sync ? Math.floor((Date.now()-new Date(sync).getTime())/86400000) : null;
+
+    let html = `<div class="veredicto">
+      <p class="titular">${titular(t, alc)}</p>
+      <div class="cifras">
+        <div class="cifra"><div class="v">${eur(t.act)}</div><div class="e">Este año</div></div>
+        <div class="cifra"><div class="v ${t.varPct<0?"baja":"sube"}">${t.varPct!==null?pct(t.varPct):"—"}</div>
+          <div class="e">vs mismo periodo</div></div>
+        <div class="cifra"><div class="v">${t.margenPct!==null?t.margenPct.toFixed(1)+" %":"—"}</div>
+          <div class="e">Margen</div></div>
+        <div class="cifra"><div class="v">${eur(t.mes)}</div><div class="e">Este mes</div></div>
+      </div>
+    </div>`;
+
+    if(alc.tipo!=="agente"){
+      const caen=alc.lista.filter(a=>a.variacionPct!==null&&a.variacionPct<0&&a.ventasAntYTD>20000)
+        .sort((a,b)=>a.variacionPct-b.variacionPct).slice(0,6);
+      const suben=alc.lista.filter(a=>a.variacionPct!==null&&a.variacionPct>0&&a.ventasAct>20000)
+        .sort((a,b)=>b.variacionPct-a.variacionPct).slice(0,5);
+
+      html += `<h2>Quién baja</h2><div class="grupo">${
+        caen.length
+          ? caen.map(a=>filaAgente(a,
+              `${eur(a.ventasAntYTD-a.ventasAct)} menos · ${a.equipo||"sin equipo"}`)).join("")
+          : `<p class="vacio">Nadie cae respecto al año pasado.</p>`
+      }</div>`;
+
+      html += `<h2>Quién crece</h2><div class="grupo">${
+        suben.length
+          ? suben.map(a=>filaAgente(a,
+              `${eur(a.ventasAct-a.ventasAntYTD)} más · ${a.equipo||"sin equipo"}`)).join("")
+          : `<p class="vacio">Sin crecimientos destacables.</p>`
+      }</div>`;
+
+      // Margen por debajo del objetivo: lo que no se ve en la cifra de ventas
+      const flojos=alc.lista
+        .filter(a=>a.desviacionObjetivo!==null&&a.desviacionObjetivo!==undefined
+                   &&a.desviacionObjetivo<0&&a.ventasAct>20000)
+        .sort((a,b)=>a.desviacionObjetivo-b.desviacionObjetivo).slice(0,6);
+      if(flojos.length){
+        html += `<h2>Margen por debajo del objetivo</h2><div class="grupo">${
+          flojos.map(a=>`<div class="fila">
+            <div><div class="nom">${a.agente}</div>
+              <div class="det">objetivo ${(a.objetivoMargen||0).toFixed(1)} % · ${a.equipo||""}</div></div>
+            <div class="der"><div class="imp">${(a.margenPctAct||0).toFixed(1)} %</div>
+              <div class="pct baja">${a.desviacionObjetivo.toFixed(1)} pts</div></div>
+          </div>`).join("")
+        }</div>`;
+      }
+    }else{
+      const a=alc.lista[0];
+      const dormidos=(a.clientes||0)-(a.clientesConVentaMes||0);
+      html += `<h2>Tu cartera</h2><div class="grupo">
+        <div class="fila"><div><div class="nom">${a.clientes||0} clientes asignados</div>
+          <div class="det">${a.clientesConVentaMes||0} han comprado este mes</div></div></div>
+        <div class="fila"><div><div class="nom">${dormidos} sin comprar este mes</div>
+          <div class="det">Es tu lista de recuperación</div></div></div>
+        <div class="fila"><div><div class="nom">Margen ${(a.margenPctAct||0).toFixed(1)} %</div>
+          <div class="det">objetivo ${(a.objetivoMargen||0).toFixed(1)} %${
+            a.desviacionObjetivo!=null
+              ? ` · ${a.desviacionObjetivo>0?"por encima":"por debajo"} ${Math.abs(a.desviacionObjetivo).toFixed(1)} pts`
+              : ""}</div></div></div>
+      </div>`;
+    }
+
+    if(alc.tipo!=="agente"){
+      html += `<h2>Reparto por equipo</h2><div class="grupo">${(()=>{
+        const eq={};
+        for(const a of alc.lista){
+          const k=a.equipo||"Sin equipo";
+          eq[k]=eq[k]||{act:0,ant:0,n:0};
+          eq[k].act+=a.ventasAct||0; eq[k].ant+=a.ventasAntYTD||0; eq[k].n++;
+        }
+        const filas=Object.entries(eq).sort((a,b)=>b[1].act-a[1].act);
+        if(!filas.length) return `<p class="vacio">Sin datos.</p>`;
+        return filas.map(([k,v])=>{
+          const p=v.ant?(v.act-v.ant)/v.ant*100:null;
+          return `<div class="fila">
+            <div><div class="nom">${k}</div><div class="det">${v.n} vendedores</div></div>
+            <div class="der"><div class="imp">${eur(v.act)}</div>
+              <div class="pct ${p<0?"baja":"sube"}">${p!==null?pct(p):"—"}</div></div>
+          </div>`;
+        }).join("");
+      })()}</div>`;
+    }
+
+    html += `<p class="pie">${
+      dias!==null && dias>=2
+        ? `⚠️ Datos de hace ${dias} días. La sincronización puede haber fallado.`
+        : `Ventas reales de Power BI${sync?" · "+new Date(sync).toLocaleDateString("es-ES"):""}`
+    }</p>`;
+
+    $("app").innerHTML=html;
+  }catch(e){
+    $("app").innerHTML=`<div class="err">No se han podido cargar los datos: ${e.message}</div>`;
+  }
+}
+
+arrancar();
+</script>
+</body>
+</html>
