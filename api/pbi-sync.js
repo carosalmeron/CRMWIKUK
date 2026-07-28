@@ -63,7 +63,7 @@ const DIAS_HISTORICO = 365;
 // la tabla '00 Stock' no tiene columna de cantidad, asi que ahora mismo
 // solo devolveria un recuento de registros (13.666 filas sin valor).
 // Reactivar cuando sistemas indique donde vive el stock disponible.
-const ACTIVOS = ["ventas"];
+const ACTIVOS = ["ventas", "pedidos"];
 
 // Ventas intercompania: traspasos entre empresas del propio grupo, no
 // clientes reales. En los informes de Power BI ya se excluyen con el
@@ -171,6 +171,26 @@ EVALUATE
     "UltimaVenta", CALCULATE(MAX(${M.vFecha}))
   )
   ORDER BY [VentaAct] DESC`,
+
+    // Pedidos con entrega planificada de hoy en adelante. Es lo que un
+    // comercial necesita ver: cuando le va a salir cada pedido.
+    // Solo futuro: la tabla conserva entregas desde 2017 sin purgar.
+    pedidos: `
+DEFINE
+  VAR _hoy = TODAY()
+EVALUATE
+  SELECTCOLUMNS(
+    FILTER('00 Pedidos Validados Global',
+      '00 Pedidos Validados Global'[FECHAPLANIFICADA] >= _hoy),
+    "Cliente",  '00 Pedidos Validados Global'[CLIENTE],
+    "Vendedor", '00 Pedidos Validados Global'[VENDEDOR],
+    "Fecha",    '00 Pedidos Validados Global'[FECHAPLANIFICADA],
+    "Articulo", '00 Pedidos Validados Global'[CODIGO],
+    "Familia",  '00 Pedidos Validados Global'[FAMILIA],
+    "Uni",      '00 Pedidos Validados Global'[UNI],
+    "Importe",  '00 Pedidos Validados Global'[BASE],
+    "Pedido",   '00 Pedidos Validados Global'[NumPedido]
+  )`,
 
     // Dimension de clientes en consulta SEPARADA.
     // Antes iba dentro del SUMMARIZECOLUMNS de ventas, pero la tabla
@@ -1047,30 +1067,34 @@ EVALUATE
   // verdad, que periodo cubre y si el pendiente se puede aislar.
   if (req.query.pedidos === "1") {
     const T = "'00 Entrada Pedidos Global'";
-    const out = { ok: true, tabla: T };
-    try {
-      const { token } = await getToken(req);
+    const V = "'00 Pedidos Validados Global'";
+    const out = { ok: true, entrada: T, validados: V };
+    let token;
+    try { ({ token } = await getToken(req)); }
+    catch (e) { return res.status(500).json({ ok: false, error: e.message }); }
 
-      out.totales = await pbiQuery(token, `
+    // Cada consulta va aislada: si una falla, las demas siguen. Antes un
+    // error de DAX en el primer bloque dejaba la respuesta a medias.
+    const pedir = async (clave, dax) => {
+      try { out[clave] = await pbiQuery(token, dax, true); }
+      catch (e) { out[clave] = { error: e.message.slice(0, 240) }; }
+    };
+
+    await pedir("totalesEntrada", `
 EVALUATE
   ROW(
     "Lineas",        COUNTROWS(${T}),
     "Importe",       SUM(${T}[BASE]),
-    "Unidades",      SUM(${T}[UNI]),
     "LineasConImporte", CALCULATE(COUNTROWS(${T}), FILTER(${T}, ${T}[BASE] > 0)),
-    "ImporteConValor",  CALCULATE(SUM(${T}[BASE]), FILTER(${T}, ${T}[BASE] > 0)),
     "Clientes",      DISTINCTCOUNT(${T}[CLIENTE]),
     "Articulos",     DISTINCTCOUNT(${T}[CODIGO]),
     "Familias",      DISTINCTCOUNT(${T}[FAMILIA]),
     "PrimerPedido",  MIN(${T}[FECHA]),
     "UltimoPedido",  MAX(${T}[FECHA]),
-    "PrimeraEntrega",MIN(${T}[FECHAPLANIFICADA]),
     "UltimaEntrega", MAX(${T}[FECHAPLANIFICADA])
-  )`, true);
+  )`);
 
-      // Reparto por año. SUMMARIZECOLUMNS no admite una expresion como
-      // columna de agrupacion, hay que crearla antes con ADDCOLUMNS.
-      out.porAno = await pbiQuery(token, `
+    await pedir("porAnoEntrada", `
 EVALUATE
   GROUPBY(
     ADDCOLUMNS(${T}, "@Ano", YEAR(${T}[FECHA])),
@@ -1078,52 +1102,36 @@ EVALUATE
     "Lineas",  SUMX(CURRENTGROUP(), 1),
     "Importe", SUMX(CURRENTGROUP(), ${T}[BASE])
   )
-  ORDER BY [@Ano] DESC`, true);
+  ORDER BY [@Ano] DESC`);
 
-      // Lo pendiente de verdad: entrega futura o de los ultimos 60 dias
-      out.pendienteHoy = await pbiQuery(token, `
-DEFINE
-  VAR _hoy = TODAY()
-EVALUATE
-  ROW(
-    "LineasFuturas",  CALCULATE(COUNTROWS(${T}), FILTER(${T}, ${T}[FECHAPLANIFICADA] >= _hoy)),
-    "ImporteFuturo",  CALCULATE(SUM(${T}[BASE]),  FILTER(${T}, ${T}[FECHAPLANIFICADA] >= _hoy)),
-    "Lineas60d",      CALCULATE(COUNTROWS(${T}), FILTER(${T}, ${T}[FECHA] >= _hoy - 60)),
-    "Importe60d",     CALCULATE(SUM(${T}[BASE]),  FILTER(${T}, ${T}[FECHA] >= _hoy - 60))
-  )`, true);
-
-      // Que hay en ESVISITA: si distingue pedidos nacidos de una visita,
-      // se puede medir el retorno de la actividad comercial del CRM.
-      out.esVisita = await pbiQuery(token, `
+    await pedir("esVisita", `
 EVALUATE
   SUMMARIZECOLUMNS(
     ${T}[ESVISITA],
     "Lineas", COUNTROWS(${T}),
     "Importe", SUM(${T}[BASE])
-  )`, true);
+  )`);
 
-      // "00 Pedidos Validados Global": ninguna de las dos tablas tiene campo
-      // de estado, pero el Panel Principal muestra "Ped. Pdte de Servir".
-      // Si el total de validados coincide con esa cifra, validado = pendiente.
-      const V = "'00 Pedidos Validados Global'";
-      out.validados = await pbiQuery(token, `
+    // El Panel Principal muestra "Ped. Pdte de Servir". Si el total de
+    // validados coincide con esa cifra, validado equivale a pendiente y no
+    // hace falta ningun campo de estado.
+    await pedir("totalesValidados", `
 DEFINE
   VAR _hoy = TODAY()
 EVALUATE
   ROW(
-    "Lineas",      COUNTROWS(${V}),
-    "Importe",     SUM(${V}[BASE]),
-    "Unidades",    SUM(${V}[UNI]),
-    "Pedidos",     DISTINCTCOUNT(${V}[NumPedido]),
-    "Clientes",    DISTINCTCOUNT(${V}[CLIENTE]),
+    "Lineas",         COUNTROWS(${V}),
+    "Importe",        SUM(${V}[BASE]),
+    "Unidades",       SUM(${V}[UNI]),
+    "Pedidos",        DISTINCTCOUNT(${V}[NumPedido]),
+    "Clientes",       DISTINCTCOUNT(${V}[CLIENTE]),
     "PrimeraEntrega", MIN(${V}[FECHAPLANIFICADA]),
     "UltimaEntrega",  MAX(${V}[FECHAPLANIFICADA]),
     "EntregaFutura",  CALCULATE(SUM(${V}[BASE]), FILTER(${V}, ${V}[FECHAPLANIFICADA] >= _hoy)),
     "EntregaPasada",  CALCULATE(SUM(${V}[BASE]), FILTER(${V}, ${V}[FECHAPLANIFICADA] < _hoy))
-  )`, true);
+  )`);
 
-      // Los diez clientes con mas pendiente validado
-      out.validadosPorCliente = await pbiQuery(token, `
+    await pedir("validadosPorCliente", `
 EVALUATE
   TOPN(10,
     SUMMARIZECOLUMNS(
@@ -1132,10 +1140,9 @@ EVALUATE
       "Importe", SUM(${V}[BASE]),
       "Lineas",  COUNTROWS(${V})
     ),
-    [Importe], DESC)`, true);
+    [Importe], DESC)`);
 
-      // Familias con mas peso, para saber si el codigo es util
-      out.topFamilias = await pbiQuery(token, `
+    await pedir("topFamilias", `
 EVALUATE
   TOPN(10,
     SUMMARIZECOLUMNS(
@@ -1143,12 +1150,8 @@ EVALUATE
       "Lineas", COUNTROWS(${T}),
       "Importe", SUM(${T}[BASE])
     ),
-    [Importe], DESC)`, true);
+    [Importe], DESC)`);
 
-    } catch (e) {
-      out.ok = false;
-      out.error = e.message;
-    }
     return res.status(200).json(out);
   }
 
@@ -1634,6 +1637,40 @@ EVALUATE
     } catch (e) {
       log.errores.push(`ventas: ${e.message}`);
     }
+
+    // ── 1 bis. Pedidos planificados ──
+    if (activo("pedidos")) try {
+      const filas = await pbiQuery(token, Q.pedidos);
+      const docs = filas.map((r, i) => {
+        const cli = String(pick(r, "Cliente") || "").trim();
+        const ven = String(pick(r, "Vendedor") || "").trim();
+        const fec = String(pick(r, "Fecha") || "").slice(0, 10);
+        const art = String(pick(r, "Articulo") || "").trim();
+        const ficha = fichas.get(cli) || fichas.get(canonico(cli)) || {};
+        return {
+          _id: docId(`${fec}_${cli}_${art}_${i}`),
+          cliente: cli,
+          nombre: ficha.nombre || cli,
+          poblacion: ficha.poblacion || null,
+          agente: agentes.get(ven)?.grupo || null,
+          vendedor: ven,
+          fecha: fec,
+          articulo: art,
+          familia: String(pick(r, "Familia") || "").trim() || null,
+          unidades: num(pick(r, "Uni")),
+          importe: num(pick(r, "Importe")),
+          pedido: String(pick(r, "Pedido") || "").trim(),
+          actualizado: new Date().toISOString(),
+        };
+      }).filter((d) => d.cliente && d.fecha);
+
+      log.pedidos = dry ? docs.length : await fbCommit("pbi_pedidos", docs);
+      log.pedidosImporte = num(docs.reduce((t, d) => t + d.importe, 0));
+      if (dry) log.muestraPedidos = docs.slice(0, 3);
+    } catch (e) {
+      log.errores.push(`pedidos: ${e.message}`);
+    }
+    else log.pedidos = "desactivado";
 
     // ── 2. Pendiente de servir (desactivado, ver ACTIVOS) ──
     if (activo("pendiente")) try {
