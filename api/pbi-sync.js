@@ -943,6 +943,53 @@ EVALUATE
     }
   }
 
+  // ?vendedores=1 → ventas del mes agrupadas por el VENDEDOR del ERP,
+  // que es el mismo campo que usa el Panel Principal de Power BI.
+  // Sirve para comparar cifra a cifra y localizar diferencias, sin que
+  // interfiera el mapeo a los agentes del CRM.
+  if (req.query.vendedores === "1") {
+    try {
+      const { token } = await getToken(req);
+      const T = M.ventas;
+      const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _iniMes = DATE(YEAR(_hoy), MONTH(_hoy), 1)
+  VAR _anoAct = YEAR(_hoy)
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${T}[VENDEDOR],
+    "VentasMes", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
+    "VentasAno", CALCULATE(SUM(${M.vBase}), FILTER(${T}, YEAR(${M.vFecha}) = _anoAct))
+  )
+  ORDER BY [VentasMes] DESC`);
+
+      const eur = (n) => Number(n || 0).toLocaleString("es-ES",
+        { maximumFractionDigits: 0 });
+      const lista = filas.map((r) => ({
+        vendedor: pick(r, "VENDEDOR"),
+        ventasMes: num(pick(r, "VentasMes")),
+        ventasAno: num(pick(r, "VentasAno")),
+      })).filter((v) => v.ventasMes || v.ventasAno);
+
+      return res.status(200).json({
+        ok: true,
+        nota: "Mismo campo VENDEDOR que el Panel Principal. Incluye intercompania.",
+        desde: `01/${String(new Date().getMonth() + 1).padStart(2, "0")}`,
+        hasta: new Date().toISOString().slice(0, 10),
+        totalMes: eur(lista.reduce((t, v) => t + v.ventasMes, 0)),
+        totalAno: eur(lista.reduce((t, v) => t + v.ventasAno, 0)),
+        vendedores: lista.map((v) => ({
+          vendedor: v.vendedor,
+          ventasMes: eur(v.ventasMes),
+          ventasAno: eur(v.ventasAno),
+        })),
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: e.message });
+    }
+  }
+
   const dry = req.query.dry === "1"; // ?dry=1 → consulta pero NO escribe
   const t0 = Date.now();
   const log = { dry, ventas: 0, pendiente: 0, stock: 0, errores: [] };
@@ -1143,6 +1190,16 @@ EVALUATE
                (b.ventasAct - a.ventasAct) || (b.ventasAntFull - a.ventasAntFull))[0];
 
         const suma = (k) => grupo.reduce((t, d) => t + (d[k] || 0), 0);
+
+        // IMPORTANTE: las bases limpias se calculan ANTES de sobrescribir
+        // los importes del principal. Si no, su cobertura se aplicaria al
+        // total del grupo y se contaria dos veces.
+        const base = (k, cob) => grupo.reduce(
+          (t, d) => t + (d[k] || 0) * ((d[cob] || 0) / 100), 0);
+        const bAntFull = base("ventasAntFull", "coberturaAntFull");
+        const bAntYTD  = base("ventasAntYTD", "coberturaAntYTD");
+        const bAct     = base("ventasAct", "coberturaAct");
+
         principal.ventasAntFull = num(suma("ventasAntFull"));
         principal.margenAntFull = num(suma("margenAntFull"));
         principal.ventasAntYTD  = num(suma("ventasAntYTD"));
@@ -1150,13 +1207,7 @@ EVALUATE
         principal.ventasAct     = num(suma("ventasAct"));
         principal.margenAct     = num(suma("margenAct"));
         principal.ventasMes     = num(suma("ventasMes"));
-        // Recalcular bases limpias y porcentajes: sumar importes no basta,
-        // los % y la cobertura hay que rehacerlos sobre el grupo entero.
-        const base = (k, cob) => grupo.reduce(
-          (t, d) => t + (d[k] || 0) * ((d[cob] || 0) / 100), 0);
-        const bAntFull = base("ventasAntFull", "coberturaAntFull");
-        const bAntYTD  = base("ventasAntYTD", "coberturaAntYTD");
-        const bAct     = base("ventasAct", "coberturaAct");
+
         const pct = (m, b) => (b ? num((100 * m) / b) : null);
         const cob = (b, v) => (v ? num((100 * b) / v) : 0);
 
@@ -1169,9 +1220,10 @@ EVALUATE
         principal.variacionMargenPts =
           (principal.margenPctAct !== null && principal.margenPctAntYTD !== null)
             ? num(principal.margenPctAct - principal.margenPctAntYTD) : null;
-        principal.variacionPct  = principal.ventasAntYTD
+        principal.variacionPct = principal.ventasAntYTD
           ? num((100 * (principal.ventasAct - principal.ventasAntYTD)) / principal.ventasAntYTD)
           : null;
+
         principal.codigosFusionados = grupo.map((d) => d.cliente).join(", ");
 
         for (const d of grupo) {
