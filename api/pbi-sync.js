@@ -923,6 +923,7 @@ EVALUATE
           }
           return o;
         })
+        .filter((c) => !c.fusionadoEn)
         .sort((a, b) => (b.ventasAct || 0) - (a.ventasAct || 0));
 
       const eur = (n) => Number(n || 0).toLocaleString("es-ES",
@@ -1118,7 +1119,11 @@ EVALUATE
 
       const docs = filas.map((r) => {
         const cliente = pick(r, "CLIENTE");
-        const ficha = fichas.get(String(cliente).trim()) || {};
+        // Si el codigo ya no existe en el maestro, se busca su equivalente
+        // recodificado para no dejar el cliente sin nombre ni poblacion.
+        const ficha = fichas.get(String(cliente).trim())
+          || fichas.get(canonico(cliente))
+          || {};
 
         const vAntFull = num(pick(r, "VentaAntFull"));
         const vAntYTD  = num(pick(r, "VentaAntYTD"));
@@ -1350,6 +1355,10 @@ EVALUATE
 
         for (const d of universo) {
           if (d.intercompany) continue;            // fuera traspasos internos
+          // Los codigos secundarios de una fusion quedan a cero: su venta
+          // ya esta sumada en el principal. Contarlos inflaria la cartera
+          // y falsearia el recuento de clientes sin venta.
+          if (d.fusionadoEn) continue;
           // Prioridad: el comercial que dice Power BI. El CRM queda como
           // respaldo para clientes cuyo vendedor no este en la tabla.
           const agente = d.agente
