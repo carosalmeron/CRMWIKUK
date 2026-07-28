@@ -177,6 +177,18 @@ EVALUATE
     ${M.cCodconta}
   )`,
 
+    // Tabla Agentes: traduce el codigo de vendedor del ERP al comercial
+    // (GRUPOAGENTE) y marca la intercompania (GRUPONIVEL1). Es la misma
+    // logica que usa el Panel Principal, asi que las cifras cuadran.
+    agentes: `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    'Agentes'[CODIGO],
+    'Agentes'[GRUPOAGENTE],
+    'Agentes'[GRUPONIVEL1],
+    'Agentes'[MARGEN OBJETIVO]
+  )`,
+
     // Variante de respaldo: sin datos de la tabla de clientes.
     ventasSimple: `
 DEFINE
@@ -1051,6 +1063,23 @@ EVALUATE
       }
       log.ventasEnriquecido = enriquecido;
 
+      // Mapa vendedor -> comercial, desde el propio modelo
+      const agentes = new Map();
+      try {
+        for (const a of await pbiQuery(token, Q.agentes, true)) {
+          const cod = String(pick(a, "CODIGO") || "").trim();
+          if (!cod) continue;
+          agentes.set(cod, {
+            grupo: String(pick(a, "GRUPOAGENTE") || "").trim() || null,
+            nivel1: String(pick(a, "GRUPONIVEL1") || "").trim() || null,
+            objetivo: pick(a, "MARGEN OBJETIVO"),
+          });
+        }
+        log.agentesMapeados = agentes.size;
+      } catch (e) {
+        log.errores.push(`agentes: ${e.message}`);
+      }
+
       // Ficha de cliente: primera aparicion de cada codigo
       const fichas = new Map();
       try {
@@ -1097,7 +1126,11 @@ EVALUATE
           // Sin ficha = codigo que ya no existe en el maestro: historico
           // que quedo huerfano tras la recodificacion de 2026.
           huerfano: !ficha.nombre,
-          intercompany: esIntercompany(ficha.nombre),
+          // Intercompania segun GRUPONIVEL1 del modelo, que es el filtro
+          // oficial del Panel Principal. El nombre queda de respaldo.
+          intercompany: (agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.nivel1
+                          === "Intercompany") || esIntercompany(ficha.nombre),
+          agente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.grupo || null,
           poblacion: ficha.poblacion,
           provincia: ficha.provincia,
           bloqueado: ficha.bloqueado === true,
@@ -1293,7 +1326,10 @@ EVALUATE
 
         for (const d of universo) {
           if (d.intercompany) continue;            // fuera traspasos internos
-          const agente = asignacion.get(String(d.cliente).trim())
+          // Prioridad: el comercial que dice Power BI. El CRM queda como
+          // respaldo para clientes cuyo vendedor no este en la tabla.
+          const agente = d.agente
+            || asignacion.get(String(d.cliente).trim())
             || (d.codconta ? asignacion.get("CC:" + d.codconta) : null);
           if (!agente) {
             sinAsignar++;
