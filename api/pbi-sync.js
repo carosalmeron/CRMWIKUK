@@ -518,10 +518,30 @@ async function fbLeerColeccion(coleccion) {
 // 4 digitos. Verificado cruzando nombres (U433509 -> U4303509 WIKUK EASY,
 // U434210 -> U4304210 LORIENTE PIQUERAS, U431880 -> U4301880 MANACOR).
 // El historico de ventas y el CRM conservan el codigo viejo.
+// La regla se puede sobrescribir desde Firestore (pbi_config/reglas):
+//   recodPrefijo="U43", recodDigitos=4, recodInserta="0"
+// Lo de aqui es solo el valor por defecto verificado en julio de 2026.
+let RECOD = { prefijo: "U43", digitos: 4, inserta: "0" };
+
 function canonico(cod) {
   const c = String(cod || "").trim().toUpperCase();
-  const m = /^U43(\d{4})$/.exec(c);
-  return m ? "U430" + m[1] : c;
+  if (!RECOD.prefijo) return c;
+  const re = new RegExp(`^${RECOD.prefijo}(\\d{${RECOD.digitos}})$`);
+  const m = re.exec(c);
+  return m ? RECOD.prefijo + RECOD.inserta + m[1] : c;
+}
+
+// Lee la configuracion editable. Si no existe, se sigue con los valores
+// por defecto: la sincronizacion nunca debe caerse por esto.
+async function cargarReglas() {
+  try {
+    const cfg = await fbLeerDocumento("pbi_config", "reglas");
+    if (!cfg) return false;
+    if (cfg.recodPrefijo !== undefined) RECOD.prefijo = String(cfg.recodPrefijo || "");
+    if (cfg.recodDigitos) RECOD.digitos = Number(cfg.recodDigitos) || 4;
+    if (cfg.recodInserta !== undefined) RECOD.inserta = String(cfg.recodInserta || "");
+    return true;
+  } catch (e) { return false; }
 }
 
 // Normaliza el nombre comercial para poder emparejar el mismo cliente
@@ -1029,6 +1049,8 @@ EVALUATE
   try {
     const { token, modo } = await getToken(req);
     log.modoAuth = modo;
+
+    log.reglasDeFirestore = await cargarReglas();
 
     // ── Decidir si toca sincronizacion completa o incremental ──
     // Se fuerza completa cuando:
