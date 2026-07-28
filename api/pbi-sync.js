@@ -118,6 +118,7 @@ DEFINE
   VAR _anoAct = YEAR(_hoy)
   VAR _anoAnt = _anoAct - 1
   VAR _iniMes = DATE(YEAR(_hoy), MONTH(_hoy), 1)
+  VAR _iniSem = _hoy - WEEKDAY(_hoy, 2) + 1
   // Mismo dia del ano pasado, para comparar periodos equivalentes
   VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
 EVALUATE
@@ -158,6 +159,7 @@ EVALUATE
         NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
 
     "VentaMes", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
+    "VentaSem", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniSem && ${M.vFecha} <= _hoy),
     "UltimaVenta", CALCULATE(MAX(${M.vFecha}))
   )
   ORDER BY [VentaAct] DESC`,
@@ -188,6 +190,7 @@ EVALUATE
     'Agentes'[GRUPONIVEL1],
     'Agentes'[GRUPONIVEL2],
     'Agentes'[GRUPONIVEL3],
+    'Agentes'[GRUPONIVEL4],
     'Agentes'[MB]
   )`,
 
@@ -1076,6 +1079,14 @@ EVALUATE
             nivel1: String(pick(a, "GRUPONIVEL1") || "").trim() || null,
             ambito: String(pick(a, "GRUPONIVEL2") || "").trim() || null,
             tipo: String(pick(a, "GRUPONIVEL3") || "").trim() || null,
+            // GRUPONIVEL4 es el "Grupo Agentes" del Panel Principal:
+            // Wikuk, Interkey, Portugal. Es la division real del negocio.
+            equipo: (() => {
+              const v = String(pick(a, "GRUPONIVEL4") || "").trim();
+              if (!v || v === "-") return null;
+              // "Interkey Julio" parece un apaño puntual; se normaliza
+              return v.startsWith("Interkey") ? "Interkey" : v;
+            })(),
             // MB es el objetivo de margen (0,26 = 26%). El campo
             // "MARGEN OBJETIVO" esta casi vacio; el bueno es este.
             objetivoMargen: pick(a, "MB") ? num(100 * Number(pick(a, "MB"))) : null,
@@ -1113,6 +1124,7 @@ EVALUATE
         const vAntYTD  = num(pick(r, "VentaAntYTD"));
         const vAct     = num(pick(r, "VentaAct"));
         const vMes     = num(pick(r, "VentaMes"));
+        const vSem     = num(pick(r, "VentaSem"));
 
         // Bases limpias (lineas con coste creible) para cada ventana
         const bAntFull = num(pick(r, "VentaAntFullOk"));
@@ -1139,6 +1151,7 @@ EVALUATE
           agente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.grupo || null,
           tipoAgente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.tipo || null,
           ambitoAgente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.ambito || null,
+          equipoAgente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.equipo || null,
           objetivoMargen: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.objetivoMargen ?? null,
           poblacion: ficha.poblacion,
           provincia: ficha.provincia,
@@ -1165,6 +1178,7 @@ EVALUATE
           margenPctAct: p(mAct, bAct),
 
           ventasMes: vMes,
+          ventasSem: vSem,
 
           // Variacion sobre el mismo periodo, no sobre el ano cerrado
           variacionPct: vAntYTD ? num((100 * (vAct - vAntYTD)) / vAntYTD) : null,
@@ -1255,6 +1269,7 @@ EVALUATE
         principal.ventasAct     = num(suma("ventasAct"));
         principal.margenAct     = num(suma("margenAct"));
         principal.ventasMes     = num(suma("ventasMes"));
+        principal.ventasSem     = num(suma("ventasSem"));
 
         const pct = (m, b) => (b ? num((100 * m) / b) : null);
         const cob = (b, v) => (v ? num((100 * b) / v) : 0);
@@ -1356,12 +1371,13 @@ EVALUATE
             porAgente.set(agente, {
               _id: docId(agente), agente, anoAnterior: anoAnt, anoActual: anoAct,
               tipo: d.tipoAgente || null,
+              equipo: d.equipoAgente || null,
               ambito: d.ambitoAgente || null,
               objetivoMargen: d.objetivoMargen ?? null,
               ventasAntFull: 0, margenAntFull: 0, baseAntFull: 0,
               ventasAntYTD: 0, margenAntYTD: 0, baseAntYTD: 0,
               ventasAct: 0, margenAct: 0, baseAct: 0,
-              ventasMes: 0, clientes: 0, clientesConVentaMes: 0,
+              ventasMes: 0, ventasSem: 0, clientes: 0, clientesConVentaMes: 0,
             });
           }
           d.agente = agente;   // se persiste: permite filtrar por comercial
@@ -1370,6 +1386,7 @@ EVALUATE
           a.ventasAntYTD  += d.ventasAntYTD;  a.margenAntYTD  += d.margenAntYTD;
           a.ventasAct     += d.ventasAct;     a.margenAct     += d.margenAct;
           a.ventasMes     += d.ventasMes;
+          a.ventasSem     += d.ventasSem || 0;
           a.baseAntFull += d.ventasAntFull * (d.coberturaAntFull / 100);
           a.baseAntYTD  += d.ventasAntYTD  * (d.coberturaAntYTD / 100);
           a.baseAct     += d.ventasAct     * (d.coberturaAct / 100);
@@ -1388,6 +1405,7 @@ EVALUATE
             ventasAntYTD: num(a.ventasAntYTD),   margenAntYTD: num(a.margenAntYTD),
             ventasAct: num(a.ventasAct),         margenAct: num(a.margenAct),
             ventasMes: num(a.ventasMes),
+            ventasSem: num(a.ventasSem),
             // El % se calcula sobre la venta con coste fiable, no sobre
             // la venta total, o saldria diluido.
             margenPctAntFull: p(a.margenAntFull, a.baseAntFull),
@@ -1413,13 +1431,13 @@ EVALUATE
         const tot = [...porAgente.values()].reduce((t, a) => {
           for (const k of ["ventasAntFull","margenAntFull","baseAntFull",
                            "ventasAntYTD","margenAntYTD","baseAntYTD",
-                           "ventasAct","margenAct","baseAct","ventasMes",
+                           "ventasAct","margenAct","baseAct","ventasMes","ventasSem",
                            "clientes","clientesConVentaMes"]) t[k] += a[k];
           return t;
         }, { _id: "_TOTAL", agente: "_TOTAL", anoAnterior: anoAnt, anoActual: anoAct,
              ventasAntFull:0, margenAntFull:0, baseAntFull:0,
              ventasAntYTD:0, margenAntYTD:0, baseAntYTD:0,
-             ventasAct:0, margenAct:0, baseAct:0, ventasMes:0,
+             ventasAct:0, margenAct:0, baseAct:0, ventasMes:0, ventasSem:0,
              clientes:0, clientesConVentaMes:0 });
         resumen.push(cerrar(tot));
 
