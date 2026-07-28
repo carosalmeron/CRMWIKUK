@@ -1639,7 +1639,13 @@ EVALUATE
     }
 
     // ── 1 bis. Pedidos planificados ──
-    if (activo("pedidos")) try {
+    // Con margen de tiempo: si la consulta de ventas ya se ha comido casi
+    // todo el limite de Vercel, se salta y entra en la siguiente pasada.
+    // Mas vale una sincronizacion parcial que un timeout que no escribe nada.
+    const quedanSegundos = () => 55 - Math.round((Date.now() - t0) / 1000);
+    if (activo("pedidos") && quedanSegundos() < 12) {
+      log.pedidos = `omitido, quedaban ${quedanSegundos()} s`;
+    } else if (activo("pedidos")) try {
       const filas = await pbiQuery(token, Q.pedidos);
       const docs = filas.map((r, i) => {
         const cli = String(pick(r, "Cliente") || "").trim();
