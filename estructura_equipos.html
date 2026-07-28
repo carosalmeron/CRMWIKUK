@@ -15,6 +15,7 @@
     --interkey:#C77B14;
     --francia:#2563A8;
     --portugal:#8A3D8F;
+    --distrib:#4A5568;
     --alerta:#B4232A;
   }
   *{box-sizing:border-box}
@@ -50,6 +51,8 @@
   }
   .rama-cab.wikuk{border-left-color:var(--wikuk)}
   .rama-cab.interkey{border-left-color:var(--interkey)}
+  .rama-cab.distribuidor{border-left-color:var(--distrib)}
+  .rama-cab.francia{border-left-color:var(--francia)}
   .rama-nom{font-weight:800;font-size:15px;letter-spacing:.02em}
   .rama-meta{font-size:12px;color:var(--tenue);margin-left:auto;text-align:right}
   .rama-imp{font-variant-numeric:tabular-nums;font-weight:700;font-size:15px}
@@ -143,11 +146,17 @@ const CLAVE_INICIAL = "1234";
 // franceses de Discob no traen ese campo, así que caen en Francia por defecto.
 // Francia y Portugal cuelgan de Interkey, según lo acordado.
 const EQUIPOS = {
-  WIKUK:    {nombre:"WIKUK",    color:"var(--wikuk)",    padre:null},
-  INTERKEY: {nombre:"INTERKEY", color:"var(--interkey)", padre:null},
-  FRANCIA:  {nombre:"Francia (Discob)", color:"var(--francia)",  padre:"INTERKEY"},
-  PORTUGAL: {nombre:"Portugal",         color:"var(--portugal)", padre:"INTERKEY"},
+  WIKUK:        {nombre:"WIKUK",            color:"var(--wikuk)",    padre:null},
+  INTERKEY:     {nombre:"INTERKEY",         color:"var(--interkey)", padre:null},
+  FRANCIA:      {nombre:"FRANCIA (Discob)", color:"var(--francia)",  padre:null},
+  DISTRIBUIDOR: {nombre:"DISTRIBUIDOR",     color:"var(--distrib)",  padre:null},
 };
+
+// Portugal deja de ser una rama: toda su venta se atribuye a Miguel, que es
+// quien figura en Power BI como responsable del mercado, y queda en Interkey.
+const PORTUGAL_EN = "MIGUEL";
+const EQUIPO_DE_MIGUEL = "INTERKEY";
+
 
 const $ = (id) => document.getElementById(id);
 const eur = (n) => Math.round(n||0).toLocaleString("es-ES") + " €";
@@ -207,10 +216,13 @@ async function leerColeccion(nombre){
 
 // A qué equipo pertenece un agente de Power BI
 function equipoDe(ag){
+  // Distribuidor es una figura propia, no encaja en la division comercial:
+  // se separa aunque Power BI lo tenga marcado como Wikuk o Interkey.
+  if(norm(ag.tipo)==="DISTRIBUIDOR") return "DISTRIBUIDOR";
   const e=norm(ag.equipo);
   if(e==="WIKUK")    return "WIKUK";
   if(e.startsWith("INTERKEY")) return "INTERKEY";
-  if(e==="PORTUGAL") return "PORTUGAL";
+  if(e==="PORTUGAL") return "_PORTUGAL";   // marca temporal, se fusiona
   return "FRANCIA";   // sin GRUPONIVEL4 = comerciales de Discob
 }
 
@@ -228,7 +240,7 @@ async function cargar(){
       .map(a => ({
         clave: norm(a._id),
         nombre: a.agente || a._id,
-        equipo: equipoDe(a),
+        equipo: equipoDe({equipo:a.equipo, tipo:a.tipo}),
         ventasAct: a.ventasAct||0,
         ventasAntYTD: a.ventasAntYTD||0,
         ventasMes: a.ventasMes||0,
@@ -239,6 +251,38 @@ async function cargar(){
         tipo: a.tipo||"",
       }))
       .sort((a,b)=>b.ventasAct-a.ventasAct);
+
+    // ── Consolidar Portugal en un unico comercial ──
+    const portugueses = AGENTES.filter(a => a.equipo==="_PORTUGAL");
+    let destino = AGENTES.find(a => a.clave===PORTUGAL_EN);
+    if(portugueses.length){
+      if(!destino){
+        // Si Miguel no aparece con ventas propias, se crea la ficha destino
+        destino = {clave:PORTUGAL_EN, nombre:PORTUGAL_EN, equipo:EQUIPO_DE_MIGUEL,
+          ventasAct:0, ventasAntYTD:0, ventasMes:0, margen:null, objetivo:null,
+          variacion:null, clientes:0, tipo:"Comercial", fusiona:[]};
+        AGENTES.push(destino);
+      }
+      destino.equipo=EQUIPO_DE_MIGUEL;
+      destino.fusiona = destino.fusiona || [];
+      // Margen ponderado por venta: promediar sin ponderar falsearia el dato
+      let baseM = (destino.margen!=null ? destino.margen*destino.ventasAct : 0);
+      let baseV = (destino.margen!=null ? destino.ventasAct : 0);
+      for(const p of portugueses){
+        if(p===destino) continue;
+        destino.ventasAct    += p.ventasAct;
+        destino.ventasAntYTD += p.ventasAntYTD;
+        destino.ventasMes    += p.ventasMes;
+        destino.clientes     += p.clientes;
+        if(p.margen!=null){ baseM += p.margen*p.ventasAct; baseV += p.ventasAct; }
+        destino.fusiona.push(p.nombre);
+        p.absorbido = true;
+      }
+      if(baseV) destino.margen = baseM/baseV;
+      destino.variacion = destino.ventasAntYTD
+        ? (destino.ventasAct-destino.ventasAntYTD)/destino.ventasAntYTD*100 : null;
+      AGENTES = AGENTES.filter(a => !a.absorbido);
+    }
 
     USUARIOS = usuarios;
 
@@ -322,14 +366,17 @@ function pintarArbol(){
         <td class="n">${eur(a.ventasAct)}</td>
         <td class="n ${a.variacion<0?"neg":"pos"}">${a.variacion!=null?a.variacion.toFixed(1)+" %":"—"}</td>
         <td class="n">${a.margen!=null?a.margen.toFixed(1)+" %":"—"}</td>
-        <td>${a.creado?"sí":"<strong>falta</strong>"}</td>
+        <td>${a.creado?"sí":"<strong>falta</strong>"}${
+          a.fusiona&&a.fusiona.length
+            ? `<br><span style="color:var(--tenue);font-size:11px">incluye ${a.fusiona.join(", ")}</span>`
+            : ""}</td>
       </tr>`;
     }
     html+=`</tbody></table></details></div>`;
     return html;
   };
 
-  cont.innerHTML = bloque("WIKUK") + bloque("INTERKEY");
+  cont.innerHTML = Object.keys(EQUIPOS).map(bloque).join("");
   const huerfanos=AGENTES.filter(a=>!EQUIPOS[a.equipo]);
   if(huerfanos.length) cont.innerHTML+=`<div class="aviso">${huerfanos.length} vendedores sin equipo reconocible.</div>`;
 }
@@ -400,14 +447,13 @@ async function crearUsuarios(){
     // El equipo del CRM solo entiende WIKUK e INTERKEY; Francia y Portugal
     // cuelgan de Interkey, así que sus vendedores se guardan como INTERKEY
     // y conservan su grupo real en el campo subequipo.
-    const equipoCRM = (a.equipo==="WIKUK") ? "WIKUK" : "INTERKEY";
+    const equipoCRM = a.equipo;   // ramas planas: WIKUK, INTERKEY, FRANCIA, DISTRIBUIDOR
     const usuario={
       id, nombre:a.nombre, rol:"agente",
-      equipo:equipoCRM, subequipo:EQUIPOS[a.equipo].nombre,
+      equipo:equipoCRM,
       user:id, username:id, grupoAgente:a.clave, catalogoVendedor:a.clave,
       email:"", activo:true, icon:"🧑‍💼",
-      color: a.equipo==="WIKUK"?"#1F9D55":a.equipo==="INTERKEY"?"#C77B14":
-             a.equipo==="FRANCIA"?"#2563A8":"#8A3D8F",
+      color: {WIKUK:"#1F9D55",INTERKEY:"#C77B14",FRANCIA:"#2563A8",DISTRIBUIDOR:"#4A5568"}[a.equipo]||"#6B7684",
       creadoDesde:"estructura_equipos",
       creadoEl:new Date().toISOString(),
     };
