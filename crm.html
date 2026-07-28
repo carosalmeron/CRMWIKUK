@@ -30089,7 +30089,33 @@ async function cargarVentasPBI(){
     }
     if(altas) console.log(`[PBI] ${altas} agentes añadidos a AGENTES_DATA desde USUARIOS`);
 
-    let n=0;
+    // ── Objetivos importados desde los Excel de reporting ──
+    // Un documento por comercial en pbi_objetivos, con sem_1..sem_53,
+    // mes_1..mes_12 y mgMes_1..mgMes_12. Los que no tienen presupuesto
+    // llevan como objetivo su venta del año anterior (origen marcado).
+    const objetivos={};
+    try{
+      const ro=await fetch(`${FB_BASE}/pbi_objetivos?pageSize=300`);
+      if(ro.ok){
+        const jo=await ro.json();
+        for(const doc of (jo.documents||[])){
+          const id=doc.name.split('/').pop().toUpperCase();
+          const o={};
+          for(const [k,v] of Object.entries(doc.fields||{})){
+            o[k]= v.doubleValue!==undefined ? Number(v.doubleValue)
+                : v.integerValue!==undefined ? Number(v.integerValue)
+                : v.stringValue ?? null;
+          }
+          objetivos[id]=o;
+        }
+        console.log(`[PBI] objetivos cargados para ${Object.keys(objetivos).length} comerciales`);
+      }
+    }catch(e){ console.warn('[PBI] sin objetivos:',e.message); }
+
+    const semNum=(typeof getSemanaISO==='function')?getSemanaISO():1;
+    const mesNum=new Date().getMonth()+1;
+
+    let n=0, conObj=0;
     for(const ag of AGENTES_DATA){
       const usr=USUARIOS.find(u=>u.id===ag.id);
       const clave=(usr&&usr.grupoAgente ? usr.grupoAgente : ag.id).toUpperCase();
@@ -30114,6 +30140,20 @@ async function cargarVentasPBI(){
       ag.pbiClientes    = d.clientes;
       ag.pbiActivos     = d.activos;
       ag.pbiCobertura   = d.cobertura;
+
+      const ob=objetivos[clave];
+      if(ob){
+        const estimado = ob.origen==='ventas_ano_anterior';
+        ag.oAnual = Math.round(ob.objAnual||0);
+        ag.oMes   = Math.round(estimado ? (ob.objMesRef||0) : (ob['mes_'+mesNum]||0));
+        ag.oSem   = Math.round(estimado ? (ob.objSemRef||0) : (ob['sem_'+semNum]||0));
+        const mg  = ob['mgMes_'+mesNum];
+        if(mg) ag.oMb = Math.round(mg*10)/10;
+        // Se marca para poder distinguir en pantalla un presupuesto real
+        // de una referencia calculada con la venta del año pasado.
+        ag.objEstimado = !!estimado;
+        conObj++;
+      }
       n++;
     }
 
@@ -30142,7 +30182,7 @@ async function cargarVentasPBI(){
     }
     window.__PBI_FUERA_CRM__=fuera;
 
-    console.log(`[PBI] ventas reales cargadas en ${n} de ${AGENTES_DATA.length} agentes`);
+    console.log(`[PBI] ventas reales en ${n} agentes · objetivos en ${conObj}`);
     if(n===0) console.warn('[PBI] ningun agente cuadro. Revisa que USUARIOS[].grupoAgente coincida con los ids de pbi_resumen_agente');
     return n>0;
   }catch(e){
