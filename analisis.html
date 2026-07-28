@@ -43,6 +43,16 @@
   .fila .pct{font-size:12px;font-weight:700}
   .barra{height:3px;border-radius:2px;background:#EEF1F4;margin-top:5px;overflow:hidden}
   .barra i{display:block;height:100%}
+  .pulsa{cursor:pointer}
+  .pulsa:active{background:#F4F6F8}
+  .chev{color:#B9C2CC;font-size:20px;line-height:1;margin-left:4px}
+  .atras{display:inline-flex;align-items:center;gap:6px;background:none;border:none;
+    color:var(--tenue);font:inherit;font-size:13px;font-weight:600;cursor:pointer;
+    padding:0;margin-bottom:12px}
+  .etiq{display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.04em;
+    padding:2px 7px;border-radius:20px;background:#EEF1F4;color:var(--tenue);margin-left:6px}
+  .etiq.mal{background:#FDECEC;color:var(--baja)}
+  .etiq.bien{background:#E9F6EF;color:var(--sube)}
   .vacio{padding:18px 15px;color:var(--tenue);font-size:13px;text-align:center}
   .pie{margin-top:22px;font-size:11.5px;color:var(--tenue);text-align:center}
   .cargando{padding:40px 0;text-align:center;color:var(--tenue);font-size:14px}
@@ -142,7 +152,7 @@ function filaAgente(a, extra){
   const v=a.variacionPct;
   const color = v===null?"":v<0?"baja":"sube";
   const ancho = Math.min(100, Math.abs(v||0));
-  return `<div class="fila">
+  return `<div class="fila pulsa" onclick="verAgente('${String(a._id).replace(/'/g,"")}')">
     <div>
       <div class="nom">${a.agente||a._id}</div>
       <div class="det">${extra||""}</div>
@@ -151,9 +161,108 @@ function filaAgente(a, extra){
       <div class="imp">${eur(a.ventasAct)}</div>
       <div class="pct ${color}">${v!==null?pct(v):"—"}</div>
     </div>
+    <span class="chev">›</span>
   </div>
   <div style="padding:0 15px 9px"><div class="barra">
     <i style="width:${ancho}%;background:${v<0?"#B4232A":"#12794A"}"></i></div></div>`;
+}
+
+let CACHE={agentes:[],meta:null};
+
+// Detalle de un comercial: de donde viene su caida o su crecimiento.
+// Se leen sus clientes con una consulta filtrada, no la coleccion entera.
+async function verAgente(id){
+  const a=CACHE.agentes.find(x=>x._id===id);
+  if(!a) return;
+  window.scrollTo(0,0);
+  $("ambito").textContent=a.agente||id;
+  $("app").innerHTML=`<div class="cargando">Cargando sus clientes…</div>`;
+
+  let clientes=[];
+  try{
+    const r=await fetch(`${BASE}:runQuery`,{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({structuredQuery:{
+        from:[{collectionId:"pbi_ventas_cliente"}],
+        where:{fieldFilter:{field:{fieldPath:"agente"},op:"EQUAL",
+               value:{stringValue:a._id}}},
+        limit:800,
+      }}),
+    });
+    const j=await r.json();
+    clientes=(Array.isArray(j)?j:[]).filter(f=>f.document).map(f=>{
+      const o={_id:f.document.name.split("/").pop()};
+      for(const [k,v] of Object.entries(f.document.fields||{})) o[k]=val(v);
+      return o;
+    }).filter(c=>!c.fusionadoEn && !c.intercompany);
+  }catch(e){
+    $("app").innerHTML=`<div class="err">No se han podido leer sus clientes: ${e.message}</div>`;
+    return;
+  }
+
+  const dif=(c)=>(c.ventasAct||0)-(c.ventasAntYTD||0);
+  const pierde=clientes.filter(c=>dif(c)<-500).sort((x,y)=>dif(x)-dif(y));
+  const gana=clientes.filter(c=>dif(c)>500).sort((x,y)=>dif(y)-dif(x));
+  const dormidos=clientes.filter(c=>!(c.ventasAct>0) && (c.ventasAntFull||0)>1000)
+    .sort((x,y)=>(y.ventasAntFull||0)-(x.ventasAntFull||0));
+  const perdido=pierde.reduce((t,c)=>t+dif(c),0);
+  const ganado=gana.reduce((t,c)=>t+dif(c),0);
+
+  const fecha=(f)=>f?new Date(f).toLocaleDateString("es-ES"):"—";
+  const filaCli=(c,extra)=>`<div class="fila">
+    <div style="min-width:0">
+      <div class="nom">${c.nombre||c.cliente}</div>
+      <div class="det">${c.poblacion||""}${extra?" · "+extra:""}</div>
+    </div>
+    <div class="der">
+      <div class="imp">${eur(c.ventasAct)}</div>
+      <div class="pct ${dif(c)<0?"baja":"sube"}">${dif(c)>0?"+":""}${eur(dif(c))}</div>
+    </div>
+  </div>`;
+
+  $("app").innerHTML=`
+    <button class="atras" onclick="arrancar()">← Volver</button>
+
+    <div class="veredicto">
+      <p class="titular">${
+        perdido && Math.abs(perdido)>ganado
+          ? `Pierde ${eur(Math.abs(perdido))} en ${pierde.length} clientes y recupera ${eur(ganado)} en otros ${gana.length}.`
+          : `Gana ${eur(ganado)} en ${gana.length} clientes y cede ${eur(Math.abs(perdido))} en otros ${pierde.length}.`
+      }</p>
+      <div class="cifras">
+        <div class="cifra"><div class="v">${eur(a.ventasAct)}</div><div class="e">Este año</div></div>
+        <div class="cifra"><div class="v ${a.variacionPct<0?"baja":"sube"}">${
+          a.variacionPct!=null?pct(a.variacionPct):"—"}</div><div class="e">vs 2025</div></div>
+        <div class="cifra"><div class="v">${(a.margenPctAct||0).toFixed(1)} %</div>
+          <div class="e">Margen${a.objetivoMargen?` · obj ${a.objetivoMargen.toFixed(0)} %`:""}</div></div>
+        <div class="cifra"><div class="v">${clientes.length}</div><div class="e">Clientes</div></div>
+      </div>
+    </div>
+
+    <h2>Dónde pierde <span class="etiq mal">${eur(Math.abs(perdido))}</span></h2>
+    <div class="grupo">${pierde.length
+      ? pierde.slice(0,15).map(c=>filaCli(c,`venía de ${eur(c.ventasAntYTD)}`)).join("")
+      : `<p class="vacio">No pierde volumen en ningún cliente.</p>`}</div>
+
+    <h2>Dónde gana <span class="etiq bien">${eur(ganado)}</span></h2>
+    <div class="grupo">${gana.length
+      ? gana.slice(0,10).map(c=>filaCli(c,`venía de ${eur(c.ventasAntYTD)}`)).join("")
+      : `<p class="vacio">Sin crecimientos.</p>`}</div>
+
+    <h2>Dejaron de comprar · ${dormidos.length}</h2>
+    <div class="grupo">${dormidos.length
+      ? dormidos.slice(0,15).map(c=>`<div class="fila">
+          <div style="min-width:0">
+            <div class="nom">${c.nombre||c.cliente}</div>
+            <div class="det">${c.poblacion||""} · última venta ${fecha(c.ultimaVenta)}</div>
+          </div>
+          <div class="der"><div class="imp">${eur(c.ventasAntFull)}</div>
+            <div class="pct baja">en 2025</div></div>
+        </div>`).join("")
+      : `<p class="vacio">Todos sus clientes siguen comprando.</p>`}</div>
+
+    <p class="pie">Nada en 2026 y más de 1.000 € en 2025. Es la lista de recuperación.</p>
+  `;
 }
 
 async function arrancar(){
@@ -161,16 +270,28 @@ async function arrancar(){
   $("quien").textContent = u.nombre || u.username || "Sin identificar";
 
   try{
-    const [agentesRaw, usuarios, meta] = await Promise.all([
+    const [agentesRaw, usuarios, ajustes, meta] = await Promise.all([
       leer("pbi_resumen_agente"),
       leer("usuarios").catch(()=>[]),
+      leer("pbi_ajustes").catch(()=>[]),
       fetch(`${BASE}/pbi_meta/estado`).then(r=>r.ok?r.json():null).catch(()=>null),
     ]);
 
+    // Los cambios de rama hechos en la herramienta de estructura mandan sobre
+    // lo que traiga Power BI. Sin esto, Francia aparece como "sin equipo".
+    const AJ={}; for(const a of ajustes) AJ[norm(a._id)]=a;
+    for(const a of agentesRaw){
+      const aj=AJ[norm(a._id)];
+      if(aj && aj.equipo && aj.equipo!=="_EXCLUIR") a.equipo=aj.equipo;
+      if(aj && aj.equipo==="_EXCLUIR") a._excluido=true;
+    }
+
     const agentes = agentesRaw
+      .filter(a=>!a._excluido)
       .filter(a=>a._id!=="_TOTAL")
       .filter(a=>(a.ventasAct||0)>0 || (a.ventasAntYTD||0)>0);
 
+    CACHE.agentes=agentes;
     const alc = alcance(u, agentes, usuarios);
     $("ambito").textContent = alc.titulo;
 
@@ -227,6 +348,12 @@ async function arrancar(){
       }
     }else{
       const a=alc.lista[0];
+      html += `<div class="grupo" style="margin-bottom:14px">
+        <div class="fila pulsa" onclick="verAgente('${String(a._id).replace(/'/g,"")}')">
+          <div><div class="nom">Ver dónde ganas y dónde pierdes</div>
+            <div class="det">Cliente a cliente</div></div>
+          <span class="chev" style="margin-left:auto">›</span>
+        </div></div>`;
       const dormidos=(a.clientes||0)-(a.clientesConVentaMes||0);
       html += `<h2>Tu cartera</h2><div class="grupo">
         <div class="fila"><div><div class="nom">${a.clientes||0} clientes asignados</div>
