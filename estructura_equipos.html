@@ -189,6 +189,7 @@ let USUARIOS = [];   // los que ya existen en el CRM
 let FALTAN = [];     // los que hay que crear
 let CRM_USUARIOS = [];  // usuarios del CRM, para poder reasignar a mano
 let AJUSTES = {};       // decisiones manuales guardadas (rama y usuario)
+let PENDIENTES_FUSION = [];  // fusiones hechas en esta sesion, aun sin guardar
 
 function estado(msg, tipo){
   const e=$("estado");
@@ -230,6 +231,38 @@ async function leerColeccion(nombre){
 }
 
 // A qué equipo pertenece un agente de Power BI
+// Suma la venta de varios vendedores en uno solo. El margen se recalcula
+// ponderado por venta: promediar sin ponderar daria un dato falso.
+function fusionar(origenes, destinoDe){
+  for(const p of origenes){
+    if(p.absorbido) continue;
+    const claveDestino = destinoDe(p);
+    if(!claveDestino || claveDestino===p.clave) continue;
+    let d = AGENTES.find(x=>x.clave===claveDestino && !x.absorbido);
+    if(!d){
+      d = {clave:claveDestino, nombre:claveDestino, equipo:p.equipo,
+           ventasAct:0, ventasAntYTD:0, ventasMes:0, margen:null, objetivo:null,
+           variacion:null, clientes:0, tipo:p.tipo||"", fusiona:[]};
+      AGENTES.push(d);
+    }
+    d.fusiona = d.fusiona || [];
+    let baseM = (d.margen!=null ? d.margen*d.ventasAct : 0);
+    let baseV = (d.margen!=null ? d.ventasAct : 0);
+    if(p.margen!=null){ baseM += p.margen*p.ventasAct; baseV += p.ventasAct; }
+    d.ventasAct    += p.ventasAct;
+    d.ventasAntYTD += p.ventasAntYTD;
+    d.ventasMes    += p.ventasMes;
+    d.clientes     += p.clientes;
+    if(baseV) d.margen = baseM/baseV;
+    d.variacion = d.ventasAntYTD
+      ? (d.ventasAct-d.ventasAntYTD)/d.ventasAntYTD*100 : null;
+    d.fusiona.push(p.nombre);
+    if(p.fusiona) d.fusiona.push(...p.fusiona);
+    p.absorbido = true;
+  }
+  AGENTES = AGENTES.filter(a=>!a.absorbido);
+}
+
 function equipoDe(ag){
   // Distribuidor es una figura propia, no encaja en la division comercial:
   // se separa aunque Power BI lo tenga marcado como Wikuk o Interkey.
@@ -280,36 +313,20 @@ async function cargar(){
       if(aj && aj.equipo) a.equipo = aj.equipo;
     }
 
+    // Fusiones pedidas a mano: un vendedor absorbe la venta de otro.
+    // Se guardan en pbi_ajustes con el campo fusionEn.
+    for(const a of AGENTES){
+      const aj = AJUSTES[a.clave];
+      if(aj && aj.fusionEn) a.fusionEn = norm(aj.fusionEn);
+    }
+    fusionar(AGENTES.filter(a=>a.fusionEn), (a)=>a.fusionEn);
+
     // ── Consolidar Portugal en un unico comercial ──
     const portugueses = AGENTES.filter(a => a.equipo==="_PORTUGAL");
-    let destino = AGENTES.find(a => a.clave===PORTUGAL_EN);
     if(portugueses.length){
-      if(!destino){
-        // Si Miguel no aparece con ventas propias, se crea la ficha destino
-        destino = {clave:PORTUGAL_EN, nombre:PORTUGAL_EN, equipo:EQUIPO_DE_MIGUEL,
-          ventasAct:0, ventasAntYTD:0, ventasMes:0, margen:null, objetivo:null,
-          variacion:null, clientes:0, tipo:"Comercial", fusiona:[]};
-        AGENTES.push(destino);
-      }
-      destino.equipo=EQUIPO_DE_MIGUEL;
-      destino.fusiona = destino.fusiona || [];
-      // Margen ponderado por venta: promediar sin ponderar falsearia el dato
-      let baseM = (destino.margen!=null ? destino.margen*destino.ventasAct : 0);
-      let baseV = (destino.margen!=null ? destino.ventasAct : 0);
-      for(const p of portugueses){
-        if(p===destino) continue;
-        destino.ventasAct    += p.ventasAct;
-        destino.ventasAntYTD += p.ventasAntYTD;
-        destino.ventasMes    += p.ventasMes;
-        destino.clientes     += p.clientes;
-        if(p.margen!=null){ baseM += p.margen*p.ventasAct; baseV += p.ventasAct; }
-        destino.fusiona.push(p.nombre);
-        p.absorbido = true;
-      }
-      if(baseV) destino.margen = baseM/baseV;
-      destino.variacion = destino.ventasAntYTD
-        ? (destino.ventasAct-destino.ventasAntYTD)/destino.ventasAntYTD*100 : null;
-      AGENTES = AGENTES.filter(a => !a.absorbido);
+      fusionar(portugueses, ()=>PORTUGAL_EN);
+      const d = AGENTES.find(a=>a.clave===PORTUGAL_EN);
+      if(d) d.equipo = EQUIPO_DE_MIGUEL;
     }
 
     USUARIOS = usuarios;
@@ -436,11 +453,19 @@ function pintarArbol(){
             `<option value="${u.id}"${a.usuarioCRM===u.id?" selected":""}>${u.nombre}${
               u.origen==="portal"?" (portal)":""}</option>`).join("")}
         </select>${a.reasignado?`<br><span style="color:var(--alerta);font-size:11px">sin guardar</span>`:""}</td>
-        <td><select data-a="${i}" onchange="moverRama(this)">
+        <td>
+          <select data-a="${i}" onchange="moverRama(this)">
           ${Object.keys(EQUIPOS).map(k=>
             `<option value="${k}"${a.equipo===k?" selected":""}>${EQUIPOS[k].nombre}</option>`).join("")}
           <option value="_EXCLUIR"${a.equipo==="_EXCLUIR"?" selected":""}>— No incluir —</option>
-        </select></td>
+          </select>
+          <select data-f="${i}" onchange="fusionarCon(this)" style="margin-top:5px">
+            <option value="">— Sin fusionar —</option>
+            ${AGENTES.filter(x=>x!==a&&x.equipo!=="_EXCLUIR")
+              .sort((x,y)=>String(x.nombre).localeCompare(String(y.nombre),"es"))
+              .map(x=>`<option value="${x.clave}">Fusionar en ${x.nombre}</option>`).join("")}
+          </select>
+        </td>
       </tr>`;
     }
     html+=`</tbody></table></details></div>`;
@@ -493,6 +518,23 @@ function pintarFaltantes(){
   cont.innerHTML=html;
 }
 
+function fusionarCon(sel){
+  const a=AGENTES[+sel.dataset.f];
+  const destino=AGENTES.find(x=>x.clave===sel.value);
+  if(!a||!destino) return;
+  if(!confirm(
+      `La venta de ${a.nombre} (${eur(a.ventasAct)}) pasará a ${destino.nombre}.\n`+
+      `${a.nombre} dejará de aparecer como vendedor. ¿Continuar?`)){
+    pintarArbol(); return;
+  }
+  a.fusionEn=destino.clave;
+  a.pendiente=true;
+  PENDIENTES_FUSION.push({clave:a.clave, nombre:a.nombre, en:destino.clave, equipo:a.equipo});
+  fusionar([a], ()=>destino.clave);
+  destino.pendiente=true;
+  pintarArbol(); pintarFaltantes(); refrescarBarra();
+}
+
 function reasignar(sel){
   const a=AGENTES[+sel.dataset.u];
   if(!a) return;
@@ -527,11 +569,10 @@ function moverRama(sel){
 }
 
 function refrescarBarra(){
-  const p=AGENTES.filter(a=>a.pendiente||a.reasignado);
+  const n=AGENTES.filter(a=>a.pendiente||a.reasignado).length+PENDIENTES_FUSION.length;
   const b=$("barra");
-  b.hidden = p.length===0;
-  if(p.length) $("barra-txt").textContent =
-    `${p.length} cambio${p.length>1?"s":""} sin guardar`;
+  b.hidden = n===0;
+  if(n) $("barra-txt").textContent = `${n} cambio${n>1?"s":""} sin guardar`;
 }
 
 function cambiarEquipo(sel){
@@ -554,9 +595,27 @@ function aFields(o){
 // actualizarlos en su ficha, no crearlos de nuevo.
 async function guardarRamas(){
   const cambiados=AGENTES.filter(a=>a.pendiente||a.reasignado);
-  if(!cambiados.length){ estado("No hay cambios pendientes de guardar."); return; }
+  if(!cambiados.length && !PENDIENTES_FUSION.length){
+    estado("No hay cambios pendientes de guardar."); return; }
   const btn=$("guardar"); if(btn){btn.disabled=true; btn.textContent="Guardando…";}
-  log(`— Guardando ${cambiados.length} asignaciones —`);
+  log(`— Guardando ${cambiados.length+PENDIENTES_FUSION.length} cambios —`);
+
+  // Las fusiones se guardan por el vendedor absorbido, que es quien lleva
+  // el campo fusionEn. Al recargar, su venta vuelve a sumarse en el destino.
+  for(const f of PENDIENTES_FUSION){
+    try{
+      const r=await fetch(`${BASE}/pbi_ajustes/${f.clave}`,{
+        method:"PATCH", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify(aFields({
+          equipo:f.equipo, fusionEn:f.en, vendedor:f.nombre,
+          guardadoEl:new Date().toISOString(),
+        })),
+      });
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      log(`  ✓ ${f.nombre} fusionado en ${f.en}`);
+    }catch(e){ log(`  ✗ fusión de ${f.nombre}: ${e.message}`); }
+  }
+  PENDIENTES_FUSION=[];
   let ok=0;
   for(const a of cambiados){
     const uid=a.usuarioCRM;
