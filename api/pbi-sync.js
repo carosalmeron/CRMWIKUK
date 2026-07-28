@@ -160,6 +160,14 @@ EVALUATE
 
     "VentaMes", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
     "VentaSem", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniSem && ${M.vFecha} <= _hoy),
+    // Mismo mes y misma semana del ano pasado, para poder comparar cuando
+    // no hay presupuesto cargado. Sin esto el CRM solo puede medir contra
+    // objetivo, y si el objetivo esta a cero no hay referencia ninguna.
+    "VentaMesAnt", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAnt && MONTH(${M.vFecha}) = MONTH(_hoy)
+        && DAY(${M.vFecha}) <= DAY(_hoy))),
+    "VentaSemAnt", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, ${M.vFecha} >= _iniSem - 364 && ${M.vFecha} <= _corteAnt)),
     "UltimaVenta", CALCULATE(MAX(${M.vFecha}))
   )
   ORDER BY [VentaAct] DESC`,
@@ -1130,6 +1138,8 @@ EVALUATE
         const vAct     = num(pick(r, "VentaAct"));
         const vMes     = num(pick(r, "VentaMes"));
         const vSem     = num(pick(r, "VentaSem"));
+        const vMesAnt  = num(pick(r, "VentaMesAnt"));
+        const vSemAnt  = num(pick(r, "VentaSemAnt"));
 
         // Bases limpias (lineas con coste creible) para cada ventana
         const bAntFull = num(pick(r, "VentaAntFullOk"));
@@ -1184,6 +1194,8 @@ EVALUATE
 
           ventasMes: vMes,
           ventasSem: vSem,
+          ventasMesAnt: vMesAnt,
+          ventasSemAnt: vSemAnt,
 
           // Variacion sobre el mismo periodo, no sobre el ano cerrado
           variacionPct: vAntYTD ? num((100 * (vAct - vAntYTD)) / vAntYTD) : null,
@@ -1275,6 +1287,8 @@ EVALUATE
         principal.margenAct     = num(suma("margenAct"));
         principal.ventasMes     = num(suma("ventasMes"));
         principal.ventasSem     = num(suma("ventasSem"));
+        principal.ventasMesAnt  = num(suma("ventasMesAnt"));
+        principal.ventasSemAnt  = num(suma("ventasSemAnt"));
 
         const pct = (m, b) => (b ? num((100 * m) / b) : null);
         const cob = (b, v) => (v ? num((100 * b) / v) : 0);
@@ -1386,7 +1400,8 @@ EVALUATE
               ventasAntFull: 0, margenAntFull: 0, baseAntFull: 0,
               ventasAntYTD: 0, margenAntYTD: 0, baseAntYTD: 0,
               ventasAct: 0, margenAct: 0, baseAct: 0,
-              ventasMes: 0, ventasSem: 0, clientes: 0, clientesConVentaMes: 0,
+              ventasMes: 0, ventasSem: 0, ventasMesAnt: 0, ventasSemAnt: 0,
+              clientes: 0, clientesConVentaMes: 0,
             });
           }
           d.agente = agente;   // se persiste: permite filtrar por comercial
@@ -1396,6 +1411,8 @@ EVALUATE
           a.ventasAct     += d.ventasAct;     a.margenAct     += d.margenAct;
           a.ventasMes     += d.ventasMes;
           a.ventasSem     += d.ventasSem || 0;
+          a.ventasMesAnt  += d.ventasMesAnt || 0;
+          a.ventasSemAnt  += d.ventasSemAnt || 0;
           a.baseAntFull += d.ventasAntFull * (d.coberturaAntFull / 100);
           a.baseAntYTD  += d.ventasAntYTD  * (d.coberturaAntYTD / 100);
           a.baseAct     += d.ventasAct     * (d.coberturaAct / 100);
@@ -1415,6 +1432,8 @@ EVALUATE
             ventasAct: num(a.ventasAct),         margenAct: num(a.margenAct),
             ventasMes: num(a.ventasMes),
             ventasSem: num(a.ventasSem),
+            ventasMesAnt: num(a.ventasMesAnt),
+            ventasSemAnt: num(a.ventasSemAnt),
             // El % se calcula sobre la venta con coste fiable, no sobre
             // la venta total, o saldria diluido.
             margenPctAntFull: p(a.margenAntFull, a.baseAntFull),
@@ -1441,12 +1460,14 @@ EVALUATE
           for (const k of ["ventasAntFull","margenAntFull","baseAntFull",
                            "ventasAntYTD","margenAntYTD","baseAntYTD",
                            "ventasAct","margenAct","baseAct","ventasMes","ventasSem",
+                           "ventasMesAnt","ventasSemAnt",
                            "clientes","clientesConVentaMes"]) t[k] += a[k];
           return t;
         }, { _id: "_TOTAL", agente: "_TOTAL", anoAnterior: anoAnt, anoActual: anoAct,
              ventasAntFull:0, margenAntFull:0, baseAntFull:0,
              ventasAntYTD:0, margenAntYTD:0, baseAntYTD:0,
              ventasAct:0, margenAct:0, baseAct:0, ventasMes:0, ventasSem:0,
+             ventasMesAnt:0, ventasSemAnt:0,
              clientes:0, clientesConVentaMes:0 });
         resumen.push(cerrar(tot));
 
