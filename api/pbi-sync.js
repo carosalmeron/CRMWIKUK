@@ -653,11 +653,17 @@ export default async function handler(req, res) {
       // del modelo, no solo las cuatro habituales.
       if (req.query.tabla) {
         const t = `'${String(req.query.tabla).replace(/'/g, "")}'`;
+        // &filas=N para traer mas de 3, y &col=X&val=Y para filtrar
+        const n = Math.min(parseInt(req.query.filas, 10) || 3, 500);
+        const cf = req.query.col
+          ? `FILTER(${t}, NOT ISBLANK(${t}[${String(req.query.col).replace(/[\[\]"]/g, "")}]))`
+          : t;
         try {
-          const filas = await pbiQuery(token, `EVALUATE TOPN(3, ${t})`, true);
+          const filas = await pbiQuery(token, `EVALUATE TOPN(${n}, ${cf})`, true);
           out.tablaSolicitada = {
             tabla: t,
             filas: filas.length,
+            datos: filas,
             columnas: Object.keys(filas[0] || {}).map((c) => ({
               nombre: c,
               ejemplos: filas.map((f) => f[c]),
