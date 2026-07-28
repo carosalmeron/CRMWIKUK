@@ -29944,6 +29944,105 @@ async function cargarObjetivosFB(){
   return agentesActualizados > 0;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// cargarVentasPBI() — ventas y margen REALES desde Power BI
+// ═══════════════════════════════════════════════════════════════════════════
+// Lee la coleccion pbi_resumen_agente, que alimenta /api/pbi-sync cada dia
+// a las 13:00 consultando el modelo semantico "Global United Caro CRM".
+//
+// Muta AGENTES_DATA en-place rellenando SOLO los valores reales:
+//   vSem / vMes / vAnual  → ventas semana, mes y año en curso
+//   mb                    → % de margen real del año
+//   oMb                   → objetivo de margen (solo si aun esta a 0)
+//
+// NO toca oSem / oMes / oAnual: esos presupuestos los pone cargarObjetivosFB
+// y no estan en Power BI.
+//
+// El cruce se hace por USUARIOS[].grupoAgente, que coincide con el id de
+// pbi_resumen_agente (DAVIDMAG, CARLOSG, RPIEDRA...).
+// Devuelve true si actualizo al menos un agente.
+// ═══════════════════════════════════════════════════════════════════════════
+async function cargarVentasPBI(){
+  try{
+    const r=await fetch(`${FB_BASE}/pbi_resumen_agente?pageSize=300`);
+    if(!r.ok){ console.warn('[PBI] no se pudo leer pbi_resumen_agente:',r.status); return false; }
+    const j=await r.json();
+
+    const val=(f)=>{
+      if(!f) return null;
+      if(f.doubleValue!==undefined)  return Number(f.doubleValue);
+      if(f.integerValue!==undefined) return Number(f.integerValue);
+      if(f.stringValue!==undefined)  return f.stringValue;
+      if(f.booleanValue!==undefined) return f.booleanValue;
+      return null;
+    };
+
+    const porAgente={};
+    for(const doc of (j.documents||[])){
+      const id=doc.name.split('/').pop();
+      const f=doc.fields||{};
+      porAgente[id.toUpperCase()]={
+        ventasSem:  val(f.ventasSem)||0,
+        ventasMes:  val(f.ventasMes)||0,
+        ventasAct:  val(f.ventasAct)||0,
+        ventasAntYTD:val(f.ventasAntYTD)||0,
+        ventasAntFull:val(f.ventasAntFull)||0,
+        margenPct:  val(f.margenPctAct),
+        objetivoMb: val(f.objetivoMargen),
+        variacion:  val(f.variacionPct),
+        clientes:   val(f.clientes)||0,
+        activos:    val(f.clientesConVentaMes)||0,
+        cobertura:  val(f.coberturaAct)||0,
+        equipo:     val(f.equipo),
+        tipo:       val(f.tipo),
+      };
+    }
+
+    let n=0;
+    for(const ag of AGENTES_DATA){
+      const usr=USUARIOS.find(u=>u.id===ag.id);
+      const clave=(usr&&usr.grupoAgente ? usr.grupoAgente : ag.id).toUpperCase();
+      const d=porAgente[clave];
+      if(!d) continue;
+
+      ag.vSem   = Math.round(d.ventasSem);
+      ag.vMes   = Math.round(d.ventasMes);
+      ag.vAnual = Math.round(d.ventasAct);
+      if(d.margenPct!==null && d.margenPct!==undefined)
+        ag.mb = Math.round(d.margenPct*10)/10;
+      // El objetivo de margen de Power BI solo se aplica si no hay otro puesto
+      if((!ag.oMb || ag.oMb===0) && d.objetivoMb)
+        ag.oMb = Math.round(d.objetivoMb*10)/10;
+
+      // Extras disponibles para el panel, sin romper la estructura previa
+      ag.pbiVarPct      = d.variacion;
+      ag.pbiVentasAntYTD= Math.round(d.ventasAntYTD);
+      ag.pbiVentasAnt   = Math.round(d.ventasAntFull);
+      ag.pbiClientes    = d.clientes;
+      ag.pbiActivos     = d.activos;
+      ag.pbiCobertura   = d.cobertura;
+      n++;
+    }
+
+    // Sello de frescura: si el dato lleva dias sin refrescarse, el cron fallo
+    try{
+      const m=await fetch(`${FB_BASE}/pbi_meta/estado`);
+      if(m.ok){
+        const mj=await m.json();
+        window.__PBI_ULTIMA_SYNC__=mj.fields?.ultimaSync?.stringValue||null;
+      }
+    }catch(e){}
+
+    console.log(`[PBI] ventas reales cargadas en ${n} de ${AGENTES_DATA.length} agentes`);
+    if(n===0) console.warn('[PBI] ningun agente cuadro. Revisa que USUARIOS[].grupoAgente coincida con los ids de pbi_resumen_agente');
+    return n>0;
+  }catch(e){
+    console.warn('[PBI] error cargando ventas:',e.message);
+    return false;
+  }
+}
+
+
 function App(props){
   const [usuario,setUsuario]=useState(function(){
     // Auto-login desde portal
@@ -30148,6 +30247,16 @@ function App(props){
     cargarObjetivosFB().then(ok=>{
       if(ok) setObjVer(v=>v+1);
     });
+  },[]);
+
+  // Ventas reales de Power BI — despues de los objetivos para no pisarlos
+  useEffect(()=>{
+    const t=setTimeout(()=>{
+      cargarVentasPBI().then(ok=>{
+        if(ok) setObjVer(v=>v+1);
+      });
+    },900);
+    return()=>clearTimeout(t);
   },[]);
 
   // Cargar clientes del usuario — query específica por grupoAgente (mucho más rápido)
