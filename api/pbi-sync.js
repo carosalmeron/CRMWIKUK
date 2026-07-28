@@ -1042,6 +1042,82 @@ EVALUATE
     }
   }
 
+  // ?pedidos=1 → radiografia de "00 Entrada Pedidos Global".
+  // Antes de construir nada encima hay que saber si tiene importes de
+  // verdad, que periodo cubre y si el pendiente se puede aislar.
+  if (req.query.pedidos === "1") {
+    const T = "'00 Entrada Pedidos Global'";
+    const out = { ok: true, tabla: T };
+    try {
+      const { token } = await getToken(req);
+
+      out.totales = await pbiQuery(token, `
+EVALUATE
+  ROW(
+    "Lineas",        COUNTROWS(${T}),
+    "Importe",       SUM(${T}[BASE]),
+    "Unidades",      SUM(${T}[UNI]),
+    "LineasConImporte", CALCULATE(COUNTROWS(${T}), FILTER(${T}, ${T}[BASE] > 0)),
+    "ImporteConValor",  CALCULATE(SUM(${T}[BASE]), FILTER(${T}, ${T}[BASE] > 0)),
+    "Clientes",      DISTINCTCOUNT(${T}[CLIENTE]),
+    "Articulos",     DISTINCTCOUNT(${T}[CODIGO]),
+    "Familias",      DISTINCTCOUNT(${T}[FAMILIA]),
+    "PrimerPedido",  MIN(${T}[FECHA]),
+    "UltimoPedido",  MAX(${T}[FECHA]),
+    "PrimeraEntrega",MIN(${T}[FECHAPLANIFICADA]),
+    "UltimaEntrega", MAX(${T}[FECHAPLANIFICADA])
+  )`, true);
+
+      // Reparto por año: sirve para ver si guarda historico o solo lo vivo
+      out.porAno = await pbiQuery(token, `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    "Ano", YEAR(${T}[FECHA]),
+    "Lineas", COUNTROWS(${T}),
+    "Importe", SUM(${T}[BASE])
+  )
+  ORDER BY [Ano] DESC`, true);
+
+      // Lo pendiente de verdad: entrega futura o de los ultimos 60 dias
+      out.pendienteHoy = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+EVALUATE
+  ROW(
+    "LineasFuturas",  CALCULATE(COUNTROWS(${T}), FILTER(${T}, ${T}[FECHAPLANIFICADA] >= _hoy)),
+    "ImporteFuturo",  CALCULATE(SUM(${T}[BASE]),  FILTER(${T}, ${T}[FECHAPLANIFICADA] >= _hoy)),
+    "Lineas60d",      CALCULATE(COUNTROWS(${T}), FILTER(${T}, ${T}[FECHA] >= _hoy - 60)),
+    "Importe60d",     CALCULATE(SUM(${T}[BASE]),  FILTER(${T}, ${T}[FECHA] >= _hoy - 60))
+  )`, true);
+
+      // Que hay en ESVISITA: si distingue pedidos nacidos de una visita,
+      // se puede medir el retorno de la actividad comercial del CRM.
+      out.esVisita = await pbiQuery(token, `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${T}[ESVISITA],
+    "Lineas", COUNTROWS(${T}),
+    "Importe", SUM(${T}[BASE])
+  )`, true);
+
+      // Familias con mas peso, para saber si el codigo es util
+      out.topFamilias = await pbiQuery(token, `
+EVALUATE
+  TOPN(10,
+    SUMMARIZECOLUMNS(
+      ${T}[FAMILIA],
+      "Lineas", COUNTROWS(${T}),
+      "Importe", SUM(${T}[BASE])
+    ),
+    [Importe], DESC)`, true);
+
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
   const dry = req.query.dry === "1"; // ?dry=1 → consulta pero NO escribe
   const t0 = Date.now();
   const log = { dry, ventas: 0, pendiente: 0, stock: 0, errores: [] };
