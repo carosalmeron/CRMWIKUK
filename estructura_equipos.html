@@ -106,6 +106,13 @@
   button.sec{background:#fff;color:var(--texto);border:1px solid var(--linea)}
   button:focus-visible,select:focus-visible{outline:2px solid var(--francia);outline-offset:2px}
   .acciones{display:flex;gap:9px;flex-wrap:wrap;margin-top:14px}
+  .barra{
+    position:sticky;bottom:0;z-index:5;display:flex;align-items:center;gap:12px;
+    background:var(--tinta);color:#fff;border-radius:12px;padding:11px 13px;
+    margin:14px 0;font-size:13px;box-shadow:0 6px 20px rgba(16,26,44,.22);
+  }
+  .barra button{padding:9px 14px;font-size:13px;background:#fff;color:var(--tinta)}
+  .barra span{flex:1}
   .vacio{padding:20px 15px;color:var(--tenue);font-size:13px;text-align:center}
   code{background:#EFF1F5;padding:1px 5px;border-radius:4px;font-size:12px}
   .log{
@@ -130,6 +137,11 @@
 
   <h2>Cómo quedaría</h2>
   <div id="arbol"></div>
+
+  <div id="barra" class="barra" hidden>
+    <span id="barra-txt"></span>
+    <button id="guardar" onclick="guardarRamas()">Guardar cambios</button>
+  </div>
 
   <h2>Vendedores sin usuario en el CRM</h2>
   <div id="faltantes"></div>
@@ -176,6 +188,7 @@ let AGENTES = [];    // los que vienen de Power BI
 let USUARIOS = [];   // los que ya existen en el CRM
 let FALTAN = [];     // los que hay que crear
 let CRM_USUARIOS = [];  // usuarios del CRM, para poder reasignar a mano
+let AJUSTES = {};       // decisiones manuales guardadas (rama y usuario)
 
 function estado(msg, tipo){
   const e=$("estado");
@@ -230,11 +243,18 @@ function equipoDe(ag){
 
 async function cargar(){
   try{
-    const [resumen, usuarios, portal] = await Promise.all([
+    const [resumen, usuarios, portal, ajustes] = await Promise.all([
       leerColeccion("pbi_resumen_agente"),
       leerColeccion("usuarios"),
       leerColeccion("portal_users").catch(()=>[]),
+      leerColeccion("pbi_ajustes").catch(()=>[]),
     ]);
+
+    // Ajustes manuales hechos en esta herramienta. Mandan sobre lo que diga
+    // Power BI: si alguien movio un vendedor de rama, esa decision se respeta
+    // aunque GRUPONIVEL4 siga diciendo otra cosa.
+    AJUSTES = {};
+    for(const a of ajustes) AJUSTES[norm(a._id)] = a;
 
     AGENTES = resumen
       .filter(a => a._id !== "_TOTAL")
@@ -253,6 +273,12 @@ async function cargar(){
         tipo: a.tipo||"",
       }))
       .sort((a,b)=>b.ventasAct-a.ventasAct);
+
+    // Aplicar los ajustes manuales antes de consolidar nada
+    for(const a of AGENTES){
+      const aj = AJUSTES[a.clave];
+      if(aj && aj.equipo) a.equipo = aj.equipo;
+    }
 
     // ── Consolidar Portugal en un unico comercial ──
     const portugueses = AGENTES.filter(a => a.equipo==="_PORTUGAL");
@@ -317,6 +343,12 @@ async function cargar(){
       a.usuarioCRM = u ? (u._id||u.id) : null;
       a.usuarioNombre = u ? (u.nombre||u._id) : null;
       a.origenFicha = u ? (usuarios.some(x=>(x._id||x.id)===(u._id||u.id)) ? "usuarios" : "portal") : null;
+      // Un emparejamiento corregido a mano manda sobre el automatico
+      const aj = AJUSTES[a.clave];
+      if(aj && aj.usuarioCRM !== undefined && aj.usuarioCRM !== null){
+        a.usuarioCRM = aj.usuarioCRM || null;
+        a.creado = !!a.usuarioCRM;
+      }
     }
     FALTAN = AGENTES.filter(a => !a.creado && a.equipo!=="_EXCLUIR");
 
@@ -456,7 +488,6 @@ function pintarFaltantes(){
   html+=`</tbody></table></div>
   <div class="acciones">
     <button id="crear" onclick="crearUsuarios()">Crear ${FALTAN.length} usuarios</button>
-    <button class="sec" id="guardar" onclick="guardarRamas()">Guardar asignaciones</button>
     <button class="sec" onclick="location.reload()">Recargar</button>
   </div>`;
   cont.innerHTML=html;
@@ -482,15 +513,25 @@ function reasignar(sel){
   a.reasignado=true;
   pintarArbol();
   pintarFaltantes();
+  refrescarBarra();
 }
 
 function moverRama(sel){
   const a=AGENTES[+sel.dataset.a];
   if(!a) return;
   a.equipo=sel.value;
-  if(a.creado) a.pendiente=true;   // hay que guardarlo en su ficha de usuario
+  a.pendiente=true;   // todo cambio manual hay que guardarlo
   pintarArbol();
   pintarFaltantes();
+  refrescarBarra();
+}
+
+function refrescarBarra(){
+  const p=AGENTES.filter(a=>a.pendiente||a.reasignado);
+  const b=$("barra");
+  b.hidden = p.length===0;
+  if(p.length) $("barra-txt").textContent =
+    `${p.length} cambio${p.length>1?"s":""} sin guardar`;
 }
 
 function cambiarEquipo(sel){
@@ -512,7 +553,7 @@ function aFields(o){
 // Los agentes que YA tienen usuario y se han movido de rama hay que
 // actualizarlos en su ficha, no crearlos de nuevo.
 async function guardarRamas(){
-  const cambiados=AGENTES.filter(a=>(a.pendiente||a.reasignado) && a.usuarioCRM);
+  const cambiados=AGENTES.filter(a=>a.pendiente||a.reasignado);
   if(!cambiados.length){ estado("No hay cambios pendientes de guardar."); return; }
   const btn=$("guardar"); if(btn){btn.disabled=true; btn.textContent="Guardando…";}
   log(`— Guardando ${cambiados.length} asignaciones —`);
@@ -520,6 +561,20 @@ async function guardarRamas(){
   for(const a of cambiados){
     const uid=a.usuarioCRM;
     try{
+      // 1) El ajuste manual, que es lo que sobrevive a la recarga
+      const r0=await fetch(`${BASE}/pbi_ajustes/${a.clave}`,{
+        method:"PATCH", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify(aFields({
+          equipo:a.equipo, usuarioCRM:uid||"", vendedor:a.nombre,
+          guardadoEl:new Date().toISOString(),
+        })),
+      });
+      if(!r0.ok) throw new Error("ajuste HTTP "+r0.status);
+      if(!uid){
+        a.pendiente=false; a.reasignado=false; ok++;
+        log(`  ✓ ${a.nombre} → ${EQUIPOS[a.equipo].nombre} (sin usuario)`);
+        continue;
+      }
       // Se guarda el equipo y, sobre todo, el grupoAgente: es el campo por el
       // que el CRM engancha las ventas de Power BI con cada usuario.
       const campos=["equipo","grupoAgente","catalogoVendedor"];
@@ -535,7 +590,9 @@ async function guardarRamas(){
     }catch(e){ log(`  ✗ ${a.nombre}: ${e.message}`); }
   }
   if(btn){btn.disabled=false; btn.textContent="Guardar asignaciones";}
-  estado(`${ok} asignaciones guardadas.`, ok?"ok":"error");
+  AJUSTES=AJUSTES||{};
+  estado(`${ok} cambios guardados. Al recargar se mantendrán.`, ok?"ok":"error");
+  refrescarBarra();
 }
 
 async function crearUsuarios(){
