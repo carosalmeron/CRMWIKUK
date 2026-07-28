@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Objetivos por comercial · Grupo Consolidado</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{--tinta:#0E1626;--papel:#F6F7F9;--blanco:#fff;--linea:#E2E6EC;
+        --texto:#0E1626;--tenue:#69737F;--ok:#12794A;--mal:#B4232A;--avi:#8A5A00}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--papel);color:var(--texto);
+    font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+  header{background:var(--tinta);color:#fff;padding:20px 18px}
+  h1{margin:0;font-size:20px;font-weight:800}
+  .sub{margin:5px 0 0;font-size:13px;color:#93A1B5}
+  main{padding:16px 14px 70px;max-width:820px;margin:0 auto}
+  h2{font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--tenue);
+     margin:22px 0 9px;font-weight:700}
+  .caja{background:var(--blanco);border:1px solid var(--linea);border-radius:13px;overflow:hidden}
+  .zona{border:2px dashed var(--linea);border-radius:13px;padding:26px 18px;text-align:center;
+    background:var(--blanco);cursor:pointer}
+  .zona:hover{border-color:var(--tinta)}
+  .zona b{display:block;font-size:15px;margin-bottom:4px}
+  .zona span{font-size:13px;color:var(--tenue)}
+  input[type=file]{display:none}
+  .fila{display:flex;align-items:center;gap:11px;padding:12px 14px;border-top:1px solid #EEF1F4}
+  .fila:first-child{border-top:none}
+  .nom{font-weight:700;font-size:14px}
+  .det{font-size:11.5px;color:var(--tenue);margin-top:1px}
+  .der{margin-left:auto;text-align:right;font-variant-numeric:tabular-nums;font-size:13px}
+  select{font:inherit;font-size:12.5px;padding:6px 8px;border:1px solid var(--linea);
+    border-radius:8px;background:#fff;max-width:160px}
+  button{font:inherit;font-weight:700;border:none;border-radius:11px;cursor:pointer;
+    padding:14px 18px;background:var(--tinta);color:#fff;font-size:14px;width:100%}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .aviso{background:#FFF9EC;border:1px solid #F0DCA8;border-radius:11px;
+    padding:12px 14px;font-size:13px;margin-bottom:14px}
+  .estado{padding:11px 13px;border-radius:11px;font-size:13px;margin-bottom:14px;
+    border:1px solid var(--linea);background:#fff}
+  .estado.ok{border-color:#BFE3CD;background:#F2FAF5;color:#166534}
+  .estado.err{border-color:#F0C2C4;background:#FDF3F3;color:var(--mal)}
+  .marca{font-size:10.5px;font-weight:700;padding:2px 7px;border-radius:20px;
+    background:#EEF1F4;color:var(--tenue)}
+  .marca.ok{background:#E9F6EF;color:var(--ok)}
+  .marca.no{background:#FDECEC;color:var(--mal)}
+  .log{font:12px/1.6 ui-monospace,Menlo,monospace;background:var(--tinta);color:#C9D4E4;
+    border-radius:11px;padding:12px 14px;margin-top:14px;white-space:pre-wrap;
+    max-height:240px;overflow:auto}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Objetivos por comercial</h1>
+  <p class="sub">Carga los Excel de reporting y guarda el presupuesto semanal en Firebase.</p>
+</header>
+
+<main>
+  <div id="estado" class="estado">Leyendo los comerciales de Power BI…</div>
+
+  <label class="zona" for="ficheros">
+    <input type="file" id="ficheros" multiple accept=".xlsx,.xls">
+    <b>Selecciona los archivos</b>
+    <span>Archivo_Reporting_Comercial_*.xlsx · puedes elegir todos a la vez</span>
+  </label>
+
+  <div id="resultado"></div>
+  <div id="log" class="log" hidden></div>
+</main>
+
+<script>
+const PROY="grupo-consolidado-crm";
+const BASE=`https://firestore.googleapis.com/v1/projects/${PROY}/databases/(default)/documents`;
+const ANIO=new Date().getFullYear();
+
+const $=(id)=>document.getElementById(id);
+const eur=(n)=>Math.round(n||0).toLocaleString("es-ES")+" €";
+const norm=(s)=>String(s||"").toUpperCase().trim()
+  .normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^A-Z0-9]/g,"");
+const val=(f)=>!f?null:f.doubleValue!==undefined?Number(f.doubleValue):
+  f.integerValue!==undefined?Number(f.integerValue):
+  f.stringValue!==undefined?f.stringValue:null;
+
+let AGENTES=[];   // comerciales que existen en pbi_resumen_agente
+let FICHEROS=[];  // lo leido de los Excel
+
+function estado(t,c){ const e=$("estado"); e.textContent=t; e.className="estado"+(c?" "+c:""); }
+function log(t){ const l=$("log"); l.hidden=false; l.textContent+=t+"\n"; l.scrollTop=l.scrollHeight; }
+
+// Los nombres de los Excel no coinciden con los de Power BI. Estos son los
+// casos que no resuelve la comparación directa.
+const ALIAS={
+  RAMON:"RPIEDRA", ZARCO:"AZARCO", VESES:"PACOVESES", VERO:"VERONICA",
+  JESUS:"R-JESUS", PEPE:"R-PEPE", DAVIDMAG:"DAVIDMAG", JOSEP:"JOSEPMARIA",
+  LLUIS:"LLVILA", GERHARD:"JLGARCIA", BOSCH:"JBOSCH", MIGUEL:"MIGUEL",
+};
+
+function emparejar(nombreExcel){
+  const n=norm(nombreExcel);
+  if(ALIAS[n]){
+    const a=AGENTES.find(x=>norm(x._id)===norm(ALIAS[n]));
+    if(a) return a._id;
+  }
+  let a=AGENTES.find(x=>norm(x._id)===n);            if(a) return a._id;
+  a=AGENTES.find(x=>norm(x.agente)===n);             if(a) return a._id;
+  a=AGENTES.find(x=>norm(x._id).startsWith(n)&&n.length>=4);  if(a) return a._id;
+  a=AGENTES.find(x=>n.startsWith(norm(x._id))&&norm(x._id).length>=4); if(a) return a._id;
+  return null;
+}
+
+async function cargarAgentes(){
+  try{
+    const r=await fetch(`${BASE}/pbi_resumen_agente?pageSize=300`);
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    const j=await r.json();
+    AGENTES=(j.documents||[]).map(d=>{
+      const o={_id:d.name.split("/").pop()};
+      for(const [k,v] of Object.entries(d.fields||{})) o[k]=val(v);
+      return o;
+    }).filter(a=>a._id!=="_TOTAL");
+    estado(`${AGENTES.length} comerciales encontrados en Power BI. Ya puedes cargar los Excel.`);
+  }catch(e){
+    estado("No se ha podido leer pbi_resumen_agente: "+e.message,"err");
+  }
+}
+
+// ── Lectura de un Excel de reporting ──
+function leerLibro(nombreFichero, buf){
+  const wb=XLSX.read(buf,{type:"array"});
+  const out={fichero:nombreFichero, agenteExcel:null, semanas:{}, meses:{},
+             mgMes:{}, total:0, filas:0};
+
+  if(wb.SheetNames.includes("PRESUPUESTO")){
+    const filas=XLSX.utils.sheet_to_json(wb.Sheets["PRESUPUESTO"],{defval:null});
+    for(const f of filas){
+      const com=f["COMERCIAL"], sem=Number(f["SEMANA"]), anio=Number(f["AÑO"]);
+      if(!com||!sem) continue;
+      out.agenteExcel=out.agenteExcel||String(com).trim();
+      if(anio && anio!==ANIO) continue;
+      const p=Number(f["VENTAS PPTO."]||0);
+      if(p){ out.semanas[sem]=p; out.total+=p; out.filas++; }
+    }
+  }
+
+  // El presupuesto mensual y el margen objetivo salen de la otra hoja
+  const hojaGen=wb.SheetNames.find(n=>/INFORMACION/i.test(n));
+  if(hojaGen){
+    const MESES=["ENERO","FEBRERO","MARZO","ABRIL","MAYO","JUNIO","JULIO",
+                 "AGOSTO","SEPTIEMBRE","OCTUBRE","NOVIEMBRE","DICIEMBRE"];
+    const bruto=XLSX.utils.sheet_to_json(wb.Sheets[hojaGen],{header:1,defval:null});
+    for(const fila of bruto){
+      if(!fila) continue;
+      for(let i=0;i<fila.length;i++){
+        const m=MESES.indexOf(String(fila[i]||"").toUpperCase().trim());
+        if(m<0) continue;
+        const venta=Number(fila[i+1]||0);
+        // El margen puede venir en la celda +3 (tras VENTAS ESTIM.)
+        let mg=Number(fila[i+3]||0);
+        if(!mg||mg>1) mg=Number(fila[i+2]||0);
+        if(venta) out.meses[m+1]=venta;
+        if(mg>0&&mg<1) out.mgMes[m+1]=Math.round(mg*1000)/10;
+        out.agenteExcel=out.agenteExcel||String(fila[i-1]||"").trim()||null;
+      }
+    }
+  }
+  return out;
+}
+
+$("ficheros").addEventListener("change", async (ev)=>{
+  const files=[...ev.target.files];
+  if(!files.length) return;
+  FICHEROS=[];
+  estado(`Leyendo ${files.length} archivos…`);
+
+  for(const f of files){
+    try{
+      const buf=await f.arrayBuffer();
+      const d=leerLibro(f.name, buf);
+      if(!d.agenteExcel){ log(`✗ ${f.name}: no se identifica el comercial`); continue; }
+      d.destino=emparejar(d.agenteExcel);
+      FICHEROS.push(d);
+    }catch(e){ log(`✗ ${f.name}: ${e.message}`); }
+  }
+  pintar();
+});
+
+function pintar(){
+  const conObj=FICHEROS.filter(f=>f.total>0).length;
+  const sinCasar=FICHEROS.filter(f=>!f.destino).length;
+  const suma=FICHEROS.reduce((t,f)=>t+f.total,0);
+
+  let html=`<h2>Archivos leídos</h2>
+  <div class="aviso">
+    ${FICHEROS.length} archivos · ${conObj} con presupuesto · ${eur(suma)} en total para ${ANIO}.
+    ${sinCasar?`<b>${sinCasar} sin emparejar</b>: elige el comercial en la lista.`:""}
+    Los comerciales sin objetivo usarán como referencia su venta del año anterior.
+  </div>
+  <div class="caja">`;
+
+  FICHEROS.forEach((f,i)=>{
+    const nSem=Object.keys(f.semanas).length;
+    html+=`<div class="fila">
+      <div style="min-width:0">
+        <div class="nom">${f.agenteExcel}
+          <span class="marca ${f.destino?"ok":"no"}">${f.destino?"emparejado":"sin emparejar"}</span></div>
+        <div class="det">${nSem} semanas · ${Object.keys(f.meses).length} meses · ${f.fichero}</div>
+      </div>
+      <div class="der">
+        <div><b>${eur(f.total)}</b></div>
+        <select data-i="${i}" onchange="cambiarDestino(this)">
+          <option value="">— Sin asignar —</option>
+          ${AGENTES.map(a=>`<option value="${a._id}"${f.destino===a._id?" selected":""}>${a._id}</option>`).join("")}
+        </select>
+      </div>
+    </div>`;
+  });
+
+  html+=`</div>
+  <div style="margin-top:14px">
+    <button id="guardar" onclick="guardar()" ${FICHEROS.some(f=>f.destino)?"":"disabled"}>
+      Guardar objetivos de ${FICHEROS.filter(f=>f.destino).length} comerciales
+    </button>
+  </div>`;
+  $("resultado").innerHTML=html;
+}
+
+function cambiarDestino(sel){
+  FICHEROS[+sel.dataset.i].destino=sel.value||null;
+  pintar();
+}
+
+function aFields(o){
+  const f={};
+  for(const [k,v] of Object.entries(o)){
+    if(v===null||v===undefined) continue;
+    f[k]= typeof v==="number" ? {doubleValue:v}
+        : typeof v==="boolean" ? {booleanValue:v}
+        : {stringValue:String(v)};
+  }
+  return {fields:f};
+}
+
+async function guardar(){
+  const btn=$("guardar"); btn.disabled=true; btn.textContent="Guardando…";
+  log(`— Guardando objetivos ${ANIO} —`);
+  let ok=0, mal=0;
+
+  for(const f of FICHEROS){
+    if(!f.destino) continue;
+    // Un documento por comercial, con las semanas y meses en campos planos:
+    // asi el CRM lee solo el que necesita, sin recorrer nada.
+    const doc={anio:ANIO, agente:f.destino, agenteExcel:f.agenteExcel,
+               objAnual:Math.round(f.total), fichero:f.fichero,
+               cargadoEl:new Date().toISOString()};
+    for(const [s,v] of Object.entries(f.semanas)) doc["sem_"+s]=Math.round(v);
+    for(const [m,v] of Object.entries(f.meses))   doc["mes_"+m]=Math.round(v);
+    for(const [m,v] of Object.entries(f.mgMes))   doc["mgMes_"+m]=v;
+
+    try{
+      const r=await fetch(`${BASE}/pbi_objetivos/${encodeURIComponent(f.destino)}`,{
+        method:"PATCH", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify(aFields(doc)),
+      });
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      ok++;
+      log(`  ✓ ${f.destino.padEnd(14)} ${eur(f.total)} · ${Object.keys(f.semanas).length} semanas`);
+    }catch(e){ mal++; log(`  ✗ ${f.destino}: ${e.message}`); }
+  }
+
+  // Quienes no tienen objetivo se miden contra su venta del año anterior
+  const conObj=new Set(FICHEROS.filter(f=>f.destino).map(f=>f.destino));
+  const sinObj=AGENTES.filter(a=>!conObj.has(a._id) && (a.ventasAntFull||0)>0);
+  log(`— ${sinObj.length} comerciales sin objetivo: se usará su venta de ${ANIO-1} —`);
+  for(const a of sinObj){
+    try{
+      const r=await fetch(`${BASE}/pbi_objetivos/${encodeURIComponent(a._id)}`,{
+        method:"PATCH", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify(aFields({
+          anio:ANIO, agente:a._id, origen:"ventas_ano_anterior",
+          objAnual:Math.round(a.ventasAntFull||0),
+          objMesRef:Math.round(a.ventasMesAnt||0),
+          objSemRef:Math.round(a.ventasSemAnt||0),
+          cargadoEl:new Date().toISOString(),
+        })),
+      });
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      ok++;
+    }catch(e){ mal++; log(`  ✗ ${a._id}: ${e.message}`); }
+  }
+
+  btn.textContent = mal ? `${ok} guardados, ${mal} con error` : `${ok} comerciales guardados`;
+  estado(mal
+    ? `Se han guardado ${ok} y han fallado ${mal}. Mira el detalle abajo.`
+    : `Listo: ${ok} comerciales con objetivo en Firebase. Recarga el CRM para verlos.`,
+    mal?"err":"ok");
+}
+
+cargarAgentes();
+</script>
+</body>
+</html>
