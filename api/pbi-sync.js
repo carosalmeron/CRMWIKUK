@@ -1068,15 +1068,17 @@ EVALUATE
     "UltimaEntrega", MAX(${T}[FECHAPLANIFICADA])
   )`, true);
 
-      // Reparto por año: sirve para ver si guarda historico o solo lo vivo
+      // Reparto por año. SUMMARIZECOLUMNS no admite una expresion como
+      // columna de agrupacion, hay que crearla antes con ADDCOLUMNS.
       out.porAno = await pbiQuery(token, `
 EVALUATE
-  SUMMARIZECOLUMNS(
-    "Ano", YEAR(${T}[FECHA]),
-    "Lineas", COUNTROWS(${T}),
-    "Importe", SUM(${T}[BASE])
+  GROUPBY(
+    ADDCOLUMNS(${T}, "@Ano", YEAR(${T}[FECHA])),
+    [@Ano],
+    "Lineas",  SUMX(CURRENTGROUP(), 1),
+    "Importe", SUMX(CURRENTGROUP(), ${T}[BASE])
   )
-  ORDER BY [Ano] DESC`, true);
+  ORDER BY [@Ano] DESC`, true);
 
       // Lo pendiente de verdad: entrega futura o de los ultimos 60 dias
       out.pendienteHoy = await pbiQuery(token, `
@@ -1099,6 +1101,38 @@ EVALUATE
     "Lineas", COUNTROWS(${T}),
     "Importe", SUM(${T}[BASE])
   )`, true);
+
+      // "00 Pedidos Validados Global": ninguna de las dos tablas tiene campo
+      // de estado, pero el Panel Principal muestra "Ped. Pdte de Servir".
+      // Si el total de validados coincide con esa cifra, validado = pendiente.
+      const V = "'00 Pedidos Validados Global'";
+      out.validados = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+EVALUATE
+  ROW(
+    "Lineas",      COUNTROWS(${V}),
+    "Importe",     SUM(${V}[BASE]),
+    "Unidades",    SUM(${V}[UNI]),
+    "Pedidos",     DISTINCTCOUNT(${V}[NumPedido]),
+    "Clientes",    DISTINCTCOUNT(${V}[CLIENTE]),
+    "PrimeraEntrega", MIN(${V}[FECHAPLANIFICADA]),
+    "UltimaEntrega",  MAX(${V}[FECHAPLANIFICADA]),
+    "EntregaFutura",  CALCULATE(SUM(${V}[BASE]), FILTER(${V}, ${V}[FECHAPLANIFICADA] >= _hoy)),
+    "EntregaPasada",  CALCULATE(SUM(${V}[BASE]), FILTER(${V}, ${V}[FECHAPLANIFICADA] < _hoy))
+  )`, true);
+
+      // Los diez clientes con mas pendiente validado
+      out.validadosPorCliente = await pbiQuery(token, `
+EVALUATE
+  TOPN(10,
+    SUMMARIZECOLUMNS(
+      ${V}[CLIENTE],
+      ${V}[VENDEDOR],
+      "Importe", SUM(${V}[BASE]),
+      "Lineas",  COUNTROWS(${V})
+    ),
+    [Importe], DESC)`, true);
 
       // Familias con mas peso, para saber si el codigo es util
       out.topFamilias = await pbiQuery(token, `
