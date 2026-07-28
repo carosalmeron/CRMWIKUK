@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pedidos planificados · Grupo Consolidado</title>
+<style>
+  :root{--tinta:#0E1626;--papel:#F6F7F9;--blanco:#fff;--linea:#E2E6EC;
+        --texto:#0E1626;--tenue:#69737F;--hoy:#B4232A;--pronto:#8A5A00;--ok:#12794A}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--papel);color:var(--texto);
+    font:15px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+    -webkit-font-smoothing:antialiased}
+  header{background:var(--tinta);color:#fff;padding:18px 18px 20px}
+  .volver{display:inline-block;color:#93A1B5;text-decoration:none;font-size:13px;margin-bottom:10px}
+  h1{margin:0;font-size:20px;font-weight:800}
+  .sub{margin:4px 0 0;font-size:13px;color:#93A1B5}
+  main{padding:14px 14px 60px;max-width:760px;margin:0 auto}
+
+  .tabs{display:flex;gap:6px;margin-bottom:14px}
+  .tabs button{flex:1;padding:11px;border-radius:10px;font:inherit;font-size:13px;
+    font-weight:700;border:1.5px solid var(--linea);background:#fff;color:var(--tenue);
+    cursor:pointer}
+  .tabs button[aria-pressed=true]{background:var(--tinta);border-color:var(--tinta);color:#fff}
+
+  .resumen{background:var(--blanco);border:1px solid var(--linea);border-radius:13px;
+    padding:15px 16px;margin-bottom:14px;display:flex;gap:20px;flex-wrap:wrap}
+  .resumen .v{font-size:23px;font-weight:800;font-variant-numeric:tabular-nums}
+  .resumen .e{font-size:10.5px;color:var(--tenue);text-transform:uppercase;
+    letter-spacing:.05em;font-weight:700}
+
+  /* Cada bloque es una fecha de salida: eso es lo que se viene a mirar */
+  .grupo{background:var(--blanco);border:1px solid var(--linea);border-radius:13px;
+    margin-bottom:11px;overflow:hidden}
+  .cab{display:flex;align-items:baseline;gap:10px;padding:12px 15px;
+    border-left:4px solid var(--linea);background:#FBFCFD}
+  .cab.urge{border-left-color:var(--hoy)}
+  .cab.pronto{border-left-color:var(--pronto)}
+  .cab .f{font-weight:800;font-size:15px}
+  .cab .c{font-size:11.5px;color:var(--tenue)}
+  .cab .imp{margin-left:auto;font-weight:800;font-variant-numeric:tabular-nums}
+  .linea{display:flex;gap:11px;padding:10px 15px;border-top:1px solid #EFF2F5;font-size:13.5px}
+  .linea .nom{font-weight:600}
+  .linea .det{font-size:11.5px;color:var(--tenue);margin-top:1px}
+  .linea .der{margin-left:auto;text-align:right;font-variant-numeric:tabular-nums}
+  .vacio{padding:34px 16px;text-align:center;color:var(--tenue);font-size:14px}
+  .cargando{padding:40px 0;text-align:center;color:var(--tenue)}
+  .err{background:#FDF3F3;border:1px solid #F0C2C4;color:var(--hoy);
+    padding:12px 14px;border-radius:11px;font-size:13px}
+  .pie{margin-top:18px;font-size:11.5px;color:var(--tenue);text-align:center}
+</style>
+</head>
+<body>
+
+<header>
+  <a class="volver" href="index.html">← Hub</a>
+  <h1>Pedidos planificados</h1>
+  <p class="sub" id="quien">Cargando…</p>
+</header>
+
+<main>
+  <div class="tabs" role="group" aria-label="Agrupar por">
+    <button onclick="ver('dia')"    aria-pressed="true"  id="t-dia">Por día</button>
+    <button onclick="ver('semana')" aria-pressed="false" id="t-semana">Por semana</button>
+    <button onclick="ver('mes')"    aria-pressed="false" id="t-mes">Por mes</button>
+  </div>
+  <div id="app"><div class="cargando">Leyendo pedidos…</div></div>
+</main>
+
+<script>
+const PROY="grupo-consolidado-crm";
+const BASE=`https://firestore.googleapis.com/v1/projects/${PROY}/databases/(default)/documents`;
+const $=(id)=>document.getElementById(id);
+const eur=(n)=>Math.round(n||0).toLocaleString("es-ES")+" €";
+const norm=(s)=>String(s||"").toUpperCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+const val=(f)=>!f?null:f.doubleValue!==undefined?Number(f.doubleValue):
+  f.integerValue!==undefined?Number(f.integerValue):f.stringValue??null;
+
+let PEDIDOS=[], MODO="dia";
+
+const DIAS=["domingo","lunes","martes","miércoles","jueves","viernes","sábado"];
+const MESES=["enero","febrero","marzo","abril","mayo","junio","julio",
+             "agosto","septiembre","octubre","noviembre","diciembre"];
+
+function sesion(){
+  try{ return JSON.parse(localStorage.getItem("gc_portal_user")||"{}"); }catch(e){ return {}; }
+}
+
+// Semana ISO: el lunes manda, que es como se organiza la ruta
+function lunesDe(d){
+  const x=new Date(d);
+  const dow=(x.getDay()+6)%7;
+  x.setDate(x.getDate()-dow);
+  x.setHours(0,0,0,0);
+  return x;
+}
+
+function etiqueta(fechaISO){
+  const f=new Date(fechaISO+"T00:00:00");
+  const hoy=new Date(); hoy.setHours(0,0,0,0);
+  const dias=Math.round((f-hoy)/86400000);
+
+  if(MODO==="dia"){
+    const cuando = dias===0?"hoy" : dias===1?"mañana"
+      : dias<7 ? DIAS[f.getDay()]
+      : `${DIAS[f.getDay()]} ${f.getDate()} de ${MESES[f.getMonth()]}`;
+    return {clave:fechaISO, titulo:cuando.charAt(0).toUpperCase()+cuando.slice(1),
+            sub:f.toLocaleDateString("es-ES"), dias};
+  }
+  if(MODO==="semana"){
+    const l=lunesDe(f), v=new Date(l); v.setDate(v.getDate()+4);
+    const dl=Math.round((l-hoy)/86400000);
+    const t = dl<=0 ? "Esta semana" : dl<8 ? "Semana que viene"
+      : `Semana del ${l.getDate()} de ${MESES[l.getMonth()]}`;
+    return {clave:l.toISOString().slice(0,10), titulo:t,
+            sub:`${l.getDate()}/${l.getMonth()+1} al ${v.getDate()}/${v.getMonth()+1}`, dias:dl};
+  }
+  const t=`${MESES[f.getMonth()]} ${f.getFullYear()}`;
+  return {clave:`${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,"0")}`,
+          titulo:t.charAt(0).toUpperCase()+t.slice(1), sub:"", dias};
+}
+
+async function cargar(){
+  const u=sesion();
+  let clave=null, titulo="Todos los comerciales";
+
+  try{
+    // A quién corresponde: si el usuario es comercial, solo lo suyo
+    const ru=await fetch(`${BASE}/usuarios?pageSize=300`);
+    const usuarios = ru.ok ? ((await ru.json()).documents||[]).map(d=>{
+      const o={_id:d.name.split("/").pop()};
+      for(const [k,v] of Object.entries(d.fields||{})) o[k]=val(v);
+      return o;
+    }) : [];
+
+    const rol=String(u.rol||"").toLowerCase();
+    const mando = rol.includes("director")||rol==="admin"||rol==="ceo";
+    if(!mando){
+      const f=usuarios.find(x=>(u.crmId&&(x._id||x.id)===u.crmId)
+        || (u.username&&norm(x.username)===norm(u.username))
+        || (u.nombre&&norm(x.nombre)===norm(u.nombre)));
+      clave = norm((f&&(f.grupoAgente||f.catalogoVendedor))||u.username)||null;
+      if(clave) titulo = (f&&f.nombre)||clave;
+    }
+    $("quien").textContent = titulo;
+
+    // Solo los pedidos que tocan: una consulta filtrada, no la colección
+    const cuerpo = clave
+      ? {structuredQuery:{from:[{collectionId:"pbi_pedidos"}],
+          where:{fieldFilter:{field:{fieldPath:"agente"},op:"EQUAL",
+                 value:{stringValue:clave}}}, limit:2000}}
+      : {structuredQuery:{from:[{collectionId:"pbi_pedidos"}], limit:2000}};
+
+    const r=await fetch(`${BASE}:runQuery`,{method:"POST",
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify(cuerpo)});
+    const j=await r.json();
+    PEDIDOS=(Array.isArray(j)?j:[]).filter(x=>x.document).map(x=>{
+      const o={};
+      for(const [k,v] of Object.entries(x.document.fields||{})) o[k]=val(v);
+      return o;
+    }).filter(p=>p.fecha);
+
+    pintar();
+  }catch(e){
+    $("app").innerHTML=`<div class="err">No se han podido cargar los pedidos: ${e.message}</div>`;
+  }
+}
+
+function ver(modo){
+  MODO=modo;
+  for(const m of ["dia","semana","mes"])
+    $("t-"+m).setAttribute("aria-pressed", String(m===modo));
+  pintar();
+}
+
+function pintar(){
+  if(!PEDIDOS.length){
+    $("app").innerHTML=`<div class="grupo"><p class="vacio">
+      No tienes pedidos con fecha de entrega pendiente.</p></div>`;
+    return;
+  }
+
+  const grupos=new Map();
+  for(const p of PEDIDOS){
+    const e=etiqueta(p.fecha);
+    if(!grupos.has(e.clave)) grupos.set(e.clave,{...e, lineas:[], importe:0, clientes:new Set()});
+    const g=grupos.get(e.clave);
+    g.lineas.push(p); g.importe+=p.importe||0; g.clientes.add(p.cliente);
+  }
+  const orden=[...grupos.values()].sort((a,b)=>a.clave.localeCompare(b.clave));
+
+  const total=PEDIDOS.reduce((t,p)=>t+(p.importe||0),0);
+  const clientes=new Set(PEDIDOS.map(p=>p.cliente)).size;
+  const prox=orden[0];
+
+  let html=`<div class="resumen">
+    <div><div class="v">${eur(total)}</div><div class="e">Por servir</div></div>
+    <div><div class="v">${clientes}</div><div class="e">Clientes</div></div>
+    <div><div class="v">${PEDIDOS.length}</div><div class="e">Líneas</div></div>
+    ${prox?`<div><div class="v">${prox.titulo}</div><div class="e">Próxima salida</div></div>`:""}
+  </div>`;
+
+  for(const g of orden){
+    // Agrupar por cliente dentro de cada fecha: es como se lee
+    const porCli=new Map();
+    for(const l of g.lineas){
+      const k=l.cliente;
+      if(!porCli.has(k)) porCli.set(k,{nombre:l.nombre||k, poblacion:l.poblacion,
+                                        importe:0, uni:0, n:0, pedidos:new Set()});
+      const c=porCli.get(k);
+      c.importe+=l.importe||0; c.uni+=l.unidades||0; c.n++;
+      if(l.pedido) c.pedidos.add(l.pedido);
+    }
+    const clase = g.dias<=1 ? "urge" : g.dias<=7 ? "pronto" : "";
+    html+=`<div class="grupo">
+      <div class="cab ${clase}">
+        <div><div class="f">${g.titulo}</div>
+          <div class="c">${g.sub}${g.sub?" · ":""}${porCli.size} cliente${porCli.size>1?"s":""}</div></div>
+        <div class="imp">${eur(g.importe)}</div>
+      </div>
+      ${[...porCli.values()].sort((a,b)=>b.importe-a.importe).map(c=>`
+        <div class="linea">
+          <div style="min-width:0">
+            <div class="nom">${c.nombre}</div>
+            <div class="det">${c.poblacion?c.poblacion+" · ":""}${c.n} línea${c.n>1?"s":""}${
+              c.pedidos.size?` · pedido ${[...c.pedidos].join(", ")}`:""}</div>
+          </div>
+          <div class="der"><b>${eur(c.importe)}</b></div>
+        </div>`).join("")}
+    </div>`;
+  }
+
+  html+=`<p class="pie">Pedidos validados con fecha de entrega desde hoy.
+    Se actualizan cada día a las 13:00.</p>`;
+  $("app").innerHTML=html;
+}
+
+cargar();
+</script>
+</body>
+</html>
