@@ -118,6 +118,7 @@ DEFINE
   VAR _anoAct = YEAR(_hoy)
   VAR _anoAnt = _anoAct - 1
   VAR _iniMes = DATE(YEAR(_hoy), MONTH(_hoy), 1)
+  VAR _iniSem = _hoy - WEEKDAY(_hoy, 2) + 1
   // Mismo dia del ano pasado, para comparar periodos equivalentes
   VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
 EVALUATE
@@ -125,11 +126,6 @@ EVALUATE
     ${M.vCliente},
     ${M.vVendedor},
     ${M.vEmpresa},
-    ${M.cNombre},
-    ${M.cPoblacion},
-    ${M.cProvincia},
-    ${M.cBloqueado},
-    ${M.cCodconta},
     ${filtroIncremental}
 
     // ── Ano anterior COMPLETO: dato de referencia que se guarda ──
@@ -163,9 +159,48 @@ EVALUATE
         NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
 
     "VentaMes", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
+    "VentaSem", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniSem && ${M.vFecha} <= _hoy),
+    // Mismo mes y misma semana del ano pasado, para poder comparar cuando
+    // no hay presupuesto cargado. Sin esto el CRM solo puede medir contra
+    // objetivo, y si el objetivo esta a cero no hay referencia ninguna.
+    "VentaMesAnt", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAnt && MONTH(${M.vFecha}) = MONTH(_hoy)
+        && DAY(${M.vFecha}) <= DAY(_hoy))),
+    "VentaSemAnt", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, ${M.vFecha} >= _iniSem - 364 && ${M.vFecha} <= _corteAnt)),
     "UltimaVenta", CALCULATE(MAX(${M.vFecha}))
   )
   ORDER BY [VentaAct] DESC`,
+
+    // Dimension de clientes en consulta SEPARADA.
+    // Antes iba dentro del SUMMARIZECOLUMNS de ventas, pero la tabla
+    // tiene codigos repetidos (una fila por sociedad) y eso multiplicaba
+    // las filas de resultado. Aqui se trae una vez y se cruza en JS.
+    clientes: `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${M.clientes}[CODIGO],
+    ${M.cNombre},
+    ${M.cPoblacion},
+    ${M.cProvincia},
+    ${M.cBloqueado},
+    ${M.cCodconta}
+  )`,
+
+    // Tabla Agentes: traduce el codigo de vendedor del ERP al comercial
+    // (GRUPOAGENTE) y marca la intercompania (GRUPONIVEL1). Es la misma
+    // logica que usa el Panel Principal, asi que las cifras cuadran.
+    agentes: `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    'Agentes'[CODIGO],
+    'Agentes'[GRUPOAGENTE],
+    'Agentes'[GRUPONIVEL1],
+    'Agentes'[GRUPONIVEL2],
+    'Agentes'[GRUPONIVEL3],
+    'Agentes'[GRUPONIVEL4],
+    'Agentes'[MB]
+  )`,
 
     // Variante de respaldo: sin datos de la tabla de clientes.
     ventasSimple: `
@@ -417,7 +452,13 @@ async function fbLeerClientes() {
       const agente = val("GRUPOAGENTE") || val("grupoAgente") || val("agente");
       const conta = val("CODCONTA") || val("codconta");
       if (!agente) continue;
-      if (codigo) mapa.set(String(codigo).trim(), String(agente).trim());
+      if (codigo) {
+        const cod = String(codigo).trim();
+        mapa.set(cod, String(agente).trim());
+        // El CRM guarda los codigos antiguos; Power BI ya usa los nuevos.
+        const can = canonico(cod);
+        if (can !== cod && !mapa.has(can)) mapa.set(can, String(agente).trim());
+      }
       // Segundo indice por codigo contable: en 2026 se recodificaron
       // clientes (serie U4... -> C0...) y el codigo nuevo no esta en el
       // CRM, pero el contable no cambia.
@@ -471,6 +512,50 @@ async function fbLeerColeccion(coleccion) {
     vueltas++;
   } while (pageToken && vueltas < 60);
   return docs;
+}
+
+// Recodificacion de 2026: los codigos U43+4digitos pasaron a U43+0+esos
+// 4 digitos. Verificado cruzando nombres (U433509 -> U4303509 WIKUK EASY,
+// U434210 -> U4304210 LORIENTE PIQUERAS, U431880 -> U4301880 MANACOR).
+// El historico de ventas y el CRM conservan el codigo viejo.
+// La regla se puede sobrescribir desde Firestore (pbi_config/reglas):
+//   recodPrefijo="U43", recodDigitos=4, recodInserta="0"
+// Lo de aqui es solo el valor por defecto verificado en julio de 2026.
+let RECOD = { prefijo: "U43", digitos: 4, inserta: "0" };
+
+function canonico(cod) {
+  const c = String(cod || "").trim().toUpperCase();
+  if (!RECOD.prefijo) return c;
+  const re = new RegExp(`^${RECOD.prefijo}(\\d{${RECOD.digitos}})$`);
+  const m = re.exec(c);
+  return m ? RECOD.prefijo + RECOD.inserta + m[1] : c;
+}
+
+// Lee la configuracion editable. Si no existe, se sigue con los valores
+// por defecto: la sincronizacion nunca debe caerse por esto.
+async function cargarReglas() {
+  try {
+    const cfg = await fbLeerDocumento("pbi_config", "reglas");
+    if (!cfg) return false;
+    if (cfg.recodPrefijo !== undefined) RECOD.prefijo = String(cfg.recodPrefijo || "");
+    if (cfg.recodDigitos) RECOD.digitos = Number(cfg.recodDigitos) || 4;
+    if (cfg.recodInserta !== undefined) RECOD.inserta = String(cfg.recodInserta || "");
+    return true;
+  } catch (e) { return false; }
+}
+
+// Normaliza el nombre comercial para poder emparejar el mismo cliente
+// dado de alta con codigos distintos en varias sociedades del grupo.
+// Quita acentos, formas juridicas y puntuacion.
+function normNombre(n) {
+  return String(n || "")
+    .toUpperCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")   // acentos
+    .replace(/[.,'"`&\-\/]/g, " ")
+    .replace(/\b(S\s?L\s?U|S\s?L|S\s?A\s?U|S\s?A|SLNE|SCP|SCCL|CB|SC|LDA|GMBH|SRL|CO\s?KG|E\s?I)\b/g, " ")
+    .replace(/\bE\s+HIJOS\b|\bY\s+HIJOS\b|\bHNOS\b|\bHERMANOS\b/g, " HNOS ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 // Limpia el código para usarlo como id de documento
@@ -609,6 +694,32 @@ export default async function handler(req, res) {
     try {
       const { token, modo } = await getToken(req);
       out.modoAuth = modo;
+      // ?peek=1&tabla=06 Clientes United SAP  → inspecciona cualquier tabla
+      // del modelo, no solo las cuatro habituales.
+      if (req.query.tabla) {
+        const t = `'${String(req.query.tabla).replace(/'/g, "")}'`;
+        // &filas=N para traer mas de 3, y &col=X&val=Y para filtrar
+        const n = Math.min(parseInt(req.query.filas, 10) || 3, 500);
+        const cf = req.query.col
+          ? `FILTER(${t}, NOT ISBLANK(${t}[${String(req.query.col).replace(/[\[\]"]/g, "")}]))`
+          : t;
+        try {
+          const filas = await pbiQuery(token, `EVALUATE TOPN(${n}, ${cf})`, true);
+          out.tablaSolicitada = {
+            tabla: t,
+            filas: filas.length,
+            datos: filas,
+            columnas: Object.keys(filas[0] || {}).map((c) => ({
+              nombre: c,
+              ejemplos: filas.map((f) => f[c]),
+            })),
+          };
+        } catch (e) {
+          out.tablaSolicitada = { tabla: t, error: e.message.slice(0, 300) };
+        }
+        return res.status(200).json(out);
+      }
+
       const tablas = {
         ventas:    M.ventas,
         pendiente: M.pendiente,
@@ -674,8 +785,7 @@ EVALUATE
     FILTER(
       SUMMARIZECOLUMNS(
         ${M.vCliente},
-        ${M.cNombre},
-        "Venta",  SUM(${M.vBase}),
+            "Venta",  SUM(${M.vBase}),
         "Coste",  SUM(${M.vCoste}),
         "Unidades", SUM(${T}[UNI]),
         "Lineas",   COUNTROWS(${T})
@@ -710,6 +820,33 @@ EVALUATE
     [CosteLinea] - [Base], DESC
   )`, true);
       }
+
+      // C 0) Lineas crudas de una familia de articulos, con TODAS las
+      // columnas de coste una al lado de otra. Sirve para decidir si
+      // COSTOLINEAL es el coste bueno en los productos por metros.
+      //   ?audit=1&articulo=MX255
+      const pref = String(req.query.articulo || "MX255").replace(/"/g, "");
+      out.familiaAnalizada = pref;
+      out.lineasFamilia = await pbiQuery(token, `
+EVALUATE
+  TOPN(
+    15,
+    SELECTCOLUMNS(
+      FILTER(${T}, LEFT(${T}[CODIGO], ${pref.length}) = "${pref}"),
+      "Articulo",      ${T}[CODIGO],
+      "Fecha",         ${T}[FECHA],
+      "Uni",           ${T}[UNI],
+      "Metros",        ${T}[METROS],
+      "MetrosTotales", ${T}[Metros Totales],
+      "Calibre",       ${T}[CALIBRE],
+      "Precio",        ${T}[PRECIO],
+      "Base",          ${M.vBase},
+      "CosteRefUnit",  ${T}[COSTOREFERENCIA],
+      "CosteRefLinea", ${M.vCoste},
+      "CosteLineal",   ${T}[COSTOLINEAL]
+    ),
+    [Fecha], DESC
+  )`, true);
 
       // C bis) Articulos con coste de referencia incoherente.
       // Compara precio medio de venta contra coste medio del maestro.
@@ -775,6 +912,246 @@ EVALUATE
     return res.status(200).json(out);
   }
 
+  // ?ver=RPIEDRA → ficha de ventas de un comercial, leida de Firestore.
+  // No toca Power BI: consulta lo ya sincronizado, asi que es instantanea.
+  if (req.query.ver) {
+    const id = String(req.query.ver).trim().toUpperCase();
+    try {
+      const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+      const key = ENV.FB_API_KEY ? `?key=${ENV.FB_API_KEY}` : "";
+
+      const resumen = await fbLeerDocumento("pbi_resumen_agente", docId(id));
+
+      // Sin orderBy para no exigir indice compuesto en Firestore:
+      // se ordena despues en JavaScript.
+      const r = await fetch(`https://firestore.googleapis.com/v1/${base}:runQuery${key}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          structuredQuery: {
+            from: [{ collectionId: "pbi_ventas_cliente" }],
+            where: { fieldFilter: {
+              field: { fieldPath: "agente" },
+              op: "EQUAL",
+              value: { stringValue: id },
+            }},
+            limit: 500,
+          },
+        }),
+      });
+      const filas = await r.json();
+      const clientes = (Array.isArray(filas) ? filas : [])
+        .filter((f) => f.document)
+        .map((f) => {
+          const o = { _id: f.document.name.split("/").pop() };
+          for (const [k, v] of Object.entries(f.document.fields || {})) {
+            o[k] = v.doubleValue !== undefined ? Number(v.doubleValue)
+                 : v.integerValue !== undefined ? Number(v.integerValue)
+                 : v.stringValue ?? v.booleanValue ?? null;
+          }
+          return o;
+        })
+        .filter((c) => !c.fusionadoEn)
+        .sort((a, b) => (b.ventasAct || 0) - (a.ventasAct || 0));
+
+      const eur = (n) => Number(n || 0).toLocaleString("es-ES",
+        { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
+
+      return res.status(200).json({
+        ok: true,
+        agente: id,
+        resumen: resumen ? {
+          ventas2025completo: eur(resumen.ventasAntFull),
+          ventas2025mismoPeriodo: eur(resumen.ventasAntYTD),
+          ventas2026: eur(resumen.ventasAct),
+          variacion: resumen.variacionPct !== null ? `${resumen.variacionPct} %` : "—",
+          margen2026: resumen.margenPctAct !== null ? `${resumen.margenPctAct} %` : "—",
+          margen2025: resumen.margenPctAntYTD !== null ? `${resumen.margenPctAntYTD} %` : "—",
+          ventasMesActual: eur(resumen.ventasMes),
+          clientes: resumen.clientes,
+          clientesConVentaEsteMes: resumen.clientesConVentaMes,
+          coberturaMargen: `${resumen.coberturaAct} %`,
+        } : "sin datos: lanza primero una sincronizacion real",
+        totalClientes: clientes.length,
+        top20: clientes.slice(0, 20).map((c) => ({
+          codigo: c.cliente,
+          nombre: c.nombre,
+          poblacion: c.poblacion,
+          v2026: eur(c.ventasAct),
+          // Las dos cifras de 2025: la comparable y la del ano cerrado.
+          // La variacion se calcula SIEMPRE contra el mismo periodo.
+          v2025mismoPeriodo: eur(c.ventasAntYTD),
+          v2025completo: eur(c.ventasAntFull),
+          variacion: c.variacionPct !== null && c.variacionPct !== undefined
+            ? `${c.variacionPct} %` : "sin venta en ese periodo",
+          margen: c.margenPctAct !== null && c.margenPctAct !== undefined
+            ? `${c.margenPctAct} %` : "—",
+          ultimaVenta: (c.ultimaVenta || "").slice(0, 10),
+        })),
+        sinVentaEsteAno: clientes.filter((c) => !c.ventasAct).length,
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: e.message });
+    }
+  }
+
+  // ?vendedores=1 → ventas del mes agrupadas por el VENDEDOR del ERP,
+  // que es el mismo campo que usa el Panel Principal de Power BI.
+  // Sirve para comparar cifra a cifra y localizar diferencias, sin que
+  // interfiera el mapeo a los agentes del CRM.
+  if (req.query.vendedores === "1") {
+    try {
+      const { token } = await getToken(req);
+      const T = M.ventas;
+      const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _iniMes = DATE(YEAR(_hoy), MONTH(_hoy), 1)
+  VAR _anoAct = YEAR(_hoy)
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${T}[VENDEDOR],
+    "VentasMes", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
+    "VentasAno", CALCULATE(SUM(${M.vBase}), FILTER(${T}, YEAR(${M.vFecha}) = _anoAct))
+  )
+  ORDER BY [VentasMes] DESC`);
+
+      const eur = (n) => Number(n || 0).toLocaleString("es-ES",
+        { maximumFractionDigits: 0 });
+      const lista = filas.map((r) => ({
+        vendedor: pick(r, "VENDEDOR"),
+        ventasMes: num(pick(r, "VentasMes")),
+        ventasAno: num(pick(r, "VentasAno")),
+      })).filter((v) => v.ventasMes || v.ventasAno);
+
+      return res.status(200).json({
+        ok: true,
+        nota: "Mismo campo VENDEDOR que el Panel Principal. Incluye intercompania.",
+        desde: `01/${String(new Date().getMonth() + 1).padStart(2, "0")}`,
+        hasta: new Date().toISOString().slice(0, 10),
+        totalMes: eur(lista.reduce((t, v) => t + v.ventasMes, 0)),
+        totalAno: eur(lista.reduce((t, v) => t + v.ventasAno, 0)),
+        vendedores: lista.map((v) => ({
+          vendedor: v.vendedor,
+          ventasMes: eur(v.ventasMes),
+          ventasAno: eur(v.ventasAno),
+        })),
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: e.message });
+    }
+  }
+
+  // ?pedidos=1 → radiografia de "00 Entrada Pedidos Global".
+  // Antes de construir nada encima hay que saber si tiene importes de
+  // verdad, que periodo cubre y si el pendiente se puede aislar.
+  if (req.query.pedidos === "1") {
+    const T = "'00 Entrada Pedidos Global'";
+    const out = { ok: true, tabla: T };
+    try {
+      const { token } = await getToken(req);
+
+      out.totales = await pbiQuery(token, `
+EVALUATE
+  ROW(
+    "Lineas",        COUNTROWS(${T}),
+    "Importe",       SUM(${T}[BASE]),
+    "Unidades",      SUM(${T}[UNI]),
+    "LineasConImporte", CALCULATE(COUNTROWS(${T}), FILTER(${T}, ${T}[BASE] > 0)),
+    "ImporteConValor",  CALCULATE(SUM(${T}[BASE]), FILTER(${T}, ${T}[BASE] > 0)),
+    "Clientes",      DISTINCTCOUNT(${T}[CLIENTE]),
+    "Articulos",     DISTINCTCOUNT(${T}[CODIGO]),
+    "Familias",      DISTINCTCOUNT(${T}[FAMILIA]),
+    "PrimerPedido",  MIN(${T}[FECHA]),
+    "UltimoPedido",  MAX(${T}[FECHA]),
+    "PrimeraEntrega",MIN(${T}[FECHAPLANIFICADA]),
+    "UltimaEntrega", MAX(${T}[FECHAPLANIFICADA])
+  )`, true);
+
+      // Reparto por año. SUMMARIZECOLUMNS no admite una expresion como
+      // columna de agrupacion, hay que crearla antes con ADDCOLUMNS.
+      out.porAno = await pbiQuery(token, `
+EVALUATE
+  GROUPBY(
+    ADDCOLUMNS(${T}, "@Ano", YEAR(${T}[FECHA])),
+    [@Ano],
+    "Lineas",  SUMX(CURRENTGROUP(), 1),
+    "Importe", SUMX(CURRENTGROUP(), ${T}[BASE])
+  )
+  ORDER BY [@Ano] DESC`, true);
+
+      // Lo pendiente de verdad: entrega futura o de los ultimos 60 dias
+      out.pendienteHoy = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+EVALUATE
+  ROW(
+    "LineasFuturas",  CALCULATE(COUNTROWS(${T}), FILTER(${T}, ${T}[FECHAPLANIFICADA] >= _hoy)),
+    "ImporteFuturo",  CALCULATE(SUM(${T}[BASE]),  FILTER(${T}, ${T}[FECHAPLANIFICADA] >= _hoy)),
+    "Lineas60d",      CALCULATE(COUNTROWS(${T}), FILTER(${T}, ${T}[FECHA] >= _hoy - 60)),
+    "Importe60d",     CALCULATE(SUM(${T}[BASE]),  FILTER(${T}, ${T}[FECHA] >= _hoy - 60))
+  )`, true);
+
+      // Que hay en ESVISITA: si distingue pedidos nacidos de una visita,
+      // se puede medir el retorno de la actividad comercial del CRM.
+      out.esVisita = await pbiQuery(token, `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${T}[ESVISITA],
+    "Lineas", COUNTROWS(${T}),
+    "Importe", SUM(${T}[BASE])
+  )`, true);
+
+      // "00 Pedidos Validados Global": ninguna de las dos tablas tiene campo
+      // de estado, pero el Panel Principal muestra "Ped. Pdte de Servir".
+      // Si el total de validados coincide con esa cifra, validado = pendiente.
+      const V = "'00 Pedidos Validados Global'";
+      out.validados = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+EVALUATE
+  ROW(
+    "Lineas",      COUNTROWS(${V}),
+    "Importe",     SUM(${V}[BASE]),
+    "Unidades",    SUM(${V}[UNI]),
+    "Pedidos",     DISTINCTCOUNT(${V}[NumPedido]),
+    "Clientes",    DISTINCTCOUNT(${V}[CLIENTE]),
+    "PrimeraEntrega", MIN(${V}[FECHAPLANIFICADA]),
+    "UltimaEntrega",  MAX(${V}[FECHAPLANIFICADA]),
+    "EntregaFutura",  CALCULATE(SUM(${V}[BASE]), FILTER(${V}, ${V}[FECHAPLANIFICADA] >= _hoy)),
+    "EntregaPasada",  CALCULATE(SUM(${V}[BASE]), FILTER(${V}, ${V}[FECHAPLANIFICADA] < _hoy))
+  )`, true);
+
+      // Los diez clientes con mas pendiente validado
+      out.validadosPorCliente = await pbiQuery(token, `
+EVALUATE
+  TOPN(10,
+    SUMMARIZECOLUMNS(
+      ${V}[CLIENTE],
+      ${V}[VENDEDOR],
+      "Importe", SUM(${V}[BASE]),
+      "Lineas",  COUNTROWS(${V})
+    ),
+    [Importe], DESC)`, true);
+
+      // Familias con mas peso, para saber si el codigo es util
+      out.topFamilias = await pbiQuery(token, `
+EVALUATE
+  TOPN(10,
+    SUMMARIZECOLUMNS(
+      ${T}[FAMILIA],
+      "Lineas", COUNTROWS(${T}),
+      "Importe", SUM(${T}[BASE])
+    ),
+    [Importe], DESC)`, true);
+
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
   const dry = req.query.dry === "1"; // ?dry=1 → consulta pero NO escribe
   const t0 = Date.now();
   const log = { dry, ventas: 0, pendiente: 0, stock: 0, errores: [] };
@@ -782,6 +1159,8 @@ EVALUATE
   try {
     const { token, modo } = await getToken(req);
     log.modoAuth = modo;
+
+    log.reglasDeFirestore = await cargarReglas();
 
     // ── Decidir si toca sincronizacion completa o incremental ──
     // Se fuerza completa cuando:
@@ -830,13 +1209,69 @@ EVALUATE
       }
       log.ventasEnriquecido = enriquecido;
 
+      // Mapa vendedor -> comercial, desde el propio modelo
+      const agentes = new Map();
+      try {
+        for (const a of await pbiQuery(token, Q.agentes, true)) {
+          const cod = String(pick(a, "CODIGO") || "").trim();
+          if (!cod) continue;
+          agentes.set(cod, {
+            grupo: String(pick(a, "GRUPOAGENTE") || "").trim() || null,
+            nivel1: String(pick(a, "GRUPONIVEL1") || "").trim() || null,
+            ambito: String(pick(a, "GRUPONIVEL2") || "").trim() || null,
+            tipo: String(pick(a, "GRUPONIVEL3") || "").trim() || null,
+            // GRUPONIVEL4 es el "Grupo Agentes" del Panel Principal:
+            // Wikuk, Interkey, Portugal. Es la division real del negocio.
+            equipo: (() => {
+              const v = String(pick(a, "GRUPONIVEL4") || "").trim();
+              if (!v || v === "-") return null;
+              // "Interkey Julio" parece un apaño puntual; se normaliza
+              return v.startsWith("Interkey") ? "Interkey" : v;
+            })(),
+            // MB es el objetivo de margen (0,26 = 26%). El campo
+            // "MARGEN OBJETIVO" esta casi vacio; el bueno es este.
+            objetivoMargen: pick(a, "MB") ? num(100 * Number(pick(a, "MB"))) : null,
+          });
+        }
+        log.agentesMapeados = agentes.size;
+      } catch (e) {
+        log.errores.push(`agentes: ${e.message}`);
+      }
+
+      // Ficha de cliente: primera aparicion de cada codigo
+      const fichas = new Map();
+      try {
+        for (const c of await pbiQuery(token, Q.clientes)) {
+          const cod = String(pick(c, "CODIGO") || "").trim();
+          if (!cod || fichas.has(cod)) continue;
+          fichas.set(cod, {
+            nombre: pick(c, "NOMBRE"),
+            poblacion: pick(c, "POBLACION"),
+            provincia: pick(c, "PROVINCIA"),
+            bloqueado: pick(c, "BLQ") === "SI",
+            codconta: String(pick(c, "CODCONTA") || "").trim() || null,
+          });
+        }
+        log.fichasCliente = fichas.size;
+      } catch (e) {
+        log.errores.push(`clientes: ${e.message}`);
+      }
+
       const docs = filas.map((r) => {
         const cliente = pick(r, "CLIENTE");
+        // Si el codigo ya no existe en el maestro, se busca su equivalente
+        // recodificado para no dejar el cliente sin nombre ni poblacion.
+        const ficha = fichas.get(String(cliente).trim())
+          || fichas.get(canonico(cliente))
+          || {};
 
         const vAntFull = num(pick(r, "VentaAntFull"));
         const vAntYTD  = num(pick(r, "VentaAntYTD"));
         const vAct     = num(pick(r, "VentaAct"));
         const vMes     = num(pick(r, "VentaMes"));
+        const vSem     = num(pick(r, "VentaSem"));
+        const vMesAnt  = num(pick(r, "VentaMesAnt"));
+        const vSemAnt  = num(pick(r, "VentaSemAnt"));
 
         // Bases limpias (lineas con coste creible) para cada ventana
         const bAntFull = num(pick(r, "VentaAntFullOk"));
@@ -852,12 +1287,23 @@ EVALUATE
         return {
           _id: docId(cliente),
           cliente,
-          nombre: pick(r, "NOMBRE") || cliente,
-          intercompany: esIntercompany(pick(r, "NOMBRE")),
-          poblacion: pick(r, "POBLACION"),
-          provincia: pick(r, "PROVINCIA"),
-          bloqueado: pick(r, "BLQ") === "SI",
-          codconta: String(pick(r, "CODCONTA") || "").trim() || null,
+          nombre: ficha.nombre || cliente,
+          // Sin ficha = codigo que ya no existe en el maestro: historico
+          // que quedo huerfano tras la recodificacion de 2026.
+          huerfano: !ficha.nombre,
+          // Intercompania segun GRUPONIVEL1 del modelo, que es el filtro
+          // oficial del Panel Principal. El nombre queda de respaldo.
+          intercompany: (agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.nivel1
+                          === "Intercompany") || esIntercompany(ficha.nombre),
+          agente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.grupo || null,
+          tipoAgente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.tipo || null,
+          ambitoAgente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.ambito || null,
+          equipoAgente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.equipo || null,
+          objetivoMargen: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.objetivoMargen ?? null,
+          poblacion: ficha.poblacion,
+          provincia: ficha.provincia,
+          bloqueado: ficha.bloqueado === true,
+          codconta: ficha.codconta || null,
           vendedor: pick(r, "VENDEDOR"),
           empresa: pick(r, "EMPRESA"),
 
@@ -879,6 +1325,9 @@ EVALUATE
           margenPctAct: p(mAct, bAct),
 
           ventasMes: vMes,
+          ventasSem: vSem,
+          ventasMesAnt: vMesAnt,
+          ventasSemAnt: vSemAnt,
 
           // Variacion sobre el mismo periodo, no sobre el ano cerrado
           variacionPct: vAntYTD ? num((100 * (vAct - vAntYTD)) / vAntYTD) : null,
@@ -901,11 +1350,43 @@ EVALUATE
       // ano, asi que la comparativa interanual sale rota en ambos.
       // Se agrupan por CODCONTA y el codigo con mas venta actual pasa a
       // ser el principal, heredando el historico del grupo.
+      // Clave de agrupacion: codigo contable si existe, y si no,
+      // nombre normalizado + poblacion. Los codigos nuevos creados en la
+      // migracion de sociedad de marzo de 2026 no llevan CODCONTA, asi
+      // que el nombre es la unica via para reconstruir su historico.
+      // ?fusion=no  -> solo agrupa por codigo contable
+      // ?fusion=off -> no agrupa nada, cada codigo es un cliente
+      // Tras corregir los codigos en Power BI (julio 2026) la fusion por
+      // nombre deberia sobrar. Se conserva por si reaparecen duplicados.
+      const modoFusion = String(req.query.fusion || "si").toLowerCase();
+      log.modoFusion = modoFusion;
+
+      let recodificados = 0;
+      for (const d of docs) {
+        const can = canonico(d.cliente);
+        if (can !== d.cliente) { d.canonico = can; recodificados++; }
+      }
+      log.codigosRecodificados = recodificados;
+
+      const claveGrupo = (d) => {
+        // La equivalencia de codigo manda sobre cualquier otra regla
+        if (d.canonico) return "CAN:" + d.canonico;
+        if (docs.some((x) => x.canonico === d.cliente)) return "CAN:" + d.cliente;
+        if (modoFusion === "off") return null;
+        if (d.codconta) return "CC:" + d.codconta;
+        if (modoFusion === "no") return null;
+        const n = normNombre(d.nombre);
+        if (!n || n === String(d.cliente).toUpperCase()) return null;
+        return "NP:" + n + "|" + String(d.poblacion || "").toUpperCase().trim();
+      };
+
       const porConta = new Map();
       for (const d of docs) {
-        if (!d.codconta) continue;
-        if (!porConta.has(d.codconta)) porConta.set(d.codconta, []);
-        porConta.get(d.codconta).push(d);
+        const k = claveGrupo(d);
+        if (!k) continue;
+        d._clave = k;
+        if (!porConta.has(k)) porConta.set(k, []);
+        porConta.get(k).push(d);
       }
 
       let fusionados = 0;
@@ -913,10 +1394,23 @@ EVALUATE
         if (grupo.length < 2) continue;
         // Principal = el que mas ha vendido este ano; si ninguno vende,
         // el que tenga mas historico.
-        const principal = grupo.slice().sort((a, b) =>
-          (b.ventasAct - a.ventasAct) || (b.ventasAntFull - a.ventasAntFull))[0];
+        // En grupos por equivalencia de codigo, el principal es siempre
+        // el codigo NUEVO (el que sigue existiendo en el maestro).
+        const principal = grupo.find((d) => !d.canonico && !d.huerfano)
+          || grupo.slice().sort((a, b) =>
+               (b.ventasAct - a.ventasAct) || (b.ventasAntFull - a.ventasAntFull))[0];
 
         const suma = (k) => grupo.reduce((t, d) => t + (d[k] || 0), 0);
+
+        // IMPORTANTE: las bases limpias se calculan ANTES de sobrescribir
+        // los importes del principal. Si no, su cobertura se aplicaria al
+        // total del grupo y se contaria dos veces.
+        const base = (k, cob) => grupo.reduce(
+          (t, d) => t + (d[k] || 0) * ((d[cob] || 0) / 100), 0);
+        const bAntFull = base("ventasAntFull", "coberturaAntFull");
+        const bAntYTD  = base("ventasAntYTD", "coberturaAntYTD");
+        const bAct     = base("ventasAct", "coberturaAct");
+
         principal.ventasAntFull = num(suma("ventasAntFull"));
         principal.margenAntFull = num(suma("margenAntFull"));
         principal.ventasAntYTD  = num(suma("ventasAntYTD"));
@@ -924,9 +1418,26 @@ EVALUATE
         principal.ventasAct     = num(suma("ventasAct"));
         principal.margenAct     = num(suma("margenAct"));
         principal.ventasMes     = num(suma("ventasMes"));
-        principal.variacionPct  = principal.ventasAntYTD
+        principal.ventasSem     = num(suma("ventasSem"));
+        principal.ventasMesAnt  = num(suma("ventasMesAnt"));
+        principal.ventasSemAnt  = num(suma("ventasSemAnt"));
+
+        const pct = (m, b) => (b ? num((100 * m) / b) : null);
+        const cob = (b, v) => (v ? num((100 * b) / v) : 0);
+
+        principal.margenPctAntFull = pct(principal.margenAntFull, bAntFull);
+        principal.margenPctAntYTD  = pct(principal.margenAntYTD, bAntYTD);
+        principal.margenPctAct     = pct(principal.margenAct, bAct);
+        principal.coberturaAntFull = cob(bAntFull, principal.ventasAntFull);
+        principal.coberturaAntYTD  = cob(bAntYTD, principal.ventasAntYTD);
+        principal.coberturaAct     = cob(bAct, principal.ventasAct);
+        principal.variacionMargenPts =
+          (principal.margenPctAct !== null && principal.margenPctAntYTD !== null)
+            ? num(principal.margenPctAct - principal.margenPctAntYTD) : null;
+        principal.variacionPct = principal.ventasAntYTD
           ? num((100 * (principal.ventasAct - principal.ventasAntYTD)) / principal.ventasAntYTD)
           : null;
+
         principal.codigosFusionados = grupo.map((d) => d.cliente).join(", ");
 
         for (const d of grupo) {
@@ -936,14 +1447,31 @@ EVALUATE
           d.ventasAntYTD = 0;  d.margenAntYTD = 0;
           d.ventasAct = 0;     d.margenAct = 0;
           d.ventasMes = 0;     d.variacionPct = null;
+          d.margenPctAntFull = null; d.margenPctAntYTD = null; d.margenPctAct = null;
+          d.coberturaAntFull = 0; d.coberturaAntYTD = 0; d.coberturaAct = 0;
+          d.variacionMargenPts = null;
           fusionados++;
         }
       }
       log.codigosFusionados = fusionados;
-      log.gruposConta = [...porConta.values()].filter((g) => g.length > 1).length;
+      const multi = [...porConta.entries()].filter(([, g]) => g.length > 1);
+      log.gruposPorContable = multi.filter(([k]) => k.startsWith("CC:")).length;
+      log.gruposPorNombre = multi.filter(([k]) => k.startsWith("NP:")).length;
       log.sinCodconta = docs.filter((d) => !d.codconta).length;
+      // Muestra para revisar a ojo que no se estan fusionando clientes
+      // distintos que se llaman parecido
+      log.ejemplosFusionPorNombre = multi
+        .filter(([k]) => k.startsWith("NP:"))
+        .slice(0, 12)
+        .map(([k, g]) => ({
+          clave: k.slice(3),
+          codigos: g.map((d) => `${d.cliente} (${num(d.ventasAct)}€)`).join(" + "),
+        }));
 
       log.intercompanyMarcados = docs.filter((d) => d.intercompany).length;
+      log.codigosHuerfanos = docs.filter((d) => d.huerfano).length;
+      log.ventaEnHuerfanos = num(docs.filter((d) => d.huerfano)
+        .reduce((t, d) => t + d.ventasAntFull, 0));
 
       // ── Resumen por comercial, para el dashboard ──
       // Se cruza cada cliente con su grupoAgente segun el CRM, porque el
@@ -973,7 +1501,14 @@ EVALUATE
 
         for (const d of universo) {
           if (d.intercompany) continue;            // fuera traspasos internos
-          const agente = asignacion.get(String(d.cliente).trim())
+          // Los codigos secundarios de una fusion quedan a cero: su venta
+          // ya esta sumada en el principal. Contarlos inflaria la cartera
+          // y falsearia el recuento de clientes sin venta.
+          if (d.fusionadoEn) continue;
+          // Prioridad: el comercial que dice Power BI. El CRM queda como
+          // respaldo para clientes cuyo vendedor no este en la tabla.
+          const agente = d.agente
+            || asignacion.get(String(d.cliente).trim())
             || (d.codconta ? asignacion.get("CC:" + d.codconta) : null);
           if (!agente) {
             sinAsignar++;
@@ -990,17 +1525,26 @@ EVALUATE
           if (!porAgente.has(agente)) {
             porAgente.set(agente, {
               _id: docId(agente), agente, anoAnterior: anoAnt, anoActual: anoAct,
+              tipo: d.tipoAgente || null,
+              equipo: d.equipoAgente || null,
+              ambito: d.ambitoAgente || null,
+              objetivoMargen: d.objetivoMargen ?? null,
               ventasAntFull: 0, margenAntFull: 0, baseAntFull: 0,
               ventasAntYTD: 0, margenAntYTD: 0, baseAntYTD: 0,
               ventasAct: 0, margenAct: 0, baseAct: 0,
-              ventasMes: 0, clientes: 0, clientesConVentaMes: 0,
+              ventasMes: 0, ventasSem: 0, ventasMesAnt: 0, ventasSemAnt: 0,
+              clientes: 0, clientesConVentaMes: 0,
             });
           }
+          d.agente = agente;   // se persiste: permite filtrar por comercial
           const a = porAgente.get(agente);
           a.ventasAntFull += d.ventasAntFull; a.margenAntFull += d.margenAntFull;
           a.ventasAntYTD  += d.ventasAntYTD;  a.margenAntYTD  += d.margenAntYTD;
           a.ventasAct     += d.ventasAct;     a.margenAct     += d.margenAct;
           a.ventasMes     += d.ventasMes;
+          a.ventasSem     += d.ventasSem || 0;
+          a.ventasMesAnt  += d.ventasMesAnt || 0;
+          a.ventasSemAnt  += d.ventasSemAnt || 0;
           a.baseAntFull += d.ventasAntFull * (d.coberturaAntFull / 100);
           a.baseAntYTD  += d.ventasAntYTD  * (d.coberturaAntYTD / 100);
           a.baseAct     += d.ventasAct     * (d.coberturaAct / 100);
@@ -1019,6 +1563,9 @@ EVALUATE
             ventasAntYTD: num(a.ventasAntYTD),   margenAntYTD: num(a.margenAntYTD),
             ventasAct: num(a.ventasAct),         margenAct: num(a.margenAct),
             ventasMes: num(a.ventasMes),
+            ventasSem: num(a.ventasSem),
+            ventasMesAnt: num(a.ventasMesAnt),
+            ventasSemAnt: num(a.ventasSemAnt),
             // El % se calcula sobre la venta con coste fiable, no sobre
             // la venta total, o saldria diluido.
             margenPctAntFull: p(a.margenAntFull, a.baseAntFull),
@@ -1026,6 +1573,9 @@ EVALUATE
             margenPctAct: pctAct,
             variacionPct: a.ventasAntYTD
               ? num((100 * (a.ventasAct - a.ventasAntYTD)) / a.ventasAntYTD) : null,
+            // Puntos por encima o por debajo del objetivo de margen
+            desviacionObjetivo: (pctAct !== null && a.objetivoMargen)
+              ? num(pctAct - a.objetivoMargen) : null,
             variacionMargenPts: (pctAct !== null && pctAntYTD !== null)
               ? num(pctAct - pctAntYTD) : null,
             coberturaAntFull: cob(a.baseAntFull, a.ventasAntFull),
@@ -1041,13 +1591,15 @@ EVALUATE
         const tot = [...porAgente.values()].reduce((t, a) => {
           for (const k of ["ventasAntFull","margenAntFull","baseAntFull",
                            "ventasAntYTD","margenAntYTD","baseAntYTD",
-                           "ventasAct","margenAct","baseAct","ventasMes",
+                           "ventasAct","margenAct","baseAct","ventasMes","ventasSem",
+                           "ventasMesAnt","ventasSemAnt",
                            "clientes","clientesConVentaMes"]) t[k] += a[k];
           return t;
         }, { _id: "_TOTAL", agente: "_TOTAL", anoAnterior: anoAnt, anoActual: anoAct,
              ventasAntFull:0, margenAntFull:0, baseAntFull:0,
              ventasAntYTD:0, margenAntYTD:0, baseAntYTD:0,
-             ventasAct:0, margenAct:0, baseAct:0, ventasMes:0,
+             ventasAct:0, margenAct:0, baseAct:0, ventasMes:0, ventasSem:0,
+             ventasMesAnt:0, ventasSemAnt:0,
              clientes:0, clientesConVentaMes:0 });
         resumen.push(cerrar(tot));
 
