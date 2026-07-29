@@ -730,11 +730,16 @@ export default async function handler(req, res) {
       const { token } = await getToken(req);
       const T = M.ventas;
 
+      // Los filtros van como condiciones simples de columna, no con FILTER
+      // sobre toda la tabla: FILTER sustituye el contexto y devolvia el total
+      // del cliente en todas las filas en vez del importe de cada articulo.
       const filas = await pbiQuery(token, `
 DEFINE
   VAR _hoy = TODAY()
   VAR _anoAct = YEAR(_hoy)
   VAR _anoAnt = _anoAct - 1
+  VAR _iniAct = DATE(_anoAct, 1, 1)
+  VAR _iniAnt = DATE(_anoAnt, 1, 1)
   VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
 EVALUATE
   TOPN(${n},
@@ -742,14 +747,16 @@ EVALUATE
       ADDCOLUMNS(
         CALCULATETABLE(VALUES(${T}[CODIGO]), ${T}[CLIENTE] = "${cli}"),
         "Act", CALCULATE(SUM(${M.vBase}),
-          FILTER(${T}, ${T}[CLIENTE] = "${cli}" && YEAR(${M.vFecha}) = _anoAct)),
+          ${T}[CLIENTE] = "${cli}",
+          ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy),
         "Ant", CALCULATE(SUM(${M.vBase}),
-          FILTER(${T}, ${T}[CLIENTE] = "${cli}" && YEAR(${M.vFecha}) = _anoAnt
-            && ${M.vFecha} <= _corteAnt)),
+          ${T}[CLIENTE] = "${cli}",
+          ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt),
         "UniAct", CALCULATE(SUM(${T}[UNI]),
-          FILTER(${T}, ${T}[CLIENTE] = "${cli}" && YEAR(${M.vFecha}) = _anoAct))
+          ${T}[CLIENTE] = "${cli}",
+          ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy)
       ),
-      [Ant] > 0 || [Act] > 0
+      [Ant] <> 0 || [Act] <> 0
     ),
     [Ant] - [Act], DESC)`, true);
 
@@ -764,7 +771,8 @@ EVALUATE
             metros: pick(a, "METROS"),
           });
         }
-      } catch (e) { /* sin maestro se muestra el codigo */ }
+      } catch (e) { out.errorMaestro = e.message.slice(0, 160); }
+      out.articulosEnMaestro = arts.size;
 
       out.articulos = filas.map((r) => {
         const cod = String(pick(r, "CODIGO") || "").trim();
