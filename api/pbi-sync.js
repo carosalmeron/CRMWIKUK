@@ -1273,6 +1273,11 @@ EVALUATE
       out.importe = num(docs.reduce((t, d) => t + d.importe, 0));
       out.clientes = new Set(docs.map((d) => d.cliente)).size;
       out.sinAgente = docs.filter((d) => !d.agente).length;
+      out.intercompany = docs.filter((d) => d.intercompany).length;
+      out.importeIntercompany = num(docs.filter((d) => d.intercompany)
+        .reduce((t, d) => t + d.importe, 0));
+      out.conDescripcion = docs.filter((d) => d.descripcion).length;
+      out.pedidosDistintos = new Set(docs.map((d) => d.pedido).filter(Boolean)).size;
       out.primeraEntrega = docs.map((d) => d.fecha).sort()[0] || null;
 
       if (req.query.dry === "1") {
