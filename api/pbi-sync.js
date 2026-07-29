@@ -188,6 +188,8 @@ EVALUATE
     "Articulo", '00 Pedidos Validados Global'[CODIGO],
     "Familia",  '00 Pedidos Validados Global'[FAMILIA],
     "Uni",      '00 Pedidos Validados Global'[UNI],
+    "Precio",   '00 Pedidos Validados Global'[PRECIO],
+    "Subfamilia",'00 Pedidos Validados Global'[SUBFAMILIA],
     "Importe",  '00 Pedidos Validados Global'[BASE],
     "Pedido",   '00 Pedidos Validados Global'[NumPedido]
   )`,
@@ -1225,6 +1227,8 @@ EVALUATE
           articulo: art,
           familia: String(pick(r, "Familia") || "").trim() || null,
           unidades: num(pick(r, "Uni")),
+          precio: num(pick(r, "Precio")),
+          subfamilia: String(pick(r, "Subfamilia") || "").trim() || null,
           importe: num(pick(r, "Importe")),
           pedido: String(pick(r, "Pedido") || "").trim(),
           // Traspasos entre empresas del grupo: mismo criterio que en ventas
@@ -1789,6 +1793,8 @@ EVALUATE
           articulo: art,
           familia: String(pick(r, "Familia") || "").trim() || null,
           unidades: num(pick(r, "Uni")),
+          precio: num(pick(r, "Precio")),
+          subfamilia: String(pick(r, "Subfamilia") || "").trim() || null,
           importe: num(pick(r, "Importe")),
           pedido: String(pick(r, "Pedido") || "").trim(),
           // Traspasos entre empresas del grupo: mismo criterio que en ventas
