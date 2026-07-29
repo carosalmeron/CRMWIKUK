@@ -786,6 +786,8 @@ EVALUATE
       } catch (e) { out.errorMaestro = e.message.slice(0, 160); }
       out.articulosEnMaestro = arts.size;
 
+      // TOPN recorta por caida pero no garantiza el orden de salida: se
+      // reordena aqui para que el que mas cae salga primero.
       out.articulos = filas.map((r) => {
         const cod = String(pick(r, "CODIGO") || "").trim();
         const act = num(pick(r, "Act"));
@@ -802,7 +804,7 @@ EVALUATE
           variacionPct: ant ? num((100 * (act - ant)) / ant) : null,
           unidades: num(pick(r, "UniAct")),
         };
-      });
+      }).sort((a, b) => a.diferencia - b.diferencia);
     } catch (e) {
       out.ok = false;
       out.error = e.message;
