@@ -12,7 +12,13 @@
     font:15px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
     -webkit-font-smoothing:antialiased}
   header{background:var(--tinta);color:#fff;padding:18px 18px 20px}
-  .volver{display:inline-block;color:#93A1B5;text-decoration:none;font-size:13px;margin-bottom:10px}
+  /* Zona de toque holgada: en movil una flecha pequena se falla siempre */
+  .volver{display:inline-flex;align-items:center;gap:8px;color:#C6D0DC;
+    text-decoration:none;font-size:15px;font-weight:600;margin-bottom:12px;
+    padding:9px 14px 9px 10px;border-radius:11px;background:rgba(255,255,255,.09);
+    min-height:44px}
+  .volver:active{background:rgba(255,255,255,.18)}
+  .volver .f{font-size:22px;line-height:1}
   h1{margin:0;font-size:20px;font-weight:800}
   .sub{margin:4px 0 0;font-size:13px;color:#93A1B5}
   main{padding:14px 14px 60px;max-width:760px;margin:0 auto}
@@ -43,6 +49,24 @@
   .linea .nom{font-weight:600}
   .linea .det{font-size:11.5px;color:var(--tenue);margin-top:1px}
   .linea .der{margin-left:auto;text-align:right;font-variant-numeric:tabular-nums}
+  /* Filtros: agente e intercompania */
+  .filtros{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
+  .filtros select{flex:1;min-width:150px;font:inherit;font-size:13px;padding:10px 11px;
+    border:1.5px solid var(--linea);border-radius:10px;background:#fff;color:var(--texto)}
+  .chip{font:inherit;font-size:12.5px;font-weight:700;padding:9px 13px;border-radius:10px;
+    border:1.5px solid var(--linea);background:#fff;color:var(--tenue);cursor:pointer}
+  .chip[aria-pressed=true]{background:var(--tinta);border-color:var(--tinta);color:#fff}
+
+  .cab{cursor:pointer;user-select:none}
+  .cab .flecha{margin-left:10px;color:#94A3B0;font-size:15px;transition:transform .18s}
+  .cab[aria-expanded=true] .flecha{transform:rotate(90deg)}
+  .linea{cursor:pointer}
+  .linea:active{background:#F4F7FA}
+  .detalle{background:#FAFBFC;border-top:1px solid #EFF2F5;padding:4px 0}
+  .art{display:flex;gap:10px;padding:7px 15px 7px 26px;font-size:12.5px}
+  .art .c{font-weight:600}
+  .art .s{font-size:11px;color:var(--tenue);margin-top:1px}
+  .art .d{margin-left:auto;text-align:right;font-variant-numeric:tabular-nums}
   .vacio{padding:34px 16px;text-align:center;color:var(--tenue);font-size:14px}
   .cargando{padding:40px 0;text-align:center;color:var(--tenue)}
   .err{background:#FDF3F3;border:1px solid #F0C2C4;color:var(--hoy);
@@ -53,12 +77,19 @@
 <body>
 
 <header>
-  <a class="volver" href="index.html">← Hub</a>
+  <a class="volver" href="index.html"><span class="f">←</span> Volver al portal</a>
   <h1>Pedidos planificados</h1>
   <p class="sub" id="quien">Cargando…</p>
 </header>
 
 <main>
+  <div class="filtros" id="filtros" hidden>
+    <select id="fagente" onchange="filtrar()"></select>
+    <button class="chip" id="finter" aria-pressed="false" onclick="alternarInter()">
+      Sin intercompañía
+    </button>
+  </div>
+
   <div class="tabs" role="group" aria-label="Agrupar por">
     <button onclick="ver('dia')"    aria-pressed="true"  id="t-dia">Por día</button>
     <button onclick="ver('semana')" aria-pressed="false" id="t-semana">Por semana</button>
@@ -76,7 +107,10 @@ const norm=(s)=>String(s||"").toUpperCase().trim().normalize("NFD").replace(/[\u
 const val=(f)=>!f?null:f.doubleValue!==undefined?Number(f.doubleValue):
   f.integerValue!==undefined?Number(f.integerValue):f.stringValue??null;
 
-let PEDIDOS=[], MODO="dia";
+let TODOS=[], PEDIDOS=[], MODO="dia";
+let F_AGENTE="", SIN_INTER=false;
+const ABIERTOS=new Set();      // grupos de fecha desplegados
+const CLI_ABIERTO=new Set();   // clientes con el detalle abierto
 
 const DIAS=["domingo","lunes","martes","miércoles","jueves","viernes","sábado"];
 const MESES=["enero","febrero","marzo","abril","mayo","junio","julio",
@@ -154,13 +188,25 @@ async function cargar(){
     const r=await fetch(`${BASE}:runQuery`,{method:"POST",
       headers:{"Content-Type":"application/json"}, body:JSON.stringify(cuerpo)});
     const j=await r.json();
-    PEDIDOS=(Array.isArray(j)?j:[]).filter(x=>x.document).map(x=>{
+    TODOS=(Array.isArray(j)?j:[]).filter(x=>x.document).map(x=>{
       const o={};
       for(const [k,v] of Object.entries(x.document.fields||{})) o[k]=val(v);
       return o;
     }).filter(p=>p.fecha);
 
-    pintar();
+    // El filtro de agente solo tiene sentido para quien ve varios
+    if(!clave){
+      const ags=[...new Set(TODOS.map(p=>p.agente).filter(Boolean))].sort();
+      $("fagente").innerHTML=`<option value="">Todos los comerciales (${ags.length})</option>`
+        + ags.map(a=>`<option value="${a}">${a}</option>`).join("");
+      $("filtros").hidden=false;
+    }else{
+      // Un comercial solo necesita el filtro de intercompania
+      $("fagente").hidden=true;
+      $("filtros").hidden=false;
+    }
+
+    filtrar();
   }catch(e){
     $("app").innerHTML=`<div class="err">No se han podido cargar los pedidos: ${e.message}</div>`;
   }
@@ -170,6 +216,32 @@ function ver(modo){
   MODO=modo;
   for(const m of ["dia","semana","mes"])
     $("t-"+m).setAttribute("aria-pressed", String(m===modo));
+  ABIERTOS.clear();
+  pintar();
+}
+
+function filtrar(){
+  F_AGENTE=$("fagente").value||"";
+  PEDIDOS=TODOS.filter(p=>
+    (!F_AGENTE || p.agente===F_AGENTE) &&
+    (!SIN_INTER || !p.intercompany));
+  ABIERTOS.clear();
+  pintar();
+}
+
+function alternarInter(){
+  SIN_INTER=!SIN_INTER;
+  $("finter").setAttribute("aria-pressed", String(SIN_INTER));
+  filtrar();
+}
+
+function abrirGrupo(clave){
+  if(ABIERTOS.has(clave)) ABIERTOS.delete(clave); else ABIERTOS.add(clave);
+  pintar();
+}
+
+function abrirCliente(id){
+  if(CLI_ABIERTO.has(id)) CLI_ABIERTO.delete(id); else CLI_ABIERTO.add(id);
   pintar();
 }
 
@@ -200,34 +272,63 @@ function pintar(){
     ${prox?`<div><div class="v">${prox.titulo}</div><div class="e">Próxima salida</div></div>`:""}
   </div>`;
 
+  // Solo el primer grupo abierto de inicio: lo demas se despliega al pulsar
+  if(!ABIERTOS.size && orden.length) ABIERTOS.add(orden[0].clave);
+
   for(const g of orden){
-    // Agrupar por cliente dentro de cada fecha: es como se lee
+    const abierto=ABIERTOS.has(g.clave);
+
+    // Dentro de cada fecha, agrupado por cliente
     const porCli=new Map();
     for(const l of g.lineas){
       const k=l.cliente;
-      if(!porCli.has(k)) porCli.set(k,{nombre:l.nombre||k, poblacion:l.poblacion,
-                                        importe:0, uni:0, n:0, pedidos:new Set()});
+      if(!porCli.has(k)) porCli.set(k,{id:g.clave+"|"+k, cliente:k,
+        nombre:l.nombre||k, poblacion:l.poblacion, inter:!!l.intercompany,
+        importe:0, lineas:[], pedidos:new Set()});
       const c=porCli.get(k);
-      c.importe+=l.importe||0; c.uni+=l.unidades||0; c.n++;
+      c.importe+=l.importe||0; c.lineas.push(l);
       if(l.pedido) c.pedidos.add(l.pedido);
     }
+
     const clase = g.dias<=1 ? "urge" : g.dias<=7 ? "pronto" : "";
     html+=`<div class="grupo">
-      <div class="cab ${clase}">
+      <div class="cab ${clase}" role="button" tabindex="0" aria-expanded="${abierto}"
+        onclick="abrirGrupo('${g.clave}')">
         <div><div class="f">${g.titulo}</div>
           <div class="c">${g.sub}${g.sub?" · ":""}${porCli.size} cliente${porCli.size>1?"s":""}</div></div>
         <div class="imp">${eur(g.importe)}</div>
-      </div>
-      ${[...porCli.values()].sort((a,b)=>b.importe-a.importe).map(c=>`
-        <div class="linea">
+        <span class="flecha">›</span>
+      </div>`;
+
+    if(abierto){
+      for(const c of [...porCli.values()].sort((a,b)=>b.importe-a.importe)){
+        const cAbierto=CLI_ABIERTO.has(c.id);
+        html+=`<div class="linea" role="button" tabindex="0"
+          aria-expanded="${cAbierto}" onclick="abrirCliente('${c.id}')">
           <div style="min-width:0">
-            <div class="nom">${c.nombre}</div>
-            <div class="det">${c.poblacion?c.poblacion+" · ":""}${c.n} línea${c.n>1?"s":""}${
-              c.pedidos.size?` · pedido ${[...c.pedidos].join(", ")}`:""}</div>
+            <div class="nom">${c.nombre}${c.inter?' <span style="font-size:10px;font-weight:700;color:#4338CA">·INTERCO</span>':""}</div>
+            <div class="det">${c.poblacion?c.poblacion+" · ":""}${c.lineas.length} línea${c.lineas.length>1?"s":""}${
+              c.pedidos.size?` · ${[...c.pedidos].slice(0,2).join(", ")}${c.pedidos.size>2?"…":""}`:""}</div>
           </div>
           <div class="der"><b>${eur(c.importe)}</b></div>
-        </div>`).join("")}
-    </div>`;
+          <span class="flecha" style="margin-left:8px;color:#94A3B0">${cAbierto?"▾":"›"}</span>
+        </div>`;
+
+        if(cAbierto){
+          html+=`<div class="detalle">${c.lineas
+            .sort((a,b)=>(b.importe||0)-(a.importe||0))
+            .map(l=>`<div class="art">
+              <div style="min-width:0">
+                <div class="c">${l.articulo||"—"}</div>
+                <div class="s">${l.pedido||""}${l.familia?" · familia "+l.familia:""}</div>
+              </div>
+              <div class="d"><b>${eur(l.importe)}</b>
+                <div class="s">${(l.unidades||0).toLocaleString("es-ES")} uds</div></div>
+            </div>`).join("")}</div>`;
+        }
+      }
+    }
+    html+=`</div>`;
   }
 
   html+=`<p class="pie">Pedidos validados con fecha de entrega desde hoy.
