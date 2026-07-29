@@ -79,6 +79,13 @@
   .art-d{margin-left:auto;text-align:right;font-variant-numeric:tabular-nums;
     flex:none;white-space:nowrap}
   .art-d b{font-size:14.5px;font-weight:800}
+  .hist{margin-top:7px;padding-left:1px}
+  .hist-l{font-size:11.5px;color:var(--verde);font-weight:600;line-height:1.5}
+  .art-acc{display:flex;gap:7px;margin-top:8px;flex-wrap:wrap}
+  .acc{font:inherit;font-size:12px;font-weight:700;padding:7px 11px;
+    border:1.5px solid var(--linea);border-radius:9px;background:#fff;
+    color:var(--texto);cursor:pointer;min-height:34px}
+  .acc:active{background:#EEF2F6}
   .arts-cargando{margin:0;padding:12px 15px 12px 26px;font-size:12.5px;
     color:var(--tenue);border-top:1px solid #E6EBF0}
   .vacio{padding:18px 15px;color:var(--tenue);font-size:13px;text-align:center}
@@ -108,6 +115,13 @@ const PROY="grupo-consolidado-crm";
 const BASE=`https://firestore.googleapis.com/v1/projects/${PROY}/databases/(default)/documents`;
 
 const API="/api/pbi-sync";
+// Qué puede hacer cada uno desde un artículo
+function permisos(){
+  const u=sesion();
+  const rol=String(u.rol||"").toLowerCase();
+  const mando = rol.includes("director")||rol.includes("jefe")||rol==="admin"||rol==="ceo";
+  return {mando, rol, usuario:u};
+}
 const $=(id)=>document.getElementById(id);
 const eur=(n)=>Math.round(n||0).toLocaleString("es-ES")+" €";
 const pct=(n)=>(n>0?"+":"")+Number(n||0).toFixed(1)+" %";
@@ -251,6 +265,8 @@ function filaAgente(a, extra){
 let CACHE={agentes:[],meta:null};
 let BASE_LISTA=[], ALC=null, SYNC=null;
 let F_EQUIPO="", F_AGENTE="";
+let AGENTE_ABIERTO=null;       // comercial cuyo detalle está a la vista
+let ACCIONES={};               // histórico por cliente|artículo
 
 // Detalle de un comercial: de donde viene su caida o su crecimiento.
 // Se leen sus clientes con una consulta filtrada, no la coleccion entera.
@@ -274,12 +290,40 @@ async function verArticulos(cliente, fila){
       caja.innerHTML=`<p class="arts-cargando">No hay artículos con caída.</p>`;
       return;
     }
-    const html=lista.map(a=>`<div class="art">
+    const P=permisos();
+    const nomCli=(fila&&fila.querySelector(".nom"))?fila.querySelector(".nom").textContent:cliente;
+
+    const html=lista.map((a,i)=>`<div class="art">
       <div style="min-width:0">
         <div class="art-n">${a.descripcion||a.articulo}</div>
         <div class="art-s">${a.descripcion?a.articulo:""}${
           a.calibre?" · calibre "+a.calibre:""}${
+          a.metros?" · "+a.metros+" m":""}${
           a.ventasAnt?` · venía de ${eur(a.ventasAnt)}`:""}</div>
+        ${(()=>{
+          const hist=ACCIONES[`${cliente}|${a.articulo}`]||[];
+          if(!hist.length) return "";
+          const nom={estrategia:"Estrategia lanzada",solicitud:"Estrategia solicitada",
+                     oferta:"Oferta enviada"};
+          return `<div class="hist">${hist.slice(0,3).map(h=>{
+            const f=h.fecha?new Date(h.fecha):null;
+            return `<div class="hist-l">✓ ${nom[h.tipo]||h.tipo}${
+              h.usuario?" · "+h.usuario:""}${
+              f?" · "+f.toLocaleDateString("es-ES"):""}</div>`;
+          }).join("")}${hist.length>3?`<div class="hist-l">y ${hist.length-3} más</div>`:""}</div>`;
+        })()}
+        <div class="art-acc">
+          ${P.mando
+            ? `<button class="acc" onclick="accionArticulo('estrategia','${cliente}','${
+                (nomCli||"").replace(/'/g,"")}','${a.articulo}','${
+                (a.descripcion||"").replace(/'/g,"")}')">Lanzar estrategia</button>`
+            : `<button class="acc" onclick="accionArticulo('solicitud','${cliente}','${
+                (nomCli||"").replace(/'/g,"")}','${a.articulo}','${
+                (a.descripcion||"").replace(/'/g,"")}')">Pedir estrategia</button>
+               <button class="acc" onclick="accionArticulo('oferta','${cliente}','${
+                (nomCli||"").replace(/'/g,"")}','${a.articulo}','${
+                (a.descripcion||"").replace(/'/g,"")}')">Enviar oferta</button>`}
+        </div>
       </div>
       <div class="art-d">
         <b>${eur(a.ventasAct)}</b>
@@ -293,9 +337,56 @@ async function verArticulos(cliente, fila){
   }
 }
 
-async function verAgente(id){
+// No se crea el registro aquí: se deja el contexto y se abre el CRM, que es
+// donde viven las validaciones y la cadena de aprobación. Duplicar esa lógica
+// en dos sitios acabaría con estrategias que se saltan una aprobación.
+async function accionArticulo(tipo, cliente, nombreCliente, articulo, descripcion){
+  const P=permisos();
+
+  // Se deja constancia de la acción: queda el histórico de lo que se ha
+  // hecho sobre cada artículo, y al volver se ve sin depender del CRM.
+  const idAcc=`${Date.now()}_${String(cliente).replace(/[^A-Za-z0-9]/g,"")}_${
+    String(articulo).replace(/[^A-Za-z0-9]/g,"")}`;
+  try{
+    await fetch(`${BASE}/acciones_analisis/${idAcc}`,{
+      method:"PATCH", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({fields:{
+        tipo:{stringValue:tipo},
+        cliente:{stringValue:String(cliente)},
+        nombreCliente:{stringValue:String(nombreCliente||"")},
+        articulo:{stringValue:String(articulo)},
+        descripcion:{stringValue:String(descripcion||"")},
+        agente:{stringValue:String(AGENTE_ABIERTO||"")},
+        usuario:{stringValue:String(P.usuario.nombre||P.usuario.username||"")},
+        fecha:{stringValue:new Date().toISOString()},
+      }}),
+    });
+  }catch(e){ /* si falla el registro, la acción sigue adelante */ }
+
+  // Y dónde estábamos, para volver al mismo sitio
+  try{
+    sessionStorage.setItem("volverAnalisis", JSON.stringify({
+      agente:AGENTE_ABIERTO, cliente, equipo:F_EQUIPO, filtroAgente:F_AGENTE }));
+  }catch(e){}
+
+  const contexto={
+    tipo,                        // estrategia | solicitud | oferta
+    cliente, nombreCliente,
+    articulo, descripcion,
+    origen:"analisis",
+    solicitadoPor:P.usuario.nombre||P.usuario.username||null,
+    rol:P.rol,
+    creadoEl:new Date().toISOString(),
+  };
+  try{ sessionStorage.setItem("accionDesdeAnalisis", JSON.stringify(contexto)); }
+  catch(e){}
+  location.href="crm.html";
+}
+
+async function verAgente(id, abrirCliente){
   const a=CACHE.agentes.find(x=>x._id===id);
   if(!a) return;
+  AGENTE_ABIERTO=id;
   window.scrollTo(0,0);
   $("ambito").textContent=a.agente||id;
   $("app").innerHTML=`<div class="cargando">Cargando sus clientes…</div>`;
@@ -405,7 +496,7 @@ async function verAgente(id){
       : `<p class="vacio">Todos sus clientes siguen comprando.</p>`}</div>
 
     <p class="pie">Nada en ${new Date().getFullYear()} y más de 1.000 € el año
-      anterior. Es la lista de recuperación. · v1.7</p>
+      anterior. Es la lista de recuperación. · v1.9</p>
   `;
   }catch(e){
     $("app").innerHTML=`<div class="err">Error al mostrar el detalle: ${e.message}
@@ -419,12 +510,22 @@ async function arrancar(){
   $("quien").textContent = u.nombre || u.username || "Sin identificar";
 
   try{
-    const [agentesRaw, usuarios, ajustes, meta] = await Promise.all([
+    const [agentesRaw, usuarios, ajustes, meta, acciones] = await Promise.all([
       leer("pbi_resumen_agente"),
       leer("usuarios").catch(()=>[]),
       leer("pbi_ajustes").catch(()=>[]),
       fetch(`${BASE}/pbi_meta/estado`).then(r=>r.ok?r.json():null).catch(()=>null),
+      leer("acciones_analisis").catch(()=>[]),
     ]);
+
+    // Histórico de acciones comerciales, agrupado por cliente y artículo
+    ACCIONES={};
+    for(const x of acciones){
+      const k=`${x.cliente}|${x.articulo}`;
+      (ACCIONES[k]=ACCIONES[k]||[]).push(x);
+    }
+    for(const k of Object.keys(ACCIONES))
+      ACCIONES[k].sort((a,b)=>String(b.fecha||"").localeCompare(String(a.fecha||"")));
 
     // Los cambios de rama hechos en la herramienta de estructura mandan sobre
     // lo que traiga Power BI. Sin esto, Francia aparece como "sin equipo".
@@ -461,6 +562,21 @@ async function arrancar(){
       pintarAgentes();
       $("filtros").hidden=false;
     }
+    // Si volvemos del CRM, se recupera el sitio donde estábamos
+    let vuelta=null;
+    try{
+      const raw=sessionStorage.getItem("volverAnalisis");
+      if(raw){ vuelta=JSON.parse(raw); sessionStorage.removeItem("volverAnalisis"); }
+    }catch(e){}
+
+    if(vuelta && vuelta.agente){
+      if(vuelta.equipo){ F_EQUIPO=vuelta.equipo; $("fequipo").value=vuelta.equipo; pintarAgentes(); }
+      if(vuelta.filtroAgente){ F_AGENTE=vuelta.filtroAgente; $("fagente").value=vuelta.filtroAgente; }
+      await verAgente(vuelta.agente);
+      if(vuelta.cliente) setTimeout(()=>verArticulos(vuelta.cliente, null), 150);
+      return;
+    }
+
     render();
   }catch(e){
     $("app").innerHTML=`<div class="err">No se han podido cargar los datos: ${e.message}</div>`;
@@ -643,7 +759,7 @@ function render(){
     html += `<p class="pie">${
       dias!==null && dias>=2
         ? `⚠️ Datos de hace ${dias} días. La sincronización puede haber fallado.`
-        : `Ventas reales de Power BI${sync?" · "+new Date(sync).toLocaleDateString("es-ES"):""} · v1.7`
+        : `Ventas reales de Power BI${sync?" · "+new Date(sync).toLocaleDateString("es-ES"):""} · v1.9`
     }</p>`;
 
     $("app").innerHTML=html;
