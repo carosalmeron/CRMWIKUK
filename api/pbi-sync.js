@@ -158,6 +158,24 @@ EVALUATE
       FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAct &&
         NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
 
+    // Margen del mes y del mismo mes del ano pasado, con el mismo filtro de
+    // coste limpio que el anual: sin esto no se puede saber si el margen del
+    // mes mejora o empeora respecto al ano anterior.
+    "VentaMesOk", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+    "CosteMesOk", CALCULATE(SUM(${M.vCoste}),
+      FILTER(${M.ventas}, ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+    "VentaMesAntOk", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAnt && MONTH(${M.vFecha}) = MONTH(_hoy)
+        && DAY(${M.vFecha}) <= DAY(_hoy) &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+    "CosteMesAntOk", CALCULATE(SUM(${M.vCoste}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAnt && MONTH(${M.vFecha}) = MONTH(_hoy)
+        && DAY(${M.vFecha}) <= DAY(_hoy) &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+
     "VentaMes", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
     "VentaSem", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniSem && ${M.vFecha} <= _hoy),
     // Mismo mes y misma semana del ano pasado, para poder comparar cuando
@@ -1610,6 +1628,10 @@ EVALUATE
         const mAntFull = num(bAntFull - num(pick(r, "CosteAntFullOk")));
         const mAntYTD  = num(bAntYTD  - num(pick(r, "CosteAntYTDOk")));
         const mAct     = num(bAct     - num(pick(r, "CosteActOk")));
+        const bMes     = num(pick(r, "VentaMesOk"));
+        const bMesAnt  = num(pick(r, "VentaMesAntOk"));
+        const mMes     = num(bMes    - num(pick(r, "CosteMesOk")));
+        const mMesAnt  = num(bMesAnt - num(pick(r, "CosteMesAntOk")));
 
         const p = (m, b) => (b ? num((100 * m) / b) : null);
         const cob = (b, v) => (v ? num((100 * b) / v) : 0);
@@ -1658,6 +1680,12 @@ EVALUATE
           ventasSem: vSem,
           ventasMesAnt: vMesAnt,
           ventasSemAnt: vSemAnt,
+
+          // Margen del mes, con su referencia del ano anterior
+          margenMes: mMes,       baseMes: bMes,
+          margenPctMes: p(mMes, bMes),
+          margenMesAnt: mMesAnt, baseMesAnt: bMesAnt,
+          margenPctMesAnt: p(mMesAnt, bMesAnt),
 
           // Variacion sobre el mismo periodo, no sobre el ano cerrado
           variacionPct: vAntYTD ? num((100 * (vAct - vAntYTD)) / vAntYTD) : null,
@@ -1751,6 +1779,10 @@ EVALUATE
         principal.ventasSem     = num(suma("ventasSem"));
         principal.ventasMesAnt  = num(suma("ventasMesAnt"));
         principal.ventasSemAnt  = num(suma("ventasSemAnt"));
+        principal.margenMes     = num(suma("margenMes"));
+        principal.baseMes       = num(suma("baseMes"));
+        principal.margenMesAnt  = num(suma("margenMesAnt"));
+        principal.baseMesAnt    = num(suma("baseMesAnt"));
 
         const pct = (m, b) => (b ? num((100 * m) / b) : null);
         const cob = (b, v) => (v ? num((100 * b) / v) : 0);
@@ -1884,6 +1916,7 @@ EVALUATE
               ventasAntYTD: 0, margenAntYTD: 0, baseAntYTD: 0,
               ventasAct: 0, margenAct: 0, baseAct: 0,
               ventasMes: 0, ventasSem: 0, ventasMesAnt: 0, ventasSemAnt: 0,
+              margenMes: 0, baseMes: 0, margenMesAnt: 0, baseMesAnt: 0,
               clientes: 0, clientesConVentaMes: 0,
             });
           }
@@ -1896,6 +1929,10 @@ EVALUATE
           a.ventasSem     += d.ventasSem || 0;
           a.ventasMesAnt  += d.ventasMesAnt || 0;
           a.ventasSemAnt  += d.ventasSemAnt || 0;
+          a.margenMes     += d.margenMes || 0;
+          a.baseMes       += d.baseMes || 0;
+          a.margenMesAnt  += d.margenMesAnt || 0;
+          a.baseMesAnt    += d.baseMesAnt || 0;
           a.baseAntFull += d.ventasAntFull * (d.coberturaAntFull / 100);
           a.baseAntYTD  += d.ventasAntYTD  * (d.coberturaAntYTD / 100);
           a.baseAct     += d.ventasAct     * (d.coberturaAct / 100);
@@ -1916,6 +1953,10 @@ EVALUATE
             ventasMes: num(a.ventasMes),
             ventasSem: num(a.ventasSem),
             ventasMesAnt: num(a.ventasMesAnt),
+            margenPctMes:    p(a.margenMes, a.baseMes),
+            margenPctMesAnt: p(a.margenMesAnt, a.baseMesAnt),
+            margenMes: num(a.margenMes),       baseMes: num(a.baseMes),
+            margenMesAnt: num(a.margenMesAnt), baseMesAnt: num(a.baseMesAnt),
             ventasSemAnt: num(a.ventasSemAnt),
             // El % se calcula sobre la venta con coste fiable, no sobre
             // la venta total, o saldria diluido.
@@ -1944,6 +1985,7 @@ EVALUATE
                            "ventasAntYTD","margenAntYTD","baseAntYTD",
                            "ventasAct","margenAct","baseAct","ventasMes","ventasSem",
                            "ventasMesAnt","ventasSemAnt",
+                           "margenMes","baseMes","margenMesAnt","baseMesAnt",
                            "clientes","clientesConVentaMes"]) t[k] += a[k];
           return t;
         }, { _id: "_TOTAL", agente: "_TOTAL", anoAnterior: anoAnt, anoActual: anoAct,
@@ -1951,6 +1993,7 @@ EVALUATE
              ventasAntYTD:0, margenAntYTD:0, baseAntYTD:0,
              ventasAct:0, margenAct:0, baseAct:0, ventasMes:0, ventasSem:0,
              ventasMesAnt:0, ventasSemAnt:0,
+             margenMes:0, baseMes:0, margenMesAnt:0, baseMesAnt:0,
              clientes:0, clientesConVentaMes:0 });
         resumen.push(cerrar(tot));
 
