@@ -590,6 +590,38 @@ async function fbLeerColeccion(coleccion) {
 // Lo de aqui es solo el valor por defecto verificado en julio de 2026.
 let RECOD = { prefijo: "U43", digitos: 4, inserta: "0" };
 
+// ── Ramas comerciales ──────────────────────────────────────────────
+// Se calculan aqui una sola vez y se escriben en pbi_resumen_agente, para
+// que el CRM y las paginas de analisis no tengan que repetir la regla.
+// Editable en Firestore: pbi_config/ramas
+let RAMAS = {
+  // valor de Agentes[GRUPONIVEL4] normalizado -> rama final
+  WIKUK: "WIKUK",
+  INTERKEY: "INTERKEY",
+  PORTUGAL: "INTERKEY",     // Portugal se integro en Interkey
+  FRANCIA: "FRANCIA",
+  DISTRIBUIDOR: "DISTRIBUIDOR",
+  // sin GRUPONIVEL4 son los comerciales de Discob
+  "": "FRANCIA",
+  // Agentes[GRUPONIVEL3] = Distribuidor manda sobre la division comercial
+  _porTipo: { DISTRIBUIDOR: "DISTRIBUIDOR" },
+};
+
+const sinTildes = (v) => String(v || "").toUpperCase().trim()
+  .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+function ramaDe(equipo, tipo) {
+  const t = sinTildes(tipo);
+  if (RAMAS._porTipo && RAMAS._porTipo[t]) return RAMAS._porTipo[t];
+  const e = sinTildes(equipo);
+  if (RAMAS[e]) return RAMAS[e];
+  // "Interkey Julio" y similares
+  for (const k of Object.keys(RAMAS)) {
+    if (k && k !== "_porTipo" && e.startsWith(k)) return RAMAS[k];
+  }
+  return e || RAMAS[""] || null;
+}
+
 function canonico(cod) {
   const c = String(cod || "").trim().toUpperCase();
   if (!RECOD.prefijo) return c;
@@ -607,6 +639,18 @@ async function cargarReglas() {
     if (cfg.recodPrefijo !== undefined) RECOD.prefijo = String(cfg.recodPrefijo || "");
     if (cfg.recodDigitos) RECOD.digitos = Number(cfg.recodDigitos) || 4;
     if (cfg.recodInserta !== undefined) RECOD.inserta = String(cfg.recodInserta || "");
+
+    // Ramas: campos rama_WIKUK="WIKUK", rama_PORTUGAL="INTERKEY", etc.
+    const ramas = {};
+    for (const [k, v] of Object.entries(cfg)) {
+      if (k.startsWith("rama_") && v) ramas[k.slice(5).toUpperCase()] = String(v);
+      if (k.startsWith("tipo_") && v) {
+        RAMAS._porTipo = RAMAS._porTipo || {};
+        RAMAS._porTipo[k.slice(5).toUpperCase()] = String(v);
+      }
+    }
+    if (Object.keys(ramas).length) Object.assign(RAMAS, ramas);
+    if (cfg.ramaSinEquipo) RAMAS[""] = String(cfg.ramaSinEquipo);
     return true;
   } catch (e) { return false; }
 }
@@ -779,6 +823,40 @@ export default async function handler(req, res) {
   // Truco que no depende de las funciones INFO.*: la respuesta incluye
   // todas las columnas como claves, y un valor de ejemplo de cada una,
   // asi que revela nombres exactos Y tipos de dato de golpe.
+  // ?tablas=1 → lista las tablas del modelo y, si se pide, busca una columna
+  // concreta en todas ellas. Util cuando el ERP tiene un campo que no se sabe
+  // si ha llegado al modelo, como VALIDARPRECIO.
+  if (req.query.tablas === "1") {
+    const out = { ok: true };
+    try {
+      const { token } = await getToken(req);
+      const filas = await pbiQuery(token,
+        `EVALUATE SELECTCOLUMNS(INFO.TABLES(), "Tabla", [Name])`, true);
+      out.tablas = filas.map((r) => pick(r, "Tabla")).filter(Boolean).sort();
+      out.total = out.tablas.length;
+
+      // &buscar=VALIDAR → devuelve en que tablas aparece esa columna
+      if (req.query.buscar) {
+        const q = String(req.query.buscar).toUpperCase();
+        const cols = await pbiQuery(token, `
+EVALUATE
+  SELECTCOLUMNS(
+    NATURALLEFTOUTERJOIN(
+      SELECTCOLUMNS(INFO.COLUMNS(), "TableID", [TableID], "Columna", [ExplicitName]),
+      SELECTCOLUMNS(INFO.TABLES(), "TableID", [ID], "Tabla", [Name])
+    ),
+    "Tabla", [Tabla], "Columna", [Columna])`, true);
+        out.coincidencias = cols
+          .filter((c) => String(pick(c, "Columna") || "").toUpperCase().includes(q))
+          .map((c) => `${pick(c, "Tabla")} → ${pick(c, "Columna")}`);
+      }
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
   if (req.query.peek === "1") {
     const out = { ok: true };
     try {
@@ -1400,6 +1478,20 @@ EVALUATE
 
     log.reglasDeFirestore = await cargarReglas();
 
+    // Correcciones de rama hechas a mano en la herramienta de estructura.
+    // Mandan sobre la regla general y se resuelven aqui, no en cada pagina.
+    const AJUSTES_RAMA = {};
+    try {
+      for (const a of await fbLeerColeccion("pbi_ajustes")) {
+        if (a.equipo && a.equipo !== "_EXCLUIR")
+          AJUSTES_RAMA[String(a._id).toUpperCase()] = a.equipo;
+      }
+    } catch (e) {
+      log.errores.push(`ajustes de rama: ${e.message}`);
+    }
+    log.ajustesRama = Object.keys(AJUSTES_RAMA).length;
+    globalThis.__AJUSTES_RAMA__ = AJUSTES_RAMA;
+
     // ── Decidir si toca sincronizacion completa o incremental ──
     // Se fuerza completa cuando:
     //   - se pide con ?full=1
@@ -1783,7 +1875,9 @@ EVALUATE
             porAgente.set(agente, {
               _id: docId(agente), agente, anoAnterior: anoAnt, anoActual: anoAct,
               tipo: d.tipoAgente || null,
-              equipo: d.equipoAgente || null,
+              equipo: (globalThis.__AJUSTES_RAMA__ || {})[String(agente).toUpperCase()]
+                || ramaDe(d.equipoAgente, d.tipoAgente),
+              equipoOriginal: d.equipoAgente || null,
               ambito: d.ambitoAgente || null,
               objetivoMargen: d.objetivoMargen ?? null,
               ventasAntFull: 0, margenAntFull: 0, baseAntFull: 0,
