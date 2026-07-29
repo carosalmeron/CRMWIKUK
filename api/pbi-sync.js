@@ -209,6 +209,38 @@ EVALUATE
     ${M.cCodconta}
   )`,
 
+    // Entrada de pedidos por vendedor, por FECHA de pedido (no de entrega).
+    // Mide el trabajo comercial de la semana, que es lo que el vendedor
+    // controla: la factura llega semanas despues.
+    entrada: `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _iniSem = _hoy - WEEKDAY(_hoy, 2) + 1
+  VAR _iniMes = DATE(YEAR(_hoy), MONTH(_hoy), 1)
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
+EVALUATE
+  SUMMARIZECOLUMNS(
+    '00 Entrada Pedidos Global'[VENDEDOR],
+    "Sem", CALCULATE(SUM('00 Entrada Pedidos Global'[BASE]),
+      '00 Entrada Pedidos Global'[FECHA] >= _iniSem &&
+      '00 Entrada Pedidos Global'[FECHA] <= _hoy),
+    "Mes", CALCULATE(SUM('00 Entrada Pedidos Global'[BASE]),
+      '00 Entrada Pedidos Global'[FECHA] >= _iniMes &&
+      '00 Entrada Pedidos Global'[FECHA] <= _hoy),
+    "Ano", CALCULATE(SUM('00 Entrada Pedidos Global'[BASE]),
+      FILTER('00 Entrada Pedidos Global',
+        YEAR('00 Entrada Pedidos Global'[FECHA]) = _anoAct)),
+    "SemAnt", CALCULATE(SUM('00 Entrada Pedidos Global'[BASE]),
+      '00 Entrada Pedidos Global'[FECHA] >= _iniSem - 364 &&
+      '00 Entrada Pedidos Global'[FECHA] <= _corteAnt),
+    "AnoAnt", CALCULATE(SUM('00 Entrada Pedidos Global'[BASE]),
+      FILTER('00 Entrada Pedidos Global',
+        YEAR('00 Entrada Pedidos Global'[FECHA]) = _anoAnt &&
+        '00 Entrada Pedidos Global'[FECHA] <= _corteAnt))
+  )`,
+
     // Maestro de articulos: descripcion, metros y calibre. La tabla de
     // pedidos solo trae el codigo, asi que sin esto el comercial ve
     // "ESP60.10" en vez de saber que producto va a salir.
@@ -1280,11 +1312,67 @@ EVALUATE
       out.pedidosDistintos = new Set(docs.map((d) => d.pedido).filter(Boolean)).size;
       out.primeraEntrega = docs.map((d) => d.fecha).sort()[0] || null;
 
+      // ── Resumen por comercial: entrada de pedidos y previsión ──
+      // Dos cosas distintas y complementarias:
+      //   entrada*   = pedidos METIDOS en el periodo (trabajo de la semana)
+      //   previsto*  = pedidos que SALEN en el periodo (lo que se facturara)
+      const porAg = {};
+      const dameAg = (a) => (porAg[a] = porAg[a] || {
+        _id: docId(a), agente: a,
+        entradaSem: 0, entradaMes: 0, entradaAno: 0,
+        entradaSemAnt: 0, entradaAnoAnt: 0,
+        previstoEstaSem: 0, previstoProxSem: 0, previstoTotal: 0,
+      });
+
+      try {
+        for (const e of await pbiQuery(token, Q.entrada)) {
+          const ven = String(pick(e, "VENDEDOR") || "").trim();
+          const ag = agentes.get(ven);
+          if (!ag) continue;
+          const a = dameAg(ag);
+          a.entradaSem    += num(pick(e, "Sem"));
+          a.entradaMes    += num(pick(e, "Mes"));
+          a.entradaAno    += num(pick(e, "Ano"));
+          a.entradaSemAnt += num(pick(e, "SemAnt"));
+          a.entradaAnoAnt += num(pick(e, "AnoAnt"));
+        }
+      } catch (e) { out.errorEntrada = e.message.slice(0, 200); }
+
+      // Lo que sale esta semana y la que viene, a partir de los pedidos ya
+      // planificados: permite anticipar si se llegara al objetivo.
+      const hoy0 = new Date(); hoy0.setHours(0, 0, 0, 0);
+      const lunes = new Date(hoy0);
+      lunes.setDate(lunes.getDate() - ((lunes.getDay() + 6) % 7));
+      const finSem = new Date(lunes); finSem.setDate(finSem.getDate() + 6);
+      const finProx = new Date(lunes); finProx.setDate(finProx.getDate() + 13);
+      const iso = (d) => d.toISOString().slice(0, 10);
+
+      for (const d of docs) {
+        if (!d.agente || d.intercompany) continue;
+        const a = dameAg(d.agente);
+        a.previstoTotal += d.importe;
+        if (d.fecha <= iso(finSem)) a.previstoEstaSem += d.importe;
+        else if (d.fecha <= iso(finProx)) a.previstoProxSem += d.importe;
+      }
+
+      const resumen = Object.values(porAg).map((a) => ({
+        ...a,
+        entradaSem: num(a.entradaSem), entradaMes: num(a.entradaMes),
+        entradaAno: num(a.entradaAno), entradaSemAnt: num(a.entradaSemAnt),
+        entradaAnoAnt: num(a.entradaAnoAnt),
+        previstoEstaSem: num(a.previstoEstaSem),
+        previstoProxSem: num(a.previstoProxSem),
+        previstoTotal: num(a.previstoTotal),
+        actualizado: new Date().toISOString(),
+      }));
+
       if (req.query.dry === "1") {
         out.dry = true;
         out.muestra = docs.slice(0, 5);
+        out.resumenAgentes = resumen.slice(0, 8);
       } else {
         out.escritos = await fbCommit("pbi_pedidos", docs);
+        out.agentesConEntrada = await fbCommit("pbi_entrada_agente", resumen);
         // Fuera lo ya servido
         const hoyISO = new Date().toISOString().slice(0, 10);
         const guardados = await fbLeerColeccion("pbi_pedidos");
