@@ -1178,6 +1178,87 @@ EVALUATE
     return res.status(200).json(out);
   }
 
+  // ?solopedidos=1 → sincroniza unicamente los pedidos planificados.
+  // La sincronizacion completa consume casi los 60 s de Vercel con las
+  // ventas y nunca llega a este bloque, asi que se puede lanzar aparte.
+  if (req.query.solopedidos === "1") {
+    const t1 = Date.now();
+    const out = { ok: true };
+    try {
+      const { token, modo } = await getToken(req);
+      out.modoAuth = modo;
+      const Q = dax(null);
+
+      // Ficha de cliente para poner nombre y poblacion
+      const fichas = new Map();
+      for (const c of await pbiQuery(token, Q.clientes)) {
+        const cod = String(pick(c, "CODIGO") || "").trim();
+        if (!cod || fichas.has(cod)) continue;
+        fichas.set(cod, {
+          nombre: pick(c, "NOMBRE"),
+          poblacion: pick(c, "POBLACION"),
+        });
+      }
+
+      // Vendedor -> comercial del CRM
+      const agentes = new Map();
+      for (const a of await pbiQuery(token, Q.agentes, true)) {
+        const cod = String(pick(a, "CODIGO") || "").trim();
+        if (cod) agentes.set(cod, String(pick(a, "GRUPOAGENTE") || "").trim() || null);
+      }
+
+      const filas = await pbiQuery(token, Q.pedidos);
+      const docs = filas.map((r, i) => {
+        const cli = String(pick(r, "Cliente") || "").trim();
+        const ven = String(pick(r, "Vendedor") || "").trim();
+        const fec = String(pick(r, "Fecha") || "").slice(0, 10);
+        const art = String(pick(r, "Articulo") || "").trim();
+        const ficha = fichas.get(cli) || fichas.get(canonico(cli)) || {};
+        return {
+          _id: docId(`${fec}_${cli}_${art}_${i}`),
+          cliente: cli,
+          nombre: ficha.nombre || cli,
+          poblacion: ficha.poblacion || null,
+          agente: agentes.get(ven) || null,
+          vendedor: ven,
+          fecha: fec,
+          articulo: art,
+          familia: String(pick(r, "Familia") || "").trim() || null,
+          unidades: num(pick(r, "Uni")),
+          importe: num(pick(r, "Importe")),
+          pedido: String(pick(r, "Pedido") || "").trim(),
+          actualizado: new Date().toISOString(),
+        };
+      }).filter((d) => d.cliente && d.fecha);
+
+      out.lineas = docs.length;
+      out.importe = num(docs.reduce((t, d) => t + d.importe, 0));
+      out.clientes = new Set(docs.map((d) => d.cliente)).size;
+      out.sinAgente = docs.filter((d) => !d.agente).length;
+      out.primeraEntrega = docs.map((d) => d.fecha).sort()[0] || null;
+
+      if (req.query.dry === "1") {
+        out.dry = true;
+        out.muestra = docs.slice(0, 5);
+      } else {
+        out.escritos = await fbCommit("pbi_pedidos", docs);
+        // Fuera lo ya servido
+        const hoyISO = new Date().toISOString().slice(0, 10);
+        const guardados = await fbLeerColeccion("pbi_pedidos");
+        const caducados = guardados
+          .filter((g) => !g.fecha || String(g.fecha) < hoyISO)
+          .map((g) => g._id);
+        out.caducadosBorrados = caducados.length;
+        if (caducados.length) await fbBorrar("pbi_pedidos", caducados);
+      }
+      out.segundos = Math.round((Date.now() - t1) / 1000);
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(out.ok ? 200 : 500).json(out);
+  }
+
   const dry = req.query.dry === "1"; // ?dry=1 → consulta pero NO escribe
   const t0 = Date.now();
   const log = { dry, ventas: 0, pendiente: 0, stock: 0, errores: [] };
