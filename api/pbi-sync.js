@@ -1227,6 +1227,8 @@ EVALUATE
           unidades: num(pick(r, "Uni")),
           importe: num(pick(r, "Importe")),
           pedido: String(pick(r, "Pedido") || "").trim(),
+          // Traspasos entre empresas del grupo: mismo criterio que en ventas
+          intercompany: esIntercompany(ficha.nombre || cli),
           actualizado: new Date().toISOString(),
         };
       }).filter((d) => d.cliente && d.fecha);
@@ -1789,6 +1791,8 @@ EVALUATE
           unidades: num(pick(r, "Uni")),
           importe: num(pick(r, "Importe")),
           pedido: String(pick(r, "Pedido") || "").trim(),
+          // Traspasos entre empresas del grupo: mismo criterio que en ventas
+          intercompany: esIntercompany(ficha.nombre || cli),
           actualizado: new Date().toISOString(),
         };
       }).filter((d) => d.cliente && d.fecha);
