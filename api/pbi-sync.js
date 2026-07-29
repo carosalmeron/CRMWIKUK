@@ -729,6 +729,18 @@ export default async function handler(req, res) {
     try {
       const { token } = await getToken(req);
       const T = M.ventas;
+      const Q = dax(null);   // se necesita el maestro de articulos
+
+      // El historico de ventas conserva el codigo antiguo del cliente, asi que
+      // hay que consultar tambien su variante: U4309094 hoy era U439094 antes
+      // de la recodificacion de marzo. Sin esto el ano anterior sale a cero.
+      const variantes = new Set([cli]);
+      const m = /^U430(\d{4})$/.exec(cli);
+      if (m) variantes.add("U43" + m[1]);
+      const canon = canonico(cli);
+      if (canon !== cli) variantes.add(canon);
+      const enLista = [...variantes].map((c) => `"${c}"`).join(", ");
+      out.codigosConsultados = [...variantes];
 
       // Los filtros van como condiciones simples de columna, no con FILTER
       // sobre toda la tabla: FILTER sustituye el contexto y devolvia el total
@@ -745,15 +757,15 @@ EVALUATE
   TOPN(${n},
     FILTER(
       ADDCOLUMNS(
-        CALCULATETABLE(VALUES(${T}[CODIGO]), ${T}[CLIENTE] = "${cli}"),
+        CALCULATETABLE(VALUES(${T}[CODIGO]), ${T}[CLIENTE] IN {${enLista}}),
         "Act", CALCULATE(SUM(${M.vBase}),
-          ${T}[CLIENTE] = "${cli}",
+          ${T}[CLIENTE] IN {${enLista}},
           ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy),
         "Ant", CALCULATE(SUM(${M.vBase}),
-          ${T}[CLIENTE] = "${cli}",
+          ${T}[CLIENTE] IN {${enLista}},
           ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt),
         "UniAct", CALCULATE(SUM(${T}[UNI]),
-          ${T}[CLIENTE] = "${cli}",
+          ${T}[CLIENTE] IN {${enLista}},
           ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy)
       ),
       [Ant] <> 0 || [Act] <> 0
