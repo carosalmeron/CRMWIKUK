@@ -1491,6 +1491,78 @@ EVALUATE
     return res.status(out.ok ? 200 : 500).json(out);
   }
 
+  // ?articulosCliente=CODIGO → los artículos donde ese cliente ha caído más
+  // respecto al año anterior. Se consulta a demanda, no se guarda: 6.597
+  // clientes por cinco artículos serían 33.000 documentos en Firestore.
+  if (req.query.articulosCliente) {
+    const cli = String(req.query.articulosCliente).trim().toUpperCase()
+      .replace(/[^A-Z0-9._-]/g, "");
+    const n = Math.min(parseInt(req.query.top, 10) || 5, 30);
+    const out = { ok: true, cliente: cli, top: n };
+    try {
+      const { token } = await getToken(req);
+      const T = M.ventas;
+
+      const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
+EVALUATE
+  TOPN(${n},
+    FILTER(
+      ADDCOLUMNS(
+        CALCULATETABLE(VALUES(${T}[CODIGO]), ${T}[CLIENTE] = "${cli}"),
+        "Act", CALCULATE(SUM(${M.vBase}),
+          FILTER(${T}, ${T}[CLIENTE] = "${cli}" && YEAR(${M.vFecha}) = _anoAct)),
+        "Ant", CALCULATE(SUM(${M.vBase}),
+          FILTER(${T}, ${T}[CLIENTE] = "${cli}" && YEAR(${M.vFecha}) = _anoAnt
+            && ${M.vFecha} <= _corteAnt)),
+        "UniAct", CALCULATE(SUM(${T}[UNI]),
+          FILTER(${T}, ${T}[CLIENTE] = "${cli}" && YEAR(${M.vFecha}) = _anoAct))
+      ),
+      [Ant] > 0 || [Act] > 0
+    ),
+    [Ant] - [Act], DESC)`, true);
+
+      // Descripción del maestro de artículos
+      const arts = new Map();
+      try {
+        for (const a of await pbiQuery(token, Q.articulos, true)) {
+          const cod = String(pick(a, "CODIGO") || "").trim();
+          if (cod && !arts.has(cod)) arts.set(cod, {
+            descripcion: pick(a, "DESCRIPCION"),
+            calibre: pick(a, "CALIBRE"),
+            metros: pick(a, "METROS"),
+          });
+        }
+      } catch (e) { /* sin maestro se muestra el codigo */ }
+
+      out.articulos = filas.map((r) => {
+        const cod = String(pick(r, "CODIGO") || "").trim();
+        const act = num(pick(r, "Act"));
+        const ant = num(pick(r, "Ant"));
+        const f = arts.get(cod) || {};
+        return {
+          articulo: cod,
+          descripcion: f.descripcion || null,
+          calibre: f.calibre || null,
+          metros: f.metros || null,
+          ventasAct: act,
+          ventasAnt: ant,
+          diferencia: num(act - ant),
+          variacionPct: ant ? num((100 * (act - ant)) / ant) : null,
+          unidades: num(pick(r, "UniAct")),
+        };
+      });
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
   const dry = req.query.dry === "1"; // ?dry=1 → consulta pero NO escribe
   const t0 = Date.now();
   const log = { dry, ventas: 0, pendiente: 0, stock: 0, errores: [] };
