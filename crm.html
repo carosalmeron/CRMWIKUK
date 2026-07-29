@@ -5351,6 +5351,63 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, es
             })()}%`,borderRadius:99,background:vO>0?cV:T.blue,transition:"width .5s"}}/>
           </div>
 
+          {/* ── Entrada de pedidos y previsión ──
+              La factura llega semanas después del esfuerzo comercial. Esta
+              franja mide lo que se ha METIDO en el periodo, y lo que ya está
+              planificado para salir, que anticipa la facturación. */}
+          {(()=>{
+            const ent=filtradosEq.reduce((s,v)=>s+(
+              periodo==="semana"?(v.entradaSem||0):
+              periodo==="mes"   ?(v.entradaMes||0):(v.entradaAnual||0)),0);
+            const entAnt=filtradosEq.reduce((s,v)=>s+(
+              periodo==="semana"?(v.entradaSemAnt||0):
+              periodo==="año"   ?(v.entradaAnoAnt||0):0),0);
+            const prox=filtradosEq.reduce((s,v)=>s+(v.prevProxSem||0),0);
+            const cartera=filtradosEq.reduce((s,v)=>s+(v.prevTotal||0),0);
+            if(!ent && !prox) return null;
+
+            const varEnt = entAnt ? Math.round((ent-entAnt)/entAnt*100) : null;
+            // ¿Lo ya planificado cubre el objetivo de la semana que viene?
+            const objSem = filtradosEq.reduce((s,v)=>s+(v.oSem||0),0);
+            const cubre  = objSem ? Math.round(prox/objSem*100) : null;
+
+            return (
+              <div style={{background:"#F8FAFC",borderRadius:11,padding:"10px 12px",
+                marginBottom:10,display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+                <div>
+                  <p style={{margin:0,fontSize:9.5,fontWeight:800,letterSpacing:.5,
+                    textTransform:"uppercase",color:T.muted}}>Pedidos introducidos</p>
+                  <p style={{margin:"2px 0 0",fontSize:16,fontWeight:800,color:T.text}}>
+                    {fmt(ent)}€
+                    {varEnt!==null&&<span style={{fontSize:11.5,fontWeight:800,marginLeft:6,
+                      color:varEnt<0?T.red:T.green}}>{varEnt>0?"+":""}{varEnt}%</span>}
+                  </p>
+                </div>
+
+                {prox>0&&(
+                  <div style={{marginLeft:"auto",textAlign:"right"}}>
+                    <p style={{margin:0,fontSize:9.5,fontWeight:800,letterSpacing:.5,
+                      textTransform:"uppercase",color:T.muted}}>Sale la semana que viene</p>
+                    <p style={{margin:"2px 0 0",fontSize:16,fontWeight:800,color:T.text}}>
+                      {fmt(prox)}€
+                      {cubre!==null&&<span style={{fontSize:11.5,fontWeight:800,marginLeft:6,
+                        color:cubre>=100?T.green:cubre>=70?T.amber:T.red}}>{cubre}% obj.</span>}
+                    </p>
+                  </div>
+                )}
+
+                {cartera>0&&(
+                  <p style={{margin:0,width:"100%",fontSize:11,color:T.muted,
+                    borderTop:`1px solid ${T.border}`,paddingTop:7}}>
+                    Cartera pendiente de servir: <b style={{color:T.text}}>{fmt(cartera)}€</b>
+                    {cubre!==null&&cubre<100&&objSem>0&&
+                      ` · faltan ${fmt(Math.max(0,objSem-prox))}€ para cubrir la semana`}
+                  </p>
+                )}
+              </div>
+            );
+          })()}
+
           {/* Sub-KPIs */}
           <div style={{display:"flex",gap:8}}>
             {[
@@ -30163,6 +30220,28 @@ async function cargarVentasPBI(){
     }
     if(altas) console.log(`[PBI] ${altas} agentes añadidos a AGENTES_DATA desde USUARIOS`);
 
+    // ── Entrada de pedidos y previsión ──
+    // Distinto de la facturación: mide lo que el comercial ha metido esta
+    // semana, y lo que ya está planificado para salir en la siguiente.
+    const entrada={};
+    try{
+      const re=await fetch(`${FB_BASE}/pbi_entrada_agente?pageSize=300`);
+      if(re.ok){
+        const je=await re.json();
+        for(const doc of (je.documents||[])){
+          const id=doc.name.split('/').pop().toUpperCase();
+          const o={};
+          for(const [k,v] of Object.entries(doc.fields||{})){
+            o[k]= v.doubleValue!==undefined ? Number(v.doubleValue)
+                : v.integerValue!==undefined ? Number(v.integerValue)
+                : v.stringValue ?? null;
+          }
+          entrada[id]=o;
+        }
+        console.log(`[PBI] entrada de pedidos en ${Object.keys(entrada).length} comerciales`);
+      }
+    }catch(e){ console.warn('[PBI] sin entrada de pedidos:',e.message); }
+
     // ── Objetivos importados desde los Excel de reporting ──
     // Un documento por comercial en pbi_objetivos, con sem_1..sem_53,
     // mes_1..mes_12 y mgMes_1..mgMes_12. Los que no tienen presupuesto
@@ -30214,6 +30293,18 @@ async function cargarVentasPBI(){
       ag.pbiClientes    = d.clientes;
       ag.pbiActivos     = d.activos;
       ag.pbiCobertura   = d.cobertura;
+
+      const en=entrada[clave];
+      if(en){
+        ag.entradaSem   = Math.round(en.entradaSem||0);
+        ag.entradaMes   = Math.round(en.entradaMes||0);
+        ag.entradaAnual = Math.round(en.entradaAno||0);
+        ag.entradaSemAnt= Math.round(en.entradaSemAnt||0);
+        ag.entradaAnoAnt= Math.round(en.entradaAnoAnt||0);
+        ag.prevEstaSem  = Math.round(en.previstoEstaSem||0);
+        ag.prevProxSem  = Math.round(en.previstoProxSem||0);
+        ag.prevTotal    = Math.round(en.previstoTotal||0);
+      }
 
       // Sin objetivo cargado, la referencia es lo que vendió el año pasado.
       // Vale tanto si no hay documento como si lo hay pero vacío: el
