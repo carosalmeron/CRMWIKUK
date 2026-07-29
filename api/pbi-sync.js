@@ -209,6 +209,19 @@ EVALUATE
     ${M.cCodconta}
   )`,
 
+    // Maestro de articulos: descripcion, metros y calibre. La tabla de
+    // pedidos solo trae el codigo, asi que sin esto el comercial ve
+    // "ESP60.10" en vez de saber que producto va a salir.
+    articulos: `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    '00 Plu Global'[CODIGO],
+    '00 Plu Global'[DESCRIPCION],
+    '00 Plu Global'[METROS],
+    '00 Plu Global'[CALIBRE],
+    '00 Plu Global'[CALIDAD]
+  )`,
+
     // Tabla Agentes: traduce el codigo de vendedor del ERP al comercial
     // (GRUPOAGENTE) y marca la intercompania (GRUPONIVEL1). Es la misma
     // logica que usa el Panel Principal, asi que las cifras cuadran.
@@ -1209,6 +1222,21 @@ EVALUATE
         if (cod) agentes.set(cod, String(pick(a, "GRUPOAGENTE") || "").trim() || null);
       }
 
+      // Maestro de articulos, para poner descripcion en cada linea
+      const arts = new Map();
+      try {
+        for (const a of await pbiQuery(token, Q.articulos, true)) {
+          const cod = String(pick(a, "CODIGO") || "").trim();
+          if (!cod || arts.has(cod)) continue;
+          arts.set(cod, {
+            descripcion: pick(a, "DESCRIPCION"),
+            metros: pick(a, "METROS"),
+            calibre: pick(a, "CALIBRE"),
+            calidad: pick(a, "CALIDAD"),
+          });
+        }
+      } catch (e) { /* sin maestro se muestra solo el codigo */ }
+
       const filas = await pbiQuery(token, Q.pedidos);
       const docs = filas.map((r, i) => {
         const cli = String(pick(r, "Cliente") || "").trim();
@@ -1228,6 +1256,10 @@ EVALUATE
           familia: String(pick(r, "Familia") || "").trim() || null,
           unidades: num(pick(r, "Uni")),
           precio: num(pick(r, "Precio")),
+          descripcion: (arts.get(art) || {}).descripcion || null,
+          metros: (arts.get(art) || {}).metros || null,
+          calibre: (arts.get(art) || {}).calibre || null,
+          calidad: (arts.get(art) || {}).calidad || null,
           subfamilia: String(pick(r, "Subfamilia") || "").trim() || null,
           importe: num(pick(r, "Importe")),
           pedido: String(pick(r, "Pedido") || "").trim(),
@@ -1775,6 +1807,21 @@ EVALUATE
     if (activo("pedidos") && quedanSegundos() < 12) {
       log.pedidos = `omitido, quedaban ${quedanSegundos()} s`;
     } else if (activo("pedidos")) try {
+      // Maestro de articulos, para poner descripcion en cada linea
+      const arts = new Map();
+      try {
+        for (const a of await pbiQuery(token, Q.articulos, true)) {
+          const cod = String(pick(a, "CODIGO") || "").trim();
+          if (!cod || arts.has(cod)) continue;
+          arts.set(cod, {
+            descripcion: pick(a, "DESCRIPCION"),
+            metros: pick(a, "METROS"),
+            calibre: pick(a, "CALIBRE"),
+            calidad: pick(a, "CALIDAD"),
+          });
+        }
+      } catch (e) { /* sin maestro se muestra solo el codigo */ }
+
       const filas = await pbiQuery(token, Q.pedidos);
       const docs = filas.map((r, i) => {
         const cli = String(pick(r, "Cliente") || "").trim();
@@ -1794,6 +1841,10 @@ EVALUATE
           familia: String(pick(r, "Familia") || "").trim() || null,
           unidades: num(pick(r, "Uni")),
           precio: num(pick(r, "Precio")),
+          descripcion: (arts.get(art) || {}).descripcion || null,
+          metros: (arts.get(art) || {}).metros || null,
+          calibre: (arts.get(art) || {}).calibre || null,
+          calidad: (arts.get(art) || {}).calidad || null,
           subfamilia: String(pick(r, "Subfamilia") || "").trim() || null,
           importe: num(pick(r, "Importe")),
           pedido: String(pick(r, "Pedido") || "").trim(),
