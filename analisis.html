@@ -163,11 +163,13 @@ function alcance(u, agentes, usuarios){
 function totales(lista){
   const t=lista.reduce((s,a)=>({
     act:s.act+(a.ventasAct||0), ant:s.ant+(a.ventasAntYTD||0),
-    mes:s.mes+(a.ventasMes||0), mg:s.mg+(a.margenAct||0),
+    mes:s.mes+(a.ventasMes||0), mesAnt:s.mesAnt+(a.ventasMesAnt||0),
+    mg:s.mg+(a.margenAct||0),
     base:s.base+((a.ventasAct||0)*((a.coberturaAct||0)/100)),
     cli:s.cli+(a.clientes||0), act1:s.act1+(a.clientesConVentaMes||0),
   }),{act:0,ant:0,mes:0,mg:0,base:0,cli:0,act1:0});
   t.varPct = t.ant ? (t.act-t.ant)/t.ant*100 : null;
+  t.varMes = t.mesAnt ? (t.mes-t.mesAnt)/t.mesAnt*100 : null;
   t.margenPct = t.base ? t.mg/t.base*100 : null;
   return t;
 }
@@ -265,6 +267,9 @@ async function verAgente(id){
           ? `Pierde ${eur(Math.abs(perdido))} en ${pierde.length} clientes y recupera ${eur(ganado)} en otros ${gana.length}.`
           : `Gana ${eur(ganado)} en ${gana.length} clientes y cede ${eur(Math.abs(perdido))} en otros ${pierde.length}.`
       }</p>
+      ${(()=>{const tx=tendencia(t); return tx
+        ? `<p style="margin:-4px 0 13px;font-size:13.5px;color:var(--tenue);
+             line-height:1.5">${tx}</p>` : "";})()}
       <div class="cifras">
         <div class="cifra"><div class="v">${eur(a.ventasAct)}</div><div class="e">Este año</div></div>
         <div class="cifra"><div class="v ${a.variacionPct<0?"baja":"sube"}">${
@@ -315,26 +320,14 @@ async function arrancar(){
 
     // Los cambios de rama hechos en la herramienta de estructura mandan sobre
     // lo que traiga Power BI. Sin esto, Francia aparece como "sin equipo".
+    // La rama ya viene resuelta desde la sincronización, que aplica la regla
+    // de pbi_config/ramas y las correcciones de pbi_ajustes. Aquí solo se
+    // respetan las exclusiones.
     const AJ={}; for(const a of ajustes) AJ[norm(a._id)]=a;
-
-    // Las ramas llegan de dos sitios con formatos distintos: Power BI las
-    // escribe "Wikuk" y los ajustes manuales "WIKUK", asi que aparecian
-    // duplicadas. Y quien no trae GRUPONIVEL4 es comercial de Discob.
-    const rama=(v, tipo)=>{
-      const e=norm(v);
-      if(norm(tipo)==="DISTRIBUIDOR") return "DISTRIBUIDOR";
-      if(e==="WIKUK") return "WIKUK";
-      if(e.startsWith("INTERKEY")) return "INTERKEY";
-      if(e==="PORTUGAL") return "INTERKEY";   // Portugal se integro en Interkey
-      if(e==="DISTRIBUIDOR") return "DISTRIBUIDOR";
-      if(e==="FRANCIA" || !e) return "FRANCIA";
-      return e;
-    };
-
     for(const a of agentesRaw){
       const aj=AJ[norm(a._id)];
-      if(aj && aj.equipo==="_EXCLUIR"){ a._excluido=true; continue; }
-      a.equipo = rama(aj && aj.equipo ? aj.equipo : a.equipo, a.tipo);
+      if(aj && aj.equipo==="_EXCLUIR") a._excluido=true;
+      if(!a.equipo) a.equipo="Sin rama";
     }
 
     const agentes = agentesRaw
@@ -390,6 +383,23 @@ function render(){
     const sync = SYNC;
     const dias = sync ? Math.floor((Date.now()-new Date(sync).getTime())/86400000) : null;
 
+    // Compara el mes con el acumulado del año: dice si la cosa mejora o
+    // empeora, que es lo que no se ve mirando solo una cifra.
+    const tendencia=(t)=>{
+      if(t.varMes===null || t.varPct===null) return "";
+      const dif=t.varMes-t.varPct;
+      const mes=pct(t.varMes), ano=pct(t.varPct);
+      if(Math.abs(dif)<3)
+        return `Este mes va ${mes}, en línea con el acumulado del año (${ano}).`;
+      if(t.varMes>=0 && t.varPct<0)
+        return `Este mes remonta: ${mes} frente al ${ano} acumulado. Si se mantiene, la brecha del año se estrecha.`;
+      if(dif>0)
+        return `Este mes mejora: ${mes} frente al ${ano} del año. La caída se está frenando.`;
+      if(t.varMes<0 && t.varPct>=0)
+        return `Ojo al mes: ${mes}, cuando el año va ${ano}. Es un cambio de signo.`;
+      return `Este mes empeora: ${mes} frente al ${ano} del año. La tendencia se acelera a la baja.`;
+    };
+
     let html = "";
     if(alc.sinSesion) html += `<div class="nota">
       No has iniciado sesión, así que se muestra el grupo completo.
@@ -400,13 +410,21 @@ function render(){
 
     html += `<div class="veredicto">
       <p class="titular">${titular(t, alc)}</p>
+      ${(()=>{const tx=tendencia(t); return tx
+        ? `<p style="margin:-4px 0 13px;font-size:13.5px;color:var(--tenue);
+             line-height:1.5">${tx}</p>` : "";})()}
       <div class="cifras">
         <div class="cifra"><div class="v">${eur(t.act)}</div><div class="e">Este año</div></div>
         <div class="cifra"><div class="v ${t.varPct<0?"baja":"sube"}">${t.varPct!==null?pct(t.varPct):"—"}</div>
           <div class="e">vs mismo periodo</div></div>
         <div class="cifra"><div class="v">${t.margenPct!==null?t.margenPct.toFixed(1)+" %":"—"}</div>
           <div class="e">Margen</div></div>
-        <div class="cifra"><div class="v">${eur(t.mes)}</div><div class="e">Este mes</div></div>
+        <div class="cifra">
+          <div class="v">${eur(t.mes)}
+            ${t.varMes!==null?`<span style="font-size:15px;font-weight:800;margin-left:5px"
+              class="${t.varMes<0?"baja":"sube"}">${pct(t.varMes)}</span>`:""}</div>
+          <div class="e">Este mes${t.mesAnt?" · vs año pasado":""}</div>
+        </div>
       </div>
     </div>`;
 
