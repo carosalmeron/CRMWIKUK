@@ -250,7 +250,12 @@ async function verAgente(id){
 
   let clientes=[];
   try{
-    const r=await fetch(`${BASE}:runQuery`,{
+    // Con limite de espera: si Firestore no responde, mejor decirlo que
+    // dejar "Cargando sus clientes..." indefinidamente.
+    const conLimite=(prom,ms)=>Promise.race([prom,
+      new Promise((_,rj)=>setTimeout(()=>rj(new Error(`sin respuesta en ${ms/1000} s`)),ms))]);
+
+    const r=await conLimite(fetch(`${BASE}:runQuery`,{
       method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify({structuredQuery:{
         from:[{collectionId:"pbi_ventas_cliente"}],
@@ -258,15 +263,22 @@ async function verAgente(id){
                value:{stringValue:a._id}}},
         limit:800,
       }}),
-    });
+    }), 20000);
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
     const j=await r.json();
+    if(j && j.error) throw new Error(j.error.message||"error de Firestore");
     clientes=(Array.isArray(j)?j:[]).filter(f=>f.document).map(f=>{
       const o={_id:f.document.name.split("/").pop()};
       for(const [k,v] of Object.entries(f.document.fields||{})) o[k]=val(v);
       return o;
     }).filter(c=>!c.fusionadoEn && !c.intercompany);
   }catch(e){
-    $("app").innerHTML=`<div class="err">No se han podido leer sus clientes: ${e.message}</div>`;
+    $("app").innerHTML=`<div class="err">
+      No se han podido leer sus clientes: ${e.message}
+      <p style="margin:8px 0 0"><button class="atras" onclick="verAgente('${
+        String(a._id).replace(/'/g,"")}')">Reintentar</button></p>
+      <p style="margin:8px 0 0"><button class="atras" onclick="arrancar()">← Volver</button></p>
+    </div>`;
     return;
   }
 
