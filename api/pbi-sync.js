@@ -1156,6 +1156,8 @@ EVALUATE
           margenMes: resumen.margenPctMes != null ? `${resumen.margenPctMes} %` : "FALTA",
           margenMesAnt: resumen.margenPctMesAnt != null ? `${resumen.margenPctMesAnt} %` : "FALTA",
           coberturaAntYTD: resumen.coberturaAntYTD != null ? `${resumen.coberturaAntYTD} %` : "FALTA",
+          ventasMesAnt: resumen.ventasMesAnt != null ? eur(resumen.ventasMesAnt) : "FALTA",
+          baseMesAnt:   resumen.baseMesAnt != null ? eur(resumen.baseMesAnt) : "FALTA",
           ventasMesActual: eur(resumen.ventasMes),
           clientes: resumen.clientes,
           clientesConVentaEsteMes: resumen.clientesConVentaMes,
