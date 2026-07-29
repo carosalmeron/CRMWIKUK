@@ -49,6 +49,10 @@
   .fila .pct{font-size:12px;font-weight:700}
   .barra{height:3px;border-radius:2px;background:#EEF1F4;margin-top:5px;overflow:hidden}
   .barra i{display:block;height:100%}
+  .filtros{display:flex;gap:8px;max-width:760px;margin:0 auto;padding:14px 14px 0}
+  .filtros select{flex:1;min-width:0;font:inherit;font-size:13.5px;padding:11px 12px;
+    border:1.5px solid var(--linea);border-radius:11px;background:#fff;
+    color:var(--texto);min-height:46px}
   .pulsa{cursor:pointer;min-height:56px}
   .pulsa:active{background:#EEF2F6}
   .chev{color:#94A3B0;font-size:26px;line-height:1;margin-left:6px;
@@ -79,6 +83,11 @@
   <div class="quien" id="quien">Cargando</div>
   <h1 id="ambito">Análisis</h1>
 </header>
+
+<div id="filtros" class="filtros" hidden>
+    <select id="fequipo" onchange="cambiaEquipo()"></select>
+    <select id="fagente" onchange="cambiaAgente()"></select>
+  </div>
 
 <main id="app"><div class="cargando">Leyendo datos de ventas…</div></main>
 
@@ -193,6 +202,8 @@ function filaAgente(a, extra){
 }
 
 let CACHE={agentes:[],meta:null};
+let BASE_LISTA=[], ALC=null, SYNC=null;
+let F_EQUIPO="", F_AGENTE="";
 
 // Detalle de un comercial: de donde viene su caida o su crecimiento.
 // Se leen sus clientes con una consulta filtrada, no la coleccion entera.
@@ -305,10 +316,25 @@ async function arrancar(){
     // Los cambios de rama hechos en la herramienta de estructura mandan sobre
     // lo que traiga Power BI. Sin esto, Francia aparece como "sin equipo".
     const AJ={}; for(const a of ajustes) AJ[norm(a._id)]=a;
+
+    // Las ramas llegan de dos sitios con formatos distintos: Power BI las
+    // escribe "Wikuk" y los ajustes manuales "WIKUK", asi que aparecian
+    // duplicadas. Y quien no trae GRUPONIVEL4 es comercial de Discob.
+    const rama=(v, tipo)=>{
+      const e=norm(v);
+      if(norm(tipo)==="DISTRIBUIDOR") return "DISTRIBUIDOR";
+      if(e==="WIKUK") return "WIKUK";
+      if(e.startsWith("INTERKEY")) return "INTERKEY";
+      if(e==="PORTUGAL") return "INTERKEY";   // Portugal se integro en Interkey
+      if(e==="DISTRIBUIDOR") return "DISTRIBUIDOR";
+      if(e==="FRANCIA" || !e) return "FRANCIA";
+      return e;
+    };
+
     for(const a of agentesRaw){
       const aj=AJ[norm(a._id)];
-      if(aj && aj.equipo && aj.equipo!=="_EXCLUIR") a.equipo=aj.equipo;
-      if(aj && aj.equipo==="_EXCLUIR") a._excluido=true;
+      if(aj && aj.equipo==="_EXCLUIR"){ a._excluido=true; continue; }
+      a.equipo = rama(aj && aj.equipo ? aj.equipo : a.equipo, a.tipo);
     }
 
     const agentes = agentesRaw
@@ -317,11 +343,51 @@ async function arrancar(){
       .filter(a=>(a.ventasAct||0)>0 || (a.ventasAntYTD||0)>0);
 
     CACHE.agentes=agentes;
-    const alc = alcance(u, agentes, usuarios);
+    ALC = alcance(u, agentes, usuarios);
+    BASE_LISTA = ALC.lista;
+    SYNC = meta?.fields?.ultimaSync?.stringValue;
+
+    // Un comercial no necesita filtros: solo tiene su propia cartera
+    if(ALC.tipo!=="agente"){
+      const eqs=[...new Set(BASE_LISTA.map(a=>a.equipo).filter(Boolean))].sort();
+      $("fequipo").innerHTML=`<option value="">Todas las ramas (${eqs.length})</option>`
+        + eqs.map(e=>`<option value="${e}">${e}</option>`).join("");
+      pintarAgentes();
+      $("filtros").hidden=false;
+    }
+    render();
+  }catch(e){
+    $("app").innerHTML=`<div class="err">No se han podido cargar los datos: ${e.message}</div>`;
+  }
+}
+
+function pintarAgentes(){
+  const lista=BASE_LISTA.filter(a=>!F_EQUIPO || a.equipo===F_EQUIPO);
+  const ags=[...new Set(lista.map(a=>a.agente||a._id))].sort();
+  $("fagente").innerHTML=`<option value="">Todos los comerciales (${ags.length})</option>`
+    + ags.map(a=>`<option value="${a}"${F_AGENTE===a?" selected":""}>${a}</option>`).join("");
+}
+
+function cambiaEquipo(){
+  F_EQUIPO=$("fequipo").value||"";
+  F_AGENTE="";                 // al cambiar de rama, el agente deja de aplicar
+  pintarAgentes();
+  render();
+}
+function cambiaAgente(){ F_AGENTE=$("fagente").value||""; render(); }
+
+function render(){
+  {
+    const alc = {...ALC};
+    alc.lista = BASE_LISTA.filter(a=>
+      (!F_EQUIPO  || a.equipo===F_EQUIPO) &&
+      (!F_AGENTE  || (a.agente||a._id)===F_AGENTE));
+
+    alc.titulo = F_AGENTE ? F_AGENTE : F_EQUIPO ? F_EQUIPO : ALC.titulo;
     $("ambito").textContent = alc.titulo;
 
     const t = totales(alc.lista);
-    const sync = meta?.fields?.ultimaSync?.stringValue;
+    const sync = SYNC;
     const dias = sync ? Math.floor((Date.now()-new Date(sync).getTime())/86400000) : null;
 
     let html = "";
@@ -429,8 +495,6 @@ async function arrancar(){
     }</p>`;
 
     $("app").innerHTML=html;
-  }catch(e){
-    $("app").innerHTML=`<div class="err">No se han podido cargar los datos: ${e.message}</div>`;
   }
 }
 
