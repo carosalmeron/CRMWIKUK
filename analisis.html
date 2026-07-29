@@ -95,6 +95,7 @@
 const PROY="grupo-consolidado-crm";
 const BASE=`https://firestore.googleapis.com/v1/projects/${PROY}/databases/(default)/documents`;
 
+const API="/api/pbi-sync";
 const $=(id)=>document.getElementById(id);
 const eur=(n)=>Math.round(n||0).toLocaleString("es-ES")+" €";
 const pct=(n)=>(n>0?"+":"")+Number(n||0).toFixed(1)+" %";
@@ -241,6 +242,45 @@ let F_EQUIPO="", F_AGENTE="";
 
 // Detalle de un comercial: de donde viene su caida o su crecimiento.
 // Se leen sus clientes con una consulta filtrada, no la coleccion entera.
+// Artículos con mayor caída de un cliente. Se despliegan bajo su fila.
+const ARTS_CACHE={};
+async function verArticulos(cliente, fila){
+  const id="arts-"+String(cliente).replace(/[^A-Za-z0-9._-]/g,"");
+  const caja=$(id);
+  if(!caja) return;
+  if(caja.innerHTML){ caja.innerHTML=""; return; }   // segundo toque: cerrar
+
+  if(ARTS_CACHE[cliente]){ caja.innerHTML=ARTS_CACHE[cliente]; return; }
+  caja.innerHTML=`<p class="arts-cargando">Buscando sus artículos…</p>`;
+
+  try{
+    const r=await fetch(`${API}?articulosCliente=${encodeURIComponent(cliente)}&top=5`);
+    const j=await r.json();
+    if(!j.ok) throw new Error(j.error||"sin respuesta");
+    const lista=(j.articulos||[]).filter(a=>a.diferencia<0);
+    if(!lista.length){
+      caja.innerHTML=`<p class="arts-cargando">No hay artículos con caída.</p>`;
+      return;
+    }
+    const html=lista.map(a=>`<div class="art">
+      <div style="min-width:0">
+        <div class="art-n">${a.descripcion||a.articulo}</div>
+        <div class="art-s">${a.descripcion?a.articulo:""}${
+          a.calibre?" · calibre "+a.calibre:""}${
+          a.ventasAnt?` · venía de ${eur(a.ventasAnt)}`:""}</div>
+      </div>
+      <div class="art-d">
+        <b>${eur(a.ventasAct)}</b>
+        <div class="art-s baja">${eur(a.diferencia)}</div>
+      </div>
+    </div>`).join("");
+    ARTS_CACHE[cliente]=html;
+    caja.innerHTML=html;
+  }catch(e){
+    caja.innerHTML=`<p class="arts-cargando baja">No se han podido leer: ${e.message}</p>`;
+  }
+}
+
 async function verAgente(id){
   const a=CACHE.agentes.find(x=>x._id===id);
   if(!a) return;
@@ -295,7 +335,10 @@ async function verAgente(id){
   const ganado=gana.reduce((t,c)=>t+dif(c),0);
 
   const fecha=(f)=>f?new Date(f).toLocaleDateString("es-ES"):"—";
-  const filaCli=(c,extra)=>`<div class="fila">
+  // Al pulsar un cliente se piden sus artículos con más caída. Se consultan
+  // a demanda porque no caben precalculados para 6.597 clientes.
+  const filaCli=(c,extra)=>`<div class="fila pulsa"
+      onclick="verArticulos('${String(c.cliente).replace(/'/g,"")}',this)">
     <div style="min-width:0">
       <div class="nom">${c.nombre||c.cliente}</div>
       <div class="det">${c.poblacion||""}${extra?" · "+extra:""}</div>
@@ -304,7 +347,9 @@ async function verAgente(id){
       <div class="imp">${eur(c.ventasAct)}</div>
       <div class="pct ${dif(c)<0?"baja":"sube"}">${dif(c)>0?"+":""}${eur(dif(c))}</div>
     </div>
-  </div>`;
+    <span class="chev">→</span>
+  </div>
+  <div class="arts" id="arts-${String(c.cliente).replace(/[^A-Za-z0-9._-]/g,"")}"></div>`;
 
   $("app").innerHTML=`
     <button class="atras" onclick="arrancar()">← Volver al análisis</button>
