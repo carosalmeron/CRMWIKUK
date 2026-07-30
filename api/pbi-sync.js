@@ -947,8 +947,12 @@ EVALUATE
   // comercial si se pasa &agente=. Hasta ahora solo se podía llegar al
   // artículo entrando por un cliente concreto.
   if (req.query.articulosGrupo === "1") {
-    const ag = String(req.query.agente || "").trim().toUpperCase()
-      .replace(/[^A-Z0-9._-]/g, "");
+    // Se admite uno o varios comerciales (para filtrar por rama). Llegan
+    // como GRUPOAGENTE ("CARLOSG"), no como código de vendedor del ERP.
+    const pedidos = String(req.query.agentes || req.query.agente || "")
+      .split(",").map((x) => x.trim().toUpperCase().replace(/[^A-Z0-9._-]/g, ""))
+      .filter(Boolean);
+    const ag = pedidos.join(",");
     const n = Math.min(parseInt(req.query.top, 10) || 20, 60);
     // &orden=suben para ver los que crecen: la caída de unos artículos solo
     // se interpreta bien sabiendo hacia dónde se ha movido la venta.
@@ -979,7 +983,30 @@ EVALUATE
       const { token } = await getToken(req);
       const T = M.ventas;
       const Q = dax(null);
-      const filtroAg = ag ? `${T}[VENDEDOR] = "${ag}", ` : "";
+
+      // La tabla de ventas guarda el código de vendedor del ERP, no el
+      // nombre del comercial: hay que traducirlo o el filtro no encuentra
+      // nada. Un comercial puede tener varios códigos.
+      let codigosVend = [];
+      if (pedidos.length) {
+        try {
+          for (const a of await pbiQuery(token, Q.agentes, true)) {
+            const grupo = String(pick(a, "GRUPOAGENTE") || "").trim().toUpperCase();
+            if (grupo && pedidos.includes(grupo)) {
+              const c = String(pick(a, "CODIGO") || "").trim();
+              if (c) codigosVend.push(c);
+            }
+          }
+        } catch (e) { out.avisoAgentes = e.message.slice(0, 120); }
+        out.codigosVendedor = codigosVend;
+        if (!codigosVend.length) {
+          out.articulos = [];
+          out.aviso = `No se han encontrado códigos de vendedor para ${ag}`;
+          return res.status(200).json(out);
+        }
+      }
+      const enVend = codigosVend.map((c) => `"${c}"`).join(", ");
+      const filtroAg = codigosVend.length ? `${T}[VENDEDOR] IN {${enVend}}, ` : "";
 
       const filas = await pbiQuery(token, `
 DEFINE
@@ -992,8 +1019,8 @@ DEFINE
 EVALUATE
   FILTER(
     ADDCOLUMNS(
-      ${ag
-        ? `CALCULATETABLE(VALUES(${T}[CODIGO]), ${T}[VENDEDOR] = "${ag}",
+      ${codigosVend.length
+        ? `CALCULATETABLE(VALUES(${T}[CODIGO]), ${T}[VENDEDOR] IN {${enVend}},
              ${M.vFecha} >= _iniAnt)`
         : `CALCULATETABLE(VALUES(${T}[CODIGO]), ${M.vFecha} >= _iniAnt)`},
       "Act", CALCULATE(SUM(${M.vBase}), ${filtroAg}
