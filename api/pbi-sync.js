@@ -1171,28 +1171,18 @@ EVALUATE
       const enLista = [...variantes].map((c) => `"${c}"`).join(", ");
       out.codigosConsultados = [...variantes];
 
+      // El filtro va como argumento de tabla, antes de los pares de
+      // nombre y expresión: al ponerlo al final, DAX lo interpreta como
+      // el nombre de una columna más y rechaza la consulta.
+      const mes = (i) => `    "M${i}", CALCULATE(SUM(${M.vBase}), `
+        + `FILTER(${T}, MONTH(${M.vFecha}) = ${i}))`;
+
       const filas = await pbiQuery(token, `
-DEFINE
-  VAR _hoy = TODAY()
-  VAR _anoAct = YEAR(_hoy)
-  VAR _anoAnt = _anoAct - 1
 EVALUATE
   SUMMARIZECOLUMNS(
     ${T}[ANO],
-    "Mes", 0,
-    "M1",  CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 1),
-    "M2",  CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 2),
-    "M3",  CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 3),
-    "M4",  CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 4),
-    "M5",  CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 5),
-    "M6",  CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 6),
-    "M7",  CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 7),
-    "M8",  CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 8),
-    "M9",  CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 9),
-    "M10", CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 10),
-    "M11", CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 11),
-    "M12", CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 12),
-    FILTER(${T}, ${T}[CLIENTE] IN {${enLista}})
+    FILTER(${T}, ${T}[CLIENTE] IN {${enLista}}),
+${[...Array(12)].map((_, i) => mes(i + 1)).join(",\n")}
   )`, true);
 
       const anoAct = new Date().getFullYear();
