@@ -342,7 +342,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.35.0";
+const CRM_VERSION = "4.36.1";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -34973,7 +34973,7 @@ function PanelAnalisis({usuario, onNav}){
   // una vez y permite buscar por cualquier parte del nombre, que es lo que
   // Firestore no sabe hacer.
   useEffect(()=>{
-    if(vista!=="clientes"||indice) return;
+    if(vista!=="clientes"||indice) return;   // hace falta para buscar y para la cartera
     let vivo=true;
     (async()=>{
       try{
@@ -34995,6 +34995,22 @@ function PanelAnalisis({usuario, onNav}){
   // ── Vista por cliente: los que más caen, sin pasar por su comercial ──
   useEffect(()=>{
     if(vista!=="clientes"||cliGrupo) return;
+    // Toda la cartera se arma con el índice, que ya está cargado: es una
+    // sola lectura y no depende de que Firestore pueda ordenar por ventas.
+    if(!soloCaen){
+      if(!indice) return;               // se espera a que llegue el índice
+      const lista=indice
+        .map(([cliente,nombre,agente,act,ant,poblacion])=>({
+          cliente, nombre, agente, poblacion,
+          ventasAct:act, ventasAntYTD:ant, caida:act-ant }))
+        .filter(c=>!hayFiltro
+          || (c.agente && delAmbito.has(String(c.agente).toUpperCase())))
+        .sort((a,b)=>(b.ventasAct||0)-(a.ventasAct||0));
+      setCliError(null);
+      setCliGrupo(lista);
+      return;
+    }
+
     let vivo=true;
     // Si Firestore no responde, mejor decirlo que dejar "Buscando clientes…"
     const aviso=setTimeout(()=>{
@@ -35067,7 +35083,7 @@ function PanelAnalisis({usuario, onNav}){
       }
     })().finally(()=>clearTimeout(aviso));
     return()=>{ vivo=false; clearTimeout(aviso); };
-  },[vista,fRama,fAgente,soloCaen]);
+  },[vista,fRama,fAgente,soloCaen,indice]);
 
   // ── Vista por artículo: los que más caen en todo el grupo ──
   useEffect(()=>{
@@ -35202,7 +35218,14 @@ function PanelAnalisis({usuario, onNav}){
       const r=await fetch(`/api/pbi-sync?articulosCliente=${encodeURIComponent(cliente)}`
         +`&top=5${forzar?"&recargar=1":""}`);
       const j=await r.json();
-      setArts(p=>({...p,[cliente]:j.ok?(j.articulos||[]):[]}));
+      setArts(p=>({...p,[cliente]: j.ok
+        ? {caen: j.articulos||[], suben: j.suben||[]}
+        : {caen:[], suben:[]}}));
+      return;
+      // Se guardan las dos listas: lo que cae y lo que crece
+      setArts(p=>({...p,[cliente]: j.ok
+        ? {caen:j.articulos||[], suben:j.suben||[]}
+        : {caen:[], suben:[]}}));
     }catch(e){ setArts(p=>({...p,[cliente]:[]})); }
   };
 
@@ -35210,7 +35233,8 @@ function PanelAnalisis({usuario, onNav}){
   const lanzar=async(tipo,c,art)=>{
     // La estrategia y la oferta son por línea de artículo: se envía el artículo
     // concreto en primer lugar y el resto como contexto de la caída.
-    const otros=(arts[c.cliente]||[]).filter(a=>a.diferencia<0 && a.articulo!==art.articulo)
+    const otros=(((arts[c.cliente]||{}).caen)||[])
+      .filter(a=>a.diferencia<0 && a.articulo!==art.articulo)
       .map(a=>({p:a.descripcion||a.articulo, cal:a.calibre||"", v25:Math.abs(a.diferencia)}));
     const lista=[
       {p:art.descripcion||art.articulo, cal:art.calibre||"", v25:Math.abs(art.diferencia||0)},
@@ -35504,24 +35528,50 @@ function PanelAnalisis({usuario, onNav}){
                           {!arts[c.cliente]
                             ? <p style={{margin:0,padding:"10px 15px 10px 26px",
                                 fontSize:12,color:T.muted}}>Buscando artículos…</p>
-                            : arts[c.cliente].filter(x=>x.diferencia<0).slice(0,5).map(x=>(
-                              <div key={x.articulo} style={{display:"flex",gap:10,
-                                padding:"9px 15px 9px 26px",borderTop:`1px solid #E9EEF3`}}>
-                                <div style={{flex:1,minWidth:0}}>
-                                  <p style={{margin:0,fontSize:13,fontWeight:700}}>
-                                    {x.descripcion||x.articulo}</p>
-                                  <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
-                                    {x.articulo}{x.calibre?" · calibre "+x.calibre:""}</p>
+                            : (()=>{
+                              // Lo que pierde y lo que gana: con solo las
+                              // caídas no se sabe si están compensadas.
+                              const A=arts[c.cliente]||{};
+                              const caen=(A.caen||[]).slice(0,5);
+                              const suben=(A.suben||[]).slice(0,5);
+                              if(!caen.length&&!suben.length) return (
+                                <p style={{margin:0,padding:"10px 15px 10px 26px",
+                                  fontSize:12,color:T.muted}}>Sin movimientos por artículo.</p>
+                              );
+                              const fila=(x,baja)=>(
+                                <div key={x.articulo} style={{display:"flex",gap:10,
+                                  padding:"9px 15px 9px 26px",borderTop:"1px solid #E9EEF3"}}>
+                                  <div style={{flex:1,minWidth:0}}>
+                                    <p style={{margin:0,fontSize:13,fontWeight:700}}>
+                                      {x.descripcion||x.articulo}</p>
+                                    <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
+                                      {x.articulo}{x.calibre?" · calibre "+x.calibre:""}
+                                      {x.ventasAnt?` · venía de ${eur(x.ventasAnt)}`:""}</p>
+                                  </div>
+                                  <div style={{textAlign:"right",flex:"none",
+                                    fontVariantNumeric:"tabular-nums"}}>
+                                    <p style={{margin:0,fontSize:13,fontWeight:800}}>
+                                      {eur(x.ventasAct)}</p>
+                                    <p style={{margin:0,fontSize:11,fontWeight:700,
+                                      color:baja?T.red:T.green}}>
+                                      {x.diferencia>0?"+":""}{eur(x.diferencia)}
+                                      {x.variacionPct!=null?` · ${pc(x.variacionPct)}`:""}</p>
+                                  </div>
                                 </div>
-                                <div style={{textAlign:"right",flex:"none",
-                                  fontVariantNumeric:"tabular-nums"}}>
-                                  <p style={{margin:0,fontSize:13,fontWeight:800}}>
-                                    {eur(x.ventasAct)}</p>
-                                  <p style={{margin:0,fontSize:11,color:T.red}}>
-                                    {eur(x.diferencia)}</p>
-                                </div>
-                              </div>
-                            ))}
+                              );
+                              const titulo=(t,c2)=>(
+                                <p style={{margin:0,padding:"9px 15px 5px 26px",
+                                  fontSize:10.5,fontWeight:800,letterSpacing:.5,
+                                  textTransform:"uppercase",color:c2,
+                                  borderTop:"1px solid #E9EEF3"}}>{t}</p>
+                              );
+                              return (<>
+                                {caen.length>0 && titulo("Dónde pierde",T.red)}
+                                {caen.map(x=>fila(x,true))}
+                                {suben.length>0 && titulo("Dónde gana",T.green)}
+                                {suben.map(x=>fila(x,false))}
+                              </>);
+                            })()}
                         </div>
                       )}
                     </div>
@@ -35718,7 +35768,8 @@ function PanelAnalisis({usuario, onNav}){
                                   {!arts[c.cliente]
                                     ? <p style={{margin:0,padding:"10px 15px 10px 34px",
                                         fontSize:12,color:T.muted}}>Buscando artículos…</p>
-                                    : arts[c.cliente].filter(x=>x.diferencia<0).length===0
+                                    : ((arts[c.cliente].caen||[]).length===0
+                                        && (arts[c.cliente].suben||[]).length===0)
                                       ? <p style={{margin:0,padding:"10px 15px 10px 34px",
                                           fontSize:12,color:T.muted}}>Sin artículos con caída.</p>
                                       : <>
@@ -35726,7 +35777,9 @@ function PanelAnalisis({usuario, onNav}){
                                           borderTop:`1px solid #E2E8EF`,display:"flex",
                                           alignItems:"center",gap:9,flexWrap:"wrap"}}>
                                           <span style={{fontSize:11,color:T.muted}}>
-                                            {arts[c.cliente].filter(x=>x.diferencia<0).length} artículos con caída
+                                            {(arts[c.cliente].caen||[]).length} caen
+                                            {(arts[c.cliente].suben||[]).length
+                                              ? ` · ${(arts[c.cliente].suben||[]).length} crecen` : ""}
                                           </span>
                                           <button onClick={()=>{
                                               setArts(p=>{const q={...p}; delete q[c.cliente]; return q;});
@@ -35739,7 +35792,7 @@ function PanelAnalisis({usuario, onNav}){
                                             Recalcular
                                           </button>
                                         </div>
-                                        {arts[c.cliente].filter(x=>x.diferencia<0).map(x=>(
+                                        {(arts[c.cliente].caen||[]).map(x=>(
                                         <React.Fragment key={x.articulo}>
                                           <div style={{display:"flex",gap:10,
                                             padding:"9px 15px 4px 34px",
