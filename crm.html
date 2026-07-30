@@ -342,7 +342,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.34.0";
+const CRM_VERSION = "4.35.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -34880,7 +34880,7 @@ function PanelAnalisis({usuario, onNav}){
   const [buscaCli,setBuscaCli]=useState("");
   const [soloCaen,setSoloCaen]=useState(true);   // o toda la cartera
   const [progre,setProgre]=useState({});      // evolución mensual por cliente
-  const [hallados,setHallados]=useState(null); // resultados de búsqueda real
+  const [indice,setIndice]=useState(null);     // toda la cartera, para buscar
   const [artGrupo,setArtGrupo]=useState(null);
   const [artError,setArtError]=useState(null);
   const [artAbierto,setArtAbierto]=useState(null);   // artículo desplegado
@@ -34968,43 +34968,38 @@ function PanelAnalisis({usuario, onNav}){
   const agentesSel=[...new Set(base.filter(a=>!fRama||a.equipo===fRama)
     .map(a=>a.agente||a._id))].sort();
 
-  // ── Búsqueda sobre toda la cartera ──
-  // La lista cargada son los primeros por facturación o por caída, así que
-  // un cliente pequeño no está. Firestore no busca por "contiene", pero sí
-  // por prefijo, y los nombres están en mayúsculas.
+  // ── Índice de búsqueda ──
+  // La sincronización deja toda la cartera en un documento compacto. Se lee
+  // una vez y permite buscar por cualquier parte del nombre, que es lo que
+  // Firestore no sabe hacer.
   useEffect(()=>{
-    const q=buscaCli.trim().toUpperCase();
-    if(vista!=="clientes"||q.length<3){ setHallados(null); return; }
+    if(vista!=="clientes"||indice) return;
     let vivo=true;
-    const t=setTimeout(async()=>{
+    (async()=>{
       try{
-        const r=await fetch(`${FB_BASE}:runQuery`,{
-          method:"POST",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({structuredQuery:{
-            from:[{collectionId:"pbi_ventas_cliente"}],
-            orderBy:[{field:{fieldPath:"nombre"},direction:"ASCENDING"}],
-            startAt:{values:[{stringValue:q}],before:true},
-            endAt:{values:[{stringValue:q+"\uf8ff"}]},
-            limit:40}}),
-        });
+        const r=await fetch(`${FB_BASE}/pbi_indice_clientes?pageSize=10`);
+        if(!r.ok) throw new Error(`HTTP ${r.status}`);
         const j=await r.json();
-        if(!vivo) return;
-        if(j && j.error) throw new Error(j.error.message||"consulta rechazada");
-        const cs=(Array.isArray(j)?j:[]).filter(x=>x.document).map(x=>{
-          const o={};
-          for(const [k,v] of Object.entries(x.document.fields||{})) o[k]=val(v);
-          return o;
-        }).filter(c=>!c.fusionadoEn&&!c.intercompany);
-        setHallados(cs);
-      }catch(e){ if(vivo) setHallados([]); }
-    }, 350);   // se espera a que deje de teclear
-    return()=>{ vivo=false; clearTimeout(t); };
-  },[buscaCli,vista]);
+        const todos=[];
+        for(const d of (j.documents||[])){
+          const f=d.fields||{};
+          const datos=f.datos?.stringValue;
+          if(datos) todos.push(...JSON.parse(datos));
+        }
+        if(vivo) setIndice(todos);
+      }catch(e){ if(vivo) setIndice([]); }
+    })();
+    return()=>{vivo=false;};
+  },[vista]);
 
   // ── Vista por cliente: los que más caen, sin pasar por su comercial ──
   useEffect(()=>{
     if(vista!=="clientes"||cliGrupo) return;
     let vivo=true;
+    // Si Firestore no responde, mejor decirlo que dejar "Buscando clientes…"
+    const aviso=setTimeout(()=>{
+      if(vivo){ setCliError("la consulta no ha respondido en 15 segundos"); setCliGrupo([]); }
+    }, 15000);
     (async()=>{
       const parsea=(j)=>(Array.isArray(j)?j:[]).filter(x=>x.document).map(x=>{
         const o={};
@@ -35070,8 +35065,8 @@ function PanelAnalisis({usuario, onNav}){
           if(vivo){ setCliError(e2.message); setCliGrupo([]); }
         }
       }
-    })();
-    return()=>{vivo=false;};
+    })().finally(()=>clearTimeout(aviso));
+    return()=>{ vivo=false; clearTimeout(aviso); };
   },[vista,fRama,fAgente,soloCaen]);
 
   // ── Vista por artículo: los que más caen en todo el grupo ──
@@ -35372,7 +35367,9 @@ function PanelAnalisis({usuario, onNav}){
             ))}
           </div>
           <input value={buscaCli} onChange={e=>setBuscaCli(e.target.value)}
-            placeholder="Buscar cliente por el principio del nombre…"
+            placeholder={indice
+              ? `Buscar entre ${indice.length.toLocaleString("es-ES")} clientes…`
+              : "Buscar cliente…"}
             style={{width:"100%",font:"inherit",fontSize:13.5,padding:"11px 13px",
               border:`1.5px solid ${T.border}`,borderRadius:11,marginBottom:10,
               background:"#fff",boxSizing:"border-box"}}/>
@@ -35399,20 +35396,28 @@ function PanelAnalisis({usuario, onNav}){
                       const enLista=cliGrupo.filter(c=>
                         String(c.nombre||"").toUpperCase().includes(q)
                         || String(c.cliente||"").toUpperCase().includes(q));
-                      // Se añaden los que ha encontrado la búsqueda y no
-                      // estaban entre los cargados
+                      // Y los del índice, que cubre toda la cartera
                       const vistos=new Set(enLista.map(c=>c.cliente));
-                      const extra=(hallados||[])
-                        .filter(c=>!vistos.has(c.cliente))
-                        .filter(c=>!hayFiltro
-                          || (c.agente && delAmbito.has(String(c.agente).toUpperCase())));
+                      const extra=(indice||[])
+                        .filter(([cod,nom])=>
+                          String(nom||"").toUpperCase().includes(q)
+                          || String(cod||"").toUpperCase().includes(q))
+                        .filter(([cod])=>!vistos.has(cod))
+                        .filter(([,,ag])=>!hayFiltro
+                          || (ag && delAmbito.has(String(ag).toUpperCase())))
+                        .slice(0,60)
+                        .map(([cliente,nombre,agente,act,ant])=>({
+                          cliente, nombre, agente,
+                          ventasAct:act, ventasAntYTD:ant,
+                          caida: act-ant,
+                        }));
                       lista=[...enLista,...extra];
                     }
                     if(!lista.length) return (
                       <p style={{padding:"18px 15px",textAlign:"center",
                         color:T.muted,fontSize:13}}>
-                        {hallados===null&&q.length>=3
-                          ? "Buscando…"
+                        {indice===null
+                          ? "Cargando la cartera…"
                           : `Ningún cliente coincide con "${buscaCli}".`}</p>
                     );
                     return lista.slice(0,40).map((c,i)=>(
