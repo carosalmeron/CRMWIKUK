@@ -1089,29 +1089,34 @@ EVALUATE
       out.ejemplosPadre = ejemplosPadre;
 
       const agrupado = req.query.sinAgrupar === "1" ? false : true;
-      // Sufijos que de verdad marcan una variante del mismo producto. La
-      // lista es corta y explícita a propósito: una regla amplia agrupaba
-      // artículos distintos (.C20 no es variante de su código base).
-      // Ampliable desde pbi_config/reglas con sufijosVariante="BG,C140".
-      let SUFIJOS = ["BG", "C140"];
-      try {
-        const cfg = await fbLeerDocumento("pbi_config", "reglas");
-        if (cfg && cfg.sufijosVariante) {
-          SUFIJOS = String(cfg.sufijosVariante).split(",")
-            .map((x) => x.trim().toUpperCase()).filter(Boolean);
-        }
-      } catch (e) { /* con la lista por defecto basta */ }
-      out.sufijosVariante = SUFIJOS;
-      const RE_SUFIJO = new RegExp(
-        `\\.(${SUFIJOS.map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})$`, "i");
+      // El sufijo tras el último punto es el envase (.BG, .C140, .N32...) y
+      // el maestro no informa el producto padre en esos casos. Se agrupa por
+      // el código base, pero solo si ese código existe de verdad Y tiene la
+      // misma descripción: sin esa segunda condición se juntarían artículos
+      // que solo comparten el principio del código.
+      const RE_ENVASE = /\.[A-Z0-9]+$/i;
+      // El ERP a veces repite el envase en la descripción ("... A .BG"), así
+      // que no basta con exigir textos idénticos: se compara si uno empieza
+      // por el otro, con un mínimo de longitud para que no valga cualquiera.
+      const desc = (c) => String((arts.get(c) || {}).descripcion || "")
+        .toUpperCase().replace(/\s*\.[A-Z0-9]+$/, "").replace(/\s+/g, " ").trim();
+      const parecidas = (a, b) => {
+        if (!a || !b) return false;
+        const [c1, c2] = a.length <= b.length ? [a, b] : [b, a];
+        return c1.length >= 12 && c2.startsWith(c1);
+      };
 
+      let porEnvase = 0;
       const padreDe = (cod) => {
         if (!agrupado) return cod;
         const f = arts.get(cod);
         const p = f && f.padre;
         if (p && p !== cod) return p;
-        const base = cod.replace(RE_SUFIJO, "");
-        if (base !== cod && arts.has(base)) return base;
+        const base = cod.replace(RE_ENVASE, "");
+        if (base !== cod && arts.has(base) && parecidas(desc(base), desc(cod))) {
+          porEnvase++;
+          return base;
+        }
         return cod;
       };
 
@@ -1134,6 +1139,8 @@ EVALUATE
         if (!g.origen.includes(original)) g.origen.push(original);
         porCodigo.set(cod, g);
       }
+
+      out.agrupadosPorEnvase = porEnvase;
 
       out.articulos = [...porCodigo.values()].map((g) => {
         let f = arts.get(g.articulo);
@@ -1284,13 +1291,24 @@ ${[...Array(12)].map((_, i) => mes(i + 1)).join(",\n")}
         if (nuevo === cod) familia.add(viejo);
       }
       try {
-        const RE_SUFIJO = /\.(BG|C140)$/i;
-        for (const a of await pbiQuery(token, Q.articulos, true)) {
+        const RE_ENVASE = /\.[A-Z0-9]+$/i;
+        const descs = new Map();
+        const filasArt = await pbiQuery(token, Q.articulos, true);
+        for (const a of filasArt) {
+          const c = String(pick(a, "CODIGO") || "").trim().toUpperCase();
+          if (c && !descs.has(c)) descs.set(c,
+            String(pick(a, "DESCRIPCION") || "").toUpperCase()
+              .replace(/\s*\.[A-Z0-9]+$/, "").replace(/\s+/g, " ").trim());
+        }
+        for (const a of filasArt) {
           const c = String(pick(a, "CODIGO") || "").trim().toUpperCase();
           if (!c) continue;
           const padre = String(pick(a, "PRODUCTOPADRE") || "").trim().toUpperCase();
-          const base = c.replace(RE_SUFIJO, "");
-          if (padre === cod || (base === cod && base !== c)) familia.add(c);
+          const base = c.replace(RE_ENVASE, "");
+          const d1 = descs.get(base) || "", d2 = descs.get(c) || "";
+          const [k1, k2] = d1.length <= d2.length ? [d1, d2] : [d2, d1];
+          const mismoTexto = k1.length >= 12 && k2.startsWith(k1);
+          if (padre === cod || (base === cod && base !== c && mismoTexto)) familia.add(c);
           // También los códigos antiguos de las variantes
           if (familia.has(codArt(c))) familia.add(c);
         }
