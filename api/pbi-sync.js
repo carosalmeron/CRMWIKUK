@@ -2990,6 +2990,45 @@ EVALUATE
         log.errores.push(`resumen: ${e.message}`);
       }
 
+      // ── Índice de búsqueda ──
+      // Firestore solo busca por prefijo. Para poder buscar por cualquier
+      // parte del nombre se guarda una lista compacta de toda la cartera en
+      // un único documento: una lectura y se busca en el navegador.
+      if (!dry) try {
+        const compacta = docs
+          .filter((d) => !d.fusionadoEn && !d.intercompany)
+          .map((d) => [
+            d.cliente,
+            String(d.nombre || "").slice(0, 60),
+            d.agente || "",
+            Math.round(d.ventasAct || 0),
+            Math.round(d.ventasAntYTD || 0),
+          ]);
+
+        // Un documento de Firestore admite 1 MB. Se trocea con margen.
+        const trozos = [];
+        let actual = [], bytes = 0;
+        for (const c of compacta) {
+          const t = JSON.stringify(c).length + 1;
+          if (bytes + t > 700000) { trozos.push(actual); actual = []; bytes = 0; }
+          actual.push(c); bytes += t;
+        }
+        if (actual.length) trozos.push(actual);
+
+        await fbCommit("pbi_indice_clientes", trozos.map((t, i) => ({
+          _id: `parte${i}`,
+          parte: i,
+          partes: trozos.length,
+          clientes: t.length,
+          // [codigo, nombre, agente, ventasAct, ventasAntYTD]
+          datos: JSON.stringify(t),
+          actualizado: new Date().toISOString(),
+        })));
+        log.indiceBusqueda = { clientes: compacta.length, partes: trozos.length };
+      } catch (e) {
+        log.errores.push(`indice busqueda: ${e.message}`);
+      }
+
       log.ventas = dry ? docs.length : await fbCommit("pbi_ventas_cliente", docs);
       if (dry) log.muestraVentas = docs.slice(0, 3);
     } catch (e) {
