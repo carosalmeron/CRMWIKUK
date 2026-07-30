@@ -918,6 +918,30 @@ EVALUATE
     return res.status(200).json(out);
   }
 
+  // ?limpiarArticulos=1 → borra las consultas de artículos guardadas, para que
+  // se recalculen con la tabla de equivalencias actual. Alternativa rápida a
+  // relanzar la sincronización completa, que también las invalida al cambiar
+  // el sello pero tarda casi un minuto.
+  if (req.query.limpiarArticulos === "1") {
+    const out = { ok: true };
+    try {
+      const guardadas = await fbLeerColeccion("pbi_articulos_cliente");
+      out.encontradas = guardadas.length;
+      const ids = guardadas.map((d) => d._id);
+      if (ids.length) {
+        for (let i = 0; i < ids.length; i += 400) {
+          await fbBorrar("pbi_articulos_cliente", ids.slice(i, i + 400));
+        }
+      }
+      out.borradas = ids.length;
+      out.nota = "Las próximas consultas volverán a Power BI y aplicarán las equivalencias.";
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
   // Solo el cron de Vercel (o tú con el secreto) puede lanzarlo
   const auth = req.headers.authorization || "";
   const secreto = req.query.secret || auth.replace("Bearer ", "");
