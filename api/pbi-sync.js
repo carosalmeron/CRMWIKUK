@@ -1064,6 +1064,92 @@ EVALUATE
     return res.status(200).json(out);
   }
 
+  // ?equivalencias=1 → busca códigos recodificados que falten en la tabla.
+  // Si un artículo se dejó de vender y otro con la misma descripción empezó a
+  // venderse por un importe parecido, casi seguro que son el mismo producto.
+  if (req.query.equivalencias === "1") {
+    const out = { ok: true };
+    try {
+      await cargarEquivArticulos();
+      const { token } = await getToken(req);
+      const T = M.ventas;
+      const Q = dax(null);
+
+      const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+  VAR _iniAct = DATE(_anoAct, 1, 1)
+  VAR _iniAnt = DATE(_anoAnt, 1, 1)
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
+EVALUATE
+  FILTER(
+    ADDCOLUMNS(
+      CALCULATETABLE(VALUES(${T}[CODIGO]), ${M.vFecha} >= _iniAnt),
+      "Act", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy),
+      "Ant", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt)
+    ),
+    ABS([Act] - [Ant]) > 15000)`, true);
+
+      const arts = new Map();
+      for (const a of await pbiQuery(token, Q.articulos, true)) {
+        const cod = String(pick(a, "CODIGO") || "").trim().toUpperCase();
+        if (cod && !arts.has(cod)) arts.set(cod, String(pick(a, "DESCRIPCION") || "").trim());
+      }
+
+      const norma = (d) => String(d || "").toUpperCase()
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^A-Z0-9]/g, "");
+
+      const caen = [], suben = [];
+      for (const r of filas) {
+        const cod = String(pick(r, "CODIGO") || "").trim().toUpperCase();
+        if (EQUIV_ART[cod]) continue;           // ya está en la tabla
+        const act = num(pick(r, "Act")), ant = num(pick(r, "Ant"));
+        const dif = num(act - ant);
+        const item = { codigo: cod, descripcion: arts.get(cod) || null,
+          clave: norma(arts.get(cod)), ventasAct: act, ventasAnt: ant, diferencia: dif };
+        if (dif < 0 && act <= Math.abs(ant) * 0.15) caen.push(item);
+        else if (dif > 0 && ant <= act * 0.15) suben.push(item);
+      }
+
+      // Se empareja cada caída con la subida de misma descripción e importe
+      // más parecido. Es una propuesta, no una certeza: hay que revisarla.
+      const usados = new Set();
+      const props = [];
+      for (const c of caen.sort((a, b) => a.diferencia - b.diferencia)) {
+        if (!c.clave) continue;
+        const cands = suben.filter((x) => x.clave === c.clave && !usados.has(x.codigo));
+        if (!cands.length) continue;
+        cands.sort((a, b) =>
+          Math.abs(a.diferencia + c.diferencia) - Math.abs(b.diferencia + c.diferencia));
+        const m = cands[0];
+        usados.add(m.codigo);
+        const encaje = Math.abs(c.diferencia) > 0
+          ? Math.round(100 * Math.min(m.diferencia, -c.diferencia) / -c.diferencia) : 0;
+        props.push({
+          antiguo: c.codigo, nuevo: m.codigo,
+          descripcion: c.descripcion,
+          dejoDeVender: num(-c.diferencia),
+          empezoAVender: num(m.diferencia),
+          encajePct: encaje,
+          fiabilidad: encaje >= 70 ? "alta" : encaje >= 40 ? "media" : "baja",
+        });
+      }
+
+      out.analizados = filas.length;
+      out.caenSinPareja = caen.length - props.length;
+      out.propuestas = props.sort((a, b) => b.dejoDeVender - a.dejoDeVender);
+      out.nota = "Revisa antes de aplicar: la coincidencia es por descripción "
+        + "e importe, no por dato del ERP.";
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
   // Solo el cron de Vercel (o tú con el secreto) puede lanzarlo
   const auth = req.headers.authorization || "";
   const secreto = req.query.secret || auth.replace("Bearer ", "");
@@ -2243,8 +2329,16 @@ EVALUATE
           ventasAntYTD: vAntYTD,
           margenAntYTD: mAntYTD,
           margenPctAntYTD: p(mAntYTD, bAntYTD),
-          // Guardado para poder ordenar por caída sin leer toda la colección
-          caida: num(vAct - vAntYTD),
+          // Solo se guarda la caída de clientes reales que de verdad bajan:
+          // Firestore excluye de la ordenación los documentos sin el campo, y
+          // así los 418 fusionados no ocupan los primeros puestos con su
+          // caída aparente de todo el histórico.
+          ...(function () {
+            const esInter = (agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.nivel1
+                              === "Intercompany") || esIntercompany(ficha.nombre);
+            const baja = num(vAct - vAntYTD);
+            return (!esInter && baja < 0) ? { caida: baja } : {};
+          })(),
 
           ventasAct: vAct,
           margenAct: mAct,
@@ -2381,6 +2475,10 @@ EVALUATE
           : null;
 
         principal.codigosFusionados = grupo.map((d) => d.cliente).join(", ");
+        // Se recalcula después de sumar, no antes
+        const bajaP = num((principal.ventasAct || 0) - (principal.ventasAntYTD || 0));
+        if (!principal.intercompany && bajaP < 0) principal.caida = bajaP;
+        else delete principal.caida;
 
         for (const d of grupo) {
           if (d === principal) continue;
@@ -2388,6 +2486,8 @@ EVALUATE
           d.ventasAntFull = 0; d.margenAntFull = 0;
           d.ventasAntYTD = 0;  d.margenAntYTD = 0;
           d.ventasAct = 0;     d.margenAct = 0;
+          // Un fusionado no cae: su venta se ha movido al principal
+          delete d.caida;
           d.ventasMes = 0;     d.variacionPct = null;
           d.margenPctAntFull = null; d.margenPctAntYTD = null; d.margenPctAct = null;
           d.coberturaAntFull = 0; d.coberturaAntYTD = 0; d.coberturaAct = 0;
