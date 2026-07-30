@@ -161,6 +161,15 @@ EVALUATE
     // Margen del mes y del mismo mes del ano pasado, con el mismo filtro de
     // coste limpio que el anual: sin esto no se puede saber si el margen del
     // mes mejora o empeora respecto al ano anterior.
+    // Margen de la semana en curso: lo necesita el cierre semanal, que hasta
+    // ahora obligaba al comercial a teclearlo de memoria.
+    "VentaSemOk", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, ${M.vFecha} >= _iniSem && ${M.vFecha} <= _hoy &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+    "CosteSemOk", CALCULATE(SUM(${M.vCoste}),
+      FILTER(${M.ventas}, ${M.vFecha} >= _iniSem && ${M.vFecha} <= _hoy &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+
     "VentaMesOk", CALCULATE(SUM(${M.vBase}),
       FILTER(${M.ventas}, ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy &&
         NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
@@ -612,6 +621,33 @@ let RECOD = { prefijo: "U43", digitos: 4, inserta: "0" };
 // Se calculan aqui una sola vez y se escriben en pbi_resumen_agente, para
 // que el CRM y las paginas de analisis no tengan que repetir la regla.
 // Editable en Firestore: pbi_config/ramas
+// ── Equivalencias de artículos ─────────────────────────────────────
+// Al cambiar la codificación, un artículo vendido el año pasado como US45.70
+// hoy se factura como IR18.7N. Sin traducir, el análisis muestra el antiguo
+// perdiendo el 100% y el nuevo creciendo desde cero: dos falsos movimientos
+// por cada artículo recodificado. Se lee de pbi_config/equiv_articulos.
+let EQUIV_ART = null;
+
+async function cargarEquivArticulos() {
+  if (EQUIV_ART) return EQUIV_ART;
+  EQUIV_ART = {};
+  try {
+    const d = await fbLeerDocumento("pbi_config", "equiv_articulos");
+    if (d && d.mapa) {
+      const obj = JSON.parse(d.mapa);
+      for (const [a, b] of Object.entries(obj)) {
+        EQUIV_ART[String(a).toUpperCase().trim()] = String(b).toUpperCase().trim();
+      }
+    }
+  } catch (e) { /* sin tabla se usan los codigos tal cual */ }
+  return EQUIV_ART;
+}
+
+const codArt = (c) => {
+  const x = String(c || "").toUpperCase().trim();
+  return (EQUIV_ART && EQUIV_ART[x]) || x;
+};
+
 let RAMAS = {
   // valor de Agentes[GRUPONIVEL4] normalizado -> rama final
   WIKUK: "WIKUK",
@@ -750,6 +786,7 @@ export default async function handler(req, res) {
         } catch (e) { /* si falla la lectura se consulta Power BI */ }
       }
 
+      await cargarEquivArticulos();
       const { token } = await getToken(req);
       const T = M.ventas;
       const Q = dax(null);   // se necesita el maestro de articulos
@@ -777,7 +814,7 @@ DEFINE
   VAR _iniAnt = DATE(_anoAnt, 1, 1)
   VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
 EVALUATE
-  TOPN(${n},
+  TOPN(${Math.min(n * 10, 80)},
     FILTER(
       ADDCOLUMNS(
         CALCULATETABLE(VALUES(${T}[CODIGO]), ${T}[CLIENTE] IN {${enLista}}),
@@ -811,13 +848,38 @@ EVALUATE
 
       // TOPN recorta por caida pero no garantiza el orden de salida: se
       // reordena aqui para que el que mas cae salga primero.
-      out.articulos = filas.map((r) => {
-        const cod = String(pick(r, "CODIGO") || "").trim();
-        const act = num(pick(r, "Act"));
-        const ant = num(pick(r, "Ant"));
-        const f = arts.get(cod) || {};
+      // Se agrupa por el codigo actual: la venta del codigo antiguo se suma a
+      // la del nuevo, y el falso -100% desaparece. Por eso se piden mas filas
+      // a Power BI de las que se devuelven: el recorte va despues de traducir.
+      const porCodigo = new Map();
+      let traducidos = 0;
+      for (const r of filas) {
+        const original = String(pick(r, "CODIGO") || "").trim().toUpperCase();
+        if (!original) continue;
+        const cod = codArt(original);
+        if (cod !== original) traducidos++;
+
+        const g = porCodigo.get(cod) || {
+          articulo: cod, ventasAct: 0, ventasAnt: 0, unidades: 0, codigosOrigen: [],
+        };
+        g.ventasAct += num(pick(r, "Act"));
+        g.ventasAnt += num(pick(r, "Ant"));
+        g.unidades  += num(pick(r, "UniAct"));
+        if (!g.codigosOrigen.includes(original)) g.codigosOrigen.push(original);
+        porCodigo.set(cod, g);
+      }
+      out.codigosTraducidos = traducidos;
+
+      out.articulos = [...porCodigo.values()].map((g) => {
+        // La descripcion se busca por el codigo actual y, si no esta en el
+        // maestro, por cualquiera de los antiguos que lo alimentan.
+        let f = arts.get(g.articulo);
+        if (!f) for (const o of g.codigosOrigen) { if (arts.get(o)) { f = arts.get(o); break; } }
+        f = f || {};
+        const act = num(g.ventasAct);
+        const ant = num(g.ventasAnt);
         return {
-          articulo: cod,
+          articulo: g.articulo,
           descripcion: f.descripcion || null,
           calibre: f.calibre || null,
           metros: f.metros || null,
@@ -825,9 +887,14 @@ EVALUATE
           ventasAnt: ant,
           diferencia: num(act - ant),
           variacionPct: ant ? num((100 * (act - ant)) / ant) : null,
-          unidades: num(pick(r, "UniAct")),
+          unidades: num(g.unidades),
+          // Solo se informa si hubo recodificacion, para poder auditarlo
+          codigoAntiguo: g.codigosOrigen.filter((o) => o !== g.articulo).join(", ") || undefined,
         };
-      }).sort((a, b) => a.diferencia - b.diferencia);
+      })
+        .filter((a) => a.ventasAct !== 0 || a.ventasAnt !== 0)
+        .sort((a, b) => a.diferencia - b.diferencia)
+        .slice(0, n);
       out.deCache = false;
       out.basadoEn = sello;
 
@@ -1769,6 +1836,8 @@ EVALUATE
         const mAntFull = num(bAntFull - num(pick(r, "CosteAntFullOk")));
         const mAntYTD  = num(bAntYTD  - num(pick(r, "CosteAntYTDOk")));
         const mAct     = num(bAct     - num(pick(r, "CosteActOk")));
+        const bSem     = num(pick(r, "VentaSemOk"));
+        const mSem     = num(bSem - num(pick(r, "CosteSemOk")));
         const bMes     = num(pick(r, "VentaMesOk"));
         const bMesAnt  = num(pick(r, "VentaMesAntOk"));
         const mMes     = num(bMes    - num(pick(r, "CosteMesOk")));
@@ -1821,6 +1890,10 @@ EVALUATE
           ventasSem: vSem,
           ventasMesAnt: vMesAnt,
           ventasSemAnt: vSemAnt,
+
+          // Margen de la semana, para el cierre semanal
+          margenSem: mSem,       baseSem: bSem,
+          margenPctSem: p(mSem, bSem),
 
           // Margen del mes, con su referencia del ano anterior
           margenMes: mMes,       baseMes: bMes,
@@ -1920,6 +1993,8 @@ EVALUATE
         principal.ventasSem     = num(suma("ventasSem"));
         principal.ventasMesAnt  = num(suma("ventasMesAnt"));
         principal.ventasSemAnt  = num(suma("ventasSemAnt"));
+        principal.margenSem     = num(suma("margenSem"));
+        principal.baseSem       = num(suma("baseSem"));
         principal.margenMes     = num(suma("margenMes"));
         principal.baseMes       = num(suma("baseMes"));
         principal.margenMesAnt  = num(suma("margenMesAnt"));
@@ -2058,6 +2133,7 @@ EVALUATE
               ventasAct: 0, margenAct: 0, baseAct: 0,
               ventasMes: 0, ventasSem: 0, ventasMesAnt: 0, ventasSemAnt: 0,
               margenMes: 0, baseMes: 0, margenMesAnt: 0, baseMesAnt: 0,
+              margenSem: 0, baseSem: 0,
               clientes: 0, clientesConVentaMes: 0,
             });
           }
@@ -2070,6 +2146,8 @@ EVALUATE
           a.ventasSem     += d.ventasSem || 0;
           a.ventasMesAnt  += d.ventasMesAnt || 0;
           a.ventasSemAnt  += d.ventasSemAnt || 0;
+          a.margenSem     += d.margenSem || 0;
+          a.baseSem       += d.baseSem || 0;
           a.margenMes     += d.margenMes || 0;
           a.baseMes       += d.baseMes || 0;
           a.margenMesAnt  += d.margenMesAnt || 0;
@@ -2094,6 +2172,8 @@ EVALUATE
             ventasMes: num(a.ventasMes),
             ventasSem: num(a.ventasSem),
             ventasMesAnt: num(a.ventasMesAnt),
+            margenPctSem:    p(a.margenSem, a.baseSem),
+            margenSem: num(a.margenSem),       baseSem: num(a.baseSem),
             margenPctMes:    p(a.margenMes, a.baseMes),
             margenPctMesAnt: p(a.margenMesAnt, a.baseMesAnt),
             margenMes: num(a.margenMes),       baseMes: num(a.baseMes),
@@ -2127,6 +2207,7 @@ EVALUATE
                            "ventasAct","margenAct","baseAct","ventasMes","ventasSem",
                            "ventasMesAnt","ventasSemAnt",
                            "margenMes","baseMes","margenMesAnt","baseMesAnt",
+                           "margenSem","baseSem",
                            "clientes","clientesConVentaMes"]) t[k] += a[k];
           return t;
         }, { _id: "_TOTAL", agente: "_TOTAL", anoAnterior: anoAnt, anoActual: anoAct,
@@ -2135,6 +2216,7 @@ EVALUATE
              ventasAct:0, margenAct:0, baseAct:0, ventasMes:0, ventasSem:0,
              ventasMesAnt:0, ventasSemAnt:0,
              margenMes:0, baseMes:0, margenMesAnt:0, baseMesAnt:0,
+             margenSem:0, baseSem:0,
              clientes:0, clientesConVentaMes:0 });
         resumen.push(cerrar(tot));
 
