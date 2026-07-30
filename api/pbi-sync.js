@@ -942,6 +942,128 @@ EVALUATE
     return res.status(200).json(out);
   }
 
+  // ?articulosGrupo=1 → artículos con más caída en todo el grupo, o de un
+  // comercial si se pasa &agente=. Hasta ahora solo se podía llegar al
+  // artículo entrando por un cliente concreto.
+  if (req.query.articulosGrupo === "1") {
+    const ag = String(req.query.agente || "").trim().toUpperCase()
+      .replace(/[^A-Z0-9._-]/g, "");
+    const n = Math.min(parseInt(req.query.top, 10) || 20, 60);
+    const out = { ok: true, agente: ag || "todos", top: n };
+    try {
+      let sello = null;
+      try {
+        const m = await fbLeerDocumento("pbi_meta", "estado");
+        sello = m && m.ultimaSync ? String(m.ultimaSync) : null;
+      } catch (e) {}
+
+      const idCache = docId(`grupo_${ag || "TODOS"}_${n}`);
+      if (sello && req.query.recargar !== "1") {
+        try {
+          const g = await fbLeerDocumento("pbi_articulos_cliente", idCache);
+          if (g && g.basadoEn === sello && g.datos) {
+            out.articulos = JSON.parse(g.datos);
+            out.deCache = true;
+            return res.status(200).json(out);
+          }
+        } catch (e) {}
+      }
+
+      await cargarEquivArticulos();
+      const { token } = await getToken(req);
+      const T = M.ventas;
+      const Q = dax(null);
+      const filtroAg = ag ? `${T}[VENDEDOR] = "${ag}", ` : "";
+
+      const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+  VAR _iniAct = DATE(_anoAct, 1, 1)
+  VAR _iniAnt = DATE(_anoAnt, 1, 1)
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
+EVALUATE
+  TOPN(${Math.min(n * 6, 200)},
+    FILTER(
+      ADDCOLUMNS(
+        ${ag
+          ? `CALCULATETABLE(VALUES(${T}[CODIGO]), ${T}[VENDEDOR] = "${ag}",
+               ${M.vFecha} >= _iniAnt)`
+          : `CALCULATETABLE(VALUES(${T}[CODIGO]), ${M.vFecha} >= _iniAnt)`},
+        "Act", CALCULATE(SUM(${M.vBase}), ${filtroAg}
+          ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy),
+        "Ant", CALCULATE(SUM(${M.vBase}), ${filtroAg}
+          ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt),
+        "Clientes", CALCULATE(DISTINCTCOUNT(${T}[CLIENTE]), ${filtroAg}
+          ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy)
+      ),
+      [Ant] <> 0 || [Act] <> 0
+    ),
+    [Ant] - [Act], DESC)`, true);
+
+      out.filasDevueltas = filas.length;
+
+      const arts = new Map();
+      try {
+        for (const a of await pbiQuery(token, Q.articulos, true)) {
+          const cod = String(pick(a, "CODIGO") || "").trim();
+          if (cod && !arts.has(cod)) arts.set(cod, {
+            descripcion: pick(a, "DESCRIPCION"),
+            calibre: pick(a, "CALIBRE"), metros: pick(a, "METROS"),
+          });
+        }
+      } catch (e) { out.errorMaestro = e.message.slice(0, 140); }
+
+      // Se agrupa por el código actual, igual que en la vista por cliente
+      const porCodigo = new Map();
+      for (const r of filas) {
+        const original = String(pick(r, "CODIGO") || "").trim().toUpperCase();
+        if (!original) continue;
+        const cod = codArt(original);
+        const g = porCodigo.get(cod)
+          || { articulo: cod, ventasAct: 0, ventasAnt: 0, clientes: 0, origen: [] };
+        g.ventasAct += num(pick(r, "Act"));
+        g.ventasAnt += num(pick(r, "Ant"));
+        g.clientes = Math.max(g.clientes, num(pick(r, "Clientes")));
+        if (!g.origen.includes(original)) g.origen.push(original);
+        porCodigo.set(cod, g);
+      }
+
+      out.articulos = [...porCodigo.values()].map((g) => {
+        let f = arts.get(g.articulo);
+        if (!f) for (const o of g.origen) { if (arts.get(o)) { f = arts.get(o); break; } }
+        f = f || {};
+        return {
+          articulo: g.articulo,
+          descripcion: f.descripcion || null,
+          calibre: f.calibre || null,
+          ventasAct: num(g.ventasAct),
+          ventasAnt: num(g.ventasAnt),
+          diferencia: num(g.ventasAct - g.ventasAnt),
+          variacionPct: g.ventasAnt ? num((100 * (g.ventasAct - g.ventasAnt)) / g.ventasAnt) : null,
+          clientes: g.clientes,
+          codigoAntiguo: g.origen.filter((o) => o !== g.articulo).join(", ") || undefined,
+        };
+      }).sort((a, b) => a.diferencia - b.diferencia).slice(0, n);
+
+      if (sello) {
+        try {
+          await fbCommit("pbi_articulos_cliente", [{
+            _id: idCache, cliente: `_GRUPO_${ag || "TODOS"}`, basadoEn: sello,
+            datos: JSON.stringify(out.articulos),
+            guardadoEl: new Date().toISOString(),
+          }]);
+        } catch (e) {}
+      }
+      out.deCache = false;
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
   // Solo el cron de Vercel (o tú con el secreto) puede lanzarlo
   const auth = req.headers.authorization || "";
   const secreto = req.query.secret || auth.replace("Bearer ", "");
@@ -1068,128 +1190,6 @@ EVALUATE
   // Truco que no depende de las funciones INFO.*: la respuesta incluye
   // todas las columnas como claves, y un valor de ejemplo de cada una,
   // asi que revela nombres exactos Y tipos de dato de golpe.
-  // ?articulosGrupo=1 → artículos con más caída en todo el grupo, o de un
-  // comercial si se pasa &agente=. Hasta ahora solo se podía llegar al
-  // artículo entrando por un cliente concreto.
-  if (req.query.articulosGrupo === "1") {
-    const ag = String(req.query.agente || "").trim().toUpperCase()
-      .replace(/[^A-Z0-9._-]/g, "");
-    const n = Math.min(parseInt(req.query.top, 10) || 20, 60);
-    const out = { ok: true, agente: ag || "todos", top: n };
-    try {
-      let sello = null;
-      try {
-        const m = await fbLeerDocumento("pbi_meta", "estado");
-        sello = m && m.ultimaSync ? String(m.ultimaSync) : null;
-      } catch (e) {}
-
-      const idCache = docId(`grupo_${ag || "TODOS"}_${n}`);
-      if (sello && req.query.recargar !== "1") {
-        try {
-          const g = await fbLeerDocumento("pbi_articulos_cliente", idCache);
-          if (g && g.basadoEn === sello && g.datos) {
-            out.articulos = JSON.parse(g.datos);
-            out.deCache = true;
-            return res.status(200).json(out);
-          }
-        } catch (e) {}
-      }
-
-      await cargarEquivArticulos();
-      const { token } = await getToken(req);
-      const T = M.ventas;
-      const Q = dax(null);
-      const filtroAg = ag ? `${T}[VENDEDOR] = "${ag}", ` : "";
-
-      const filas = await pbiQuery(token, `
-DEFINE
-  VAR _hoy = TODAY()
-  VAR _anoAct = YEAR(_hoy)
-  VAR _anoAnt = _anoAct - 1
-  VAR _iniAct = DATE(_anoAct, 1, 1)
-  VAR _iniAnt = DATE(_anoAnt, 1, 1)
-  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
-EVALUATE
-  TOPN(${Math.min(n * 6, 200)},
-    FILTER(
-      ADDCOLUMNS(
-        ${ag
-          ? `CALCULATETABLE(VALUES(${T}[CODIGO]), ${T}[VENDEDOR] = "${ag}",
-               ${M.vFecha} >= _iniAnt)`
-          : `CALCULATETABLE(VALUES(${T}[CODIGO]), ${M.vFecha} >= _iniAnt)`},
-        "Act", CALCULATE(SUM(${M.vBase}), ${filtroAg}
-          ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy),
-        "Ant", CALCULATE(SUM(${M.vBase}), ${filtroAg}
-          ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt),
-        "Clientes", CALCULATE(DISTINCTCOUNT(${T}[CLIENTE]), ${filtroAg}
-          ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy)
-      ),
-      [Ant] <> 0 || [Act] <> 0
-    ),
-    [Ant] - [Act], DESC)`, true);
-
-      out.filasDevueltas = filas.length;
-
-      const arts = new Map();
-      try {
-        for (const a of await pbiQuery(token, Q.articulos, true)) {
-          const cod = String(pick(a, "CODIGO") || "").trim();
-          if (cod && !arts.has(cod)) arts.set(cod, {
-            descripcion: pick(a, "DESCRIPCION"),
-            calibre: pick(a, "CALIBRE"), metros: pick(a, "METROS"),
-          });
-        }
-      } catch (e) { out.errorMaestro = e.message.slice(0, 140); }
-
-      // Se agrupa por el código actual, igual que en la vista por cliente
-      const porCodigo = new Map();
-      for (const r of filas) {
-        const original = String(pick(r, "CODIGO") || "").trim().toUpperCase();
-        if (!original) continue;
-        const cod = codArt(original);
-        const g = porCodigo.get(cod)
-          || { articulo: cod, ventasAct: 0, ventasAnt: 0, clientes: 0, origen: [] };
-        g.ventasAct += num(pick(r, "Act"));
-        g.ventasAnt += num(pick(r, "Ant"));
-        g.clientes = Math.max(g.clientes, num(pick(r, "Clientes")));
-        if (!g.origen.includes(original)) g.origen.push(original);
-        porCodigo.set(cod, g);
-      }
-
-      out.articulos = [...porCodigo.values()].map((g) => {
-        let f = arts.get(g.articulo);
-        if (!f) for (const o of g.origen) { if (arts.get(o)) { f = arts.get(o); break; } }
-        f = f || {};
-        return {
-          articulo: g.articulo,
-          descripcion: f.descripcion || null,
-          calibre: f.calibre || null,
-          ventasAct: num(g.ventasAct),
-          ventasAnt: num(g.ventasAnt),
-          diferencia: num(g.ventasAct - g.ventasAnt),
-          variacionPct: g.ventasAnt ? num((100 * (g.ventasAct - g.ventasAnt)) / g.ventasAnt) : null,
-          clientes: g.clientes,
-          codigoAntiguo: g.origen.filter((o) => o !== g.articulo).join(", ") || undefined,
-        };
-      }).sort((a, b) => a.diferencia - b.diferencia).slice(0, n);
-
-      if (sello) {
-        try {
-          await fbCommit("pbi_articulos_cliente", [{
-            _id: idCache, cliente: `_GRUPO_${ag || "TODOS"}`, basadoEn: sello,
-            datos: JSON.stringify(out.articulos),
-            guardadoEl: new Date().toISOString(),
-          }]);
-        } catch (e) {}
-      }
-      out.deCache = false;
-    } catch (e) {
-      out.ok = false;
-      out.error = e.message;
-    }
-    return res.status(200).json(out);
-  }
-
   // ?medidas=1 → devuelve las medidas del modelo con su fórmula DAX. Es la
   // forma de saber qué hace exactamente "Ventas Mes Facturado" en vez de
   // deducirlo por diferencias.
