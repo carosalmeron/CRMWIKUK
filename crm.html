@@ -342,7 +342,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.26.0";
+const CRM_VERSION = "4.28.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -6998,6 +6998,48 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
   });
   const [step,setStep]=useState(0);
   const [ventas,setVentas]=useState({venta:"",mb:"",promo:"",liq:""});
+
+  // Las ventas y el margen los da Power BI: pedirlos de memoria era la única
+  // opción antes de tener los datos, pero ahora la cifra del sistema es más
+  // fiable. Promoción y liquidación siguen a mano: no están en el modelo.
+  const [pbiSem,setPbiSem]=useState(null);   // null = cargando, false = sin dato
+  React.useEffect(function(){
+    let vivo=true;
+    const claves=[usuario.grupoAgente,usuario.catalogoVendedor,usuario.id,usuario.nombre]
+      .filter(Boolean).map(x=>String(x).toUpperCase());
+    (async function(){
+      for(const k of claves){
+        try{
+          const r=await fetch(`${FB_BASE}/pbi_resumen_agente/${encodeURIComponent(k)}`);
+          if(!r.ok) continue;
+          const j=await r.json();
+          const f=j.fields||{};
+          const n=(x)=>x&&x.doubleValue!==undefined?Number(x.doubleValue)
+            :x&&x.integerValue!==undefined?Number(x.integerValue):null;
+          const venta=n(f.ventasSem), mb=n(f.margenPctSem);
+          if(venta!=null){
+            if(!vivo) return;
+            let sello=null;
+            try{
+              const rm=await fetch(`${FB_BASE}/pbi_meta/estado`);
+              if(rm.ok){
+                const mj=await rm.json();
+                sello=mj.fields?.ultimaSync?.stringValue||null;
+              }
+            }catch(e){}
+            setPbiSem({venta, mb, agente:k, sello});
+            setVentas(v=>({...v,
+              venta: String(Math.round(venta)),
+              mb: mb!=null ? String(Math.round(mb*10)/10) : v.mb,
+            }));
+            return;
+          }
+        }catch(e){}
+      }
+      if(vivo) setPbiSem(false);
+    })();
+    return function(){ vivo=false; };
+  },[]);
   const [visitas,setVisitas]=useState(function(){
     // Pre-cargar visitas de la sesion actual
     var init={};
@@ -7280,7 +7322,8 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
   };
   const rutasDisp=[...new Set(clientes.map(c=>getRouteNum2(c)).filter(r=>r>0))].sort((a,b)=>a-b);
   const visitasDone=Object.keys(visitas).length;
-  const ventasOk=ventas.venta&&Number(ventas.venta)>0&&ventas.mb&&Number(ventas.mb)>0;
+  const ventasOk=(ventas.venta&&Number(ventas.venta)>0&&ventas.mb&&Number(ventas.mb)>0)
+    || !!(pbiSem&&pbiSem.venta>0);
 
   const guardarVisita=async()=>{
     if(!clienteSel||!formV.resultado||!formV.tipoContacto) return;
@@ -7616,10 +7659,65 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
       {/* PASO 0 — Ventas */}
       {step===0&&(
         <div>
-          <p style={{margin:"0 0 20px",fontSize:17,fontWeight:800,color:T.text}}>💰 ¿Cuánto has vendido esta semana?</p>
+          <p style={{margin:"0 0 6px",fontSize:17,fontWeight:800,color:T.text}}>
+            {pbiSem ? "💰 Tu semana" : "💰 ¿Cuánto has vendido esta semana?"}
+          </p>
+
+          {pbiSem===null && (
+            <p style={{margin:"0 0 16px",fontSize:12.5,color:T.muted}}>
+              Buscando tus ventas de la semana…
+            </p>
+          )}
+
+          {pbiSem && (
+            <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:13,
+              padding:"14px 16px",marginBottom:16}}>
+              <div style={{display:"flex",gap:22,flexWrap:"wrap"}}>
+                <div>
+                  <p style={{margin:0,fontSize:22,fontWeight:800,letterSpacing:"-.02em",
+                    fontVariantNumeric:"tabular-nums"}}>{fmt(Math.round(pbiSem.venta))}€</p>
+                  <p style={{margin:"2px 0 0",fontSize:10,fontWeight:700,letterSpacing:.5,
+                    textTransform:"uppercase",color:T.muted}}>Ventas de la semana</p>
+                </div>
+                {pbiSem.mb!=null && (
+                  <div>
+                    <p style={{margin:0,fontSize:22,fontWeight:800,letterSpacing:"-.02em",
+                      fontVariantNumeric:"tabular-nums"}}>{(Math.round(pbiSem.mb*10)/10)}%</p>
+                    <p style={{margin:"2px 0 0",fontSize:10,fontWeight:700,letterSpacing:.5,
+                      textTransform:"uppercase",color:T.muted}}>Margen bruto</p>
+                  </div>
+                )}
+              </div>
+              <p style={{margin:"10px 0 0",paddingTop:9,borderTop:`1px solid ${T.border}`,
+                fontSize:11.5,color:T.muted,lineHeight:1.5}}>
+                Facturación real del sistema, no hace falta teclearla.
+                {(()=>{
+                  if(!pbiSem.sello) return " Si no te cuadra, explícalo en el comentario del final.";
+                  const d=new Date(pbiSem.sello);
+                  if(isNaN(d)) return "";
+                  const h=Math.floor((Date.now()-d.getTime())/3600000);
+                  const cuando=d.toLocaleString("es-ES",
+                    {weekday:"long",hour:"2-digit",minute:"2-digit"});
+                  // Se actualiza a primera hora, asi que lo facturado hoy aun no cuenta
+                  return h>=6
+                    ? ` Actualizado el ${cuando}, así que lo facturado desde entonces todavía no cuenta.`
+                    : ` Actualizado el ${cuando}.`;
+                })()}
+              </p>
+            </div>
+          )}
+
+          {pbiSem===false && (
+            <p style={{margin:"0 0 16px",fontSize:12,color:T.amber,fontWeight:600}}>
+              No he encontrado tus ventas en el sistema, así que rellénalas a mano.
+            </p>
+          )}
+
           {[
-            {k:"venta",label:"Ventas totales",icon:"💰",placeholder:"ej: 24500",sufijo:"€"},
-            {k:"mb",label:"Margen bruto (MB%)",icon:"📊",placeholder:"ej: 34",sufijo:"%"},
+            ...(pbiSem ? [] : [
+              {k:"venta",label:"Ventas totales",icon:"💰",placeholder:"ej: 24500",sufijo:"€"},
+              {k:"mb",label:"Margen bruto (MB%)",icon:"📊",placeholder:"ej: 34",sufijo:"%"},
+            ]),
             {k:"promo",label:"Ventas promo",icon:"🎯",placeholder:"ej: 1200",sufijo:"€"},
             {k:"liq",label:"Liquidación",icon:"📋",placeholder:"ej: 800",sufijo:"€"},
           ].map(f=>(
@@ -7638,7 +7736,7 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
           <Btn full onClick={()=>setStep(1)} color={usuario.color} disabled={!ventasOk}>
             Siguiente → Visitas
           </Btn>
-          {!ventasOk&&<p style={{margin:"8px 0 0",fontSize:11,color:T.red,textAlign:"center",fontWeight:600}}>⚠️ Introduce ventas totales y margen bruto para continuar (deben ser mayor que 0)</p>}
+          {!ventasOk&&!pbiSem&&<p style={{margin:"8px 0 0",fontSize:11,color:T.red,textAlign:"center",fontWeight:600}}>⚠️ Introduce ventas totales y margen bruto para continuar (deben ser mayor que 0)</p>}
         </div>
       )}
 
@@ -8663,6 +8761,9 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
                 numVisitas:Object.keys(visitas).length,
                 numMuestras:muestras.length,
                 estado:"enviado",
+                // De dónde salen las cifras: importa para interpretar el
+                // histórico cuando se comparen semanas antiguas con nuevas.
+                origenCifras: pbiSem ? "power_bi" : "manual",
               };
               console.log("[CIERRE] Guardando informe:",JSON.stringify(doc));
               console.log("[CIERRE] ventas.venta=",ventas.venta,"→ parseFloat=",parseFloat(ventas.venta||0));
@@ -34905,12 +35006,13 @@ function PanelAnalisis({usuario, onNav}){
   };
 
   // ── Abrir un cliente: sus artículos ──
-  const verArts=async(cliente)=>{
-    if(cliAbierto===cliente){ setCliAbierto(null); return; }
+  const verArts=async(cliente, forzar)=>{
+    if(cliAbierto===cliente && !forzar){ setCliAbierto(null); return; }
     setCliAbierto(cliente);
-    if(arts[cliente]) return;
+    if(arts[cliente] && !forzar) return;
     try{
-      const r=await fetch(`/api/pbi-sync?articulosCliente=${encodeURIComponent(cliente)}&top=5`);
+      const r=await fetch(`/api/pbi-sync?articulosCliente=${encodeURIComponent(cliente)}`
+        +`&top=5${forzar?"&recargar=1":""}`);
       const j=await r.json();
       setArts(p=>({...p,[cliente]:j.ok?(j.articulos||[]):[]}));
     }catch(e){ setArts(p=>({...p,[cliente]:[]})); }
@@ -35115,6 +35217,23 @@ function PanelAnalisis({usuario, onNav}){
                                       ? <p style={{margin:0,padding:"10px 15px 10px 34px",
                                           fontSize:12,color:T.muted}}>Sin artículos con caída.</p>
                                       : <>
+                                        <div style={{padding:"7px 15px 7px 34px",
+                                          borderTop:`1px solid #E2E8EF`,display:"flex",
+                                          alignItems:"center",gap:9,flexWrap:"wrap"}}>
+                                          <span style={{fontSize:11,color:T.muted}}>
+                                            {arts[c.cliente].filter(x=>x.diferencia<0).length} artículos con caída
+                                          </span>
+                                          <button onClick={()=>{
+                                              setArts(p=>{const q={...p}; delete q[c.cliente]; return q;});
+                                              verArts(c.cliente,true);
+                                            }}
+                                            style={{marginLeft:"auto",font:"inherit",fontSize:11,
+                                              fontWeight:700,padding:"5px 10px",borderRadius:8,
+                                              border:`1px solid ${T.border}`,background:"#fff",
+                                              color:T.muted,cursor:"pointer"}}>
+                                            Recalcular
+                                          </button>
+                                        </div>
                                         {arts[c.cliente].filter(x=>x.diferencia<0).map(x=>(
                                         <React.Fragment key={x.articulo}>
                                           <div style={{display:"flex",gap:10,
@@ -35127,6 +35246,7 @@ function PanelAnalisis({usuario, onNav}){
                                                 color:T.muted}}>
                                                 {x.descripcion?x.articulo:""}
                                                 {x.calibre?" · calibre "+x.calibre:""}
+                                                {x.codigoAntiguo?" · antes "+x.codigoAntiguo:""}
                                                 {x.ventasAnt?" · venía de "+eur(x.ventasAnt):""}
                                               </p>
                                               {(()=>{
@@ -35182,7 +35302,7 @@ function PanelAnalisis({usuario, onNav}){
                                             </div>
                                           </div>
                                           <div style={{display:"flex",gap:7,flexWrap:"wrap",
-                                            padding:"0 15px 11px 34px"}}>
+                                            padding:"0 15px 11px 34px",alignItems:"center"}}>
                                             <button onClick={()=>lanzar(mando?"estrategia":"solicitud",c,x)}
                                               style={{font:"inherit",fontSize:12,fontWeight:700,
                                                 padding:"7px 12px",borderRadius:9,
@@ -35288,9 +35408,17 @@ function AvisoStock({codigo, compacto}){
 
   // Se suman los envases del mismo producto: el código de venta puede tener
   // variantes y el stock está desglosado por envase.
+  // Coincidencia en los dos sentidos: el stock puede estar desglosado por
+  // envase ("SC122.60") o al contrario, el artículo puede ser más específico
+  // que la ficha de stock ("SC122.60/65" frente a "SC122").
   let stock=0, entradas=0, comprometido=0, hallados=0;
+  const raiz=cod.split(/[.\/ ]/)[0];
   for(const k of Object.keys(st)){
-    if(k===cod || k.startsWith(cod)){
+    const coincide = k===cod
+      || k.startsWith(cod)
+      || (cod.startsWith(k) && k.length>=4)
+      || (raiz.length>=4 && k.startsWith(raiz));
+    if(coincide){
       stock+=st[k].stock; entradas+=st[k].entradas;
       comprometido+=st[k].comprometido; hallados++;
     }
@@ -35298,6 +35426,9 @@ function AvisoStock({codigo, compacto}){
   if(!hallados) return (
     <p style={{margin:"6px 0 0",fontSize:11.5,color:T.muted}}>
       Sin datos de stock para {cod}
+      {Object.keys(st).length===0
+        ? " · no se ha podido leer el stock"
+        : ` · ${Object.keys(st).length} referencias en stock`}
     </p>
   );
 
