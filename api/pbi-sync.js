@@ -1027,6 +1027,20 @@ EVALUATE
       // Los códigos con sufijo (.C140, .BG) son hijos del mismo producto: si
       // van por separado, la venta de un artículo aparece partida en varias
       // líneas y ninguna refleja lo que pasa de verdad.
+      // Diagnóstico: cuántos artículos declaran un padre distinto de sí
+      // mismos. Si sale cero, el campo no está informado y agrupar por él
+      // no puede funcionar.
+      let conPadre = 0, ejemplosPadre = [];
+      for (const [cod, f] of arts) {
+        if (f.padre && f.padre !== cod) {
+          conPadre++;
+          if (ejemplosPadre.length < 6) ejemplosPadre.push(`${cod} → ${f.padre}`);
+        }
+      }
+      out.articulosConPadre = conPadre;
+      out.totalMaestro = arts.size;
+      out.ejemplosPadre = ejemplosPadre;
+
       const agrupado = req.query.sinAgrupar === "1" ? false : true;
       const padreDe = (cod) => {
         if (!agrupado) return cod;
