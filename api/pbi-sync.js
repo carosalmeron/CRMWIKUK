@@ -1605,7 +1605,10 @@ EVALUATE
         const art = String(pick(r, "Articulo") || "").trim();
         const ficha = fichas.get(cli) || fichas.get(canonico(cli)) || {};
         return {
-          _id: docId(`${fec}_${cli}_${art}_${i}`),
+          // El identificador no puede depender de la posición de la fila: si
+          // Power BI devuelve el resultado en otro orden, la misma línea
+          // recibe otro id y se duplica en vez de sobrescribirse.
+          _id: docId(`${String(pick(r, "Pedido") || "SP").trim()}_${cli}_${art}_${fec}`),
           // Clave que no depende de la fecha de entrega: permite reconocer la
           // misma línea de un día para otro y detectar si se ha movido.
           linea: docId(`${String(pick(r, "Pedido") || "").trim()}_${cli}_${art}`),
@@ -1802,13 +1805,16 @@ EVALUATE
         out.escritos = await fbCommit("pbi_pedidos", docs);
         out.agentesConEntrada = await fbCommit("pbi_entrada_agente", resumen);
         // Fuera lo ya servido
-        const hoyISO = new Date().toISOString().slice(0, 10);
+        // Reconciliación completa: la colección debe contener exactamente lo
+        // que hay ahora en Power BI. Borrar solo lo caducado dejaba dentro los
+        // pedidos que habían cambiado de fecha, y el total crecía cada día.
+        const vivos = new Set(docs.map((d) => d._id));
         const guardados = await fbLeerColeccion("pbi_pedidos");
-        const caducados = guardados
-          .filter((g) => !g.fecha || String(g.fecha) < hoyISO)
-          .map((g) => g._id);
-        out.caducadosBorrados = caducados.length;
-        if (caducados.length) await fbBorrar("pbi_pedidos", caducados);
+        const sobran = guardados.filter((g) => !vivos.has(g._id)).map((g) => g._id);
+        out.sobrantesBorrados = sobran.length;
+        for (let i = 0; i < sobran.length; i += 400) {
+          await fbBorrar("pbi_pedidos", sobran.slice(i, i + 400));
+        }
       }
       out.segundos = Math.round((Date.now() - t1) / 1000);
     } catch (e) {
@@ -2407,7 +2413,10 @@ EVALUATE
         const art = String(pick(r, "Articulo") || "").trim();
         const ficha = fichas.get(cli) || fichas.get(canonico(cli)) || {};
         return {
-          _id: docId(`${fec}_${cli}_${art}_${i}`),
+          // El identificador no puede depender de la posición de la fila: si
+          // Power BI devuelve el resultado en otro orden, la misma línea
+          // recibe otro id y se duplica en vez de sobrescribirse.
+          _id: docId(`${String(pick(r, "Pedido") || "SP").trim()}_${cli}_${art}_${fec}`),
           // Clave que no depende de la fecha de entrega: permite reconocer la
           // misma línea de un día para otro y detectar si se ha movido.
           linea: docId(`${String(pick(r, "Pedido") || "").trim()}_${cli}_${art}`),
@@ -2440,13 +2449,15 @@ EVALUATE
       // acabaria viendo entregas de la semana pasada mezcladas con las suyas.
       if (!dry) {
         try {
-          const hoyISO = new Date().toISOString().slice(0, 10);
+          // Igual que en el modo solopedidos: la colección se deja idéntica a
+          // lo que devuelve Power BI, no solo sin lo caducado.
+          const vivos = new Set(docs.map((d) => d._id));
           const guardados = await fbLeerColeccion("pbi_pedidos");
-          const caducados = guardados
-            .filter((g) => !g.fecha || String(g.fecha) < hoyISO)
-            .map((g) => g._id);
-          log.pedidosCaducados = caducados.length;
-          if (caducados.length) await fbBorrar("pbi_pedidos", caducados);
+          const sobran = guardados.filter((g) => !vivos.has(g._id)).map((g) => g._id);
+          log.pedidosSobrantes = sobran.length;
+          for (let i = 0; i < sobran.length; i += 400) {
+            await fbBorrar("pbi_pedidos", sobran.slice(i, i + 400));
+          }
         } catch (e) {
           log.errores.push(`purga pedidos: ${e.message}`);
         }
