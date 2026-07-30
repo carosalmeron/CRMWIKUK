@@ -899,8 +899,9 @@ EVALUATE
       out.deCache = false;
       out.basadoEn = sello;
 
-      // Se guarda para las siguientes consultas del mismo cliente
-      if (sello) {
+      // Se guarda para las siguientes consultas del mismo cliente, salvo
+      // que venga vacía: ver el motivo en la vista de grupo.
+      if (sello && out.articulos.length) {
         try {
           await fbCommit("pbi_articulos_cliente", [{
             _id: idCache,
@@ -1130,7 +1131,10 @@ EVALUATE
       // Para poder contrastar: cuánto suman las subidas frente a las bajadas
       out.sumaMostrada = num(out.articulos.reduce((x, a) => x + a.diferencia, 0));
 
-      if (sello) {
+      // No se guarda una lista vacía: si la consulta falla o el filtro no
+      // resuelve, ese vacío quedaría servido hasta la siguiente
+      // sincronización y parecería un dato ("ningún artículo cae").
+      if (sello && out.articulos.length) {
         try {
           await fbCommit("pbi_articulos_cliente", [{
             _id: idCache, cliente: `_GRUPO_${ag || "TODOS"}`, basadoEn: sello,
