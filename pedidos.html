@@ -90,6 +90,9 @@
   .cargando{padding:40px 0;text-align:center;color:var(--tenue)}
   .err{background:#FDF3F3;border:1px solid #F0C2C4;color:var(--hoy);
     padding:12px 14px;border-radius:11px;font-size:13px}
+  .sec{font-size:10px;font-weight:800;letter-spacing:.7px;text-transform:uppercase;
+    color:var(--tenue);padding:10px 15px 6px;background:#F7F9FB;
+    border-top:1px solid var(--linea)}
   .pie{margin-top:18px;font-size:11.5px;color:var(--tenue);text-align:center}
 </style>
 </head>
@@ -273,7 +276,116 @@ function abrirCliente(id){
   pintar();
 }
 
+// ── Diario de pedidos ─────────────────────────────────────────────
+// Qué pasó desde la sincronización anterior: qué salió, qué se movió de
+// fecha y qué entró. Power BI no guarda ese histórico, así que se calcula
+// comparando cada día con el anterior.
+async function pintarMovimientos(){
+  $("app").innerHTML=`<div class="grupo"><p class="vacio">Leyendo el diario…</p></div>`;
+  try{
+    const r=await fetch(`${BASE}/pbi_pedidos_cambios?pageSize=30`);
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
+    const j=await r.json();
+    const dias=(j.documents||[]).map(doc=>{
+      const o={_id:doc.name.split("/").pop()};
+      for(const [k,v] of Object.entries(doc.fields||{})) o[k]=val(v);
+      return o;
+    }).sort((a,b)=>String(b.fecha||"").localeCompare(String(a.fecha||"")));
+
+    if(!dias.length){
+      $("app").innerHTML=`<div class="grupo"><p class="vacio">
+        Todavía no hay diario. Hace falta una sincronización más para poder
+        comparar con la de hoy.</p></div>`;
+      return;
+    }
+
+    const lee=(t)=>{ try{ return JSON.parse(t||"[]"); }catch(e){ return []; } };
+    const mio=(m)=>(!F_AGENTE||m.agente===F_AGENTE)
+      && (!SIN_INTER || !/INTERCO|WIKUK EASY|DISCOB/i.test(m.nombre||""));
+
+    let html="";
+    for(const d of dias){
+      const salidas=lee(d.salidas).filter(mio);
+      const movs=lee(d.movimientos).filter(mio);
+      const entradas=lee(d.entradas).filter(mio);
+      if(!salidas.length&&!movs.length&&!entradas.length) continue;
+
+      const servidos=salidas.filter(m=>m.tipo==="servido");
+      const anulados=salidas.filter(m=>m.tipo==="anulado");
+      const ret=movs.filter(m=>m.tipo==="retraso");
+      const ade=movs.filter(m=>m.tipo==="adelanto");
+      const tot=(l)=>l.reduce((s,m)=>s+(m.importe||0),0);
+
+      const f=new Date(d.fecha+"T12:00:00");
+      const cab=f.toLocaleDateString("es-ES",{weekday:"long",day:"numeric",month:"long"});
+
+      html+=`<div class="grupo">
+        <div class="gcab">
+          <div>
+            <div class="gtit">${cab.charAt(0).toUpperCase()+cab.slice(1)}</div>
+            <div class="gsub">${d.lineasAntes} líneas antes · ${d.lineasAhora} después</div>
+          </div>
+          <div class="gimp">${servidos.length?eurC(tot(servidos)):"—"}
+            <div class="gsub" style="text-align:right">servido</div></div>
+        </div>`;
+
+      const fila=(m,extra)=>`<div class="fila">
+        <div style="min-width:0">
+          <div class="nom">${m.nombre||m.cliente}</div>
+          <div class="det">${m.descripcion||m.articulo}${
+            m.pedido?" · "+m.pedido:""}${m.agente?" · "+m.agente:""}</div>
+          ${extra?`<div class="det">${extra}</div>`:""}
+        </div>
+        <div class="der">
+          <div class="imp">${eurC(m.importe)}</div>
+          ${m.dias!=null?`<div class="pct ${m.dias>0?"baja":"sube"}">${
+            m.dias>0?"+":""}${m.dias} d</div>`:""}
+        </div>
+      </div>`;
+
+      if(servidos.length){
+        html+=`<div class="sec">Servidos · ${eurC(tot(servidos))}</div>`
+          +servidos.map(m=>fila(m,`salía el ${fechaCorta(m.fechaAntes)}`)).join("");
+      }
+      if(ret.length){
+        html+=`<div class="sec">Se retrasan · ${eurC(tot(ret))}</div>`
+          +ret.map(m=>fila(m,`${fechaCorta(m.fechaAntes)} → <b>${fechaCorta(m.fechaNueva)}</b>`)).join("");
+      }
+      if(ade.length){
+        html+=`<div class="sec">Se adelantan · ${eurC(tot(ade))}</div>`
+          +ade.map(m=>fila(m,`${fechaCorta(m.fechaAntes)} → <b>${fechaCorta(m.fechaNueva)}</b>`)).join("");
+      }
+      if(anulados.length){
+        html+=`<div class="sec">Ya no están · ${eurC(tot(anulados))}</div>`
+          +anulados.map(m=>fila(m,`estaba previsto para el ${fechaCorta(m.fechaAntes)}`)).join("");
+      }
+      if(entradas.length){
+        html+=`<div class="sec">Entran nuevos · ${eurC(tot(entradas))}</div>`
+          +entradas.map(m=>fila(m,`sale el ${fechaCorta(m.fechaNueva)}`)).join("");
+      }
+      html+=`</div>`;
+    }
+
+    if(!html) html=`<div class="grupo"><p class="vacio">
+      Sin movimientos con los filtros actuales.</p></div>`;
+    $("app").innerHTML=html+`<p class="pie">
+      Comparación con la sincronización anterior. Un pedido que desaparece con
+      fecha ya pasada se da por servido; si su fecha era futura, se marca como
+      anulado o modificado. · v1.4</p>`;
+  }catch(e){
+    $("app").innerHTML=`<div class="grupo"><p class="vacio">
+      No se ha podido leer el diario: ${e.message}</p></div>`;
+  }
+}
+
+const fechaCorta=(f)=>{
+  if(!f) return "—";
+  const d=new Date(f+"T12:00:00");
+  return isNaN(d)?f:d.toLocaleDateString("es-ES",{day:"numeric",month:"short"});
+};
+
 function pintar(){
+  if(AGRUP==="movs"){ pintarMovimientos(); return; }
   if(!PEDIDOS.length){
     $("app").innerHTML=`<div class="grupo"><p class="vacio">
       No tienes pedidos con fecha de entrega pendiente.</p></div>`;
