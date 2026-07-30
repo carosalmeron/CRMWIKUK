@@ -342,7 +342,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.30.1";
+const CRM_VERSION = "4.31.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -34941,6 +34941,18 @@ function PanelAnalisis({usuario, onNav}){
     return()=>{vivo=false;};
   },[]);
 
+  // ── Alcance según el rol ──
+  const rol=String(usuario.rol||"").toLowerCase();
+  const mando=rol.includes("director")||rol.includes("jefe")||rol==="admin"||rol==="ceo";
+  const miClave=String(usuario.grupoAgente||usuario.catalogoVendedor||"").toUpperCase();
+  const base = mando ? datos : datos.filter(a=>String(a._id).toUpperCase()===miClave);
+
+  const ramas=[...new Set(base.map(a=>a.equipo))].sort();
+  const visibles=base.filter(a=>
+    (!fRama||a.equipo===fRama) && (!fAgente||(a.agente||a._id)===fAgente));
+  const agentesSel=[...new Set(base.filter(a=>!fRama||a.equipo===fRama)
+    .map(a=>a.agente||a._id))].sort();
+
   // ── Vista por cliente: los que más caen, sin pasar por su comercial ──
   useEffect(()=>{
     if(vista!=="clientes"||cliGrupo) return;
@@ -34951,8 +34963,19 @@ function PanelAnalisis({usuario, onNav}){
         for(const [k,v] of Object.entries(x.document.fields||{})) o[k]=val(v);
         return o;
       });
+      // Solo los comerciales del ámbito: con una rama o un comercial
+      // seleccionado, la lista debe reducirse igual que el resto del panel.
+      const delAmbito=new Set(
+        base.filter(a=>(!fRama||a.equipo===fRama)
+                    && (!fAgente||(a.agente||a._id)===fAgente))
+            .map(a=>String(a.agente||a._id).toUpperCase()));
+      const enAmbito=(c)=>!c.agente
+        ? false
+        : delAmbito.has(String(c.agente).toUpperCase());
+
       const utiles=(l)=>l
         .filter(c=>!c.fusionadoEn&&!c.intercompany&&(c.caida||0)<0)
+        .filter(c=>(!fRama&&!fAgente) || enAmbito(c))
         .sort((a,b)=>(a.caida||0)-(b.caida||0));
 
       try{
@@ -34962,7 +34985,7 @@ function PanelAnalisis({usuario, onNav}){
           body:JSON.stringify({structuredQuery:{
             from:[{collectionId:"pbi_ventas_cliente"}],
             orderBy:[{field:{fieldPath:"caida"},direction:"ASCENDING"}],
-            limit:80}}),
+            limit:(fRama||fAgente)?600:80}}),
         });
         const j=await r.json();
         if(j && j.error) throw new Error(j.error.message||"consulta rechazada");
@@ -34993,7 +35016,7 @@ function PanelAnalisis({usuario, onNav}){
       }
     })();
     return()=>{vivo=false;};
-  },[vista]);
+  },[vista,fRama,fAgente]);
 
   // ── Vista por artículo: los que más caen en todo el grupo ──
   useEffect(()=>{
@@ -35001,21 +35024,37 @@ function PanelAnalisis({usuario, onNav}){
     let vivo=true;
     (async()=>{
       try{
-        const q=fAgente?`&agente=${encodeURIComponent(fAgente)}`:"";
+        // Con una rama seleccionada hay que enviar todos sus comerciales:
+        // el filtro de la consulta es por vendedor, no por rama.
+        const q = fAgente
+          ? `&agente=${encodeURIComponent(fAgente)}`
+          : fRama
+            ? `&agentes=${encodeURIComponent(
+                [...new Set(base.filter(a=>a.equipo===fRama)
+                  .map(a=>a.agente||a._id))].join(","))}`
+            : "";
         const r=await fetch(`/api/pbi-sync?articulosGrupo=1&top=25${q}`);
         const j=await r.json();
         if(!vivo) return;
         // Si la consulta falla hay que decirlo: mostrarlo como "ningún
         // artículo cae" hacía pensar que el dato era ese.
         if(!j.ok){ setArtError(j.error||"la consulta no ha respondido"); setArtGrupo([]); }
-        else { setArtError(null); setArtGrupo(j.articulos||[]); }
+        else {
+          // Un aviso con lista vacía no es "no cae nada": es que la consulta
+          // no ha podido resolver el filtro. Hay que distinguirlo.
+          setArtError(j.aviso && !(j.articulos||[]).length ? j.aviso : null);
+          setArtGrupo(j.articulos||[]);
+        }
       }catch(e){ if(vivo){ setArtError(e.message); setArtGrupo([]); } }
     })();
     return()=>{vivo=false;};
-  },[vista,fAgente]);
+  },[vista,fAgente,fRama]);
 
-  // Al cambiar el filtro de comercial, los artículos del grupo dejan de valer
-  useEffect(()=>{ setArtGrupo(null); setArtError(null); },[fAgente]);
+  // Al cambiar cualquier filtro, lo consultado deja de valer
+  useEffect(()=>{
+    setArtGrupo(null); setArtError(null); setArtAbierto(null); setCliArt({});
+    setCliGrupo(null); setCliError(null);
+  },[fAgente,fRama]);
 
 
   if(error) return (
@@ -35026,18 +35065,6 @@ function PanelAnalisis({usuario, onNav}){
   );
   if(!datos) return <p style={{padding:"34px 16px",textAlign:"center",
     color:T.muted,fontSize:14}}>Leyendo ventas reales…</p>;
-
-  // ── Alcance según el rol ──
-  const rol=String(usuario.rol||"").toLowerCase();
-  const mando=rol.includes("director")||rol.includes("jefe")||rol==="admin"||rol==="ceo";
-  const miClave=String(usuario.grupoAgente||usuario.catalogoVendedor||"").toUpperCase();
-  const base = mando ? datos : datos.filter(a=>String(a._id).toUpperCase()===miClave);
-
-  const ramas=[...new Set(base.map(a=>a.equipo))].sort();
-  const visibles=base.filter(a=>
-    (!fRama||a.equipo===fRama) && (!fAgente||(a.agente||a._id)===fAgente));
-  const agentesSel=[...new Set(base.filter(a=>!fRama||a.equipo===fRama)
-    .map(a=>a.agente||a._id))].sort();
 
   // ── Totales ──
   const t=visibles.reduce((s,a)=>({
@@ -35263,7 +35290,8 @@ function PanelAnalisis({usuario, onNav}){
       {vista==="clientes" && (
         <>
           <p style={{margin:"18px 0 8px",fontSize:11,fontWeight:800,letterSpacing:.7,
-            textTransform:"uppercase",color:T.muted}}>Clientes que más caen</p>
+            textTransform:"uppercase",color:T.muted}}>
+            Clientes que más caen{fAgente?` · ${fAgente}`:fRama?` · ${fRama}`:""}</p>
           {cliGrupo===null
             ? <p style={{padding:"20px 0",textAlign:"center",color:T.muted,
                 fontSize:13}}>Buscando clientes…</p>
@@ -35340,7 +35368,7 @@ function PanelAnalisis({usuario, onNav}){
         <>
           <p style={{margin:"18px 0 8px",fontSize:11,fontWeight:800,letterSpacing:.7,
             textTransform:"uppercase",color:T.muted}}>
-            Artículos que más caen{fAgente?` · ${fAgente}`:""}
+            Artículos que más caen{fAgente?` · ${fAgente}`:fRama?` · ${fRama}`:""}
           </p>
           {artGrupo===null
             ? <p style={{padding:"20px 0",textAlign:"center",color:T.muted,
