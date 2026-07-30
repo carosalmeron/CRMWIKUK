@@ -278,7 +278,8 @@ EVALUATE
     '00 Plu Global'[DESCRIPCION],
     '00 Plu Global'[METROS],
     '00 Plu Global'[CALIBRE],
-    '00 Plu Global'[CALIDAD]
+    '00 Plu Global'[CALIDAD],
+    '00 Plu Global'[PRODUCTOPADRE]
   )`,
 
     // Tabla Agentes: traduce el codigo de vendedor del ERP al comercial
@@ -961,7 +962,8 @@ EVALUATE
         sello = m && m.ultimaSync ? String(m.ultimaSync) : null;
       } catch (e) {}
 
-      const idCache = docId(`grupo_${ag || "TODOS"}_${n}_${suben ? "up" : "down"}`);
+      const idCache = docId(`grupo_${ag || "TODOS"}_${n}_${suben ? "up" : "down"}`
+        + (req.query.sinAgrupar === "1" ? "_sinagrupar" : ""));
       if (sello && req.query.recargar !== "1") {
         try {
           const g = await fbLeerDocumento("pbi_articulos_cliente", idCache);
@@ -1017,18 +1019,36 @@ EVALUATE
           if (cod && !arts.has(cod)) arts.set(cod, {
             descripcion: pick(a, "DESCRIPCION"),
             calibre: pick(a, "CALIBRE"), metros: pick(a, "METROS"),
+            padre: String(pick(a, "PRODUCTOPADRE") || "").trim().toUpperCase() || null,
           });
         }
       } catch (e) { out.errorMaestro = e.message.slice(0, 140); }
+
+      // Los códigos con sufijo (.C140, .BG) son hijos del mismo producto: si
+      // van por separado, la venta de un artículo aparece partida en varias
+      // líneas y ninguna refleja lo que pasa de verdad.
+      const agrupado = req.query.sinAgrupar === "1" ? false : true;
+      const padreDe = (cod) => {
+        if (!agrupado) return cod;
+        const f = arts.get(cod);
+        const p = f && f.padre;
+        // El padre solo vale si existe y no es el propio código
+        return (p && p !== cod) ? p : cod;
+      };
 
       // Se agrupa por el código actual, igual que en la vista por cliente
       const porCodigo = new Map();
       for (const r of filas) {
         const original = String(pick(r, "CODIGO") || "").trim().toUpperCase();
         if (!original) continue;
-        const cod = codArt(original);
+        // Primero se traduce el código antiguo al actual, y después se sube
+        // al producto padre: las dos cosas, en ese orden.
+        const actual = codArt(original);
+        const cod = padreDe(actual);
         const g = porCodigo.get(cod)
-          || { articulo: cod, ventasAct: 0, ventasAnt: 0, clientes: 0, origen: [] };
+          || { articulo: cod, ventasAct: 0, ventasAnt: 0, clientes: 0,
+               origen: [], hijos: [] };
+        if (cod !== actual && !g.hijos.includes(actual)) g.hijos.push(actual);
         g.ventasAct += num(pick(r, "Act"));
         g.ventasAnt += num(pick(r, "Ant"));
         g.clientes = Math.max(g.clientes, num(pick(r, "Clientes")));
@@ -1049,7 +1069,9 @@ EVALUATE
           diferencia: num(g.ventasAct - g.ventasAnt),
           variacionPct: g.ventasAnt ? num((100 * (g.ventasAct - g.ventasAnt)) / g.ventasAnt) : null,
           clientes: g.clientes,
-          codigoAntiguo: g.origen.filter((o) => o !== g.articulo).join(", ") || undefined,
+          codigoAntiguo: g.origen.filter((o) => o !== g.articulo
+            && !g.hijos.includes(o)).join(", ") || undefined,
+          variantes: g.hijos.length ? g.hijos.join(", ") : undefined,
         };
       }).sort((a, b) => suben ? b.diferencia - a.diferencia
                               : a.diferencia - b.diferencia).slice(0, n);
