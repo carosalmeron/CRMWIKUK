@@ -342,7 +342,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.28.0";
+const CRM_VERSION = "4.29.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -34874,6 +34874,9 @@ function PanelAnalisis({usuario, onNav}){
   const [acciones,setAcciones]=useState({});
   const [fRama,setFRama]=useState("");
   const [fAgente,setFAgente]=useState("");
+  const [vista,setVista]=useState("comerciales");  // comerciales | clientes | articulos
+  const [cliGrupo,setCliGrupo]=useState(null);
+  const [artGrupo,setArtGrupo]=useState(null);
   const [abierto,setAbierto]=useState(null);   // comercial desplegado
   const [clientes,setClientes]=useState(null);
   const [cliAbierto,setCliAbierto]=useState(null);
@@ -34982,6 +34985,51 @@ function PanelAnalisis({usuario, onNav}){
     if(vAno<=-3) return `${quien} ${va} por detrás del año pasado: faltan ${eur(dif)}.`;
     return `${quien} ${va} en línea con el año pasado.`;
   };
+
+  // ── Vista por cliente: los que más caen, sin pasar por su comercial ──
+  useEffect(()=>{
+    if(vista!=="clientes"||cliGrupo) return;
+    let vivo=true;
+    (async()=>{
+      try{
+        // Se ordena por el campo "caida", que guarda la sincronización: sin
+        // él habría que leer los 6.597 clientes en el navegador.
+        const r=await fetch(`${FB_BASE}:runQuery`,{
+          method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({structuredQuery:{
+            from:[{collectionId:"pbi_ventas_cliente"}],
+            orderBy:[{field:{fieldPath:"caida"},direction:"ASCENDING"}],
+            limit:60}}),
+        });
+        const j=await r.json();
+        const cs=(Array.isArray(j)?j:[]).filter(x=>x.document).map(x=>{
+          const o={};
+          for(const [k,v] of Object.entries(x.document.fields||{})) o[k]=val(v);
+          return o;
+        }).filter(c=>!c.fusionadoEn&&!c.intercompany&&(c.caida||0)<0);
+        if(vivo) setCliGrupo(cs);
+      }catch(e){ if(vivo) setCliGrupo([]); }
+    })();
+    return()=>{vivo=false;};
+  },[vista]);
+
+  // ── Vista por artículo: los que más caen en todo el grupo ──
+  useEffect(()=>{
+    if(vista!=="articulos"||artGrupo) return;
+    let vivo=true;
+    (async()=>{
+      try{
+        const q=fAgente?`&agente=${encodeURIComponent(fAgente)}`:"";
+        const r=await fetch(`/api/pbi-sync?articulosGrupo=1&top=25${q}`);
+        const j=await r.json();
+        if(vivo) setArtGrupo(j.ok?(j.articulos||[]):[]);
+      }catch(e){ if(vivo) setArtGrupo([]); }
+    })();
+    return()=>{vivo=false;};
+  },[vista,fAgente]);
+
+  // Al cambiar el filtro de comercial, los artículos del grupo dejan de valer
+  useEffect(()=>{ setArtGrupo(null); },[fAgente]);
 
   // ── Abrir un comercial: sus clientes ──
   const verAgente=async(id)=>{
@@ -35119,6 +35167,19 @@ function PanelAnalisis({usuario, onNav}){
         </div>
       )}
 
+      {/* Tres formas de mirar lo mismo: quién, a quién y qué */}
+      <div style={{display:"flex",gap:6,marginBottom:12}}>
+        {[["comerciales","Comerciales"],["clientes","Clientes"],["articulos","Artículos"]]
+          .map(([k,t])=>(
+          <button key={k} onClick={()=>setVista(k)}
+            style={{flex:1,font:"inherit",fontSize:12.5,fontWeight:700,padding:"9px 6px",
+              borderRadius:10,cursor:"pointer",minHeight:40,
+              border:`1.5px solid ${vista===k?T.navy:T.border}`,
+              background:vista===k?T.navy:"#fff",
+              color:vista===k?"#fff":T.muted}}>{t}</button>
+        ))}
+      </div>
+
       {/* Veredicto */}
       <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:14,
         padding:"15px 16px",marginBottom:14}}>
@@ -35148,8 +35209,117 @@ function PanelAnalisis({usuario, onNav}){
         </div>
       </div>
 
+      {/* Clientes que más caen, de todo el ámbito */}
+      {vista==="clientes" && (
+        <>
+          <p style={{margin:"18px 0 8px",fontSize:11,fontWeight:800,letterSpacing:.7,
+            textTransform:"uppercase",color:T.muted}}>Clientes que más caen</p>
+          {cliGrupo===null
+            ? <p style={{padding:"20px 0",textAlign:"center",color:T.muted,
+                fontSize:13}}>Buscando clientes…</p>
+            : cliGrupo.length===0
+              ? <p style={{padding:"20px 0",textAlign:"center",color:T.muted,
+                  fontSize:13}}>Ningún cliente cae respecto al año pasado.</p>
+              : <div style={{background:T.white,border:`1px solid ${T.border}`,
+                  borderRadius:14,overflow:"hidden"}}>
+                  {cliGrupo.slice(0,30).map((c,i)=>(
+                    <div key={c.cliente||i}>
+                      <div onClick={()=>verArts(c.cliente)}
+                        style={{display:"flex",gap:10,padding:"12px 15px",
+                          borderTop:i?`1px solid #F1F5F9`:"none",cursor:"pointer"}}>
+                        <div style={{flex:1,minWidth:0}}>
+                          <p style={{margin:0,fontSize:14,fontWeight:700}}>
+                            {c.nombre||c.cliente}</p>
+                          <p style={{margin:"1px 0 0",fontSize:11.5,color:T.muted}}>
+                            {c.poblacion||""}{c.agente?" · "+c.agente:""} · venía de {eur(c.ventasAntYTD)}
+                          </p>
+                        </div>
+                        <div style={{textAlign:"right",flex:"none",
+                          fontVariantNumeric:"tabular-nums"}}>
+                          <p style={{margin:0,fontSize:14,fontWeight:700}}>
+                            {eur(c.ventasAct)}</p>
+                          <p style={{margin:0,fontSize:12,fontWeight:700,color:T.red}}>
+                            {eur(c.caida)}</p>
+                        </div>
+                        <span style={{color:"#94A3B0",fontSize:19}}>
+                          {cliAbierto===c.cliente?"▾":"›"}</span>
+                      </div>
+                      {cliAbierto===c.cliente && (
+                        <div style={{background:"#F8FAFC",padding:"2px 0"}}>
+                          {!arts[c.cliente]
+                            ? <p style={{margin:0,padding:"10px 15px 10px 26px",
+                                fontSize:12,color:T.muted}}>Buscando artículos…</p>
+                            : arts[c.cliente].filter(x=>x.diferencia<0).slice(0,5).map(x=>(
+                              <div key={x.articulo} style={{display:"flex",gap:10,
+                                padding:"9px 15px 9px 26px",borderTop:`1px solid #E9EEF3`}}>
+                                <div style={{flex:1,minWidth:0}}>
+                                  <p style={{margin:0,fontSize:13,fontWeight:700}}>
+                                    {x.descripcion||x.articulo}</p>
+                                  <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
+                                    {x.articulo}{x.calibre?" · calibre "+x.calibre:""}</p>
+                                </div>
+                                <div style={{textAlign:"right",flex:"none",
+                                  fontVariantNumeric:"tabular-nums"}}>
+                                  <p style={{margin:0,fontSize:13,fontWeight:800}}>
+                                    {eur(x.ventasAct)}</p>
+                                  <p style={{margin:0,fontSize:11,color:T.red}}>
+                                    {eur(x.diferencia)}</p>
+                                </div>
+                              </div>
+                            ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>}
+        </>
+      )}
+
+      {/* Artículos que más caen en todo el grupo */}
+      {vista==="articulos" && (
+        <>
+          <p style={{margin:"18px 0 8px",fontSize:11,fontWeight:800,letterSpacing:.7,
+            textTransform:"uppercase",color:T.muted}}>
+            Artículos que más caen{fAgente?` · ${fAgente}`:""}
+          </p>
+          {artGrupo===null
+            ? <p style={{padding:"20px 0",textAlign:"center",color:T.muted,
+                fontSize:13}}>Consultando artículos…</p>
+            : artGrupo.filter(a=>a.diferencia<0).length===0
+              ? <p style={{padding:"20px 0",textAlign:"center",color:T.muted,
+                  fontSize:13}}>Ningún artículo cae respecto al año pasado.</p>
+              : <div style={{background:T.white,border:`1px solid ${T.border}`,
+                  borderRadius:14,overflow:"hidden"}}>
+                  {artGrupo.filter(a=>a.diferencia<0).map((a,i)=>(
+                    <div key={a.articulo} style={{display:"flex",gap:10,
+                      padding:"12px 15px",borderTop:i?`1px solid #F1F5F9`:"none"}}>
+                      <div style={{flex:1,minWidth:0}}>
+                        <p style={{margin:0,fontSize:14,fontWeight:700}}>
+                          {a.descripcion||a.articulo}</p>
+                        <p style={{margin:"1px 0 0",fontSize:11.5,color:T.muted}}>
+                          {a.articulo}{a.calibre?" · calibre "+a.calibre:""}
+                          {a.codigoAntiguo?" · antes "+a.codigoAntiguo:""}
+                          {a.clientes?` · ${a.clientes} cliente${a.clientes===1?"":"s"}`:""}
+                        </p>
+                        <p style={{margin:"1px 0 0",fontSize:11.5,color:T.muted}}>
+                          venía de {eur(a.ventasAnt)}
+                        </p>
+                      </div>
+                      <div style={{textAlign:"right",flex:"none",
+                        fontVariantNumeric:"tabular-nums"}}>
+                        <p style={{margin:0,fontSize:14,fontWeight:700}}>
+                          {eur(a.ventasAct)}</p>
+                        <p style={{margin:0,fontSize:12,fontWeight:700,color:T.red}}>
+                          {eur(a.diferencia)}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>}
+        </>
+      )}
+
       {/* Quién baja */}
-      {mando && caen.length>0 && (
+      {vista==="comerciales" && mando && caen.length>0 && (
         <>
           <p style={{margin:"18px 0 8px",fontSize:11,fontWeight:800,letterSpacing:.7,
             textTransform:"uppercase",color:T.muted}}>Quién baja</p>
@@ -35337,7 +35507,7 @@ function PanelAnalisis({usuario, onNav}){
       )}
 
       {/* Quién crece */}
-      {mando && crecen.length>0 && (
+      {vista==="comerciales" && mando && crecen.length>0 && (
         <>
           <p style={{margin:"18px 0 8px",fontSize:11,fontWeight:800,letterSpacing:.7,
             textTransform:"uppercase",color:T.muted}}>Quién crece</p>
