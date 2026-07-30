@@ -1068,6 +1068,56 @@ EVALUATE
   // Truco que no depende de las funciones INFO.*: la respuesta incluye
   // todas las columnas como claves, y un valor de ejemplo de cada una,
   // asi que revela nombres exactos Y tipos de dato de golpe.
+  // ?facturas=1 → desglosa la venta del mes por el campo FACTURA. Sirve para
+  // entender por qué "Ventas Mes" y "Ventas Mes Facturado" no coinciden: si
+  // hay líneas sin factura, esas son la diferencia.
+  if (req.query.facturas === "1") {
+    const out = { ok: true };
+    try {
+      const { token } = await getToken(req);
+      const T = M.ventas;
+
+      const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _iniMes = DATE(YEAR(_hoy), MONTH(_hoy), 1)
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${T}[FACTURA],
+    FILTER(${T}, ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
+    "Importe", SUM(${M.vBase}),
+    "Lineas", COUNTROWS(${T})
+  )`, true);
+
+      let total = 0, sinFactura = 0, lineasSin = 0;
+      const prefijos = {};
+      for (const r of filas) {
+        const fac = String(pick(r, "FACTURA") || "").trim();
+        const imp = num(pick(r, "Importe"));
+        const lin = num(pick(r, "Lineas"));
+        total += imp;
+        if (!fac) { sinFactura += imp; lineasSin += lin; continue; }
+        const pre = (fac.match(/^[A-Za-z]+/) || ["(numérica)"])[0].toUpperCase();
+        prefijos[pre] = prefijos[pre] || { importe: 0, lineas: 0, facturas: 0 };
+        prefijos[pre].importe += imp;
+        prefijos[pre].lineas += lin;
+        prefijos[pre].facturas += 1;
+      }
+
+      out.mes = { total: num(total), documentos: filas.length };
+      out.sinFactura = { importe: num(sinFactura), lineas: num(lineasSin) };
+      out.porPrefijo = Object.entries(prefijos)
+        .map(([pre, v]) => ({ prefijo: pre, importe: num(v.importe),
+          lineas: num(v.lineas), facturas: v.facturas }))
+        .sort((a, b) => b.importe - a.importe);
+      out.nota = "Compara 'total' con Ventas Mes y 'total menos sinFactura' con Ventas Mes Facturado.";
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
   // ?tablas=1 → lista las tablas del modelo y, si se pide, busca una columna
   // concreta en todas ellas. Util cuando el ERP tiene un campo que no se sabe
   // si ha llegado al modelo, como VALIDARPRECIO.
