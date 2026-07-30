@@ -1771,6 +1771,11 @@ EVALUATE
               detectadoEl: new Date().toISOString(),
               lineasAntes: antes.size,
               lineasAhora: docs.length,
+              // Importe y número de pedidos de cada foto, para la cabecera
+              importeAntes: num([...antes.values()].reduce((x, a) => x + (a.importe || 0), 0)),
+              importeAhora: num(docs.reduce((x, d) => x + (d.importe || 0), 0)),
+              pedidosAntes: new Set([...antes.values()].map((a) => a.pedido).filter(Boolean)).size,
+              pedidosAhora: new Set(docs.map((d) => d.pedido).filter(Boolean)).size,
               retrasos: cuenta("retraso"),   importeRetrasos: suma("retraso"),
               adelantos: cuenta("adelanto"), importeAdelantos: suma("adelanto"),
               nuevos: cuenta("nuevo"),       importeNuevos: suma("nuevo"),
