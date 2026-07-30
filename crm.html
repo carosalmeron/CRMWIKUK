@@ -342,7 +342,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.29.1";
+const CRM_VERSION = "4.29.3";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -34876,7 +34876,9 @@ function PanelAnalisis({usuario, onNav}){
   const [fAgente,setFAgente]=useState("");
   const [vista,setVista]=useState("comerciales");  // comerciales | clientes | articulos
   const [cliGrupo,setCliGrupo]=useState(null);
+  const [cliError,setCliError]=useState(null);
   const [artGrupo,setArtGrupo]=useState(null);
+  const [artError,setArtError]=useState(null);
   const [abierto,setAbierto]=useState(null);   // comercial desplegado
   const [clientes,setClientes]=useState(null);
   const [cliAbierto,setCliAbierto]=useState(null);
@@ -34942,24 +34944,51 @@ function PanelAnalisis({usuario, onNav}){
     if(vista!=="clientes"||cliGrupo) return;
     let vivo=true;
     (async()=>{
+      const parsea=(j)=>(Array.isArray(j)?j:[]).filter(x=>x.document).map(x=>{
+        const o={};
+        for(const [k,v] of Object.entries(x.document.fields||{})) o[k]=val(v);
+        return o;
+      });
+      const utiles=(l)=>l
+        .filter(c=>!c.fusionadoEn&&!c.intercompany&&(c.caida||0)<0)
+        .sort((a,b)=>(a.caida||0)-(b.caida||0));
+
       try{
-        // Se ordena por el campo "caida", que guarda la sincronización: sin
-        // él habría que leer los 6.597 clientes en el navegador.
+        // Primero se intenta que ordene Firestore por el campo "caida".
         const r=await fetch(`${FB_BASE}:runQuery`,{
           method:"POST",headers:{"Content-Type":"application/json"},
           body:JSON.stringify({structuredQuery:{
             from:[{collectionId:"pbi_ventas_cliente"}],
             orderBy:[{field:{fieldPath:"caida"},direction:"ASCENDING"}],
-            limit:60}}),
+            limit:80}}),
         });
         const j=await r.json();
-        const cs=(Array.isArray(j)?j:[]).filter(x=>x.document).map(x=>{
-          const o={};
-          for(const [k,v] of Object.entries(x.document.fields||{})) o[k]=val(v);
-          return o;
-        }).filter(c=>!c.fusionadoEn&&!c.intercompany&&(c.caida||0)<0);
-        if(vivo) setCliGrupo(cs);
-      }catch(e){ if(vivo) setCliGrupo([]); }
+        if(j && j.error) throw new Error(j.error.message||"consulta rechazada");
+        const cs=utiles(parsea(j));
+        if(cs.length){ if(vivo){ setCliError(null); setCliGrupo(cs); } return; }
+        throw new Error("la consulta ordenada no ha devuelto clientes");
+      }catch(e1){
+        // Si no puede ordenar (por ejemplo, falta el índice), se traen los
+        // que tienen caída y se ordenan aquí. Más pesado, pero funciona.
+        try{
+          const r2=await fetch(`${FB_BASE}:runQuery`,{
+            method:"POST",headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({structuredQuery:{
+              from:[{collectionId:"pbi_ventas_cliente"}],
+              where:{fieldFilter:{field:{fieldPath:"caida"},op:"LESS_THAN",
+                     value:{doubleValue:-2000}}},
+              limit:600}}),
+          });
+          const j2=await r2.json();
+          if(j2 && j2.error) throw new Error(j2.error.message||"consulta rechazada");
+          const cs2=utiles(parsea(j2));
+          if(!vivo) return;
+          setCliError(cs2.length?null:`sin resultados (${e1.message})`);
+          setCliGrupo(cs2);
+        }catch(e2){
+          if(vivo){ setCliError(e2.message); setCliGrupo([]); }
+        }
+      }
     })();
     return()=>{vivo=false;};
   },[vista]);
@@ -34973,14 +35002,18 @@ function PanelAnalisis({usuario, onNav}){
         const q=fAgente?`&agente=${encodeURIComponent(fAgente)}`:"";
         const r=await fetch(`/api/pbi-sync?articulosGrupo=1&top=25${q}`);
         const j=await r.json();
-        if(vivo) setArtGrupo(j.ok?(j.articulos||[]):[]);
-      }catch(e){ if(vivo) setArtGrupo([]); }
+        if(!vivo) return;
+        // Si la consulta falla hay que decirlo: mostrarlo como "ningún
+        // artículo cae" hacía pensar que el dato era ese.
+        if(!j.ok){ setArtError(j.error||"la consulta no ha respondido"); setArtGrupo([]); }
+        else { setArtError(null); setArtGrupo(j.articulos||[]); }
+      }catch(e){ if(vivo){ setArtError(e.message); setArtGrupo([]); } }
     })();
     return()=>{vivo=false;};
   },[vista,fAgente]);
 
   // Al cambiar el filtro de comercial, los artículos del grupo dejan de valer
-  useEffect(()=>{ setArtGrupo(null); },[fAgente]);
+  useEffect(()=>{ setArtGrupo(null); setArtError(null); },[fAgente]);
 
 
   if(error) return (
@@ -35218,6 +35251,14 @@ function PanelAnalisis({usuario, onNav}){
           {cliGrupo===null
             ? <p style={{padding:"20px 0",textAlign:"center",color:T.muted,
                 fontSize:13}}>Buscando clientes…</p>
+            : cliError
+              ? <div style={{background:"#FDF3F3",border:`1px solid ${T.red}33`,
+                  borderRadius:12,padding:"13px 15px"}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:700,color:"#991B1B"}}>
+                    No se han podido leer los clientes</p>
+                  <p style={{margin:"5px 0 0",fontSize:11.5,color:"#8A4448",
+                    fontFamily:"ui-monospace,Menlo,monospace"}}>{cliError}</p>
+                </div>
             : cliGrupo.length===0
               ? <p style={{padding:"20px 0",textAlign:"center",color:T.muted,
                   fontSize:13}}>Ningún cliente cae respecto al año pasado.</p>
@@ -35286,6 +35327,14 @@ function PanelAnalisis({usuario, onNav}){
           {artGrupo===null
             ? <p style={{padding:"20px 0",textAlign:"center",color:T.muted,
                 fontSize:13}}>Consultando artículos…</p>
+            : artError
+              ? <div style={{background:"#FDF3F3",border:`1px solid ${T.red}33`,
+                  borderRadius:12,padding:"13px 15px"}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:700,color:"#991B1B"}}>
+                    No se han podido consultar los artículos</p>
+                  <p style={{margin:"5px 0 0",fontSize:11.5,color:"#8A4448",
+                    fontFamily:"ui-monospace,Menlo,monospace"}}>{artError}</p>
+                </div>
             : artGrupo.filter(a=>a.diferencia<0).length===0
               ? <p style={{padding:"20px 0",textAlign:"center",color:T.muted,
                   fontSize:13}}>Ningún artículo cae respecto al año pasado.</p>
