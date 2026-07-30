@@ -342,7 +342,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.31.1";
+const CRM_VERSION = "4.33.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -34877,6 +34877,9 @@ function PanelAnalisis({usuario, onNav}){
   const [vista,setVista]=useState("comerciales");  // comerciales | clientes | articulos
   const [cliGrupo,setCliGrupo]=useState(null);
   const [cliError,setCliError]=useState(null);
+  const [buscaCli,setBuscaCli]=useState("");
+  const [soloCaen,setSoloCaen]=useState(true);   // o toda la cartera
+  const [progre,setProgre]=useState({});      // evolución mensual por cliente
   const [artGrupo,setArtGrupo]=useState(null);
   const [artError,setArtError]=useState(null);
   const [artAbierto,setArtAbierto]=useState(null);   // artículo desplegado
@@ -34950,6 +34953,14 @@ function PanelAnalisis({usuario, onNav}){
   const todos = datos || [];
   const base = mando ? todos : todos.filter(a=>String(a._id).toUpperCase()===miClave);
 
+  // Comerciales dentro del filtro actual. Se usa en varias listas, así que
+  // se calcula una sola vez.
+  const delAmbito=new Set(
+    base.filter(a=>(!fRama||a.equipo===fRama)
+                && (!fAgente||(a.agente||a._id)===fAgente))
+        .map(a=>String(a.agente||a._id).toUpperCase()));
+  const hayFiltro=!!(fRama||fAgente);
+
   const ramas=[...new Set(base.map(a=>a.equipo))].sort();
   const visibles=base.filter(a=>
     (!fRama||a.equipo===fRama) && (!fAgente||(a.agente||a._id)===fAgente));
@@ -34966,29 +34977,37 @@ function PanelAnalisis({usuario, onNav}){
         for(const [k,v] of Object.entries(x.document.fields||{})) o[k]=val(v);
         return o;
       });
-      // Solo los comerciales del ámbito: con una rama o un comercial
-      // seleccionado, la lista debe reducirse igual que el resto del panel.
-      const delAmbito=new Set(
-        base.filter(a=>(!fRama||a.equipo===fRama)
-                    && (!fAgente||(a.agente||a._id)===fAgente))
-            .map(a=>String(a.agente||a._id).toUpperCase()));
+      // Solo los comerciales del ámbito, igual que el resto del panel
       const enAmbito=(c)=>!c.agente
         ? false
         : delAmbito.has(String(c.agente).toUpperCase());
 
+      const dif=(c)=>(c.ventasAct||0)-(c.ventasAntYTD||0);
       const utiles=(l)=>l
-        .filter(c=>!c.fusionadoEn&&!c.intercompany&&(c.caida||0)<0)
-        .filter(c=>(!fRama&&!fAgente) || enAmbito(c))
-        .sort((a,b)=>(a.caida||0)-(b.caida||0));
+        .filter(c=>!c.fusionadoEn&&!c.intercompany)
+        .filter(c=>!soloCaen || dif(c)<0)
+        .filter(c=>!hayFiltro || enAmbito(c))
+        .sort((a,b)=> soloCaen ? dif(a)-dif(b)
+                               : (b.ventasAct||0)-(a.ventasAct||0));
 
       try{
-        // Primero se intenta que ordene Firestore por el campo "caida".
+        // Con un comercial concreto se filtra en la propia consulta: es más
+        // barato que traerse media colección y descartar después.
+        const q = fAgente
+          ? { from:[{collectionId:"pbi_ventas_cliente"}],
+              where:{fieldFilter:{field:{fieldPath:"agente"},op:"EQUAL",
+                     value:{stringValue:fAgente}}}, limit:900 }
+          : soloCaen
+            ? { from:[{collectionId:"pbi_ventas_cliente"}],
+                orderBy:[{field:{fieldPath:"caida"},direction:"ASCENDING"}],
+                limit:fRama?600:80 }
+            : { from:[{collectionId:"pbi_ventas_cliente"}],
+                orderBy:[{field:{fieldPath:"ventasAct"},direction:"DESCENDING"}],
+                limit:fRama?600:120 };
+
         const r=await fetch(`${FB_BASE}:runQuery`,{
           method:"POST",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({structuredQuery:{
-            from:[{collectionId:"pbi_ventas_cliente"}],
-            orderBy:[{field:{fieldPath:"caida"},direction:"ASCENDING"}],
-            limit:(fRama||fAgente)?600:80}}),
+          body:JSON.stringify({structuredQuery:q}),
         });
         const j=await r.json();
         if(j && j.error) throw new Error(j.error.message||"consulta rechazada");
@@ -35019,7 +35038,7 @@ function PanelAnalisis({usuario, onNav}){
       }
     })();
     return()=>{vivo=false;};
-  },[vista,fRama,fAgente]);
+  },[vista,fRama,fAgente,soloCaen]);
 
   // ── Vista por artículo: los que más caen en todo el grupo ──
   useEffect(()=>{
@@ -35058,6 +35077,7 @@ function PanelAnalisis({usuario, onNav}){
     setArtGrupo(null); setArtError(null); setArtAbierto(null); setCliArt({});
     setCliGrupo(null); setCliError(null);
   },[fAgente,fRama]);
+  useEffect(()=>{ setCliGrupo(null); setCliError(null); },[soloCaen]);
 
 
   if(error) return (
@@ -35095,6 +35115,17 @@ function PanelAnalisis({usuario, onNav}){
     if(vAno>=3)  return `${quien} ${va} por delante del año pasado: ${eur(dif)} más.`;
     if(vAno<=-3) return `${quien} ${va} por detrás del año pasado: faltan ${eur(dif)}.`;
     return `${quien} ${va} en línea con el año pasado.`;
+  };
+
+  // ── Evolución mensual de un cliente ──
+  const verProgresion = async (cod) => {
+    if(progre[cod]) return;
+    setProgre(p=>({...p,[cod]:"cargando"}));
+    try{
+      const r=await fetch(`/api/pbi-sync?progresionCliente=${encodeURIComponent(cod)}`);
+      const j=await r.json();
+      setProgre(p=>({...p,[cod]: j.ok ? j : {error: j.error||"sin respuesta"}}));
+    }catch(e){ setProgre(p=>({...p,[cod]:{error:e.message}})); }
   };
 
   // ── Abrir un artículo: qué clientes lo han dejado de comprar ──
@@ -35294,7 +35325,23 @@ function PanelAnalisis({usuario, onNav}){
         <>
           <p style={{margin:"18px 0 8px",fontSize:11,fontWeight:800,letterSpacing:.7,
             textTransform:"uppercase",color:T.muted}}>
-            Clientes que más caen{fAgente?` · ${fAgente}`:fRama?` · ${fRama}`:""}</p>
+            {soloCaen?"Clientes que más caen":"Cartera"}{
+              fAgente?` · ${fAgente}`:fRama?` · ${fRama}`:""}</p>
+          <div style={{display:"flex",gap:6,marginBottom:9}}>
+            {[[true,"Solo los que caen"],[false,"Toda la cartera"]].map(([v,t])=>(
+              <button key={String(v)} onClick={()=>setSoloCaen(v)}
+                style={{flex:1,font:"inherit",fontSize:12,fontWeight:700,
+                  padding:"8px 6px",borderRadius:9,cursor:"pointer",minHeight:36,
+                  border:`1.5px solid ${soloCaen===v?T.navy:T.border}`,
+                  background:soloCaen===v?T.navy:"#fff",
+                  color:soloCaen===v?"#fff":T.muted}}>{t}</button>
+            ))}
+          </div>
+          <input value={buscaCli} onChange={e=>setBuscaCli(e.target.value)}
+            placeholder="Buscar cliente por nombre o código…"
+            style={{width:"100%",font:"inherit",fontSize:13.5,padding:"11px 13px",
+              border:`1.5px solid ${T.border}`,borderRadius:11,marginBottom:10,
+              background:"#fff",boxSizing:"border-box"}}/>
           {cliGrupo===null
             ? <p style={{padding:"20px 0",textAlign:"center",color:T.muted,
                 fontSize:13}}>Buscando clientes…</p>
@@ -35311,9 +35358,21 @@ function PanelAnalisis({usuario, onNav}){
                   fontSize:13}}>Ningún cliente cae respecto al año pasado.</p>
               : <div style={{background:T.white,border:`1px solid ${T.border}`,
                   borderRadius:14,overflow:"hidden"}}>
-                  {cliGrupo.slice(0,30).map((c,i)=>(
+                  {(()=>{
+                    const q=buscaCli.trim().toUpperCase();
+                    const lista=q
+                      ? cliGrupo.filter(c=>
+                          String(c.nombre||"").toUpperCase().includes(q)
+                          || String(c.cliente||"").toUpperCase().includes(q))
+                      : cliGrupo;
+                    if(!lista.length) return (
+                      <p style={{padding:"18px 15px",textAlign:"center",
+                        color:T.muted,fontSize:13}}>
+                        Ningún cliente coincide con "{buscaCli}".</p>
+                    );
+                    return lista.slice(0,30).map((c,i)=>(
                     <div key={c.cliente||i}>
-                      <div onClick={()=>verArts(c.cliente)}
+                      <div onClick={()=>{verArts(c.cliente); verProgresion(c.cliente);}}
                         style={{display:"flex",gap:10,padding:"12px 15px",
                           borderTop:i?`1px solid #F1F5F9`:"none",cursor:"pointer"}}>
                         <div style={{flex:1,minWidth:0}}>
@@ -35327,16 +35386,71 @@ function PanelAnalisis({usuario, onNav}){
                           fontVariantNumeric:"tabular-nums"}}>
                           <p style={{margin:0,fontSize:14,fontWeight:700}}>
                             {eur(c.ventasAct)}</p>
-                          <p style={{margin:0,fontSize:12,fontWeight:700,color:T.red}}>
-                            {eur(c.caida)}
-                            {c.ventasAntYTD
-                              ? ` · ${pc(c.caida/c.ventasAntYTD*100)}` : ""}</p>
+                          {(()=>{
+                            const d=(c.ventasAct||0)-(c.ventasAntYTD||0);
+                            return (
+                              <p style={{margin:0,fontSize:12,fontWeight:700,
+                                color:d<0?T.red:T.green}}>
+                                {d>0?"+":""}{eur(d)}
+                                {c.ventasAntYTD
+                                  ? ` · ${pc(d/c.ventasAntYTD*100)}` : ""}</p>
+                            );
+                          })()}
                         </div>
                         <span style={{color:"#94A3B0",fontSize:19}}>
                           {cliAbierto===c.cliente?"▾":"›"}</span>
                       </div>
                       {cliAbierto===c.cliente && (
                         <div style={{background:"#F8FAFC",padding:"2px 0"}}>
+                          {/* Evolución mes a mes: dice cuándo empezó la caída */}
+                          {(()=>{
+                            const pr=progre[c.cliente];
+                            if(!pr) return null;
+                            if(pr==="cargando") return (
+                              <p style={{margin:0,padding:"10px 15px 10px 26px",
+                                fontSize:12,color:T.muted}}>Cargando su evolución…</p>);
+                            if(pr.error) return (
+                              <p style={{margin:0,padding:"10px 15px 10px 26px",
+                                fontSize:12,color:T.red}}>{pr.error}</p>);
+                            const vis=pr.meses.filter(m=>!m.futuro);
+                            const tope=Math.max(...vis.map(m=>Math.max(m.actual,m.anterior)),1);
+                            return (
+                              <div style={{padding:"11px 15px 13px 26px",
+                                borderBottom:`1px solid #E9EEF3`}}>
+                                <p style={{margin:"0 0 9px",fontSize:11,fontWeight:800,
+                                  letterSpacing:.5,textTransform:"uppercase",color:T.muted}}>
+                                  Mes a mes{pr.caeDesde
+                                    ? ` · cae desde ${pr.caeDesde}` : ""}
+                                </p>
+                                {vis.map(m=>(
+                                  <div key={m.numero} style={{display:"flex",
+                                    alignItems:"center",gap:8,marginBottom:4}}>
+                                    <span style={{width:26,fontSize:11,color:T.muted,
+                                      flex:"none"}}>{m.mes}</span>
+                                    <div style={{flex:1,minWidth:0}}>
+                                      <div style={{height:7,borderRadius:99,
+                                        background:"#E2E8EF",marginBottom:2,
+                                        width:`${Math.max(2,m.anterior/tope*100)}%`}}/>
+                                      <div style={{height:7,borderRadius:99,
+                                        background:m.actual>=m.anterior?T.green:T.red,
+                                        width:`${Math.max(2,m.actual/tope*100)}%`}}/>
+                                    </div>
+                                    <span style={{fontSize:11,fontWeight:700,flex:"none",
+                                      minWidth:74,textAlign:"right",
+                                      fontVariantNumeric:"tabular-nums",
+                                      color:m.actual>=m.anterior?T.green:T.red}}>
+                                      {eur(m.actual)}
+                                      {m.enCurso?" *":""}
+                                    </span>
+                                  </div>
+                                ))}
+                                <p style={{margin:"7px 0 0",fontSize:10.5,color:T.muted}}>
+                                  Barra gris: {pr.anoAnterior}. Barra de color: {pr.anoActual}.
+                                  {vis.some(m=>m.enCurso)?" El mes marcado con * está en curso.":""}
+                                </p>
+                              </div>
+                            );
+                          })()}
                           {!arts[c.cliente]
                             ? <p style={{margin:0,padding:"10px 15px 10px 26px",
                                 fontSize:12,color:T.muted}}>Buscando artículos…</p>
@@ -35361,7 +35475,8 @@ function PanelAnalisis({usuario, onNav}){
                         </div>
                       )}
                     </div>
-                  ))}
+                  ));
+                  })()}
                 </div>}
         </>
       )}
@@ -35428,12 +35543,24 @@ function PanelAnalisis({usuario, onNav}){
                             ? <p style={{margin:0,padding:"11px 15px 11px 26px",
                                 fontSize:12,color:T.red}}>
                                 {cliArt[a.articulo].error}</p>
-                            : cliArt[a.articulo].filter(c=>c.diferencia<0).length===0
-                              ? <p style={{margin:0,padding:"11px 15px 11px 26px",
-                                  fontSize:12.5,color:T.muted}}>
-                                  Ningún cliente cae en este artículo.</p>
-                              : cliArt[a.articulo].filter(c=>c.diferencia<0)
-                                  .map(c=>(
+                            : (()=>{
+                                // El artículo se consulta en todo el grupo,
+                                // así que aquí hay que aplicar el filtro de
+                                // rama o comercial que esté seleccionado.
+                                const todos=cliArt[a.articulo].filter(c=>c.diferencia<0);
+                                const suyos=hayFiltro
+                                  ? todos.filter(c=>c.agente
+                                      && delAmbito.has(String(c.agente).toUpperCase()))
+                                  : todos;
+                                if(!suyos.length) return (
+                                  <p style={{margin:0,padding:"11px 15px 11px 26px",
+                                    fontSize:12.5,color:T.muted}}>
+                                    {todos.length
+                                      ? `Ningún cliente de ${fAgente||fRama} cae en este artículo (${todos.length} en el resto del grupo).`
+                                      : "Ningún cliente cae en este artículo."}</p>
+                                );
+                                return (<>
+                                  {suyos.map(c=>(
                                 <div key={c.cliente} style={{display:"flex",gap:10,
                                   padding:"10px 15px 10px 26px",
                                   borderTop:`1px solid #E9EEF3`}}>
@@ -35456,6 +35583,16 @@ function PanelAnalisis({usuario, onNav}){
                                   </div>
                                 </div>
                               ))}
+                                  {hayFiltro && todos.length>suyos.length && (
+                                    <p style={{margin:0,padding:"9px 15px 10px 26px",
+                                      fontSize:11,color:T.muted,
+                                      borderTop:`1px solid #E9EEF3`}}>
+                                      Se ocultan {todos.length-suyos.length} clientes
+                                      de otros comerciales.
+                                    </p>
+                                  )}
+                                </>);
+                              })()}
                       </div>
                     )}
                     </React.Fragment>
