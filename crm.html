@@ -342,7 +342,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.23.8";
+const CRM_VERSION = "4.25.1";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -17384,1082 +17384,7 @@ function SinAsignarView({usuario, clientesFB, ventasDB, onAbrirCliente, onNav}){
   );
 }
 
-function Recuperacion({usuario, ventasDB, clientesFB, onBack, onNav, onAbrirCliente}){
-  var rol = usuario.rol;
-  var esAgente = rol === "agente";
-  var esJefe = rol === "jefe";
-  var esDir = rol === "director" || rol === "ceo";
-  var miEquipo = usuario.equipo;
-  var misIds = resolverMisIds(usuario);
 
-  // Estados
-  var _f = React.useState(esAgente ? {tipo:"agente", valor:(usuario.grupoAgente||usuario.id||"").toUpperCase()}
-                         : esJefe   ? {tipo:"equipo", valor:miEquipo}
-                                    : {tipo:"todos", valor:""});
-  var filtro = _f[0], setFiltro = _f[1];
-  var _s = React.useState("lost"); var severidad = _s[0], setSeveridad = _s[1];
-  var _v = React.useState("clientes"); var vista = _v[0], setVista = _v[1];
-  var _sel = React.useState(new Set()); var sels = _sel[0], setSels = _sel[1];
-  var _q = React.useState(""); var busqueda = _q[0], setBusqueda = _q[1];
-  // (v3.22.6) Búsqueda específica para tab "Por artículo"
-  var _qa = React.useState(""); var busquedaArt = _qa[0], setBusquedaArt = _qa[1];
-  var _to = React.useState({WIKUK:esJefe&&miEquipo==="WIKUK", INTERKEY:esJefe&&miEquipo==="INTERKEY"});
-  var treeOpen = _to[0], setTreeOpen = _to[1];
-  // (v3.22.5) Estilo MiSemana: árbol acordeón
-  var _tro = React.useState(false); var treeRootOpen = _tro[0], setTreeRootOpen = _tro[1];
-  var _teq = React.useState(null); var treeEqOpen = _teq[0], setTreeEqOpen = _teq[1];
-  var _modal = React.useState(null); var modalAccion = _modal[0], setModalAccion = _modal[1];
-  // null | "estrategia" | "tareas"
-
-  // (v3.20.0) Filtro por ruta semanal
-  var _ruta = React.useState(false); var soloRuta = _ruta[0], setSoloRuta = _ruta[1];
-  var _planSem = React.useState(null); var planSem = _planSem[0], setPlanSem = _planSem[1];
-  var _semIso = React.useState(0); var semIso = _semIso[0], setSemIso = _semIso[1];
-  var _sr = React.useState(0); var semanaRuta = _sr[0], setSemanaRuta = _sr[1];
-
-  // (v3.20.0) Filtro por artículo (drill-down desde vista artículos)
-  var _af = React.useState(null); var articuloFiltro = _af[0], setArticuloFiltro = _af[1];
-
-  // (v3.20.2) Mapa clienteCodigo → ruta (cargado una vez al montar)
-  var _mr = React.useState({}); var mapaRutas = _mr[0], setMapaRutas = _mr[1];
-  // (v3.22.1) Mapa agenteId → rutaNum de la semana seleccionada (para jefes/dir/ceo)
-  var _rpa = React.useState({}); var rutasPorAgente = _rpa[0], setRutasPorAgente = _rpa[1];
-  // (v3.22.4) Todos los planes cargados de Firebase (para refiltrado al cambiar semana)
-  var _tp = React.useState([]); var todosPlanes = _tp[0], setTodosPlanes = _tp[1];
-  // (v3.22.4) Semana ISO seleccionada por el jefe (default = actual)
-  var _sj = React.useState(0); var semanaJefe = _sj[0], setSemanaJefe = _sj[1];
-  React.useEffect(function(){
-    fbLeerTodos("clientes").then(function(arr){
-      if(!arr) return;
-      var m = {};
-      arr.forEach(function(c){
-        var cod = ((c.codigo||c.id||"")+"").toUpperCase();
-        var r = parseInt(c.SEMANAVISITA||c.semanaVisita||c.ruta||c.semana||0);
-        if(cod && r > 0) m[cod] = r;
-      });
-      setMapaRutas(m);
-    }).catch(function(){});
-  },[]);
-
-  // Cargar plan semanal (para resolver "esta semana") y fijar semana inicial — para TODOS los roles
-  React.useEffect(function(){
-    var s = (typeof getSemanaISO==="function") ? getSemanaISO() : 0;
-    setSemIso(s);
-    setSemanaRuta(s); // Por defecto, semana actual
-    setSemanaJefe(s); // (v3.22.4) Default semana ISO actual para jefes
-    fbLeer("planes_semanales").then(function(planes){
-      if(!planes) return;
-      setTodosPlanes(planes); // (v3.22.4) Guardar TODOS para refiltrado
-      // Plan del usuario actual (para agentes y para semana inicial)
-      var found = planes.find(function(p){
-        return p.agente===usuario.id && parseInt(p.semana)===s && parseInt(p.anio)===new Date().getFullYear();
-      });
-      setPlanSem(found || null);
-      // Si tiene plan en modo ruta con rutaNum, usar esa como semana por defecto
-      if(found && found.modo==="ruta" && found.rutaNum){
-        setSemanaRuta(parseInt(found.rutaNum));
-      }
-    }).catch(function(){});
-  },[]);
-
-  // (v3.22.4) Recalcular rutasPorAgente cuando cambia la semana seleccionada o se cargan planes
-  React.useEffect(function(){
-    if(!todosPlanes || todosPlanes.length===0 || !semanaJefe) return;
-    var rpa = {};
-    var anioActual = new Date().getFullYear();
-    todosPlanes.forEach(function(p){
-      if(parseInt(p.semana)===semanaJefe && parseInt(p.anio)===anioActual && p.modo==="ruta" && p.rutaNum){
-        var agId = String(p.agente||"").toUpperCase().trim();
-        if(agId) rpa[agId] = parseInt(p.rutaNum);
-      }
-    });
-    setRutasPorAgente(rpa);
-  },[semanaJefe, todosPlanes]);
-
-  // ── Procesar ventasDB → agrupar por cliente y clasificar ──
-  var datosCalc = React.useMemo(function(){
-    if(!ventasDB || ventasDB.length === 0) return {clientes:[], totales:{lost:0,risk:0,warn:0,amt_lost:0,amt_risk:0,amt_warn:0}};
-    // (v3.20.3) Helpers tolerantes a variantes de nombres
-    function pick(o, keys){
-      for(var i=0;i<keys.length;i++){
-        if(o[keys[i]] !== undefined && o[keys[i]] !== null && o[keys[i]] !== "") return o[keys[i]];
-      }
-      return null;
-    }
-    function num(x){
-      if(x === null || x === undefined || x === "") return 0;
-      var n = Number(x);
-      return isNaN(n) ? 0 : n;
-    }
-    // Agrupar por clienteCodigo
-    var byCli = {};
-    ventasDB.forEach(function(v){
-      var codigo = pick(v, ["clienteCodigo","cliente_codigo","codigoCliente","CODIGO_CLIENTE","CODIGO","codigo"]);
-      if(!codigo) return;
-      var k = String(codigo).trim();
-      if(!byCli[k]){
-        byCli[k] = {
-          codigo: k,
-          nombre: pick(v, ["clienteNombre","cliente_nombre","nombreCliente","NOMBRE","nombre"]) || "",
-          agente: String(pick(v, ["grupoAgente","GRUPOAGENTE","grupo_agente","agente","AGENTE"]) || "").toUpperCase(),
-          equipo: pick(v, ["equipo","EQUIPO"]) || "",
-          v2025: 0, v2026: 0,
-          articulos: []
-        };
-      }
-      var c = byCli[k];
-      var v1 = num(pick(v, ["ventas1Ant","ventas_1_ant","ventasAnioAnt","Ventas_1_Año_Ant"]));
-      var vA = num(pick(v, ["ventasActual","ventas_actual","Ventas_2026","Ventas_Actual"]));
-      var v2 = num(pick(v, ["ventas2Ant","ventas_2_ant"]));
-      var v3 = num(pick(v, ["ventas3Ant","ventas_3_ant"]));
-      var v4 = num(pick(v, ["ventas4Ant","ventas_4_ant"]));
-      var anioActual = num(pick(v, ["anioActual","anio_actual","year"])) || (new Date().getFullYear());
-      c.v2025 += v1;
-      c.v2026 += vA;
-      if(v1 > 0 || v2 > 0 || v3 > 0 || v4 > 0 || vA > 0){
-        var ultAnio = null;
-        if(vA > 0) ultAnio = anioActual;
-        else if(v1 > 0) ultAnio = anioActual - 1;
-        else if(v2 > 0) ultAnio = anioActual - 2;
-        else if(v3 > 0) ultAnio = anioActual - 3;
-        else if(v4 > 0) ultAnio = anioActual - 4;
-        c.articulos.push({
-          p: pick(v, ["productoPadre","PRODUCTOPADRE","producto_padre","articuloCodigo","articulo_codigo","ARTICULO"]) || "",
-          cal: pick(v, ["calibre","CALIBRE"]) || "",
-          cod: pick(v, ["articuloCodigo","articulo_codigo","ARTICULO"]) || "",
-          v25: v1,
-          v26: vA,
-          ultAnio: ultAnio
-        });
-      }
-    });
-    // Clasificar
-    var clientes = [];
-    Object.keys(byCli).forEach(function(k){
-      var c = byCli[k];
-      if(c.v2025 <= 100) return;
-      // (v3.20.4) Permitir clientes sin vendedor — se etiquetan como "Sin asignar"
-      if(!c.agente){
-        c.agente = "(Sin asignar)";
-        c.sinAsignar = true;
-      }
-      if(c.v2026 === 0){
-        c.cls = "lost"; c.perdida = c.v2025; c.pct = -100;
-      } else if(c.v2026 < c.v2025){
-        var dpct = (c.v2026 - c.v2025)/c.v2025*100;
-        c.perdida = c.v2026 - c.v2025;
-        c.pct = Math.round(dpct);
-        if(dpct <= -30) c.cls = "risk";
-        else if(dpct <= -10) c.cls = "warn";
-        else return;
-      } else { return; }
-      // Top 4 artículos perdidos/bajados
-      var rel = c.articulos.filter(function(a){return a.v25>0 && (a.v26===0 || a.v26<a.v25*0.5);});
-      rel.sort(function(a,b){return (a.v26-a.v25)-(b.v26-b.v25);});
-      c.arts = rel.slice(0,4).map(function(a){return {p:String(a.p).substring(0,30), cod:a.cod, cal:a.cal, v25:Math.round(a.v25), ultAnio:a.ultAnio};});
-      delete c.articulos;
-      c.v2025 = Math.round(c.v2025);
-      c.v2026 = Math.round(c.v2026);
-      c.perdida = Math.round(c.perdida);
-      clientes.push(c);
-    });
-
-    var lost = clientes.filter(function(c){return c.cls==="lost";});
-    var risk = clientes.filter(function(c){return c.cls==="risk";});
-    var warn = clientes.filter(function(c){return c.cls==="warn";});
-
-    return {
-      clientes: clientes,
-      totales: {
-        lost: lost.length, risk: risk.length, warn: warn.length,
-        amt_lost: lost.reduce(function(s,c){return s+c.perdida;},0),
-        amt_risk: risk.reduce(function(s,c){return s+c.perdida;},0),
-        amt_warn: warn.reduce(function(s,c){return s+c.perdida;},0)
-      }
-    };
-  }, [ventasDB]);
-
-  // ── Aplicar filtro ──
-  function pasaFiltro(c){
-    if(filtro.tipo === "todos") return true;
-    if(filtro.tipo === "equipo") return c.equipo === filtro.valor;
-    if(filtro.tipo === "agente"){
-      // (v3.20.1) Match case-insensitive y tolerante a variantes
-      var ag = (c.agente||"").toUpperCase();
-      var f = (filtro.valor||"").toUpperCase();
-      if(ag === f) return true;
-      // Si filtramos por el usuario actual, aceptar cualquier alias
-      if(esAgente && misIds.has(ag)) return true;
-      return false;
-    }
-    return true;
-  }
-  // Para agentes: forzar a sus IDs (case-insensitive). Los "Sin asignar" NO aparecen para agentes.
-  function esMio(c){
-    if(!esAgente) return true;
-    if(c.sinAsignar) return false;
-    return misIds.has((c.agente||"").toUpperCase());
-  }
-
-  var clientesFiltrados = datosCalc.clientes.filter(function(c){
-    return esMio(c) && pasaFiltro(c);
-  });
-
-  // (v3.20.2 / v3.22.1) Filtro por ruta — disponible para todos los roles
-  // Para AGENTE: filtra por su propia rutaNum (semanaRuta es número de ruta)
-  // Para JEFE/DIRECTOR/CEO: filtra por la ruta activa de cada vendedor en la semana ISO actual
-  if(soloRuta){
-    if(esAgente && semanaRuta > 0){
-      // Modo agente: clientes con SEMANAVISITA === su rutaNum del plan
-      clientesFiltrados = clientesFiltrados.filter(function(c){
-        var cod = ((c.codigo||"")+"").toUpperCase();
-        var r = mapaRutas[cod];
-        if(r) return r === semanaRuta;
-        // Fallback: buscar en clientesFB local
-        var cli = (clientesFB||[]).find(function(x){
-          return ((x.codigo||x.id||"")+"").toUpperCase() === cod;
-        });
-        if(!cli) return false;
-        var ruta = parseInt(cli.SEMANAVISITA||cli.semanaVisita||cli.ruta||cli.semana||0);
-        return ruta === semanaRuta;
-      });
-    } else if(!esAgente){
-      // Modo jefe/dir/ceo: cada vendedor su propia ruta de esta semana
-      clientesFiltrados = clientesFiltrados.filter(function(c){
-        var ag = (c.agente||"").toUpperCase().trim();
-        var rutaDelAgente = rutasPorAgente[ag];
-        if(!rutaDelAgente) return false; // ese vendedor no tiene plan de ruta esta semana
-        var cod = ((c.codigo||"")+"").toUpperCase();
-        var r = mapaRutas[cod];
-        if(r) return r === rutaDelAgente;
-        var cli = (clientesFB||[]).find(function(x){
-          return ((x.codigo||x.id||"")+"").toUpperCase() === cod;
-        });
-        if(!cli) return false;
-        var ruta = parseInt(cli.SEMANAVISITA||cli.semanaVisita||cli.ruta||cli.semana||0);
-        return ruta === rutaDelAgente;
-      });
-    }
-  }
-
-  // (v3.20.0) Filtro adicional por artículo (drill-down)
-  if(articuloFiltro){
-    clientesFiltrados = clientesFiltrados.filter(function(c){
-      return (c.arts||[]).some(function(a){return a.p === articuloFiltro;});
-    });
-  }
-
-  // KPIs reactivos
-  var kpis = {
-    lost: clientesFiltrados.filter(function(c){return c.cls==="lost";}),
-    risk: clientesFiltrados.filter(function(c){return c.cls==="risk";}),
-    warn: clientesFiltrados.filter(function(c){return c.cls==="warn";})
-  };
-
-  // Lista por severidad activa + búsqueda + ordenación
-  var listaActiva = kpis[severidad].slice();
-  if(busqueda){
-    var q = busqueda.toUpperCase();
-    listaActiva = listaActiva.filter(function(c){return (c.nombre||"").toUpperCase().indexOf(q)>=0 || (c.codigo||"").toUpperCase().indexOf(q)>=0;});
-  }
-  listaActiva.sort(function(a,b){
-    return severidad==="lost" ? b.perdida - a.perdida : a.perdida - b.perdida;
-  });
-
-  // Por agente (ranking)
-  var porAgente = React.useMemo(function(){
-    var m = {};
-    clientesFiltrados.forEach(function(c){
-      if(!m[c.agente]) m[c.agente] = {agente:c.agente, nombre:nombreDeAgente(c.agente),
-        equipo:c.equipo, n_lost:0, n_risk:0, n_warn:0, amt:0};
-      m[c.agente]["n_"+c.cls]++;
-      m[c.agente].amt += Math.abs(c.perdida);
-    });
-    var arr = [];
-    for(var k in m) arr.push(m[k]);
-    arr.sort(function(a,b){return b.amt - a.amt;});
-    return arr;
-  }, [clientesFiltrados]);
-
-  // Por artículo (top productos en bajada)
-  var porArticulo = React.useMemo(function(){
-    var m = {};
-    clientesFiltrados.forEach(function(c){
-      (c.arts||[]).forEach(function(a){
-        if(!a.p) return;
-        if(!m[a.p]) m[a.p] = {p:a.p, cod:a.cod||"", v25:0, n_clientes:0};
-        // Guardar todos los códigos PLU asociados a esta familia
-        if(a.cod && m[a.p].cod && a.cod !== m[a.p].cod){
-          // Si hay múltiples PLUs en la misma familia, los acumulamos
-          var codsExistentes = m[a.p].cod.split(", ");
-          if(codsExistentes.indexOf(a.cod) < 0) m[a.p].cod = (m[a.p].cod + ", " + a.cod).substring(0,80);
-        } else if(a.cod && !m[a.p].cod){
-          m[a.p].cod = a.cod;
-        }
-        m[a.p].v25 += a.v25;
-        m[a.p].n_clientes++;
-      });
-    });
-    var arr = [];
-    for(var k in m) arr.push(m[k]);
-    arr.sort(function(a,b){return b.v25 - a.v25;});
-    return arr.slice(0,15);
-  }, [clientesFiltrados]);
-
-  // Equipos disponibles (lista de agentes por equipo)
-  var arbolDatos = React.useMemo(function(){
-    var w = new Set(), i = new Set();
-    datosCalc.clientes.forEach(function(c){
-      if(c.equipo === "WIKUK") w.add(c.agente);
-      else if(c.equipo === "INTERKEY") i.add(c.agente);
-    });
-    return {WIKUK: Array.from(w).sort(), INTERKEY: Array.from(i).sort()};
-  }, [datosCalc]);
-
-  // Helpers UI
-  function fmt(n){
-    n = Math.abs(n);
-    if(n >= 1000000) return (n/1000000).toFixed(1).replace(/\.0$/,"") + "M€";
-    if(n >= 1000) return (n/1000).toFixed(1).replace(/\.0$/,"") + "k€";
-    return Math.round(n) + "€";
-  }
-  function fmtFull(n){return Math.abs(n).toLocaleString("es-ES") + "€";}
-
-  function colorSev(s){return s==="lost"?"#DC2626":s==="risk"?"#F59E0B":"#EAB308";}
-  function bgSev(s){return s==="lost"?"#FEF2F2":s==="risk"?"#FFFBEB":"#FEFCE8";}
-
-  function toggleSel(cod){
-    var nuevo = new Set(sels);
-    if(nuevo.has(cod)) nuevo["delete"](cod); else nuevo.add(cod);
-    setSels(nuevo);
-  }
-
-  function descFiltro(){
-    if(filtro.tipo === "todos") return "(todos los equipos)";
-    return "(" + filtro.valor + ")";
-  }
-
-  function selectedClientesArr(){
-    return datosCalc.clientes.filter(function(c){return sels.has(c.codigo);});
-  }
-
-  // ── Acciones masivas ──
-  function crearEstrategiasMasivas(){
-    var seleccionados = selectedClientesArr();
-    if(seleccionados.length === 0) return;
-    // (v3.22.13) Validar que cada cliente tenga datos antes de escribir
-    var validos = seleccionados.filter(function(c){return c&&(c.nombre||c.codigo);});
-    if(validos.length === 0){alert("Los clientes seleccionados no tienen datos válidos. Cancelado.");return;}
-    if(validos.length < seleccionados.length){
-      if(!confirm("Solo "+validos.length+" de "+seleccionados.length+" clientes tienen datos válidos. ¿Continuar?")) return;
-    }
-    var hoy = new Date();
-    var fechaStr = hoy.toLocaleDateString("es-ES");
-    var promesas = validos.map(function(c){
-      var topArts = (c.arts||[]).map(function(a){return a.p+(a.cal?" ("+a.cal+")":"");}).slice(0,3).join(", ");
-      var texto = "Estrategia recuperación: cliente "+(c.cls==="lost"?"PERDIDO":c.cls==="risk"?"EN RIESGO":"con bajada")+" ("+c.pct+"%, "+fmt(c.perdida)+"). " +
-                  (topArts?"Artículos a recuperar: "+topArts+".":"");
-      var est = {
-        id: "est_recup_"+(c.codigo||"sin")+"_"+Date.now(),
-        cliente: c.nombre||"(sin nombre)",
-        clienteNombre: c.nombre||"(sin nombre)",
-        clienteCodigo: c.codigo||"",
-        agente: c.agente||usuario.id,
-        equipo: c.equipo||usuario.equipo||"",
-        creadoPor: usuario.id,
-        creadoPorNombre: usuario.nombre,
-        texto: texto,
-        tipo: "recuperacion",
-        estado: "aprobada",
-        maxDescuento: 0,
-        seguimientos: [],
-        fechaCreacion: fechaStr,
-        fecha: fechaStr,
-        semana: getSemanaISO(),
-        origen: "recuperacion_masiva"
-      };
-      return fbEscribir("estrategias", est.id, est);
-    });
-    Promise.all(promesas).then(function(){
-      alert("✅ Creadas "+validos.length+" estrategias de recuperación");
-      setSels(new Set());
-      setModalAccion(null);
-      if(onNav) onNav("estrategias");
-    }).catch(function(e){
-      alert("❌ Error guardando: "+e.message);
-    });
-  }
-
-  function crearTareasMasivas(){
-    var seleccionados = selectedClientesArr();
-    if(seleccionados.length === 0) return;
-    var hoy = new Date();
-    var venceStr = hoy.toISOString().substring(0,10);
-    var fechaCreacionStr = hoy.toLocaleDateString("es-ES");
-    var promesas = seleccionados.map(function(c){
-      var t = {
-        id: "tarea_recup_"+c.codigo+"_"+Date.now(),
-        titulo: "Visitar cliente recuperación: "+c.nombre,
-        texto: "Cliente "+(c.cls==="lost"?"PERDIDO":c.cls==="risk"?"EN RIESGO":"con bajada")+" ("+c.pct+"%, "+fmt(c.perdida)+"). Pendiente de recuperación.",
-        clienteNombre: c.nombre,
-        clienteCodigo: c.codigo,
-        agente: c.agente,
-        agenteId: c.agente,
-        equipo: c.equipo,
-        creadoPor: usuario.id,
-        creadoPorNombre: usuario.nombre,
-        prioridad: c.cls==="lost" ? "alta" : "normal",
-        estado: "pendiente",
-        vence: venceStr,
-        fechaCreacion: fechaCreacionStr,
-        origen: "recuperacion_masiva"
-      };
-      return fbEscribir("tareas", t.id, t);
-    });
-    Promise.all(promesas).then(function(){
-      alert("✅ Creadas "+seleccionados.length+" tareas de seguimiento");
-      setSels(new Set());
-      setModalAccion(null);
-    }).catch(function(e){
-      alert("❌ Error guardando: "+e.message);
-    });
-  }
-
-  // ════════════════════════ UI ════════════════════════
-  if(!ventasDB || ventasDB.length === 0){
-    return (
-      <div style={{padding:30, textAlign:"center"}}>
-        <div style={{fontSize:48, marginBottom:14}}>📊</div>
-        <p style={{margin:0, fontSize:16, fontWeight:700, color:T.text}}>Sin datos de ventas</p>
-        <p style={{margin:"6px 0 0", fontSize:13, color:T.muted}}>Aún no se han importado los datos de ventas anuales.</p>
-        <p style={{margin:"6px 0 0", fontSize:12, color:T.muted}}>Pide a un administrador que use el importador.</p>
-      </div>
-    );
-  }
-
-  return (
-    <div style={{padding:"14px 16px 100px"}}>
-      <h1 style={{fontSize:22, fontWeight:900, margin:"6px 0 2px"}}>🩹 Recuperación</h1>
-      <p style={{fontSize:13, color:T.muted, margin:"0 0 14px"}}>
-        {esAgente ? "Tu cartera con riesgo de pérdida" : esJefe ? "Pérdidas de tu equipo" : "Pérdidas globales del negocio"}
-      </p>
-
-      {/* Árbol jerárquico estilo MiSemana — acordeón limpio (v3.22.5) */}
-      {!esAgente && (
-        <div style={{marginBottom:14}}>
-          {/* Nivel 1: Todos los equipos (raíz) */}
-          {esDir && (
-            <div onClick={function(){
-                var wasSel = filtro.tipo==="todos";
-                if(wasSel){
-                  setTreeRootOpen(!treeRootOpen);
-                } else {
-                  setFiltro({tipo:"todos",valor:""});
-                  setSels(new Set());
-                  setTreeEqOpen(null);
-                  setTreeRootOpen(true);
-                }
-              }}
-              style={{background:filtro.tipo==="todos"?T.navy:"#fff",
-                borderRadius:11, padding:"10px 14px", cursor:"pointer",
-                border:"2px solid "+(filtro.tipo==="todos"?T.navy:T.border),
-                marginBottom:6, display:"flex", alignItems:"center", gap:10}}>
-              <span style={{fontSize:18}}>🌐</span>
-              <div style={{flex:1}}>
-                <p style={{margin:0, fontSize:13, fontWeight:700,
-                  color:filtro.tipo==="todos"?"#fff":T.text}}>Todos los equipos</p>
-                <p style={{margin:0, fontSize:10,
-                  color:filtro.tipo==="todos"?"rgba(255,255,255,.65)":T.muted}}>
-                  {(arbolDatos.WIKUK||[]).length + (arbolDatos.INTERKEY||[]).length} vendedores · {datosCalc.totales.lost+datosCalc.totales.risk+datosCalc.totales.warn} clientes
-                </p>
-              </div>
-              {filtro.tipo==="todos" && <span style={{color:"#fff",fontWeight:800,marginRight:4}}>✓</span>}
-              <span style={{color:filtro.tipo==="todos"?"rgba(255,255,255,.8)":T.muted,
-                fontSize:18, transform:treeRootOpen?"rotate(90deg)":"rotate(0deg)",
-                display:"inline-block", transition:"transform .2s"}}>›</span>
-            </div>
-          )}
-
-          {/* Nivel 2: Equipos */}
-          {(treeRootOpen || !esDir) && [
-            {k:"WIKUK", color:T.green},
-            {k:"INTERKEY", color:"#F59E0B"}
-          ].filter(function(eq){return esDir || (esJefe && eq.k===miEquipo);}).map(function(eq){
-            var ags = arbolDatos[eq.k] || [];
-            var isOpen = treeEqOpen===eq.k;
-            var isSel = filtro.tipo==="equipo" && filtro.valor===eq.k;
-            return (
-              <div key={eq.k} style={{marginBottom:6}}>
-                <div onClick={function(){
-                    if(isSel){
-                      setTreeEqOpen(isOpen?null:eq.k);
-                    } else {
-                      setFiltro({tipo:"equipo",valor:eq.k});
-                      setSels(new Set());
-                      setTreeEqOpen(eq.k);
-                    }
-                  }}
-                  style={{background:isSel?eq.color+"15":"#fff",
-                    borderRadius:11, padding:"10px 14px", cursor:"pointer",
-                    border:"2px solid "+(isSel?eq.color:T.border),
-                    display:"flex", alignItems:"center", gap:10}}>
-                  <div style={{width:30,height:30,borderRadius:8,background:eq.color+"20",
-                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,
-                    color:eq.color,fontWeight:800,flexShrink:0}}>{eq.k[0]}</div>
-                  <div style={{flex:1}}>
-                    <p style={{margin:0, fontSize:13, fontWeight:700, color:isSel?eq.color:T.text}}>{eq.k}</p>
-                    <p style={{margin:0, fontSize:10, color:T.muted}}>
-                      {ags.length} vendedores
-                    </p>
-                  </div>
-                  {isSel && <span style={{color:eq.color,fontWeight:800}}>✓</span>}
-                  <span style={{color:isOpen?eq.color:T.muted, fontSize:16,
-                    transform:isOpen?"rotate(90deg)":"rotate(0deg)",
-                    display:"inline-block", transition:"transform .2s"}}>›</span>
-                </div>
-
-                {/* Nivel 3: Vendedores */}
-                {isOpen && (
-                  <div style={{marginLeft:12, borderLeft:"2px solid "+eq.color+"22",
-                      paddingLeft:10, marginTop:6}}>
-                    {ags.map(function(ag){
-                      var sel = filtro.tipo==="agente" && filtro.valor===ag;
-                      return (
-                        <div key={ag} onClick={function(){
-                            setFiltro({tipo:"agente",valor:ag});
-                            setSels(new Set());
-                          }}
-                          style={{background:sel?eq.color+"12":"#fff", borderRadius:10,
-                            padding:"9px 12px", marginBottom:5, cursor:"pointer",
-                            border:"1.5px solid "+(sel?eq.color:T.border),
-                            display:"flex", alignItems:"center", gap:10}}>
-                          <div style={{width:28,height:28,borderRadius:7, background:eq.color+"20",
-                            display:"flex",alignItems:"center",justifyContent:"center",
-                            fontSize:13, flexShrink:0}}>🧑‍💼</div>
-                          <div style={{flex:1}}>
-                            <p style={{margin:0, fontSize:12, fontWeight:700, color:T.text}}>{ag}</p>
-                          </div>
-                          {sel && <span style={{color:eq.color,fontWeight:800}}>✓</span>}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* (v3.20.2 / v3.22.1) Filtro por semana de ruta — visible para todos los roles */}
-      <div style={{background:soloRuta?T.blue:"#fff", color:soloRuta?"#fff":T.text,
-          borderRadius:11, padding:"10px 14px", marginBottom:10,
-          border:"1.5px solid "+(soloRuta?T.blue:T.border)}}>
-        <div onClick={function(){setSoloRuta(!soloRuta);}}
-          style={{display:"flex", alignItems:"center", gap:10, cursor:"pointer"}}>
-          <span style={{width:22,height:22,borderRadius:6,
-            border:"2px solid "+(soloRuta?"#fff":"#CBD5E1"),
-            background:soloRuta?"#fff":"transparent",
-            display:"flex",alignItems:"center",justifyContent:"center",
-            color:T.blue, fontWeight:800, fontSize:14}}>{soloRuta?"✓":""}</span>
-          <div style={{flex:1}}>
-            <p style={{margin:0, fontSize:13, fontWeight:700}}>
-              {esAgente ? "📍 Filtrar por ruta de visita" : "📅 Solo rutas de esta semana"}
-            </p>
-            <p style={{margin:0, fontSize:10.5, opacity:.75}}>
-              {soloRuta
-                ? (esAgente
-                    ? "Solo clientes con SEMANAVISITA = "+semanaRuta
-                    : "Cada vendedor con su ruta de la semana ISO "+semanaJefe+" ("+(Object.keys(rutasPorAgente).length)+" planes activos)")
-                : (esAgente
-                    ? "Activa para ver solo los clientes de tu ruta"
-                    : "Activa para ver lo que cada vendedor tiene programado esta semana")}
-            </p>
-          </div>
-        </div>
-        {soloRuta && esAgente && (
-          <div style={{marginTop:10, paddingTop:10, borderTop:"1px solid "+(soloRuta?"#ffffff33":T.border),
-              display:"flex", alignItems:"center", gap:8}}>
-            <span style={{fontSize:11, opacity:.85, fontWeight:700}}>Ruta:</span>
-            <button onClick={function(){setSemanaRuta(Math.max(1, semanaRuta-1));}}
-              style={{background:"#ffffff22", border:"none", color:"inherit", padding:"4px 10px",
-                borderRadius:7, fontWeight:800, fontSize:14, cursor:"pointer"}}>‹</button>
-            <select value={semanaRuta} onChange={function(e){setSemanaRuta(parseInt(e.target.value));}}
-              style={{padding:"5px 8px", borderRadius:7, border:"none", background:"#ffffff",
-                color:T.text, fontWeight:800, fontSize:12, cursor:"pointer"}}>
-              {Array.from({length:52},function(_,i){return i+1;}).map(function(n){
-                var esActual = n===semIso;
-                var esMiPlan = planSem && planSem.modo==="ruta" && parseInt(planSem.rutaNum)===n;
-                var sufijo = esMiPlan ? " (📍 mi ruta)" : esActual ? " (sem. actual)" : "";
-                return <option key={n} value={n}>Ruta {n}{sufijo}</option>;
-              })}
-            </select>
-            <button onClick={function(){setSemanaRuta(Math.min(52, semanaRuta+1));}}
-              style={{background:"#ffffff22", border:"none", color:"inherit", padding:"4px 10px",
-                borderRadius:7, fontWeight:800, fontSize:14, cursor:"pointer"}}>›</button>
-            {planSem && planSem.modo==="ruta" && planSem.rutaNum && parseInt(planSem.rutaNum)!==semanaRuta && (
-              <button onClick={function(){setSemanaRuta(parseInt(planSem.rutaNum));}}
-                style={{marginLeft:"auto", background:"#ffffff", color:T.blue, border:"none",
-                  padding:"4px 10px", borderRadius:7, fontWeight:800, fontSize:10.5, cursor:"pointer"}}>
-                📍 Mi ruta
-              </button>
-            )}
-          </div>
-        )}
-        {soloRuta && !esAgente && (
-          <div style={{marginTop:10, paddingTop:10, borderTop:"1px solid #ffffff33",
-              display:"flex", alignItems:"center", gap:8, flexWrap:"wrap"}}>
-            <span style={{fontSize:11, opacity:.85, fontWeight:700}}>Semana ISO:</span>
-            <button onClick={function(){setSemanaJefe(Math.max(1, semanaJefe-1));}}
-              style={{background:"#ffffff22", border:"none", color:"inherit", padding:"4px 10px",
-                borderRadius:7, fontWeight:800, fontSize:14, cursor:"pointer"}}>‹</button>
-            <select value={semanaJefe} onChange={function(e){setSemanaJefe(parseInt(e.target.value));}}
-              style={{padding:"5px 8px", borderRadius:7, border:"none", background:"#ffffff",
-                color:T.text, fontWeight:800, fontSize:12, cursor:"pointer"}}>
-              {Array.from({length:52},function(_,i){return i+1;}).map(function(n){
-                var esActual = n===semIso;
-                var sufijo = esActual ? " (sem. actual)" : "";
-                return <option key={n} value={n}>Semana {n}{sufijo}</option>;
-              })}
-            </select>
-            <button onClick={function(){setSemanaJefe(Math.min(52, semanaJefe+1));}}
-              style={{background:"#ffffff22", border:"none", color:"inherit", padding:"4px 10px",
-                borderRadius:7, fontWeight:800, fontSize:14, cursor:"pointer"}}>›</button>
-            {semanaJefe !== semIso && (
-              <button onClick={function(){setSemanaJefe(semIso);}}
-                style={{marginLeft:"auto", background:"#ffffff", color:T.blue, border:"none",
-                  padding:"4px 10px", borderRadius:7, fontWeight:800, fontSize:10.5, cursor:"pointer"}}>
-                📅 Hoy
-              </button>
-            )}
-            {Object.keys(rutasPorAgente).length===0 && (
-              <div style={{flex:"1 1 100%", marginTop:8, fontSize:11, opacity:.9, lineHeight:1.5}}>
-                ⚠️ Ningún vendedor tiene ruta planificada para la semana ISO {semanaJefe}.
-                Cuando los comerciales fijen sus rutas en "Mi semana", aparecerán aquí.
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* (v3.20.0) Chip de filtro por artículo (drill-down) */}
-      {articuloFiltro && (
-        <div style={{background:"#FEF3C7", border:"1.5px solid #F59E0B",
-          borderRadius:11, padding:"10px 14px", marginBottom:10,
-          display:"flex", alignItems:"center", gap:10}}>
-          <span style={{fontSize:18}}>📦</span>
-          <div style={{flex:1}}>
-            <p style={{margin:0, fontSize:11, fontWeight:700, color:"#92400E", textTransform:"uppercase", letterSpacing:.4}}>Filtrando por artículo</p>
-            <p style={{margin:"2px 0 0", fontSize:13, fontWeight:800, color:"#7C2D12", fontFamily:"ui-monospace,Menlo,monospace"}}>{articuloFiltro}</p>
-          </div>
-          <button onClick={function(){setArticuloFiltro(null);}}
-            style={{background:"#fff", border:"1px solid #F59E0B", color:"#92400E",
-              padding:"6px 10px", borderRadius:7, fontWeight:800, fontSize:11, cursor:"pointer"}}>✕ Quitar</button>
-        </div>
-      )}
-
-      {/* KPIs (3 chips) */}
-      <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8, marginBottom:14}}>
-        {[
-          {k:"lost", icon:"🔴", lbl:"Perdidos", n:kpis.lost.length, amt:kpis.lost.reduce(function(s,c){return s+c.perdida;},0), color:"#DC2626"},
-          {k:"risk", icon:"🟠", lbl:"En riesgo", n:kpis.risk.length, amt:kpis.risk.reduce(function(s,c){return s+c.perdida;},0), color:"#F59E0B"},
-          {k:"warn", icon:"🟡", lbl:"Atención", n:kpis.warn.length, amt:kpis.warn.reduce(function(s,c){return s+c.perdida;},0), color:"#EAB308"}
-        ].map(function(kpi){
-          var act = severidad===kpi.k;
-          return <div key={kpi.k} onClick={function(){setSeveridad(kpi.k); if(vista!=="clientes") setVista("clientes");}}
-            style={{background:"#fff", borderRadius:14, padding:"12px 6px", textAlign:"center",
-              border:"2px solid "+(act?kpi.color:"transparent"), cursor:"pointer",
-              boxShadow:act?"0 2px 8px "+kpi.color+"33":"0 1px 3px rgba(0,0,0,.04)"}}>
-            <div style={{fontSize:20, marginBottom:3}}>{kpi.icon}</div>
-            <p style={{margin:0, fontSize:22, fontWeight:900, color:kpi.color, lineHeight:1}}>{kpi.n}</p>
-            <p style={{margin:"3px 0 0", fontSize:10, fontWeight:700, color:T.muted, textTransform:"uppercase", letterSpacing:.4}}>{kpi.lbl}</p>
-            <p style={{margin:"2px 0 0", fontSize:10, fontWeight:600, color:T.muted}}>{fmt(kpi.amt)}</p>
-          </div>;
-        })}
-      </div>
-
-      {/* (v3.20.1) Panel diagnóstico cuando no hay clientes en el filtro actual */}
-      {clientesFiltrados.length === 0 && datosCalc.clientes.length > 0 && (
-        <div style={{background:"#FFFBEB", border:"1.5px solid #F59E0B", borderRadius:12, padding:14, marginBottom:14}}>
-          <p style={{margin:0, fontSize:13, fontWeight:800, color:"#92400E"}}>⚠️ Sin clientes con este filtro</p>
-          <p style={{margin:"6px 0 0", fontSize:11.5, color:"#78350F"}}>Hay <strong>{datosCalc.clientes.length}</strong> clientes con bajadas en total, pero ninguno encaja con tu filtro actual.</p>
-          {esAgente && (function(){
-            // Calcular agentes presentes en los datos
-            var agentesUnicos = {};
-            datosCalc.clientes.forEach(function(c){ agentesUnicos[c.agente||"(vacío)"] = (agentesUnicos[c.agente||"(vacío)"]||0)+1; });
-            var topAgentes = Object.keys(agentesUnicos).map(function(k){return {ag:k, n:agentesUnicos[k]};}).sort(function(a,b){return b.n-a.n;}).slice(0,8);
-            var misIdsArr = Array.from(misIds);
-            return <div style={{marginTop:10, padding:10, background:"#fff", borderRadius:8, fontSize:11}}>
-              <p style={{margin:"0 0 4px", fontWeight:700, color:T.text}}>🔍 Diagnóstico:</p>
-              <p style={{margin:"0 0 4px"}}><strong>Tu identificador en el CRM:</strong> <code style={{background:"#F1F5F9", padding:"1px 5px", borderRadius:3}}>{misIdsArr.join(", ")}</code></p>
-              <p style={{margin:"0 0 4px"}}><strong>Agentes presentes en las ventas:</strong></p>
-              <ul style={{margin:"0 0 4px 14px", padding:0}}>
-                {topAgentes.map(function(t,i){
-                  var match = misIds.has((t.ag||"").toUpperCase());
-                  return <li key={i} style={{color:match?"#16A34A":T.text, fontWeight:match?700:400}}>{t.ag} ({t.n} clientes){match?" ✓ coincide contigo":""}</li>;
-                })}
-              </ul>
-              <p style={{margin:"6px 0 0", fontSize:10.5, color:T.muted}}>
-                Si tu identificador no aparece en la lista, los datos de ventas no se están asociando a tu usuario. Pide al admin que actualice los datos de clientes y re-importe ventas.
-              </p>
-            </div>;
-          })()}
-          {!esAgente && (
-            <p style={{margin:"8px 0 0", fontSize:11.5, color:"#78350F"}}>Cambia el filtro del árbol jerárquico (arriba) para ver otros equipos o agentes.</p>
-          )}
-        </div>
-      )}
-
-      {/* Diagnóstico cuando ventasDB está vacío pero la pantalla cargó */}
-      {datosCalc.clientes.length === 0 && ventasDB && ventasDB.length > 0 && (
-        <div style={{background:"#FEF2F2", border:"1.5px solid #DC2626", borderRadius:12, padding:14, marginBottom:14}}>
-          <p style={{margin:0, fontSize:13, fontWeight:800, color:"#991B1B"}}>⚠️ Datos importados pero sin clasificar</p>
-          <p style={{margin:"6px 0 0", fontSize:11.5, color:"#7F1D1D"}}>
-            Hay <strong>{ventasDB.length}</strong> registros en Firebase pero ninguno cumple los criterios para ser clasificado como perdido/riesgo/atención.
-          </p>
-          <p style={{margin:"6px 0 0", fontSize:11, color:"#7F1D1D"}}>
-            Posibles causas: ventas &lt; 100€, sin <code>grupoAgente</code> asignado, o sin bajada respecto al año anterior.
-          </p>
-          {/* (v3.20.3) Mostrar campos reales del primer registro para diagnóstico */}
-          <div style={{marginTop:10, padding:10, background:"#fff", borderRadius:8, fontSize:10.5}}>
-            <p style={{margin:"0 0 6px", fontWeight:800, color:T.text}}>🔍 Primer registro real en Firebase:</p>
-            <pre style={{margin:0, fontFamily:"ui-monospace,Menlo,monospace", fontSize:10, color:"#1A1816", whiteSpace:"pre-wrap", wordBreak:"break-all", maxHeight:200, overflowY:"auto", background:"#F8FAFC", padding:8, borderRadius:6}}>
-{JSON.stringify(ventasDB[0], null, 2)}
-            </pre>
-            <p style={{margin:"8px 0 0", fontSize:10.5, color:T.muted}}>
-              Si los campos no son <code>clienteCodigo, ventas1Ant, ventasActual, grupoAgente</code> o variantes, el problema es de mapping. Avisa para ajustar.
-            </p>
-            {(function(){
-              // Stats rápidos
-              var conCodigo = ventasDB.filter(function(v){return v.clienteCodigo||v.cliente_codigo||v.codigo;}).length;
-              var conAgente = ventasDB.filter(function(v){return v.grupoAgente||v.GRUPOAGENTE||v.agente;}).length;
-              var conV1 = ventasDB.filter(function(v){return v.ventas1Ant||v.ventasAnioAnt;}).length;
-              var conVA = ventasDB.filter(function(v){return v.ventasActual||v.Ventas_2026;}).length;
-              return <p style={{margin:"6px 0 0", fontSize:10.5, color:T.muted}}>
-                📊 Con código cliente: <strong>{conCodigo}</strong> · Con agente: <strong>{conAgente}</strong> · Con ventas año ant.: <strong>{conV1}</strong> · Con ventas actuales: <strong>{conVA}</strong>
-              </p>;
-            })()}
-          </div>
-        </div>
-      )}
-
-      {/* Sub-tabs */}
-      <div style={{display:"flex", gap:4, marginBottom:12, padding:4, background:T.bg, borderRadius:11}}>
-        {[
-          {k:"clientes", lbl:"👤 Clientes", show:true},
-          {k:"agentes", lbl:"📊 Por agente", show:!esAgente},
-          {k:"articulos", lbl:"📦 Por artículo", show:true},
-          {k:"sinasignar", lbl:"⚠️ Sin asignar", show:!esAgente}
-        ].filter(function(t){return t.show;}).map(function(tab){
-          var act = vista===tab.k;
-          return <button key={tab.k} onClick={function(){setVista(tab.k);}}
-            style={{flex:1, padding:"9px 4px", borderRadius:9, border:"none",
-              background:act?T.navy:"transparent", color:act?"#fff":T.muted,
-              fontWeight:act?800:600, fontSize:11.5, cursor:"pointer"}}>{tab.lbl}</button>;
-        })}
-      </div>
-
-      {/* Vista CLIENTES */}
-      {vista==="clientes" && (
-        <div>
-          <div style={{display:"flex", gap:8, marginBottom:10}}>
-            <input value={busqueda} onChange={function(e){setBusqueda(e.target.value);}}
-              placeholder="🔍 Buscar cliente o código..."
-              style={{flex:1, padding:"10px 14px", border:"1px solid "+T.border, borderRadius:10, fontSize:13, background:"#F8FAFC"}}/>
-            {busqueda && (
-              <button onClick={function(){setBusqueda("");}}
-                style={{padding:"0 14px", border:"1px solid "+T.border, borderRadius:10,
-                  background:"#fff", color:T.muted, fontSize:13, cursor:"pointer"}}>✕</button>
-            )}
-          </div>
-          <div style={{display:"flex", justifyContent:"space-between", marginBottom:8, padding:"0 4px"}}>
-            <span style={{fontSize:11, fontWeight:800, textTransform:"uppercase", letterSpacing:.6, color:T.muted}}>
-              {severidad==="lost"?"Clientes perdidos":severidad==="risk"?"En riesgo":"Necesitan atención"} {descFiltro()}
-            </span>
-            <span style={{fontSize:11, fontWeight:700, color:T.text}}>{listaActiva.length} mostrados</span>
-          </div>
-
-          {listaActiva.length === 0 ? (
-            <div style={{textAlign:"center", padding:30, color:T.muted}}>
-              <p style={{margin:0, fontSize:14}}>Sin clientes en esta categoría 🎉</p>
-            </div>
-          ) : listaActiva.slice(0, 50).map(function(c){
-            var sev = c.cls;
-            var color = colorSev(sev);
-            var artBg = bgSev(sev);
-            var max = Math.max(c.v2025, c.v2026, 1);
-            var w25 = Math.round(c.v2025/max*100);
-            var w26 = Math.round(c.v2026/max*100);
-            var sel = sels.has(c.codigo);
-            return (
-              <div key={c.codigo} style={{background:"#fff", borderRadius:14, marginBottom:10,
-                  border:"1.5px solid "+(sel?T.purple:T.border),
-                  boxShadow:sel?"0 0 0 3px "+T.purple+"22":"0 1px 3px rgba(0,0,0,.03)",
-                  position:"relative", overflow:"hidden"}}>
-                {/* Checkbox */}
-                <div onClick={function(){toggleSel(c.codigo);}}
-                  style={{position:"absolute", top:12, left:12, width:22, height:22, borderRadius:6,
-                    border:"2px solid "+(sel?T.purple:"#CBD5E1"), background:sel?T.purple:"#fff",
-                    cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center",
-                    color:"#fff", fontWeight:800, fontSize:13, zIndex:5}}>{sel?"✓":""}</div>
-                <div style={{padding:"14px 16px 10px 44px", display:"flex", alignItems:"center", gap:10}}>
-                  <div style={{width:10, height:10, borderRadius:99, background:color, flexShrink:0}}></div>
-                  <div style={{flex:1, minWidth:0}}>
-                    <p style={{margin:0, fontSize:13, fontWeight:800, color:T.text, lineHeight:1.2}}>{c.nombre}</p>
-                    <p style={{margin:"3px 0 0", fontSize:10.5, color:T.muted}}>
-                      {c.codigo} · <span style={{background:"#F1F5F9", padding:"1px 5px", borderRadius:4, fontWeight:700, color:"#475569"}}>{nombreDeAgente(c.agente)}</span>
-                      {c.equipo && <span style={{marginLeft:4, fontSize:9.5, padding:"1px 5px", borderRadius:4, fontWeight:700,
-                        background:c.equipo==="WIKUK"?"#DCFCE7":"#FEF3C7",
-                        color:c.equipo==="WIKUK"?"#166534":"#92400E"}}>{c.equipo}</span>}
-                    </p>
-                  </div>
-                  <div style={{textAlign:"right", flexShrink:0}}>
-                    <p style={{margin:0, fontSize:15, fontWeight:900, color:color}}>{c.pct}%</p>
-                    <p style={{margin:"2px 0 0", fontSize:10, fontWeight:700, color:T.muted}}>{fmt(c.perdida)}</p>
-                  </div>
-                </div>
-                {/* Barras */}
-                <div style={{padding:"0 16px 8px 44px"}}>
-                  <div style={{display:"flex", alignItems:"center", gap:8, fontSize:10.5, marginBottom:4}}>
-                    <span style={{color:T.muted, fontWeight:700, width:32}}>2025</span>
-                    <div style={{flex:1, height:7, background:"#F1F5F9", borderRadius:99, overflow:"hidden"}}>
-                      <div style={{height:"100%", width:w25+"%", background:"#94A3B8", borderRadius:99}}/>
-                    </div>
-                    <span style={{fontWeight:800, color:T.text, minWidth:64, textAlign:"right", fontSize:10.5}}>{fmtFull(c.v2025)}</span>
-                  </div>
-                  <div style={{display:"flex", alignItems:"center", gap:8, fontSize:10.5}}>
-                    <span style={{color:T.muted, fontWeight:700, width:32}}>2026</span>
-                    <div style={{flex:1, height:7, background:"#F1F5F9", borderRadius:99, overflow:"hidden"}}>
-                      <div style={{height:"100%", width:w26+"%", background:color, borderRadius:99}}/>
-                    </div>
-                    <span style={{fontWeight:800, color:T.text, minWidth:64, textAlign:"right", fontSize:10.5}}>{fmtFull(c.v2026)}</span>
-                  </div>
-                </div>
-                {/* Artículos */}
-                {c.arts && c.arts.length > 0 && (
-                  <div style={{margin:"0 16px 12px", background:artBg, borderRadius:9, padding:"9px 11px"}}>
-                    <p style={{margin:"0 0 5px", fontSize:9.5, fontWeight:800, textTransform:"uppercase", letterSpacing:.5, color:color}}>
-                      {sev==="lost"?"❌ Ha dejado de comprar":"📉 Ha bajado en estos artículos"}
-                    </p>
-                    {c.arts.map(function(a,i){
-                      return <div key={i} style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start", fontSize:11, padding:"3px 0", gap:6}}>
-                        <div style={{flex:1, minWidth:0}}>
-                          <span style={{fontFamily:"ui-monospace,Menlo,monospace", fontSize:10.5, fontWeight:600, color:T.text}}>{a.p}</span>
-                          {a.cal && a.cal!=="." && <span style={{color:color, fontWeight:700, background:"#fff", padding:"0 5px", borderRadius:3, marginLeft:4, fontSize:9.5}}>{a.cal}</span>}
-                          {a.ultAnio && <span style={{display:"block", fontSize:9.5, color:T.muted, fontWeight:600, marginTop:1}}>📅 Última compra: {a.ultAnio}</span>}
-                        </div>
-                        <span style={{fontWeight:800, color:color, whiteSpace:"nowrap"}}>{fmt(a.v25)}</span>
-                      </div>;
-                    })}
-                  </div>
-                )}
-                {/* Acciones individuales */}
-                <div style={{padding:"10px 14px", display:"flex", gap:8, borderTop:"1px solid "+T.bg, background:"#FAFAFA"}}>
-                  <button onClick={function(){
-                      // Abrir wizard estrategia con cliente pre-seleccionado
-                      sessionStorage.setItem("estrategia_recup_cliente", JSON.stringify({nombre:c.nombre, codigo:c.codigo, agente:c.agente, perdida:c.perdida, pct:c.pct, arts:c.arts, cls:c.cls}));
-                      onNav("estrategias");
-                    }}
-                    style={{flex:1, padding:9, fontSize:11.5, fontWeight:800, borderRadius:9,
-                      border:"none", background:T.purple, color:"#fff", cursor:"pointer"}}>
-                    🎯 Crear estrategia
-                  </button>
-                  <button onClick={function(){
-                      var cli = (clientesFB||[]).find(function(x){return ((x.codigo||x.id||"")+"").toUpperCase()===c.codigo.toUpperCase() || (x.nombre||"").toUpperCase()===c.nombre.toUpperCase();});
-                      if(cli && onAbrirCliente) onAbrirCliente(cli);
-                      else if(onAbrirCliente) onAbrirCliente(c.nombre);
-                    }}
-                    style={{flex:1, padding:9, fontSize:11.5, fontWeight:800, borderRadius:9,
-                      border:"1.5px solid "+T.border, background:"#fff", color:T.text, cursor:"pointer"}}>
-                    👁 Ver ficha
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-          {listaActiva.length > 50 && (
-            <p style={{textAlign:"center", color:T.muted, padding:14, fontSize:12}}>
-              … {listaActiva.length-50} más. Aplica más filtros para reducir.
-            </p>
-          )}
-        </div>
-      )}
-
-      {/* Vista AGENTES */}
-      {vista==="agentes" && !esAgente && (
-        <div>
-          <div style={{display:"flex", justifyContent:"space-between", marginBottom:8, padding:"0 4px"}}>
-            <span style={{fontSize:11, fontWeight:800, textTransform:"uppercase", letterSpacing:.6, color:T.muted}}>
-              Ranking de agentes {descFiltro()}
-            </span>
-            <span style={{fontSize:11, fontWeight:700}}>{porAgente.length} agentes</span>
-          </div>
-          {porAgente.length === 0 ? (
-            <div style={{textAlign:"center", padding:30, color:T.muted}}>
-              <p style={{margin:0, fontSize:14}}>Sin datos en este filtro</p>
-            </div>
-          ) : porAgente.map(function(a){
-            var tot = a.n_lost + a.n_risk + a.n_warn;
-            return (
-              <div key={a.agente} onClick={function(){setFiltro({tipo:"agente",valor:a.agente}); setVista("clientes");}}
-                style={{background:"#fff", borderRadius:11, padding:"12px 14px", marginBottom:8,
-                  border:"1.5px solid "+T.border, cursor:"pointer", display:"flex", alignItems:"center", gap:12}}>
-                <div style={{width:36, height:36, borderRadius:99, background:"#F5F3FF",
-                  display:"flex", alignItems:"center", justifyContent:"center",
-                  fontSize:11, fontWeight:800, color:T.purple, flexShrink:0}}>{(a.nombre||a.agente).substring(0,2).toUpperCase()}</div>
-                <div style={{flex:1}}>
-                  <p style={{margin:0, fontSize:13, fontWeight:700}}>{a.nombre||a.agente}</p>
-                  <p style={{margin:"2px 0 0", fontSize:10.5, color:T.muted}}>
-                    {a.n_lost} perd · {a.n_risk} riesgo · {a.n_warn} aten
-                    <span style={{marginLeft:6, fontSize:9.5, padding:"1px 5px", borderRadius:4, fontWeight:700,
-                      background:a.equipo==="WIKUK"?"#DCFCE7":"#FEF3C7",
-                      color:a.equipo==="WIKUK"?"#166534":"#92400E"}}>{a.equipo}</span>
-                  </p>
-                </div>
-                <div style={{textAlign:"right"}}>
-                  <p style={{margin:0, fontSize:14, fontWeight:900, color:"#DC2626"}}>{fmt(a.amt)}</p>
-                  <p style={{margin:"2px 0 0", fontSize:9.5, fontWeight:600, textTransform:"uppercase", color:T.muted}}>{tot} clientes</p>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Vista ARTÍCULOS */}
-      {vista==="articulos" && (
-        <div>
-          {/* (v3.22.6) Buscador propio para artículos */}
-          <div style={{display:"flex", gap:8, marginBottom:10}}>
-            <input value={busquedaArt} onChange={function(e){setBusquedaArt(e.target.value);}}
-              placeholder="🔍 Buscar producto o código..."
-              style={{flex:1, padding:"10px 14px", border:"1px solid "+T.border, borderRadius:10, fontSize:13, background:"#F8FAFC"}}/>
-            {busquedaArt && (
-              <button onClick={function(){setBusquedaArt("");}}
-                style={{padding:"0 14px", border:"1px solid "+T.border, borderRadius:10,
-                  background:"#fff", color:T.muted, fontSize:13, cursor:"pointer"}}>✕</button>
-            )}
-          </div>
-          {(function(){
-            var listaArt = porArticulo;
-            if(busquedaArt){
-              var qa = busquedaArt.toUpperCase();
-              listaArt = listaArt.filter(function(a){
-                return (a.p||"").toUpperCase().indexOf(qa)>=0
-                    || (a.cod||"").toUpperCase().indexOf(qa)>=0;
-              });
-            }
-            return (
-              <div>
-                <div style={{display:"flex", justifyContent:"space-between", marginBottom:8, padding:"0 4px"}}>
-                  <span style={{fontSize:11, fontWeight:800, textTransform:"uppercase", letterSpacing:.6, color:T.muted}}>
-                    Top artículos en bajada {descFiltro()}
-                  </span>
-                  <span style={{fontSize:11, fontWeight:700}}>{listaArt.length} artículos</span>
-                </div>
-                {listaArt.length === 0 ? (
-                  <div style={{textAlign:"center", padding:30, color:T.muted}}>
-                    <p style={{margin:0, fontSize:14}}>{busquedaArt ? "Ningún artículo coincide con la búsqueda" : "Sin datos en este filtro"}</p>
-                  </div>
-                ) : listaArt.map(function(a,i){
-                  return (
-                    <div key={i} onClick={function(){setArticuloFiltro(a.p); setVista("clientes");}}
-                      style={{background:"#fff", borderRadius:11, padding:"13px 14px", marginBottom:8,
-                        border:"1.5px solid "+T.border, cursor:"pointer", transition:"all .15s"}}>
-                      <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:8, marginBottom:6}}>
-                        <div style={{flex:1, minWidth:0}}>
-                          <p style={{margin:0, fontFamily:"ui-monospace,Menlo,monospace", fontSize:13, fontWeight:800, color:T.text}}>{a.p}</p>
-                          <span style={{display:"inline-block", marginTop:4, background:"#FEF2F2", color:"#991B1B", padding:"2px 8px", borderRadius:5, fontSize:11, fontWeight:700}}>
-                            👁 Ver {a.n_clientes} cliente{a.n_clientes!==1?"s":""} afectado{a.n_clientes!==1?"s":""}
-                          </span>
-                        </div>
-                        <div style={{textAlign:"right", flexShrink:0}}>
-                          <p style={{margin:0, fontSize:14, fontWeight:900, color:"#DC2626"}}>-{fmt(a.v25)}</p>
-                          <p style={{margin:"2px 0 0", fontSize:9.5, fontWeight:600, textTransform:"uppercase", color:T.muted}}>perdido</p>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })()}
-        </div>
-      )}
-
-      {/* (v3.22.34) Vista CLIENTES SIN ASIGNAR — solo CEO/Director/Jefe */}
-      {vista==="sinasignar" && !esAgente && (
-        <SinAsignarView usuario={usuario} clientesFB={clientesFB} ventasDB={ventasDB}
-          onAbrirCliente={onAbrirCliente} onNav={onNav}/>
-      )}
-
-      {/* Barra flotante multi-select */}
-      {sels.size > 0 && (
-        <div style={{position:"fixed", bottom:62, left:"50%", transform:"translateX(-50%)",
-          maxWidth:420, width:"calc(100% - 24px)", background:T.text, color:"#fff",
-          borderRadius:14, padding:"12px 14px", display:"flex", alignItems:"center", gap:10,
-          boxShadow:"0 8px 24px rgba(0,0,0,.3)", zIndex:100}}>
-          <div style={{flex:1}}>
-            <p style={{margin:0, fontSize:13, fontWeight:800}}>{sels.size} clientes seleccionados</p>
-            <p style={{margin:"2px 0 0", fontSize:11, opacity:.7}}>
-              {fmt(selectedClientesArr().reduce(function(s,c){return s+Math.abs(c.perdida);},0))} a recuperar
-            </p>
-          </div>
-          <button onClick={function(){setModalAccion("estrategia");}}
-            style={{background:T.purple, border:"none", color:"#fff", padding:"8px 11px",
-              borderRadius:8, fontWeight:800, fontSize:11, cursor:"pointer"}}>🎯 Estrategia</button>
-          <button onClick={function(){setModalAccion("tareas");}}
-            style={{background:"#EF4444", border:"none", color:"#fff", padding:"8px 11px",
-              borderRadius:8, fontWeight:800, fontSize:11, cursor:"pointer"}}>📌 Tareas</button>
-        </div>
-      )}
-
-      {/* Modal de confirmación */}
-      {modalAccion && (
-        <div onClick={function(){setModalAccion(null);}}
-          style={{position:"fixed", inset:0, background:"rgba(0,0,0,.5)", zIndex:200,
-            display:"flex", alignItems:"flex-end", justifyContent:"center"}}>
-          <div onClick={function(e){e.stopPropagation();}}
-            style={{background:"#fff", borderRadius:"20px 20px 0 0", padding:24,
-              width:"100%", maxWidth:440, animation:"slideUp .2s"}}>
-            <div style={{textAlign:"center", marginBottom:14}}>
-              <div style={{fontSize:36, marginBottom:8}}>{modalAccion==="estrategia"?"🎯":"📌"}</div>
-              <p style={{margin:0, fontSize:17, fontWeight:800}}>
-                {modalAccion==="estrategia"?"Crear estrategias masivas":"Crear tareas masivas"}
-              </p>
-              <p style={{margin:"6px 0 0", fontSize:13, color:T.muted}}>
-                Se {modalAccion==="estrategia"?"crearán":"crearán"} <strong>{sels.size}</strong> {modalAccion==="estrategia"?"estrategias de recuperación":"tareas de seguimiento"} (una por cliente)
-              </p>
-            </div>
-            <div style={{background:T.bg, borderRadius:11, padding:"10px 12px", marginBottom:14, maxHeight:160, overflowY:"auto"}}>
-              {selectedClientesArr().slice(0,8).map(function(c){
-                return <div key={c.codigo} style={{padding:"4px 0", fontSize:11.5, color:T.text}}>
-                  • {c.nombre} <span style={{color:T.muted, fontSize:10}}>({fmt(c.perdida)})</span>
-                </div>;
-              })}
-              {sels.size > 8 && <p style={{margin:"6px 0 0", fontSize:10.5, color:T.muted, textAlign:"center"}}>… y {sels.size-8} más</p>}
-            </div>
-            <div style={{display:"flex", gap:8}}>
-              <button onClick={function(){setModalAccion(null);}}
-                style={{flex:1, padding:13, fontSize:13, fontWeight:800, borderRadius:11,
-                  border:"1.5px solid "+T.border, background:"#fff", color:T.muted, cursor:"pointer"}}>
-                Cancelar
-              </button>
-              <button onClick={function(){
-                  if(modalAccion==="estrategia") crearEstrategiasMasivas();
-                  else crearTareasMasivas();
-                }}
-                style={{flex:1, padding:13, fontSize:13, fontWeight:800, borderRadius:11,
-                  border:"none", background:modalAccion==="estrategia"?T.purple:"#EF4444", color:"#fff", cursor:"pointer"}}>
-                {modalAccion==="estrategia"?"Crear "+sels.size+" estrategias":"Crear "+sels.size+" tareas"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
 
 
 // ═══════════════════════════════════════════════════════════════════
@@ -31148,7 +30073,7 @@ function App(props){
   const NAV_AGENTE=[
     {id:"dashboard",    icon:"🏠",label:"Inicio",      color:usuario.color},
     {id:"plan_semanal", icon:"📅",label:"Mi semana",   color:T.blue},
-    {id:"recuperacion", icon:"🩹",label:"Recuperar",   color:"#DC2626"},
+    {id:"analisis",     icon:"📈",label:"Análisis",   color:"#1F5FA8"},
     {id:"clientes",     icon:"📋",label:"Clientes",    color:T.blue},
     {id:"actividad",    icon:"📊",label:"Actividad",   color:"#6366F1"},
     {id:"oportunidades",icon:"💼",label:"Ops",         color:T.navy,  badge:opsAbiertas},
@@ -31167,7 +30092,7 @@ function App(props){
     {id:"dashboard",    icon:"📊",label:"Mi equipo",   color:usuario.color},
     {id:"sala_mandos",  icon:"🎯",label:"Mandos",      color:"#6366F1"},
     {id:"plan_semanal", icon:"📅",label:"Mi semana",   color:T.blue},
-    {id:"recuperacion", icon:"🩹",label:"Recuperar",   color:"#DC2626"},
+    {id:"analisis",     icon:"📈",label:"Análisis",   color:"#1F5FA8"},
     {id:"calendario",   icon:"🗓️",label:"Agenda",       color:T.blue},
     {id:"tareas",       icon:"📌",label:"Tareas",      color:T.red,   badge:urgCount},
     {id:"clientes_eq",  icon:"📋",label:"Clientes",    color:T.blue},
@@ -31186,7 +30111,7 @@ function App(props){
     {id:"dashboard",    icon:"📊",label:"Dashboard",    color:usuario.color},
     {id:"sala_mandos",  icon:"🎯",label:"Mandos",       color:"#6366F1"},
     {id:"plan_semanal", icon:"📅",label:"Mi semana",    color:T.blue},
-    {id:"recuperacion", icon:"🩹",label:"Recuperar",    color:"#DC2626"},
+    {id:"analisis",     icon:"📈",label:"Análisis",    color:"#1F5FA8"},
     {id:"calendario",   icon:"🗓️",label:"Agenda",        color:T.blue},
     {id:"tareas",       icon:"📌",label:"Tareas",       color:T.red,   badge:urgCount},
     {id:"clientes_eq",  icon:"📋",label:"Clientes",     color:T.blue},
@@ -31847,7 +30772,7 @@ function App(props){
                section==="reporting"?"📈 Reporting":
                section==="ia"?"🤖 Asistente IA":
                section==="plan_semanal"?"📅 Mi semana":
-               section==="recuperacion"?"🩹 Recuperación":
+               section==="analisis"?"📈 Análisis":
                section}
             </p>
           </div>
@@ -31885,7 +30810,11 @@ function App(props){
         {esAgente&&section==="clientes"&&   <GestorClientes usuario={usuario} actividad={actividadSemana} onActividad={onActividad} onBack={function(){setHideNav(false);setClienteDirecto(null);setSection(prevSectionRef.current||"dashboard");}} clientesFB={misClientesFB} muestrasDB={muestrasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} estrategiasDB={estrategiasDB} ofertasDB={ofertasDB} clienteDirecto={clienteDirecto} onClienteDirectoUsado={()=>setClienteDirecto(null)} onNewIncidencia={function(inc){setIncidenciasDB(function(prev){return [inc].concat(prev);});}} onNewMuestra={function(m){setMuestrasDB(function(prev){return [m].concat(prev);});}} onNewEstrategia={function(e){setEstrategiasDB(function(prev){return [e].concat(prev);});}} onNewOferta={function(o){setOfertasDB(function(prev){return [o].concat(prev||[]);});}} onNavegar={setSection}/> }
         {esAgente&&section==="plan_semanal"&& <MiSemana usuario={usuario} clientesFB={misClientesFB} todosClientesFB={(clientesDB&&clientesDB._todos)||misClientesFB} onBack={null} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} muestrasDB={muestrasDB} ofertasDB={ofertasDB} setOfertasDB={setOfertasDB} portalUsersDB={portalUsersDB} actividad={actividadSemana} onAbrirCliente={function(data){var obj=typeof data==="string"?{nombre:data,ts:Date.now()}:Object.assign({},data,{ts:Date.now()});setClienteDirecto(obj);setHideNav(true);setSection("clientes");}} onAbrirProyecto={function(nombre){setProyectoDirecto({nombre:nombre,ts:Date.now()});setSection("proyectos");}} onNewCliente={function(nuevo){setClientesDB(function(prev){if(!prev||!prev._todos)return prev;return Object.assign({},prev,{_todos:[nuevo].concat(prev._todos)});});}} onAbrirOportunidad={function(opo){setOpoDirecta(Object.assign({},opo,{ts:Date.now()}));setSection("oportunidades");}}/>}
         {!esAgente&&section==="plan_semanal"&& <MiSemana usuario={usuario} clientesFB={misClientesFB} todosClientesFB={(clientesDB&&clientesDB._todos)||misClientesFB} onBack={null} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} muestrasDB={muestrasDB} ofertasDB={ofertasDB} setOfertasDB={setOfertasDB} portalUsersDB={portalUsersDB} actividad={actividadSemana} onAbrirCliente={function(data){var obj=typeof data==="string"?{nombre:data,ts:Date.now()}:Object.assign({},data,{ts:Date.now()});setClienteDirecto(obj);setHideNav(true);setSection(esJefeOmas?"clientes_eq":"clientes");}} onAbrirProyecto={function(nombre){setProyectoDirecto({nombre:nombre,ts:Date.now()});setSection("proyectos");}} onNewCliente={function(nuevo){setClientesDB(function(prev){if(!prev||!prev._todos)return prev;return Object.assign({},prev,{_todos:[nuevo].concat(prev._todos)});});}} onAbrirOportunidad={function(opo){setOpoDirecta(Object.assign({},opo,{ts:Date.now()}));setSection("oportunidades");}}/>}
-        {section==="recuperacion"&& <Recuperacion usuario={usuario} ventasDB={ventasDB} clientesFB={misClientesFB} onBack={()=>setSection("dashboard")} onNav={setSection} onAbrirCliente={function(data){var obj=typeof data==="string"?{nombre:data,ts:Date.now()}:Object.assign({},data,{ts:Date.now()});setClienteDirecto(obj);setHideNav(true);setSection(esAgente?"clientes":"clientes_eq");}}/>}
+        {section==="analisis"&& (
+          <Barrera nombre="El análisis">
+            <PanelAnalisis usuario={usuario} onNav={setSection}/>
+          </Barrera>
+        )}
         {/* (v3.23.60) Centro de Pendientes */}
         {section==="centro_pendientes"&& <CentroPendientes usuario={usuario} muestrasDB={muestrasDB} ofertasDB={ofertasDB} incidenciasDB={incidenciasDB} onBack={function(){setSection("dashboard");}} onNav={setSection}/>}
         {section==="aprob_clientes"&& <AprobClientes usuario={usuario} clientesDB={clientesDB} setClientesDB={setClientesDB} onBack={function(){setSection("dashboard");}}/>}
@@ -35786,6 +34715,442 @@ function AsistenteIA({ usuario, clientesFB, oportunidadesDB }) {
       `}</style>
     </div>
   );
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// PanelAnalisis — ventas reales de Power BI, dónde se pierde y en qué
+// artículos. Sustituye a la página analisis.html: dentro del CRM no hay
+// recarga y la estrategia se abre con el formulario ya relleno.
+// ══════════════════════════════════════════════════════════════════════
+function PanelAnalisis({usuario, onNav}){
+  const [datos,setDatos]=useState(null);      // null = cargando
+  const [error,setError]=useState(null);
+  const [meta,setMeta]=useState(null);
+  const [acciones,setAcciones]=useState({});
+  const [fRama,setFRama]=useState("");
+  const [fAgente,setFAgente]=useState("");
+  const [abierto,setAbierto]=useState(null);   // comercial desplegado
+  const [clientes,setClientes]=useState(null);
+  const [cliAbierto,setCliAbierto]=useState(null);
+  const [arts,setArts]=useState({});
+
+  const eur=(n)=>Math.round(n||0).toLocaleString("es-ES")+" €";
+  const pc=(n)=>(n>0?"+":"")+Number(n||0).toFixed(1)+" %";
+  const val=(f)=>!f?null:
+    f.doubleValue!==undefined?Number(f.doubleValue):
+    f.integerValue!==undefined?Number(f.integerValue):
+    f.booleanValue!==undefined?f.booleanValue:
+    f.stringValue!==undefined?f.stringValue:null;
+  const docs=(j)=>(j.documents||[]).map(d=>{
+    const o={_id:d.name.split("/").pop()};
+    for(const [k,v] of Object.entries(d.fields||{})) o[k]=val(v);
+    return o;
+  });
+
+  // ── Carga inicial ──
+  useEffect(()=>{
+    let vivo=true;
+    (async()=>{
+      try{
+        const [ra,rj,rc,rm]=await Promise.all([
+          fetch(`${FB_BASE}/pbi_resumen_agente?pageSize=300`),
+          fetch(`${FB_BASE}/pbi_ajustes?pageSize=300`).catch(()=>null),
+          fetch(`${FB_BASE}/acciones_analisis?pageSize=300`).catch(()=>null),
+          fetch(`${FB_BASE}/pbi_meta/estado`).catch(()=>null),
+        ]);
+        if(!ra.ok) throw new Error(`resumen: HTTP ${ra.status}`);
+        const ags=docs(await ra.json()).filter(a=>a._id!=="_TOTAL");
+        const aj={};
+        if(rj&&rj.ok) for(const x of docs(await rj.json())) aj[String(x._id).toUpperCase()]=x;
+
+        const norm=(v)=>String(v||"").toUpperCase().trim();
+        const lista=ags.filter(a=>{
+          const x=aj[norm(a._id)];
+          if(x&&x.equipo==="_EXCLUIR") return false;
+          const n=norm(a._id)+" "+norm(a.agente);
+          if(/INTERC|SIN AGENTE|TIENDA/.test(n)) return false;
+          return (a.ventasAct||0)>0||(a.ventasAntYTD||0)>0;
+        }).map(a=>({...a, equipo:a.equipo||"Sin rama"}));
+
+        const acc={};
+        if(rc&&rc.ok) for(const x of docs(await rc.json())){
+          const k=`${x.cliente}|${x.articulo}`;
+          (acc[k]=acc[k]||[]).push(x);
+        }
+        if(rm&&rm.ok){
+          const mj=await rm.json();
+          if(vivo) setMeta(mj.fields?.ultimaSync?.stringValue||null);
+        }
+        if(!vivo) return;
+        setAcciones(acc);
+        setDatos(lista);
+      }catch(e){ if(vivo) setError(e.message); }
+    })();
+    return()=>{vivo=false;};
+  },[]);
+
+  if(error) return (
+    <div style={{margin:"14px 16px",padding:"13px 15px",background:"#FDF3F3",
+      border:`1px solid ${T.red}40`,borderRadius:12,fontSize:13,color:"#991B1B"}}>
+      No se han podido cargar las ventas: {error}
+    </div>
+  );
+  if(!datos) return <p style={{padding:"34px 16px",textAlign:"center",
+    color:T.muted,fontSize:14}}>Leyendo ventas reales…</p>;
+
+  // ── Alcance según el rol ──
+  const rol=String(usuario.rol||"").toLowerCase();
+  const mando=rol.includes("director")||rol.includes("jefe")||rol==="admin"||rol==="ceo";
+  const miClave=String(usuario.grupoAgente||usuario.catalogoVendedor||"").toUpperCase();
+  const base = mando ? datos : datos.filter(a=>String(a._id).toUpperCase()===miClave);
+
+  const ramas=[...new Set(base.map(a=>a.equipo))].sort();
+  const visibles=base.filter(a=>
+    (!fRama||a.equipo===fRama) && (!fAgente||(a.agente||a._id)===fAgente));
+  const agentesSel=[...new Set(base.filter(a=>!fRama||a.equipo===fRama)
+    .map(a=>a.agente||a._id))].sort();
+
+  // ── Totales ──
+  const t=visibles.reduce((s,a)=>({
+    act:s.act+(a.ventasAct||0), ant:s.ant+(a.ventasAntYTD||0),
+    mes:s.mes+(a.ventasMes||0), mesAnt:s.mesAnt+(a.ventasMesAnt||0),
+    mg:s.mg+(a.margenAct||0), mgAnt:s.mgAnt+(a.margenAntYTD||0),
+    base:s.base+((a.ventasAct||0)*((a.coberturaAct||0)/100)),
+    baseAnt:s.baseAnt+((a.ventasAntYTD||0)*((a.coberturaAntYTD||0)/100)),
+    mgMes:s.mgMes+(a.margenMes||0), bMes:s.bMes+(a.baseMes||0),
+    mgMesAnt:s.mgMesAnt+(a.margenMesAnt||0), bMesAnt:s.bMesAnt+(a.baseMesAnt||0),
+  }),{act:0,ant:0,mes:0,mesAnt:0,mg:0,mgAnt:0,base:0,baseAnt:0,
+      mgMes:0,bMes:0,mgMesAnt:0,bMesAnt:0});
+  const vAno = t.ant ? (t.act-t.ant)/t.ant*100 : null;
+  const vMes = t.mesAnt ? (t.mes-t.mesAnt)/t.mesAnt*100 : null;
+  const mAno = t.base ? t.mg/t.base*100 : null;
+  const mAnoAnt = t.baseAnt ? t.mgAnt/t.baseAnt*100 : null;
+  const mMes = t.bMes ? t.mgMes/t.bMes*100 : null;
+  const mMesAnt = t.bMesAnt ? t.mgMesAnt/t.bMesAnt*100 : null;
+
+  const titular=()=>{
+    if(vAno===null) return `${eur(t.act)} facturados este año.`;
+    const dif=Math.abs(t.act-t.ant);
+    const quien = mando ? (fAgente||fRama||"El grupo") : "Vas";
+    const va = mando ? "va" : "";
+    if(vAno>=3)  return `${quien} ${va} por delante del año pasado: ${eur(dif)} más.`;
+    if(vAno<=-3) return `${quien} ${va} por detrás del año pasado: faltan ${eur(dif)}.`;
+    return `${quien} ${va} en línea con el año pasado.`;
+  };
+
+  // ── Abrir un comercial: sus clientes ──
+  const verAgente=async(id)=>{
+    if(abierto===id){ setAbierto(null); setClientes(null); return; }
+    setAbierto(id); setClientes(null); setCliAbierto(null);
+    try{
+      const r=await fetch(`${FB_BASE}:runQuery`,{
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({structuredQuery:{
+          from:[{collectionId:"pbi_ventas_cliente"}],
+          where:{fieldFilter:{field:{fieldPath:"agente"},op:"EQUAL",
+                 value:{stringValue:id}}}, limit:800}}),
+      });
+      const j=await r.json();
+      const cs=(Array.isArray(j)?j:[]).filter(x=>x.document).map(x=>{
+        const o={};
+        for(const [k,v] of Object.entries(x.document.fields||{})) o[k]=val(v);
+        return o;
+      }).filter(c=>!c.fusionadoEn&&!c.intercompany);
+      setClientes(cs);
+    }catch(e){ setClientes([]); }
+  };
+
+  // ── Abrir un cliente: sus artículos ──
+  const verArts=async(cliente)=>{
+    if(cliAbierto===cliente){ setCliAbierto(null); return; }
+    setCliAbierto(cliente);
+    if(arts[cliente]) return;
+    try{
+      const r=await fetch(`/api/pbi-sync?articulosCliente=${encodeURIComponent(cliente)}&top=5`);
+      const j=await r.json();
+      setArts(p=>({...p,[cliente]:j.ok?(j.articulos||[]):[]}));
+    }catch(e){ setArts(p=>({...p,[cliente]:[]})); }
+  };
+
+  // ── Lanzar o pedir estrategia con el formulario ya relleno ──
+  const lanzar=async(tipo,c)=>{
+    const lista=(arts[c.cliente]||[]).filter(a=>a.diferencia<0)
+      .map(a=>({p:a.descripcion||a.articulo, cal:a.calibre||"", v25:Math.abs(a.diferencia)}));
+    const perdida=lista.reduce((s,a)=>s+a.v25,0);
+    const caida=c.ventasAntYTD
+      ? Math.round((c.ventasAct-c.ventasAntYTD)/c.ventasAntYTD*100) : 0;
+    try{
+      sessionStorage.setItem("estrategia_recup_cliente",JSON.stringify({
+        nombre:c.nombre||c.cliente, codigo:c.cliente, agente:abierto||"",
+        arts:lista, perdida, pct:caida,
+        cls: !c.ventasAct ? "lost" : caida<=-30 ? "risk" : "down",
+        origen:"analisis", solicitud:tipo==="solicitud",
+        solicitadoPor:usuario.nombre||"",
+      }));
+    }catch(e){}
+
+    // Histórico, para que quede constancia de lo hecho sobre cada cliente
+    const id=`${Date.now()}_${String(c.cliente).replace(/[^A-Za-z0-9]/g,"")}`;
+    fbEscribir("acciones_analisis",id,{
+      tipo, cliente:c.cliente, nombreCliente:c.nombre||"",
+      agente:abierto||"", usuario:usuario.nombre||"",
+      fecha:new Date().toISOString(),
+    }).catch(()=>{});
+
+    if(onNav) onNav("estrategias");
+  };
+
+  const dif=(c)=>(c.ventasAct||0)-(c.ventasAntYTD||0);
+  const caen=visibles.filter(a=>a.variacionPct!=null&&a.variacionPct<0&&a.ventasAntYTD>20000)
+    .sort((a,b)=>a.variacionPct-b.variacionPct).slice(0,8);
+  const crecen=visibles.filter(a=>a.variacionPct!=null&&a.variacionPct>0&&a.ventasAct>20000)
+    .sort((a,b)=>b.variacionPct-a.variacionPct).slice(0,5);
+  const dias = meta ? Math.floor((Date.now()-new Date(meta).getTime())/86400000) : null;
+
+  const Cifra=({v,e,c})=>(
+    <div style={{minWidth:0}}>
+      <p style={{margin:0,fontSize:19,fontWeight:800,letterSpacing:"-.02em",
+        color:c||T.text,fontVariantNumeric:"tabular-nums"}}>{v}</p>
+      <p style={{margin:"2px 0 0",fontSize:9.5,fontWeight:700,letterSpacing:.5,
+        textTransform:"uppercase",color:T.muted}}>{e}</p>
+    </div>
+  );
+
+  return (
+    <div style={{padding:"12px 16px 20px"}}>
+      {/* Filtros: solo para quien ve más de un comercial */}
+      {mando && (
+        <div style={{display:"flex",gap:8,marginBottom:12}}>
+          <select value={fRama} onChange={e=>{setFRama(e.target.value);setFAgente("");}}
+            style={{flex:1,minWidth:0,font:"inherit",fontSize:13,padding:"10px 11px",
+              border:`1.5px solid ${T.border}`,borderRadius:10,background:"#fff"}}>
+            <option value="">Todas las ramas ({ramas.length})</option>
+            {ramas.map(r=><option key={r} value={r}>{r}</option>)}
+          </select>
+          <select value={fAgente} onChange={e=>setFAgente(e.target.value)}
+            style={{flex:1,minWidth:0,font:"inherit",fontSize:13,padding:"10px 11px",
+              border:`1.5px solid ${T.border}`,borderRadius:10,background:"#fff"}}>
+            <option value="">Comerciales ({agentesSel.length})</option>
+            {agentesSel.map(a=><option key={a} value={a}>{a}</option>)}
+          </select>
+        </div>
+      )}
+
+      {/* Veredicto */}
+      <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:14,
+        padding:"15px 16px",marginBottom:14}}>
+        <p style={{margin:"0 0 12px",fontSize:14.5,fontWeight:700,lineHeight:1.4}}>
+          {titular()}
+        </p>
+        <div style={{display:"flex",gap:18,flexWrap:"wrap"}}>
+          <Cifra v={eur(t.act)} e="Este año"/>
+          {vAno!==null && <Cifra v={pc(vAno)} e="vs mismo periodo"
+            c={vAno<0?T.red:T.green}/>}
+          <Cifra v={eur(t.mes)} e={`Este mes${t.mesAnt?" · antes "+eur(t.mesAnt):""}`}/>
+          {vMes!==null && <Cifra v={pc(vMes)} e="vs año pasado"
+            c={vMes<0?T.red:T.green}/>}
+        </div>
+        <div style={{display:"flex",gap:18,flexWrap:"wrap",marginTop:12,
+          paddingTop:12,borderTop:`1px solid ${T.border}`}}>
+          <Cifra v={mAno!==null?mAno.toFixed(1)+" %":"—"}
+            e={`Margen${mAnoAnt!==null?" · antes "+mAnoAnt.toFixed(1)+" %":""}`}/>
+          {(mAno!==null&&mAnoAnt!==null) && <Cifra
+            v={`${mAno-mAnoAnt>0?"+":""}${(mAno-mAnoAnt).toFixed(1)} pts`} e="Año"
+            c={mAno<mAnoAnt?T.red:T.green}/>}
+          <Cifra v={mMes!==null?mMes.toFixed(1)+" %":"—"}
+            e={`Margen mes${mMesAnt!==null?" · antes "+mMesAnt.toFixed(1)+" %":""}`}/>
+          {(mMes!==null&&mMesAnt!==null) && <Cifra
+            v={`${mMes-mMesAnt>0?"+":""}${(mMes-mMesAnt).toFixed(1)} pts`} e="Mes"
+            c={mMes<mMesAnt?T.red:T.green}/>}
+        </div>
+      </div>
+
+      {/* Quién baja */}
+      {mando && caen.length>0 && (
+        <>
+          <p style={{margin:"18px 0 8px",fontSize:11,fontWeight:800,letterSpacing:.7,
+            textTransform:"uppercase",color:T.muted}}>Quién baja</p>
+          <div style={{background:T.white,border:`1px solid ${T.border}`,
+            borderRadius:14,overflow:"hidden"}}>
+            {caen.map((a,i)=>(
+              <div key={a._id}>
+                <div onClick={()=>verAgente(a._id)}
+                  style={{display:"flex",alignItems:"center",gap:11,padding:"13px 15px",
+                    borderTop:i?`1px solid #F1F5F9`:"none",cursor:"pointer",minHeight:56}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{margin:0,fontSize:14,fontWeight:700}}>{a.agente||a._id}</p>
+                    <p style={{margin:"1px 0 0",fontSize:11.5,color:T.muted}}>
+                      {eur(a.ventasAntYTD-a.ventasAct)} menos · {a.equipo}
+                    </p>
+                  </div>
+                  <div style={{textAlign:"right",fontVariantNumeric:"tabular-nums"}}>
+                    <p style={{margin:0,fontSize:14,fontWeight:700}}>{eur(a.ventasAct)}</p>
+                    <p style={{margin:0,fontSize:12,fontWeight:700,color:T.red}}>
+                      {pc(a.variacionPct)}</p>
+                  </div>
+                  <span style={{color:"#94A3B0",fontSize:20}}>
+                    {abierto===a._id?"▾":"›"}</span>
+                </div>
+
+                {/* Clientes del comercial */}
+                {abierto===a._id && (
+                  <div style={{background:"#F8FAFC"}}>
+                    {clientes===null
+                      ? <p style={{margin:0,padding:"12px 15px 12px 26px",fontSize:12.5,
+                          color:T.muted}}>Cargando sus clientes…</p>
+                      : (()=>{
+                          const pierde=clientes.filter(c=>dif(c)<-500)
+                            .sort((x,y)=>dif(x)-dif(y)).slice(0,10);
+                          if(!pierde.length) return <p style={{margin:0,
+                            padding:"12px 15px 12px 26px",fontSize:12.5,color:T.muted}}>
+                            No pierde volumen en ningún cliente.</p>;
+                          return pierde.map(c=>(
+                            <div key={c.cliente}>
+                              <div onClick={()=>verArts(c.cliente)}
+                                style={{display:"flex",gap:10,padding:"11px 15px 11px 26px",
+                                  borderTop:`1px solid #EEF2F6`,cursor:"pointer"}}>
+                                <div style={{flex:1,minWidth:0}}>
+                                  <p style={{margin:0,fontSize:13.5,fontWeight:600}}>
+                                    {c.nombre||c.cliente}</p>
+                                  <p style={{margin:"1px 0 0",fontSize:11,color:T.muted}}>
+                                    {c.poblacion||""} · venía de {eur(c.ventasAntYTD)}</p>
+                                </div>
+                                <div style={{textAlign:"right",flex:"none",
+                                  fontVariantNumeric:"tabular-nums"}}>
+                                  <p style={{margin:0,fontSize:13.5,fontWeight:700}}>
+                                    {eur(c.ventasAct)}</p>
+                                  <p style={{margin:0,fontSize:11.5,fontWeight:700,
+                                    color:T.red}}>{eur(dif(c))}</p>
+                                </div>
+                              </div>
+
+                              {/* Artículos y acciones */}
+                              {cliAbierto===c.cliente && (
+                                <div style={{background:"#F1F5F9"}}>
+                                  {!arts[c.cliente]
+                                    ? <p style={{margin:0,padding:"10px 15px 10px 34px",
+                                        fontSize:12,color:T.muted}}>Buscando artículos…</p>
+                                    : arts[c.cliente].filter(x=>x.diferencia<0).length===0
+                                      ? <p style={{margin:0,padding:"10px 15px 10px 34px",
+                                          fontSize:12,color:T.muted}}>Sin artículos con caída.</p>
+                                      : <>
+                                        {arts[c.cliente].filter(x=>x.diferencia<0).map(x=>(
+                                          <div key={x.articulo} style={{display:"flex",gap:10,
+                                            padding:"9px 15px 9px 34px",
+                                            borderTop:`1px solid #E2E8EF`}}>
+                                            <div style={{flex:1,minWidth:0}}>
+                                              <p style={{margin:0,fontSize:13,fontWeight:700}}>
+                                                {x.descripcion||x.articulo}</p>
+                                              <p style={{margin:"2px 0 0",fontSize:11,
+                                                color:T.muted}}>
+                                                {x.descripcion?x.articulo:""}
+                                                {x.calibre?" · calibre "+x.calibre:""}
+                                                {x.ventasAnt?" · venía de "+eur(x.ventasAnt):""}
+                                              </p>
+                                              {(acciones[`${c.cliente}|${x.articulo}`]||[])
+                                                .slice(0,2).map((h,k)=>(
+                                                <p key={k} style={{margin:"3px 0 0",fontSize:11,
+                                                  fontWeight:600,color:T.green}}>
+                                                  ✓ {h.tipo==="oferta"?"Oferta enviada"
+                                                    :h.tipo==="solicitud"?"Estrategia solicitada"
+                                                    :"Estrategia lanzada"}
+                                                  {h.usuario?" · "+h.usuario:""}
+                                                </p>
+                                              ))}
+                                            </div>
+                                            <div style={{textAlign:"right",flex:"none",
+                                              fontVariantNumeric:"tabular-nums"}}>
+                                              <p style={{margin:0,fontSize:13,fontWeight:800}}>
+                                                {eur(x.ventasAct)}</p>
+                                              <p style={{margin:0,fontSize:11,color:T.red}}>
+                                                {eur(x.diferencia)}</p>
+                                            </div>
+                                          </div>
+                                        ))}
+                                        <div style={{padding:"10px 15px 12px 34px"}}>
+                                          <button onClick={()=>lanzar(mando?"estrategia":"solicitud",c)}
+                                            style={{font:"inherit",fontSize:12.5,fontWeight:700,
+                                              padding:"9px 14px",borderRadius:9,
+                                              border:`1.5px solid ${T.navy}`,background:T.navy,
+                                              color:"#fff",cursor:"pointer"}}>
+                                            {mando?"Lanzar estrategia":"Pedir estrategia"}
+                                          </button>
+                                        </div>
+                                      </>}
+                                </div>
+                              )}
+                            </div>
+                          ));
+                        })()}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* Quién crece */}
+      {mando && crecen.length>0 && (
+        <>
+          <p style={{margin:"18px 0 8px",fontSize:11,fontWeight:800,letterSpacing:.7,
+            textTransform:"uppercase",color:T.muted}}>Quién crece</p>
+          <div style={{background:T.white,border:`1px solid ${T.border}`,
+            borderRadius:14,overflow:"hidden"}}>
+            {crecen.map((a,i)=>(
+              <div key={a._id} style={{display:"flex",alignItems:"center",gap:11,
+                padding:"12px 15px",borderTop:i?`1px solid #F1F5F9`:"none"}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{margin:0,fontSize:14,fontWeight:700}}>{a.agente||a._id}</p>
+                  <p style={{margin:"1px 0 0",fontSize:11.5,color:T.muted}}>
+                    {eur(a.ventasAct-a.ventasAntYTD)} más · {a.equipo}</p>
+                </div>
+                <div style={{textAlign:"right",fontVariantNumeric:"tabular-nums"}}>
+                  <p style={{margin:0,fontSize:14,fontWeight:700}}>{eur(a.ventasAct)}</p>
+                  <p style={{margin:0,fontSize:12,fontWeight:700,color:T.green}}>
+                    {pc(a.variacionPct)}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      <p style={{margin:"18px 0 0",fontSize:11,color:T.muted,textAlign:"center"}}>
+        {dias!==null&&dias>=2
+          ? `⚠️ Datos de hace ${dias} días. La sincronización puede haber fallado.`
+          : `Ventas reales de Power BI${meta?" · "+new Date(meta).toLocaleDateString("es-ES"):""}`}
+      </p>
+    </div>
+  );
+}
+
+// Barrera de errores: si un panel falla, se muestra el aviso en su hueco en
+// lugar de dejar la aplicacion entera en blanco.
+class Barrera extends React.Component{
+  constructor(p){ super(p); this.state={err:null}; }
+  static getDerivedStateFromError(e){ return {err:e}; }
+  componentDidCatch(e,info){ console.error("[BARRERA]",this.props.nombre,e,info); }
+  render(){
+    if(this.state.err) return (
+      <div style={{margin:"14px 16px",padding:"14px 16px",background:"#FDF3F3",
+        border:"1px solid #F0C2C4",borderRadius:12}}>
+        <p style={{margin:0,fontSize:13,fontWeight:800,color:"#B4232A"}}>
+          {this.props.nombre||"Este panel"} no se ha podido mostrar
+        </p>
+        <p style={{margin:"6px 0 0",fontSize:12,color:"#8A4448",
+          fontFamily:"ui-monospace,Menlo,monospace",whiteSpace:"pre-wrap"}}>
+          {String(this.state.err&&this.state.err.message||this.state.err)}
+        </p>
+        <button onClick={()=>this.setState({err:null})}
+          style={{marginTop:10,font:"inherit",fontSize:12.5,fontWeight:700,
+            padding:"8px 13px",borderRadius:9,border:"1px solid #F0C2C4",
+            background:"#fff",cursor:"pointer"}}>Reintentar</button>
+      </div>
+    );
+    return this.props.children;
+  }
 }
 
 // ── Montar la app ──────────────────────────────────────────────────
