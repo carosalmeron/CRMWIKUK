@@ -779,6 +779,7 @@ export default async function handler(req, res) {
           const g = await fbLeerDocumento("pbi_articulos_cliente", idCache);
           if (g && g.basadoEn === sello && g.datos) {
             out.articulos = JSON.parse(g.datos);
+            out.suben = g.suben ? JSON.parse(g.suben) : [];
             out.deCache = true;
             out.basadoEn = sello;
             out.codigosConsultados = g.codigos ? JSON.parse(g.codigos) : undefined;
@@ -892,10 +893,21 @@ EVALUATE
           // Solo se informa si hubo recodificacion, para poder auditarlo
           codigoAntiguo: g.codigosOrigen.filter((o) => o !== g.articulo).join(", ") || undefined,
         };
-      })
+      });
+
+      const utiles = out.articulos
         .filter((a) => a.ventasAct !== 0 || a.ventasAnt !== 0)
-        .sort((a, b) => a.diferencia - b.diferencia)
-        .slice(0, n);
+        .sort((a, b) => a.diferencia - b.diferencia);
+
+      // También los que crecen: sin esto solo se ve la mitad de la historia
+      // y no se puede saber si lo perdido se ha compensado con otra cosa.
+      out.articulos = utiles.filter((a) => a.diferencia < 0).slice(0, n);
+      out.suben = utiles.filter((a) => a.diferencia > 0)
+        .sort((a, b) => b.diferencia - a.diferencia).slice(0, n);
+      out.balance = {
+        pierde: num(out.articulos.reduce((x, a) => x + a.diferencia, 0)),
+        gana: num(out.suben.reduce((x, a) => x + a.diferencia, 0)),
+      };
       out.deCache = false;
       out.basadoEn = sello;
 
@@ -908,6 +920,7 @@ EVALUATE
             cliente: cli,
             basadoEn: sello,
             datos: JSON.stringify(out.articulos),
+            suben: JSON.stringify(out.suben || []),
             codigos: JSON.stringify(out.codigosConsultados || []),
             guardadoEl: new Date().toISOString(),
           }]);
@@ -1216,11 +1229,16 @@ ${[...Array(12)].map((_, i) => mes(i + 1)).join(",\n")}
 
       // Desde qué mes cae de forma sostenida: útil para saber si el problema
       // viene de una decisión concreta o es una erosión lenta.
+      // Solo se avisa si la caída sigue viva: si el último mes cerrado ha
+      // recuperado, la racha terminó y decir "cae desde abril" engaña.
       let desde = null;
-      for (let i = mesActual - 1; i >= 0; i--) {
-        const m2 = out.meses[i];
-        if (m2.anterior > 0 && m2.actual < m2.anterior * 0.7) desde = m2.mes;
-        else if (desde) break;
+      const ultimo = out.meses[mesActual - 1];
+      if (ultimo && ultimo.anterior > 0 && ultimo.actual < ultimo.anterior * 0.7) {
+        for (let i = mesActual - 1; i >= 0; i--) {
+          const m2 = out.meses[i];
+          if (m2.anterior > 0 && m2.actual < m2.anterior * 0.7) desde = m2.mes;
+          else break;
+        }
       }
       out.caeDesde = desde;
     } catch (e) {
@@ -1593,7 +1611,8 @@ EVALUATE
         const compacta = docs
           .filter((d) => !d.fusionadoEn && !d.intercompany)
           .map((d) => [d._id, String(d.nombre || "").slice(0, 60), d.agente || "",
-                       Math.round(d.ventasAct || 0), Math.round(d.ventasAntYTD || 0)]);
+                       Math.round(d.ventasAct || 0), Math.round(d.ventasAntYTD || 0),
+                       String(d.poblacion || "").slice(0, 28)]);
         const trozos = [];
         let actual = [], bytes = 0;
         for (const c of compacta) {
@@ -3196,6 +3215,7 @@ EVALUATE
             d.agente || "",
             Math.round(d.ventasAct || 0),
             Math.round(d.ventasAntYTD || 0),
+            String(d.poblacion || "").slice(0, 28),
           ]);
 
         // Un documento de Firestore admite 1 MB. Se trocea con margen.
