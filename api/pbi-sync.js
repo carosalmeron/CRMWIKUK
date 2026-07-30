@@ -1156,7 +1156,7 @@ EVALUATE
   if (req.query.progresionCliente) {
     const cli = String(req.query.progresionCliente).trim().toUpperCase()
       .replace(/[^A-Z0-9._-]/g, "");
-    const out = { ok: true, cliente: cli };
+    const out = { ok: true, cliente: cli, consulta: "v2-filtro-delante" };
     try {
       const { token } = await getToken(req);
       const T = M.ventas;
