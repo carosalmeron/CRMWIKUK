@@ -1606,6 +1606,9 @@ EVALUATE
         const ficha = fichas.get(cli) || fichas.get(canonico(cli)) || {};
         return {
           _id: docId(`${fec}_${cli}_${art}_${i}`),
+          // Clave que no depende de la fecha de entrega: permite reconocer la
+          // misma línea de un día para otro y detectar si se ha movido.
+          linea: docId(`${String(pick(r, "Pedido") || "").trim()}_${cli}_${art}`),
           cliente: cli,
           nombre: ficha.nombre || cli,
           poblacion: ficha.poblacion || null,
@@ -1699,6 +1702,98 @@ EVALUATE
         out.muestra = docs.slice(0, 5);
         out.resumenAgentes = resumen.slice(0, 8);
       } else {
+        // ── Movimientos de fecha ───────────────────────────────────────
+        // Antes de sobrescribir se compara la fecha planificada de cada línea
+        // con la que tenía en la sincronización anterior. Un pedido que se
+        // mueve no deja rastro en Power BI: si no se guarda aquí, se pierde.
+        try {
+          const antes = new Map();
+          for (const g of await fbLeerColeccion("pbi_pedidos")) {
+            if (g.linea) antes.set(g.linea, g);
+          }
+
+          const hoy = new Date().toISOString().slice(0, 10);
+          const movs = [];
+          const vistas = new Set();
+
+          for (const d of docs) {
+            if (!d.linea) continue;
+            vistas.add(d.linea);
+            const a = antes.get(d.linea);
+            if (!a) {
+              movs.push({ tipo: "nuevo", linea: d.linea, cliente: d.cliente,
+                nombre: d.nombre, agente: d.agente, articulo: d.articulo,
+                descripcion: d.descripcion, importe: d.importe,
+                pedido: d.pedido, fechaNueva: d.fecha, dias: null });
+              continue;
+            }
+            if (a.fecha && d.fecha && a.fecha !== d.fecha) {
+              const dias = Math.round(
+                (new Date(d.fecha) - new Date(a.fecha)) / 86400000);
+              movs.push({
+                tipo: dias > 0 ? "retraso" : "adelanto",
+                linea: d.linea, cliente: d.cliente, nombre: d.nombre,
+                agente: d.agente, articulo: d.articulo,
+                descripcion: d.descripcion, importe: d.importe,
+                pedido: d.pedido, fechaAntes: a.fecha, fechaNueva: d.fecha, dias,
+              });
+            }
+          }
+
+          // Líneas que estaban y ya no. Si su entrega estaba prevista para
+          // ayer o antes, lo normal es que se hayan servido. Si era futura,
+          // el pedido se ha anulado o modificado. No es certeza: Power BI no
+          // dice por qué desaparece una línea, solo que ya no está.
+          const ayer = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+          for (const [k, a] of antes) {
+            if (vistas.has(k)) continue;
+            const servido = a.fecha && a.fecha <= hoy;
+            movs.push({ tipo: servido ? "servido" : "anulado",
+              linea: k, cliente: a.cliente,
+              nombre: a.nombre, agente: a.agente, articulo: a.articulo,
+              descripcion: a.descripcion, importe: a.importe,
+              unidades: a.unidades, pedido: a.pedido,
+              fechaAntes: a.fecha, dias: null });
+          }
+
+          const porTipo = (lista, tipos, tope) => lista
+            .filter((m) => tipos.includes(m.tipo))
+            .sort((x, y) => (y.importe || 0) - (x.importe || 0))
+            .slice(0, tope);
+          const cuenta = (t) => movs.filter((m) => m.tipo === t).length;
+          const suma = (t) => num(movs.filter((m) => m.tipo === t)
+            .reduce((x, m) => x + (m.importe || 0), 0));
+
+          if (antes.size) {
+            await fbCommit("pbi_pedidos_cambios", [{
+              _id: hoy,
+              fecha: hoy,
+              detectadoEl: new Date().toISOString(),
+              lineasAntes: antes.size,
+              lineasAhora: docs.length,
+              retrasos: cuenta("retraso"),   importeRetrasos: suma("retraso"),
+              adelantos: cuenta("adelanto"), importeAdelantos: suma("adelanto"),
+              nuevos: cuenta("nuevo"),       importeNuevos: suma("nuevo"),
+              servidos: cuenta("servido"),   importeServidos: suma("servido"),
+              anulados: cuenta("anulado"),   importeAnulados: suma("anulado"),
+
+              // Cada categoría por separado, ordenada por importe. Se limita
+              // el volumen para que el documento no crezca sin control.
+              movimientos: JSON.stringify(porTipo(movs, ["retraso", "adelanto"], 150)),
+              salidas:     JSON.stringify(porTipo(movs, ["servido", "anulado"], 150)),
+              entradas:    JSON.stringify(porTipo(movs, ["nuevo"], 80)),
+            }]);
+            out.cambiosFecha = { retrasos: cuenta("retraso"),
+              adelantos: cuenta("adelanto"), nuevos: cuenta("nuevo"),
+              servidos: cuenta("servido"), anulados: cuenta("anulado"),
+              importeServidos: suma("servido"), importeRetrasos: suma("retraso") };
+          } else {
+            out.cambiosFecha = "primera pasada, no hay con qué comparar";
+          }
+        } catch (e) {
+          out.avisoCambios = e.message.slice(0, 160);
+        }
+
         out.escritos = await fbCommit("pbi_pedidos", docs);
         out.agentesConEntrada = await fbCommit("pbi_entrada_agente", resumen);
         // Fuera lo ya servido
@@ -2308,6 +2403,9 @@ EVALUATE
         const ficha = fichas.get(cli) || fichas.get(canonico(cli)) || {};
         return {
           _id: docId(`${fec}_${cli}_${art}_${i}`),
+          // Clave que no depende de la fecha de entrega: permite reconocer la
+          // misma línea de un día para otro y detectar si se ha movido.
+          linea: docId(`${String(pick(r, "Pedido") || "").trim()}_${cli}_${art}`),
           cliente: cli,
           nombre: ficha.nombre || cli,
           poblacion: ficha.poblacion || null,
