@@ -1068,6 +1068,35 @@ EVALUATE
   // Truco que no depende de las funciones INFO.*: la respuesta incluye
   // todas las columnas como claves, y un valor de ejemplo de cada una,
   // asi que revela nombres exactos Y tipos de dato de golpe.
+  // ?medidas=1 → devuelve las medidas del modelo con su fórmula DAX. Es la
+  // forma de saber qué hace exactamente "Ventas Mes Facturado" en vez de
+  // deducirlo por diferencias.
+  if (req.query.medidas === "1") {
+    const out = { ok: true };
+    try {
+      const { token } = await getToken(req);
+      const filas = await pbiQuery(token, `
+EVALUATE
+  SELECTCOLUMNS(INFO.MEASURES(),
+    "Medida", [Name],
+    "Formula", [Expression])`, true);
+
+      const buscar = String(req.query.buscar || "").toUpperCase();
+      out.total = filas.length;
+      out.medidas = filas
+        .map((r) => ({
+          medida: pick(r, "Medida"),
+          formula: String(pick(r, "Formula") || "").replace(/\s+/g, " ").trim(),
+        }))
+        .filter((m) => !buscar || String(m.medida).toUpperCase().includes(buscar))
+        .sort((a, b) => String(a.medida).localeCompare(String(b.medida)));
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
   // ?facturas=1 → desglosa la venta del mes por el campo FACTURA. Sirve para
   // entender por qué "Ventas Mes" y "Ventas Mes Facturado" no coinciden: si
   // hay líneas sin factura, esas son la diferencia.
