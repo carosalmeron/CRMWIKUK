@@ -1456,8 +1456,32 @@ EVALUATE
       } catch (e) { out.avisoAjustes = e.message.slice(0, 120); }
       out.ajustesRama = Object.keys(AJUSTES_RAMA).length;
 
-      const docs = await fbLeerColeccion("pbi_ventas_cliente");
-      out.clientesLeidos = docs.length;
+      const todos = await fbLeerColeccion("pbi_ventas_cliente");
+      out.clientesLeidos = todos.length;
+
+      // Documentos que la sincronización ya no toca: códigos que dejaron de
+      // existir en el modelo y quedaron ahí de pasadas anteriores. Se
+      // reconocen por el sello "actualizado", que la sincronización refresca
+      // en todos los que sí escribe.
+      const CADUCA_HORAS = 36;
+      const corte = Date.now() - CADUCA_HORAS * 3600000;
+      const viejo = (d) => {
+        const t = d.actualizado ? Date.parse(d.actualizado) : NaN;
+        return !isNaN(t) && t < corte;
+      };
+      const obsoletos = todos.filter(viejo);
+      const docs = todos.filter((d) => !viejo(d));
+      out.obsoletos = obsoletos.length;
+
+      if (obsoletos.length && req.query.purgar !== "no") {
+        try {
+          await fbBorrar("pbi_ventas_cliente", obsoletos.map((d) => d._id));
+          out.obsoletosBorrados = obsoletos.length;
+          out.ejemplosObsoletos = obsoletos.slice(0, 6)
+            .map((d) => `${d._id} · ${d.nombre || "sin nombre"} · ${
+              (d.actualizado || "").slice(0, 10)}`);
+        } catch (e) { out.avisoPurga = e.message.slice(0, 140); }
+      }
       const anoAct = new Date().getFullYear();
       const anoAnt = anoAct - 1;
 
