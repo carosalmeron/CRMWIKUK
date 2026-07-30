@@ -342,7 +342,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.25.7";
+const CRM_VERSION = "4.26.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -12525,6 +12525,8 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
               <input value={of.descripcion||""} onChange={e=>setFormEst(f=>({...f,ofActual:{...(f.ofActual||{}),descripcion:e.target.value}}))}
                 placeholder="Ej: entubado, atado… (extras)"
                 style={{width:"100%",border:`1.5px solid ${T.border}`,borderRadius:8,padding:"8px 10px",fontSize:13,outline:"none",boxSizing:"border-box",marginBottom:8,fontFamily:"inherit"}}/>
+              <AvisoStock codigo={of.codigo||of.nombre} compacto={true}/>
+
               <div style={{display:"flex",gap:8,marginBottom:8}}>
                 <div style={{flex:1}}>
                   <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Precio tarifa €/kg</p>
@@ -16717,6 +16719,9 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
                     style={{width:"100%",padding:"10px 12px",borderRadius:10,border:"1px solid "+T.border,fontSize:13,boxSizing:"border-box"}}/>
                 </div>
               </div>
+
+              {/* Existencias del artículo, para no ofrecer lo que no hay */}
+              <AvisoStock codigo={formOf.codigo||formOf.producto}/>
 
               {/* (v3.41) Precio base (referencia) + Precio y Descuento enlazados */}
               {formOf.precioBase&&(
@@ -35242,6 +35247,97 @@ function PanelAnalisis({usuario, onNav}){
           ? `⚠️ Datos de hace ${dias} días. La sincronización puede haber fallado.`
           : `Ventas reales de Power BI${meta?" · "+new Date(meta).toLocaleDateString("es-ES"):""}`}
       </p>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// AvisoStock — existencias del artículo en el propio formulario, para no
+// ofrecer lo que no hay. Misma fuente que el catálogo: stock_sap/resumen,
+// con {codigo: [stock, entradas, comprometido]}.
+// Suma todos los envases que empiezan por el código, como hace Compras.
+// ══════════════════════════════════════════════════════════════════════
+let _STOCK_CACHE=null;
+function AvisoStock({codigo, compacto}){
+  const [st,setSt]=React.useState(_STOCK_CACHE);
+
+  React.useEffect(function(){
+    if(_STOCK_CACHE){ setSt(_STOCK_CACHE); return; }
+    let vivo=true;
+    fetch(`${FB_BASE}/stock_sap/resumen`)
+      .then(r=>r.ok?r.json():null)
+      .then(j=>{
+        const m={};
+        try{
+          const obj=JSON.parse((j&&j.fields&&j.fields.exact&&j.fields.exact.stringValue)||"{}");
+          Object.keys(obj).forEach(function(c){
+            const a=obj[c]||[];
+            m[String(c).toUpperCase()]={stock:Number(a[0])||0,
+              entradas:Number(a[1])||0, comprometido:Number(a[2])||0};
+          });
+        }catch(e){}
+        _STOCK_CACHE=m;
+        if(vivo) setSt(m);
+      })
+      .catch(()=>{ _STOCK_CACHE={}; if(vivo) setSt({}); });
+    return function(){ vivo=false; };
+  },[]);
+
+  const cod=String(codigo||"").toUpperCase().trim();
+  if(!cod || !st) return null;
+
+  // Se suman los envases del mismo producto: el código de venta puede tener
+  // variantes y el stock está desglosado por envase.
+  let stock=0, entradas=0, comprometido=0, hallados=0;
+  for(const k of Object.keys(st)){
+    if(k===cod || k.startsWith(cod)){
+      stock+=st[k].stock; entradas+=st[k].entradas;
+      comprometido+=st[k].comprometido; hallados++;
+    }
+  }
+  if(!hallados) return (
+    <p style={{margin:"6px 0 0",fontSize:11.5,color:T.muted}}>
+      Sin datos de stock para {cod}
+    </p>
+  );
+
+  const libre=stock-comprometido;
+  const color = libre>0 ? T.green : entradas>0 ? T.amber : T.red;
+  const n=(v)=>Math.round(v).toLocaleString("es-ES");
+
+  if(compacto) return (
+    <p style={{margin:"5px 0 0",fontSize:11.5,fontWeight:700,color}}>
+      Stock libre {n(libre)}
+      {entradas>0?` · entran ${n(entradas)}`:""}
+      {comprometido>0?` · comprometido ${n(comprometido)}`:""}
+    </p>
+  );
+
+  return (
+    <div style={{marginTop:8,padding:"9px 11px",borderRadius:9,
+      background:libre>0?"#F0FDF4":entradas>0?"#FFFBEB":"#FEF2F2",
+      border:`1px solid ${color}33`}}>
+      <p style={{margin:0,fontSize:11,fontWeight:800,letterSpacing:.4,
+        textTransform:"uppercase",color:T.muted}}>Existencias</p>
+      <p style={{margin:"3px 0 0",fontSize:14,fontWeight:800,color}}>
+        {n(libre)} libre{libre===1?"":"s"}
+      </p>
+      <p style={{margin:"2px 0 0",fontSize:11.5,color:T.muted}}>
+        {n(stock)} en almacén
+        {comprometido>0?` · ${n(comprometido)} comprometido`:""}
+        {entradas>0?` · ${n(entradas)} por entrar`:""}
+        {hallados>1?` · ${hallados} envases`:""}
+      </p>
+      {libre<=0 && entradas>0 && (
+        <p style={{margin:"5px 0 0",fontSize:11.5,fontWeight:700,color:T.amber}}>
+          Sin stock libre, pero hay entradas previstas
+        </p>
+      )}
+      {libre<=0 && entradas<=0 && (
+        <p style={{margin:"5px 0 0",fontSize:11.5,fontWeight:700,color:T.red}}>
+          Sin stock ni entradas previstas
+        </p>
+      )}
     </div>
   );
 }
