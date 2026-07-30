@@ -1120,6 +1120,120 @@ EVALUATE
     return res.status(200).json(out);
   }
 
+  // ?clientesArticulo=CODIGO → qué clientes han dejado de comprar ese
+  // artículo, de mayor a menor pérdida. Es el paso que faltaba: sabemos qué
+  // producto cae, pero no a quién hay que llamar.
+  if (req.query.clientesArticulo) {
+    const cod = String(req.query.clientesArticulo).trim().toUpperCase()
+      .replace(/[^A-Z0-9._\-]/g, "");
+    const n = Math.min(parseInt(req.query.top, 10) || 20, 60);
+    const out = { ok: true, articulo: cod, top: n };
+    try {
+      await cargarEquivArticulos();
+      const { token } = await getToken(req);
+      const T = M.ventas;
+      const Q = dax(null);
+
+      // Un artículo agrupa varios códigos: el suyo, los antiguos que se
+      // tradujeron a él y sus variantes de formato. Hay que consultarlos
+      // todos o la comparativa sale coja.
+      const familia = new Set([cod]);
+      for (const [viejo, nuevo] of Object.entries(EQUIV_ART || {})) {
+        if (nuevo === cod) familia.add(viejo);
+      }
+      try {
+        const RE_SUFIJO = /\.(C\d+|BG|F\d+|R\d+)$/i;
+        for (const a of await pbiQuery(token, Q.articulos, true)) {
+          const c = String(pick(a, "CODIGO") || "").trim().toUpperCase();
+          if (!c) continue;
+          const padre = String(pick(a, "PRODUCTOPADRE") || "").trim().toUpperCase();
+          const base = c.replace(RE_SUFIJO, "");
+          if (padre === cod || (base === cod && base !== c)) familia.add(c);
+          // También los códigos antiguos de las variantes
+          if (familia.has(codArt(c))) familia.add(c);
+        }
+      } catch (e) { out.avisoMaestro = e.message.slice(0, 120); }
+
+      out.codigosIncluidos = [...familia];
+      const enLista = [...familia].map((c) => `"${c}"`).join(", ");
+
+      const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+  VAR _iniAct = DATE(_anoAct, 1, 1)
+  VAR _iniAnt = DATE(_anoAnt, 1, 1)
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
+EVALUATE
+  FILTER(
+    ADDCOLUMNS(
+      CALCULATETABLE(VALUES(${T}[CLIENTE]), ${T}[CODIGO] IN {${enLista}}),
+      "Act", CALCULATE(SUM(${M.vBase}), ${T}[CODIGO] IN {${enLista}},
+        ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy),
+      "Ant", CALCULATE(SUM(${M.vBase}), ${T}[CODIGO] IN {${enLista}},
+        ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt),
+      "Vendedor", CALCULATE(MAX(${T}[VENDEDOR]), ${T}[CODIGO] IN {${enLista}})
+    ),
+    [Act] <> 0 || [Ant] <> 0
+  )`, true);
+
+      // Nombre del cliente y comercial que lo lleva
+      const fichas = new Map();
+      try {
+        for (const c of await pbiQuery(token, Q.clientes)) {
+          const k = String(pick(c, "CODIGO") || "").trim();
+          if (k && !fichas.has(k)) fichas.set(k, {
+            nombre: pick(c, "NOMBRE"), poblacion: pick(c, "POBLACION"),
+          });
+        }
+      } catch (e) {}
+      const agentes = new Map();
+      try {
+        for (const a of await pbiQuery(token, Q.agentes, true)) {
+          const k = String(pick(a, "CODIGO") || "").trim();
+          if (k) agentes.set(k, String(pick(a, "GRUPOAGENTE") || "").trim() || null);
+        }
+      } catch (e) {}
+
+      // El mismo cliente puede aparecer con su código viejo y el nuevo
+      const porCli = new Map();
+      for (const r of filas) {
+        const original = String(pick(r, "CLIENTE") || "").trim();
+        if (!original) continue;
+        const k = canonico(original);
+        const g = porCli.get(k) || { cliente: k, act: 0, ant: 0, ven: null, codigos: [] };
+        g.act += num(pick(r, "Act"));
+        g.ant += num(pick(r, "Ant"));
+        g.ven = g.ven || String(pick(r, "Vendedor") || "").trim() || null;
+        if (!g.codigos.includes(original)) g.codigos.push(original);
+        porCli.set(k, g);
+      }
+
+      out.clientes = [...porCli.values()].map((g) => {
+        const f = fichas.get(g.cliente) || fichas.get(g.codigos[0]) || {};
+        return {
+          cliente: g.cliente,
+          nombre: f.nombre || g.cliente,
+          poblacion: f.poblacion || null,
+          agente: agentes.get(g.ven) || null,
+          ventasAct: num(g.act),
+          ventasAnt: num(g.ant),
+          diferencia: num(g.act - g.ant),
+          variacionPct: g.ant ? num((100 * (g.act - g.ant)) / g.ant) : null,
+        };
+      }).sort((a, b) => a.diferencia - b.diferencia).slice(0, n);
+
+      out.totalClientes = porCli.size;
+      out.sumaCaidas = num(out.clientes.filter((c) => c.diferencia < 0)
+        .reduce((x, c) => x + c.diferencia, 0));
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
   // ?equivalencias=1 → busca códigos recodificados que falten en la tabla.
   // Si un artículo se dejó de vender y otro con la misma descripción empezó a
   // venderse por un importe parecido, casi seguro que son el mismo producto.
