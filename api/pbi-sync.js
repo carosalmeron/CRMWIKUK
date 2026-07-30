@@ -1437,6 +1437,163 @@ EVALUATE
     return res.status(401).json({ error: "no autorizado" });
   }
 
+  // ?resumen=1 → recalcula el resumen por comercial y el índice de búsqueda
+  // leyendo de Firestore, sin tocar Power BI. Existe para sacar este trabajo
+  // de la sincronización completa, que ya rozaba los 60 s de Vercel y algún
+  // día se cortaría entera sin escribir nada.
+  if (req.query.resumen === "1") {
+    const t1 = Date.now();
+    const out = { ok: true, fuente: "firestore" };
+    try {
+      await cargarReglas();
+
+      const AJUSTES_RAMA = {};
+      try {
+        for (const a of await fbLeerColeccion("pbi_ajustes")) {
+          if (a.equipo && a.equipo !== "_EXCLUIR")
+            AJUSTES_RAMA[String(a._id).toUpperCase()] = a.equipo;
+        }
+      } catch (e) { out.avisoAjustes = e.message.slice(0, 120); }
+      out.ajustesRama = Object.keys(AJUSTES_RAMA).length;
+
+      const docs = await fbLeerColeccion("pbi_ventas_cliente");
+      out.clientesLeidos = docs.length;
+      const anoAct = new Date().getFullYear();
+      const anoAnt = anoAct - 1;
+
+      const porAgente = new Map();
+      let sinAsignar = 0, ventaSinAsignar = 0, ventaSinAsignarAnt = 0;
+
+      for (const d of docs) {
+        if (d.intercompany || d.fusionadoEn) continue;
+        const agente = d.agente;
+        if (!agente) {
+          sinAsignar++;
+          ventaSinAsignar += d.ventasAct || 0;
+          ventaSinAsignarAnt += d.ventasAntYTD || 0;
+          continue;
+        }
+        if (!porAgente.has(agente)) {
+          porAgente.set(agente, {
+            _id: docId(agente), agente, anoAnterior: anoAnt, anoActual: anoAct,
+            tipo: d.tipoAgente || null,
+            equipo: AJUSTES_RAMA[String(agente).toUpperCase()]
+              || ramaDe(d.equipoAgente, d.tipoAgente),
+            equipoOriginal: d.equipoAgente || null,
+            ambito: d.ambitoAgente || null,
+            objetivoMargen: d.objetivoMargen ?? null,
+            ventasAntFull: 0, margenAntFull: 0, baseAntFull: 0,
+            ventasAntYTD: 0, margenAntYTD: 0, baseAntYTD: 0,
+            ventasAct: 0, margenAct: 0, baseAct: 0,
+            ventasMes: 0, ventasSem: 0, ventasMesAnt: 0, ventasSemAnt: 0,
+            margenMes: 0, baseMes: 0, margenMesAnt: 0, baseMesAnt: 0,
+            margenSem: 0, baseSem: 0,
+            clientes: 0, clientesConVentaMes: 0,
+          });
+        }
+        const a = porAgente.get(agente);
+        for (const k of ["ventasAntFull","margenAntFull","ventasAntYTD","margenAntYTD",
+                         "ventasAct","margenAct","ventasMes","ventasSem",
+                         "ventasMesAnt","ventasSemAnt","margenSem","baseSem",
+                         "margenMes","baseMes","margenMesAnt","baseMesAnt"]) {
+          a[k] += d[k] || 0;
+        }
+        a.baseAntFull += (d.ventasAntFull || 0) * ((d.coberturaAntFull || 0) / 100);
+        a.baseAntYTD  += (d.ventasAntYTD || 0)  * ((d.coberturaAntYTD || 0) / 100);
+        a.baseAct     += (d.ventasAct || 0)     * ((d.coberturaAct || 0) / 100);
+        a.clientes++;
+        if ((d.ventasMes || 0) > 0) a.clientesConVentaMes++;
+      }
+
+      const cerrar = (a) => {
+        const p = (m, b) => (b ? num((100 * m) / b) : null);
+        const cob = (b, v) => (v ? num((100 * b) / v) : 0);
+        const pctAct = p(a.margenAct, a.baseAct);
+        const pctAntYTD = p(a.margenAntYTD, a.baseAntYTD);
+        return {
+          ...a,
+          ventasAntFull: num(a.ventasAntFull), margenAntFull: num(a.margenAntFull),
+          ventasAntYTD: num(a.ventasAntYTD),   margenAntYTD: num(a.margenAntYTD),
+          ventasAct: num(a.ventasAct),         margenAct: num(a.margenAct),
+          ventasMes: num(a.ventasMes),         ventasSem: num(a.ventasSem),
+          ventasMesAnt: num(a.ventasMesAnt),   ventasSemAnt: num(a.ventasSemAnt),
+          margenPctSem: p(a.margenSem, a.baseSem),
+          margenSem: num(a.margenSem), baseSem: num(a.baseSem),
+          margenPctMes: p(a.margenMes, a.baseMes),
+          margenPctMesAnt: p(a.margenMesAnt, a.baseMesAnt),
+          margenMes: num(a.margenMes), baseMes: num(a.baseMes),
+          margenMesAnt: num(a.margenMesAnt), baseMesAnt: num(a.baseMesAnt),
+          margenPctAntFull: p(a.margenAntFull, a.baseAntFull),
+          margenPctAntYTD: pctAntYTD, margenPctAct: pctAct,
+          variacionPct: a.ventasAntYTD
+            ? num((100 * (a.ventasAct - a.ventasAntYTD)) / a.ventasAntYTD) : null,
+          desviacionObjetivo: (pctAct !== null && a.objetivoMargen)
+            ? num(pctAct - a.objetivoMargen) : null,
+          variacionMargenPts: (pctAct !== null && pctAntYTD !== null)
+            ? num(pctAct - pctAntYTD) : null,
+          coberturaAntFull: cob(a.baseAntFull, a.ventasAntFull),
+          coberturaAntYTD: cob(a.baseAntYTD, a.ventasAntYTD),
+          coberturaAct: cob(a.baseAct, a.ventasAct),
+          baseAntFull: num(a.baseAntFull), baseAntYTD: num(a.baseAntYTD),
+          baseAct: num(a.baseAct),
+          actualizado: new Date().toISOString(),
+        };
+      };
+
+      const resumen = [...porAgente.values()].map(cerrar);
+      const tot = [...porAgente.values()].reduce((t, a) => {
+        for (const k of ["ventasAntFull","margenAntFull","baseAntFull",
+                         "ventasAntYTD","margenAntYTD","baseAntYTD",
+                         "ventasAct","margenAct","baseAct","ventasMes","ventasSem",
+                         "ventasMesAnt","ventasSemAnt",
+                         "margenMes","baseMes","margenMesAnt","baseMesAnt",
+                         "margenSem","baseSem",
+                         "clientes","clientesConVentaMes"]) t[k] += a[k];
+        return t;
+      }, { _id: "_TOTAL", agente: "_TOTAL", anoAnterior: anoAnt, anoActual: anoAct,
+           ventasAntFull:0, margenAntFull:0, baseAntFull:0,
+           ventasAntYTD:0, margenAntYTD:0, baseAntYTD:0,
+           ventasAct:0, margenAct:0, baseAct:0, ventasMes:0, ventasSem:0,
+           ventasMesAnt:0, ventasSemAnt:0,
+           margenMes:0, baseMes:0, margenMesAnt:0, baseMesAnt:0,
+           margenSem:0, baseSem:0, clientes:0, clientesConVentaMes:0 });
+      resumen.push(cerrar(tot));
+
+      out.agentes = resumen.length - 1;
+      out.clientesSinAgente = sinAsignar;
+      out.ventaSinAsignar = num(ventaSinAsignar);
+      out.escritos = await fbCommit("pbi_resumen_agente", resumen);
+
+      // Índice de búsqueda, con la misma lista ya leída
+      try {
+        const compacta = docs
+          .filter((d) => !d.fusionadoEn && !d.intercompany)
+          .map((d) => [d._id, String(d.nombre || "").slice(0, 60), d.agente || "",
+                       Math.round(d.ventasAct || 0), Math.round(d.ventasAntYTD || 0)]);
+        const trozos = [];
+        let actual = [], bytes = 0;
+        for (const c of compacta) {
+          const t = JSON.stringify(c).length + 1;
+          if (bytes + t > 700000) { trozos.push(actual); actual = []; bytes = 0; }
+          actual.push(c); bytes += t;
+        }
+        if (actual.length) trozos.push(actual);
+        await fbCommit("pbi_indice_clientes", trozos.map((t, i) => ({
+          _id: `parte${i}`, parte: i, partes: trozos.length,
+          clientes: t.length, datos: JSON.stringify(t),
+          actualizado: new Date().toISOString(),
+        })));
+        out.indiceBusqueda = { clientes: compacta.length, partes: trozos.length };
+      } catch (e) { out.avisoIndice = e.message.slice(0, 140); }
+
+      out.segundos = Math.round((Date.now() - t1) / 1000);
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(out.ok ? 200 : 500).json(out);
+  }
+
   // ?diag=1 → lista lo que el service principal REALMENTE ve.
   // Sirve para demostrar a sistemas si el acceso al workspace está dado.
   if (req.query.diag === "1") {
@@ -2799,7 +2956,13 @@ EVALUATE
       // Se cruza cada cliente con su grupoAgente segun el CRM, porque el
       // codigo de vendedor de Power BI ("1201") no coincide con los
       // agentes del CRM (AZARCO, CARLOSG...).
-      try {
+      // Si el tiempo aprieta, el resumen se deja para la llamada ?resumen=1:
+      // lo importante de esta pasada es que las ventas por cliente queden
+      // escritas. Antes se intentaba siempre y arriesgaba el conjunto.
+      const margen = () => 44 - Math.round((Date.now() - t0) / 1000);
+      if (!dry && margen() < 8) {
+        log.resumenAgentes = `omitido, quedaban ${margen()} s · lánzalo con ?resumen=1`;
+      } else try {
         const asignacion = await fbLeerClientes();
         log.clientesCrmLeidos = asignacion.size;
 
