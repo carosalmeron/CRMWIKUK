@@ -831,7 +831,7 @@ EVALUATE
       ),
       [Ant] <> 0 || [Act] <> 0
     ),
-    [Ant] - [Act], ${suben ? "ASC" : "DESC"})`, true);
+    [Ant] - [Act], DESC)`, true);
 
       // Descripción del maestro de artículos
       const arts = new Map();
@@ -1015,7 +1015,10 @@ EVALUATE
       const arts = new Map();
       try {
         for (const a of await pbiQuery(token, Q.articulos, true)) {
-          const cod = String(pick(a, "CODIGO") || "").trim();
+          // En mayúsculas los dos: el maestro tiene el mismo código escrito
+          // de varias formas ("1094 Bis" y "1094 BIS") y sin normalizar se
+          // toman por padre e hijo cuando son el mismo artículo.
+          const cod = String(pick(a, "CODIGO") || "").trim().toUpperCase();
           if (cod && !arts.has(cod)) arts.set(cod, {
             descripcion: pick(a, "DESCRIPCION"),
             calibre: pick(a, "CALIBRE"), metros: pick(a, "METROS"),
@@ -1042,12 +1045,19 @@ EVALUATE
       out.ejemplosPadre = ejemplosPadre;
 
       const agrupado = req.query.sinAgrupar === "1" ? false : true;
+      // Sufijos que marcan una variante del mismo producto y que el maestro
+      // no enlaza por PRODUCTOPADRE. Solo se aplica si el código base existe
+      // de verdad, para no inventar agrupaciones.
+      const RE_SUFIJO = /\.(C\d+|BG|F\d+|R\d+)$/i;
+
       const padreDe = (cod) => {
         if (!agrupado) return cod;
         const f = arts.get(cod);
         const p = f && f.padre;
-        // El padre solo vale si existe y no es el propio código
-        return (p && p !== cod) ? p : cod;
+        if (p && p !== cod) return p;
+        const base = cod.replace(RE_SUFIJO, "");
+        if (base !== cod && arts.has(base)) return base;
+        return cod;
       };
 
       // Se agrupa por el código actual, igual que en la vista por cliente
