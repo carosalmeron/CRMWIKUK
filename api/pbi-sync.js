@@ -2994,7 +2994,13 @@ EVALUATE
       // Firestore solo busca por prefijo. Para poder buscar por cualquier
       // parte del nombre se guarda una lista compacta de toda la cartera en
       // un único documento: una lectura y se busca en el navegador.
-      if (!dry) try {
+      // El índice solo se regenera si queda margen: es un extra útil, no
+      // puede ser la causa de que la sincronización entera se pase de los
+      // 60 segundos de Vercel y no escriba nada.
+      const quedan = () => 52 - Math.round((Date.now() - t0) / 1000);
+      if (!dry && quedan() < 6) {
+        log.indiceBusqueda = `omitido, quedaban ${quedan()} s`;
+      } else if (!dry) try {
         const compacta = docs
           .filter((d) => !d.fusionadoEn && !d.intercompany)
           .map((d) => [
