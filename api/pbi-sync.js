@@ -1089,10 +1089,21 @@ EVALUATE
       out.ejemplosPadre = ejemplosPadre;
 
       const agrupado = req.query.sinAgrupar === "1" ? false : true;
-      // Sufijos que marcan una variante del mismo producto y que el maestro
-      // no enlaza por PRODUCTOPADRE. Solo se aplica si el código base existe
-      // de verdad, para no inventar agrupaciones.
-      const RE_SUFIJO = /\.(C\d+|BG|F\d+|R\d+)$/i;
+      // Sufijos que de verdad marcan una variante del mismo producto. La
+      // lista es corta y explícita a propósito: una regla amplia agrupaba
+      // artículos distintos (.C20 no es variante de su código base).
+      // Ampliable desde pbi_config/reglas con sufijosVariante="BG,C140".
+      let SUFIJOS = ["BG", "C140"];
+      try {
+        const cfg = await fbLeerDocumento("pbi_config", "reglas");
+        if (cfg && cfg.sufijosVariante) {
+          SUFIJOS = String(cfg.sufijosVariante).split(",")
+            .map((x) => x.trim().toUpperCase()).filter(Boolean);
+        }
+      } catch (e) { /* con la lista por defecto basta */ }
+      out.sufijosVariante = SUFIJOS;
+      const RE_SUFIJO = new RegExp(
+        `\\.(${SUFIJOS.map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})$`, "i");
 
       const padreDe = (cod) => {
         if (!agrupado) return cod;
@@ -1273,7 +1284,7 @@ ${[...Array(12)].map((_, i) => mes(i + 1)).join(",\n")}
         if (nuevo === cod) familia.add(viejo);
       }
       try {
-        const RE_SUFIJO = /\.(C\d+|BG|F\d+|R\d+)$/i;
+        const RE_SUFIJO = /\.(BG|C140)$/i;
         for (const a of await pbiQuery(token, Q.articulos, true)) {
           const c = String(pick(a, "CODIGO") || "").trim().toUpperCase();
           if (!c) continue;
