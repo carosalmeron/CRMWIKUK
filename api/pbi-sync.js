@@ -773,7 +773,10 @@ export default async function handler(req, res) {
         sello = m && m.ultimaSync ? String(m.ultimaSync) : null;
       } catch (e) { /* sin sello se consulta siempre */ }
 
-      const idCache = docId(`${cli}_${n}`);
+      // La clave lleva versión: al cambiar el formato de la respuesta, las
+      // consultas guardadas con el formato viejo dejan de servirse solas y
+      // no hay que acordarse de purgar.
+      const idCache = docId(`${cli}_${n}_v2`);
       if (sello && req.query.recargar !== "1") {
         try {
           const g = await fbLeerDocumento("pbi_articulos_cliente", idCache);
@@ -980,7 +983,7 @@ EVALUATE
         sello = m && m.ultimaSync ? String(m.ultimaSync) : null;
       } catch (e) {}
 
-      const idCache = docId(`grupo_${ag || "TODOS"}_${n}_${suben ? "up" : "down"}`
+      const idCache = docId(`grupo_${ag || "TODOS"}_${n}_${suben ? "up" : "down"}_v2`
         + (req.query.sinAgrupar === "1" ? "_sinagrupar" : ""));
       if (sello && req.query.recargar !== "1") {
         try {
