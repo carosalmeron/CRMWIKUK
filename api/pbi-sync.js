@@ -830,7 +830,7 @@ EVALUATE
       ),
       [Ant] <> 0 || [Act] <> 0
     ),
-    [Ant] - [Act], DESC)`, true);
+    [Ant] - [Act], ${suben ? "ASC" : "DESC"})`, true);
 
       // Descripción del maestro de artículos
       const arts = new Map();
@@ -949,7 +949,11 @@ EVALUATE
     const ag = String(req.query.agente || "").trim().toUpperCase()
       .replace(/[^A-Z0-9._-]/g, "");
     const n = Math.min(parseInt(req.query.top, 10) || 20, 60);
-    const out = { ok: true, agente: ag || "todos", top: n };
+    // &orden=suben para ver los que crecen: la caída de unos artículos solo
+    // se interpreta bien sabiendo hacia dónde se ha movido la venta.
+    const suben = req.query.orden === "suben";
+    const out = { ok: true, agente: ag || "todos", top: n,
+      orden: suben ? "los que más suben" : "los que más caen" };
     try {
       let sello = null;
       try {
@@ -957,7 +961,7 @@ EVALUATE
         sello = m && m.ultimaSync ? String(m.ultimaSync) : null;
       } catch (e) {}
 
-      const idCache = docId(`grupo_${ag || "TODOS"}_${n}`);
+      const idCache = docId(`grupo_${ag || "TODOS"}_${n}_${suben ? "up" : "down"}`);
       if (sello && req.query.recargar !== "1") {
         try {
           const g = await fbLeerDocumento("pbi_articulos_cliente", idCache);
@@ -1000,7 +1004,7 @@ EVALUATE
       ),
       [Ant] <> 0 || [Act] <> 0
     ),
-    [Ant] - [Act], DESC)`, true);
+    [Ant] - [Act], ${suben ? "ASC" : "DESC"})`, true);
 
       out.filasDevueltas = filas.length;
 
@@ -1045,7 +1049,11 @@ EVALUATE
           clientes: g.clientes,
           codigoAntiguo: g.origen.filter((o) => o !== g.articulo).join(", ") || undefined,
         };
-      }).sort((a, b) => a.diferencia - b.diferencia).slice(0, n);
+      }).sort((a, b) => suben ? b.diferencia - a.diferencia
+                              : a.diferencia - b.diferencia).slice(0, n);
+
+      // Para poder contrastar: cuánto suman las subidas frente a las bajadas
+      out.sumaMostrada = num(out.articulos.reduce((x, a) => x + a.diferencia, 0));
 
       if (sello) {
         try {
