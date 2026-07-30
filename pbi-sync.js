@@ -830,7 +830,7 @@ EVALUATE
       ),
       [Ant] <> 0 || [Act] <> 0
     ),
-    [Ant] - [Act], DESC)`, true);
+    [Ant] - [Act], ${suben ? "ASC" : "DESC"})`, true);
 
       // Descripción del maestro de artículos
       const arts = new Map();
@@ -935,6 +935,224 @@ EVALUATE
       }
       out.borradas = ids.length;
       out.nota = "Las próximas consultas volverán a Power BI y aplicarán las equivalencias.";
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
+  // ?articulosGrupo=1 → artículos con más caída en todo el grupo, o de un
+  // comercial si se pasa &agente=. Hasta ahora solo se podía llegar al
+  // artículo entrando por un cliente concreto.
+  if (req.query.articulosGrupo === "1") {
+    const ag = String(req.query.agente || "").trim().toUpperCase()
+      .replace(/[^A-Z0-9._-]/g, "");
+    const n = Math.min(parseInt(req.query.top, 10) || 20, 60);
+    // &orden=suben para ver los que crecen: la caída de unos artículos solo
+    // se interpreta bien sabiendo hacia dónde se ha movido la venta.
+    const suben = req.query.orden === "suben";
+    const out = { ok: true, agente: ag || "todos", top: n,
+      orden: suben ? "los que más suben" : "los que más caen" };
+    try {
+      let sello = null;
+      try {
+        const m = await fbLeerDocumento("pbi_meta", "estado");
+        sello = m && m.ultimaSync ? String(m.ultimaSync) : null;
+      } catch (e) {}
+
+      const idCache = docId(`grupo_${ag || "TODOS"}_${n}_${suben ? "up" : "down"}`);
+      if (sello && req.query.recargar !== "1") {
+        try {
+          const g = await fbLeerDocumento("pbi_articulos_cliente", idCache);
+          if (g && g.basadoEn === sello && g.datos) {
+            out.articulos = JSON.parse(g.datos);
+            out.deCache = true;
+            return res.status(200).json(out);
+          }
+        } catch (e) {}
+      }
+
+      await cargarEquivArticulos();
+      const { token } = await getToken(req);
+      const T = M.ventas;
+      const Q = dax(null);
+      const filtroAg = ag ? `${T}[VENDEDOR] = "${ag}", ` : "";
+
+      const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+  VAR _iniAct = DATE(_anoAct, 1, 1)
+  VAR _iniAnt = DATE(_anoAnt, 1, 1)
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
+EVALUATE
+  FILTER(
+    ADDCOLUMNS(
+      ${ag
+        ? `CALCULATETABLE(VALUES(${T}[CODIGO]), ${T}[VENDEDOR] = "${ag}",
+             ${M.vFecha} >= _iniAnt)`
+        : `CALCULATETABLE(VALUES(${T}[CODIGO]), ${M.vFecha} >= _iniAnt)`},
+      "Act", CALCULATE(SUM(${M.vBase}), ${filtroAg}
+        ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy),
+      "Ant", CALCULATE(SUM(${M.vBase}), ${filtroAg}
+        ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt),
+      "Clientes", CALCULATE(DISTINCTCOUNT(${T}[CLIENTE]), ${filtroAg}
+        ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy)
+    ),
+    ABS([Act]) > 2000 || ABS([Ant]) > 2000
+  )`, true);
+      // Sin TOPN: si se recorta en Power BI, un código antiguo puede entrar y
+      // su equivalente nuevo quedarse fuera, con lo que la suma de los dos
+      // años sale a medias. Se traen todos los que se mueven algo y el
+      // recorte se hace aquí, ya con los códigos unificados.
+
+      out.filasDevueltas = filas.length;
+
+      const arts = new Map();
+      try {
+        for (const a of await pbiQuery(token, Q.articulos, true)) {
+          const cod = String(pick(a, "CODIGO") || "").trim();
+          if (cod && !arts.has(cod)) arts.set(cod, {
+            descripcion: pick(a, "DESCRIPCION"),
+            calibre: pick(a, "CALIBRE"), metros: pick(a, "METROS"),
+          });
+        }
+      } catch (e) { out.errorMaestro = e.message.slice(0, 140); }
+
+      // Se agrupa por el código actual, igual que en la vista por cliente
+      const porCodigo = new Map();
+      for (const r of filas) {
+        const original = String(pick(r, "CODIGO") || "").trim().toUpperCase();
+        if (!original) continue;
+        const cod = codArt(original);
+        const g = porCodigo.get(cod)
+          || { articulo: cod, ventasAct: 0, ventasAnt: 0, clientes: 0, origen: [] };
+        g.ventasAct += num(pick(r, "Act"));
+        g.ventasAnt += num(pick(r, "Ant"));
+        g.clientes = Math.max(g.clientes, num(pick(r, "Clientes")));
+        if (!g.origen.includes(original)) g.origen.push(original);
+        porCodigo.set(cod, g);
+      }
+
+      out.articulos = [...porCodigo.values()].map((g) => {
+        let f = arts.get(g.articulo);
+        if (!f) for (const o of g.origen) { if (arts.get(o)) { f = arts.get(o); break; } }
+        f = f || {};
+        return {
+          articulo: g.articulo,
+          descripcion: f.descripcion || null,
+          calibre: f.calibre || null,
+          ventasAct: num(g.ventasAct),
+          ventasAnt: num(g.ventasAnt),
+          diferencia: num(g.ventasAct - g.ventasAnt),
+          variacionPct: g.ventasAnt ? num((100 * (g.ventasAct - g.ventasAnt)) / g.ventasAnt) : null,
+          clientes: g.clientes,
+          codigoAntiguo: g.origen.filter((o) => o !== g.articulo).join(", ") || undefined,
+        };
+      }).sort((a, b) => suben ? b.diferencia - a.diferencia
+                              : a.diferencia - b.diferencia).slice(0, n);
+
+      // Para poder contrastar: cuánto suman las subidas frente a las bajadas
+      out.sumaMostrada = num(out.articulos.reduce((x, a) => x + a.diferencia, 0));
+
+      if (sello) {
+        try {
+          await fbCommit("pbi_articulos_cliente", [{
+            _id: idCache, cliente: `_GRUPO_${ag || "TODOS"}`, basadoEn: sello,
+            datos: JSON.stringify(out.articulos),
+            guardadoEl: new Date().toISOString(),
+          }]);
+        } catch (e) {}
+      }
+      out.deCache = false;
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
+  // ?equivalencias=1 → busca códigos recodificados que falten en la tabla.
+  // Si un artículo se dejó de vender y otro con la misma descripción empezó a
+  // venderse por un importe parecido, casi seguro que son el mismo producto.
+  if (req.query.equivalencias === "1") {
+    const out = { ok: true };
+    try {
+      await cargarEquivArticulos();
+      const { token } = await getToken(req);
+      const T = M.ventas;
+      const Q = dax(null);
+
+      const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+  VAR _iniAct = DATE(_anoAct, 1, 1)
+  VAR _iniAnt = DATE(_anoAnt, 1, 1)
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
+EVALUATE
+  FILTER(
+    ADDCOLUMNS(
+      CALCULATETABLE(VALUES(${T}[CODIGO]), ${M.vFecha} >= _iniAnt),
+      "Act", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy),
+      "Ant", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt)
+    ),
+    ABS([Act] - [Ant]) > 15000)`, true);
+
+      const arts = new Map();
+      for (const a of await pbiQuery(token, Q.articulos, true)) {
+        const cod = String(pick(a, "CODIGO") || "").trim().toUpperCase();
+        if (cod && !arts.has(cod)) arts.set(cod, String(pick(a, "DESCRIPCION") || "").trim());
+      }
+
+      const norma = (d) => String(d || "").toUpperCase()
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^A-Z0-9]/g, "");
+
+      const caen = [], suben = [];
+      for (const r of filas) {
+        const cod = String(pick(r, "CODIGO") || "").trim().toUpperCase();
+        if (EQUIV_ART[cod]) continue;           // ya está en la tabla
+        const act = num(pick(r, "Act")), ant = num(pick(r, "Ant"));
+        const dif = num(act - ant);
+        const item = { codigo: cod, descripcion: arts.get(cod) || null,
+          clave: norma(arts.get(cod)), ventasAct: act, ventasAnt: ant, diferencia: dif };
+        if (dif < 0 && act <= Math.abs(ant) * 0.15) caen.push(item);
+        else if (dif > 0 && ant <= act * 0.15) suben.push(item);
+      }
+
+      // Se empareja cada caída con la subida de misma descripción e importe
+      // más parecido. Es una propuesta, no una certeza: hay que revisarla.
+      const usados = new Set();
+      const props = [];
+      for (const c of caen.sort((a, b) => a.diferencia - b.diferencia)) {
+        if (!c.clave) continue;
+        const cands = suben.filter((x) => x.clave === c.clave && !usados.has(x.codigo));
+        if (!cands.length) continue;
+        cands.sort((a, b) =>
+          Math.abs(a.diferencia + c.diferencia) - Math.abs(b.diferencia + c.diferencia));
+        const m = cands[0];
+        usados.add(m.codigo);
+        const encaje = Math.abs(c.diferencia) > 0
+          ? Math.round(100 * Math.min(m.diferencia, -c.diferencia) / -c.diferencia) : 0;
+        props.push({
+          antiguo: c.codigo, nuevo: m.codigo,
+          descripcion: c.descripcion,
+          dejoDeVender: num(-c.diferencia),
+          empezoAVender: num(m.diferencia),
+          encajePct: encaje,
+          fiabilidad: encaje >= 70 ? "alta" : encaje >= 40 ? "media" : "baja",
+        });
+      }
+
+      out.analizados = filas.length;
+      out.caenSinPareja = caen.length - props.length;
+      out.propuestas = props.sort((a, b) => b.dejoDeVender - a.dejoDeVender);
+      out.nota = "Revisa antes de aplicar: la coincidencia es por descripción "
+        + "e importe, no por dato del ERP.";
     } catch (e) {
       out.ok = false;
       out.error = e.message;
@@ -1068,124 +1286,6 @@ EVALUATE
   // Truco que no depende de las funciones INFO.*: la respuesta incluye
   // todas las columnas como claves, y un valor de ejemplo de cada una,
   // asi que revela nombres exactos Y tipos de dato de golpe.
-  // ?articulosGrupo=1 → artículos con más caída en todo el grupo, o de un
-  // comercial si se pasa &agente=. Hasta ahora solo se podía llegar al
-  // artículo entrando por un cliente concreto.
-  if (req.query.articulosGrupo === "1") {
-    const ag = String(req.query.agente || "").trim().toUpperCase()
-      .replace(/[^A-Z0-9._-]/g, "");
-    const n = Math.min(parseInt(req.query.top, 10) || 20, 60);
-    const out = { ok: true, agente: ag || "todos", top: n };
-    try {
-      let sello = null;
-      try {
-        const m = await fbLeerDocumento("pbi_meta", "estado");
-        sello = m && m.ultimaSync ? String(m.ultimaSync) : null;
-      } catch (e) {}
-
-      const idCache = docId(`grupo_${ag || "TODOS"}_${n}`);
-      if (sello && req.query.recargar !== "1") {
-        try {
-          const g = await fbLeerDocumento("pbi_articulos_cliente", idCache);
-          if (g && g.basadoEn === sello && g.datos) {
-            out.articulos = JSON.parse(g.datos);
-            out.deCache = true;
-            return res.status(200).json(out);
-          }
-        } catch (e) {}
-      }
-
-      await cargarEquivArticulos();
-      const { token } = await getToken(req);
-      const T = M.ventas;
-      const Q = dax(null);
-      const filtroAg = ag ? `${T}[VENDEDOR] = "${ag}", ` : "";
-
-      const filas = await pbiQuery(token, `
-DEFINE
-  VAR _hoy = TODAY()
-  VAR _anoAct = YEAR(_hoy)
-  VAR _anoAnt = _anoAct - 1
-  VAR _iniAct = DATE(_anoAct, 1, 1)
-  VAR _iniAnt = DATE(_anoAnt, 1, 1)
-  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
-EVALUATE
-  TOPN(${Math.min(n * 6, 200)},
-    FILTER(
-      ADDCOLUMNS(
-        ${ag ? `CALCULATETABLE(VALUES(${T}[CODIGO]), ${T}[VENDEDOR] = "${ag}")`
-             : `VALUES(${T}[CODIGO])`},
-        "Act", CALCULATE(SUM(${M.vBase}), ${filtroAg}
-          ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy),
-        "Ant", CALCULATE(SUM(${M.vBase}), ${filtroAg}
-          ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt),
-        "Clientes", CALCULATE(DISTINCTCOUNT(${T}[CLIENTE]), ${filtroAg}
-          ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy)
-      ),
-      [Ant] <> 0 || [Act] <> 0
-    ),
-    [Ant] - [Act], DESC)`, true);
-
-      const arts = new Map();
-      try {
-        for (const a of await pbiQuery(token, Q.articulos, true)) {
-          const cod = String(pick(a, "CODIGO") || "").trim();
-          if (cod && !arts.has(cod)) arts.set(cod, {
-            descripcion: pick(a, "DESCRIPCION"),
-            calibre: pick(a, "CALIBRE"), metros: pick(a, "METROS"),
-          });
-        }
-      } catch (e) {}
-
-      // Se agrupa por el código actual, igual que en la vista por cliente
-      const porCodigo = new Map();
-      for (const r of filas) {
-        const original = String(pick(r, "CODIGO") || "").trim().toUpperCase();
-        if (!original) continue;
-        const cod = codArt(original);
-        const g = porCodigo.get(cod)
-          || { articulo: cod, ventasAct: 0, ventasAnt: 0, clientes: 0, origen: [] };
-        g.ventasAct += num(pick(r, "Act"));
-        g.ventasAnt += num(pick(r, "Ant"));
-        g.clientes = Math.max(g.clientes, num(pick(r, "Clientes")));
-        if (!g.origen.includes(original)) g.origen.push(original);
-        porCodigo.set(cod, g);
-      }
-
-      out.articulos = [...porCodigo.values()].map((g) => {
-        let f = arts.get(g.articulo);
-        if (!f) for (const o of g.origen) { if (arts.get(o)) { f = arts.get(o); break; } }
-        f = f || {};
-        return {
-          articulo: g.articulo,
-          descripcion: f.descripcion || null,
-          calibre: f.calibre || null,
-          ventasAct: num(g.ventasAct),
-          ventasAnt: num(g.ventasAnt),
-          diferencia: num(g.ventasAct - g.ventasAnt),
-          variacionPct: g.ventasAnt ? num((100 * (g.ventasAct - g.ventasAnt)) / g.ventasAnt) : null,
-          clientes: g.clientes,
-          codigoAntiguo: g.origen.filter((o) => o !== g.articulo).join(", ") || undefined,
-        };
-      }).sort((a, b) => a.diferencia - b.diferencia).slice(0, n);
-
-      if (sello) {
-        try {
-          await fbCommit("pbi_articulos_cliente", [{
-            _id: idCache, cliente: `_GRUPO_${ag || "TODOS"}`, basadoEn: sello,
-            datos: JSON.stringify(out.articulos),
-            guardadoEl: new Date().toISOString(),
-          }]);
-        } catch (e) {}
-      }
-      out.deCache = false;
-    } catch (e) {
-      out.ok = false;
-      out.error = e.message;
-    }
-    return res.status(200).json(out);
-  }
-
   // ?medidas=1 → devuelve las medidas del modelo con su fórmula DAX. Es la
   // forma de saber qué hace exactamente "Ventas Mes Facturado" en vez de
   // deducirlo por diferencias.
@@ -2239,8 +2339,16 @@ EVALUATE
           ventasAntYTD: vAntYTD,
           margenAntYTD: mAntYTD,
           margenPctAntYTD: p(mAntYTD, bAntYTD),
-          // Guardado para poder ordenar por caída sin leer toda la colección
-          caida: num(vAct - vAntYTD),
+          // Solo se guarda la caída de clientes reales que de verdad bajan:
+          // Firestore excluye de la ordenación los documentos sin el campo, y
+          // así los 418 fusionados no ocupan los primeros puestos con su
+          // caída aparente de todo el histórico.
+          ...(function () {
+            const esInter = (agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.nivel1
+                              === "Intercompany") || esIntercompany(ficha.nombre);
+            const baja = num(vAct - vAntYTD);
+            return (!esInter && baja < 0) ? { caida: baja } : {};
+          })(),
 
           ventasAct: vAct,
           margenAct: mAct,
@@ -2377,6 +2485,10 @@ EVALUATE
           : null;
 
         principal.codigosFusionados = grupo.map((d) => d.cliente).join(", ");
+        // Se recalcula después de sumar, no antes
+        const bajaP = num((principal.ventasAct || 0) - (principal.ventasAntYTD || 0));
+        if (!principal.intercompany && bajaP < 0) principal.caida = bajaP;
+        else delete principal.caida;
 
         for (const d of grupo) {
           if (d === principal) continue;
@@ -2384,6 +2496,8 @@ EVALUATE
           d.ventasAntFull = 0; d.margenAntFull = 0;
           d.ventasAntYTD = 0;  d.margenAntYTD = 0;
           d.ventasAct = 0;     d.margenAct = 0;
+          // Un fusionado no cae: su venta se ha movido al principal
+          delete d.caida;
           d.ventasMes = 0;     d.variacionPct = null;
           d.margenPctAntFull = null; d.margenPctAntYTD = null; d.margenPctAct = null;
           d.coberturaAntFull = 0; d.coberturaAntYTD = 0; d.coberturaAct = 0;
