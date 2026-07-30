@@ -1151,6 +1151,95 @@ EVALUATE
     return res.status(200).json(out);
   }
 
+  // ?progresionCliente=CODIGO → venta mes a mes de este año y del anterior.
+  // Los totales dicen cuánto cae un cliente; esto dice cuándo empezó.
+  if (req.query.progresionCliente) {
+    const cli = String(req.query.progresionCliente).trim().toUpperCase()
+      .replace(/[^A-Z0-9._-]/g, "");
+    const out = { ok: true, cliente: cli };
+    try {
+      const { token } = await getToken(req);
+      const T = M.ventas;
+
+      // Igual que en la vista de artículos: hay que incluir el código
+      // antiguo o el año pasado sale a cero.
+      const variantes = new Set([cli]);
+      const m = /^U430(\d{4})$/.exec(cli);
+      if (m) variantes.add("U43" + m[1]);
+      const canon = canonico(cli);
+      if (canon !== cli) variantes.add(canon);
+      const enLista = [...variantes].map((c) => `"${c}"`).join(", ");
+      out.codigosConsultados = [...variantes];
+
+      const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${T}[ANO],
+    "Mes", 0,
+    "M1",  CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 1),
+    "M2",  CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 2),
+    "M3",  CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 3),
+    "M4",  CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 4),
+    "M5",  CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 5),
+    "M6",  CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 6),
+    "M7",  CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 7),
+    "M8",  CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 8),
+    "M9",  CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 9),
+    "M10", CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 10),
+    "M11", CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 11),
+    "M12", CALCULATE(SUM(${M.vBase}), MONTH(${M.vFecha}) = 12),
+    FILTER(${T}, ${T}[CLIENTE] IN {${enLista}})
+  )`, true);
+
+      const anoAct = new Date().getFullYear();
+      const meses = { [anoAct]: Array(12).fill(0), [anoAct - 1]: Array(12).fill(0) };
+      for (const r of filas) {
+        const ano = Number(pick(r, "ANO"));
+        if (!meses[ano]) continue;
+        for (let i = 1; i <= 12; i++) meses[ano][i - 1] = num(pick(r, `M${i}`));
+      }
+
+      const NOMBRES = ["ene","feb","mar","abr","may","jun",
+                       "jul","ago","sep","oct","nov","dic"];
+      const mesActual = new Date().getMonth();   // 0-11
+      out.anoActual = anoAct;
+      out.anoAnterior = anoAct - 1;
+      out.meses = NOMBRES.map((nombre, i) => {
+        const act = meses[anoAct][i];
+        const ant = meses[anoAct - 1][i];
+        return {
+          mes: nombre, numero: i + 1,
+          actual: act, anterior: ant,
+          diferencia: num(act - ant),
+          variacionPct: ant ? num((100 * (act - ant)) / ant) : null,
+          // El mes en curso está incompleto: no se puede comparar igual
+          enCurso: i === mesActual,
+          futuro: i > mesActual,
+        };
+      });
+      out.totalActual = num(meses[anoAct].reduce((a, b) => a + b, 0));
+      out.totalAnterior = num(meses[anoAct - 1].reduce((a, b) => a + b, 0));
+
+      // Desde qué mes cae de forma sostenida: útil para saber si el problema
+      // viene de una decisión concreta o es una erosión lenta.
+      let desde = null;
+      for (let i = mesActual - 1; i >= 0; i--) {
+        const m2 = out.meses[i];
+        if (m2.anterior > 0 && m2.actual < m2.anterior * 0.7) desde = m2.mes;
+        else if (desde) break;
+      }
+      out.caeDesde = desde;
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
   // ?clientesArticulo=CODIGO → qué clientes han dejado de comprar ese
   // artículo, de mayor a menor pérdida. Es el paso que faltaba: sabemos qué
   // producto cae, pero no a quién hay que llamar.
