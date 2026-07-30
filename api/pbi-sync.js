@@ -727,6 +727,29 @@ export default async function handler(req, res) {
     const n = Math.min(parseInt(req.query.top, 10) || 5, 30);
     const out = { ok: true, cliente: cli, top: n };
     try {
+      // Los artículos de un cliente solo cambian cuando corre la
+      // sincronización. Se guarda la consulta junto al sello de la última, y
+      // mientras coincidan se devuelve lo guardado sin tocar Power BI.
+      let sello = null;
+      try {
+        const m = await fbLeerDocumento("pbi_meta", "estado");
+        sello = m && m.ultimaSync ? String(m.ultimaSync) : null;
+      } catch (e) { /* sin sello se consulta siempre */ }
+
+      const idCache = docId(`${cli}_${n}`);
+      if (sello && req.query.recargar !== "1") {
+        try {
+          const g = await fbLeerDocumento("pbi_articulos_cliente", idCache);
+          if (g && g.basadoEn === sello && g.datos) {
+            out.articulos = JSON.parse(g.datos);
+            out.deCache = true;
+            out.basadoEn = sello;
+            out.codigosConsultados = g.codigos ? JSON.parse(g.codigos) : undefined;
+            return res.status(200).json(out);
+          }
+        } catch (e) { /* si falla la lectura se consulta Power BI */ }
+      }
+
       const { token } = await getToken(req);
       const T = M.ventas;
       const Q = dax(null);   // se necesita el maestro de articulos
@@ -805,6 +828,22 @@ EVALUATE
           unidades: num(pick(r, "UniAct")),
         };
       }).sort((a, b) => a.diferencia - b.diferencia);
+      out.deCache = false;
+      out.basadoEn = sello;
+
+      // Se guarda para las siguientes consultas del mismo cliente
+      if (sello) {
+        try {
+          await fbCommit("pbi_articulos_cliente", [{
+            _id: idCache,
+            cliente: cli,
+            basadoEn: sello,
+            datos: JSON.stringify(out.articulos),
+            codigos: JSON.stringify(out.codigosConsultados || []),
+            guardadoEl: new Date().toISOString(),
+          }]);
+        } catch (e) { out.avisoCache = e.message.slice(0, 120); }
+      }
     } catch (e) {
       out.ok = false;
       out.error = e.message;
