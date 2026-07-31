@@ -2428,7 +2428,7 @@ EVALUATE
       } catch (e) { /* sin maestro se muestra solo el codigo */ }
 
       const filas = await pbiQuery(token, Q.pedidos);
-      const docs = filas.map((r, i) => {
+      const crudos = filas.map((r, i) => {
         const cli = String(pick(r, "Cliente") || "").trim();
         const ven = String(pick(r, "Vendedor") || "").trim();
         const fec = String(pick(r, "Fecha") || "").slice(0, 10);
@@ -2464,6 +2464,30 @@ EVALUATE
           actualizado: new Date().toISOString(),
         };
       }).filter((d) => d.cliente && d.fecha);
+
+      // Power BI no publica el numero de linea del pedido. Un pedido con dos
+      // lineas del mismo articulo y la misma fecha llega como dos filas
+      // identicas, y se pisaban al escribir porque comparten _id: la coleccion
+      // guardaba menos lineas de las que decia contar. Ademas, al comparar el
+      // importe contra la unica guardada, el diario cantaria un cambio falso
+      // todos los dias. Se suman en una sola linea.
+      const agrupados = new Map();
+      for (const d of crudos) {
+        const previo = agrupados.get(d._id);
+        if (!previo) { agrupados.set(d._id, d); continue; }
+        previo.importe = num(previo.importe + d.importe);
+        previo.unidades = num(previo.unidades + d.unidades);
+      }
+      const docs = [...agrupados.values()];
+      out.filasAgrupadas = crudos.length - docs.length;
+
+      // Aviso: si una misma linea se entrega en dos fechas, sobreviven dos
+      // documentos con la misma clave "linea" y el diario no sabria cual de
+      // los dos se ha movido. Se cuenta para saber si el caso existe de verdad
+      // antes de complicar el codigo por el.
+      const vecesPorLinea = new Map();
+      for (const d of docs) vecesPorLinea.set(d.linea, (vecesPorLinea.get(d.linea) || 0) + 1);
+      out.lineasRepetidas = [...vecesPorLinea.values()].filter((n) => n > 1).length;
 
       out.lineas = docs.length;
       out.importe = num(docs.reduce((t, d) => t + d.importe, 0));
@@ -3339,7 +3363,7 @@ EVALUATE
       } catch (e) { /* sin maestro se muestra solo el codigo */ }
 
       const filas = await pbiQuery(token, Q.pedidos);
-      const docs = filas.map((r, i) => {
+      const crudos = filas.map((r, i) => {
         const cli = String(pick(r, "Cliente") || "").trim();
         const ven = String(pick(r, "Vendedor") || "").trim();
         const fec = String(pick(r, "Fecha") || "").slice(0, 10);
@@ -3375,6 +3399,30 @@ EVALUATE
           actualizado: new Date().toISOString(),
         };
       }).filter((d) => d.cliente && d.fecha);
+
+      // Power BI no publica el numero de linea del pedido. Un pedido con dos
+      // lineas del mismo articulo y la misma fecha llega como dos filas
+      // identicas, y se pisaban al escribir porque comparten _id: la coleccion
+      // guardaba menos lineas de las que decia contar. Ademas, al comparar el
+      // importe contra la unica guardada, el diario cantaria un cambio falso
+      // todos los dias. Se suman en una sola linea.
+      const agrupados = new Map();
+      for (const d of crudos) {
+        const previo = agrupados.get(d._id);
+        if (!previo) { agrupados.set(d._id, d); continue; }
+        previo.importe = num(previo.importe + d.importe);
+        previo.unidades = num(previo.unidades + d.unidades);
+      }
+      const docs = [...agrupados.values()];
+      log.filasAgrupadas = crudos.length - docs.length;
+
+      // Aviso: si una misma linea se entrega en dos fechas, sobreviven dos
+      // documentos con la misma clave "linea" y el diario no sabria cual de
+      // los dos se ha movido. Se cuenta para saber si el caso existe de verdad
+      // antes de complicar el codigo por el.
+      const vecesPorLinea = new Map();
+      for (const d of docs) vecesPorLinea.set(d.linea, (vecesPorLinea.get(d.linea) || 0) + 1);
+      log.lineasRepetidas = [...vecesPorLinea.values()].filter((n) => n > 1).length;
 
       log.pedidos = dry ? docs.length : await fbCommit("pbi_pedidos", docs);
 
