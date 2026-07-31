@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>¿Se puede enviar el informe?</title>
+<style>
+  :root{
+    --papel:#EEF1F5; --tinta:#0F1E33; --tenue:#5C6B80;
+    --falta:#C2263D; --ok:#0F6E63; --aviso:#B07908;
+    --linea:#CFD8E3; --hueco:#FFFFFF;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0;background:var(--papel);color:var(--tinta);
+    font:400 16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    padding:24px 18px calc(48px + env(safe-area-inset-bottom));
+    max-width:640px;margin-inline:auto;
+  }
+  .num{font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  header{margin-bottom:26px}
+  h1{margin:0 0 6px;font-size:23px;font-weight:800;letter-spacing:-.03em;line-height:1.15}
+  .sub{margin:0;font-size:13.5px;color:var(--tenue)}
+
+  .caso{
+    background:var(--hueco);border:1px solid var(--linea);border-left:3px solid var(--tenue);
+    border-radius:3px;padding:16px;margin-bottom:14px;
+  }
+  .caso.si{border-left-color:var(--ok)}
+  .caso.no{border-left-color:var(--falta)}
+  .caso.ojo{border-left-color:var(--aviso)}
+  .cab{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
+  .que{font-size:15px;font-weight:700;margin:0}
+  .dato{font-size:19px;font-weight:800;white-space:nowrap}
+  .caso.si .dato{color:var(--ok)}
+  .caso.no .dato{color:var(--falta)}
+  .caso.ojo .dato{color:var(--aviso)}
+  .expl{margin:7px 0 0;font-size:13px;color:var(--tenue);line-height:1.5}
+  .lista{margin:11px 0 0;padding:10px 0 0;border-top:1px solid var(--linea);
+    font-size:12.5px;color:var(--tenue);line-height:1.7}
+  .lista b{color:var(--tinta);font-weight:600}
+  .estado{padding:34px 4px;font-size:14.5px;color:var(--tenue)}
+  code{font-size:12px;background:var(--papel);padding:1px 5px;border-radius:3px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>¿Se puede enviar el informe?</h1>
+  <p class="sub">Lo que hace falta para el parte semanal de los viernes. v1.0</p>
+</header>
+
+<div id="app"><p class="estado">Leyendo Firestore…</p></div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const arriba=(s)=>String(s||"").toUpperCase().trim();
+
+function val(f){
+  if(!f) return null;
+  if(f.doubleValue!==undefined)  return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.stringValue!==undefined)  return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  if(f.mapValue!==undefined)     return "{…}";
+  if(f.arrayValue!==undefined)   return "[…]";
+  return null;
+}
+function planos(j){
+  return (j.documents||[]).map(d=>{
+    const o={_id:decodeURIComponent(d.name.split("/").pop()), _campos:Object.keys(d.fields||{})};
+    for(const [k,v] of Object.entries(d.fields||{})) o[k]=val(v);
+    return o;
+  });
+}
+async function leer(col){
+  const r=await fetch(`${FB}/${col}?pageSize=300`);
+  if(!r.ok) throw new Error(`${col}: HTTP ${r.status}`);
+  return planos(await r.json());
+}
+
+const caso=(clase,que,dato,expl,lista)=>`
+  <div class="caso ${clase}">
+    <div class="cab"><p class="que">${que}</p><span class="dato num">${dato}</span></div>
+    <p class="expl">${expl}</p>
+    ${lista?`<p class="lista">${lista}</p>`:""}
+  </div>`;
+
+(async()=>{
+  const app=document.getElementById("app");
+  try{
+    const [agentes,usuarios,portal,objetivos]=await Promise.all([
+      leer("pbi_resumen_agente"),
+      leer("usuarios").catch(()=>[]),
+      leer("portal_users").catch(()=>[]),
+      leer("pbi_objetivos").catch(()=>[]),
+    ]);
+
+    // Comerciales que facturan: son los destinatarios reales del informe
+    const vivos=agentes.filter(a=>a._id!=="_TOTAL" &&
+      ((a.ventasAct||0)>0 || (a.ventasAntYTD||0)>0));
+
+    const fichas=[...usuarios,...portal];
+
+    // Emparejar comercial → ficha, por cualquiera de sus claves
+    const porClave=new Map();
+    for(const u of fichas)
+      for(const c of [u.grupoAgente,u.catalogoVendedor,u.username,u._id,u.id,u.nombre])
+        if(c && !porClave.has(arriba(c))) porClave.set(arriba(c), u);
+
+    const conFicha=vivos.filter(a=>porClave.has(arriba(a._id)));
+    const sinFicha=vivos.filter(a=>!porClave.has(arriba(a._id)));
+    const conMail=conFicha.filter(a=>{
+      const u=porClave.get(arriba(a._id));
+      return u && String(u.email||"").includes("@");
+    });
+    const sinMail=conFicha.filter(a=>{
+      const u=porClave.get(arriba(a._id));
+      return !(u && String(u.email||"").includes("@"));
+    });
+
+    // Objetivos
+    const clavesObj=new Set(objetivos.map(o=>arriba(o._id)));
+    const conObj=vivos.filter(a=>clavesObj.has(arriba(a._id)));
+    const sinObj=vivos.filter(a=>!clavesObj.has(arriba(a._id)));
+    const camposObj=objetivos.length?objetivos[0]._campos.join(", "):"—";
+
+    // Roles y equipos
+    const roles={};
+    for(const a of conFicha){
+      const r=String(porClave.get(arriba(a._id)).rol||"(sin rol)").toLowerCase();
+      roles[r]=(roles[r]||0)+1;
+    }
+    const equipos={};
+    for(const a of vivos){ const e=a.equipo||"(sin equipo)"; equipos[e]=(equipos[e]||0)+1; }
+
+    const pct=(n)=>vivos.length?Math.round(n/vivos.length*100):0;
+    const nombres=(l,n=8)=>l.slice(0,n).map(a=>`<b>${a._id}</b>`).join(" · ")
+      + (l.length>n?` y ${l.length-n} más`:"");
+
+    app.innerHTML=
+      caso(sinMail.length?(conMail.length?"ojo":"no"):"si",
+        "Direcciones de correo",
+        `${conMail.length} / ${vivos.length}`,
+        conMail.length===vivos.length
+          ? "Todos los comerciales con ventas tienen email. El envío automático puede funcionar."
+          : `Solo ${pct(conMail.length)}% puede recibir el informe. Los demás lo tendrán en el CRM, pero no les llegará nada.`,
+        sinMail.length?`Sin email: ${nombres(sinMail)}`:"")
+
+    + caso(sinObj.length?(conObj.length?"ojo":"no"):"si",
+        "Objetivos cargados",
+        `${conObj.length} / ${vivos.length}`,
+        conObj.length===vivos.length
+          ? "Todos tienen objetivo. El bloque del año puede pintarse para cualquiera."
+          : "Sin objetivo no hay barra del año ni marca de ritmo. Ese bloque debe decir «sin objetivo cargado», no pintar un 0 %.",
+        `Campos que trae <code>pbi_objetivos</code>: ${camposObj}` +
+        (sinObj.length?`<br>Sin objetivo: ${nombres(sinObj)}`:""))
+
+    + caso(sinFicha.length?"ojo":"si",
+        "Comerciales sin ficha",
+        String(sinFicha.length),
+        sinFicha.length
+          ? "Facturan pero no hay usuario que los reconozca. No recibirán informe ni aparecerán en el de su jefe."
+          : "Todos los que facturan tienen ficha en el CRM.",
+        sinFicha.length?nombres(sinFicha,10):"")
+
+    + caso("ojo","Roles encontrados", String(Object.keys(roles).length),
+        "El generador tiene que saber a quién manda el informe de equipo. Hoy los roles están mezclados.",
+        Object.entries(roles).sort((a,b)=>b[1]-a[1])
+          .map(([r,n])=>`<b>${n}</b> ${r}`).join(" · "))
+
+    + caso("si","Equipos", String(Object.keys(equipos).length),
+        "Cada jefe recibiría la suma de su equipo. El equipo sale de pbi_resumen_agente, así que agrupar es directo.",
+        Object.entries(equipos).sort((a,b)=>b[1]-a[1])
+          .map(([e,n])=>`<b>${e}</b> ${n}`).join(" · "));
+
+  }catch(e){
+    app.innerHTML=`<p class="estado">No se ha podido leer Firestore: ${e.message}.</p>`;
+  }
+})();
+</script>
+</body>
+</html>
