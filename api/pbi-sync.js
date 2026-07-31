@@ -3344,7 +3344,13 @@ EVALUATE
     // todo el limite de Vercel, se salta y entra en la siguiente pasada.
     // Mas vale una sincronizacion parcial que un timeout que no escribe nada.
     const quedanSegundos = () => 55 - Math.round((Date.now() - t0) / 1000);
-    if (activo("pedidos") && quedanSegundos() < 12) {
+    // Con sinpedidos=1 se refrescan solo las ventas. Sirve para lanzar una
+    // pasada extra cuando Power BI vuelve a refrescar por la tarde: reescribir
+    // pbi_pedidos fuera de la sincronizacion de la mañana desplazaria la foto
+    // contra la que se compara el diario, y ese dia se perderia entero.
+    if (req.query.sinpedidos === "1") {
+      log.pedidos = "omitido a proposito (sinpedidos=1)";
+    } else if (activo("pedidos") && quedanSegundos() < 12) {
       log.pedidos = `omitido, quedaban ${quedanSegundos()} s`;
     } else if (activo("pedidos")) try {
       // Maestro de articulos, para poner descripcion en cada linea
