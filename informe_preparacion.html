@@ -48,7 +48,7 @@
 
 <header>
   <h1>¿Se puede enviar el informe?</h1>
-  <p class="sub">Lo que hace falta para el parte semanal de los viernes. v1.0</p>
+  <p class="sub">Lo que hace falta para el parte semanal de los viernes. v1.1</p>
 </header>
 
 <div id="app"><p class="estado">Leyendo Firestore…</p></div>
@@ -98,16 +98,26 @@ const caso=(clase,que,dato,expl,lista)=>`
     ]);
 
     // Comerciales que facturan: son los destinatarios reales del informe
-    const vivos=agentes.filter(a=>a._id!=="_TOTAL" &&
-      ((a.ventasAct||0)>0 || (a.ventasAntYTD||0)>0));
+    // Solo quien factura este año: los que solo vendieron en 2025 son bajas.
+    const vivos=agentes.filter(a=>a._id!=="_TOTAL" && (a.ventasAct||0)>0);
 
     const fichas=[...usuarios,...portal];
 
     // Emparejar comercial → ficha, por cualquiera de sus claves
+    // Un mismo comercial puede tener ficha en las dos colecciones con datos
+    // distintos: el correo suele estar solo en portal_users. Antes me quedaba
+    // con la primera que encontraba y daba por perdidos los emails.
     const porClave=new Map();
     for(const u of fichas)
-      for(const c of [u.grupoAgente,u.catalogoVendedor,u.username,u._id,u.id,u.nombre])
-        if(c && !porClave.has(arriba(c))) porClave.set(arriba(c), u);
+      for(const c of [u.grupoAgente,u.catalogoVendedor,u.crmId,u.username,u._id,u.id,u.nombre]){
+        if(!c) continue;
+        const k=arriba(c), prev=porClave.get(k);
+        porClave.set(k, prev ? Object.assign({}, prev, limpio(u)) : u);
+      }
+    function limpio(o){
+      const r={}; for(const [k,v] of Object.entries(o)) if(v!==null && v!=="") r[k]=v;
+      return r;
+    }
 
     const conFicha=vivos.filter(a=>porClave.has(arriba(a._id)));
     const sinFicha=vivos.filter(a=>!porClave.has(arriba(a._id)));
@@ -134,6 +144,18 @@ const caso=(clase,que,dato,expl,lista)=>`
     }
     const equipos={};
     for(const a of vivos){ const e=a.equipo||"(sin equipo)"; equipos[e]=(equipos[e]||0)+1; }
+
+    // Jefes de equipo del portal y a cuántos comerciales cubren
+    const jefes=[...usuarios,...portal].filter(u=>{
+      const r=String(u.rol||"").toLowerCase();
+      return r==="crm_jefe" || r==="jefe" || (u.equipoCrm && String(u.equipoCrm).length>2);
+    });
+    const idsCubiertos=new Set();
+    for(const j of jefes) for(const a of (j.equipoCrm||[])) idsCubiertos.add(arriba(a));
+    const cubiertos=vivos.filter(a=>{
+      const u=porClave.get(arriba(a._id));
+      return u && (idsCubiertos.has(arriba(u.crmId)) || idsCubiertos.has(arriba(u._id)));
+    }).length;
 
     const pct=(n)=>vivos.length?Math.round(n/vivos.length*100):0;
     const nombres=(l,n=8)=>l.slice(0,n).map(a=>`<b>${a._id}</b>`).join(" · ")
@@ -165,10 +187,13 @@ const caso=(clase,que,dato,expl,lista)=>`
           : "Todos los que facturan tienen ficha en el CRM.",
         sinFicha.length?nombres(sinFicha,10):"")
 
-    + caso("ojo","Roles encontrados", String(Object.keys(roles).length),
-        "El generador tiene que saber a quién manda el informe de equipo. Hoy los roles están mezclados.",
-        Object.entries(roles).sort((a,b)=>b[1]-a[1])
-          .map(([r,n])=>`<b>${n}</b> ${r}`).join(" · "))
+    + caso(jefes.length?"si":"no",
+        "Jefes con equipo definido", String(jefes.length),
+        jefes.length
+          ? "Cada jefe tiene su lista de agentes en <code>equipoCrm</code>. El informe de equipo puede usar esa misma lista, que es la que ya limita lo que ve en el CRM."
+          : "Ningún usuario tiene equipo asignado. El informe de equipo no se puede montar.",
+        jefes.map(j=>`<b>${j.nombre||j._id}</b> ${(j.equipoCrm||[]).length||0} agentes`).join(" · ")
+        + `<br>Cubiertos por algún jefe: <b>${cubiertos}</b> de ${vivos.length}`)
 
     + caso("si","Equipos", String(Object.keys(equipos).length),
         "Cada jefe recibiría la suma de su equipo. El equipo sale de pbi_resumen_agente, así que agrupar es directo.",
