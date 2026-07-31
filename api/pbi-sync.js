@@ -2548,6 +2548,7 @@ EVALUATE
           const hoy = new Date().toISOString().slice(0, 10);
           const movs = [];
           const vistas = new Set();
+          let variacion = 0;   // suma de cambios de importe en líneas vivas
 
           for (const d of docs) {
             if (!d.linea) continue;
@@ -2560,6 +2561,11 @@ EVALUATE
                 pedido: d.pedido, fechaNueva: d.fecha, dias: null });
               continue;
             }
+            // Toda línea que sobrevive puede haber cambiado de importe. Se
+            // acumula siempre, aunque además se haya movido de fecha: es lo
+            // único que permite cuadrar la cabecera de ayer con la de hoy.
+            variacion += num(d.importe) - num(a.importe);
+
             if (a.fecha && d.fecha && a.fecha !== d.fecha) {
               const dias = Math.round(
                 (new Date(d.fecha) - new Date(a.fecha)) / 86400000);
@@ -2569,6 +2575,20 @@ EVALUATE
                 agente: d.agente, articulo: d.articulo,
                 descripcion: d.descripcion, importe: d.importe,
                 pedido: d.pedido, fechaAntes: a.fecha, fechaNueva: d.fecha, dias,
+              });
+            } else if (Math.abs(num(d.importe) - num(a.importe)) >= 1) {
+              // Cambia el importe sin moverse de fecha: hasta ahora era
+              // invisible. Se guarda la diferencia, no el importe, para que
+              // el total de la sección sea la variación neta.
+              movs.push({
+                tipo: "cambio",
+                linea: d.linea, cliente: d.cliente, nombre: d.nombre,
+                agente: d.agente, articulo: d.articulo,
+                descripcion: d.descripcion,
+                importe: num(d.importe - a.importe),
+                importeAntes: num(a.importe), importeAhora: num(d.importe),
+                pedido: d.pedido, fechaAntes: a.fecha, fechaNueva: d.fecha,
+                dias: null,
               });
             }
           }
@@ -2580,7 +2600,7 @@ EVALUATE
           const ayer = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
           for (const [k, a] of antes) {
             if (vistas.has(k)) continue;
-            const servido = a.fecha && a.fecha <= hoy;
+            const servido = a.fecha && a.fecha <= ayer;
             movs.push({ tipo: servido ? "servido" : "anulado",
               linea: k, cliente: a.cliente,
               nombre: a.nombre, agente: a.agente, articulo: a.articulo,
@@ -2592,6 +2612,13 @@ EVALUATE
           const porTipo = (lista, tipos, tope) => lista
             .filter((m) => tipos.includes(m.tipo))
             .sort((x, y) => (y.importe || 0) - (x.importe || 0))
+            .slice(0, tope);
+          // Los cambios de importe se ordenan por magnitud: una bajada de
+          // 20.000 € importa tanto como una subida, y ordenando por signo
+          // el tope se comería justo las caídas.
+          const porMagnitud = (lista, tope) => lista
+            .filter((m) => m.tipo === "cambio")
+            .sort((x, y) => Math.abs(y.importe || 0) - Math.abs(x.importe || 0))
             .slice(0, tope);
           const cuenta = (t) => movs.filter((m) => m.tipo === t).length;
           const suma = (t) => num(movs.filter((m) => m.tipo === t)
@@ -2614,17 +2641,25 @@ EVALUATE
               nuevos: cuenta("nuevo"),       importeNuevos: suma("nuevo"),
               servidos: cuenta("servido"),   importeServidos: suma("servido"),
               anulados: cuenta("anulado"),   importeAnulados: suma("anulado"),
+              variaciones: cuenta("cambio"), importeVariaciones: suma("cambio"),
+              // Variación de TODAS las líneas vivas, incluidas las que además
+              // se movieron de fecha. Con esto la cabecera cuadra:
+              //   importeAntes + nuevos - servidos - anulados + variacion
+              //   = importeAhora
+              importeVariacion: num(variacion),
 
               // Cada categoría por separado, ordenada por importe. Se limita
               // el volumen para que el documento no crezca sin control.
               movimientos: JSON.stringify(porTipo(movs, ["retraso", "adelanto"], 150)),
               salidas:     JSON.stringify(porTipo(movs, ["servido", "anulado"], 150)),
               entradas:    JSON.stringify(porTipo(movs, ["nuevo"], 80)),
+              cambios:     JSON.stringify(porMagnitud(movs, 80)),
             }]);
             out.cambiosFecha = { retrasos: cuenta("retraso"),
               adelantos: cuenta("adelanto"), nuevos: cuenta("nuevo"),
               servidos: cuenta("servido"), anulados: cuenta("anulado"),
-              importeServidos: suma("servido"), importeRetrasos: suma("retraso") };
+              importeServidos: suma("servido"), importeRetrasos: suma("retraso"),
+              variaciones: cuenta("cambio"), importeVariacion: num(variacion) };
           } else {
             out.cambiosFecha = "primera pasada, no hay con qué comparar";
           }
