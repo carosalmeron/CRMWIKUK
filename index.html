@@ -132,7 +132,7 @@ input,button,select{font-family:inherit;}
 <!-- ENTRY -->
 <div id="entry" class="screen active">
   <div class="entry-logo">GRUPO <span>CONSOLIDADO</span></div>
-  <div class="entry-tag">PORTAL DE GESTIÓN · <span id="ver-entrada">v3.50.0</span></div>
+  <div class="entry-tag">PORTAL DE GESTIÓN · <span id="ver-entrada">v3.52.0</span></div>
   <div class="entry-cards">
     <div class="entry-card" onclick="showLogin()">
       <div class="entry-card-icon" style="background:#EDF4F0">🔐</div>
@@ -170,7 +170,7 @@ input,button,select{font-family:inherit;}
 <!-- HUB -->
 <div id="hub" class="screen">
   <div class="hub-header">
-    <div class="hub-logo">GRUPO <span>CONSOLIDADO</span> <span style="font-size:0.4em;color:#8A8078;font-weight:400;margin-left:8px" id="ver-hub">v3.50.0</span></div>
+    <div class="hub-logo">GRUPO <span>CONSOLIDADO</span> <span style="font-size:0.4em;color:#8A8078;font-weight:400;margin-left:8px" id="ver-hub">v3.52.0</span></div>
     <div style="display:flex;align-items:center;gap:10px">
       <span class="hub-user" id="hub-user-name"></span>
       <button class="hub-logout" onclick="doLogout()">Salir</button>
@@ -202,7 +202,7 @@ input,button,select{font-family:inherit;}
       Volver
     </button>
     <span class="admin-title">Zona Administrador</span>
-    <span class="admin-fb" style="opacity:.5" id="ver-admin">v3.50.0</span>
+    <span class="admin-fb" style="opacity:.5" id="ver-admin">v3.52.0</span>
     <span class="admin-fb fb-status" id="admin-fb-status"></span>
   </div>
   <div class="admin-tabs">
@@ -276,7 +276,7 @@ const USERS_DEFAULT=[
 
 // ── Persistencia ─────────────────────────────────────────────────
 // ── Versión del Portal (mantener sincronizada en cada cambio) ──
-const PORTAL_VERSION="3.50.0";
+const PORTAL_VERSION="3.52.0";
 const PORTAL_BUILD="31/07/2026-version-unificada";
 try{var _pv=document.getElementById('portal-ver');if(_pv)_pv.textContent='Portal v'+PORTAL_VERSION;}catch(e){}
 // Habia tres numeros de version distintos escritos a mano en este archivo y
@@ -359,23 +359,47 @@ function _toFB(u){
   return{fields:f};
 }
 function saveUserFB(u){
-  fetch(PORTAL_FB+"/portal_users/"+u.id,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(_toFB(u))}).catch(function(){});
+  // A su coleccion de origen: escribir siempre en portal_users habria creado
+  // un duplicado de cada ficha que vive en usuarios.
+  var col=u._col||"portal_users";
+  var limpio={};
+  Object.keys(u).forEach(function(k){ if(k!=="_col") limpio[k]=u[k]; });
+  fetch(PORTAL_FB+"/"+col+"/"+encodeURIComponent(u.id),{method:"PATCH",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(_toFB(limpio))}).catch(function(){});
 }
 function deleteUserFB(id){
   fetch(PORTAL_FB+"/portal_users/"+id,{method:"DELETE"}).catch(function(){});
 }
 async function loadUsersFB(){
-  try{
-    var r=await fetch(PORTAL_FB+"/portal_users?pageSize=100");
-    if(r.ok){
+  // Las mismas personas viven en dos colecciones: portal_users, que es donde
+  // escribe esta pantalla, y usuarios, donde las crea estructura_equipos.html.
+  // El CRM lee las dos, asi que si aqui solo se leia una, habia comerciales
+  // que contaban en el dashboard y no se podian editar (BARBELANNE y otros).
+  // Cada ficha recuerda su coleccion en _col para poder guardarla en su sitio.
+  async function leer(col){
+    try{
+      var r=await fetch(PORTAL_FB+"/"+col+"?pageSize=300");
+      if(!r.ok) return [];
       var d=await r.json();
-      if(d.documents&&d.documents.length>0){
-        var fb=d.documents.map(_fromFB).filter(Boolean);
-        var ids=new Set(fb.map(function(u){return u.id;}));
-        var merged=fb.concat(USERS_DEFAULT.filter(function(u){return !ids.has(u.id);}));
-        saveUsersLocal(merged);
-        return merged;
-      }
+      return (d.documents||[]).map(_fromFB).filter(Boolean)
+        .map(function(u){ u._col=col; return u; });
+    }catch(e){ return []; }
+  }
+  try{
+    var dos=await Promise.all([leer("portal_users"),leer("usuarios")]);
+    var fb=dos[0].slice();
+    var vistos={};
+    fb.forEach(function(u){ vistos[String(u.id).toLowerCase()]=true; });
+    // Los de usuarios solo entran si no estan ya en portal_users, que manda.
+    dos[1].forEach(function(u){
+      if(!vistos[String(u.id).toLowerCase()]){ fb.push(u); vistos[String(u.id).toLowerCase()]=true; }
+    });
+    if(fb.length){
+      var ids=new Set(fb.map(function(u){return u.id;}));
+      var merged=fb.concat(USERS_DEFAULT.filter(function(u){return !ids.has(u.id);}));
+      saveUsersLocal(merged);
+      return merged;
     }
   }catch(e){}
   return loadUsers();
@@ -1049,6 +1073,7 @@ function renderUsuarios(){
       +(u.crmId?'<span class="badge-sm" style="background:#EBF2F8;color:#1E5A8A">CRM:'+u.crmId+'</span>':'')
       +(u.catalogoVendedor?'<span class="badge-sm" style="background:#EDF4F0;color:#2E6B42">📦 '+u.catalogoVendedor+'</span>':'')
       +(u.equipo?'<span class="badge-sm" style="background:'+(u.equipo==='WIKUK'?'#EBF2F8':'#EDF4F0')+';color:'+(u.equipo==='WIKUK'?'#1E5A8A':'#2E6B42')+'">'+u.equipo+'</span>':'')
+      +(u._col==='usuarios'?'<span class="badge-sm" style="background:#F3F0FA;color:#5B4B8A">usuarios</span>':'')
       +(esJefeEq&&equipoActual.length?'<span class="badge-sm" style="background:#FBF6EC;color:#8A6B00">👥 '+equipoActual.length+' agentes</span>':'')
       +'</div></div>'
       +'<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#8A8078" stroke-width="2.5" style="transform:'+(open?'rotate(180deg)':'')+'"><path d="M6 9l6 6 6-6"/></svg>'
@@ -1124,12 +1149,26 @@ function renderUsuarios(){
       // Jefe de equipo — selección de agentes
       if(esJefeEq){
         html+='<div><div class="field-label">Agentes de su equipo</div>';
-        adminUsers.filter(function(a){return a.rol==='crm_agente';}).forEach(function(ag){
+        // Antes salian todos los comerciales del portal, de cualquier rama.
+        // Ahora solo los de su equipo, mas los que ya tuviera asignados para
+        // poder quitarlos. Sin equipo propio se muestran todos, avisando.
+        var deSuEquipo=adminUsers.filter(function(a){
+          if(a.rol!=='crm_agente') return false;
+          if(!u.equipo) return true;
+          return a.equipo===u.equipo||equipoActual.includes(a.id);
+        });
+        if(!u.equipo){
+          html+='<div style="font-size:.72rem;color:#92400E;background:#FFFBEB;'
+            +'border-radius:8px;padding:8px 10px;margin-bottom:8px">'
+            +'Asignale un equipo arriba y aqui solo apareceran los suyos.</div>';
+        }
+        deSuEquipo.forEach(function(ag){
           var en=equipoActual.includes(ag.id);
           html+='<div class="agent-row'+(en?' on':'')+'" onclick="toggleAgente(\''+u.id+'\',\''+ag.id+'\')">'
             +'<div style="width:30px;height:30px;border-radius:7px;background:'+(ag.color||'#8A8078')+';color:white;display:flex;align-items:center;justify-content:center;font-size:.85rem;font-weight:700;flex-shrink:0">'+ag.icon+'</div>'
             +'<div style="flex:1"><div style="font-size:.85rem;font-weight:'+(en?700:400)+'">'+ag.nombre+'</div>'
-            +'<div style="font-size:.7rem;color:#8A8078;font-family:monospace">'+ag.id+'</div></div>'
+            +'<div style="font-size:.7rem;color:#8A8078;font-family:monospace">'+ag.id
+            +(ag.equipo?' · '+ag.equipo:' · sin equipo')+'</div></div>'
             +'<div class="toggle-sw '+(en?'on':'off')+'"></div>'
             +'</div>';
         });
@@ -1137,7 +1176,7 @@ function renderUsuarios(){
       }
 
       // Agente/Resp — CRM ID (solo lectura) + catálogo vendedor
-      if(pareceComercial||esResp){
+      if(pareceComercial||esResp||esJefeEq){
         html+='<div>'
           +'<div class="field-label">Perfil en el CRM</div>'
           +'<div style="display:flex;align-items:center;gap:8px">'
