@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Dónde se pierden las ventas</title>
+<style>
+  :root{
+    --papel:#EEF1F5;
+    --tinta:#0F1E33;
+    --tenue:#5C6B80;
+    --fuga:#C2263D;
+    --cuadra:#0F6E63;
+    --linea:#CFD8E3;
+    --hueco:#FFFFFF;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0;background:var(--papel);color:var(--tinta);
+    font:400 16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    padding:24px 18px calc(48px + env(safe-area-inset-bottom));
+    max-width:640px;margin-inline:auto;
+  }
+  .num{font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+
+  header{margin-bottom:28px}
+  h1{margin:0 0 6px;font-size:23px;font-weight:800;letter-spacing:-.03em;line-height:1.15}
+  .sub{margin:0;font-size:13.5px;color:var(--tenue)}
+
+  .partida{
+    background:var(--hueco);border:1px solid var(--linea);
+    border-radius:3px;padding:18px 16px;margin-bottom:22px;
+  }
+  .rot{
+    font-size:10.5px;font-weight:800;letter-spacing:.09em;
+    text-transform:uppercase;color:var(--tenue);margin:0 0 8px;
+  }
+  .cifra{font-size:34px;font-weight:800;letter-spacing:-.035em;margin:0}
+  .pie{margin:6px 0 0;font-size:12.5px;color:var(--tenue)}
+
+  /* La cascada: cada filtro cuelga de una línea vertical y el saldo baja */
+  .cascada{position:relative;padding-left:20px;margin:0 0 22px}
+  .cascada::before{
+    content:"";position:absolute;left:3px;top:6px;bottom:18px;
+    width:1px;background:var(--linea);
+  }
+  .paso{position:relative;padding:11px 0;border-bottom:1px solid var(--linea)}
+  .paso::before{
+    content:"";position:absolute;left:-20px;top:19px;
+    width:7px;height:7px;border-radius:50%;
+    background:var(--fuga);outline:3px solid var(--papel);
+  }
+  .paso.ok::before{background:var(--cuadra)}
+  .fila{display:flex;justify-content:space-between;align-items:baseline;gap:14px}
+  .que{font-size:14.5px;font-weight:600;min-width:0}
+  .cuanto{font-size:15px;font-weight:800;white-space:nowrap;color:var(--fuga)}
+  .paso.ok .cuanto{color:var(--cuadra)}
+  .detalle{margin:3px 0 0;font-size:12px;color:var(--tenue)}
+  .saldo{
+    display:flex;justify-content:space-between;align-items:baseline;
+    padding-top:13px;font-size:15px;font-weight:800;
+  }
+  .saldo span:last-child{font-size:19px}
+
+  table{width:100%;border-collapse:collapse;margin-top:4px}
+  td{padding:8px 0;border-bottom:1px solid var(--linea);font-size:13.5px;vertical-align:top}
+  td:last-child{text-align:right;font-weight:700;white-space:nowrap;padding-left:12px}
+  .motivo{display:block;font-size:11px;color:var(--tenue);margin-top:1px}
+
+  .aviso{
+    font-size:12.5px;color:var(--tenue);line-height:1.55;
+    border-left:2px solid var(--linea);padding-left:12px;margin:22px 0 0;
+  }
+  .estado{padding:34px 4px;font-size:14.5px;color:var(--tenue)}
+  b{font-weight:700}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Dónde se pierden las ventas</h1>
+  <p class="sub">De lo que trae Power BI a lo que enseña el dashboard. v1.0</p>
+</header>
+
+<div id="app"><p class="estado">Leyendo Firestore…</p></div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const eur=(n)=>Math.round(n||0).toLocaleString("es-ES")+" €";
+const arriba=(s)=>String(s||"").toUpperCase().trim();
+
+// Firestore devuelve cada campo envuelto en su tipo. Se desenvuelve aquí para
+// no repetir la comprobación en cada lectura.
+function val(f){
+  if(!f) return null;
+  if(f.doubleValue!==undefined)  return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.stringValue!==undefined)  return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  return null;
+}
+function planos(j){
+  return (j.documents||[]).map(d=>{
+    const o={_id:decodeURIComponent(d.name.split("/").pop())};
+    for(const [k,v] of Object.entries(d.fields||{})) o[k]=val(v);
+    return o;
+  });
+}
+async function leer(col){
+  const r=await fetch(`${FB}/${col}?pageSize=300`);
+  if(!r.ok) throw new Error(`${col}: HTTP ${r.status}`);
+  return planos(await r.json());
+}
+
+(async()=>{
+  const app=document.getElementById("app");
+  try{
+    const [agentes,ajustes,usuarios,portal]=await Promise.all([
+      leer("pbi_resumen_agente"),
+      leer("pbi_ajustes").catch(()=>[]),
+      leer("usuarios").catch(()=>[]),
+      leer("portal_users").catch(()=>[]),
+    ]);
+
+    const total=agentes.find(a=>a._id==="_TOTAL");
+    let vivos=agentes.filter(a=>a._id!=="_TOTAL");
+    const suma=(l)=>l.reduce((s,a)=>s+(a.ventasMes||0),0);
+    const partida=suma(vivos);
+
+    // Claves con las que el dashboard reconoce a un comercial. Solo se leen
+    // rol e identificadores: nada más de estas fichas se usa ni se muestra.
+    const ROLES=["agente","crm_agente","comercial"];
+    const reconocidos=new Set();
+    for(const u of [...usuarios,...portal]){
+      if(!ROLES.includes(String(u.rol||"").toLowerCase())) continue;
+      for(const k of [u.grupoAgente,u.catalogoVendedor,u.username,u.id,u._id])
+        if(k) reconocidos.add(arriba(k));
+    }
+
+    const exc=new Set(ajustes.filter(a=>a.equipo==="_EXCLUIR").map(a=>arriba(a._id)));
+    const PATRON=/INTERC|SIN AGENTE|TIENDA/;
+
+    // Cada filtro se aplica en el mismo orden que en crm.html, para que el
+    // reparto de la pérdida sea el real y no una atribución inventada.
+    const pasos=[
+      {que:"Marcados _EXCLUIR",       nota:"ajuste manual de rama",
+       fn:a=>exc.has(arriba(a._id))},
+      {que:"Patrón INTERC / SIN AGENTE / TIENDA", nota:"por el nombre, no por un campo",
+       fn:a=>PATRON.test(arriba(a._id)+" "+arriba(a.agente))},
+      {que:"Sin venta este año ni el anterior", nota:"se descartan al cargar",
+       fn:a=>!((a.ventasAct||0)>0||(a.ventasAntYTD||0)>0)},
+      {que:"Sin usuario con rol de agente", nota:"facturan, pero no existen en el portal",
+       fn:a=>!reconocidos.has(arriba(a._id))},
+    ];
+
+    const caidos=[];
+    let saldo=partida, html="";
+    for(const p of pasos){
+      const fuera=vivos.filter(p.fn);
+      vivos=vivos.filter(a=>!p.fn(a));
+      const imp=suma(fuera);
+      saldo-=imp;
+      fuera.forEach(a=>caidos.push({...a,motivo:p.que}));
+      html+=`<div class="paso${imp?"":" ok"}">
+        <div class="fila">
+          <span class="que">${p.que}</span>
+          <span class="cuanto num">${imp?"−"+eur(imp):"0 €"}</span>
+        </div>
+        <p class="detalle">${fuera.length} ${fuera.length===1?"comercial":"comerciales"} · ${p.nota}</p>
+      </div>`;
+    }
+
+    const desvio=total?Math.abs((total.ventasMes||0)-partida):null;
+
+    app.innerHTML=`
+      <div class="partida">
+        <p class="rot">Suma de los ${agentes.length-1} comerciales</p>
+        <p class="cifra num">${eur(partida)}</p>
+        <p class="pie">${total
+          ? (desvio<1
+             ? "Coincide con el documento _TOTAL."
+             : `El documento _TOTAL dice ${eur(total.ventasMes)}. Difieren en ${eur(desvio)}.`)
+          : "No se ha encontrado el documento _TOTAL."}</p>
+      </div>
+
+      <div class="cascada">
+        ${html}
+        <div class="saldo">
+          <span>Queda en el dashboard</span>
+          <span class="num">${eur(saldo)}</span>
+        </div>
+      </div>
+
+      <div class="partida">
+        <p class="rot">Se pierden por el camino</p>
+        <p class="cifra num" style="color:var(--fuga)">${eur(partida-saldo)}</p>
+        <p class="pie">${caidos.length} comerciales con venta este mes o sin ella.</p>
+      </div>
+
+      ${caidos.filter(a=>(a.ventasMes||0)!==0).length?`
+      <p class="rot" style="margin-bottom:2px">Quién se cae, y con cuánto</p>
+      <table>${caidos
+        .filter(a=>(a.ventasMes||0)!==0)
+        .sort((x,y)=>(y.ventasMes||0)-(x.ventasMes||0))
+        .map(a=>`<tr>
+          <td>${a.agente||a._id}<span class="motivo">${a.motivo}</span></td>
+          <td class="num">${eur(a.ventasMes)}</td>
+        </tr>`).join("")}</table>`:""}
+
+      <p class="aviso">
+        El reparto por motivo sigue el orden de <b>crm.html</b>: quien cumple dos
+        condiciones se anota en la primera. El paso del rol de agente se
+        aproxima cruzando <b>usuarios</b> y <b>portal_users</b>; el CRM añade
+        además una lista escrita a mano, así que ahí puede sobrar algún nombre.
+        Los demás pasos son exactos.
+      </p>`;
+
+  }catch(e){
+    app.innerHTML=`<p class="estado">No se ha podido leer Firestore: ${e.message}.
+      Comprueba que hay conexión y que las reglas siguen permitiendo lectura.</p>`;
+  }
+})();
+</script>
+</body>
+</html>
