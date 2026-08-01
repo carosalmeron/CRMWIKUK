@@ -89,6 +89,13 @@
     font-family:"IBM Plex Mono",monospace}
   .mpie b{font-size:14px;font-weight:700}
 
+  .mpend{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
+    margin-top:10px;padding:8px 11px;background:#FFF8E8;
+    border-left:2px solid var(--pendiente);border-radius:0 2px 2px 0}
+  .mpend span:first-child{font-size:12.5px;color:#7A5A08}
+  .mpend b{font-size:15px;font-weight:700;color:var(--pendiente)}
+  .mdias{font-size:11px;color:#9C7A2E;white-space:nowrap}
+
   table{width:100%;border-collapse:collapse;margin-top:2px}
   td{padding:10px 0;border-bottom:1px solid var(--linea);font-size:14px;vertical-align:baseline}
   td:last-child{text-align:right;white-space:nowrap;padding-left:14px}
@@ -179,6 +186,69 @@ function agregar(lista){
   return t;
 }
 
+// Estados sacados de crm.html. Todo lo que no sea un cierre explicito cuenta
+// como abierto: es la lectura dura, y es la que hace visible el atasco.
+const CIERRES={
+  muestras:    {ok:["pedido"],              ko:["cerrada","rechazada","ko"]},
+  ofertas:     {ok:["pedido","aceptada"],   ko:["rechazada","perdida"]},
+  estrategias: {ok:["completada"],          ko:["ko","cancelada"]},
+  incidencias: {ok:["cerrada","resuelta"],  ko:[]},
+};
+const FECHAS=["fecha","fechaCreacion","creadoEl","fechaEnvio","fechaAlta","createdAt"];
+function fechaDe(o){
+  for(const c of FECHAS) if(o[c]) return String(o[c]).slice(0,10);
+  return null;
+}
+function clasificar(col,lista,clave,desde){
+  const r={nuevas:0, ok:0, ko:0, abiertas:0, masVieja:null};
+  const reglas=CIERRES[col];
+  for(const o of lista){
+    if(clave && arriba(o.agente)!==clave) continue;
+    const est=String(o.estado||"").toLowerCase();
+    const res=String(o.resultado||"").toLowerCase();
+    const esOk=reglas.ok.includes(est)||reglas.ok.includes(res);
+    const esKo=!esOk&&(reglas.ko.includes(est)||reglas.ko.includes(res));
+    const f=fechaDe(o);
+    if(f&&f>=desde) r.nuevas++;
+    if(esOk) r.ok++;
+    else if(esKo) r.ko++;
+    else {
+      r.abiertas++;
+      if(f&&(!r.masVieja||f<r.masVieja)) r.masVieja=f;
+    }
+  }
+  return r;
+}
+function marcadorHTML(tit,r,etqOk,etqKo){
+  const cerradas=r.ok+r.ko;
+  const total=cerradas+r.abiertas;
+  if(!total) return "";
+  const pct=total?r.ok/total*100:0;
+  const dias=r.masVieja
+    ? Math.round((Date.now()-new Date(r.masVieja+"T12:00:00"))/86400000) : null;
+  const w=(n)=>total?(n/total*100).toFixed(1):0;
+  return `<div class="marca">
+    <div class="mcab"><span class="mtit">${tit}</span>
+      <span class="mpct m" style="color:var(--${pct>=40?"sube":pct>=15?"pendiente":"cae"})">${
+        Math.round(pct)} %</span></div>
+    <p class="mflujo m">${r.nuevas} nueva${r.nuevas===1?"":"s"} esta semana · ${total} en total</p>
+    <div class="mbar">
+      <i style="width:${w(r.ok)}%;background:var(--sube)"></i>
+      <i style="width:${w(r.ko)}%;background:var(--cae)"></i>
+      <i style="width:${w(r.abiertas)}%;background:var(--pendiente)"></i>
+    </div>
+    <div class="mpie">
+      <span><b style="color:var(--sube)">${r.ok}</b> ${etqOk}</span>
+      ${etqKo?`<span><b style="color:var(--cae)">${r.ko}</b> ${etqKo}</span>`:""}
+      <span><b style="color:var(--pendiente)">${r.abiertas}</b> abiertas</span>
+    </div>
+    ${r.abiertas?`<div class="mpend">
+      <span class="m"><b>${r.abiertas}</b> sin resolver</span>
+      ${dias!==null?`<span class="mdias m">la más antigua, ${dias} días</span>`:""}
+    </div>`:""}
+  </div>`;
+}
+
 // Barra de desviacion. El ancho se satura al 50% para que un +900% no rompa
 // la escala; el numero de al lado sigue siendo el real.
 function desvHTML(pct, etqMenos, etqMas){
@@ -200,11 +270,16 @@ function desvHTML(pct, etqMenos, etqMas){
     const rol=String(u.rol||"").toLowerCase();
     const mando=rol.includes("director")||rol==="admin"||rol==="ceo";
 
-    const [agentes,objetivos,usuarios,portal]=await Promise.all([
+    const [agentes,objetivos,usuarios,portal,
+           muestras,ofertas,estrategias,incidencias]=await Promise.all([
       leerCol("pbi_resumen_agente"),
       leerCol("pbi_objetivos").catch(()=>[]),
       leerCol("usuarios").catch(()=>[]),
       leerCol("portal_users").catch(()=>[]),
+      leerCol("muestras").catch(()=>[]),
+      leerCol("ofertas").catch(()=>[]),
+      leerCol("estrategias").catch(()=>[]),
+      leerCol("incidencias").catch(()=>[]),
     ]);
     const vivos=agentes.filter(a=>a._id!=="_TOTAL");
 
@@ -267,6 +342,15 @@ function desvHTML(pct, etqMenos, etqMas){
     const fCorta=(f)=>{ if(!f) return ""; const d=new Date(f+"T12:00:00");
       return isNaN(d)?f:`${d.getDate()} ${MESES[d.getMonth()].slice(0,3)}`; };
 
+    // Actividad: flujo de los ultimos 7 dias frente a la cartera abierta
+    const desde=fechas[fechas.length-1];
+    const actividadHTML=[
+      marcadorHTML("Muestras",   clasificar("muestras",muestras,clave,desde),   "con pedido","rechazadas"),
+      marcadorHTML("Ofertas",    clasificar("ofertas",ofertas,clave,desde),     "en pedido","perdidas"),
+      marcadorHTML("Estrategias",clasificar("estrategias",estrategias,clave,desde),"completadas","sin resultado"),
+      marcadorHTML("Incidencias",clasificar("incidencias",incidencias,clave,desde),"resueltas",""),
+    ].filter(Boolean).join("");
+
     // ── Pintar ──────────────────────────────────────────────────────
     const varSem = t.ventasSemAnt ? (t.ventasSem-t.ventasSemAnt)/t.ventasSemAnt*100 : null;
     const varAno = t.ventasAntYTD ? (t.ventasAct-t.ventasAntYTD)/t.ventasAntYTD*100 : null;
@@ -276,7 +360,7 @@ function desvHTML(pct, etqMenos, etqMas){
 
     app.innerHTML=`
 <header>
-  <a class="volver" href="index.html">← Volver al portal</a>
+  ${window.parent!==window?"":'<a class="volver" href="index.html">← Volver al portal</a>'}
   <p class="eyebrow">Parte semanal</p>
   <h1>${titulo}</h1>
   <p class="equipo">${sub}</p>
@@ -353,12 +437,8 @@ function desvHTML(pct, etqMenos, etqMas){
 
 <section>
   <p class="rot">Actividad</p>
-  <div class="falta">
-    Muestras, ofertas, estrategias e incidencias están en el CRM, pero no sé
-    con qué campo se marca cada una como cerrada ni dónde vive la fecha de
-    creación. Sin eso no se puede separar lo de esta semana de lo que sigue
-    abierto, que era justo la idea.
-  </div>
+  ${actividadHTML||`<div class="falta">No hay muestras, ofertas, estrategias ni
+    incidencias registradas${clave?" a tu nombre":""}.</div>`}
 </section>
 
 <section>
