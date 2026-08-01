@@ -1566,11 +1566,16 @@ ${meses.join(",\n")}
       // Solo intercompany. Los codigos fusionados NO se excluyen: su venta es
       // real y esta apuntada al codigo antiguo, asi que quitarlos borraba la
       // mitad del año de algunos comerciales.
+      // Por el campo y tambien por el nombre: un codigo antiguo de la
+      // recodificacion puede no traer la marca aunque el cliente sea del
+      // grupo, y esos son los que colaban 300.000 € al mes.
       const fuera = new Set();
       let leidos = 0;
       for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
         leidos++;
-        if (c.intercompany) fuera.add(String(c._id).toUpperCase());
+        if (c.intercompany || esIntercompany(c.nombre)) {
+          fuera.add(String(c._id).toUpperCase());
+        }
       }
       out.clientesLeidos = leidos;
       out.clientesExcluidos = fuera.size;
