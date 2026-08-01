@@ -1542,10 +1542,14 @@ EVALUATE
         meses.push(`    "a${m}", CALCULATE(SUM(${M.vBase}),\n` +
           `      FILTER(${M.ventas}, YEAR(${M.vFecha}) = ${anoAct} && MONTH(${M.vFecha}) = ${m}))`);
       }
+      // Se agrupa tambien por cliente para poder descartar el intercompany
+      // con el mismo criterio que el resumen: si no, marzo salia con 370.000 €
+      // de traspasos entre empresas del grupo y no era comparable.
       const daxMes = `
 EVALUATE
   SUMMARIZECOLUMNS(
     ${M.vVendedor},
+    ${M.vCliente},
 ${meses.join(",\n")}
   )`;
 
@@ -1557,18 +1561,27 @@ ${meses.join(",\n")}
       out.columnas = filas.length ? Object.keys(filas[0]) : [];
       out.filaEjemplo = filas.length ? filas[0] : null;
 
+      // Clientes que el resumen excluye: intercompany y codigos fusionados.
+      // Se leen de pbi_ventas_cliente, que es donde ya estan marcados.
+      const fuera = new Set();
+      for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
+        if (c.intercompany || c.fusionadoEn) fuera.add(String(c._id).toUpperCase());
+      }
+      out.clientesExcluidos = fuera.size;
+
       const porVend = {};
       for (const r of filas) {
         const v = String(pick(r, "VENDEDOR") || "").trim();
-        if (!v) continue;
-        const d = { total: 0, meses: {}, totalAct: 0, act: {} };
+        const cli = String(pick(r, "CLIENTE") || "").trim().toUpperCase();
+        if (!v || fuera.has(cli)) continue;
+        if (!porVend[v]) porVend[v] = { total: 0, meses: {}, totalAct: 0, act: {} };
+        const d = porVend[v];
         for (let m = 1; m <= 12; m++) {
           const imp = Number(pick(r, "m" + m)) || 0;
-          if (imp) { d.meses[m] = num(imp); d.total = num(d.total + imp); }
+          if (imp) { d.meses[m] = num((d.meses[m] || 0) + imp); d.total = num(d.total + imp); }
           const act = Number(pick(r, "a" + m)) || 0;
-          if (act) { d.act[m] = num(act); d.totalAct = num(d.totalAct + act); }
+          if (act) { d.act[m] = num((d.act[m] || 0) + act); d.totalAct = num(d.totalAct + act); }
         }
-        if (d.total || d.totalAct) porVend[v] = d;
       }
 
       // Del codigo del ERP al GRUPOAGENTE que usa el CRM: un comercial tiene
