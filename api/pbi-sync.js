@@ -1516,6 +1516,89 @@ EVALUATE
     return res.status(401).json({ error: "no autorizado" });
   }
 
+  // ?estacionalidad=1 → ventas del año pasado mes a mes, por vendedor.
+  // A quien se le cargó el objetivo igualando 2025 se le reparte hoy en doce
+  // partes iguales, y eso da una marca de ritmo falsa en un negocio con
+  // temporada. Con esto se reparte como vendió de verdad.
+  // Consulta propia y aislada: no toca Q.ventas ni ninguna ruta existente.
+  if (req.query.estacionalidad === "1") {
+    const t1 = Date.now();
+    const out = { ok: true };
+    try {
+      const { token } = await getToken(req);
+      const anoAnt = new Date().getFullYear() - 1;
+
+      // Agrupado por vendedor y fecha; el mes se saca en JS al recorrer, que
+      // evita depender de que el modelo tenga tabla de calendario.
+      const daxMes = `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${M.vVendedor},
+    ${M.vFecha},
+    "Venta", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = ${anoAnt}))
+  )`;
+
+      const filas = await pbiQuery(token, daxMes);
+
+      // Agrupar en JS: pedir por fecha y sumar aqui evita depender de que el
+      // modelo tenga tabla de calendario.
+      const porVend = {};
+      for (const r of filas) {
+        const v = String(pick(r, "Vendedor") || "").trim();
+        const f = String(pick(r, "Fecha") || "");
+        const imp = Number(pick(r, "Venta")) || 0;
+        if (!v || !f || !imp) continue;
+        const mes = Number(f.slice(5, 7));
+        if (!mes) continue;
+        if (!porVend[v]) porVend[v] = { total: 0, meses: {} };
+        porVend[v].meses[mes] = num((porVend[v].meses[mes] || 0) + imp);
+        porVend[v].total = num(porVend[v].total + imp);
+      }
+
+      // Del codigo del ERP al GRUPOAGENTE que usa el CRM: un comercial tiene
+      // varios codigos de vendedor, asi que sin esto no cuadra nada.
+      const agentes = {};
+      for (const a of await pbiQuery(token, Q.agentes, true)) {
+        const cod = String(pick(a, "CODIGO") || "").trim();
+        const grupo = String(pick(a, "GRUPOAGENTE") || "").trim().toUpperCase();
+        if (cod && grupo) agentes[cod] = grupo;
+      }
+      const porAgente = {};
+      for (const [vend, d] of Object.entries(porVend)) {
+        const ag = agentes[vend] || agentes[vend.toUpperCase()];
+        if (!ag) continue;
+        if (!porAgente[ag]) porAgente[ag] = { total: 0, meses: {} };
+        for (const [m, v] of Object.entries(d.meses))
+          porAgente[ag].meses[m] = num((porAgente[ag].meses[m] || 0) + v);
+        porAgente[ag].total = num(porAgente[ag].total + d.total);
+      }
+
+      const docs = Object.entries(porAgente).map(([ag, d]) => {
+        const o = { _id: ag, agente: ag, anio: anoAnt, total: d.total,
+                    actualizado: new Date().toISOString() };
+        // Reparto en tanto por uno: el parte multiplica el objetivo por esto
+        for (let m = 1; m <= 12; m++) {
+          o["mes_" + m] = num(d.meses[m] || 0);
+          o["peso_" + m] = d.total ? Math.round((d.meses[m] || 0) / d.total * 10000) / 10000 : 0;
+        }
+        return o;
+      });
+
+      if (!req.query.dry) await fbCommit("pbi_estacionalidad", docs);
+
+      out.anio = anoAnt;
+      out.vendedores = Object.keys(porVend).length;
+      out.agentes = docs.length;
+      out.dry = !!req.query.dry;
+      out.muestra = docs.slice(0, 3);
+    } catch (e) {
+      out.ok = false; out.error = e.message;
+    }
+    out.segundos = Math.round((Date.now() - t1) / 1000);
+    return res.status(out.ok ? 200 : 500).json(out);
+  }
+
   // ?cierre=1 → congela la foto de la semana. pbi_resumen_agente solo guarda
   // la semana en curso y se pisa cada mañana, asi que sin esto no hay forma
   // de mirar atras ni de mandar el parte del viernes con datos cerrados.
@@ -1535,7 +1618,7 @@ EVALUATE
       const CAMPOS = ["agente", "equipo", "tipo", "objetivoMargen",
         "ventasSem", "ventasSemAnt", "margenSem", "baseSem",
         "ventasMes", "ventasMesAnt", "margenMes", "baseMes",
-        "ventasAct", "ventasAntYTD", "margenAct", "baseAct",
+        "ventasAct", "ventasAntYTD", "ventasAntFull", "margenAct", "baseAct",
         "clientes", "clientesConVentaMes"];
       const foto = vivos.map((a) => {
         const o = { id: a._id };
