@@ -124,7 +124,7 @@
 </style>
 </head>
 <body>
-<div id="app"><p class="estado">Leyendo…</p></div>
+<div id="app"><p class="estado">Leyendo… <span id="ver">v1.1</span></p></div>
 
 <script>
 const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
@@ -150,13 +150,26 @@ function plano(doc){
   for(const [k,v] of Object.entries(doc.fields||{})) o[k]=val(v);
   return o;
 }
-const FALLOS=[];
+const FALLOS=[]; let HECHAS=0, TOTAL=0;
+// Con tiempo limite: una peticion que no vuelve dejaba la pagina en "Leyendo…"
+// para siempre, sin decir cual era. Ahora aborta a los 12 s y lo cuenta.
 async function leerCol(col){
+  TOTAL++;
+  const ctrl=new AbortController();
+  const reloj=setTimeout(()=>ctrl.abort(), 12000);
   try{
-    const r=await fetch(`${FB}/${col}?pageSize=300`);
+    const r=await fetch(`${FB}/${col}?pageSize=300`,{signal:ctrl.signal});
     if(!r.ok){ FALLOS.push(`${col} (HTTP ${r.status})`); return []; }
-    return ((await r.json()).documents||[]).map(plano);
-  }catch(e){ FALLOS.push(`${col} (${e.message})`); return []; }
+    const j=await r.json();
+    return (j.documents||[]).map(plano);
+  }catch(e){
+    FALLOS.push(`${col} (${e.name==="AbortError"?"sin respuesta en 12 s":e.message})`);
+    return [];
+  }finally{
+    clearTimeout(reloj); HECHAS++;
+    const el=document.querySelector(".estado");
+    if(el) el.textContent=`Leyendo… ${HECHAS} de ${TOTAL}`;
+  }
 }
 async function leerDoc(ruta){
   try{
@@ -344,6 +357,11 @@ function desvHTML(pct, etqMenos, etqMas){
       return l;
     }
 
+    // Se leen aqui, fuera de pintar(): no dependen del filtro y asi pintar()
+    // no necesita await. Tenerlo dentro rompia el script entero.
+    const fechas=[]; for(let i=0;i<7;i++){ const d=new Date(); d.setDate(d.getDate()-i); fechas.push(iso(d)); }
+    const dias=(await Promise.all(fechas.map(f=>leerDoc(`pbi_pedidos_cambios/${f}`)))).filter(Boolean);
+
     function pintar(){
     const mios=seleccionados();
     const t=agregar(mios);
@@ -360,8 +378,6 @@ function desvHTML(pct, etqMenos, etqMas){
     const ritmo=objAnual*(mesesHechos/12);
 
     // ── Pedidos: la semana entera del diario, agregada ──────────────
-    const fechas=[]; for(let i=0;i<7;i++){ const d=new Date(); d.setDate(d.getDate()-i); fechas.push(iso(d)); }
-    const dias=(await Promise.all(fechas.map(f=>leerDoc(`pbi_pedidos_cambios/${f}`)))).filter(Boolean);
     const lee=(s)=>{ try{ return JSON.parse(s||"[]"); }catch(e){ return []; } };
     const sel=new Set(mios.map(a=>arriba(a._id)));
     const mio=(m)=>sel.has(arriba(m.agente));
