@@ -1563,10 +1563,16 @@ ${meses.join(",\n")}
 
       // Clientes que el resumen excluye: intercompany y codigos fusionados.
       // Se leen de pbi_ventas_cliente, que es donde ya estan marcados.
+      // Solo intercompany. Los codigos fusionados NO se excluyen: su venta es
+      // real y esta apuntada al codigo antiguo, asi que quitarlos borraba la
+      // mitad del año de algunos comerciales.
       const fuera = new Set();
+      let leidos = 0;
       for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
-        if (c.intercompany || c.fusionadoEn) fuera.add(String(c._id).toUpperCase());
+        leidos++;
+        if (c.intercompany) fuera.add(String(c._id).toUpperCase());
       }
+      out.clientesLeidos = leidos;
       out.clientesExcluidos = fuera.size;
 
       const porVend = {};
