@@ -1526,6 +1526,7 @@ EVALUATE
     const out = { ok: true };
     try {
       const { token } = await getToken(req);
+      const Q = dax(null);
       const anoAnt = new Date().getFullYear() - 1;
 
       // Agrupado por vendedor y fecha; el mes se saca en JS al recorrer, que
