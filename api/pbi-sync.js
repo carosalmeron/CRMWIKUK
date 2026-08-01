@@ -582,6 +582,35 @@ async function fbLeerDocumento(coleccion, id) {
   return o;
 }
 
+// Semana ISO 8601: la semana 1 es la que contiene el primer jueves del año.
+// Sin esto, a caballo entre diciembre y enero el numero baila.
+function isoSemana(fecha) {
+  const d = new Date(Date.UTC(fecha.getFullYear(), fecha.getMonth(), fecha.getDate()));
+  d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
+  const ini = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const n = Math.ceil(((d - ini) / 86400000 + 1) / 7);
+  return `${d.getUTCFullYear()}-W${String(n).padStart(2, "0")}`;
+}
+
+async function fbLeerDoc(coleccion, id) {
+  // Mismo desempaquetado que fbLeerColeccion, pero para un documento suelto:
+  // los siete dias del diario se piden por nombre, no listando la coleccion.
+  const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+  const key = ENV.FB_API_KEY ? `?key=${ENV.FB_API_KEY}` : "";
+  const url = `https://firestore.googleapis.com/v1/${base}/${coleccion}/` +
+              `${encodeURIComponent(id)}${key}`;
+  const r = await fetch(url);
+  if (!r.ok) return null;
+  const j = await r.json();
+  const o = { _id: id };
+  for (const [k, v] of Object.entries(j.fields || {})) {
+    o[k] = v.doubleValue ?? v.integerValue ?? v.stringValue ?? v.booleanValue ?? null;
+    if (v.integerValue !== undefined) o[k] = Number(o[k]);
+    if (v.doubleValue !== undefined) o[k] = Number(v.doubleValue);
+  }
+  return o;
+}
+
 async function fbLeerColeccion(coleccion) {
   const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
   const key = ENV.FB_API_KEY ? `&key=${ENV.FB_API_KEY}` : "";
@@ -1485,6 +1514,82 @@ EVALUATE
   const secreto = req.query.secret || auth.replace("Bearer ", "");
   if (ENV.CRON_SECRET && secreto !== ENV.CRON_SECRET) {
     return res.status(401).json({ error: "no autorizado" });
+  }
+
+  // ?cierre=1 → congela la foto de la semana. pbi_resumen_agente solo guarda
+  // la semana en curso y se pisa cada mañana, asi que sin esto no hay forma
+  // de mirar atras ni de mandar el parte del viernes con datos cerrados.
+  // No toca Power BI: lee de Firestore, como resumen=1.
+  if (req.query.cierre === "1") {
+    const t1 = Date.now();
+    const out = { ok: true, fuente: "firestore" };
+    try {
+      const ahora = new Date();
+      const sem = isoSemana(ahora);
+
+      const resumen = await fbLeerColeccion("pbi_resumen_agente");
+      const vivos = resumen.filter((a) => a._id !== "_TOTAL");
+
+      // Solo lo que hace falta para pintar un parte. Guardar el documento
+      // entero por 74 comerciales y 52 semanas seria tirar espacio.
+      const CAMPOS = ["agente", "equipo", "tipo", "objetivoMargen",
+        "ventasSem", "ventasSemAnt", "margenSem", "baseSem",
+        "ventasMes", "ventasMesAnt", "margenMes", "baseMes",
+        "ventasAct", "ventasAntYTD", "margenAct", "baseAct",
+        "clientes", "clientesConVentaMes"];
+      const foto = vivos.map((a) => {
+        const o = { id: a._id };
+        for (const c of CAMPOS) if (a[c] !== undefined && a[c] !== null) o[c] = a[c];
+        return o;
+      });
+
+      // Los movimientos de pedidos de los siete dias, ya agregados: los
+      // documentos diarios se pueden purgar y el parte de esa semana sigue
+      // contando lo mismo dentro de un año.
+      const totales = { salido: 0, retrasado: 0, anulado: 0, nuevo: 0, adelantado: 0,
+                        nSalido: 0, nRetrasado: 0, nAnulado: 0, nNuevo: 0 };
+      const lee = (t) => { try { return JSON.parse(t || "[]"); } catch (e) { return []; } };
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(ahora); d.setDate(d.getDate() - i);
+        const dia = d.toISOString().slice(0, 10);
+        const doc = await fbLeerDoc("pbi_pedidos_cambios", dia).catch(() => null);
+        if (!doc) continue;
+        for (const m of lee(doc.salidas)) {
+          if (m.tipo === "servido") { totales.salido += num(m.importe); totales.nSalido++; }
+          else { totales.anulado += num(m.importe); totales.nAnulado++; }
+        }
+        for (const m of lee(doc.movimientos)) {
+          if (m.tipo === "adelanto") { totales.adelantado += num(m.importe); continue; }
+          if (m.fechaAntes && m.fechaAntes < (doc.fecha || dia)) {
+            totales.retrasado += num(m.importe); totales.nRetrasado++;
+          }
+        }
+        for (const m of lee(doc.entradas)) { totales.nuevo += num(m.importe); totales.nNuevo++; }
+      }
+      for (const k of Object.keys(totales)) totales[k] = num(totales[k]);
+
+      await fbCommit("pbi_semanas", [{
+        _id: sem,
+        semana: sem,
+        cerradoEl: ahora.toISOString(),
+        desde: (() => { const d = new Date(ahora); d.setDate(d.getDate() - 6); return d.toISOString().slice(0, 10); })(),
+        hasta: ahora.toISOString().slice(0, 10),
+        comerciales: foto.length,
+        ventasSem: num(foto.reduce((x, a) => x + num(a.ventasSem), 0)),
+        agentes: JSON.stringify(foto),
+        pedidos: JSON.stringify(totales),
+      }]);
+
+      out.semana = sem;
+      out.comerciales = foto.length;
+      out.ventasSem = num(foto.reduce((x, a) => x + num(a.ventasSem), 0));
+      out.pedidos = totales;
+      out.tamano = JSON.stringify(foto).length + " bytes";
+    } catch (e) {
+      out.ok = false; out.error = e.message;
+    }
+    out.segundos = Math.round((Date.now() - t1) / 1000);
+    return res.status(out.ok ? 200 : 500).json(out);
   }
 
   // ?resumen=1 → recalcula el resumen por comercial y el índice de búsqueda
