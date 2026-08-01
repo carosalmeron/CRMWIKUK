@@ -116,6 +116,23 @@
   .mpend b{font-size:15px;font-weight:700;color:var(--pendiente)}
   .mdias{font-size:11px;color:#9C7A2E;white-space:nowrap}
 
+  .tabla{overflow-x:auto;-webkit-overflow-scrolling:touch;
+    border:1px solid var(--linea);border-radius:3px;background:var(--hueco)}
+  table.rank{border-collapse:separate;border-spacing:0;font-size:12px;white-space:nowrap}
+  table.rank th{position:sticky;top:0;background:#EDF0F3;font-weight:700;
+    font-size:10px;letter-spacing:.04em;text-transform:uppercase;color:var(--tenue);
+    padding:8px 7px;text-align:right;border-bottom:1px solid var(--linea)}
+  table.rank td{padding:8px 7px;border-bottom:1px solid var(--linea);text-align:right}
+  table.rank .fijo{position:sticky;left:0;background:var(--hueco);text-align:left;
+    font-weight:700;min-width:118px;box-shadow:1px 0 0 var(--linea)}
+  table.rank th.fijo{background:#EDF0F3;z-index:2}
+  table.rank .fijo small{display:block;font-weight:400;font-size:10px;color:var(--tenue)}
+  table.rank .n{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums}
+  table.rank .sep{border-left:1px solid var(--linea)}
+  table.rank .ok{color:var(--sube)} table.rank .ko{color:var(--cae)}
+  table.rank .pd{color:var(--pendiente)}
+  table.rank tr:last-child td{border-bottom:none}
+
   table{width:100%;border-collapse:collapse;margin-top:2px}
   td{padding:10px 0;border-bottom:1px solid var(--linea);font-size:14px;vertical-align:baseline}
   td:last-child{text-align:right;white-space:nowrap;padding-left:14px}
@@ -230,9 +247,22 @@ const CIERRES={
   estrategias: {ok:["completada"],          ko:["ko","cancelada"]},
   incidencias: {ok:["cerrada","resuelta"],  ko:[]},
 };
-const FECHAS=["fecha","fechaCreacion","creadoEl","fechaEnvio","fechaAlta","createdAt"];
+const AGENTES_C=["agente","comercial","vendedor","autor","grupoAgente"];
+function agenteDe(o){
+  for(const c of AGENTES_C) if(o[c]) return arriba(o[c]);
+  return "";
+}
+const FECHAS=["fecha","fechaCreacion","fechaCreacionStr","creadoEl","fechaEnvio","fechaAlta","fechaSolicitud","createdAt"];
 function fechaDe(o){
-  for(const c of FECHAS) if(o[c]) return String(o[c]).slice(0,10);
+  for(const c of FECHAS){
+    if(!o[c]) continue;
+    const v=String(o[c]);
+    // Puede venir como 2026-07-31, 31/07/2026 o un sello con hora
+    let m=v.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if(m) return `${m[1]}-${m[2]}-${m[3]}`;
+    m=v.match(/^(\d{2})[\/-](\d{2})[\/-](\d{4})/);
+    if(m) return `${m[3]}-${m[2]}-${m[1]}`;
+  }
   return null;
 }
 function clasificar(col,lista,clave,desde,sel,hasta){
@@ -240,8 +270,8 @@ function clasificar(col,lista,clave,desde,sel,hasta){
   const r={nuevas:0, ok:0, ko:0, abiertas:0, masVieja:null};
   const reglas=CIERRES[col];
   for(const o of lista){
-    if(clave && arriba(o.agente)!==clave) continue;
-    if(!clave && sel && sel.size && !sel.has(arriba(o.agente))) continue;
+    if(clave && agenteDe(o)!==clave) continue;
+    if(!clave && sel && sel.size && !sel.has(agenteDe(o))) continue;
     const est=String(o.estado||"").toLowerCase();
     const res=String(o.resultado||"").toLowerCase();
     const esOk=reglas.ok.includes(est)||reglas.ok.includes(res);
@@ -263,8 +293,11 @@ function marcadorHTML(tit,r,etqOk,etqKo){
   const total=cerradas+r.abiertas;
   if(!total) return "";
   const pct=total?r.ok/total*100:0;
-  const dias=r.masVieja
-    ? Math.round((Date.now()-new Date(r.masVieja+"T12:00:00"))/86400000) : null;
+  let dias=null;
+  if(r.masVieja){
+    const d=new Date(r.masVieja+"T12:00:00");
+    if(!isNaN(d)) dias=Math.round((Date.now()-d)/86400000);
+  }
   const w=(n)=>total?(n/total*100).toFixed(1):0;
   return `<div class="marca">
     <div class="mcab"><span class="mtit">${tit}</span>
@@ -391,7 +424,9 @@ function desvHTML(pct, etqMenos, etqMas){
       let l=base;
       if(fEquipo) l=l.filter(a=>a.equipo===fEquipo);
       if(fAgente) l=l.filter(a=>arriba(a._id)===arriba(fAgente));
-      return l;
+      // De mayor a menor segun el periodo que se este mirando
+      const v=(a)=>periodo==="sem"?num(a.ventasSem):periodo==="ano"?num(a.ventasAct):num(a.ventasMes);
+      return l.slice().sort((x,y)=>v(y)-v(x));
     }
 
     // Se leen aqui, fuera de pintar(): no dependen del filtro y asi pintar()
@@ -494,6 +529,22 @@ function desvHTML(pct, etqMenos, etqMas){
       desde=`${hoy.getFullYear()}-01-01`;
       rotAct="este año";
     }
+    // Actividad por comercial, indexada una vez para la tabla final
+    function actDe(col,lista,ag){
+      const g=CIERRES[col]; const r={env:0,ok:0,ko:0,pend:0};
+      for(const o of lista){
+        if(agenteDe(o)!==ag) continue;
+        const est=String(o.estado||"").toLowerCase();
+        const res=String(o.resultado||"").toLowerCase();
+        const f=fechaDe(o);
+        if(f&&f>=desde&&f<=hasta) r.env++;
+        if(g.ok.includes(est)||g.ok.includes(res)) r.ok++;
+        else if(g.ko.includes(est)||g.ko.includes(res)) r.ko++;
+        else r.pend++;
+      }
+      return r;
+    }
+
     VENTANA=rotAct;
     const actividadHTML=[
       marcadorHTML("Muestras",   clasificar("muestras",muestras,claveAct,desde,sel,hasta),   "con pedido","rechazadas"),
@@ -701,6 +752,67 @@ function desvHTML(pct, etqMenos, etqMas){
     </table>
   </div>` : `<div class="falta">Todavía no hay días de diario guardados en
     <b>pbi_pedidos_cambios</b>. El primero completo será el de mañana.</div>`}
+</section>
+
+<section>
+  <p class="rot">Clasificación de comerciales</p>
+  <p class="mflujo m" style="margin-bottom:10px">
+    Ordenados por ventas ${P.rot} · desliza a la derecha</p>
+  <div class="tabla">
+    <table class="rank">
+      <thead>
+        <tr>
+          <th class="fijo">Comercial</th>
+          <th>Ventas</th><th>vs 25</th><th>vs ppto</th>
+          <th>MB</th><th>vs obj</th>
+          <th class="sep">Mue.</th><th>ok</th><th>ko</th><th>pdte</th>
+          <th class="sep">Ofe.</th><th>ok</th><th>ko</th><th>pdte</th>
+          <th class="sep">Est.</th><th>ok</th><th>ko</th><th>pdte</th>
+          <th class="sep">Inc.</th><th>res</th><th>pdte</th>
+        </tr>
+      </thead>
+      <tbody>${
+        mios.map(a=>{
+          const ag=arriba(a._id);
+          const vAct = periodo==="sem" ? num(a.ventasSem)
+                     : periodo==="ano" ? num(a.ventasAct)
+                     : (fMes ? num((porEstacion[ag]||{})["act_"+fMes]) : num(a.ventasMes));
+          const vAnt = periodo==="sem" ? num(a.ventasSemAnt)
+                     : periodo==="ano" ? num(a.ventasAntYTD)
+                     : (fMes ? num((porEstacion[ag]||{})["mes_"+fMes]) : num(a.ventasMesAnt));
+          // Presupuesto del periodo: el mes sale de pbi_objetivos si lo tiene
+          const o=porObj[ag]||{};
+          const mNum=fMes||hoy.getMonth()+1;
+          const ppto = periodo==="mes" ? num(o["mes_"+mNum])
+                     : periodo==="ano" ? (()=>{ let x=0; for(let m=1;m<=mesesHechos;m++) x+=num(o["mes_"+m]); return x; })()
+                     : 0;
+          const mb = num(a.baseMes) ? num(a.margenMes)/num(a.baseMes)*100 : null;
+          const obj = num(a.objetivoMargen);
+          const pc=(x,y)=>y?((x/y-1)*100).toFixed(0):null;
+          const col=(v)=>v===null?"":`color:var(--${Number(v)>=0?"sube":"cae"})`;
+          const mu=actDe("muestras",muestras,ag), of=actDe("ofertas",ofertas,ag);
+          const es=actDe("estrategias",estrategias,ag), inc=actDe("incidencias",incidencias,ag);
+          const d=(v)=>v?v:"·";
+          return `<tr>
+            <td class="fijo">${a.agente||a._id}<small>${a.equipo||""}</small></td>
+            <td class="n">${eur(vAct)}</td>
+            <td class="n" style="${col(pc(vAct,vAnt))}">${pc(vAct,vAnt)!==null?pc(vAct,vAnt)+"%":"·"}</td>
+            <td class="n" style="${col(pc(vAct,ppto))}">${pc(vAct,ppto)!==null?pc(vAct,ppto)+"%":"·"}</td>
+            <td class="n">${mb===null?"·":mb.toFixed(1)+"%"}</td>
+            <td class="n" style="${col(mb!==null&&obj?(mb-obj):null)}">${
+              mb!==null&&obj?(mb-obj>=0?"+":"")+(mb-obj).toFixed(1):"·"}</td>
+            <td class="n sep">${d(mu.env)}</td><td class="n ok">${d(mu.ok)}</td>
+            <td class="n ko">${d(mu.ko)}</td><td class="n pd">${d(mu.pend)}</td>
+            <td class="n sep">${d(of.env)}</td><td class="n ok">${d(of.ok)}</td>
+            <td class="n ko">${d(of.ko)}</td><td class="n pd">${d(of.pend)}</td>
+            <td class="n sep">${d(es.env)}</td><td class="n ok">${d(es.ok)}</td>
+            <td class="n ko">${d(es.ko)}</td><td class="n pd">${d(es.pend)}</td>
+            <td class="n sep">${d(inc.env)}</td><td class="n ok">${d(inc.ok)}</td>
+            <td class="n pd">${d(inc.pend)}</td>
+          </tr>`;
+        }).join("")}</tbody>
+    </table>
+  </div>
 </section>
 
 <p class="falta" style="margin:26px 20px 0">
