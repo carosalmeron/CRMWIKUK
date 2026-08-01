@@ -179,27 +179,31 @@ function plano(doc){
   for(const [k,v] of Object.entries(doc.fields||{})) o[k]=val(v);
   return o;
 }
-const FALLOS=[]; let HECHAS=0, TOTAL=0;
+const FALLOS=[], PAGINAS={}; let HECHAS=0, TOTAL=0;
 // Con tiempo limite: una peticion que no vuelve dejaba la pagina en "Leyendo…"
 // para siempre, sin decir cual era. Ahora aborta a los 12 s y lo cuenta.
 async function leerCol(col){
-  TOTAL++;
-  const ctrl=new AbortController();
-  const reloj=setTimeout(()=>ctrl.abort(), 12000);
-  try{
-    const r=await fetch(`${FB}/${col}?pageSize=300`,{signal:ctrl.signal});
-    if(!r.ok){ FALLOS.push(`${col} (HTTP ${r.status})`); return []; }
-    const j=await r.json();
-    return (j.documents||[]).map(plano);
-  }catch(e){
-    FALLOS.push(`${col} (${e.name==="AbortError"?"sin respuesta en 12 s":e.message})`);
-    return [];
-  }finally{
-    clearTimeout(reloj); HECHAS++;
-    const el=document.querySelector(".estado");
-    if(el) el.textContent=`Leyendo… ${HECHAS} de ${TOTAL}`;
-  }
+  // El try iba fuera del bucle: si fallaba la segunda pagina, el catch la
+  // silenciaba y devolvia los primeros 300 como si fueran todos.
+  const todo=[]; let tok=null, pag=0;
+  do{
+    let j=null;
+    try{
+      const r=await fetch(`${FB}/${col}?pageSize=300`
+        +(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+      if(!r.ok){ FALLOS.push(`${col} pag.${pag+1} HTTP ${r.status}`); break; }
+      j=await r.json();
+    }catch(e){ FALLOS.push(`${col} pag.${pag+1}: ${e.message}`); break; }
+    const docs=(j.documents||[]).map(plano);
+    todo.push(...docs);
+    pag++;
+    tok=j.nextPageToken||null;
+    if(!docs.length) break;                 // pagina vacia: no seguir
+  }while(tok&&pag<30);
+  PAGINAS[col]=pag;
+  return todo;
 }
+
 async function leerDoc(ruta){
   try{
     const r=await fetch(`${FB}/${ruta}`);
@@ -298,6 +302,7 @@ function clasificar(col,lista,clave,desde,sel,hasta){
   return r;
 }
 let VENTANA="esta semana";
+const COL_ACT={Muestras:"muestras",Ofertas:"ofertas",Estrategias:"estrategias",Incidencias:"incidencias"};
 function marcadorHTML(tit,r,etqOk,etqKo){
   const cerradas=r.ok+r.ko;
   const total=cerradas+r.abiertas;
@@ -313,7 +318,7 @@ function marcadorHTML(tit,r,etqOk,etqKo){
     <div class="mcab"><span class="mtit">${tit}</span>
       <span class="mpct m" style="color:var(--${pct>=40?"sube":pct>=15?"pendiente":"cae"})">${
         Math.round(pct)} %</span></div>
-    <p class="mflujo m">${r.nuevas} nueva${r.nuevas===1?"":"s"} ${VENTANA} · ${total} en total</p>
+    <p class="mflujo m">${r.nuevas} nueva${r.nuevas===1?"":"s"} ${VENTANA} · ${total} en total · ${PAGINAS[COL_ACT[tit]]||"?"} pág.</p>
     <div class="mbar">
       <i style="width:${w(r.ok)}%;background:var(--sube)"></i>
       <i style="width:${w(r.ko)}%;background:var(--cae)"></i>
@@ -834,7 +839,9 @@ function desvHTML(pct, etqMenos, etqMas){
 
 <p class="falta" style="margin:26px 20px 0">
   ${FALLOS.length?`<b style="color:var(--cae)">No se han podido leer:</b>
-  ${FALLOS.join(" · ")}. Esos bloques salen vacíos.<br>`:""}
+  ${FALLOS.join(" · ")}.<br>`:""}
+  <span style="font-size:11px">Páginas leídas: ${
+    Object.entries(PAGINAS).map(([k,v])=>k+" "+v).join(" · ")}</span><br>
   Lee Firestore en directo y no escribe nada.
   El «hoy tocaría» sale de <b>pbi_objetivos</b>, que
   suma los meses ya cerrados, no un prorrateo. No se puede retroceder de semana
