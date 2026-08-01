@@ -1529,32 +1529,33 @@ EVALUATE
       const Q = dax(null);
       const anoAnt = new Date().getFullYear() - 1;
 
-      // Agrupado por vendedor y fecha; el mes se saca en JS al recorrer, que
-      // evita depender de que el modelo tenga tabla de calendario.
+      // Doce medidas, una por mes, agrupando solo por vendedor. Agrupar por
+      // FECHA generaba una fila por vendedor y dia: millones de combinaciones
+      // y la consulta volvia vacia.
+      const meses = [];
+      for (let m = 1; m <= 12; m++) {
+        meses.push(`    "m${m}", CALCULATE(SUM(${M.vBase}),\n` +
+          `      FILTER(${M.ventas}, YEAR(${M.vFecha}) = ${anoAnt} && MONTH(${M.vFecha}) = ${m}))`);
+      }
       const daxMes = `
 EVALUATE
   SUMMARIZECOLUMNS(
     ${M.vVendedor},
-    ${M.vFecha},
-    "Venta", CALCULATE(SUM(${M.vBase}),
-      FILTER(${M.ventas}, YEAR(${M.vFecha}) = ${anoAnt}))
+${meses.join(",\n")}
   )`;
 
       const filas = await pbiQuery(token, daxMes);
 
-      // Agrupar en JS: pedir por fecha y sumar aqui evita depender de que el
-      // modelo tenga tabla de calendario.
       const porVend = {};
       for (const r of filas) {
-        const v = String(pick(r, "Vendedor") || "").trim();
-        const f = String(pick(r, "Fecha") || "");
-        const imp = Number(pick(r, "Venta")) || 0;
-        if (!v || !f || !imp) continue;
-        const mes = Number(f.slice(5, 7));
-        if (!mes) continue;
-        if (!porVend[v]) porVend[v] = { total: 0, meses: {} };
-        porVend[v].meses[mes] = num((porVend[v].meses[mes] || 0) + imp);
-        porVend[v].total = num(porVend[v].total + imp);
+        const v = String(pick(r, "VENDEDOR") || "").trim();
+        if (!v) continue;
+        const d = { total: 0, meses: {} };
+        for (let m = 1; m <= 12; m++) {
+          const imp = Number(pick(r, "m" + m)) || 0;
+          if (imp) { d.meses[m] = num(imp); d.total = num(d.total + imp); }
+        }
+        if (d.total) porVend[v] = d;
       }
 
       // Del codigo del ERP al GRUPOAGENTE que usa el CRM: un comercial tiene
