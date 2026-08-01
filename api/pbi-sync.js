@@ -1532,10 +1532,15 @@ EVALUATE
       // Doce medidas, una por mes, agrupando solo por vendedor. Agrupar por
       // FECHA generaba una fila por vendedor y dia: millones de combinaciones
       // y la consulta volvia vacia.
+      // Los doce meses de los dos años: 2025 da la estacionalidad y 2026 el
+      // historico mensual, que hoy no existe en ninguna coleccion.
+      const anoAct = anoAnt + 1;
       const meses = [];
       for (let m = 1; m <= 12; m++) {
         meses.push(`    "m${m}", CALCULATE(SUM(${M.vBase}),\n` +
           `      FILTER(${M.ventas}, YEAR(${M.vFecha}) = ${anoAnt} && MONTH(${M.vFecha}) = ${m}))`);
+        meses.push(`    "a${m}", CALCULATE(SUM(${M.vBase}),\n` +
+          `      FILTER(${M.ventas}, YEAR(${M.vFecha}) = ${anoAct} && MONTH(${M.vFecha}) = ${m}))`);
       }
       const daxMes = `
 EVALUATE
@@ -1546,16 +1551,24 @@ ${meses.join(",\n")}
 
       const filas = await pbiQuery(token, daxMes);
 
+      // Diagnostico: si no sale nada, lo que hace falta saber es cuantas filas
+      // vuelven y con que nombre exacto llegan las columnas.
+      out.filasDevueltas = filas.length;
+      out.columnas = filas.length ? Object.keys(filas[0]) : [];
+      out.filaEjemplo = filas.length ? filas[0] : null;
+
       const porVend = {};
       for (const r of filas) {
         const v = String(pick(r, "VENDEDOR") || "").trim();
         if (!v) continue;
-        const d = { total: 0, meses: {} };
+        const d = { total: 0, meses: {}, totalAct: 0, act: {} };
         for (let m = 1; m <= 12; m++) {
           const imp = Number(pick(r, "m" + m)) || 0;
           if (imp) { d.meses[m] = num(imp); d.total = num(d.total + imp); }
+          const act = Number(pick(r, "a" + m)) || 0;
+          if (act) { d.act[m] = num(act); d.totalAct = num(d.totalAct + act); }
         }
-        if (d.total) porVend[v] = d;
+        if (d.total || d.totalAct) porVend[v] = d;
       }
 
       // Del codigo del ERP al GRUPOAGENTE que usa el CRM: un comercial tiene
@@ -1570,19 +1583,24 @@ ${meses.join(",\n")}
       for (const [vend, d] of Object.entries(porVend)) {
         const ag = agentes[vend] || agentes[vend.toUpperCase()];
         if (!ag) continue;
-        if (!porAgente[ag]) porAgente[ag] = { total: 0, meses: {} };
+        if (!porAgente[ag]) porAgente[ag] = { total: 0, meses: {}, totalAct: 0, act: {} };
         for (const [m, v] of Object.entries(d.meses))
           porAgente[ag].meses[m] = num((porAgente[ag].meses[m] || 0) + v);
+        for (const [m, v] of Object.entries(d.act))
+          porAgente[ag].act[m] = num((porAgente[ag].act[m] || 0) + v);
         porAgente[ag].total = num(porAgente[ag].total + d.total);
+        porAgente[ag].totalAct = num(porAgente[ag].totalAct + d.totalAct);
       }
 
       const docs = Object.entries(porAgente).map(([ag, d]) => {
         const o = { _id: ag, agente: ag, anio: anoAnt, total: d.total,
                     actualizado: new Date().toISOString() };
         // Reparto en tanto por uno: el parte multiplica el objetivo por esto
+        o.totalAct = d.totalAct;
         for (let m = 1; m <= 12; m++) {
           o["mes_" + m] = num(d.meses[m] || 0);
           o["peso_" + m] = d.total ? Math.round((d.meses[m] || 0) / d.total * 10000) / 10000 : 0;
+          o["act_" + m] = num(d.act[m] || 0);   // mismo mes del año en curso
         }
         return o;
       });
