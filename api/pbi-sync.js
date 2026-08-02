@@ -1870,6 +1870,23 @@ ${meses.join(",\n")}
       out.ventaSinAsignar = num(ventaSinAsignar);
       out.escritos = await fbCommit("pbi_resumen_agente", resumen);
 
+      // pbi_resumen_agente no se purgaba nunca: un comercial que deja de
+      // facturar conserva su documento con las cifras del ultimo dia que
+      // aparecio, y sigue sumando en cualquier pantalla que recorra la
+      // coleccion. Eran 33.690 € de diferencia contra _TOTAL.
+      try {
+        const vivos = new Set(resumen.map((r) => String(r._id)));
+        const previos = await fbLeerColeccion("pbi_resumen_agente");
+        const sobran = previos
+          .filter((d) => d._id !== "_TOTAL" && !vivos.has(String(d._id)))
+          .map((d) => d._id);
+        out.agentesObsoletos = sobran.length;
+        if (sobran.length && req.query.purgar !== "no") {
+          await fbBorrar("pbi_resumen_agente", sobran);
+          out.agentesBorrados = sobran;
+        }
+      } catch (e) { out.avisoPurgaAgentes = e.message.slice(0, 140); }
+
       // Índice de búsqueda, con la misma lista ya leída
       try {
         const compacta = docs
