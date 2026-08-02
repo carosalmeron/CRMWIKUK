@@ -40,6 +40,20 @@
     color:var(--tenue);margin-top:1px}
   .s.ok b{color:var(--ok)} .s.med b{color:var(--med)} .s.mal b{color:var(--mal)}
   .s.na b{color:var(--linea)}
+  .prog{display:flex;gap:3px;align-items:flex-end;margin-top:12px;
+    padding-top:10px;border-top:1px solid var(--linea)}
+  .col{flex:1;min-width:0;text-align:center}
+  .bars{display:flex;align-items:flex-end;justify-content:center;gap:1px;height:38px}
+  .bars i{width:7px;border-radius:1px 1px 0 0;display:block;min-height:1px}
+  .bars .ant{background:#D3D9E0}
+  .bars .act.up{background:var(--ok)} .bars .act.dn{background:var(--mal)}
+  .reg{height:11px;display:flex;align-items:flex-end;justify-content:center;margin-top:2px}
+  .reg i{width:14px;background:var(--tinta);opacity:.28;border-radius:1px;display:block;min-height:1px}
+  .col span{display:block;font-family:"IBM Plex Mono",monospace;font-size:8.5px;
+    color:var(--tenue);margin-top:3px}
+  .leyprog{margin:7px 0 0;font-size:10.5px;color:var(--tenue)}
+  .leyprog b{color:var(--tinta);font-weight:600}
+
   .veredicto{margin:10px 0 0;font-size:12.5px;line-height:1.5;color:var(--tenue)}
   .veredicto b{color:var(--tinta);font-weight:600}
   .nota{font-size:11.5px;color:var(--tenue);line-height:1.55;
@@ -54,6 +68,7 @@
 <script>
 const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
 const arriba=(s)=>String(s||"").toUpperCase().trim();
+const MES3=["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
 const num=(n)=>Number(n)||0;
 const eur=(n)=>Math.round(n||0).toLocaleString("es-ES")+" €";
 let FILAS=[], fEquipo="";
@@ -109,6 +124,24 @@ function pintar(){
           <div class="s ${f.sMb}"><b>${f.mb==null?"·":f.mb.toFixed(1)}</b><span>margen</span></div>
           <div class="s ${f.sAct}"><b>${f.abiertas||"·"}</b><span>sin cerrar</span></div>
         </div>
+        ${f.serie&&f.serie.some(x=>x.act||x.ant)?`
+        <div class="prog">
+          ${(()=>{
+            const tope=Math.max(...f.serie.map(x=>Math.max(x.act,x.ant)),1);
+            const topR=Math.max(...f.serie.map(x=>x.reg),1);
+            return f.serie.map(x=>`
+              <div class="col">
+                <div class="bars">
+                  <i class="ant" style="height:${x.ant/tope*100}%"></i>
+                  <i class="act ${x.act>=x.ant?"up":"dn"}" style="height:${x.act/tope*100}%"></i>
+                </div>
+                <div class="reg"><i style="height:${x.reg/topR*100}%"></i></div>
+                <span>${MES3[x.mes-1]}</span>
+              </div>`).join("");
+          })()}
+        </div>
+        <p class="leyprog">
+          <b>gris</b> 2025 · <b>color</b> 2026 · <b>puntos</b> muestras y ofertas del mes</p>`:""}
         <p class="veredicto">${f.veredicto}</p>
       </div>`).join("");
   };
@@ -163,11 +196,24 @@ function pintar(){
       return !["pedido","positivo","positiva","ok","aceptada","ko","negativo",
                "negativa","rechazada","cerrada","perdida"].includes(e||r);
     };
-    const ab={};
+    const ab={}, actMes={};
+    const FECHAS=["fecha","fechaCreacion","fechaCreacionStr","creadoEl","fechaEnvio","fechaAlta"];
+    const mesDe=(o)=>{
+      for(const c of FECHAS){
+        if(!o[c]) continue;
+        const v=String(o[c]);
+        let m=v.match(/^(\d{4})-(\d{2})/);
+        if(m) return m[1]===String(new Date().getFullYear()) ? Number(m[2]) : 0;
+        m=v.match(/^\d{1,2}[\/-](\d{1,2})[\/-](\d{4})/);
+        if(m) return m[2]===String(new Date().getFullYear()) ? Number(m[1]) : 0;
+      }
+      return 0;
+    };
     for(const o of [...mu,...of]){
-      if(!ABIERTO(o)) continue;
       const a=arriba(o.agente||o.autor||o.comercial); if(!a) continue;
-      ab[a]=(ab[a]||0)+1;
+      if(ABIERTO(o)) ab[a]=(ab[a]||0)+1;
+      const m=mesDe(o);
+      if(m){ (actMes[a]=actMes[a]||{})[m]=(actMes[a][m]||0)+1; }
     }
 
     const mesesHechos=new Date().getMonth();   // enero=0 → 7 en agosto
@@ -225,7 +271,16 @@ function pintar(){
           p.push(b.join(", ")||"sin alertas");
         }
 
-        return { id:a._id, nombre:a.agente||a._id, equipo:a.equipo||"", ventas,
+        // Progresion mes a mes: venta de este año contra el mismo mes del
+        // anterior, y la actividad registrada en cada mes. Siete puntos por
+        // comercial, que es lo que permite ver si mejora o se apaga.
+        const serie=[];
+        for(let m=1;m<=mesesHechos;m++){
+          serie.push({ mes:m, act:num(e["act_"+m]), ant:num(e["mes_"+m]),
+                       reg:(actMes[k]||{})[m]||0 });
+        }
+
+        return { id:a._id, nombre:a.agente||a._id, equipo:a.equipo||"", ventas, serie,
                  cartera:c.total, perdido:c.perdido, nuevo:c.nuevo,
                  pctObj, variacion, pctRepite, mb, abiertas,
                  sObj, sAno, sRet, sMb, sAct, estado, malas,
