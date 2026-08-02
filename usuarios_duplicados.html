@@ -40,14 +40,16 @@
 </style></head><body>
 
 <h1>Fichas duplicadas</h1>
-<p class="sub">El mismo comercial en portal_users y en usuarios. v1.0</p>
+<p class="sub">El mismo comercial en portal_users y en usuarios. v1.1</p>
 
 <p class="aviso">
   Ahora que el equipo de la ficha manda sobre la rama, tener dos fichas del
   mismo comercial es un riesgo: si dicen equipos distintos, gana la última que
   se lea. Marca cuál se queda y se borra la otra.
   <b>Se conserva por defecto la de portal_users</b>, que es la que tiene
-  contraseña y accesos.
+  contraseña y accesos.<br><br>
+  Solo se agrupan fichas con el mismo código de vendedor <b>y</b> nombre
+  parecido. Aun así, revisa cada par antes de borrar.
 </p>
 
 <div id="app"><p class="estado">Leyendo…</p></div>
@@ -89,7 +91,26 @@ async function leer(col){
 
 // La clave del comercial es lo que la sincronizacion usa para casar la ficha
 // con sus ventas. Dos fichas con la misma clave son la misma persona.
-const claveDe=(u)=>arriba(u.grupoAgente||u.catalogoVendedor);
+// Las ramas no son claves de comercial: CEO, Jefe de Ventas y Resp. INTERKEY
+// llevaban "WIKUK" ahi y quedaban agrupados como si fueran la misma persona.
+const RAMAS=new Set(["WIKUK","INTERKEY","FRANCIA","DISTRIBUIDOR","PORTUGAL","",
+                     "SIN RAMA","-","USUARIOS"]);
+const claveDe=(u)=>{
+  const k=arriba(u.grupoAgente||u.catalogoVendedor);
+  return RAMAS.has(k) ? "" : k;
+};
+// Y aun con la misma clave, dos fichas solo son la misma persona si el nombre
+// se parece: asi no se junta un jefe con un comercial por un campo mal puesto.
+const normNom=(n)=>String(n||"").toUpperCase()
+  .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+  .replace(/[^A-Z]/g,"");
+function mismaPersona(a,b){
+  const x=normNom(a.nombre), y=normNom(b.nombre);
+  if(!x||!y) return true;                 // sin nombre, decide la clave
+  if(x===y) return true;
+  const [c,d]=x.length<=y.length?[x,y]:[y,x];
+  return c.length>=4 && d.includes(c);    // "Agustin" y "Agustin Perez"
+}
 
 // Cuanta informacion util tiene una ficha: decide cual conviene conservar
 function peso(u){
@@ -169,8 +190,17 @@ async function borrar(){
     if(!k) continue;              // sin clave no se puede emparejar
     (porClave[k]=porClave[k]||[]).push(u);
   }
-  PARES=Object.entries(porClave)
-    .filter(([,l])=>l.length>1)
+  // Dentro de cada clave se separan las personas distintas
+  const grupos=[];
+  for(const [clave,lista] of Object.entries(porClave)){
+    const bolsas=[];
+    for(const u of lista){
+      const b=bolsas.find(x=>mismaPersona(x[0],u));
+      if(b) b.push(u); else bolsas.push([u]);
+    }
+    for(const b of bolsas) if(b.length>1) grupos.push([clave,b]);
+  }
+  PARES=grupos
     .map(([clave,l])=>{
       const orden=l.slice().sort((a,b)=>peso(b)-peso(a));
       orden.forEach((f,i)=>f._keep=(i===0));
