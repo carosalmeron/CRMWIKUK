@@ -582,35 +582,6 @@ async function fbLeerDocumento(coleccion, id) {
   return o;
 }
 
-// Semana ISO 8601: la semana 1 es la que contiene el primer jueves del año.
-// Sin esto, a caballo entre diciembre y enero el numero baila.
-function isoSemana(fecha) {
-  const d = new Date(Date.UTC(fecha.getFullYear(), fecha.getMonth(), fecha.getDate()));
-  d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
-  const ini = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-  const n = Math.ceil(((d - ini) / 86400000 + 1) / 7);
-  return `${d.getUTCFullYear()}-W${String(n).padStart(2, "0")}`;
-}
-
-async function fbLeerDoc(coleccion, id) {
-  // Mismo desempaquetado que fbLeerColeccion, pero para un documento suelto:
-  // los siete dias del diario se piden por nombre, no listando la coleccion.
-  const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
-  const key = ENV.FB_API_KEY ? `?key=${ENV.FB_API_KEY}` : "";
-  const url = `https://firestore.googleapis.com/v1/${base}/${coleccion}/` +
-              `${encodeURIComponent(id)}${key}`;
-  const r = await fetch(url);
-  if (!r.ok) return null;
-  const j = await r.json();
-  const o = { _id: id };
-  for (const [k, v] of Object.entries(j.fields || {})) {
-    o[k] = v.doubleValue ?? v.integerValue ?? v.stringValue ?? v.booleanValue ?? null;
-    if (v.integerValue !== undefined) o[k] = Number(o[k]);
-    if (v.doubleValue !== undefined) o[k] = Number(v.doubleValue);
-  }
-  return o;
-}
-
 async function fbLeerColeccion(coleccion) {
   const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
   const key = ENV.FB_API_KEY ? `&key=${ENV.FB_API_KEY}` : "";
@@ -1516,209 +1487,6 @@ EVALUATE
     return res.status(401).json({ error: "no autorizado" });
   }
 
-  // ?estacionalidad=1 → ventas del año pasado mes a mes, por vendedor.
-  // A quien se le cargó el objetivo igualando 2025 se le reparte hoy en doce
-  // partes iguales, y eso da una marca de ritmo falsa en un negocio con
-  // temporada. Con esto se reparte como vendió de verdad.
-  // Consulta propia y aislada: no toca Q.ventas ni ninguna ruta existente.
-  if (req.query.estacionalidad === "1") {
-    const t1 = Date.now();
-    const out = { ok: true };
-    try {
-      const { token } = await getToken(req);
-      const Q = dax(null);
-      const anoAnt = new Date().getFullYear() - 1;
-
-      // Doce medidas, una por mes, agrupando solo por vendedor. Agrupar por
-      // FECHA generaba una fila por vendedor y dia: millones de combinaciones
-      // y la consulta volvia vacia.
-      // Los doce meses de los dos años: 2025 da la estacionalidad y 2026 el
-      // historico mensual, que hoy no existe en ninguna coleccion.
-      const anoAct = anoAnt + 1;
-      const meses = [];
-      for (let m = 1; m <= 12; m++) {
-        meses.push(`    "m${m}", CALCULATE(SUM(${M.vBase}),\n` +
-          `      FILTER(${M.ventas}, YEAR(${M.vFecha}) = ${anoAnt} && MONTH(${M.vFecha}) = ${m}))`);
-        meses.push(`    "a${m}", CALCULATE(SUM(${M.vBase}),\n` +
-          `      FILTER(${M.ventas}, YEAR(${M.vFecha}) = ${anoAct} && MONTH(${M.vFecha}) = ${m}))`);
-      }
-      // Se agrupa tambien por cliente para poder descartar el intercompany
-      // con el mismo criterio que el resumen: si no, marzo salia con 370.000 €
-      // de traspasos entre empresas del grupo y no era comparable.
-      const daxMes = `
-EVALUATE
-  SUMMARIZECOLUMNS(
-    ${M.vVendedor},
-    ${M.vCliente},
-${meses.join(",\n")}
-  )`;
-
-      const filas = await pbiQuery(token, daxMes);
-
-      // Diagnostico: si no sale nada, lo que hace falta saber es cuantas filas
-      // vuelven y con que nombre exacto llegan las columnas.
-      out.filasDevueltas = filas.length;
-      out.columnas = filas.length ? Object.keys(filas[0]) : [];
-      out.filaEjemplo = filas.length ? filas[0] : null;
-
-      // Clientes que el resumen excluye: intercompany y codigos fusionados.
-      // Se leen de pbi_ventas_cliente, que es donde ya estan marcados.
-      // Solo intercompany. Los codigos fusionados NO se excluyen: su venta es
-      // real y esta apuntada al codigo antiguo, asi que quitarlos borraba la
-      // mitad del año de algunos comerciales.
-      // Por el campo y tambien por el nombre: un codigo antiguo de la
-      // recodificacion puede no traer la marca aunque el cliente sea del
-      // grupo, y esos son los que colaban 300.000 € al mes.
-      const fuera = new Set();
-      let leidos = 0;
-      for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
-        leidos++;
-        if (c.intercompany || esIntercompany(c.nombre)) {
-          fuera.add(String(c._id).toUpperCase());
-        }
-      }
-      out.clientesLeidos = leidos;
-      out.clientesExcluidos = fuera.size;
-
-      const porVend = {};
-      for (const r of filas) {
-        const v = String(pick(r, "VENDEDOR") || "").trim();
-        const cli = String(pick(r, "CLIENTE") || "").trim().toUpperCase();
-        if (!v || fuera.has(cli)) continue;
-        if (!porVend[v]) porVend[v] = { total: 0, meses: {}, totalAct: 0, act: {} };
-        const d = porVend[v];
-        for (let m = 1; m <= 12; m++) {
-          const imp = Number(pick(r, "m" + m)) || 0;
-          if (imp) { d.meses[m] = num((d.meses[m] || 0) + imp); d.total = num(d.total + imp); }
-          const act = Number(pick(r, "a" + m)) || 0;
-          if (act) { d.act[m] = num((d.act[m] || 0) + act); d.totalAct = num(d.totalAct + act); }
-        }
-      }
-
-      // Del codigo del ERP al GRUPOAGENTE que usa el CRM: un comercial tiene
-      // varios codigos de vendedor, asi que sin esto no cuadra nada.
-      const agentes = {};
-      for (const a of await pbiQuery(token, Q.agentes, true)) {
-        const cod = String(pick(a, "CODIGO") || "").trim();
-        const grupo = String(pick(a, "GRUPOAGENTE") || "").trim().toUpperCase();
-        if (cod && grupo) agentes[cod] = grupo;
-      }
-      const porAgente = {};
-      for (const [vend, d] of Object.entries(porVend)) {
-        const ag = agentes[vend] || agentes[vend.toUpperCase()];
-        if (!ag) continue;
-        if (!porAgente[ag]) porAgente[ag] = { total: 0, meses: {}, totalAct: 0, act: {} };
-        for (const [m, v] of Object.entries(d.meses))
-          porAgente[ag].meses[m] = num((porAgente[ag].meses[m] || 0) + v);
-        for (const [m, v] of Object.entries(d.act))
-          porAgente[ag].act[m] = num((porAgente[ag].act[m] || 0) + v);
-        porAgente[ag].total = num(porAgente[ag].total + d.total);
-        porAgente[ag].totalAct = num(porAgente[ag].totalAct + d.totalAct);
-      }
-
-      const docs = Object.entries(porAgente).map(([ag, d]) => {
-        const o = { _id: ag, agente: ag, anio: anoAnt, total: d.total,
-                    actualizado: new Date().toISOString() };
-        // Reparto en tanto por uno: el parte multiplica el objetivo por esto
-        o.totalAct = d.totalAct;
-        for (let m = 1; m <= 12; m++) {
-          o["mes_" + m] = num(d.meses[m] || 0);
-          o["peso_" + m] = d.total ? Math.round((d.meses[m] || 0) / d.total * 10000) / 10000 : 0;
-          o["act_" + m] = num(d.act[m] || 0);   // mismo mes del año en curso
-        }
-        return o;
-      });
-
-      if (!req.query.dry) await fbCommit("pbi_estacionalidad", docs);
-
-      out.anio = anoAnt;
-      out.vendedores = Object.keys(porVend).length;
-      out.agentes = docs.length;
-      out.dry = !!req.query.dry;
-      out.muestra = docs.slice(0, 3);
-    } catch (e) {
-      out.ok = false; out.error = e.message;
-    }
-    out.segundos = Math.round((Date.now() - t1) / 1000);
-    return res.status(out.ok ? 200 : 500).json(out);
-  }
-
-  // ?cierre=1 → congela la foto de la semana. pbi_resumen_agente solo guarda
-  // la semana en curso y se pisa cada mañana, asi que sin esto no hay forma
-  // de mirar atras ni de mandar el parte del viernes con datos cerrados.
-  // No toca Power BI: lee de Firestore, como resumen=1.
-  if (req.query.cierre === "1") {
-    const t1 = Date.now();
-    const out = { ok: true, fuente: "firestore" };
-    try {
-      const ahora = new Date();
-      const sem = isoSemana(ahora);
-
-      const resumen = await fbLeerColeccion("pbi_resumen_agente");
-      const vivos = resumen.filter((a) => a._id !== "_TOTAL");
-
-      // Solo lo que hace falta para pintar un parte. Guardar el documento
-      // entero por 74 comerciales y 52 semanas seria tirar espacio.
-      const CAMPOS = ["agente", "equipo", "tipo", "objetivoMargen",
-        "ventasSem", "ventasSemAnt", "margenSem", "baseSem",
-        "ventasMes", "ventasMesAnt", "margenMes", "baseMes",
-        "ventasAct", "ventasAntYTD", "ventasAntFull", "margenAct", "baseAct",
-        "clientes", "clientesConVentaMes"];
-      const foto = vivos.map((a) => {
-        const o = { id: a._id };
-        for (const c of CAMPOS) if (a[c] !== undefined && a[c] !== null) o[c] = a[c];
-        return o;
-      });
-
-      // Los movimientos de pedidos de los siete dias, ya agregados: los
-      // documentos diarios se pueden purgar y el parte de esa semana sigue
-      // contando lo mismo dentro de un año.
-      const totales = { salido: 0, retrasado: 0, anulado: 0, nuevo: 0, adelantado: 0,
-                        nSalido: 0, nRetrasado: 0, nAnulado: 0, nNuevo: 0 };
-      const lee = (t) => { try { return JSON.parse(t || "[]"); } catch (e) { return []; } };
-      for (let i = 0; i < 7; i++) {
-        const d = new Date(ahora); d.setDate(d.getDate() - i);
-        const dia = d.toISOString().slice(0, 10);
-        const doc = await fbLeerDoc("pbi_pedidos_cambios", dia).catch(() => null);
-        if (!doc) continue;
-        for (const m of lee(doc.salidas)) {
-          if (m.tipo === "servido") { totales.salido += num(m.importe); totales.nSalido++; }
-          else { totales.anulado += num(m.importe); totales.nAnulado++; }
-        }
-        for (const m of lee(doc.movimientos)) {
-          if (m.tipo === "adelanto") { totales.adelantado += num(m.importe); continue; }
-          if (m.fechaAntes && m.fechaAntes < (doc.fecha || dia)) {
-            totales.retrasado += num(m.importe); totales.nRetrasado++;
-          }
-        }
-        for (const m of lee(doc.entradas)) { totales.nuevo += num(m.importe); totales.nNuevo++; }
-      }
-      for (const k of Object.keys(totales)) totales[k] = num(totales[k]);
-
-      await fbCommit("pbi_semanas", [{
-        _id: sem,
-        semana: sem,
-        cerradoEl: ahora.toISOString(),
-        desde: (() => { const d = new Date(ahora); d.setDate(d.getDate() - 6); return d.toISOString().slice(0, 10); })(),
-        hasta: ahora.toISOString().slice(0, 10),
-        comerciales: foto.length,
-        ventasSem: num(foto.reduce((x, a) => x + num(a.ventasSem), 0)),
-        agentes: JSON.stringify(foto),
-        pedidos: JSON.stringify(totales),
-      }]);
-
-      out.semana = sem;
-      out.comerciales = foto.length;
-      out.ventasSem = num(foto.reduce((x, a) => x + num(a.ventasSem), 0));
-      out.pedidos = totales;
-      out.tamano = JSON.stringify(foto).length + " bytes";
-    } catch (e) {
-      out.ok = false; out.error = e.message;
-    }
-    out.segundos = Math.round((Date.now() - t1) / 1000);
-    return res.status(out.ok ? 200 : 500).json(out);
-  }
-
   // ?resumen=1 → recalcula el resumen por comercial y el índice de búsqueda
   // leyendo de Firestore, sin tocar Power BI. Existe para sacar este trabajo
   // de la sincronización completa, que ya rozaba los 60 s de Vercel y algún
@@ -1729,11 +1497,6 @@ ${meses.join(",\n")}
     try {
       await cargarReglas();
 
-      // El equipo se editaba en la ficha del usuario pero la sincronizacion
-      // solo miraba pbi_ajustes: si la ficha ya traia el equipo de antes, el
-      // ajuste no llegaba a existir y el comercial se quedaba en la rama que
-      // le tocara por GRUPONIVEL4. Asi acabaron AGUSTIN y JLGARCIA en Francia.
-      // Ahora mandan las fichas, y pbi_ajustes queda como respaldo.
       const AJUSTES_RAMA = {};
       try {
         for (const a of await fbLeerColeccion("pbi_ajustes")) {
@@ -1741,21 +1504,6 @@ ${meses.join(",\n")}
             AJUSTES_RAMA[String(a._id).toUpperCase()] = a.equipo;
         }
       } catch (e) { out.avisoAjustes = e.message.slice(0, 120); }
-      out.ajustesRama = Object.keys(AJUSTES_RAMA).length;
-
-      let deFicha = 0;
-      try {
-        for (const col of ["portal_users", "usuarios"]) {
-          for (const u of await fbLeerColeccion(col)) {
-            if (!u.equipo) continue;
-            const clave = String(u.grupoAgente || u.catalogoVendedor || "").toUpperCase().trim();
-            if (!clave) continue;
-            if (AJUSTES_RAMA[clave] !== u.equipo) deFicha++;
-            AJUSTES_RAMA[clave] = u.equipo;
-          }
-        }
-      } catch (e) { out.avisoFichas = e.message.slice(0, 120); }
-      out.ramaDesdeFicha = deFicha;
       out.ajustesRama = Object.keys(AJUSTES_RAMA).length;
 
       const todos = await fbLeerColeccion("pbi_ventas_cliente");
@@ -1792,15 +1540,12 @@ ${meses.join(",\n")}
 
       for (const d of docs) {
         if (d.intercompany || d.fusionadoEn) continue;
-        // Los clientes sin comercial se apartaban y su venta no llegaba a
-        // ningun documento: 55.011 € que Power BI contaba y el CRM no. Son
-        // venta real, asi que van a un cajon con nombre en vez de perderse.
-        let agente = d.agente;
+        const agente = d.agente;
         if (!agente) {
           sinAsignar++;
           ventaSinAsignar += d.ventasAct || 0;
           ventaSinAsignarAnt += d.ventasAntYTD || 0;
-          agente = "SIN AGENTE";
+          continue;
         }
         if (!porAgente.has(agente)) {
           porAgente.set(agente, {
@@ -1892,23 +1637,6 @@ ${meses.join(",\n")}
       out.clientesSinAgente = sinAsignar;
       out.ventaSinAsignar = num(ventaSinAsignar);
       out.escritos = await fbCommit("pbi_resumen_agente", resumen);
-
-      // pbi_resumen_agente no se purgaba nunca: un comercial que deja de
-      // facturar conserva su documento con las cifras del ultimo dia que
-      // aparecio, y sigue sumando en cualquier pantalla que recorra la
-      // coleccion. Eran 33.690 € de diferencia contra _TOTAL.
-      try {
-        const vivos = new Set(resumen.map((r) => String(r._id)));
-        const previos = await fbLeerColeccion("pbi_resumen_agente");
-        const sobran = previos
-          .filter((d) => d._id !== "_TOTAL" && !vivos.has(String(d._id)))
-          .map((d) => d._id);
-        out.agentesObsoletos = sobran.length;
-        if (sobran.length && req.query.purgar !== "no") {
-          await fbBorrar("pbi_resumen_agente", sobran);
-          out.agentesBorrados = sobran;
-        }
-      } catch (e) { out.avisoPurgaAgentes = e.message.slice(0, 140); }
 
       // Índice de búsqueda, con la misma lista ya leída
       try {
@@ -3146,8 +2874,16 @@ EVALUATE
           huerfano: !ficha.nombre,
           // Intercompania segun GRUPONIVEL1 del modelo, que es el filtro
           // oficial del Panel Principal. El nombre queda de respaldo.
-          intercompany: (agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.nivel1
-                          === "Intercompany") || esIntercompany(ficha.nombre),
+          // Power BI decide solo con GRUPONIVEL1. Nosotros añadiamos el
+          // nombre, y los patrones incluyen WIKUK, INTERKEY y UNITED CARO:
+          // un cliente real que lleve esas palabras quedaba excluido aqui y
+          // contado alli. El nombre solo vale si el vendedor no esta en la
+          // tabla de agentes y no hay forma de saberlo por GRUPONIVEL1.
+          intercompany: (() => {
+            const a = agentes.get(String(pick(r, "VENDEDOR") || "").trim());
+            if (a && a.nivel1) return a.nivel1 === "Intercompany";
+            return esIntercompany(ficha.nombre);
+          })(),
           agente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.grupo || null,
           tipoAgente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.tipo || null,
           ambitoAgente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.ambito || null,
