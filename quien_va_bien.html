@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Quién va bien</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=Instrument+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{--papel:#F2F4F7;--tinta:#14181F;--tenue:#6B7684;--linea:#DCE1E7;
+        --hueco:#fff;--ok:#0E7C5A;--mal:#C2263D;--med:#B07908}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--papel);color:var(--tinta);max-width:640px;
+    margin-inline:auto;padding:20px 14px 50px;
+    font:400 16px/1.5 "Instrument Sans",-apple-system,system-ui,sans-serif}
+  .m{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums}
+  h1{margin:0 0 3px;font-size:23px;font-weight:700;letter-spacing:-.03em}
+  .sub{margin:0 0 16px;font-size:13px;color:var(--tenue)}
+  .chips{display:flex;gap:6px;overflow-x:auto;margin-bottom:14px;padding-bottom:2px}
+  .chip{flex:0 0 auto;border:1px solid var(--linea);background:var(--hueco);
+    color:var(--tenue);border-radius:99px;padding:7px 14px;font:600 12.5px inherit;cursor:pointer}
+  .chip.on{background:var(--tinta);border-color:var(--tinta);color:#fff}
+  .resumen{display:flex;gap:8px;margin-bottom:18px}
+  .cubo{flex:1;background:var(--hueco);border:1px solid var(--linea);
+    border-radius:3px;padding:11px 12px;text-align:center}
+  .cubo b{display:block;font-family:"IBM Plex Mono",monospace;font-size:26px;
+    font-weight:700;letter-spacing:-.03em;line-height:1}
+  .cubo span{font-size:11px;color:var(--tenue);display:block;margin-top:4px}
+  .rot{font-family:"IBM Plex Mono",monospace;font-size:10.5px;font-weight:600;
+    letter-spacing:.13em;text-transform:uppercase;color:var(--tenue);margin:22px 0 9px}
+  .f{background:var(--hueco);border:1px solid var(--linea);border-left-width:3px;
+    border-radius:3px;padding:12px 13px;margin-bottom:8px}
+  .f.ok{border-left-color:var(--ok)} .f.med{border-left-color:var(--med)}
+  .f.mal{border-left-color:var(--mal)}
+  .cab{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+  .nom{font-size:15.5px;font-weight:700}
+  .nom small{display:block;font-weight:400;font-size:11px;color:var(--tenue);margin-top:1px}
+  .vent{font-family:"IBM Plex Mono",monospace;font-size:15px;font-weight:700;white-space:nowrap}
+  .señales{display:flex;gap:5px;margin-top:10px;flex-wrap:wrap}
+  .s{flex:1 1 0;min-width:64px;border-radius:2px;padding:6px 7px;background:#F5F7F9}
+  .s b{display:block;font-family:"IBM Plex Mono",monospace;font-size:14.5px;font-weight:700}
+  .s span{display:block;font-size:9.5px;letter-spacing:.03em;text-transform:uppercase;
+    color:var(--tenue);margin-top:1px}
+  .s.ok b{color:var(--ok)} .s.med b{color:var(--med)} .s.mal b{color:var(--mal)}
+  .s.na b{color:var(--linea)}
+  .veredicto{margin:10px 0 0;font-size:12.5px;line-height:1.5;color:var(--tenue)}
+  .veredicto b{color:var(--tinta);font-weight:600}
+  .nota{font-size:11.5px;color:var(--tenue);line-height:1.55;
+    border-left:2px solid var(--linea);padding-left:11px;margin:20px 0 0}
+  .estado{padding:40px 4px;color:var(--tenue);font-size:14.5px}
+</style></head><body>
+
+<h1>Quién va bien</h1>
+<p class="sub" id="sub">Leyendo…</p>
+<div id="app"></div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const arriba=(s)=>String(s||"").toUpperCase().trim();
+const num=(n)=>Number(n)||0;
+const eur=(n)=>Math.round(n||0).toLocaleString("es-ES")+" €";
+let FILAS=[], fEquipo="";
+
+function val(f){
+  if(!f) return null;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  return null;
+}
+async function leer(col){
+  const todo=[]; let tok=null, v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      todo.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<40);
+  return todo;
+}
+
+// Cada señal se puntúa contra el propio comercial, nunca contra otros: un
+// comercial de gran cuenta y uno de proximidad no son comparables en cifras
+// absolutas, pero sí en si cumplen lo suyo.
+const semaforo=(v,bien,regular)=>v==null?"na":v>=bien?"ok":v>=regular?"med":"mal";
+window.setEq=(v)=>{ fEquipo=v; pintar(); };
+
+function pintar(){
+  const l=fEquipo?FILAS.filter(f=>f.equipo===fEquipo):FILAS;
+  const equipos=[...new Set(FILAS.map(f=>f.equipo).filter(Boolean))].sort();
+  const cuenta=(t)=>l.filter(f=>f.estado===t).length;
+
+  const bloque=(t,titulo)=>{
+    const g=l.filter(f=>f.estado===t);
+    if(!g.length) return "";
+    return `<p class="rot">${titulo} · ${g.length}</p>` + g.map(f=>`
+      <div class="f ${t}">
+        <div class="cab">
+          <div class="nom">${f.nombre}<small>${f.equipo} · ${f.cartera} clientes</small></div>
+          <div class="vent">${eur(f.ventas)}</div>
+        </div>
+        <div class="señales">
+          <div class="s ${f.sObj}"><b>${f.pctObj==null?"·":Math.round(f.pctObj)+"%"}</b><span>objetivo</span></div>
+          <div class="s ${f.sAno}"><b>${f.variacion==null?"·":(f.variacion>=0?"+":"")+Math.round(f.variacion)+"%"}</b><span>vs 2025</span></div>
+          <div class="s ${f.sRet}"><b>${f.pctRepite==null?"·":Math.round(f.pctRepite)+"%"}</b><span>retiene</span></div>
+          <div class="s ${f.sMb}"><b>${f.mb==null?"·":f.mb.toFixed(1)}</b><span>margen</span></div>
+          <div class="s ${f.sAct}"><b>${f.abiertas||"·"}</b><span>sin cerrar</span></div>
+        </div>
+        <p class="veredicto">${f.veredicto}</p>
+      </div>`).join("");
+  };
+
+  document.getElementById("app").innerHTML=`
+    <div class="chips">
+      <button class="chip${fEquipo?"":" on"}" onclick="setEq('')">Todos</button>
+      ${equipos.map(e=>`<button class="chip${fEquipo===e?" on":""}"
+        onclick="setEq('${e}')">${e}</button>`).join("")}
+    </div>
+    <div class="resumen">
+      <div class="cubo"><b style="color:var(--mal)">${cuenta("mal")}</b><span>hay que actuar</span></div>
+      <div class="cubo"><b style="color:var(--med)">${cuenta("med")}</b><span>vigilar</span></div>
+      <div class="cubo"><b style="color:var(--ok)">${cuenta("ok")}</b><span>va bien</span></div>
+    </div>
+    ${bloque("mal","Hay que actuar")}
+    ${bloque("med","Vigilar")}
+    ${bloque("ok","Va bien")}
+    <p class="nota">
+      Cinco señales, todas contra el propio comercial: cumplimiento de su
+      objetivo hasta hoy, variación sobre su año pasado, qué parte de su
+      cartera conserva, su margen frente al que tiene asignado, y cuántas
+      muestras y ofertas suyas siguen abiertas.
+      <b>No se comparan cifras entre comerciales</b>: una cartera de gran
+      cuenta y otra de proximidad no son comparables en euros, pero sí en si
+      cada uno cumple lo suyo.
+    </p>`;
+}
+
+(async()=>{
+  try{
+    const [res,cli,obj,est,mu,of]=await Promise.all([
+      leer("pbi_resumen_agente"), leer("pbi_ventas_cliente"),
+      leer("pbi_objetivos"), leer("pbi_estacionalidad"),
+      leer("muestras"), leer("ofertas"),
+    ]);
+
+    const cart={};
+    for(const c of cli){
+      if(c.intercompany||c.fusionadoEn) continue;
+      const a=arriba(c.agente); if(!a) continue;
+      const g=cart[a]=cart[a]||{total:0,repite:0,nuevo:0,perdido:0};
+      const act=num(c.ventasAct), ant=num(c.ventasAntYTD);
+      g.total++;
+      if(act>0&&ant>0) g.repite++; else if(act>0) g.nuevo++; else if(ant>0) g.perdido++;
+    }
+    const po={}; for(const o of obj) po[arriba(o.agente||o._id)]=o;
+    const pe={}; for(const e of est) pe[arriba(e.agente||e._id)]=e;
+
+    const ABIERTO=(o)=>{
+      const e=String(o.estado||"").toLowerCase(), r=String(o.resultado||"").toLowerCase();
+      return !["pedido","positivo","positiva","ok","aceptada","ko","negativo",
+               "negativa","rechazada","cerrada","perdida"].includes(e||r);
+    };
+    const ab={};
+    for(const o of [...mu,...of]){
+      if(!ABIERTO(o)) continue;
+      const a=arriba(o.agente||o.autor||o.comercial); if(!a) continue;
+      ab[a]=(ab[a]||0)+1;
+    }
+
+    const mesesHechos=new Date().getMonth();   // enero=0 → 7 en agosto
+
+    FILAS=res.filter(a=>a._id!=="_TOTAL"&&num(a.ventasAct)>0)
+      .map(a=>{
+        const k=arriba(a._id);
+        const c=cart[k]||{total:0,repite:0,nuevo:0,perdido:0};
+        const o=po[k]||{}, e=pe[k]||{};
+
+        // Objetivo hasta hoy: los meses reales del presupuesto; si no los
+        // tiene, su venta de 2025 repartida con su estacionalidad.
+        let hasta=0, anual=num(o.objAnual)||num(a.ventasAntFull);
+        let hayMeses=false;
+        for(let m=1;m<=mesesHechos;m++)
+          if(o["mes_"+m]!=null){ hasta+=num(o["mes_"+m]); hayMeses=true; }
+        if(!hayMeses){
+          let peso=0;
+          for(let m=1;m<=mesesHechos;m++) peso+=num(e["peso_"+m]);
+          hasta = peso ? anual*peso : anual*(mesesHechos/12);
+        }
+
+        const ventas=num(a.ventasAct);
+        const pctObj = hasta ? ventas/hasta*100 : null;
+        const variacion = num(a.ventasAntYTD) ? (ventas-num(a.ventasAntYTD))/num(a.ventasAntYTD)*100 : null;
+        const pctRepite = (c.repite+c.perdido) ? c.repite/(c.repite+c.perdido)*100 : null;
+        const mb = num(a.baseAct) ? num(a.margenAct)/num(a.baseAct)*100 : null;
+        const objMb = num(a.objetivoMargen);
+        const abiertas = ab[k]||0;
+
+        const sObj=semaforo(pctObj,95,80);
+        const sAno=semaforo(variacion,0,-10);
+        const sRet=semaforo(pctRepite,85,70);
+        const sMb = mb==null||!objMb ? "na" : semaforo(mb-objMb,0,-3);
+        // Muchas muestras y ofertas abiertas es señal de trabajo sin cerrar
+        const sAct = abiertas>30?"mal":abiertas>12?"med":"ok";
+
+        const señales=[sObj,sAno,sRet,sMb,sAct];
+        const malas=señales.filter(x=>x==="mal").length;
+        const medias=señales.filter(x=>x==="med").length;
+        const estado = malas>=2 ? "mal" : (malas===1||medias>=2) ? "med" : "ok";
+
+        // El veredicto nombra lo concreto, no repite los porcentajes
+        const p=[];
+        if(sObj==="mal") p.push(`le faltan <b>${eur(hasta-ventas)}</b> para su objetivo`);
+        if(sAno==="mal") p.push(`vende <b>${eur(num(a.ventasAntYTD)-ventas)}</b> menos que el año pasado`);
+        if(sRet==="mal"||c.perdido>0&&sRet==="med") p.push(`ha perdido <b>${c.perdido} clientes</b> que sí compraron en 2025`);
+        if(sMb==="mal") p.push(`margen <b>${(objMb-mb).toFixed(1)} puntos</b> por debajo del suyo`);
+        if(sAct==="mal") p.push(`<b>${abiertas} muestras y ofertas</b> sin cerrar`);
+        if(!p.length){
+          const b=[];
+          if(sObj==="ok") b.push("cumple objetivo");
+          if(sAno==="ok") b.push("crece sobre 2025");
+          if(sRet==="ok") b.push(`retiene su cartera${c.nuevo?` y ha ganado ${c.nuevo}`:""}`);
+          p.push(b.join(", ")||"sin alertas");
+        }
+
+        return { id:a._id, nombre:a.agente||a._id, equipo:a.equipo||"", ventas,
+                 cartera:c.total, perdido:c.perdido, nuevo:c.nuevo,
+                 pctObj, variacion, pctRepite, mb, abiertas,
+                 sObj, sAno, sRet, sMb, sAct, estado, malas,
+                 veredicto: p.join(" · ") };
+      })
+      .sort((a,b)=>(b.malas-a.malas)||(b.ventas-a.ventas));
+
+    document.getElementById("sub").textContent=
+      `${FILAS.length} comerciales · cada uno contra lo suyo`;
+    pintar();
+  }catch(e){
+    document.getElementById("app").innerHTML=`<p class="estado">No se ha podido montar: ${e.message}</p>`;
+  }
+})();
+</script></body></html>
