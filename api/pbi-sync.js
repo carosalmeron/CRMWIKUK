@@ -881,13 +881,45 @@ EVALUATE
       // Se agrupa por el codigo actual: la venta del codigo antiguo se suma a
       // la del nuevo, y el falso -100% desaparece. Por eso se piden mas filas
       // a Power BI de las que se devuelven: el recorte va despues de traducir.
+      // El sufijo tras el ultimo punto es el envase (.C140, .BG). Sin
+      // agrupar, MX248.8-8R2 aparecia cayendo 26.558 € y MX248.8-8R2.C140
+      // subiendo 10.540: el mismo articulo partido en dos lineas, y ninguna
+      // de las dos decia lo que pasa de verdad. Solo se agrupa si el codigo
+      // base existe en el maestro y la descripcion coincide.
+      const RE_ENVASE = /\.[A-Z0-9]+$/i;
+      const desc = (c) => String((arts.get(c) || {}).descripcion || "")
+        .toUpperCase().replace(/\s*\.[A-Z0-9]+$/, "").replace(/\s+/g, " ").trim();
+      // Las descripciones de un mismo articulo difieren en la cola
+      // ("...T2550" y "...R2550"), asi que exigir que una empiece por la otra
+      // no agrupaba nada. Se compara el tronco: los primeros 16 caracteres
+      // utiles, que ya identifican producto y formato.
+      const tronco = (d) => d.replace(/[^A-Z0-9]/g, "").slice(0, 16);
+      const parecidas = (a, b) => {
+        if (!a || !b) return false;
+        const t1 = tronco(a), t2 = tronco(b);
+        return t1.length >= 12 && t1 === t2;
+      };
+      let porEnvase = 0;
+      const conEnvase = (cod) => {
+        const f = arts.get(cod);
+        const p = f && f.padre;
+        if (p && p !== cod) return p;
+        const base = cod.replace(RE_ENVASE, "");
+        if (base !== cod && arts.has(base) && parecidas(desc(base), desc(cod))) {
+          porEnvase++; return base;
+        }
+        return cod;
+      };
+
       const porCodigo = new Map();
       let traducidos = 0;
       for (const r of filas) {
         const original = String(pick(r, "CODIGO") || "").trim().toUpperCase();
         if (!original) continue;
-        const cod = codArt(original);
-        if (cod !== original) traducidos++;
+        // Primero el codigo actual, despues su envase padre
+        const actual = codArt(original);
+        const cod = conEnvase(actual);
+        if (actual !== original) traducidos++;
 
         const g = porCodigo.get(cod) || {
           articulo: cod, ventasAct: 0, ventasAnt: 0, unidades: 0, codigosOrigen: [],
@@ -899,6 +931,7 @@ EVALUATE
         porCodigo.set(cod, g);
       }
       out.codigosTraducidos = traducidos;
+      out.agrupadosPorEnvase = porEnvase;
 
       out.articulos = [...porCodigo.values()].map((g) => {
         // La descripcion se busca por el codigo actual y, si no esta en el
