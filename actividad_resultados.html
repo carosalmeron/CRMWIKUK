@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Actividad y resultados</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=Instrument+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{--papel:#FAFBFC;--tinta:#14181F;--tenue:#6B7684;--linea:#DCE1E7;
+        --hueco:#fff;--sube:#0E7C5A;--cae:#D4232E;--pend:#B07908}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--papel);color:var(--tinta);max-width:640px;
+    margin-inline:auto;padding:22px 16px 60px;
+    font:400 16px/1.55 "Instrument Sans",-apple-system,system-ui,sans-serif}
+  .m{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums}
+  h1{margin:0 0 4px;font-size:23px;font-weight:700;letter-spacing:-.03em}
+  .sub{margin:0 0 20px;font-size:13px;color:var(--tenue)}
+  .rot{font-family:"IBM Plex Mono",monospace;font-size:10.5px;font-weight:600;
+    letter-spacing:.13em;text-transform:uppercase;color:var(--tenue);margin:26px 0 10px}
+  .caja{background:var(--hueco);border:1px solid var(--linea);border-radius:3px;padding:15px}
+  .hallazgo{font-size:15px;line-height:1.5;margin:0 0 12px}
+  .hallazgo b{font-weight:700}
+  .r{font-family:"IBM Plex Mono",monospace;font-size:30px;font-weight:700;
+    letter-spacing:-.03em;line-height:1}
+  .rlab{font-size:12px;color:var(--tenue);margin-top:4px}
+  .nota{font-size:12px;color:var(--tenue);line-height:1.55;
+    border-left:2px solid var(--linea);padding-left:11px;margin:14px 0 0}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:4px}
+  th{font-family:"IBM Plex Mono",monospace;font-size:9.5px;font-weight:700;
+    letter-spacing:.05em;text-transform:uppercase;color:var(--tenue);
+    padding:7px 5px;text-align:right;border-bottom:1px solid var(--linea)}
+  th:first-child{text-align:left}
+  td{padding:8px 5px;border-bottom:1px solid var(--linea);text-align:right;
+    font-variant-numeric:tabular-nums}
+  td:first-child{text-align:left;font-weight:600}
+  td small{display:block;font-weight:400;font-size:10.5px;color:var(--tenue)}
+  tr:last-child td{border-bottom:none}
+  .up{color:var(--sube)} .dn{color:var(--cae)}
+  .barra{height:5px;background:#EDF0F3;border-radius:99px;overflow:hidden;margin-top:3px}
+  .barra i{display:block;height:100%;background:var(--tinta)}
+  .estado{padding:40px 4px;color:var(--tenue);font-size:14.5px}
+</style></head><body>
+
+<h1>Actividad y resultados</h1>
+<p class="sub" id="sub">Leyendo…</p>
+<div id="app"></div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const arriba=(s)=>String(s||"").toUpperCase().trim();
+const num=(n)=>Number(n)||0;
+const eur=(n)=>Math.round(n||0).toLocaleString("es-ES")+" €";
+
+function val(f){
+  if(!f) return null;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  return null;
+}
+async function leer(col){
+  const todo=[]; let tok=null, v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      if(d.createTime) o._creado=String(d.createTime).slice(0,10);
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      todo.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<40);
+  return todo;
+}
+
+// Coeficiente de Pearson. Mide si dos series suben y bajan juntas, entre
+// -1 y 1. No dice que una cause la otra.
+function pearson(xs,ys){
+  const n=xs.length;
+  if(n<3) return null;
+  const mx=xs.reduce((a,b)=>a+b,0)/n, my=ys.reduce((a,b)=>a+b,0)/n;
+  let sxy=0,sxx=0,syy=0;
+  for(let i=0;i<n;i++){
+    const dx=xs[i]-mx, dy=ys[i]-my;
+    sxy+=dx*dy; sxx+=dx*dx; syy+=dy*dy;
+  }
+  if(!sxx||!syy) return null;
+  return sxy/Math.sqrt(sxx*syy);
+}
+const fuerza=(r)=>{
+  const a=Math.abs(r);
+  return a>=.6?"fuerte":a>=.35?"apreciable":a>=.2?"débil":"ninguna";
+};
+
+const AGENTES_C=["agente","comercial","vendedor","autor","grupoAgente"];
+let TRAD={};
+function agenteDe(o){
+  for(const c of AGENTES_C){
+    if(!o[c]) continue;
+    const v=arriba(o[c]);
+    return TRAD[v]||v;
+  }
+  return "";
+}
+
+(async()=>{
+  const app=document.getElementById("app");
+  try{
+    const [res,cli,portal,usuarios,mu,of,es] = await Promise.all([
+      leer("pbi_resumen_agente"), leer("pbi_ventas_cliente"),
+      leer("portal_users"), leer("usuarios"),
+      leer("muestras"), leer("ofertas"), leer("estrategias"),
+    ]);
+    for(const f of [...portal,...usuarios]){
+      const d=arriba(f.grupoAgente||f.catalogoVendedor);
+      if(!d) continue;
+      for(const c of [f.crmId,f.username,f._id,f.id,f.nombre]) if(c) TRAD[arriba(c)]=d;
+    }
+
+    // Cartera por comercial: quien repite, quien es nuevo y quien se ha ido
+    const cart={};
+    for(const c of cli){
+      if(c.intercompany||c.fusionadoEn) continue;
+      const a=arriba(c.agente); if(!a) continue;
+      const g=cart[a]=cart[a]||{total:0,repite:0,nuevo:0,perdido:0,dormido:0};
+      const act=num(c.ventasAct), ant=num(c.ventasAntYTD);
+      g.total++;
+      if(act>0&&ant>0) g.repite++;
+      else if(act>0) g.nuevo++;
+      else if(ant>0) g.perdido++;
+      else g.dormido++;
+    }
+
+    // Actividad registrada en el CRM, sin filtrar por fecha: es la carga
+    // de trabajo acumulada, que es lo comparable con la venta del año.
+    const act={};
+    const contar=(lista)=>{ for(const o of lista){
+      const a=agenteDe(o); if(!a) continue;
+      act[a]=(act[a]||0)+1;
+    }};
+    contar(mu); contar(of); contar(es);
+
+    // Solo comerciales con cartera suficiente: por debajo de 20 clientes
+    // cualquier porcentaje se dispara y ensucia la comparación.
+    const filas=res.filter(a=>a._id!=="_TOTAL")
+      .map(a=>{
+        const k=arriba(a._id);
+        const c=cart[k]||{total:0,repite:0,nuevo:0,perdido:0,dormido:0};
+        const activos=c.repite+c.nuevo;
+        return {
+          id:a._id, nombre:a.agente||a._id, equipo:a.equipo||"",
+          ventas:num(a.ventasAct), ant:num(a.ventasAntYTD),
+          variacion: num(a.ventasAntYTD) ? (num(a.ventasAct)-num(a.ventasAntYTD))/num(a.ventasAntYTD)*100 : null,
+          cartera:c.total, activos, repite:c.repite, nuevo:c.nuevo, perdido:c.perdido,
+          pctActivos: c.total? activos/c.total*100 : null,
+          pctRepite: (c.repite+c.perdido)? c.repite/(c.repite+c.perdido)*100 : null,
+          actividad: act[k]||0,
+          actPorCliente: c.total? (act[k]||0)/c.total : null,
+          ventaPorCliente: activos? num(a.ventasAct)/activos : null,
+        };
+      })
+      .filter(f=>f.cartera>=20 && f.ventas>0);
+
+    // ── Correlaciones ──
+    const par=(cx,cy)=>{
+      const xs=[],ys=[];
+      for(const f of filas){ if(f[cx]==null||f[cy]==null) continue; xs.push(f[cx]); ys.push(f[cy]); }
+      return {r:pearson(xs,ys), n:xs.length};
+    };
+    const c1=par("actPorCliente","pctActivos");
+    const c2=par("actPorCliente","variacion");
+    const c3=par("pctRepite","variacion");
+    const c4=par("actPorCliente","ventaPorCliente");
+
+    const fmt=(c)=>c.r==null?"—":(c.r>=0?"+":"")+c.r.toFixed(2);
+    const col=(c)=>c.r==null?"":`color:var(--${c.r>=0?"sube":"cae"})`;
+
+    document.getElementById("sub").textContent =
+      `${filas.length} comerciales con 20 clientes o más · datos de hoy`;
+
+    app.innerHTML=`
+<p class="rot">Lo que más se relaciona con vender más</p>
+<div class="caja">
+  <table>
+    <tr><th>Se compara</th><th>r</th><th>relación</th></tr>
+    <tr><td>Actividad por cliente<small>↔ % de cartera que compra</small></td>
+        <td class="m" style="${col(c1)}">${fmt(c1)}</td><td>${c1.r==null?"—":fuerza(c1.r)}</td></tr>
+    <tr><td>Actividad por cliente<small>↔ variación de ventas</small></td>
+        <td class="m" style="${col(c2)}">${fmt(c2)}</td><td>${c2.r==null?"—":fuerza(c2.r)}</td></tr>
+    <tr><td>Clientes que repiten<small>↔ variación de ventas</small></td>
+        <td class="m" style="${col(c3)}">${fmt(c3)}</td><td>${c3.r==null?"—":fuerza(c3.r)}</td></tr>
+    <tr><td>Actividad por cliente<small>↔ venta media por cliente</small></td>
+        <td class="m" style="${col(c4)}">${fmt(c4)}</td><td>${c4.r==null?"—":fuerza(c4.r)}</td></tr>
+  </table>
+  <p class="nota">
+    <b>r</b> va de −1 a +1. Cerca de 0 significa que no se mueven juntas; cerca
+    de 1, que cuando una sube la otra también. <b>No demuestra causa:</b> un
+    comercial con cartera grande registra más actividad y vende más por el
+    tamaño, no por la actividad. Con ${filas.length} comerciales, una relación
+    por debajo de 0,35 puede ser casualidad.
+  </p>
+</div>
+
+<p class="rot">Retención: quién conserva su cartera</p>
+<div class="caja" style="padding:0">
+  <table>
+    <tr><th>Comercial</th><th>Repite</th><th>Nuevos</th><th>Perdidos</th><th>Ventas</th></tr>
+    ${filas.slice().sort((a,b)=>(b.pctRepite||0)-(a.pctRepite||0)).map(f=>`
+      <tr>
+        <td>${f.nombre}<small>${f.equipo} · ${f.cartera} clientes</small></td>
+        <td class="m">${f.pctRepite==null?"·":Math.round(f.pctRepite)+"%"}
+          <div class="barra"><i style="width:${Math.min(f.pctRepite||0,100)}%"></i></div></td>
+        <td class="m up">${f.nuevo||"·"}</td>
+        <td class="m dn">${f.perdido||"·"}</td>
+        <td class="m ${f.variacion>=0?"up":"dn"}">${f.variacion==null?"·":(f.variacion>=0?"+":"")+Math.round(f.variacion)+"%"}</td>
+      </tr>`).join("")}
+  </table>
+</div>
+
+<p class="rot">Actividad registrada</p>
+<div class="caja" style="padding:0">
+  <table>
+    <tr><th>Comercial</th><th>Registros</th><th>Por cliente</th><th>% compra</th><th>Ventas</th></tr>
+    ${filas.slice().sort((a,b)=>(b.actPorCliente||0)-(a.actPorCliente||0)).map(f=>`
+      <tr>
+        <td>${f.nombre}<small>${f.equipo}</small></td>
+        <td class="m">${f.actividad||"·"}</td>
+        <td class="m">${f.actPorCliente==null?"·":f.actPorCliente.toFixed(2)}</td>
+        <td class="m">${f.pctActivos==null?"·":Math.round(f.pctActivos)+"%"}</td>
+        <td class="m">${eur(f.ventas)}</td>
+      </tr>`).join("")}
+  </table>
+</div>
+
+<p class="nota" style="margin-top:22px">
+  Repite = compró este año y el mismo periodo del anterior. Nuevo = solo este
+  año. Perdido = compró el año pasado y este no. La actividad es el total de
+  muestras, ofertas y estrategias registradas a nombre del comercial, sin
+  filtrar por fecha. Se excluyen intercompany, códigos fusionados y quien
+  tenga menos de 20 clientes.
+</p>`;
+  }catch(e){
+    app.innerHTML=`<p class="estado">No se ha podido montar: ${e.message}</p>`;
+  }
+})();
+</script></body></html>
