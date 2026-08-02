@@ -1729,6 +1729,11 @@ ${meses.join(",\n")}
     try {
       await cargarReglas();
 
+      // El equipo se editaba en la ficha del usuario pero la sincronizacion
+      // solo miraba pbi_ajustes: si la ficha ya traia el equipo de antes, el
+      // ajuste no llegaba a existir y el comercial se quedaba en la rama que
+      // le tocara por GRUPONIVEL4. Asi acabaron AGUSTIN y JLGARCIA en Francia.
+      // Ahora mandan las fichas, y pbi_ajustes queda como respaldo.
       const AJUSTES_RAMA = {};
       try {
         for (const a of await fbLeerColeccion("pbi_ajustes")) {
@@ -1736,6 +1741,21 @@ ${meses.join(",\n")}
             AJUSTES_RAMA[String(a._id).toUpperCase()] = a.equipo;
         }
       } catch (e) { out.avisoAjustes = e.message.slice(0, 120); }
+      out.ajustesRama = Object.keys(AJUSTES_RAMA).length;
+
+      let deFicha = 0;
+      try {
+        for (const col of ["portal_users", "usuarios"]) {
+          for (const u of await fbLeerColeccion(col)) {
+            if (!u.equipo) continue;
+            const clave = String(u.grupoAgente || u.catalogoVendedor || "").toUpperCase().trim();
+            if (!clave) continue;
+            if (AJUSTES_RAMA[clave] !== u.equipo) deFicha++;
+            AJUSTES_RAMA[clave] = u.equipo;
+          }
+        }
+      } catch (e) { out.avisoFichas = e.message.slice(0, 120); }
+      out.ramaDesdeFicha = deFicha;
       out.ajustesRama = Object.keys(AJUSTES_RAMA).length;
 
       const todos = await fbLeerColeccion("pbi_ventas_cliente");
