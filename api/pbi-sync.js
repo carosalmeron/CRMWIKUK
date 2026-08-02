@@ -1792,12 +1792,15 @@ ${meses.join(",\n")}
 
       for (const d of docs) {
         if (d.intercompany || d.fusionadoEn) continue;
-        const agente = d.agente;
+        // Los clientes sin comercial se apartaban y su venta no llegaba a
+        // ningun documento: 55.011 € que Power BI contaba y el CRM no. Son
+        // venta real, asi que van a un cajon con nombre en vez de perderse.
+        let agente = d.agente;
         if (!agente) {
           sinAsignar++;
           ventaSinAsignar += d.ventasAct || 0;
           ventaSinAsignarAnt += d.ventasAntYTD || 0;
-          continue;
+          agente = "SIN AGENTE";
         }
         if (!porAgente.has(agente)) {
           porAgente.set(agente, {
