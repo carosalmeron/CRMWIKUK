@@ -7,6 +7,22 @@
 <meta name="theme-color" content="#1A1816"/>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
 <style>
+  .mp{background:#fff;border:1px solid #E0DCD6;border-radius:10px;
+    padding:14px 15px;margin-bottom:18px;--ok:#0E7C5A;--mal:#C2263D}
+  .mp-rama{margin:0 0 11px;font-size:10.5px;font-weight:800;letter-spacing:.14em;
+    text-transform:uppercase;color:#8A8078}
+  .mp-b{padding:2px 0}
+  .mp-dest{opacity:1}
+  .mp-t{margin:0 0 9px;font-size:13px;font-weight:700;color:#2B2622}
+  .mp-g{display:flex;gap:22px;margin-bottom:10px}
+  .mp-k b{display:block;font-size:19px;font-weight:800;letter-spacing:-.02em;color:#2B2622}
+  .mp-k span{display:block;font-size:11px;color:#8A8078;margin-top:2px}
+  .mp-k i{font-style:normal;font-weight:700}
+  .mp-l{display:flex;flex-wrap:wrap;gap:5px 16px;font-size:11.5px;color:#8A8078;
+    margin-bottom:5px}
+  .mp-l b{font-size:13px;font-weight:800;color:#2B2622}
+  .mp-sep{height:1px;background:#E0DCD6;margin:12px 0}
+
 *,*::before,*::after{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
 html,body{margin:0;padding:0;font-family:'Inter',sans-serif;background:#F7F5F2;color:#1A1816;height:100%;overflow:hidden;}
 :root{--bg:#F7F5F2;--white:#fff;--text:#1A1816;--muted:#8A8078;--border:#E8E3DC;--accent:#C4501A;--accent-bg:#FDF1EC;}
@@ -170,13 +186,14 @@ input,button,select{font-family:inherit;}
 <!-- HUB -->
 <div id="hub" class="screen">
   <div class="hub-header">
-    <div class="hub-logo">GRUPO <span>CONSOLIDADO</span> <span style="font-size:0.4em;color:#8A8078;font-weight:400;margin-left:8px" id="ver-hub">v3.54.0</span></div>
+    <div class="hub-logo">GRUPO <span>CONSOLIDADO</span> <span style="font-size:0.4em;color:#8A8078;font-weight:400;margin-left:8px" id="ver-hub">v3.55.1</span></div>
     <div style="display:flex;align-items:center;gap:10px">
       <span class="hub-user" id="hub-user-name"></span>
       <button class="hub-logout" onclick="doLogout()">Salir</button>
     </div>
   </div>
   <div class="hub-body">
+    <div id="mi-panel"></div>
     <div class="hub-label">Selecciona un módulo</div>
     <div class="hub-list" id="hub-list"></div>
   </div>
@@ -276,7 +293,7 @@ const USERS_DEFAULT=[
 
 // ── Persistencia ─────────────────────────────────────────────────
 // ── Versión del Portal (mantener sincronizada en cada cambio) ──
-const PORTAL_VERSION="3.54.0";
+const PORTAL_VERSION="3.55.1";
 const PORTAL_BUILD="31/07/2026-version-unificada";
 try{var _pv=document.getElementById('portal-ver');if(_pv)_pv.textContent='Portal v'+PORTAL_VERSION;}catch(e){}
 // Habia tres numeros de version distintos escritos a mano en este archivo y
@@ -460,6 +477,7 @@ function restaurarSesion(){
     if(!u||!u.nombre||!(u.accesos&&u.accesos.length)) return false;
     currentUser=u;
     showHub();
+    try{ pintarMiPanel(u); }catch(e){}
     return true;
   }catch(e){ return false; }
 }
@@ -2033,6 +2051,161 @@ async function bkDeleteSingle(){
 // los botones. Se llama aqui, al final, no en DOMContentLoaded: el script
 // es inline y el evento puede haber pasado ya.
 try{ restaurarSesion(); }catch(e){}
+
+/* ── Panel del comercial ───────────────────────────────────────────
+   Solo para quien vende. Un jefe no lo ve: sus datos son los del equipo
+   y ya los tiene en el CRM. Compara al mejor de su rama con uno mismo,
+   en el año y en el último mes cerrado. */
+(function(){
+  var FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+  var ARR=function(s){return String(s||"").toUpperCase().trim();};
+  var NUM=function(n){return Number(n)||0;};
+  var EUR=function(n){return Math.round(n||0).toLocaleString("es-ES")+" €";};
+  var MES=["enero","febrero","marzo","abril","mayo","junio","julio",
+           "agosto","septiembre","octubre","noviembre","diciembre"];
+
+  function val(f){
+    if(!f) return null;
+    if(f.doubleValue!==undefined) return Number(f.doubleValue);
+    if(f.integerValue!==undefined) return Number(f.integerValue);
+    if(f.stringValue!==undefined) return f.stringValue;
+    if(f.booleanValue!==undefined) return f.booleanValue;
+    return null;
+  }
+  function leer(col){
+    var todo=[],tok=null,v=0;
+    function paso(){
+      return fetch(FB+"/"+col+"?pageSize=300"+(tok?"&pageToken="+encodeURIComponent(tok):""))
+        .then(function(r){ return r.ok?r.json():{}; })
+        .then(function(j){
+          (j.documents||[]).forEach(function(d){
+            var o={_id:decodeURIComponent(d.name.split("/").pop())};
+            for(var k in (d.fields||{})) o[k]=val(d.fields[k]);
+            todo.push(o);
+          });
+          tok=j.nextPageToken||null; v++;
+          return (tok&&v<30) ? paso() : todo;
+        });
+    }
+    return paso().catch(function(){ return []; });
+  }
+
+  window.pintarMiPanel=function(u){
+    var el=document.getElementById("mi-panel");
+    if(!el) return;
+    el.innerHTML="";
+    var rol=String((u&&u.rol)||"").toLowerCase();
+    // Jefes, dirección y responsables no lo ven
+    if(!u||/jefe|director|ceo|admin|resp/.test(rol)) return;
+
+    var clave=ARR(u.grupoAgente||u.catalogoVendedor||u.crmId||u.username);
+    if(!clave) return;
+
+    Promise.all([leer("pbi_resumen_agente"),leer("pbi_ventas_cliente"),
+                 leer("pbi_estacionalidad"),leer("muestras"),
+                 leer("ofertas"),leer("estrategias")])
+    .then(function(r){
+      var res=r[0],cli=r[1],est=r[2],mu=r[3],of=r[4],es=r[5];
+      var yo=null;
+      for(var i=0;i<res.length;i++) if(ARR(res[i]._id)===clave) yo=res[i];
+      if(!yo) return;
+      var rama=yo.equipo||"";
+      var E={}; est.forEach(function(x){ E[ARR(x.agente||x._id)]=x; });
+
+      // Cartera por comercial
+      var cart={};
+      cli.forEach(function(c){
+        var ok=(c.cuenta!==undefined)?c.cuenta:(!c.intercompany&&!c.fusionadoEn);
+        if(!ok) return;
+        var a=ARR(c.agenteFinal||c.agente); if(!a) return;
+        var g=cart[a]=cart[a]||{rep:0,nue:0,per:0};
+        var act=NUM(c.ventasAct),ant=NUM(c.ventasAntYTD);
+        if(act>0&&ant>0) g.rep++; else if(act>0) g.nue++; else if(ant>0) g.per++;
+      });
+
+      // Actividad: enviadas y aceptadas
+      // Cada actividad se cierra bien de una forma distinta: una muestra
+      // acaba en pedido, una estrategia en completada.
+      var OK={ mu:["pedido","positivo","positiva","ok","aceptada"],
+               of:["pedido","aceptada","ok"],
+               es:["completada","ok"] };
+      function cuenta(lista,tipo){
+        var m={}, buenos=OK[tipo];
+        lista.forEach(function(o){
+          var a=ARR(o.agente||o.autor||o.comercial); if(!a) return;
+          var g=m[a]=m[a]||{env:0,ok:0};
+          g.env++;
+          var e=String(o.estado||"").toLowerCase();
+          var r=String(o.resultado||"").toLowerCase();
+          if(buenos.indexOf(e)>=0||buenos.indexOf(r)>=0) g.ok++;
+        });
+        return m;
+      }
+      var cMu=cuenta(mu,"mu"), cOf=cuenta(of,"of"), cEs=cuenta(es,"es");
+
+      var mesCerrado=new Date().getMonth();     // 1-12 del último cerrado
+      function datos(a){
+        var k=ARR(a._id), c=cart[k]||{rep:0,nue:0,per:0}, e=E[k]||{};
+        var act=NUM(a.ventasAct), ant=NUM(a.ventasAntYTD);
+        return {
+          nom:a.agente||a._id,
+          anio:{ v:act, vs: ant?(act-ant)/ant*100:null },
+          mes:{ v:NUM(e["act_"+mesCerrado]),
+                vs: NUM(e["mes_"+mesCerrado]) ?
+                    (NUM(e["act_"+mesCerrado])-NUM(e["mes_"+mesCerrado]))/NUM(e["mes_"+mesCerrado])*100 : null },
+          nue:c.nue, per:c.per,
+          ret:(c.rep+c.per)?c.rep/(c.rep+c.per)*100:null,
+          mu:cMu[k]||{env:0,ok:0}, of:cOf[k]||{env:0,ok:0}, es:cEs[k]||{env:0,ok:0}
+        };
+      }
+
+      // El mejor de la rama: por cumplimiento sobre su propio año anterior
+      var mismos=res.filter(function(a){
+        return a._id!=="_TOTAL" && a.equipo===rama && NUM(a.ventasAct)>0; });
+      var mejor=null, mejorV=-1e9;
+      mismos.forEach(function(a){
+        var ant=NUM(a.ventasAntYTD);
+        var x = ant ? (NUM(a.ventasAct)-ant)/ant*100 : 0;
+        if(x>mejorV){ mejorV=x; mejor=a; }
+      });
+
+      var mio=datos(yo);
+      var top=mejor?datos(mejor):null;
+      var soyElMejor = mejor && ARR(mejor._id)===clave;
+
+      function pc(v){ return v==null?"·":(v>=0?"+":"")+Math.round(v)+"%"; }
+      function col(v){ return v==null?"":"color:var(--"+(v>=0?"ok":"mal")+")"; }
+      function bloque(d,tit,dest){
+        return '<div class="mp-b'+(dest?" mp-dest":"")+'">'
+          +'<p class="mp-t">'+tit+'</p>'
+          +'<div class="mp-g">'
+            +'<div class="mp-k"><b>'+EUR(d.anio.v)+'</b><span>año · <i style="'
+              +col(d.anio.vs)+'">'+pc(d.anio.vs)+'</i></span></div>'
+            +'<div class="mp-k"><b>'+EUR(d.mes.v)+'</b><span>'+MES[mesCerrado-1]
+              +' · <i style="'+col(d.mes.vs)+'">'+pc(d.mes.vs)+'</i></span></div>'
+          +'</div>'
+          +'<div class="mp-l">'
+            +'<span>Nuevos <b style="color:var(--ok)">'+(d.nue||0)+'</b></span>'
+            +'<span>Perdidos <b style="color:var(--mal)">'+(d.per||0)+'</b></span>'
+            +'<span>Retiene <b>'+(d.ret==null?"·":Math.round(d.ret)+"%")+'</b></span>'
+          +'</div>'
+          +'<div class="mp-l">'
+            +'<span>Muestras <b>'+d.mu.env+'</b> · <b style="color:var(--ok)">'+d.mu.ok+'</b> ok</span>'
+            +'<span>Ofertas <b>'+d.of.env+'</b> · <b style="color:var(--ok)">'+d.of.ok+'</b> ok</span>'
+            +'<span>Estrategias <b>'+d.es.env+'</b> · <b style="color:var(--ok)">'+d.es.ok+'</b> ok</span>'
+          +'</div></div>';
+      }
+
+      el.innerHTML='<div class="mp">'
+        +'<p class="mp-rama">'+(rama||"Sin equipo")+'</p>'
+        +(top&&!soyElMejor ? bloque(top,"El mejor de tu equipo · "+top.nom,true) : "")
+        +(top&&!soyElMejor ? '<div class="mp-sep"></div>' : "")
+        +bloque(mio, soyElMejor?"Vas primero de tu equipo":"Tus datos", soyElMejor)
+        +'</div>';
+    });
+  };
+})();
+
 </script>
 </body>
 </html>
