@@ -1545,6 +1545,80 @@ EVALUATE
     return res.status(401).json({ error: "no autorizado" });
   }
 
+  // ?mesescliente=1 → venta mes a mes de CADA cliente, los dos años. Sin esto
+  // el detalle por cliente solo puede ser anual, y al mirar un mes concreto no
+  // habia forma de saber que clientes estaban detras. Se guarda comprimido en
+  // pocos documentos: 6.500 clientes por 24 cifras serian 6.500 escrituras.
+  if (req.query.mesescliente === "1") {
+    const t1 = Date.now();
+    const out = { ok: true };
+    try {
+      const { token } = await getToken(req);
+      const anoAnt = new Date().getFullYear() - 1;
+      const anoAct = anoAnt + 1;
+
+      const med = [];
+      for (let m = 1; m <= 12; m++) {
+        med.push(`    "m${m}", CALCULATE(SUM(${M.vBase}),\n`
+          + `      FILTER(${M.ventas}, YEAR(${M.vFecha}) = ${anoAnt} && MONTH(${M.vFecha}) = ${m}))`);
+        med.push(`    "a${m}", CALCULATE(SUM(${M.vBase}),\n`
+          + `      FILTER(${M.ventas}, YEAR(${M.vFecha}) = ${anoAct} && MONTH(${M.vFecha}) = ${m}))`);
+      }
+      const filas = await pbiQuery(token, `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${M.vCliente},
+${med.join(",\n")}
+  )`);
+      out.filasDevueltas = filas.length;
+
+      // Se descarta lo mismo que el resumen para que las cifras cuadren
+      const fuera = new Set();
+      for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
+        if (c.intercompany || c.fusionadoEn) fuera.add(String(c._id).toUpperCase());
+      }
+      out.clientesExcluidos = fuera.size;
+
+      // [codigo, a1..a12, m1..m12] en arrays: ocupa un tercio que con claves
+      const compacta = [];
+      for (const r of filas) {
+        const cli = String(pick(r, "CLIENTE") || "").trim().toUpperCase();
+        if (!cli || fuera.has(cli)) continue;
+        const act = [], ant = [];
+        let hay = false;
+        for (let m = 1; m <= 12; m++) {
+          const a = num(pick(r, "a" + m)), b = num(pick(r, "m" + m));
+          act.push(a); ant.push(b);
+          if (a || b) hay = true;
+        }
+        if (hay) compacta.push([cli, ...act, ...ant]);
+      }
+      out.clientes = compacta.length;
+
+      const trozos = [];
+      let actual = [], bytes = 0;
+      for (const c of compacta) {
+        const t = JSON.stringify(c).length + 1;
+        if (bytes + t > 700000) { trozos.push(actual); actual = []; bytes = 0; }
+        actual.push(c); bytes += t;
+      }
+      if (actual.length) trozos.push(actual);
+
+      if (!req.query.dry) {
+        await fbCommit("pbi_meses_cliente", trozos.map((t, i) => ({
+          _id: `parte${i}`, parte: i, partes: trozos.length,
+          clientes: t.length, anio: anoAct,
+          datos: JSON.stringify(t),
+          actualizado: new Date().toISOString(),
+        })));
+      }
+      out.partes = trozos.length;
+      out.dry = !!req.query.dry;
+    } catch (e) { out.ok = false; out.error = e.message; }
+    out.segundos = Math.round((Date.now() - t1) / 1000);
+    return res.status(out.ok ? 200 : 500).json(out);
+  }
+
   // ?estacionalidad=1 → ventas mes a mes del año pasado y del actual, por
   // comercial. La de 2025 da la estacionalidad con la que repartir un objetivo
   // heredado; la de 2026 es el historico mensual, que no existe en ningun sitio.
