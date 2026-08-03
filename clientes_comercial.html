@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Clientes de un comercial</title>
+<style>
+  body{margin:0;background:#EEF1F5;color:#0F1E33;max-width:680px;margin-inline:auto;
+    padding:20px 14px 60px;font:400 15px/1.5 -apple-system,BlinkMacSystemFont,sans-serif}
+  h1{margin:0 0 4px;font-size:20px;font-weight:800}
+  .sub{margin:0 0 14px;font-size:13px;color:#5C6B80}
+  input,select{width:100%;padding:9px 11px;border:1px solid #CFD8E3;border-radius:3px;
+    font:inherit;margin-bottom:10px;background:#fff}
+  .k{background:#fff;border:1px solid #CFD8E3;border-radius:3px;padding:13px;margin-bottom:12px}
+  .k b{font-size:22px;font-variant-numeric:tabular-nums;display:block}
+  .k span{font-size:12px;color:#5C6B80}
+  table{width:100%;border-collapse:collapse;font-size:13px;background:#fff}
+  th{text-align:left;font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+    color:#5C6B80;padding:8px;border-bottom:1px solid #CFD8E3}
+  td{padding:7px 8px;border-bottom:1px solid #EEF1F5;vertical-align:top}
+  td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  small{display:block;color:#5C6B80;font-size:11px}
+  .estado{padding:30px 4px;color:#5C6B80}
+  .cp{width:100%;padding:10px;border:none;border-radius:3px;background:#0F1E33;
+    color:#fff;font:700 14px inherit;cursor:pointer;margin-bottom:14px}
+</style></head><body>
+
+<h1>Clientes de un comercial</h1>
+<p class="sub">Para cruzar con Power BI y encontrar los que bailan.</p>
+
+<select id="ag"><option>Cargando…</option></select>
+<button class="cp" onclick="copiar()">Copiar la lista</button>
+<div id="app"><p class="estado">Elige un comercial.</p></div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const ARR=(s)=>String(s||"").toUpperCase().trim();
+const N=(n)=>Number(n)||0;
+const EUR=(n)=>Math.round(n).toLocaleString("es-ES");
+let CLI=[], RES=[];
+
+function val(f){
+  if(!f) return null;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  return null;
+}
+async function leer(col){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<40);
+  return t;
+}
+window.copiar=()=>{
+  const k=document.getElementById("ag").value;
+  const l=CLI.filter(c=>ARR(c.agenteFinal||c.agente)===k&&N(c.ventasAct)>0)
+    .sort((a,b)=>N(b.ventasAct)-N(a.ventasAct));
+  const txt=l.map(c=>`${c._id}\t${c.nombre||""}\t${Math.round(N(c.ventasAct))}`).join("\n");
+  navigator.clipboard.writeText(txt).then(()=>alert(l.length+" clientes copiados"));
+};
+function pintar(){
+  const k=document.getElementById("ag").value;
+  const r=RES.find(x=>ARR(x._id)===k)||{};
+  const l=CLI.filter(c=>ARR(c.agenteFinal||c.agente)===k)
+    .map(c=>({id:c._id,nom:c.nombre||c._id,v:N(c.ventasAct),
+      cuenta:c.cuenta!==undefined?c.cuenta:(!c.intercompany&&!c.fusionadoEn),
+      ic:!!c.intercompany, fus:c.fusionadoEn||null, amb:c.ambito||c.mercado||""}))
+    .sort((a,b)=>b.v-a.v);
+  const suma=l.filter(c=>c.cuenta).reduce((s,c)=>s+c.v,0);
+  const fuera=l.filter(c=>!c.cuenta&&c.v>0);
+  document.getElementById("app").innerHTML=`
+    <div class="k"><b>${EUR(N(r.ventasAct))} €</b>
+      <span>pbi_resumen_agente · lo que enseña el CRM</span></div>
+    <div class="k"><b>${EUR(suma)} €</b>
+      <span>suma de sus ${l.filter(c=>c.cuenta&&c.v>0).length} clientes contables ·
+      diferencia ${EUR(N(r.ventasAct)-suma)} €</span></div>
+    ${fuera.length?`<div class="k"><b>${EUR(fuera.reduce((s,c)=>s+c.v,0))} €</b>
+      <span>en ${fuera.length} clientes EXCLUIDOS (intercompany o fusionados)</span></div>`:""}
+    <table><tr><th>Cliente</th><th>Ventas</th></tr>
+    ${l.filter(c=>c.v>0).slice(0,80).map(c=>`<tr>
+      <td>${c.nom}<small>${c.id}${c.amb?" · "+c.amb:""}${
+        c.ic?" · INTERCOMPANY":""}${c.fus?" · fusionado en "+c.fus:""}</small></td>
+      <td class="n">${EUR(c.v)}</td></tr>`).join("")}
+    </table>`;
+}
+(async()=>{
+  const [cli,res]=await Promise.all([leer("pbi_ventas_cliente"),leer("pbi_resumen_agente")]);
+  CLI=cli; RES=res.filter(a=>a._id!=="_TOTAL");
+  const sel=document.getElementById("ag");
+  sel.innerHTML=RES.filter(a=>N(a.ventasAct)>0)
+    .sort((a,b)=>N(b.ventasAct)-N(a.ventasAct))
+    .map(a=>`<option value="${ARR(a._id)}">${a._id} — ${EUR(N(a.ventasAct))} €</option>`).join("");
+  sel.onchange=pintar; pintar();
+})();
+</script></body></html>
