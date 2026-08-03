@@ -1572,26 +1572,41 @@ ${med.join(",\n")}
   )`);
       out.filasDevueltas = filas.length;
 
-      // Se descarta lo mismo que el resumen para que las cifras cuadren
-      const fuera = new Set();
+      // Solo intercompany. Los codigos fusionados NO se excluyen: el codigo
+      // viejo es el que guarda la venta de 2025, y quitarlo hacia que el nuevo
+      // apareciera naciendo de cero y el viejo muriendo. Se agrupan despues.
+      const fuera = new Set(), canon = {}, nombreDe = {};
       for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
-        if (c.intercompany || c.fusionadoEn) fuera.add(String(c._id).toUpperCase());
+        const id = String(c._id).toUpperCase();
+        if (c.intercompany) { fuera.add(id); continue; }
+        if (c.fusionadoEn) canon[id] = String(c.fusionadoEn).toUpperCase();
+        if (c.nombre) nombreDe[id] = c.nombre;
       }
       out.clientesExcluidos = fuera.size;
+      out.codigosFusionados = Object.keys(canon).length;
 
       // [codigo, a1..a12, m1..m12] en arrays: ocupa un tercio que con claves
-      const compacta = [];
+      // El codigo viejo suma sobre el nuevo: asi FOODTURE deja de aparecer
+      // dos veces, una perdiendo 58.608 y otra ganando 22.558.
+      const acum = new Map();
+      let agrupados = 0;
       for (const r of filas) {
-        const cli = String(pick(r, "CLIENTE") || "").trim().toUpperCase();
+        let cli = String(pick(r, "CLIENTE") || "").trim().toUpperCase();
         if (!cli || fuera.has(cli)) continue;
-        const act = [], ant = [];
-        let hay = false;
+        const destino = canon[cli] || canonico(cli);
+        if (destino !== cli) agrupados++;
+        const g = acum.get(destino) || new Array(24).fill(0);
         for (let m = 1; m <= 12; m++) {
-          const a = num(pick(r, "a" + m)), b = num(pick(r, "m" + m));
-          act.push(a); ant.push(b);
-          if (a || b) hay = true;
+          g[m - 1] += num(pick(r, "a" + m));
+          g[11 + m] += num(pick(r, "m" + m));
         }
-        if (hay) compacta.push([cli, ...act, ...ant]);
+        acum.set(destino, g);
+      }
+      out.codigosAgrupados = agrupados;
+
+      const compacta = [];
+      for (const [cli, g] of acum) {
+        if (g.some((x) => x)) compacta.push([cli, ...g.map((x) => num(x))]);
       }
       out.clientes = compacta.length;
 
