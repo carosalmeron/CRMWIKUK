@@ -1681,13 +1681,17 @@ ${meses.join(",\n")}
       // sincronizacion. Excluyendo solo intercompany, los codigos fusionados
       // seguian aportando su historico y el mes salia inflado: ANTONIO caia
       // 121.946 € en julio y sus clientes solo explicaban 7.554.
-      const fuera = new Set();
+      // Los fusionados NO se excluyen: su venta de 2025 vive en el codigo
+      // antiguo y Power BI no la tiene bajo el nuevo, asi que quitarlos
+      // borraba un tercio del año. Se redirigen al superviviente, igual que
+      // en mesescliente: contada una vez y a nombre de quien toca.
+      const fuera = new Set(), canonCli = {};
       let leidos = 0;
       for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
         leidos++;
-        const cuenta = c.cuenta !== undefined
-          ? c.cuenta : (!c.intercompany && !c.fusionadoEn);
-        if (!cuenta) fuera.add(String(c._id).toUpperCase());
+        const id = String(c._id).toUpperCase();
+        if (c.intercompany) { fuera.add(id); continue; }
+        if (c.fusionadoEn) canonCli[id] = String(c.fusionadoEn).toUpperCase();
       }
       out.clientesLeidos = leidos;
       out.clientesExcluidos = fuera.size;
@@ -1695,7 +1699,8 @@ ${meses.join(",\n")}
       const porVend = {};
       for (const r of filas) {
         const v = String(pick(r, "VENDEDOR") || "").trim();
-        const cli = String(pick(r, "CLIENTE") || "").trim().toUpperCase();
+        let cli = String(pick(r, "CLIENTE") || "").trim().toUpperCase();
+        if (canonCli[cli]) cli = canonCli[cli];       // codigo viejo → nuevo
         if (!v || fuera.has(cli)) continue;
         if (!porVend[v]) porVend[v] = { total: 0, meses: {}, totalAct: 0, act: {} };
         const d = porVend[v];
