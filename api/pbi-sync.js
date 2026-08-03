@@ -1575,13 +1575,18 @@ ${med.join(",\n")}
       // Solo intercompany. Los codigos fusionados NO se excluyen: el codigo
       // viejo es el que guarda la venta de 2025, y quitarlo hacia que el nuevo
       // apareciera naciendo de cero y el viejo muriendo. Se agrupan despues.
-      const fuera = new Set(), canon = {}, nombreDe = {};
+      // Solo los clientes que el nivel de comercial cuenta: si aqui entran
+      // ventas sin agente asignado, la suma por cliente no cuadra con el
+      // titular del mes y el desglose no sirve para explicarlo.
+      const fuera = new Set(), canon = {}, conAgente = new Set();
+      let sinAgente = 0;
       for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
         const id = String(c._id).toUpperCase();
         if (c.intercompany) { fuera.add(id); continue; }
         if (c.fusionadoEn) canon[id] = String(c.fusionadoEn).toUpperCase();
-        if (c.nombre) nombreDe[id] = c.nombre;
+        if (c.agente) conAgente.add(id); else sinAgente++;
       }
+      out.clientesSinAgente = sinAgente;
       out.clientesExcluidos = fuera.size;
       out.codigosFusionados = Object.keys(canon).length;
 
@@ -1594,6 +1599,9 @@ ${med.join(",\n")}
         let cli = String(pick(r, "CLIENTE") || "").trim().toUpperCase();
         if (!cli || fuera.has(cli)) continue;
         const destino = canon[cli] || canonico(cli);
+        // El destino tiene que ser un cliente con comercial: si el codigo
+        // superviviente no lo tiene, esa venta no la cuenta nadie arriba.
+        if (!conAgente.has(destino) && !conAgente.has(cli)) continue;
         if (destino !== cli) agrupados++;
         const g = acum.get(destino) || new Array(24).fill(0);
         for (let m = 1; m <= 12; m++) {
