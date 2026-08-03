@@ -1645,106 +1645,86 @@ ${med.join(",\n")}
     return res.status(out.ok ? 200 : 500).json(out);
   }
 
-  // ?estacionalidad=1 → ventas mes a mes del año pasado y del actual, por
-  // comercial. La de 2025 da la estacionalidad con la que repartir un objetivo
-  // heredado; la de 2026 es el historico mensual, que no existe en ningun sitio.
+  // ?estacionalidad=1 → ventas mes a mes por comercial. YA NO consulta Power
+  // BI: se agrega desde pbi_meses_cliente, que es la misma fuente que usa el
+  // desglose por cliente. Tenerlas separadas daba dos criterios distintos y
+  // la caida de un comercial no coincidia con la suma de sus clientes:
+  // ANTONIO caia 121.946 € y sus clientes solo explicaban 7.554.
   if (req.query.estacionalidad === "1") {
     const t1 = Date.now();
-    const out = { ok: true };
+    const out = { ok: true, fuente: "pbi_meses_cliente" };
     try {
-      const { token } = await getToken(req);
-      const Q = dax(null);
-      const anoAnt = new Date().getFullYear() - 1;
-      const anoAct = anoAnt + 1;
-
-      // Doce medidas por año. Agrupar por FECHA daba una fila por vendedor y
-      // dia: millones de combinaciones y la consulta volvia vacia.
-      const meses = [];
-      for (let m = 1; m <= 12; m++) {
-        meses.push(`    "m${m}", CALCULATE(SUM(${M.vBase}),\n`
-          + `      FILTER(${M.ventas}, YEAR(${M.vFecha}) = ${anoAnt} && MONTH(${M.vFecha}) = ${m}))`);
-        meses.push(`    "a${m}", CALCULATE(SUM(${M.vBase}),\n`
-          + `      FILTER(${M.ventas}, YEAR(${M.vFecha}) = ${anoAct} && MONTH(${M.vFecha}) = ${m}))`);
+      const partes = await fbLeerColeccion("pbi_meses_cliente");
+      if (!partes.length) {
+        out.ok = false;
+        out.error = "no hay pbi_meses_cliente. Lánzalo antes con ?mesescliente=1";
+        return res.status(500).json(out);
       }
-      // Tambien por cliente, para descartar el intercompany con el mismo
-      // criterio que el resumen.
-      const filas = await pbiQuery(token, `
-EVALUATE
-  SUMMARIZECOLUMNS(
-    ${M.vVendedor},
-    ${M.vCliente},
-${meses.join(",\n")}
-  )`);
-      out.filasDevueltas = filas.length;
+      // [codigo, a1..a12, m1..m12]
+      const mesesDe = {};
+      for (const d of partes) {
+        let f = [];
+        try { f = JSON.parse(d.datos || "[]"); } catch (e) {}
+        for (const fila of f) mesesDe[String(fila[0]).toUpperCase()] = fila;
+      }
+      out.clientesConMeses = Object.keys(mesesDe).length;
 
-      // Mismo criterio que el resumen y el indice: "cuenta" lo decide la
-      // sincronizacion. Excluyendo solo intercompany, los codigos fusionados
-      // seguian aportando su historico y el mes salia inflado: ANTONIO caia
-      // 121.946 € en julio y sus clientes solo explicaban 7.554.
-      // Los fusionados NO se excluyen: su venta de 2025 vive en el codigo
-      // antiguo y Power BI no la tiene bajo el nuevo, asi que quitarlos
-      // borraba un tercio del año. Se redirigen al superviviente, igual que
-      // en mesescliente: contada una vez y a nombre de quien toca.
-      const fuera = new Set(), canonCli = {};
-      let leidos = 0;
+      // A quien pertenece cada cliente: lo decide la sincronizacion
+      const duenoDe = {};
+      let leidos = 0, contables = 0;
       for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
         leidos++;
-        const id = String(c._id).toUpperCase();
-        if (c.intercompany) { fuera.add(id); continue; }
-        if (c.fusionadoEn) canonCli[id] = String(c.fusionadoEn).toUpperCase();
+        const cuenta = c.cuenta !== undefined
+          ? c.cuenta : (!c.intercompany && !c.fusionadoEn);
+        if (!cuenta) continue;
+        contables++;
+        const ag = String(c.agenteFinal || c.agente || "SIN AGENTE").toUpperCase();
+        duenoDe[String(c._id).toUpperCase()] = ag;
       }
       out.clientesLeidos = leidos;
-      out.clientesExcluidos = fuera.size;
+      out.clientesContables = contables;
 
-      const porVend = {};
-      for (const r of filas) {
-        const v = String(pick(r, "VENDEDOR") || "").trim();
-        let cli = String(pick(r, "CLIENTE") || "").trim().toUpperCase();
-        if (canonCli[cli]) cli = canonCli[cli];       // codigo viejo → nuevo
-        if (!v || fuera.has(cli)) continue;
-        if (!porVend[v]) porVend[v] = { total: 0, meses: {}, totalAct: 0, act: {} };
-        const d = porVend[v];
-        for (let m = 1; m <= 12; m++) {
-          const imp = Number(pick(r, "m" + m)) || 0;
-          if (imp) { d.meses[m] = num((d.meses[m] || 0) + imp); d.total = num(d.total + imp); }
-          const act = Number(pick(r, "a" + m)) || 0;
-          if (act) { d.act[m] = num((d.act[m] || 0) + act); d.totalAct = num(d.totalAct + act); }
+      const porAgente = {};
+      let sinDueno = 0;
+      for (const [cli, fila] of Object.entries(mesesDe)) {
+        const ag = duenoDe[cli];
+        if (!ag) { sinDueno++; continue; }
+        const g = porAgente[ag] = porAgente[ag]
+          || { act: new Array(12).fill(0), ant: new Array(12).fill(0) };
+        for (let m = 0; m < 12; m++) {
+          g.act[m] += Number(fila[1 + m]) || 0;
+          g.ant[m] += Number(fila[13 + m]) || 0;
         }
       }
+      out.clientesSinDueno = sinDueno;
 
-      const agentes = {};
-      for (const a of await pbiQuery(token, Q.agentes, true)) {
-        const cod = String(pick(a, "CODIGO") || "").trim();
-        const grupo = String(pick(a, "GRUPOAGENTE") || "").trim().toUpperCase();
-        if (cod && grupo) agentes[cod] = grupo;
-      }
-      const porAgente = {};
-      for (const [vend, d] of Object.entries(porVend)) {
-        const ag = agentes[vend] || agentes[vend.toUpperCase()];
-        if (!ag) continue;
-        if (!porAgente[ag]) porAgente[ag] = { total: 0, meses: {}, totalAct: 0, act: {} };
-        for (const [m, v] of Object.entries(d.meses))
-          porAgente[ag].meses[m] = num((porAgente[ag].meses[m] || 0) + v);
-        for (const [m, v] of Object.entries(d.act))
-          porAgente[ag].act[m] = num((porAgente[ag].act[m] || 0) + v);
-        porAgente[ag].total = num(porAgente[ag].total + d.total);
-        porAgente[ag].totalAct = num(porAgente[ag].totalAct + d.totalAct);
-      }
-
-      const docs = Object.entries(porAgente).map(([ag, d]) => {
-        const o = { _id: ag, agente: ag, anio: anoAnt, total: d.total,
-                    totalAct: d.totalAct, actualizado: new Date().toISOString() };
+      const anoAnt = new Date().getFullYear() - 1;
+      const docs = Object.entries(porAgente).map(([ag, g]) => {
+        const total = g.ant.reduce((a, b) => a + b, 0);
+        const totalAct = g.act.reduce((a, b) => a + b, 0);
+        const o = { _id: ag, agente: ag, anio: anoAnt,
+                    total: num(total), totalAct: num(totalAct),
+                    actualizado: new Date().toISOString() };
         for (let m = 1; m <= 12; m++) {
-          o["mes_" + m] = num(d.meses[m] || 0);
-          o["peso_" + m] = d.total ? Math.round((d.meses[m] || 0) / d.total * 10000) / 10000 : 0;
-          o["act_" + m] = num(d.act[m] || 0);
+          o["mes_" + m] = num(g.ant[m - 1]);
+          o["act_" + m] = num(g.act[m - 1]);
+          o["peso_" + m] = total ? Math.round(g.ant[m - 1] / total * 10000) / 10000 : 0;
         }
         return o;
       });
 
-      if (!req.query.dry) await fbCommit("pbi_estacionalidad", docs);
-      out.anio = anoAnt;
-      out.vendedores = Object.keys(porVend).length;
+      if (!req.query.dry) {
+        await fbCommit("pbi_estacionalidad", docs);
+        // Fuera los comerciales que ya no aparecen
+        try {
+          const vivos = new Set(docs.map((d) => d._id));
+          const previos = await fbLeerColeccion("pbi_estacionalidad");
+          const sobran = previos.filter((d) => !vivos.has(d._id)).map((d) => d._id);
+          if (sobran.length) { await fbBorrar("pbi_estacionalidad", sobran);
+            out.borrados = sobran.length; }
+        } catch (e) { out.avisoPurga = e.message.slice(0, 120); }
+      }
+
       out.agentes = docs.length;
       out.dry = !!req.query.dry;
       out.muestra = docs.slice(0, 2);
