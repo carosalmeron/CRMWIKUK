@@ -1677,11 +1677,17 @@ ${meses.join(",\n")}
   )`);
       out.filasDevueltas = filas.length;
 
+      // Mismo criterio que el resumen y el indice: "cuenta" lo decide la
+      // sincronizacion. Excluyendo solo intercompany, los codigos fusionados
+      // seguian aportando su historico y el mes salia inflado: ANTONIO caia
+      // 121.946 € en julio y sus clientes solo explicaban 7.554.
       const fuera = new Set();
       let leidos = 0;
       for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
         leidos++;
-        if (c.intercompany) fuera.add(String(c._id).toUpperCase());
+        const cuenta = c.cuenta !== undefined
+          ? c.cuenta : (!c.intercompany && !c.fusionadoEn);
+        if (!cuenta) fuera.add(String(c._id).toUpperCase());
       }
       out.clientesLeidos = leidos;
       out.clientesExcluidos = fuera.size;
