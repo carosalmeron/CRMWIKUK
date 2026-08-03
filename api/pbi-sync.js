@@ -1592,7 +1592,6 @@ ${med.join(",\n")}
       }
       out.sinCampoCuenta = viejos;
       out.clientesQueCuentan = cuentan.size;
-      out.clientesExcluidos = fuera.size;
       out.codigosFusionados = Object.keys(canon).length;
 
       // [codigo, a1..a12, m1..m12] en arrays: ocupa un tercio que con claves
@@ -1602,7 +1601,7 @@ ${med.join(",\n")}
       let agrupados = 0;
       for (const r of filas) {
         let cli = String(pick(r, "CLIENTE") || "").trim().toUpperCase();
-        if (!cli || fuera.has(cli)) continue;
+        if (!cli) continue;
         const destino = canon[cli] || canonico(cli);
         // Solo cuenta lo que la sincronización marcó como contable
         if (!cuentan.has(destino) && !cuentan.has(cli)) continue;
