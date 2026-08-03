@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Deshacer reasignación</title>
+<style>
+  :root{--papel:#EEF1F5;--tinta:#0F1E33;--tenue:#5C6B80;--linea:#CFD8E3;
+        --hueco:#fff;--ok:#0F6E63;--mal:#C2263D;--med:#B07908}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--papel);color:var(--tinta);max-width:640px;
+    margin-inline:auto;padding:22px 16px calc(110px + env(safe-area-inset-bottom));
+    font:400 16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  h1{margin:0 0 5px;font-size:22px;font-weight:800;letter-spacing:-.03em}
+  .sub{margin:0 0 16px;font-size:13px;color:var(--tenue)}
+  .aviso{font-size:12.5px;line-height:1.55;border-left:2px solid var(--mal);
+    padding-left:12px;margin:0 0 18px;color:var(--tenue)}
+  .aviso b{color:var(--tinta);font-weight:600}
+  .f{background:var(--hueco);border:1px solid var(--linea);border-radius:3px;
+    padding:12px 13px;margin-bottom:7px;display:flex;justify-content:space-between;
+    align-items:baseline;gap:10px}
+  .fn{font-size:14.5px;font-weight:700}
+  .fv{font-variant-numeric:tabular-nums;font-size:15px;font-weight:800}
+  .barra{position:fixed;left:0;right:0;bottom:0;background:var(--tinta);color:#fff;
+    padding:13px 16px calc(13px + env(safe-area-inset-bottom));
+    display:flex;justify-content:space-between;align-items:center;gap:12px}
+  .barra p{margin:0;font-size:12.5px;color:#A7B2BE}
+  button{background:#fff;color:var(--tinta);border:none;border-radius:3px;
+    padding:11px 18px;font:700 14.5px inherit;cursor:pointer}
+  button:disabled{opacity:.4}
+  .log{background:var(--hueco);border:1px solid var(--linea);border-radius:3px;
+    padding:12px;font-size:12.5px;line-height:1.7;margin-bottom:12px}
+  .estado{padding:34px 4px;color:var(--tenue);font-size:14.5px}
+</style></head><body>
+
+<h1>Deshacer reasignación</h1>
+<p class="sub" id="sub">Leyendo…</p>
+
+<p class="aviso">
+  La reasignación de las 18:14 escribió el <b>equipo</b> en vez del comercial en
+  algunas visitas: <b>ceo</b> y <b>dir</b> no tienen grupoAgente en su ficha y se
+  cogió catalogoVendedor, que ahí contiene "WIKUK".<br><br>
+  Esto devuelve cada visita a su <b>perfilOriginal</b>. Vuelve al estado de esta
+  mañana: se verán como antes.
+</p>
+
+<div id="app"><p class="estado">Leyendo…</p></div>
+
+<div class="barra">
+  <p id="cuenta">—</p>
+  <button id="btn" disabled onclick="deshacer()">Deshacer</button>
+</div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+let CAMBIOS=[];
+
+function val(f){
+  if(!f) return null;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  return null;
+}
+async function leer(col){
+  const todo=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      todo.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<40);
+  return todo;
+}
+
+async function deshacer(){
+  if(!confirm(`Se van a devolver ${CAMBIOS.length} visitas a su perfil original. ¿Seguir?`)) return;
+  const btn=document.getElementById("btn"); btn.disabled=true;
+  let ok=0,err=0;
+  for(let i=0;i<CAMBIOS.length;i++){
+    const c=CAMBIOS[i];
+    try{
+      const r=await fetch(`${FB}/visitas/${encodeURIComponent(c.id)}`
+        +`?updateMask.fieldPaths=agente`,{
+        method:"PATCH",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({fields:{agente:{stringValue:c.original}}})});
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      ok++;
+    }catch(e){ err++; }
+    if(i%25===0) btn.textContent=`${i} de ${CAMBIOS.length}…`;
+  }
+  document.getElementById("app").insertAdjacentHTML("afterbegin",
+    `<div class="log">✓ ${ok} devueltas${err?` · ✗ ${err} con error`:""}<br>
+     Recarga el CRM.</div>`);
+  btn.textContent="Hecho";
+}
+
+(async()=>{
+  try{
+    const vis=await leer("visitas");
+    const grupos={};
+    for(const v of vis){
+      if(!v.perfilOriginal) continue;              // no se tocó
+      const de=String(v.agente||"").toUpperCase();
+      const a=String(v.perfilOriginal).toUpperCase();
+      if(de===a) continue;                          // ya está bien
+      const k=a+" → "+de;
+      grupos[k]=(grupos[k]||0)+1;
+      CAMBIOS.push({id:v._id, original:v.perfilOriginal});
+    }
+    const l=Object.entries(grupos).sort((a,b)=>b[1]-a[1]);
+    document.getElementById("sub").textContent=
+      `${vis.length} visitas · ${CAMBIOS.length} a devolver`;
+    document.getElementById("app").innerHTML = l.length ? l.map(([k,n])=>`
+      <div class="f"><span class="fn">${k}</span><span class="fv">${n}</span></div>`).join("")
+      : '<p class="estado">Nada que deshacer.</p>';
+    document.getElementById("cuenta").textContent=
+      CAMBIOS.length?`${CAMBIOS.length} visitas`:"Nada que hacer";
+    document.getElementById("btn").disabled=!CAMBIOS.length;
+  }catch(e){
+    document.getElementById("app").innerHTML=`<p class="estado">Error: ${e.message}</p>`;
+  }
+})();
+</script></body></html>
