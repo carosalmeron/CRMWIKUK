@@ -1578,15 +1578,20 @@ ${med.join(",\n")}
       // Solo los clientes que el nivel de comercial cuenta: si aqui entran
       // ventas sin agente asignado, la suma por cliente no cuadra con el
       // titular del mes y el desglose no sirve para explicarlo.
-      const fuera = new Set(), canon = {}, conAgente = new Set();
-      let sinAgente = 0;
+      // Se lee la decisión que ya tomó la sincronización: cuenta y agenteFinal.
+      const canon = {}, cuentan = new Set(), agenteDe = {};
+      let viejos = 0;
       for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
         const id = String(c._id).toUpperCase();
-        if (c.intercompany) { fuera.add(id); continue; }
+        if (c.cuenta === undefined) viejos++;          // aún sin el campo
         if (c.fusionadoEn) canon[id] = String(c.fusionadoEn).toUpperCase();
-        if (c.agente) conAgente.add(id); else sinAgente++;
+        // Compatibilidad mientras no se haya relanzado la sincronización
+        const ok = c.cuenta !== undefined ? c.cuenta : (!c.intercompany && !c.fusionadoEn);
+        if (ok) cuentan.add(id);
+        if (c.agenteFinal || c.agente) agenteDe[id] = c.agenteFinal || c.agente;
       }
-      out.clientesSinAgente = sinAgente;
+      out.sinCampoCuenta = viejos;
+      out.clientesQueCuentan = cuentan.size;
       out.clientesExcluidos = fuera.size;
       out.codigosFusionados = Object.keys(canon).length;
 
@@ -1599,9 +1604,8 @@ ${med.join(",\n")}
         let cli = String(pick(r, "CLIENTE") || "").trim().toUpperCase();
         if (!cli || fuera.has(cli)) continue;
         const destino = canon[cli] || canonico(cli);
-        // El destino tiene que ser un cliente con comercial: si el codigo
-        // superviviente no lo tiene, esa venta no la cuenta nadie arriba.
-        if (!conAgente.has(destino) && !conAgente.has(cli)) continue;
+        // Solo cuenta lo que la sincronización marcó como contable
+        if (!cuentan.has(destino) && !cuentan.has(cli)) continue;
         if (destino !== cli) agrupados++;
         const g = acum.get(destino) || new Array(24).fill(0);
         for (let m = 1; m <= 12; m++) {
@@ -3440,6 +3444,21 @@ EVALUATE
           clave: k.slice(3),
           codigos: g.map((d) => `${d.cliente} (${num(d.ventasAct)}€)`).join(" + "),
         }));
+
+      // ── Verdad única ──────────────────────────────────────────────
+      // Hasta ahora cada pantalla repetía a mano las tres reglas de qué venta
+      // cuenta (fuera intercompany, fuera códigos fusionados, quién es el
+      // comercial) y cada vista nueva las replicaba mal. Se deciden aquí y se
+      // graban en el propio cliente: lo demás solo tiene que leer "cuenta" y
+      // "agenteFinal", sin volver a razonarlo.
+      for (const d of docs) {
+        d.cuenta = !d.intercompany && !d.fusionadoEn;
+        d.agenteFinal = d.agente || "SIN AGENTE";
+        // Los códigos fusionados no cuentan, pero conviene saber dónde fue su
+        // venta para poder auditarla desde cualquier vista.
+        if (d.fusionadoEn) d.agenteFinal = d.agente || "SIN AGENTE";
+      }
+      log.clientesQueCuentan = docs.filter((d) => d.cuenta).length;
 
       log.intercompanyMarcados = docs.filter((d) => d.intercompany).length;
       log.codigosHuerfanos = docs.filter((d) => d.huerfano).length;
