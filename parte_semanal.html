@@ -373,7 +373,7 @@ function desvHTML(pct, etqMenos, etqMas){
     const mando=rol.includes("director")||rol==="admin"||rol==="ceo";
 
     const [agentes,objetivos,usuarios,portal,
-           muestras,ofertas,estrategias,incidencias,semanas,estacion,clientesFB]=await Promise.all([
+           muestras,ofertas,estrategias,incidencias,semanas,estacion,clientesFB,mesesCli]=await Promise.all([
       leerCol("pbi_resumen_agente"),
       leerCol("pbi_objetivos"),
       leerCol("usuarios"),
@@ -385,6 +385,7 @@ function desvHTML(pct, etqMenos, etqMas){
       leerCol("pbi_semanas"),
       leerCol("pbi_estacionalidad"),
       leerCol("pbi_ventas_cliente"),
+      leerCol("pbi_meses_cliente").catch(()=>[]),
     ]);
     if(!agentes.length) throw new Error(
       "no se ha podido leer pbi_resumen_agente"+(FALLOS.length?" · "+FALLOS.join(" · "):""));
@@ -480,6 +481,12 @@ function desvHTML(pct, etqMenos, etqMas){
     // dan una marca falsa todo el año.
     const porObj={};
     for(const o of objetivos) porObj[arriba(o.agente||o._id)]=o;
+    // Venta mes a mes por cliente: [codigo, a1..a12, m1..m12]
+    const porMesCli={};
+    for(const d of mesesCli){
+      try{ for(const f of JSON.parse(d.datos||"[]")) porMesCli[f[0]]=f; }catch(e){}
+    }
+
     const porEstacion={};
     for(const e of estacion) porEstacion[arriba(e.agente||e._id)]=e;
     let objAnual=0, ritmo=0, heredados=0, conEstacion=0, conMeses=0, lineal=0;
@@ -753,12 +760,19 @@ function desvHTML(pct, etqMenos, etqMas){
   <p class="rot">Dónde se pierde · clientes${clave||fAgente?"":" del grupo"}</p>
   ${(()=>{
     const sel=new Set(mios.map(a=>arriba(a._id)));
+    // Con un mes elegido se usa su cifra real; si no, el acumulado del año
+    const m = periodo==="mes" ? (fMes||hoy.getMonth()+1) : 0;
     const cs=clientesFB
       .filter(c=>!c.intercompany&&!c.fusionadoEn&&sel.has(arriba(c.agente)))
-      .map(c=>({nombre:c.nombre||c._id, agente:c.agente,
-                act:num(c.ventasAct), ant:num(c.ventasAntYTD)}))
+      .map(c=>{
+        const f=porMesCli[arriba(c._id)];
+        if(m&&f) return {nombre:c.nombre||c._id, agente:c.agente,
+                         act:num(f[m]), ant:num(f[12+m])};
+        return {nombre:c.nombre||c._id, agente:c.agente,
+                act:num(c.ventasAct), ant:num(c.ventasAntYTD)};
+      })
       .map(c=>({...c,dif:c.act-c.ant}))
-      .filter(c=>Math.abs(c.dif)>500);
+      .filter(c=>Math.abs(c.dif)>(m?200:500));
     const baja=cs.filter(c=>c.dif<0).sort((a,b)=>a.dif-b.dif);
     const sube=cs.filter(c=>c.dif>0).sort((a,b)=>b.dif-a.dif);
     if(!baja.length&&!sube.length)
@@ -770,16 +784,15 @@ function desvHTML(pct, etqMenos, etqMas){
     return `
       <p class="mflujo m" style="margin-bottom:8px">
         Pierde ${eur(Math.abs(baja.reduce((s,c)=>s+c.dif,0)))} ·
-        gana ${eur(sube.reduce((s,c)=>s+c.dif,0))} · acumulado del año</p>
+        gana ${eur(sube.reduce((s,c)=>s+c.dif,0))} · ${
+          m&&Object.keys(porMesCli).length ? MESES[m-1] : "acumulado del año"}</p>
       ${baja.length?`<table>${baja.slice(0,12).map(linea).join("")}</table>`:""}
       ${sube.length?`<p class="rot" style="margin-top:20px">Y dónde se gana</p>
         <table>${sube.slice(0,8).map(linea).join("")}</table>`:""}
-      <div class="falta" style="margin-top:16px">
-        Estas cifras son del <b>año acumulado</b>, no del mes que tengas
-        elegido arriba: Firestore guarda la venta anual de cada cliente, no su
-        desglose mensual. Para el mes de un cliente concreto, su ficha en el
-        CRM tiene la progresión.
-      </div>`;
+      ${!Object.keys(porMesCli).length?`<div class="falta" style="margin-top:16px">
+        Cifras del <b>año acumulado</b>. Para verlas por mes hay que generar el
+        desglose mensual por cliente con <b>?mesescliente=1</b>.
+      </div>`:""}`;
   })()}
 </section>
 
