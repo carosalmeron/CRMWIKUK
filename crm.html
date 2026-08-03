@@ -342,7 +342,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.41.0";
+const CRM_VERSION = "4.44.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -491,8 +491,44 @@ function resolverMisIds(usuario){
   // Sin esto, si idCanonico(usuario) no coincidía con ninguno de los ids de arriba,
   // las visitas del comercial se guardaban en Firebase pero el filtro las descartaba.
   try{ var _ic=idCanonico(usuario); if(_ic) ids.add(String(_ic).toUpperCase()); }catch(e){}
+
+  // (fix 3/8/2026) Al unificar los usuarios desaparecieron las fichas que hacían
+  // de puente entre el perfil con el que se GUARDA una visita (wk4, wk6, ik3...)
+  // y el comercial. Sin ellas las visitas se guardaban bien pero no se le
+  // asignaban a nadie: salían como "(wk6)" y no contaban en Mi semana.
+  // PERFILES_CRM se carga de pbi_perfiles al arrancar.
+  try{
+    var _mios=[];
+    ids.forEach(function(x){ _mios.push(x); });
+    for(var _p in (window.PERFILES_CRM||{})){
+      if(_mios.indexOf(String(window.PERFILES_CRM[_p]).toUpperCase())>=0) ids.add(_p);
+    }
+  }catch(e){}
   return ids;
 }
+
+// Perfiles antiguos → comercial. Se resolvió por cartera y quedó fijado en
+// pbi_perfiles; aquí solo se lee.
+window.PERFILES_CRM = window.PERFILES_CRM || {};
+window.NOMBRE_PERFIL = window.NOMBRE_PERFIL || {};
+(function cargarPerfiles(){
+  try{
+    fetch(FB_BASE+"/pbi_perfiles?pageSize=300").then(function(r){
+      return r.ok?r.json():null;
+    }).then(function(j){
+      if(!j||!j.documents) return;
+      j.documents.forEach(function(d){
+        var id=decodeURIComponent(d.name.split("/").pop()).toUpperCase();
+        var ag=d.fields&&d.fields.agente&&d.fields.agente.stringValue;
+        if(ag){
+          window.PERFILES_CRM[id]=String(ag).toUpperCase();
+          window.NOMBRE_PERFIL[id]=String(ag);
+        }
+      });
+      console.log("[perfiles] "+Object.keys(window.PERFILES_CRM).length+" perfiles antiguos traducidos");
+    }).catch(function(){});
+  }catch(e){}
+})();
 // Comparar si un campo agente coincide con el usuario actual
 function esDelUsuario(agenteField, misIds){
   return agenteField && misIds.has((agenteField||"").toUpperCase());
@@ -19808,7 +19844,12 @@ async function _fbLeerReal(coleccion, pageSize=200){
       const url=`${FB_BASE}/${coleccion}?pageSize=300${nextPage?"&pageToken="+nextPage:""}`;
       const r=await fetch(url,{cache:"no-store"});
       if(!r.ok){
-        // Offline o error → intentar caché
+        // Offline o error → caché, salvo en las grandes: ahí una copia vieja
+        // esconde el trabajo del día y es peor que no enseñar nada.
+        if(coleccion==="visitas"||coleccion==="muestras"||coleccion==="ventas"){
+          console.warn("⚠️ "+coleccion+": lectura fallida, sin caché de respaldo");
+          return docs.length?docs:[];
+        }
         const cached=cacheLeer(coleccion);
         if(cached){console.log(`📴 ${coleccion}: usando caché local (${cached.length} docs)`);return cached;}
         return [];
@@ -19818,8 +19859,13 @@ async function _fbLeerReal(coleccion, pageSize=200){
       nextPage=data.nextPageToken||null;
       intentos++;
     }while(nextPage&&intentos<_maxPag);
-    // (v3.22.21) SIEMPRE guardar en caché tras leer Firebase para sobrescribir datos antiguos
-    cacheGuardar(coleccion,docs);
+    // (fix 3/8/2026) "visitas" pasó de 5.000 documentos y con las notas no cabe
+    // en localStorage: cacheGuardar fallaba en silencio y, ante cualquier error
+    // de red, cacheLeer devolvía una copia vieja SIN las visitas del día. El
+    // comercial las registraba, se guardaban bien en Firebase, y no las veía.
+    // Las colecciones grandes ya no se cachean en disco.
+    var _sinCache = (coleccion==="visitas"||coleccion==="muestras"||coleccion==="ventas");
+    if(!_sinCache) cacheGuardar(coleccion,docs);
     return docs;
   }catch(e){
     console.warn("📴 FB leer offline:",e.message);
@@ -34920,6 +34966,10 @@ function PanelAnalisis({usuario, onNav}){
   const [meta,setMeta]=useState(null);
   const [acciones,setAcciones]=useState({});
   const [fRama,setFRama]=useState("");
+  // Mes elegido (1-12) o 0 para el acumulado del año. El detalle mensual vive
+  // en pbi_estacionalidad: act_1..act_12 de este año, mes_1..mes_12 del pasado.
+  const [fMes,setFMes]=useState(0);
+  const [estac,setEstac]=useState({});
   const [fAgente,setFAgente]=useState("");
   const [vista,setVista]=useState("comerciales");  // comerciales | clientes | articulos
   const [cliGrupo,setCliGrupo]=useState(null);
@@ -34955,11 +35005,12 @@ function PanelAnalisis({usuario, onNav}){
     let vivo=true;
     (async()=>{
       try{
-        const [ra,rj,rc,rm]=await Promise.all([
+        const [ra,rj,rc,rm,re]=await Promise.all([
           fetch(`${FB_BASE}/pbi_resumen_agente?pageSize=300`),
           fetch(`${FB_BASE}/pbi_ajustes?pageSize=300`).catch(()=>null),
           fetch(`${FB_BASE}/acciones_analisis?pageSize=300`).catch(()=>null),
           fetch(`${FB_BASE}/pbi_meta/estado`).catch(()=>null),
+          fetch(`${FB_BASE}/pbi_estacionalidad?pageSize=300`).catch(()=>null),
         ]);
         if(!ra.ok) throw new Error(`resumen: HTTP ${ra.status}`);
         const ags=docs(await ra.json()).filter(a=>a._id!=="_TOTAL");
@@ -34987,6 +35038,11 @@ function PanelAnalisis({usuario, onNav}){
           const mj=await rm.json();
           if(vivo) setMeta(mj.fields?.ultimaSync?.stringValue||null);
         }
+        if(re&&re.ok){
+          const E={};
+          for(const x of docs(await re.json())) E[String(x.agente||x._id).toUpperCase()]=x;
+          if(vivo) setEstac(E);
+        }
         if(!vivo) return;
         setAcciones(acc);
         setDatos(lista);
@@ -35007,7 +35063,14 @@ function PanelAnalisis({usuario, onNav}){
   // Comerciales dentro del filtro actual. Se usa en varias listas, así que
   // se calcula una sola vez.
   const delAmbito=new Set(
-    base.filter(a=>(!fRama||a.equipo===fRama)
+    base.map(a=>{
+      if(!fMes) return a;
+      const e=estac[String(a._id).toUpperCase()]||{};
+      // Se sustituyen las dos cifras que mueven toda la pantalla; el resto
+      // (margen, clientes) sigue siendo anual y asi se avisa abajo.
+      return {...a, ventasAct:Number(e["act_"+fMes]||0),
+                    ventasAntYTD:Number(e["mes_"+fMes]||0), _mes:fMes};
+    }).filter(a=>(!fRama||a.equipo===fRama)
                 && (!fAgente||(a.agente||a._id)===fAgente))
         .map(a=>String(a.agente||a._id).toUpperCase()));
   const hayFiltro=!!(fRama||fAgente);
@@ -35379,6 +35442,31 @@ function PanelAnalisis({usuario, onNav}){
             {agentesSel.map(a=><option key={a} value={a}>{a}</option>)}
           </select>
         </div>
+      )}
+
+      {/* Mes a mes: sin esto solo se veia el acumulado y no habia forma de
+          saber en que mes concreto se torcio la venta. */}
+      <div style={{display:"flex",gap:5,overflowX:"auto",marginBottom:12,
+        paddingBottom:2,WebkitOverflowScrolling:"touch"}}>
+        {[{v:0,t:"Año"}].concat(
+          ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"]
+            .slice(0,new Date().getMonth()).map((t,i)=>({v:i+1,t})))
+          .map(o=>(
+          <button key={o.v} onClick={()=>setFMes(o.v)}
+            style={{flex:"0 0 auto",border:`1.5px solid ${fMes===o.v?T.navy:T.border}`,
+              background:fMes===o.v?T.navy:"#fff",color:fMes===o.v?"#fff":T.muted,
+              borderRadius:99,padding:"6px 13px",font:"inherit",fontSize:12.5,
+              fontWeight:600,cursor:"pointer"}}>{o.t}</button>
+        ))}
+      </div>
+      {fMes>0 && (
+        <p style={{margin:"0 0 12px",fontSize:11.5,lineHeight:1.5,color:T.muted,
+          borderLeft:`2px solid ${T.border}`,paddingLeft:10}}>
+          Ventas de <b>{["enero","febrero","marzo","abril","mayo","junio","julio",
+          "agosto","septiembre","octubre","noviembre","diciembre"][fMes-1]}</b> frente
+          al mismo mes de 2025. El margen y el detalle por cliente siguen siendo
+          del acumulado del año: ese desglose mensual no se guarda por cliente.
+        </p>
       )}
 
       {/* Tres formas de mirar lo mismo: quién, a quién y qué */}
