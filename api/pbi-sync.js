@@ -3753,6 +3753,87 @@ EVALUATE
             .map(([agente, ventas]) => ({ agente, ventas }));
         }catch(e){ log.errores.push(`descuadre: ${e.message}`); }
 
+        // ── Fusiones confirmadas por los comerciales ────────────────────
+        // El cierre semanal solo ANOTA la equivalencia; aqui se aplica. Las
+        // visitas se mueven al codigo real guardando de donde venian, para
+        // poder deshacerlo si alguien se equivoca.
+        if (req.query.fusiones === "1" || req.query.fusiones === "dry") {
+          try {
+            const soloVer = req.query.fusiones === "dry";
+            const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+            const key = ENV.FB_API_KEY ? `&key=${ENV.FB_API_KEY}` : "";
+            const leerCol = async (col) => {
+              const out = []; let tok = null, v = 0;
+              do {
+                const r = await fetch(`https://firestore.googleapis.com/v1/${base}/${col}`
+                  + `?pageSize=300${tok ? `&pageToken=${tok}` : ""}${key}`);
+                if (!r.ok) break;
+                const j = await r.json();
+                for (const d of j.documents || []) {
+                  const o = { _id: d.name.split("/").pop() };
+                  for (const [k, f] of Object.entries(d.fields || {})) {
+                    o[k] = f.stringValue ?? (f.doubleValue !== undefined ? Number(f.doubleValue)
+                         : f.integerValue !== undefined ? Number(f.integerValue) : null);
+                  }
+                  out.push(o);
+                }
+                tok = j.nextPageToken || null; v++;
+              } while (tok && v < 200);
+              return out;
+            };
+            const props = (await leerCol("fusiones_propuestas"))
+              .filter((f) => f.estado === "confirmada" && !f.aplicada);
+            log.fusionesConfirmadas = props.length;
+
+            if (props.length && !soloVer && !dry) {
+              const visitas = await leerCol("visitas");
+              let movidas = 0, fichas = 0;
+              for (const f of props) {
+                const suyas = visitas.filter((v) => String(v.clienteId) === String(f.crmId));
+                for (const v of suyas) {
+                  const r = await fetch(`https://firestore.googleapis.com/v1/${base}`
+                    + `/visitas/${encodeURIComponent(v._id)}`
+                    + `?updateMask.fieldPaths=clienteId&updateMask.fieldPaths=clienteIdOriginal`
+                    + `${key ? "&" + key.slice(1) : ""}`, {
+                    method: "PATCH", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ fields: {
+                      clienteId: { stringValue: String(f.pbiCodigo) },
+                      clienteIdOriginal: { stringValue: String(f.crmId) },
+                    }}),
+                  });
+                  if (r.ok) movidas++;
+                }
+                // La ficha vieja queda marcada, no se borra
+                await fetch(`https://firestore.googleapis.com/v1/${base}`
+                  + `/clientes/${encodeURIComponent(f.crmId)}`
+                  + `?updateMask.fieldPaths=fusionadoEn&updateMask.fieldPaths=fusionadoEl`
+                  + `${key ? "&" + key.slice(1) : ""}`, {
+                  method: "PATCH", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ fields: {
+                    fusionadoEn: { stringValue: String(f.pbiCodigo) },
+                    fusionadoEl: { stringValue: new Date().toISOString() },
+                  }}),
+                });
+                fichas++;
+                await fetch(`https://firestore.googleapis.com/v1/${base}`
+                  + `/fusiones_propuestas/${encodeURIComponent(f._id)}`
+                  + `?updateMask.fieldPaths=aplicada&updateMask.fieldPaths=visitasMovidas`
+                  + `${key ? "&" + key.slice(1) : ""}`, {
+                  method: "PATCH", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ fields: {
+                    aplicada: { stringValue: new Date().toISOString() },
+                    visitasMovidas: { doubleValue: suyas.length },
+                  }}),
+                });
+              }
+              log.fusionesAplicadas = fichas;
+              log.visitasMovidas = movidas;
+            } else {
+              log.fusionesAplicadas = "solo lectura · lanza con &fusiones=1";
+            }
+          } catch (e) { log.errores.push(`fusiones: ${e.message}`); }
+        }
+
         // ── Maestro de clientes: Power BI manda ──────────────────────────
         // El CRM arrastra fichas cargadas hace años; Power BI viene del ERP.
         // Se actualizan los datos que son del ERP y NO se toca lo que solo
