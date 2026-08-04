@@ -3448,6 +3448,30 @@ EVALUATE
       // graban en el propio cliente: lo demás solo tiene que leer "cuenta" y
       // "agenteFinal", sin volver a razonarlo.
       for (const d of docs) {
+      // Un mismo codigo puede venir en varias filas (una por sociedad). Todas
+      // escriben en el MISMO documento, asi que la ultima pisa a las demas: si
+      // esa trae cero, la venta buena desaparece. Se deja una sola por codigo,
+      // la que mas venta tenga, que es la que ya lleva la suma del grupo.
+      {
+        const mejor = new Map();
+        for (const d of docs) {
+          const k = String(d._id);
+          const a = mejor.get(k);
+          if (!a || num(d.ventasAct) > num(a.ventasAct)
+                 || (num(d.ventasAct) === num(a.ventasAct)
+                     && num(d.ventasAntFull) > num(a.ventasAntFull))) {
+            mejor.set(k, d);
+          }
+        }
+        if (mejor.size !== docs.length) {
+          log.duplicadosDescartados = docs.length - mejor.size;
+          // docs es const: se vacia y se rellena, en vez de reasignar
+          const buenos = [...mejor.values()];
+          docs.length = 0;
+          for (const d of buenos) docs.push(d);
+        }
+      }
+
         // Red de seguridad: fusionado en si mismo no es fusionado
         if (d.fusionadoEn && String(d.fusionadoEn) === String(d._id || d.cliente))
           delete d.fusionadoEn;
