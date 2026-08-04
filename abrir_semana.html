@@ -67,6 +67,11 @@
   .op .t b{display:block;font-size:15px}
   .op .t small{display:block;font-size:11.5px;color:var(--tenue);margin-top:2px}
   .chip.prop{border-color:var(--tinta);color:var(--tinta);font-weight:700}
+  .chip.mini{padding:4px 9px;font-size:11px}
+  .arts{margin-top:6px}
+  .art{display:flex;justify-content:space-between;align-items:center;gap:8px;
+    padding:8px 10px;background:#F7F9FB;border-radius:4px;margin-bottom:5px;font-size:12.5px}
+  .art b{font-size:13px} .art small{display:block;color:var(--tenue);font-size:11px}
   .tag{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;
     background:#EDF0F3;color:var(--tenue);border-radius:99px;padding:2px 7px;margin-left:5px}
 </style></head><body>
@@ -90,10 +95,10 @@ const SEMANA=Number(P.get("semana")||0);
 const VUELVE=P.get("vuelve")||"";
 const ANIO=new Date().getFullYear();
 
-// Un comercial no puede atacar veinte frentes en una semana. Se le dan OCHO,
+// Un comercial no puede atacar veinte frentes en una semana. Se le dan DIEZ,
 // las mas urgentes de todo lo que tiene, mezclando clientes, ofertas, muestras
-// y estrategias en una sola lista ordenada.
-const TOPE=8;
+// y estrategias en una sola lista ordenada. Mismo criterio con ruta y en libre.
+const TOPE=10;
 
 const R={}; let ELEGIDA=null, PEND=[];
 
@@ -136,8 +141,49 @@ function fecha(v){
 }
 const dias=(d)=>d?Math.floor((Date.now()-d)/86400000):null;
 
+// El desglose por articulo se pide a la API solo cuando el comercial lo abre:
+// son consultas caras y la mayoria de las veces no hace falta.
+// Igual que en el cierre: marcar algo como perdido lo cierra de verdad. Si
+// vuelve a salir el viernes, el comercial deja de fiarse de los botones.
+const CIERRA={ "La doy por perdida":"perdida", "La cierro":"cerrada" };
+
+window.verArticulos=async (cli,destino)=>{
+  const d=document.getElementById(destino);
+  if(d.dataset.abierto){ d.innerHTML=""; d.dataset.abierto=""; return; }
+  d.dataset.abierto="1";
+  d.innerHTML='<p class="sub" style="margin:8px 0 0">Mirando…</p>';
+  try{
+    const r=await fetch(`/api/pbi-sync?articulosCliente=${encodeURIComponent(cli)}`);
+    const j=await r.json();
+    const baja=(j.articulos||[]).slice(0,6), sube=(j.suben||[]).slice(0,3);
+    if(!baja.length&&!sube.length){ d.innerHTML=
+      '<p class="sub" style="margin:8px 0 0">Sin desglose por producto.</p>'; return; }
+    d.innerHTML=`
+      ${baja.map(a=>`<div class="art">
+        <div style="min-width:0"><b>${a.nombre||a.descripcion||a.codigo}</b>
+          <small>${a.ant?eur(a.ant)+" → ":""}${eur(a.act||0)}</small></div>
+        <div style="display:flex;gap:5px;align-items:center">
+          <span class="imp dn">${a.dif?eur(a.dif):""}</span>
+          <button class="chip mini" onclick="pedir('${cli}','${(a.codigo||"").replace(/'/g,"")}','oferta')">Oferta</button>
+          <button class="chip mini" onclick="pedir('${cli}','${(a.codigo||"").replace(/'/g,"")}','estrategia')">Estrategia</button>
+        </div>
+      </div>`).join("")}
+      ${sube.length?`<p class="sub" style="margin:7px 0 0">Sube en:
+        ${sube.map(a=>a.nombre||a.codigo).join(", ")}</p>`:""}`;
+  }catch(e){ d.innerHTML='<p class="sub" style="margin:8px 0 0">No se ha podido consultar.</p>'; }
+};
+window.pedir=(cli,art,tipo)=>{
+  // Se anota aqui y se crea al abrir la semana: asi no se generan documentos
+  // sueltos si el comercial cambia de idea antes de terminar.
+  const k=tipo+"Nueva:"+cli+"_"+art;
+  R[k]={accion:tipo==="oferta"?"Preparar oferta":"Pedir estrategia", articulo:art, cliente:cli};
+  alert(tipo==="oferta"?"Oferta anotada. Se crea al abrir la semana."
+    :"Estrategia anotada. Se crea al abrir la semana.");
+};
+
 window.marcar=(k,v,el)=>{
   R[k]=R[k]||{}; R[k].accion=v;
+  R[k].cierra = CIERRA[v] || null;
   [...el.parentNode.children].forEach(x=>x.classList.remove("on"));
   el.classList.add("on"); refrescar();
 };
@@ -200,6 +246,10 @@ function pintarAcciones(r){
         <span class="imp ${x.rojo?"dn":"pd"}">${x.cifra}</span>
       </div>
       <p style="margin:7px 0 0;font-size:13.5px">${x.motivo}</p>
+      ${x.tipo==="cliente"?`<p style="margin:5px 0 0">
+        <a href="#" onclick="verArticulos('${x.id}','a${i}');return false"
+           style="font-size:12.5px;color:var(--tenue)">▸ En qué productos cae</a></p>
+        <div id="a${i}" class="arts"></div>`:""}
       <div class="acc">${x.opciones.map(o=>
         `<button class="chip${o===x.propone?" prop":""}"
           onclick="marcar('${k}','${o}',this)">${o}</button>`).join("")}</div>
@@ -267,8 +317,11 @@ function pintarAcciones(r){
       else { peso=v*0.15;
         motivo=uv==null?"No hay ninguna visita suya registrada y va por debajo."
           :`Hace ${uv} días que nadie le visita y va por debajo.`; }
+      const vTxt = uv==null ? "sin visita registrada"
+        : uv===0 ? "visitado hoy" : `última visita hace ${uv} días`;
       cand.push({tipo:"cliente", id, nom:c.nombre||id,
-        sub:c.poblacion||"", cifra:eur(v), rojo:cae||parado, motivo, peso,
+        sub:(c.poblacion?c.poblacion+" · ":"")+vTxt,
+        cifra:eur(v), rojo:cae||parado, motivo, peso,
         propone:prop, pide:"Cuándo y con qué argumento",
         opciones:["Le visito","Le llamo","Le mando oferta","Esta semana no"]});
     }
@@ -372,7 +425,8 @@ function pintarAcciones(r){
       <div class="paso">
         <p class="tit"><span class="num">2</span>Tus ${TOPE} acciones de la semana</p>
         <p class="sub">De todo lo que tienes abierto, esto es lo que más pesa.
-          La opción marcada es la que propone el sistema.</p>
+          La opción marcada es la que propone el sistema. <b>Lo que des por
+          perdido o cerrado se cierra en el CRM.</b></p>
         <div id="acciones"><p class="sub" style="margin:0">Elige arriba cómo vas a
           trabajar y aquí saldrá tu plan.</p></div>
       </div>
@@ -402,6 +456,36 @@ async function abrir(){
     anio:ANIO, modo:ELEGIDA==="libre"?"libre":"ruta",
     rutaNum:ELEGIDA==="libre"?"":String(ELEGIDA), estado:"activo",
     acciones:JSON.stringify(R), origen:"apertura_v2" };
+  // Cerrar lo marcado como perdido antes de guardar el plan. Si algo falla no
+  // se abre la semana: mejor repetir que dar por cerrado lo que sigue abierto.
+  const cerrar=[];
+  for(const [k,v] of Object.entries(R)){
+    if(!v.cierra) continue;
+    const [t,id]=k.split(/:(.+)/);
+    const col={oferta:"ofertas",muestra:"muestras",estrategia:"estrategias"}[t];
+    if(col&&id) cerrar.push({col,id,estado:v.cierra});
+  }
+  let fallos=0;
+  for(const c of cerrar){
+    try{
+      const r=await fetch(`${FB}/${c.col}/${encodeURIComponent(c.id)}`
+        +`?updateMask.fieldPaths=estado&updateMask.fieldPaths=cerradoEn`
+        +`&updateMask.fieldPaths=cerradoPor`,{
+        method:"PATCH",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({fields:{
+          estado:{stringValue:c.estado},
+          cerradoEn:{stringValue:new Date().toISOString()},
+          cerradoPor:{stringValue:"apertura_s"+SEMANA}}})});
+      if(!r.ok) throw new Error("HTTP "+r.status);
+    }catch(e){ fallos++; }
+  }
+  if(fallos){
+    b.disabled=false; b.textContent="Reintentar";
+    alert(fallos+" no se han podido cerrar. No se ha abierto la semana.");
+    return;
+  }
+  doc.cerrados=cerrar.length;
+
   const f={};
   for(const [k,v] of Object.entries(doc))
     f[k]= typeof v==="number" ? {doubleValue:v} : {stringValue:String(v)};
@@ -411,7 +495,8 @@ async function abrir(){
     if(!r.ok) throw new Error("HTTP "+r.status);
     document.getElementById("app").innerHTML=
       `<div class="listo"><b>Semana ${SEMANA} abierta</b>
-       ${PEND.length-1} acciones anotadas. El viernes te preguntaré por ellas.</div>
+       ${PEND.length-1} acciones anotadas${cerrar.length?" · "+cerrar.length+" cerradas":""}.
+       El viernes te preguntaré por ellas.</div>
        ${VUELVE?`<div style="padding:0 16px"><button class="env"
          style="width:100%;background:var(--tinta);color:#fff"
          onclick="location.href='${VUELVE}'">Volver al CRM</button></div>`:""}`;
