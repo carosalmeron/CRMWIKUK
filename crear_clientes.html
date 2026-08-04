@@ -112,11 +112,32 @@ window.crear=async (k)=>{
 (async()=>{
   try{
     const [pbi,crm]=await Promise.all([leer("pbi_ventas_cliente"),leer("clientes")]);
-    const hay=new Set();
+    // El CRM guarda los codigos ANTIGUOS (U431468) y Power BI los nuevos
+    // (U4301468): son los 2.012 recodificados de 2026. Sin cruzar por todas
+    // las variantes, DOHR parecia no existir y se habria duplicado.
+    const hay=new Set(), porConta=new Set();
+    const mete=(x)=>{ const k=ARR(x); if(k) hay.add(k.toUpperCase()); };
     for(const c of crm){
-      hay.add(ARR(c.CODIGO||c.codigo||c._id));
-      hay.add(ARR(c._id));
+      mete(c.CODIGO); mete(c.codigo); mete(c._id);
+      const cc=ARR(c.CODCONTA||c.codconta);
+      if(cc) porConta.add(cc.toUpperCase());
     }
+    // U4301468 → U431468 : el codigo nuevo lleva un 0 insertado tras los dos
+    // primeros digitos. Se prueban las dos formas.
+    const viejoDe=(cod)=>{
+      const m=String(cod).match(/^([A-Z])(\d{2})0(\d{4})$/i);
+      return m ? (m[1]+m[2]+m[3]).toUpperCase() : null;
+    };
+    const existe=(p)=>{
+      const cod=ARR(p._id).toUpperCase();
+      if(hay.has(cod)) return true;
+      const v=viejoDe(cod);
+      if(v && hay.has(v)) return true;
+      const cc=ARR(p.codconta).toUpperCase();
+      if(cc && porConta.has(cc)) return true;
+      // Y por si acaso, mismo nombre y misma poblacion
+      return false;
+    };
     const g={
       conVenta:{tit:"Con venta este año",sub:"Los que el comercial necesita ver ya.",lista:[]},
       soloAnt:{tit:"Solo vendieron el año pasado",sub:"Cartera histórica, útil para recuperar.",lista:[]},
@@ -125,7 +146,7 @@ window.crear=async (k)=>{
     };
     for(const p of pbi){
       const cod=ARR(p._id);
-      if(hay.has(cod)) continue;
+      if(existe(p)) continue;
       if(p.fusionadoEn||p.intercompany) continue;
       const it={cod, nom:p.nombre||cod, pob:p.poblacion||"", prov:p.provincia||"",
         conta:p.codconta||"", ag:p.agente||"", act:num(p.ventasAct), ant:num(p.ventasAntFull)};
@@ -139,7 +160,8 @@ window.crear=async (k)=>{
     const tot=Object.values(g).reduce((s,x)=>s+x.lista.length,0);
     document.getElementById("app").innerHTML=`
       <div class="barra">${tot.toLocaleString("es-ES")} clientes de Power BI no están
-        en el CRM. Crea un grupo cada vez.</div>
+        en el CRM. Se cruza por código nuevo, código antiguo y código contable.<br>
+        <b>Revisa la lista antes de crear</b>: si reconoces alguno, avisa.</div>
       ${Object.entries(g).map(([k,x])=>x.lista.length?`
         <div class="g">
           <div class="gh">
