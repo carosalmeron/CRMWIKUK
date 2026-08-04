@@ -3174,8 +3174,6 @@ EVALUATE
           });
         }
         log.fichasCliente = fichas.size;
-        log.tiempos = log.tiempos || {};
-        log.tiempos.fichas = margen();
       } catch (e) {
         log.errores.push(`clientes: ${e.message}`);
       }
@@ -3484,8 +3482,6 @@ EVALUATE
         if (d.fusionadoEn) d.agenteFinal = d.agente || "SIN AGENTE";
       }
       log.clientesQueCuentan = docs.filter((d) => d.cuenta).length;
-      log.tiempos = log.tiempos || {};
-      log.tiempos.clientesListos = margen();
 
       log.intercompanyMarcados = docs.filter((d) => d.intercompany).length;
       log.codigosHuerfanos = docs.filter((d) => d.huerfano).length;
@@ -3970,8 +3966,6 @@ EVALUATE
           } catch (e) { log.errores.push(`maestro: ${e.message}`); }
         }
 
-        log.tiempos = log.tiempos || {};
-        log.tiempos.antesDeEscribirResumen = margen();
         log.resumenAgentes = dry
           ? resumen
           : await fbCommit("pbi_resumen_agente", resumen);
@@ -4021,13 +4015,45 @@ EVALUATE
           actualizado: new Date().toISOString(),
         })));
         log.indiceBusqueda = { clientes: compacta.length, partes: trozos.length };
-        log.tiempos = log.tiempos || {};
-        log.tiempos.indiceListo = margen();
       } catch (e) {
         log.errores.push(`indice busqueda: ${e.message}`);
       }
 
-      log.ventas = dry ? docs.length : await fbCommit("pbi_ventas_cliente", docs);
+      // Escribir los 6.167 clientes cada vez se lleva casi todo el tiempo del
+      // cron (24 s en seco frente a 70 escribiendo). La mayoria no ha cambiado
+      // de una pasada a otra, asi que se comparan con lo guardado y solo se
+      // escriben los que de verdad son distintos.
+      let aEscribir = docs;
+      if (!dry) {
+        try {
+          const previos = new Map();
+          for (const d of await fbLeerColeccion("pbi_ventas_cliente")) {
+            previos.set(String(d._id), d);
+          }
+          // Campos que deciden si algo cambio. "actualizado" no cuenta: cambia
+          // siempre y haria que se reescribiera todo.
+          const CLAVE = ["ventasAct", "ventasAntYTD", "ventasAntFull", "margenAct",
+                         "margenAntYTD", "ventasMes", "ventasSem", "ventasMesAnt",
+                         "agente", "agenteFinal", "cuenta", "nombre", "poblacion",
+                         "intercompany", "fusionadoEn", "ultimaVenta"];
+          aEscribir = docs.filter((d) => {
+            const a = previos.get(String(d._id));
+            if (!a) return true;                       // nuevo
+            for (const k of CLAVE) {
+              const x = d[k], y = a[k];
+              if (typeof x === "number" || typeof y === "number") {
+                if (Math.abs(num(x) - num(y)) > 0.005) return true;
+              } else if (String(x ?? "") !== String(y ?? "")) return true;
+            }
+            return false;
+          });
+          log.clientesSinCambios = docs.length - aEscribir.length;
+        } catch (e) {
+          aEscribir = docs;                            // ante la duda, todos
+          log.errores.push(`comparar clientes: ${e.message}`);
+        }
+      }
+      log.ventas = dry ? docs.length : await fbCommit("pbi_ventas_cliente", aEscribir);
       if (dry) log.muestraVentas = docs.slice(0, 3);
     } catch (e) {
       log.errores.push(`ventas: ${e.message}`);
