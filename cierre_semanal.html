@@ -253,11 +253,12 @@ async function enviar(){
     '<p class="estado">Falta indicar el comercial: añade <b>?agente=CARLOSG</b> a la dirección.</p>';
     return; }
   try{
-    const [res,cli,mesesRaw,mu,of,es,estac,objs,peds,perf,portal,usus]=await Promise.all([
+    const [res,cli,mesesRaw,mu,of,es,estac,objs,peds,perf,portal,usus,vis]=await Promise.all([
       leer("pbi_resumen_agente"), leer("pbi_ventas_cliente"),
       leer("pbi_meses_cliente"), leer("muestras"), leer("ofertas"), leer("estrategias"),
       leer("pbi_estacionalidad"), leer("pbi_objetivos"), pedidosDe(AGENTE),
       leer("pbi_perfiles"), leer("portal_users"), leer("usuarios"),
+      leer("visitas"),
     ]);
     const yo=res.find(a=>ARR(a._id)===AGENTE);
     if(!yo){ document.getElementById("app").innerHTML=
@@ -397,12 +398,96 @@ async function enviar(){
       if(f && f>=iniMes && f<=finMes){ planifMes+=i; refs.add(x.pedido||x._id); }
     }
     const nPed=refs.size;         // pedidos, no lineas
+    // ── Lo que prometió el lunes, y si se hizo ──────────────────────────
+    // No se le pregunta: se comprueba. Si hay visita, si la oferta cambió, si
+    // hubo pedido. Preguntar por algo que el sistema ya sabe es perder tiempo.
+    const plan=await leerDoc(`planes_semanales/plan_${AGENTE}_${ANIO}_s${SEMANA}`)
+      || await leerDoc(`planes_semanales/plan_${AGENTE.toLowerCase()}_${ANIO}_s${SEMANA}`);
+    let prometido=[];
+    if(plan&&plan.acciones){
+      let A={}; try{ A=JSON.parse(plan.acciones); }catch(e){}
+      // Visitas de esta semana, por cliente
+      const visSem={};
+      for(const v of vis){
+        if(!MIOS.has(ARR(v.agente))) continue;
+        if(Number(v.semana)!==SEMANA) continue;
+        const c=ARR(v.clienteId); if(!c) continue;
+        (visSem[c]=visSem[c]||[]).push(v);
+      }
+      const porId={};
+      [...of,...mu,...es].forEach(o=>{ porId[o._id]=o; });
+
+      for(const [k,val0] of Object.entries(A)){
+        if(!val0||(!val0.accion&&!val0.texto)) continue;
+        if(k==="prioridad") continue;
+        if(/Esta semana no/i.test(val0.accion||"")) continue;
+        const [t,id]=k.split(/:(.+)/);
+        let hecho=null, detalle="";
+        if(t==="cliente"){
+          const v=visSem[ARR(id)]||[];
+          if(v.length){
+            const conPedido=v.some(x=>/pedido/i.test(x.resultado||""));
+            hecho=true;
+            detalle=conPedido?`Visitado y con pedido`
+              :`${v.length} contacto${v.length>1?"s":""} registrado${v.length>1?"s":""}`;
+          } else { hecho=false; detalle="Sin rastro de contacto esta semana"; }
+        } else {
+          const o=porId[id];
+          if(!o){ hecho=true; detalle="Ya no está abierta"; }
+          else {
+            const e=String(o.estado||"").toLowerCase();
+            const cerrada=/pedido|perdida|aceptada|rechazada|completada|ko|cerrada|positivo/.test(e);
+            hecho=cerrada;
+            detalle=cerrada?`Cerrada como ${e}`:"Sigue igual que el lunes";
+          }
+        }
+        prometido.push({k, t, id, accion:val0.accion||"", dijo:val0.texto||"",
+          hecho, detalle,
+          nom:(t==="cliente"
+            ? (cli.find(c=>ARR(c._id)===ARR(id))||{}).nombre
+            : (porId[id]||{}).clienteNombre) || id});
+      }
+      // Lo no hecho primero: es de lo que hay que hablar
+      // Lo hecho primero: un comercial que cumplio 8 de 10 debe empezar
+      // viendo eso, no la lista de lo que le falta.
+      prometido.sort((a,b)=>(a.hecho===b.hecho)?0:a.hecho?-1:1);
+    }
+
     const act=num(yo.ventasAct), ant=num(yo.ventasAntYTD);
     PENDIENTES.push("semana"); PENDIENTES.push("prioridad");
 
     document.getElementById("hs").textContent=
       `${yo.agente||AGENTE} · ${yo.equipo||""} · semana ${SEMANA} · ${MESES[mNum-1]}`;
     document.getElementById("app").innerHTML=`
+      ${prometido.length?`<div class="paso" style="background:#FFFBEB;border-color:#F59E0B">
+        <p class="tit"><span class="num" style="background:#92400E">✓</span>Lo que dijiste el lunes</p>
+        <p class="sub"><b>Hiciste ${prometido.filter(x=>x.hecho).length} de ${
+          prometido.length}</b>${prometido.some(x=>/pedido/i.test(x.detalle))
+            ?", y una acabó en pedido":""}.
+          ${prometido.filter(x=>!x.hecho).length
+            ? `Cuéntame qué pasó con ${prometido.filter(x=>!x.hecho).length===1
+                ?"la que falta":"las "+prometido.filter(x=>!x.hecho).length+" que faltan"}.`
+            : "Cuenta cómo fue."}</p>
+        ${prometido.map(x=>{
+          const k="promesa:"+x.k; PEND.push(k);
+          return `<div class="item" style="display:block;padding:12px 0">
+            <div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline">
+              <div style="min-width:0"><b>${x.nom}</b>
+                <small>${x.accion}${x.dijo?" · "+x.dijo:""}</small></div>
+              <span class="imp ${x.hecho?"up":"pd"}" style="font-size:11px">
+                ${x.hecho?"✓ HECHO":"PENDIENTE"}</span>
+            </div>
+            <p style="margin:6px 0 0;font-size:12.5px;color:var(--tenue)">${x.detalle}</p>
+            <div class="acc">${(x.hecho
+              ? ["Fue bien","Sin resultado","Sigo con ello"]
+              : ["Lo hice, no lo registré","No pude","Ya no hace falta"])
+              .map(o=>`<button class="chip" onclick="marcar('${k}','${o}',this)">${o}</button>`).join("")}</div>
+            <textarea placeholder="${x.hecho?"¿Qué salió?":"¿Qué pasó?"}"
+              oninput="texto('${k}',this)"></textarea>
+          </div>`;
+        }).join("")}
+      </div>`:""}
+
       <div class="paso">
         <p class="tit"><span class="num">1</span>Cómo vas</p>
         <p class="sub">Sale del CRM. No hay que teclear nada.</p>
