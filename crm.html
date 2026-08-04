@@ -342,7 +342,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.47.0";
+const CRM_VERSION = "4.48.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -35199,11 +35199,28 @@ function PanelAnalisis({usuario, onNav}){
   // ── Alcance según el rol ──
   const rol=String(usuario.rol||"").toLowerCase();
   const mando=rol.includes("director")||rol.includes("jefe")||rol==="admin"||rol==="ceo";
-  const miClave=String(usuario.grupoAgente||usuario.catalogoVendedor||"").toUpperCase();
+  // (v4.48) El responsable de equipo NO es dirección: ve su rama, no el grupo.
+  const verGrupo=rol.includes("director")||rol==="admin"||rol==="ceo";
+  const esJefeEquipo=mando&&!verGrupo;
+  const miEquipoAn=String(usuario.equipo||"").toUpperCase().trim();
+  const miClave=String(usuario.grupoAgente||usuario.catalogoVendedor||usuario.id||"").toUpperCase();
+  // Claves de catálogo de los comerciales de mi equipo (red de seguridad por
+  // si el resumen de Power BI no trae bien la rama de algún agente).
+  const clavesMiEquipo=new Set(
+    (typeof USUARIOS!=="undefined"?USUARIOS:[])
+      .filter(u=>u&&u.rol==="agente"&&String(u.equipo||"").toUpperCase().trim()===miEquipoAn)
+      .flatMap(u=>[u.grupoAgente,u.catalogoVendedor,u.id])
+      .filter(Boolean).map(x=>String(x).toUpperCase().trim()));
   // Este bloque se evalúa también mientras cargan los datos, así que no
   // puede dar por hecho que "datos" ya existe.
   const todos = datos || [];
-  const base = mando ? todos : todos.filter(a=>String(a._id).toUpperCase()===miClave);
+  const base = verGrupo
+    ? todos
+    : esJefeEquipo
+      ? todos.filter(a=>String(a.equipo||"").toUpperCase().trim()===miEquipoAn
+                     || clavesMiEquipo.has(String(a._id).toUpperCase().trim())
+                     || clavesMiEquipo.has(String(a.agente||"").toUpperCase().trim()))
+      : todos.filter(a=>String(a._id).toUpperCase()===miClave);
 
   // Comerciales dentro del filtro actual. Se usa en varias listas, así que
   // se calcula una sola vez.
@@ -35217,8 +35234,15 @@ function PanelAnalisis({usuario, onNav}){
                     ventasAntYTD:Number(e["mes_"+fMes]||0), _mes:fMes};
     }).filter(a=>(!fRama||a.equipo===fRama)
                 && (!fAgente||(a.agente||a._id)===fAgente))
-        .map(a=>String(a.agente||a._id).toUpperCase()));
+        .flatMap(a=>[a.agente,a._id].filter(Boolean)
+                     .map(x=>String(x).toUpperCase().trim())));
   const hayFiltro=!!(fRama||fAgente);
+  // (v4.48) Un comercial o un jefe de equipo NUNCA ven la cartera de otros,
+  // aunque no hayan tocado ningún filtro. Antes las listas de clientes y
+  // artículos solo se recortaban si había filtro manual, y por eso a un
+  // comercial le salían clientes de sus compañeros.
+  const limitado = !verGrupo || hayFiltro;
+  const ambitoTxt = fAgente||fRama||(esJefeEquipo?(usuario.equipo||"tu equipo"):"tu cartera");
 
   const ramas=[...new Set(base.map(a=>a.equipo))].sort();
   const visibles=base.filter(a=>
@@ -35261,7 +35285,7 @@ function PanelAnalisis({usuario, onNav}){
         .map(([cliente,nombre,agente,act,ant,poblacion])=>({
           cliente, nombre, agente, poblacion,
           ventasAct:act, ventasAntYTD:ant, caida:act-ant }))
-        .filter(c=>!hayFiltro
+        .filter(c=>!limitado
           || (c.agente && delAmbito.has(String(c.agente).toUpperCase())))
         .sort((a,b)=>(b.ventasAct||0)-(a.ventasAct||0));
       setCliError(null);
@@ -35289,7 +35313,7 @@ function PanelAnalisis({usuario, onNav}){
       const utiles=(l)=>l
         .filter(c=>!c.fusionadoEn&&!c.intercompany)
         .filter(c=>!soloCaen || dif(c)<0)
-        .filter(c=>!hayFiltro || enAmbito(c))
+        .filter(c=>!limitado || enAmbito(c))
         .sort((a,b)=> soloCaen ? dif(a)-dif(b)
                                : (b.ventasAct||0)-(a.ventasAct||0));
 
@@ -35413,7 +35437,9 @@ function PanelAnalisis({usuario, onNav}){
   const titular=()=>{
     if(vAno===null) return `${eur(t.act)} facturados este año.`;
     const dif=Math.abs(t.act-t.ant);
-    const quien = mando ? (fAgente||fRama||"El grupo") : "Vas";
+    const quien = mando
+      ? (fAgente||fRama||(esJefeEquipo?(usuario.equipo||"Tu equipo"):"El grupo"))
+      : "Vas";
     const va = mando ? "va" : "";
     if(vAno>=3)  return `${quien} ${va} por delante del año pasado: ${eur(dif)} más.`;
     if(vAno<=-3) return `${quien} ${va} por detrás del año pasado: faltan ${eur(dif)}.`;
@@ -35710,7 +35736,7 @@ function PanelAnalisis({usuario, onNav}){
                           String(nom||"").toUpperCase().includes(q)
                           || String(cod||"").toUpperCase().includes(q))
                         .filter(([cod])=>!vistos.has(cod))
-                        .filter(([,,ag])=>!hayFiltro
+                        .filter(([,,ag])=>!limitado
                           || (ag && delAmbito.has(String(ag).toUpperCase())))
                         .slice(0,60)
                         .map(([cliente,nombre,agente,act,ant])=>({
@@ -35931,7 +35957,7 @@ function PanelAnalisis({usuario, onNav}){
                                 // así que aquí hay que aplicar el filtro de
                                 // rama o comercial que esté seleccionado.
                                 const todos=cliArt[a.articulo].filter(c=>c.diferencia<0);
-                                const suyos=hayFiltro
+                                const suyos=limitado
                                   ? todos.filter(c=>c.agente
                                       && delAmbito.has(String(c.agente).toUpperCase()))
                                   : todos;
@@ -35939,7 +35965,7 @@ function PanelAnalisis({usuario, onNav}){
                                   <p style={{margin:0,padding:"11px 15px 11px 26px",
                                     fontSize:12.5,color:T.muted}}>
                                     {todos.length
-                                      ? `Ningún cliente de ${fAgente||fRama} cae en este artículo (${todos.length} en el resto del grupo).`
+                                      ? `Ningún cliente de ${ambitoTxt} cae en este artículo (${todos.length} en el resto del grupo).`
                                       : "Ningún cliente cae en este artículo."}</p>
                                 );
                                 return (<>
@@ -35966,7 +35992,7 @@ function PanelAnalisis({usuario, onNav}){
                                   </div>
                                 </div>
                               ))}
-                                  {hayFiltro && todos.length>suyos.length && (
+                                  {limitado && todos.length>suyos.length && (
                                     <p style={{margin:0,padding:"9px 15px 10px 26px",
                                       fontSize:11,color:T.muted,
                                       borderTop:`1px solid #E9EEF3`}}>
