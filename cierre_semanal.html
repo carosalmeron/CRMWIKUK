@@ -215,6 +215,30 @@ async function enviar(){
   }
   doc.cerrados = cerrar.length;
 
+  // Las fusiones se ANOTAN; las aplica la sincronizacion, que es donde vive esa
+  // logica. Dos sitios fusionando es como se rompen los datos.
+  for(const [k,v] of Object.entries(R)){
+    if(!k.startsWith("dup:")||!v.accion) continue;
+    const id=k.slice(4);
+    const d=(typeof DUPS!=="undefined"?DUPS:[]).find(x=>x.id===id);
+    if(!d) continue;
+    const estado = /Es el mismo/i.test(v.accion) ? "confirmada"
+                 : /Son distintos/i.test(v.accion) ? "descartada" : "aplazada";
+    try{
+      await fetch(`${FB}/fusiones_propuestas/${encodeURIComponent(id)}`,{
+        method:"PATCH",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({fields:{
+          crmId:{stringValue:id}, pbiCodigo:{stringValue:d.pbiCod},
+          nombre:{stringValue:d.nom}, estado:{stringValue:estado},
+          agente:{stringValue:AGENTE}, semana:{doubleValue:SEMANA},
+          // "No lo sé" no vuelve a preguntar en cuatro semanas
+          noPreguntarHasta:{stringValue: estado==="aplazada"
+            ? new Date(Date.now()+28*86400000).toISOString() : ""},
+          decididoEl:{stringValue:new Date().toISOString()},
+        }})});
+    }catch(e){}
+  }
+
   try{
     const r=await fetch(`${FB}/informes/${encodeURIComponent(doc.id)}`,{
       method:"PATCH",headers:{"Content-Type":"application/json"},
@@ -453,6 +477,51 @@ async function enviar(){
       prometido.sort((a,b)=>(a.hecho===b.hecho)?0:a.hecho?-1:1);
     }
 
+    // ── Posibles duplicados suyos ───────────────────────────────────────
+    // 139 fichas creadas a mano coinciden con clientes de Power BI. Repartidos
+    // entre 54 comerciales salen dos o tres cada uno: quien estuvo alli es el
+    // unico que puede confirmarlo.
+    const norm=(x)=>String(x||"").toUpperCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+      .replace(/\b(S\.?L\.?U?|S\.?A\.?U?|SCL|LDA|SARL|SAS|GMBH|SRL|CB|SAT|COOP|SOC|UNIPESSOAL)\b/g,"")
+      .replace(/[^A-Z0-9]/g,"");
+    let duplicados=[];
+    try{
+      const fichas=await leer("clientes");
+      const porNom={};
+      for(const p of cli){
+        if(p.fusionadoEn) continue;
+        const k=norm(p.nombre); if(!k||k.length<5) continue;
+        (porNom[k]=porNom[k]||[]).push(p);
+      }
+      const yaVisto=new Set();
+      for(const f of fichas){
+        const id=ARR(f._id);
+        if(!/^(CLI_|TMP_)/i.test(id)) continue;
+        // Solo los suyos
+        const suyo = MIOS.has(ARR(f.GRUPOAGENTE||f.grupoAgente||f.agente));
+        if(!suyo) continue;
+        const k=norm(f.NOMBRE||f.nombre); if(!k) continue;
+        const cand=porNom[k]; if(!cand) continue;
+        const pobF=norm(f.POBLACION||f.poblacion);
+        for(const p of cand){
+          if(yaVisto.has(id)) break;
+          const pobP=norm(p.poblacion);
+          const cert = !pobF ? "sinDato" : pobF===pobP ? "seguro" : "dudoso";
+          yaVisto.add(id);
+          duplicados.push({ id, cert,
+            nom:f.NOMBRE||f.nombre||id, pob:f.POBLACION||f.poblacion||"",
+            pbiCod:p._id, pbiNom:p.nombre, pbiPob:p.poblacion||"",
+            venta:num(p.ventasAct)||num(p.ventasAntFull) });
+        }
+      }
+      // Los mas claros primero y como mucho cuatro: no es una tarea de limpieza
+      const orden={seguro:0,sinDato:1,dudoso:2};
+      duplicados.sort((a,b)=>(orden[a.cert]-orden[b.cert])||(b.venta-a.venta));
+      duplicados=duplicados.slice(0,4);
+      window.DUPS=duplicados;
+    }catch(e){}
+
     const act=num(yo.ventasAct), ant=num(yo.ventasAntYTD);
     PENDIENTES.push("semana"); PENDIENTES.push("prioridad");
 
@@ -554,6 +623,30 @@ async function enviar(){
         ${bloque("Estrategias",vEs,"estrategias",["Sigo con ella","La doy por cerrada","La replanteo"],"")}
         ${bloque("Muestras",vMu,"muestras",["Insisto","La cierro como perdida","Sigue viva"],"")}
       </div>
+
+      ${duplicados.length?`<div class="paso">
+        <p class="tit"><span class="num">+</span>¿Son el mismo cliente?</p>
+        <p class="sub">Fichas que creaste tú en una visita y que ahora aparecen
+          en facturación con su código real. Si lo confirmas, se juntan y no
+          pierdes ninguna visita.</p>
+        ${duplicados.map(d=>{
+          const k="dup:"+d.id; PEND.push(k);
+          return `<div class="item" style="display:block;padding:13px 0">
+            <b style="font-size:14.5px">${d.nom}</b>
+            ${d.cert==="dudoso"?'<span class="tag" style="background:#FFF8EC;color:var(--med)">población distinta</span>':""}
+            <div class="dato" style="margin:8px 0 0">
+              <div style="font-size:12.5px">La que creaste tú
+                <b style="display:block;font-size:13.5px">${d.nom}${d.pob?" · "+d.pob:" · sin población"}</b></div>
+              <div style="font-size:12.5px;margin-top:7px">En facturación
+                <b style="display:block;font-size:13.5px">${d.pbiNom}${d.pbiPob?" · "+d.pbiPob:""}
+                  <span style="font-weight:400;color:var(--tenue)"> · ${d.pbiCod}${
+                    d.venta?" · "+eur(d.venta):""}</span></b></div>
+            </div>
+            <div class="acc">${["Es el mismo","Son distintos","No lo sé"]
+              .map(o=>`<button class="chip" onclick="marcar('${k}','${o}',this)">${o}</button>`).join("")}</div>
+          </div>`;
+        }).join("")}
+      </div>`:""}
 
       <div class="paso">
         <p class="tit"><span class="num">4</span>La semana que viene</p>
