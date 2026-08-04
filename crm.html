@@ -342,7 +342,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.53.0";
+const CRM_VERSION = "4.54.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -430,7 +430,10 @@ function equiposActivos(){
     const ia=ORDEN_EQUIPOS.indexOf(a), ib=ORDEN_EQUIPOS.indexOf(b);
     return (ia<0?99:ia)-(ib<0?99:ib) || a.localeCompare(b,"es");
   });
-  return lista.length?lista:equiposActivos();
+  // Antes esta línea era `return lista.length?lista:equiposActivos()`, que se
+  // llamaba a sí misma sin cambiar nada: si la lista salía vacía, recursión
+  // infinita y pantalla en blanco.
+  return lista.length?lista:ORDEN_EQUIPOS.slice();
 }
 
 function equipoDeAgente(idAgente){
@@ -21741,98 +21744,312 @@ function CentroPendientes({usuario, onBack, onNav, muestrasDB, ofertasDB, incide
 
 // ─── ESCÁNER DE TARJETA DE VISITA ────────────────────────────────
 
-function DashDirector({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasDB, incidenciasDB}){
-  // Legacy EQUIPO_DATA eliminado — se usa AGENTES_DATA top-level
-  const opsActivas=OPORTUNIDADES_SEED.filter(o=>!o.etapa.includes("cerrada"));
-  const valPipeline=opsActivas.reduce((s,o)=>s+o.valor,0);
-  const proyActivos=PROYECTOS_SEED.filter(p=>p.estado==="activo");
-  const estActivas=(estrategiasDB||[]).filter(e=>(e.estado==="aprobada"||e.estado==="pendiente_aprobacion")&&!e.eliminada&&!e.resolucion);
-
-  const [periodo,setPeriodo]=useState("semana");
-  const [equipoFiltro,setEquipoFiltro]=useState("todos");
-  const [agenteFiltro,setAgenteFiltro]=useState(null); // null = todos del equipo
-  const [showVendedores,setShowVendedores]=useState(true); // árbol siempre visible
-  const [treeRootOpen,setTreeRootOpen]=useState(false); // desplegar equipos bajo "Todos"
-  const [treeEqOpen,setTreeEqOpen]=useState(null); // null | "WIKUK" | "INTERKEY"
-
-  // Datos por agente — semana/mes/año
-  // Datos por agente — lectura de AGENTES_DATA top-level
-  const EQUIPO_DATA_EXT=AGENTES_DATA;
-
-  const ETAPA_COLOR={prospecto:T.muted,propuesta:T.blue,negociacion:T.amber,cerrada_ganada:T.green,cerrada_perdida:T.red};
-  const ETAPA_ICON={prospecto:"🔍",propuesta:"📄",negociacion:"🤝",cerrada_ganada:"✅",cerrada_perdida:"❌"};
-  const TIPO_COLOR={lanzamiento:T.purple,campana:T.blue,recuperacion:T.amber,expansion:T.green,otro:T.muted};
-  const TIPO_ICON={lanzamiento:"🚀",campana:"📣",recuperacion:"🔄",expansion:"📈",otro:"📌"};
-
-  // Calcular consolidado para header
-  const getSemanaISO=()=>{const d=new Date();const s=new Date(d.getFullYear(),0,1);return Math.ceil(((d-s)/86400000+s.getDay()+1)/7);};
+// ═══════════════════════════════════════════════════════════════════════════
+// DashMando — panel único para Responsable de equipo, Jefe de Ventas y CEO.
+// (v4.54) Sustituye a DashDirector + DashJefe, que eran dos pantallas distintas
+// con dos criterios distintos para contar lo mismo. Aquí sólo cambia el ÁMBITO:
+//   · rol "jefe"                     → su equipo
+//   · director / ceo / crm_director  → toda la empresa
+// Todas las cifras salen de datos reales: AGENTES_DATA (Power BI + objetivos),
+// oportunidadesDB, muestrasDB, incidenciasDB, estrategiasDB y la colección
+// "proyectos" de Firebase. No queda ningún literal de maqueta.
+// ═══════════════════════════════════════════════════════════════════════════
+function DashMando({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasDB, incidenciasDB, forzarGlobal}){
+  const rol=String(usuario.rol||"").toLowerCase();
+  // El enrutador decide quién ve toda la empresa (incluye perfiles como Calidad,
+  // que no son dirección pero necesitan la visión global). Se respeta esa
+  // decisión y, si no llega, se deduce del rol.
+  const verTodo=forzarGlobal||["director","ceo","crm_director","admin"].includes(rol);
+  const miEq=String(usuario.equipo||"").toUpperCase().trim();
   const semanaActual=getSemanaISO();
 
-  return(
-    <div style={{padding:"20px 16px 100px"}}>
-      <p style={{margin:"0 0 4px",fontSize:22,fontWeight:900,color:T.text}}>{usuario.icon} {usuario.nombre}</p>
-      <p style={{margin:"0 0 16px",fontSize:13,color:T.muted}}>Sem. {semanaActual} · Consolidado</p>
+  // ── Proyectos reales. Antes se leía PROYECTOS_SEED, que es un array vacío:
+  // el CEO veía siempre "0 proyectos activos" y el responsable no veía la fila.
+  const [proyectosDB,setProyectosDB]=useState([]);
+  useEffect(()=>{
+    let vivo=true;
+    fbLeer("proyectos").then(d=>{ if(vivo) setProyectosDB(d||[]); }).catch(()=>{});
+    return()=>{vivo=false;};
+  },[]);
 
-      {/* Lo primero al entrar son las ventas. Lo pendiente va debajo, en
-          version compacta: el listado completo esta en Centro de pendientes. */}
+  const [periodo,setPeriodo]=useState("mes");
+  const [equipoFiltro,setEquipoFiltro]=useState(verTodo?"todos":miEq);
+  const [agenteFiltro,setAgenteFiltro]=useState(null);
+  const [treeRootOpen,setTreeRootOpen]=useState(!verTodo);
+  const [treeEqOpen,setTreeEqOpen]=useState(verTodo?null:miEq);
 
-      {/* ══ SELECCIÓN DE VENDEDOR ══
-          Va antes de las ventas: primero eliges de quién quieres ver
-          las cifras y luego las ves, no al reves. */}
-      {/* ══ 2. DETALLE POR VENDEDOR — expandible ══ */}
-      {/* ── Árbol jerárquico: Todos → Equipo → Vendedor ── */}
-      {(
-        <div style={{marginBottom:12}}>
-          {/* Nivel 1: Todos — 1er click filtra, 2º click despliega equipos */}
-          <div onClick={()=>{
-              const wasSel=equipoFiltro==="todos"&&!agenteFiltro;
-              if(wasSel){
-                // Ya está seleccionado → toggle expand
-                setTreeRootOpen(o=>!o);
-              } else {
-                // No seleccionado → seleccionar + desplegar
-                setEquipoFiltro("todos");setAgenteFiltro(null);setTreeEqOpen(null);
-                setTreeRootOpen(true);
-              }
-            }}
-            style={{background:equipoFiltro==="todos"&&!agenteFiltro?T.navy:"#fff",
-              borderRadius:11,padding:"10px 14px",cursor:"pointer",
-              border:`2px solid ${equipoFiltro==="todos"&&!agenteFiltro?T.navy:T.border}`,
-              marginBottom:6,display:"flex",alignItems:"center",gap:10}}>
-            <span style={{fontSize:18}}>🌐</span>
-            <div style={{flex:1}}>
-              <p style={{margin:0,fontSize:13,fontWeight:700,
-                color:equipoFiltro==="todos"&&!agenteFiltro?"#fff":T.text}}>Todos los equipos</p>
-              <p style={{margin:0,fontSize:10,
-                color:equipoFiltro==="todos"&&!agenteFiltro?"rgba(255,255,255,.65)":T.muted}}>
-                {EQUIPO_DATA_EXT.length} vendedores · {fmt(EQUIPO_DATA_EXT.reduce((s,v)=>s+v.vMes,0))}€ este mes
-              </p>
-            </div>
-            {equipoFiltro==="todos"&&!agenteFiltro&&<span style={{color:"#fff",fontWeight:800,marginRight:4}}>✓</span>}
-            <span style={{color:equipoFiltro==="todos"&&!agenteFiltro?"rgba(255,255,255,.8)":T.muted,
-              fontSize:18,transform:treeRootOpen?"rotate(90deg)":"rotate(0deg)",
-              display:"inline-block",transition:"transform .2s"}}>›</span>
+  // ── Ámbito de vendedores ──
+  // AGENTES_DATA lo rellena cargarVentasPBI() con todo el que factura, así que
+  // un responsable que vende también aparece aquí. Antes el listado del equipo
+  // exigía rol "agente" y dejaba fuera al propio jefe, mientras que el total sí
+  // lo sumaba: las filas nunca cuadraban con la cabecera.
+  const agentesAmbito=AGENTES_DATA.filter(a=>
+    verTodo || String(a.equipo||"").toUpperCase().trim()===miEq);
+
+  // Identificadores con los que se guardan oportunidades, muestras, estrategias
+  // y proyectos. Se recogen todos los alias posibles porque cada módulo guarda
+  // uno distinto (id de usuario, grupoAgente, catalogoVendedor o nombre).
+  const idsAmbito=React.useMemo(()=>{
+    if(verTodo) return null;
+    const s=new Set();
+    const add=x=>{ if(x) s.add(String(x).toUpperCase().trim()); };
+    USUARIOS.forEach(u=>{
+      if(String(u.equipo||"").toUpperCase().trim()!==miEq) return;
+      add(u.id); add(u._docId); add(u.grupoAgente); add(u.catalogoVendedor); add(u.nombre);
+    });
+    agentesAmbito.forEach(a=>{ add(a.id); add(a.nombre); });
+    return s;
+  },[verTodo,miEq,agentesAmbito.length,USUARIOS.length]);
+
+  const enAmbito=(...campos)=>{
+    if(!idsAmbito) return true;
+    return campos.some(c=>c&&idsAmbito.has(String(c).toUpperCase().trim()));
+  };
+
+  // ── Oportunidades reales ──
+  // Se descartan por etapa Y por estado: hay documentos que cierran con
+  // etapa "cerrada_ganada" y otros con estado "ganada". Mirar sólo uno de los
+  // dos campos dejaba oportunidades cerradas contando como pipeline vivo.
+  const CERRADAS=["ganada","perdida","cerrada_ganada","cerrada_perdida"];
+  const opsActivas=(oportunidadesDB||[]).filter(o=>
+    !o.eliminada
+    && !CERRADAS.includes(o.etapa) && !CERRADAS.includes(o.estado)
+    && enAmbito(o.agenteId,o.agente,o.agenteNombre));
+  const valPipeline=opsActivas.reduce((s,o)=>s+(Number(o.valor)||0),0);
+
+  // ── Proyectos reales ──
+  const proyActivos=proyectosDB.filter(p=>{
+    if(p.eliminada||p.estado!=="activo") return false;
+    if(verTodo) return true;
+    const ids=[].concat(Array.isArray(p.equipo)?p.equipo:[],
+      [p.agente,p.agenteId,p.responsable,p.agenteNombre]).filter(Boolean);
+    if(!ids.length) return true;   // sin dueño declarado: no se oculta
+    return ids.some(x=>enAmbito(x));
+  });
+
+  // ── Estrategias reales ──
+  // Se incluyen las pendientes de aprobación: son justo las que el responsable
+  // tiene que resolver. El panel del jefe sólo contaba las ya aprobadas.
+  const estActivas=(estrategiasDB||[]).filter(e=>
+    (e.estado==="aprobada"||e.estado==="pendiente_aprobacion")
+    && !e.eliminada && !e.resolucion
+    && enAmbito(e.agente,e.agenteId,e.agenteNombre));
+  const estPendAprob=estActivas.filter(e=>e.estado==="pendiente_aprobacion").length;
+
+  // ── Agregado de ventas del ámbito seleccionado ──
+  const filtradosEq=agentesAmbito.filter(v=>
+    agenteFiltro ? v.nombre===agenteFiltro
+    : (equipoFiltro==="todos" ? true : String(v.equipo||"").toUpperCase().trim()===equipoFiltro));
+
+  const tot=filtradosEq.reduce((s,v)=>({
+    vSem:s.vSem+(v.vSem||0), oSem:s.oSem+(v.oSem||0),
+    vMes:s.vMes+(v.vMes||0), oMes:s.oMes+(v.oMes||0),
+    vAnual:s.vAnual+(v.vAnual||0), oAnual:s.oAnual+(v.oAnual||0),
+    oAnualHoy:s.oAnualHoy+(v.oAnualHoy||0),
+    promoSem:s.promoSem+(v.promoSem||0), oPromoSem:s.oPromoSem+(v.oPromoSem||0),
+    promoMes:s.promoMes+(v.promoMes||0), oPromoMes:s.oPromoMes+(v.oPromoMes||0),
+    promoAnual:s.promoAnual+(v.promoAnual||0), oPromoAnual:s.oPromoAnual+(v.oPromoAnual||0),
+    liqSem:s.liqSem+(v.liqSem||0), oLiqSem:s.oLiqSem+(v.oLiqSem||0),
+    liqMes:s.liqMes+(v.liqMes||0), oLiqMes:s.oLiqMes+(v.oLiqMes||0),
+    liqAnual:s.liqAnual+(v.liqAnual||0), oLiqAnual:s.oLiqAnual+(v.oLiqAnual||0),
+    n:s.n+1,
+  }),{vSem:0,oSem:0,vMes:0,oMes:0,vAnual:0,oAnual:0,oAnualHoy:0,
+      promoSem:0,oPromoSem:0,promoMes:0,oPromoMes:0,promoAnual:0,oPromoAnual:0,
+      liqSem:0,oLiqSem:0,liqMes:0,oLiqMes:0,liqAnual:0,oLiqAnual:0,n:0});
+
+  // Margen PONDERADO por facturación, no media aritmética: con la media, un
+  // comercial de 5.000 € pesaba lo mismo que uno de 400.000 € y el % del equipo
+  // no se parecía al real. `mb` de Power BI es el margen del AÑO, así que se
+  // etiqueta como tal en lugar de repetirlo como si fuera el del mes.
+  const pesoMb=filtradosEq.reduce((s,v)=>s+(v.vAnual||0),0);
+  const mbReal=pesoMb>0
+    ? filtradosEq.reduce((s,v)=>s+(v.mb||0)*(v.vAnual||0),0)/pesoMb
+    : (filtradosEq.length?filtradosEq.reduce((s,v)=>s+(v.mb||0),0)/filtradosEq.length:0);
+  const mbObj=pesoMb>0
+    ? filtradosEq.reduce((s,v)=>s+(v.oMb||0)*(v.vAnual||0),0)/pesoMb
+    : (filtradosEq.length?filtradosEq.reduce((s,v)=>s+(v.oMb||0),0)/filtradosEq.length:0);
+
+  const vR=periodo==="semana"?tot.vSem:periodo==="mes"?tot.vMes:tot.vAnual;
+  // En "año" se mide contra el objetivo acumulado hasta hoy, no contra el
+  // presupuesto anual completo.
+  const vO=periodo==="semana"?tot.oSem:periodo==="mes"?tot.oMes:(tot.oAnualHoy||tot.oAnual);
+  const promoR=periodo==="semana"?tot.promoSem:periodo==="mes"?tot.promoMes:tot.promoAnual;
+  const promoO=periodo==="semana"?tot.oPromoSem:periodo==="mes"?tot.oPromoMes:tot.oPromoAnual;
+  const liqR=periodo==="semana"?tot.liqSem:periodo==="mes"?tot.liqMes:tot.liqAnual;
+  const liqO=periodo==="semana"?tot.oLiqSem:periodo==="mes"?tot.oLiqMes:tot.oLiqAnual;
+  const totalPL=promoR+liqR, totalPLObj=promoO+liqO;
+
+  const pct=vO>0?Math.round(vR/vO*100):0;
+  const pctMb=mbObj>0?Math.round(mbReal/mbObj*100):0;
+  const cPct=pct>=100?T.green:pct>=80?T.amber:T.red;
+  const cMb=pctMb>=100?T.green:pctMb>=80?T.amber:T.red;
+
+  const pctMes=tot.oMes>0?Math.round(tot.vMes/tot.oMes*100):0;
+  const ambitoNombre=agenteFiltro||(equipoFiltro!=="todos"?equipoFiltro:"Todos los equipos");
+  const rolLabel=verTodo?(rol==="ceo"?"CEO":"Jefe de Ventas"):"Responsable "+(miEq||"");
+  const sinVentas=agentesAmbito.length===0;
+
+  const Ring=({pct:p,size=44,color:rc,stroke=5})=>{
+    const r=size/2-stroke, circ=2*Math.PI*r, fill=circ*(1-Math.min(p,100)/100);
+    return(<svg width={size} height={size} style={{flexShrink:0,transform:"rotate(-90deg)"}}>
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#E2E8F0" strokeWidth={stroke}/>
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={rc} strokeWidth={stroke}
+        strokeDasharray={circ} strokeDashoffset={fill} strokeLinecap="round"
+        style={{transition:"stroke-dashoffset .8s"}}/>
+    </svg>);
+  };
+
+  // Fila de vendedor con cifras REALES. Antes el panel del responsable pintaba
+  // 85 % y 24,5k€ escritos a mano en todas las filas.
+  const FilaVendedor=({v,ultimo})=>{
+    const real=periodo==="semana"?v.vSem:periodo==="mes"?v.vMes:v.vAnual;
+    const obj =periodo==="semana"?v.oSem:periodo==="mes"?v.oMes:(v.oAnualHoy||v.oAnual);
+    const p=obj>0?Math.round(real/obj*100):0;
+    const c=obj>0?(p>=100?T.green:p>=80?T.amber:T.red):T.muted;
+    const uAg=USUARIOS.find(u=>u.id===v.id);
+    const mAg=(muestrasDB||[]).filter(m=>m.estado==="pendiente"&&!m.eliminada
+      &&(m.agente===v.id||(uAg&&(m.agente===uAg.grupoAgente||m.agente===uAg.catalogoVendedor)))).length;
+    const sel=agenteFiltro===v.nombre;
+    return(
+      <div onClick={()=>setAgenteFiltro(sel?null:v.nombre)}
+        style={{display:"flex",gap:12,alignItems:"center",padding:"14px 16px",cursor:"pointer",
+          background:sel?(v.color||T.navy)+"10":"transparent",
+          borderBottom:ultimo?"none":"1px solid #F1F5F9"}}>
+        <div style={{width:40,height:40,borderRadius:12,flexShrink:0,
+          background:"linear-gradient(135deg,#1E293B,#334155)",display:"flex",
+          alignItems:"center",justifyContent:"center",fontSize:13,fontWeight:700,color:"#fff"}}>
+          {String(v.nombre||"?").split(" ").map(w=>w[0]).slice(0,2).join("")}
+        </div>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:5}}>
+            <p style={{margin:0,fontSize:13,fontWeight:600,color:"#0F172A",
+              overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.nombre}</p>
+            {verTodo&&v.equipo&&<span style={{background:"#F1F5F9",color:"#64748B",fontSize:9,
+              fontWeight:700,padding:"2px 7px",borderRadius:99,flexShrink:0}}>{v.equipo}</span>}
+            {mAg>0&&<span style={{background:"#FFFBEB",color:"#D97706",fontSize:9,
+              fontWeight:700,padding:"2px 7px",borderRadius:99,flexShrink:0}}>{mAg} muestras</span>}
           </div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <div style={{height:3,flex:1,borderRadius:99,background:"#F1F5F9",overflow:"hidden"}}>
+              <div style={{height:"100%",width:`${Math.min(p,100)}%`,borderRadius:99,
+                background:c,transition:"width .8s"}}/>
+            </div>
+            <span style={{fontSize:10,fontWeight:700,color:c,flexShrink:0}}>
+              {obj>0?`${p}%`:"sin obj."}
+            </span>
+          </div>
+        </div>
+        <div style={{textAlign:"right",flexShrink:0}}>
+          <p style={{margin:0,fontSize:13,fontWeight:700,color:"#0F172A"}}>{fmt(real)}€</p>
+          <p style={{margin:"1px 0 0",fontSize:10,color:"#94A3B8"}}>
+            {obj>0?`obj. ${fmt(obj)}€`:"ventas"}
+          </p>
+        </div>
+      </div>
+    );
+  };
 
-          {/* Nivel 2: Equipos desplegables (solo visible si treeRootOpen) */}
-          {treeRootOpen&&equiposActivos().map(eq=>{
-            const eqColor=eq==="WIKUK"?T.green:T.amber;
-            const agEq=EQUIPO_DATA_EXT.filter(v=>v.equipo===eq);
-            const vMesEq=agEq.reduce((s,v)=>s+v.vMes,0);
+  return(
+    <div style={{background:"#F1F5F9",minHeight:"100vh",paddingBottom:100}}>
+
+      {/* ══ CABECERA ══ */}
+      <div style={{background:"linear-gradient(135deg,#0F172A 0%,#1E293B 60%,#1E3A5F 100%)",
+        padding:"32px 20px 28px",position:"relative",overflow:"hidden"}}>
+        <div style={{position:"absolute",right:-40,top:-40,width:180,height:180,
+          borderRadius:"50%",background:"rgba(255,255,255,.03)"}}/>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
+          <div style={{minWidth:0}}>
+            <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>
+              <span style={{background:"rgba(255,255,255,.1)",color:"rgba(255,255,255,.7)",
+                fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:99,
+                textTransform:"uppercase",letterSpacing:".08em"}}>{rolLabel}</span>
+              <span style={{background:"rgba(99,102,241,.3)",color:"#A5B4FC",
+                fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:99}}>Sem. {semanaActual}</span>
+              <span style={{background:"rgba(255,255,255,.08)",color:"rgba(255,255,255,.5)",
+                fontSize:10,fontWeight:600,padding:"3px 10px",borderRadius:99}}>
+                {agentesAmbito.length} vendedores
+              </span>
+            </div>
+            <p style={{margin:0,fontSize:24,fontWeight:800,color:"#FFFFFF",
+              letterSpacing:"-0.03em",lineHeight:1.1}}>
+              {usuario.icon?usuario.icon+" ":""}{String(usuario.nombre||"").split(" ").slice(0,2).join(" ")}
+            </p>
+          </div>
+          <div style={{background:"rgba(255,255,255,.08)",border:"1px solid rgba(255,255,255,.12)",
+            borderRadius:14,padding:"12px 16px",textAlign:"center",flexShrink:0}}>
+            <p style={{margin:"0 0 2px",fontSize:9,fontWeight:700,color:"rgba(255,255,255,.5)",
+              textTransform:"uppercase",letterSpacing:".1em"}}>Mes</p>
+            <p style={{margin:0,fontSize:28,fontWeight:900,lineHeight:1,
+              color:pctMes>=100?"#4ADE80":pctMes>=80?"#FCD34D":"#FB7185"}}>{pctMes}%</p>
+            <p style={{margin:"2px 0 0",fontSize:9,color:"rgba(255,255,255,.4)"}}>del objetivo</p>
+          </div>
+        </div>
+        <div>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+            <span style={{fontSize:11,color:"rgba(255,255,255,.5)"}}>Ventas mes · {ambitoNombre}</span>
+            <span style={{fontSize:11,color:"rgba(255,255,255,.7)",fontWeight:600}}>
+              {fmt(tot.vMes)}€ / {fmt(tot.oMes)}€
+            </span>
+          </div>
+          <div style={{height:4,borderRadius:99,background:"rgba(255,255,255,.12)",overflow:"hidden"}}>
+            <div style={{height:"100%",width:`${Math.min(pctMes,100)}%`,borderRadius:99,
+              background:pctMes>=100?"#4ADE80":pctMes>=80?"#FCD34D":"#FB7185",transition:"width .8s"}}/>
+          </div>
+        </div>
+      </div>
+
+      <div style={{padding:"18px 16px 0"}}>
+
+        {/* Sin datos de ventas: se dice, no se pinta un cero silencioso */}
+        {sinVentas&&(
+          <div style={{background:"#FFFBEB",border:"1px solid #FDE68A",borderRadius:12,
+            padding:"12px 14px",marginBottom:14,fontSize:12,color:"#92400E"}}>
+            No hay ventas asociadas a {verTodo?"ningún equipo":("el equipo "+(miEq||"—"))}.
+            Si acabas de entrar, espera a que termine de cargar Power BI.
+          </div>
+        )}
+
+        {/* ══ ÁMBITO: Todos → Equipo → Vendedor ══ */}
+        <p style={{margin:"0 0 8px",fontSize:10,fontWeight:700,color:"#64748B",
+          textTransform:"uppercase",letterSpacing:".12em"}}>Qué estás mirando</p>
+        <div style={{marginBottom:12}}>
+          {verTodo&&(
+            <div onClick={()=>{
+                const sel=equipoFiltro==="todos"&&!agenteFiltro;
+                if(sel) setTreeRootOpen(o=>!o);
+                else { setEquipoFiltro("todos"); setAgenteFiltro(null); setTreeEqOpen(null); setTreeRootOpen(true); }
+              }}
+              style={{background:equipoFiltro==="todos"&&!agenteFiltro?T.navy:"#fff",
+                borderRadius:11,padding:"10px 14px",cursor:"pointer",
+                border:`2px solid ${equipoFiltro==="todos"&&!agenteFiltro?T.navy:T.border}`,
+                marginBottom:6,display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:18}}>🌐</span>
+              <div style={{flex:1}}>
+                <p style={{margin:0,fontSize:13,fontWeight:700,
+                  color:equipoFiltro==="todos"&&!agenteFiltro?"#fff":T.text}}>Todos los equipos</p>
+                <p style={{margin:0,fontSize:10,
+                  color:equipoFiltro==="todos"&&!agenteFiltro?"rgba(255,255,255,.65)":T.muted}}>
+                  {agentesAmbito.length} vendedores · {fmt(agentesAmbito.reduce((s,v)=>s+(v.vMes||0),0))}€ este mes
+                </p>
+              </div>
+              {equipoFiltro==="todos"&&!agenteFiltro&&<span style={{color:"#fff",fontWeight:800,marginRight:4}}>✓</span>}
+              <span style={{color:equipoFiltro==="todos"&&!agenteFiltro?"rgba(255,255,255,.8)":T.muted,
+                fontSize:18,transform:treeRootOpen?"rotate(90deg)":"rotate(0deg)",
+                display:"inline-block",transition:"transform .2s"}}>›</span>
+            </div>
+          )}
+
+          {(treeRootOpen||!verTodo)&&(verTodo?equiposActivos():[miEq]).filter(Boolean).map(eq=>{
+            const agEq=agentesAmbito.filter(v=>String(v.equipo||"").toUpperCase().trim()===eq);
+            const eqColor=COLOR_EQUIPO(eq);
+            const vMesEq=agEq.reduce((s,v)=>s+(v.vMes||0),0);
             const isOpen=treeEqOpen===eq;
             const isSel=equipoFiltro===eq&&!agenteFiltro;
             return(
               <div key={eq} style={{marginBottom:6}}>
                 <div onClick={()=>{
-                    if(isSel){
-                      // Ya está seleccionado → toggle expand
-                      setTreeEqOpen(isOpen?null:eq);
-                    } else {
-                      // No seleccionado → filtrar + expandir
-                      setEquipoFiltro(eq);
-                      setAgenteFiltro(null);
-                      setTreeEqOpen(eq);
-                    }
+                    if(isSel) setTreeEqOpen(isOpen?null:eq);
+                    else { setEquipoFiltro(eq); setAgenteFiltro(null); setTreeEqOpen(eq); }
                   }}
                   style={{background:isSel?eqColor+"15":"#fff",borderRadius:11,padding:"10px 14px",
                     cursor:"pointer",border:`2px solid ${isSel?eqColor:T.border}`,
@@ -21848,27 +22065,33 @@ function DashDirector({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasD
                   </div>
                   {isSel&&<span style={{color:eqColor,fontWeight:800}}>✓</span>}
                   <span style={{color:isOpen?eqColor:T.muted,fontSize:16,
-                    transform:isOpen?"rotate(90deg)":"rotate(0deg)",display:"inline-block",transition:"transform .2s"}}>›</span>
+                    transform:isOpen?"rotate(90deg)":"rotate(0deg)",display:"inline-block",
+                    transition:"transform .2s"}}>›</span>
                 </div>
 
-                {/* Nivel 3: Vendedores */}
                 {isOpen&&(
-                  <div style={{marginLeft:12,borderLeft:`2px solid ${eqColor}22`,paddingLeft:10,marginTop:6}}>
+                  <div style={{marginLeft:12,borderLeft:`2px solid ${eqColor}22`,
+                    paddingLeft:10,marginTop:6}}>
+                    {agEq.length===0&&(
+                      <p style={{fontSize:11,color:T.muted,padding:"6px 2px"}}>Sin vendedores con ventas.</p>
+                    )}
                     {agEq.map(v=>{
                       const sel=agenteFiltro===v.nombre;
                       return(
-                        <div key={v.nombre} onClick={()=>{setAgenteFiltro(sel?null:v.nombre);setEquipoFiltro(eq);}}
-                          style={{background:sel?v.color+"12":"#fff",borderRadius:10,
+                        <div key={v.id||v.nombre} onClick={()=>{setAgenteFiltro(sel?null:v.nombre);setEquipoFiltro(eq);}}
+                          style={{background:sel?(v.color||T.navy)+"12":"#fff",borderRadius:10,
                             padding:"9px 12px",marginBottom:5,cursor:"pointer",
-                            border:`1.5px solid ${sel?v.color:T.border}`,
+                            border:`1.5px solid ${sel?(v.color||T.navy):T.border}`,
                             display:"flex",alignItems:"center",gap:10}}>
-                          <div style={{width:28,height:28,borderRadius:7,background:v.color+"20",
+                          <div style={{width:28,height:28,borderRadius:7,background:(v.color||T.navy)+"20",
                             display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,flexShrink:0}}>🧑‍💼</div>
                           <div style={{flex:1}}>
                             <p style={{margin:0,fontSize:12,fontWeight:700,color:T.text}}>{v.nombre}</p>
-                            <p style={{margin:0,fontSize:10,color:T.muted}}>{fmt(v.vMes)}€ · mb {v.mb}%</p>
+                            <p style={{margin:0,fontSize:10,color:T.muted}}>
+                              {fmt(v.vMes||0)}€ este mes · mb {(v.mb||0).toFixed(1)}%
+                            </p>
                           </div>
-                          {sel&&<span style={{color:v.color,fontWeight:800}}>✓</span>}
+                          {sel&&<span style={{color:v.color||T.navy,fontWeight:800}}>✓</span>}
                         </div>
                       );
                     })}
@@ -21878,185 +22101,61 @@ function DashDirector({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasD
             );
           })}
         </div>
-      )}
 
-      {/* Tarjetas detalladas: SOLO cuando un vendedor específico está seleccionado */}
-      {agenteFiltro ? (
-        <div style={{marginBottom:20}}>
-          <p style={{margin:"8px 0 10px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase",letterSpacing:".05em"}}>
-            📊 Detalle de {agenteFiltro}
-          </p>
-          {[...EQUIPO_DATA_EXT].filter(v=>v.nombre===agenteFiltro)
-            .sort((a,b)=>{
-              const va=periodo==="semana"?a.vSem:periodo==="mes"?a.vMes:a.vAnual;
-              const vb=periodo==="semana"?b.vSem:periodo==="mes"?b.vMes:b.vAnual;
-              return vb-va;
-            })
-            .map((v,i)=>{
-              const vReal=periodo==="semana"?v.vSem:periodo==="mes"?v.vMes:v.vAnual;
-              const vObj =periodo==="semana"?v.oSem:periodo==="mes"?v.oMes:v.oAnual;
-              const pctV =vObj>0?Math.round(vReal/vObj*100):0;
-              const pctMb=v.oMb>0?Math.round(v.mb/v.oMb*100):0;
-              const c   =pctV>=100?T.green:pctV>=80?T.amber:T.red;
-              const cMb =pctMb>=100?T.green:pctMb>=80?T.amber:T.red;
-              const MEDAL=["🥇","🥈","🥉","4️⃣","5️⃣"];
-              const Ring=({pct:p,size=44,color:rc})=>{
-                const r=size/2-5;const circ=2*Math.PI*r;const fill=circ*(1-Math.min(p,100)/100);
-                return(<svg width={size} height={size} style={{flexShrink:0,transform:"rotate(-90deg)"}}>
-                  <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#E2E8F0" strokeWidth="5"/>
-                  <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={rc} strokeWidth="5"
-                    strokeDasharray={circ} strokeDashoffset={fill} strokeLinecap="round"
-                    style={{transition:"stroke-dashoffset .8s"}}/>
-                </svg>);
-              };
-              return(
-                <Card key={v.nombre} style={{marginBottom:8,padding:"14px 16px"}}>
-                  <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
-                    <span style={{fontSize:20,flexShrink:0}}>{MEDAL[i]||`${i+1}`}</span>
-                    <div style={{flex:1}}>
-                      <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>{v.nombre}</p>
-                      <Badge label={v.equipo} color={v.equipo==="WIKUK"?T.green:T.amber}/>
-                    </div>
-                    <div style={{textAlign:"right"}}>
-                      <p style={{margin:0,fontSize:17,fontWeight:900,color:c}}>{fmt(vReal)}€</p>
-                      <p style={{margin:0,fontSize:10,color:T.muted}}>obj. {fmt(vObj)}€</p>
-                    </div>
-                  </div>
-                  <div style={{display:"flex",gap:8}}>
-                    {[
-                      {label:"Ventas "+periodo,val:fmt(vReal)+"€",obj:"/"+fmt(vObj)+"€",pct:pctV,c},
-                      {label:"Margen",val:v.mb+"%",obj:"obj. "+v.oMb+"%",pct:pctMb,c:cMb},
-                    ].map(m=>(
-                      <div key={m.label} style={{flex:1,background:"#F8FAFC",borderRadius:10,
-                        padding:"10px 8px",display:"flex",gap:8,alignItems:"center"}}>
-                        <div style={{position:"relative",flexShrink:0}}>
-                          <Ring pct={m.pct} color={m.c}/>
-                          <span style={{position:"absolute",top:"50%",left:"50%",
-                            transform:"translate(-50%,-50%)",fontSize:9,fontWeight:800,color:m.c}}>{m.pct}%</span>
-                        </div>
-                        <div>
-                          <p style={{margin:0,fontSize:9,color:T.muted,textTransform:"uppercase",fontWeight:700}}>{m.label}</p>
-                          <p style={{margin:0,fontSize:12,fontWeight:800,color:T.text}}>{m.val}</p>
-                          <p style={{margin:0,fontSize:9,color:T.muted}}>{m.obj}</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  <div style={{marginTop:8,height:4,borderRadius:99,background:T.border}}>
-                    <div style={{height:"100%",width:`${Math.min(pctV,100)}%`,background:c,borderRadius:99}}/>
-                  </div>
-                </Card>
-              );
-            })
-          }
+        {/* ══ VENTAS ══ */}
+        <div style={{display:"flex",gap:6,marginBottom:12}}>
+          {["semana","mes","año"].map(p=>(
+            <button key={p} onClick={()=>setPeriodo(p)}
+              style={{flex:1,padding:"8px",borderRadius:9,fontSize:12,fontWeight:700,
+                border:`2px solid ${periodo===p?T.navy:T.border}`,
+                background:periodo===p?T.navy:"#fff",
+                color:periodo===p?"#fff":T.muted,cursor:"pointer"}}>
+              {p.charAt(0).toUpperCase()+p.slice(1)}
+            </button>
+          ))}
         </div>
-      ) : null}
 
-      {/* ══ 1. VENTAS — selector período + tarjeta consolidada ══ */}
-      <div style={{display:"flex",gap:6,marginBottom:12}}>
-        {["semana","mes","año"].map(p=>(
-          <button key={p} onClick={()=>setPeriodo(p)}
-            style={{flex:1,padding:"8px",borderRadius:9,fontSize:12,fontWeight:700,
-              border:`2px solid ${periodo===p?T.navy:T.border}`,
-              background:periodo===p?T.navy:"#fff",
-              color:periodo===p?"#fff":T.muted,cursor:"pointer"}}>
-            {p.charAt(0).toUpperCase()+p.slice(1)}
-          </button>
-        ))}
-      </div>
-
-      {/* Tarjeta consolidada dinámica */}
-      {(()=>{
-        const filtradosEq = EQUIPO_DATA_EXT.filter(v=>agenteFiltro?v.nombre===agenteFiltro:(equipoFiltro==="todos"?true:v.equipo===equipoFiltro));
-        const tot2 = filtradosEq.reduce((s,v)=>({
-          vSem:s.vSem+v.vSem,oSem:s.oSem+v.oSem,
-          vMes:s.vMes+v.vMes,oMes:s.oMes+v.oMes,
-          vAnual:s.vAnual+v.vAnual,oAnual:s.oAnual+v.oAnual,
-          oAnualHoy:s.oAnualHoy+(v.oAnualHoy||0),
-          promoSem:s.promoSem+(v.promoSem||0),oPromoSem:s.oPromoSem+(v.oPromoSem||0),
-          promoMes:s.promoMes+(v.promoMes||0),oPromoMes:s.oPromoMes+(v.oPromoMes||0),
-          promoAnual:s.promoAnual+(v.promoAnual||0),oPromoAnual:s.oPromoAnual+(v.oPromoAnual||0),
-          liqSem:s.liqSem+(v.liqSem||0),oLiqSem:s.oLiqSem+(v.oLiqSem||0),
-          liqMes:s.liqMes+(v.liqMes||0),oLiqMes:s.oLiqMes+(v.oLiqMes||0),
-          liqAnual:s.liqAnual+(v.liqAnual||0),oLiqAnual:s.oLiqAnual+(v.oLiqAnual||0),
-          mb:s.mb+v.mb,oMb:s.oMb+v.oMb,n:s.n+1
-        }),{vSem:0,oSem:0,vMes:0,oMes:0,vAnual:0,oAnual:0,oAnualHoy:0,
-            promoSem:0,oPromoSem:0,promoMes:0,oPromoMes:0,promoAnual:0,oPromoAnual:0,
-            liqSem:0,oLiqSem:0,liqMes:0,oLiqMes:0,liqAnual:0,oLiqAnual:0,
-            mb:0,oMb:0,n:0});
-        const vR=periodo==="semana"?tot2.vSem:periodo==="mes"?tot2.vMes:tot2.vAnual;
-        // En "año" se mide contra el objetivo acumulado hasta hoy, no contra
-        // el presupuesto anual completo. Semana y mes sí van contra el total
-        // de su periodo, que es como se gestionan.
-        const vO=periodo==="semana"?tot2.oSem:periodo==="mes"?tot2.oMes:(tot2.oAnualHoy||tot2.oAnual);
-        const promoR=periodo==="semana"?tot2.promoSem:periodo==="mes"?tot2.promoMes:tot2.promoAnual;
-        const promoO=periodo==="semana"?tot2.oPromoSem:periodo==="mes"?tot2.oPromoMes:tot2.oPromoAnual;
-        const liqR=periodo==="semana"?tot2.liqSem:periodo==="mes"?tot2.liqMes:tot2.liqAnual;
-        const liqO=periodo==="semana"?tot2.oLiqSem:periodo==="mes"?tot2.oLiqMes:tot2.oLiqAnual;
-        const totalPL=promoR+liqR;
-        const totalPLObj=promoO+liqO;
-        const mbR=tot2.n>0?parseFloat((tot2.mb/tot2.n).toFixed(1)):0;
-        const mbO=tot2.n>0?parseFloat((tot2.oMb/tot2.n).toFixed(1)):0;
-        const pct2=vO>0?Math.round(vR/vO*100):0;
-        const pctMb2=mbO>0?Math.round(mbR/mbO*100):0;
-        const c2=pct2>=100?T.green:pct2>=80?T.amber:T.red;
-        const cMb2=pctMb2>=100?T.green:pctMb2>=80?T.amber:T.red;
-        return(
         <div style={{background:"#fff",borderRadius:16,padding:"16px 18px",marginBottom:14,
-          border:`2px solid ${c2}30`,boxShadow:`0 2px 12px ${c2}15`}}>
+          border:`2px solid ${cPct}30`,boxShadow:`0 2px 12px ${cPct}15`}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
             <div>
-              <p style={{margin:"0 0 2px",fontSize:10,color:T.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:".08em"}}>
-                Ventas {periodo}
-              </p>
+              <p style={{margin:"0 0 2px",fontSize:10,color:T.muted,fontWeight:700,
+                textTransform:"uppercase",letterSpacing:".08em"}}>Ventas {periodo} · {ambitoNombre}</p>
               <p style={{margin:0,fontSize:30,fontWeight:900,color:T.text,letterSpacing:"-0.03em"}}>{fmt(vR)}€</p>
               <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>obj. {fmt(vO)}€</p>
             </div>
-            <div style={{background:c2+"12",borderRadius:12,padding:"10px 14px",textAlign:"center"}}>
+            <div style={{background:cPct+"12",borderRadius:12,padding:"10px 14px",textAlign:"center"}}>
               <p style={{margin:"0 0 2px",fontSize:9,color:T.muted,textTransform:"uppercase",fontWeight:700}}>Cumplimiento</p>
-              <p style={{margin:0,fontSize:28,fontWeight:900,color:c2}}>{pct2}%</p>
+              <p style={{margin:0,fontSize:28,fontWeight:900,color:cPct}}>{pct}%</p>
             </div>
           </div>
           <div style={{height:8,borderRadius:99,background:"#F1F5F9",overflow:"hidden",marginBottom:12}}>
-            <div style={{height:"100%",width:`${Math.min(pct2,100)}%`,borderRadius:99,background:c2,transition:"width .8s"}}/>
+            <div style={{height:"100%",width:`${Math.min(pct,100)}%`,borderRadius:99,
+              background:cPct,transition:"width .8s"}}/>
           </div>
 
-          {/* ── Entrada de pedidos y previsión ──
-              La factura llega semanas después del esfuerzo comercial. Esta
-              franja mide lo que se ha METIDO en el periodo, y lo que ya está
-              planificado para salir, que anticipa la facturación. */}
-          {(()=>{
-            // Solo en la vista semanal: la entrada de pedidos mide el trabajo
-            // de esta semana. En mes o año se mezclaria con la facturacion y
-            // dejaria de significar nada.
-            if(periodo!=="semana") return null;
+          {/* Entrada de pedidos: sólo tiene sentido en la vista semanal */}
+          {periodo==="semana"&&(()=>{
             const ent=filtradosEq.reduce((s,v)=>s+(v.entradaSem||0),0);
             const entAnt=filtradosEq.reduce((s,v)=>s+(v.entradaSemAnt||0),0);
             const prox=filtradosEq.reduce((s,v)=>s+(v.prevProxSem||0),0);
             const cartera=filtradosEq.reduce((s,v)=>s+(v.prevTotal||0),0);
-            // Se pinta siempre, aunque venga a cero: si no aparece, es que el
-            // archivo desplegado no es este.
-            const sinDatos = !ent && !prox && !cartera;
-
-            const varEnt = entAnt ? Math.round((ent-entAnt)/entAnt*100) : null;
-            // ¿Lo ya planificado cubre el objetivo de la semana que viene?
-            const objSem = filtradosEq.reduce((s,v)=>s+(v.oSem||0),0);
-            const cubre  = objSem ? Math.round(prox/objSem*100) : null;
-
-            return (
+            const sinDatos=!ent&&!prox&&!cartera;
+            const varEnt=entAnt?Math.round((ent-entAnt)/entAnt*100):null;
+            const objSem=filtradosEq.reduce((s,v)=>s+(v.oSem||0),0);
+            const cubre=objSem?Math.round(prox/objSem*100):null;
+            return(
               <div style={{background:"#F8FAFC",borderRadius:11,padding:"10px 12px",
                 marginBottom:10,display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
                 <div>
                   <p style={{margin:0,fontSize:9.5,fontWeight:800,letterSpacing:.5,
                     textTransform:"uppercase",color:T.muted}}>Pedidos introducidos</p>
-                  <p style={{margin:"2px 0 0",fontSize:16,fontWeight:800,
-                    color:sinDatos?T.muted:T.text}}>
+                  <p style={{margin:"2px 0 0",fontSize:16,fontWeight:800,color:sinDatos?T.muted:T.text}}>
                     {sinDatos?"sin datos":`${fmt(ent)}€`}
                     {varEnt!==null&&<span style={{fontSize:11.5,fontWeight:800,marginLeft:6,
                       color:varEnt<0?T.red:T.green}}>{varEnt>0?"+":""}{varEnt}%</span>}
                   </p>
                 </div>
-
                 {prox>0&&(
                   <div style={{marginLeft:"auto",textAlign:"right"}}>
                     <p style={{margin:0,fontSize:9.5,fontWeight:800,letterSpacing:.5,
@@ -22068,26 +22167,26 @@ function DashDirector({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasD
                     </p>
                   </div>
                 )}
-
               </div>
             );
           })()}
 
           <div style={{display:"flex",gap:8}}>
             {[
-              {l:"MB Medio",v:`${mbR}%`,sub:`obj. ${mbO}%`,c:cMb2},
-              {l:"Agentes",v:tot2.n,sub:equipoFiltro==="todos"?equiposActivos().join(" + "):equipoFiltro,c:T.text},
+              {l:"MB año pond.",v:`${mbReal.toFixed(1)}%`,sub:`obj. ${mbObj.toFixed(1)}%`,c:cMb},
+              {l:"Vendedores",v:tot.n,sub:equipoFiltro==="todos"?equiposActivos().join(" + "):equipoFiltro,c:T.text},
               {l:"Restante",v:`${fmt(Math.max(vO-vR,0))}€`,sub:"para objetivo",c:T.red},
             ].map(k=>(
               <div key={k.l} style={{flex:1,background:"#F8FAFC",borderRadius:10,
-                padding:"10px 12px",border:`1px solid ${T.border}`}}>
+                padding:"10px 12px",border:`1px solid ${T.border}`,minWidth:0}}>
                 <p style={{margin:"0 0 2px",fontSize:9,color:T.muted,textTransform:"uppercase",fontWeight:700}}>{k.l}</p>
                 <p style={{margin:0,fontSize:15,fontWeight:800,color:k.c}}>{k.v}</p>
-                <p style={{margin:0,fontSize:9,color:T.muted}}>{k.sub}</p>
+                <p style={{margin:0,fontSize:9,color:T.muted,overflow:"hidden",
+                  textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{k.sub}</p>
               </div>
             ))}
           </div>
-          {/* ── 2ª fila: Promo + Liquidación + Σ Total (con objetivo debajo) ── */}
+
           <div style={{display:"flex",gap:8,marginTop:8}}>
             {[
               {l:"🎯 Promoción",  v:`${fmt(promoR)}€`,  sub:`obj. ${fmt(promoO)}€`,    c:PL_COLOR(promoO>0?Math.round(promoR/promoO*100):0)},
@@ -22095,7 +22194,7 @@ function DashDirector({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasD
               {l:"Σ Total",       v:`${fmt(totalPL)}€`, sub:`obj. ${fmt(totalPLObj)}€`,c:PL_COLOR(totalPLObj>0?Math.round(totalPL/totalPLObj*100):0)},
             ].map(k=>(
               <div key={k.l} style={{flex:1,background:"#F8FAFC",borderRadius:10,
-                padding:"10px 12px",border:`1px solid ${T.border}`}}>
+                padding:"10px 12px",border:`1px solid ${T.border}`,minWidth:0}}>
                 <p style={{margin:"0 0 2px",fontSize:9,color:T.muted,textTransform:"uppercase",fontWeight:700}}>{k.l}</p>
                 <p style={{margin:0,fontSize:15,fontWeight:800,color:k.c}}>{k.v}</p>
                 <p style={{margin:0,fontSize:9,color:T.muted}}>{k.sub}</p>
@@ -22103,195 +22202,179 @@ function DashDirector({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasD
             ))}
           </div>
         </div>
-        );
-      })()}
 
-      {/* ══ QUÉ HAY QUE RESOLVER ══
-          Version compacta: solo lo mas urgente y un acceso al listado
-          completo. Antes esto ocupaba media pantalla antes de las ventas. */}
-      {(()=>{
-        const dias=(f)=>{
-          if(!f) return 0;
-          const d=new Date(f);
-          if(isNaN(d)) return 0;
-          return Math.floor((Date.now()-d.getTime())/86400000);
-        };
-        const items=[];
-        (incidenciasDB||[]).forEach(i=>{
-          if(i.estado==="resuelta"||i.estado==="cerrada") return;
-          items.push({t:"Incidencia", n:i.cliente||i.clienteNombre||"—",
-            d:dias(i.fecha||i.creado), dest:"incidencias"});
-        });
-        (muestrasDB||[]).forEach(m=>{
-          if(m.estado==="cerrada"||m.resultado) return;
-          // (v4.30) Estado silenciado
-          if(m.estado==="seguimiento"&&(!m.revisarEl||new Date(m.revisarEl).getTime()>Date.now())) return;
-          items.push({t:"Muestra sin respuesta", n:m.cliente||m.clienteNombre||"—",
-            d:dias(m.fecha||m.enviada), dest:"muestras"});
-        });
-        (oportunidadesDB||[]).forEach(o=>{
-          if(o.estado==="ganada"||o.estado==="perdida") return;
-          items.push({t:"Oportunidad parada", n:o.cliente||o.clienteNombre||"—",
-            d:dias(o.ultimaAccion||o.fecha), dest:"oportunidades"});
-        });
+        {/* ══ QUÉ HAY QUE RESOLVER ══
+            Un único panel para los tres roles: PanelSeguimiento ya distingue
+            agente / responsable / dirección y aplica los mismos umbrales que ve
+            el comercial. Antes cada dashboard contaba a su manera y los números
+            no coincidían entre pantallas. */}
+        <PanelSeguimiento usuario={usuario} oportunidadesDB={oportunidadesDB}
+          muestrasDB={muestrasDB} estrategiasDB={estrategiasDB}
+          incidenciasDB={incidenciasDB} onNav={onNav}/>
 
-        const urgentes=items.filter(x=>x.d>=14).sort((a,b)=>b.d-a.d);
-        const top=urgentes.slice(0,4);
-
-        if(!items.length) return (
-          <div style={{background:"#F0FDF4",border:"1px solid #BBF7D0",borderRadius:14,
-            padding:"13px 16px",marginBottom:14,display:"flex",alignItems:"center",gap:11}}>
-            <span style={{fontSize:19}}>✅</span>
-            <p style={{margin:0,fontSize:13,fontWeight:700,color:"#15803D"}}>Todo al día</p>
-          </div>
-        );
-
-        return (
-          <div style={{background:"#fff",border:`1px solid ${T.border}`,borderRadius:14,
-            marginBottom:14,overflow:"hidden"}}>
-            <div style={{padding:"12px 16px",display:"flex",alignItems:"baseline",gap:8,
-              borderBottom:top.length?`1px solid ${T.border}`:"none"}}>
-              <p style={{margin:0,fontSize:12,fontWeight:800,letterSpacing:.5,
-                textTransform:"uppercase",color:T.muted}}>Qué hay que resolver</p>
-              <span style={{marginLeft:"auto",fontSize:12,fontWeight:800,
-                color:urgentes.length?T.red:T.muted}}>
-                {urgentes.length} urgente{urgentes.length===1?"":"s"}
-              </span>
-            </div>
-
-            {top.map((x,i)=>(
-              <div key={i} onClick={()=>{if(onNav)onNav(x.dest);}}
-                style={{padding:"11px 16px",display:"flex",alignItems:"center",gap:10,
-                  borderTop:i?`1px solid #F1F5F9`:"none",cursor:"pointer"}}>
-                <div style={{flex:1,minWidth:0}}>
-                  <p style={{margin:0,fontSize:13.5,fontWeight:700,color:T.text,
-                    overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{x.n}</p>
-                  <p style={{margin:"1px 0 0",fontSize:11,color:T.muted}}>{x.t}</p>
-                </div>
-                <span style={{fontSize:12,fontWeight:800,color:x.d>=30?T.red:T.amber}}>
-                  {x.d} días
-                </span>
-              </div>
-            ))}
-
-            <div onClick={()=>{if(onNav)onNav("centro_pendientes");}}
-              style={{padding:"11px 16px",borderTop:`1px solid ${T.border}`,
-                display:"flex",alignItems:"center",gap:8,cursor:"pointer",background:"#FAFBFC"}}>
-              <span style={{fontSize:12.5,fontWeight:700,color:T.text}}>
-                Ver los {items.length} pendientes
-              </span>
-              <span style={{marginLeft:"auto",color:T.muted,fontSize:16}}>›</span>
-            </div>
-          </div>
-        );
-      })()}
-
-
-      {/* ══ 3. TAREAS + PIPELINE + RESTO ══ */}
-      {/* Acciones urgentes */}
-      <div style={{marginBottom:4}}>
-        <HitosProyectoWidget usuario={usuario} onNav={onNav}/>
-        <TareasWidget onNav={onNav} usuario={usuario}/>
-      </div>
-
-      {/* KPI pipeline + proyectos */}
-      <div style={{display:"flex",gap:10,marginBottom:20}}>
-        <Card onClick={()=>onNav("oportunidades")} style={{flex:1,padding:"14px",cursor:"pointer",borderTop:`3px solid ${T.navy}`}}>
-          <p style={{margin:"0 0 2px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>💼 Pipeline</p>
-          <p style={{margin:"0 0 2px",fontSize:20,fontWeight:900,color:T.navy}}>{fmt(valPipeline)}€</p>
-          <p style={{margin:0,fontSize:11,color:T.muted}}>{opsActivas.length} ops activas</p>
-        </Card>
-        <Card onClick={()=>onNav("proyectos")} style={{flex:1,padding:"14px",cursor:"pointer",borderTop:`3px solid ${T.purple}`}}>
-          <p style={{margin:"0 0 2px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>📁 Proyectos</p>
-          <p style={{margin:"0 0 2px",fontSize:20,fontWeight:900,color:T.purple}}>{proyActivos.length}</p>
-          <p style={{margin:0,fontSize:11,color:T.muted}}>activos ahora</p>
-        </Card>
-      </div>
-
-      {/* Oportunidades en curso */}
-      <div style={{marginBottom:24}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-          <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>💼 Oportunidades en curso</p>
-          <button onClick={()=>onNav("oportunidades")} style={{background:"none",border:"none",cursor:"pointer",fontSize:12,color:T.blue,fontWeight:700}}>Ver todas →</button>
+        {/* ══ HITOS Y TAREAS ══ */}
+        <div style={{marginBottom:4}}>
+          <HitosProyectoWidget usuario={usuario} onNav={onNav}/>
+          <TareasWidget onNav={onNav} usuario={usuario}/>
         </div>
-        {opsActivas.slice(0,3).map(op=>{
-          const ec=ETAPA_COLOR[op.etapa]||T.muted;
-          const ei=ETAPA_ICON[op.etapa]||"📌";
-          const ag=USUARIOS.find(u=>u.id===op.agente);
-          return(
-            <Card key={op.id} onClick={()=>onNav("oportunidades")} style={{marginBottom:8,padding:"12px 16px",cursor:"pointer",borderLeft:`4px solid ${ec}`}}>
-              <div style={{display:"flex",alignItems:"center",gap:10}}>
-                <span style={{fontSize:20}}>{ei}</span>
-                <div style={{flex:1,minWidth:0}}>
-                  <p style={{margin:0,fontSize:13,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{op.cliente}</p>
-                  <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{ag?.nombre||""} · {op.prod}</p>
-                </div>
-                <div style={{textAlign:"right",flexShrink:0}}>
-                  <p style={{margin:0,fontSize:14,fontWeight:900,color:T.text}}>{fmt(op.valor)}€</p>
-                  <p style={{margin:0,fontSize:10,color:ec,fontWeight:700}}>{op.prob}%</p>
-                </div>
-              </div>
-            </Card>
-          );
-        })}
-      </div>
 
-      {/* Proyectos activos */}
-      <div style={{marginBottom:24}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-          <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>📁 Proyectos activos</p>
-          <button onClick={()=>onNav("proyectos")} style={{background:"none",border:"none",cursor:"pointer",fontSize:12,color:T.blue,fontWeight:700}}>Ver todos →</button>
-        </div>
-        {proyActivos.map(p=>{
-          const tc=TIPO_COLOR[p.tipo]||T.muted;
-          const ti=TIPO_ICON[p.tipo]||"📌";
-          const hitosV=(p.hitos||[]).filter(h=>h.nombre||h.titulo||h.descripcion);
-          const hechos=hitosV.filter(h=>h.hecho).length;
-          const pct=hitosV.length>0?Math.round(hechos/hitosV.length*100):0;
-          return(
-            <Card key={p.id} onClick={()=>onNav("proyectos")} style={{marginBottom:8,padding:"13px 16px",cursor:"pointer"}}>
-              <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:8}}>
-                <div style={{width:36,height:36,borderRadius:10,background:tc+"18",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{ti}</div>
-                <div style={{flex:1,minWidth:0}}>
-                  <p style={{margin:0,fontSize:13,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.nombre}</p>
-                  <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{hechos}/{hitosV.length} hitos · hasta {p.fin}</p>
-                </div>
-                <span style={{fontSize:13,fontWeight:900,color:pct===100?T.green:tc,flexShrink:0}}>{pct}%</span>
-              </div>
-              <div style={{height:4,borderRadius:99,background:T.border}}>
-                <div style={{height:"100%",width:`${pct}%`,background:pct===100?T.green:tc,borderRadius:99}}/>
-              </div>
-            </Card>
-          );
-        })}
-      </div>
-
-      {/* Estrategias activas */}
-      <div style={{marginBottom:24}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-          <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>🎯 Estrategias activas</p>
-          <button onClick={()=>onNav("estrategias")} style={{background:"none",border:"none",cursor:"pointer",fontSize:12,color:T.blue,fontWeight:700}}>Ver todas →</button>
-        </div>
-        {estActivas.length>0?estActivas.slice(0,5).map(e=>(
-          <Card key={e.id} onClick={()=>onNav("estrategias")} style={{marginBottom:8,padding:"13px 16px",cursor:"pointer"}}>
-            <p style={{margin:"0 0 3px",fontSize:13,fontWeight:700}}>{e.cliente||e.clienteNombre}</p>
-            <p style={{margin:"0 0 4px",fontSize:11,color:T.muted}}>{e.texto||e.estrategia||e.objetivo}</p>
-            <div style={{display:"flex",gap:6,alignItems:"center"}}>
-              <span style={{fontSize:10,fontWeight:700,color:e.estado==="aprobada"?T.blue:T.amber,
-                background:(e.estado==="aprobada"?T.blue:T.amber)+"15",padding:"2px 8px",borderRadius:6}}>
-                {e.estado==="aprobada"?"✅ Aprobada":"⏳ Pendiente aprobación"}
-              </span>
-              {e.agenteNombre&&<span style={{fontSize:10,color:T.muted}}>👤 {e.agenteNombre}</span>}
-            </div>
+        {/* ══ PIPELINE / PROYECTOS / ESTRATEGIAS ══ */}
+        <div style={{display:"flex",gap:10,marginBottom:14}}>
+          <Card onClick={()=>onNav("oportunidades")} style={{flex:1,padding:"14px",cursor:"pointer",borderTop:`3px solid ${T.navy}`}}>
+            <p style={{margin:"0 0 2px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>💼 Pipeline</p>
+            <p style={{margin:"0 0 2px",fontSize:20,fontWeight:900,color:T.navy}}>{fmt(valPipeline)}€</p>
+            <p style={{margin:0,fontSize:11,color:T.muted}}>{opsActivas.length} ops activas</p>
           </Card>
-        )):(
-          <p style={{fontSize:12,color:T.muted,textAlign:"center",padding:16}}>Sin estrategias activas</p>
-        )}
-      </div>
+          <Card onClick={()=>onNav("proyectos")} style={{flex:1,padding:"14px",cursor:"pointer",borderTop:`3px solid ${T.purple}`}}>
+            <p style={{margin:"0 0 2px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>📁 Proyectos</p>
+            <p style={{margin:"0 0 2px",fontSize:20,fontWeight:900,color:T.purple}}>{proyActivos.length}</p>
+            <p style={{margin:0,fontSize:11,color:T.muted}}>activos ahora</p>
+          </Card>
+          <Card onClick={()=>onNav("estrategias")} style={{flex:1,padding:"14px",cursor:"pointer",borderTop:`3px solid ${T.blue}`}}>
+            <p style={{margin:"0 0 2px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>🎯 Estrategias</p>
+            <p style={{margin:"0 0 2px",fontSize:20,fontWeight:900,color:T.blue}}>{estActivas.length}</p>
+            <p style={{margin:0,fontSize:11,color:estPendAprob?T.amber:T.muted}}>
+              {estPendAprob?`${estPendAprob} por aprobar`:"todas aprobadas"}
+            </p>
+          </Card>
+        </div>
 
+        {/* ══ VENDEDORES — cifras reales ══ */}
+        <p style={{margin:"0 0 10px",fontSize:10,fontWeight:700,color:"#64748B",
+          textTransform:"uppercase",letterSpacing:".12em"}}>
+          Vendedores · {ambitoNombre} · {periodo}
+        </p>
+        <div style={{background:"#fff",borderRadius:16,overflow:"hidden",marginBottom:22,
+          border:"1px solid #E2E8F0",boxShadow:"0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06)"}}>
+          {(()=>{
+            const lista=[...(agenteFiltro?agentesAmbito.filter(v=>v.nombre===agenteFiltro)
+                              :agentesAmbito.filter(v=>equipoFiltro==="todos"||String(v.equipo||"").toUpperCase().trim()===equipoFiltro))]
+              .sort((a,b)=>{
+                const va=periodo==="semana"?a.vSem:periodo==="mes"?a.vMes:a.vAnual;
+                const vb=periodo==="semana"?b.vSem:periodo==="mes"?b.vMes:b.vAnual;
+                return (vb||0)-(va||0);
+              });
+            if(!lista.length) return(
+              <p style={{margin:0,padding:"18px 16px",fontSize:12,color:T.muted,textAlign:"center"}}>
+                Sin vendedores en este ámbito.
+              </p>
+            );
+            return lista.map((v,i)=>(
+              <FilaVendedor key={v.id||v.nombre} v={v} ultimo={i===lista.length-1}/>
+            ));
+          })()}
+        </div>
+
+        {/* ══ OPORTUNIDADES EN CURSO ══ */}
+        <div style={{marginBottom:22}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>💼 Oportunidades en curso</p>
+            <button onClick={()=>onNav("oportunidades")} style={{background:"none",border:"none",
+              cursor:"pointer",fontSize:12,color:T.blue,fontWeight:700}}>Ver todas →</button>
+          </div>
+          {opsActivas.length===0
+            ? <p style={{fontSize:12,color:T.muted,textAlign:"center",padding:16}}>Sin oportunidades abiertas</p>
+            : [...opsActivas].sort((a,b)=>(Number(b.valor)||0)-(Number(a.valor)||0)).slice(0,4).map(op=>{
+                const et=op.etapa||op.estado||"prospecto";
+                const ec=ETAPA_COLOR_D[et]||T.muted;
+                const ei=ETAPA_ICON_D[et]||"📌";
+                const ag=USUARIOS.find(u=>u.id===(op.agenteId||op.agente));
+                return(
+                  <Card key={op.id||op._docId} onClick={()=>onNav("oportunidades")}
+                    style={{marginBottom:8,padding:"12px 16px",cursor:"pointer",borderLeft:`4px solid ${ec}`}}>
+                    <div style={{display:"flex",alignItems:"center",gap:10}}>
+                      <span style={{fontSize:20}}>{ei}</span>
+                      <div style={{flex:1,minWidth:0}}>
+                        <p style={{margin:0,fontSize:13,fontWeight:700,overflow:"hidden",
+                          textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{op.cliente||op.clienteNombre||"—"}</p>
+                        <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
+                          {(ag&&ag.nombre)||op.agenteNombre||""}{op.prod?" · "+op.prod:""}
+                        </p>
+                      </div>
+                      <div style={{textAlign:"right",flexShrink:0}}>
+                        <p style={{margin:0,fontSize:14,fontWeight:900,color:T.text}}>{fmt(Number(op.valor)||0)}€</p>
+                        {op.prob!=null&&<p style={{margin:0,fontSize:10,color:ec,fontWeight:700}}>{op.prob}%</p>}
+                      </div>
+                    </div>
+                  </Card>
+                );
+              })}
+        </div>
+
+        {/* ══ PROYECTOS ACTIVOS ══ */}
+        <div style={{marginBottom:22}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>📁 Proyectos activos</p>
+            <button onClick={()=>onNav("proyectos")} style={{background:"none",border:"none",
+              cursor:"pointer",fontSize:12,color:T.blue,fontWeight:700}}>Ver todos →</button>
+          </div>
+          {proyActivos.length===0
+            ? <p style={{fontSize:12,color:T.muted,textAlign:"center",padding:16}}>Sin proyectos activos</p>
+            : proyActivos.slice(0,5).map(p=>{
+                const tc=TIPO_COLOR_D[p.tipo]||T.muted;
+                const ti=TIPO_ICON_D[p.tipo]||"📌";
+                const hitosV=(p.hitos||[]).filter(h=>h.nombre||h.titulo||h.descripcion);
+                const hechos=hitosV.filter(h=>h.hecho).length;
+                const pc=hitosV.length>0?Math.round(hechos/hitosV.length*100):0;
+                return(
+                  <Card key={p.id||p._docId} onClick={()=>onNav("proyectos")} style={{marginBottom:8,padding:"13px 16px",cursor:"pointer"}}>
+                    <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:8}}>
+                      <div style={{width:36,height:36,borderRadius:10,background:tc+"18",display:"flex",
+                        alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{ti}</div>
+                      <div style={{flex:1,minWidth:0}}>
+                        <p style={{margin:0,fontSize:13,fontWeight:700,overflow:"hidden",
+                          textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.nombre}</p>
+                        <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
+                          {hechos}/{hitosV.length} hitos{p.fin?" · hasta "+p.fin:""}
+                        </p>
+                      </div>
+                      <span style={{fontSize:13,fontWeight:900,color:pc===100?T.green:tc,flexShrink:0}}>{pc}%</span>
+                    </div>
+                    <div style={{height:4,borderRadius:99,background:T.border}}>
+                      <div style={{height:"100%",width:`${pc}%`,background:pc===100?T.green:tc,borderRadius:99}}/>
+                    </div>
+                  </Card>
+                );
+              })}
+        </div>
+
+        {/* ══ ESTRATEGIAS ══ */}
+        <div style={{marginBottom:24}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>🎯 Estrategias activas</p>
+            <button onClick={()=>onNav("estrategias")} style={{background:"none",border:"none",
+              cursor:"pointer",fontSize:12,color:T.blue,fontWeight:700}}>Ver todas →</button>
+          </div>
+          {estActivas.length>0?estActivas.slice(0,5).map(e=>(
+            <Card key={e.id||e._docId} onClick={()=>onNav("estrategias")} style={{marginBottom:8,padding:"13px 16px",cursor:"pointer"}}>
+              <p style={{margin:"0 0 3px",fontSize:13,fontWeight:700}}>{e.cliente||e.clienteNombre}</p>
+              <p style={{margin:"0 0 4px",fontSize:11,color:T.muted}}>{e.texto||e.estrategia||e.objetivo}</p>
+              <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                <span style={{fontSize:10,fontWeight:700,color:e.estado==="aprobada"?T.blue:T.amber,
+                  background:(e.estado==="aprobada"?T.blue:T.amber)+"15",padding:"2px 8px",borderRadius:6}}>
+                  {e.estado==="aprobada"?"✅ Aprobada":"⏳ Pendiente aprobación"}
+                </span>
+                {e.agenteNombre&&<span style={{fontSize:10,color:T.muted}}>👤 {e.agenteNombre}</span>}
+              </div>
+            </Card>
+          )):(
+            <p style={{fontSize:12,color:T.muted,textAlign:"center",padding:16}}>Sin estrategias activas</p>
+          )}
+        </div>
+
+      </div>
     </div>
   );
 }
+
+const ETAPA_COLOR_D={prospecto:T.muted,propuesta:T.blue,negociacion:T.amber,cerrada_ganada:T.green,cerrada_perdida:T.red};
+const ETAPA_ICON_D={prospecto:"🔍",propuesta:"📄",negociacion:"🤝",cerrada_ganada:"✅",cerrada_perdida:"❌"};
+const TIPO_COLOR_D={lanzamiento:T.purple,campana:T.blue,recuperacion:T.amber,expansion:T.green,otro:T.muted};
+const TIPO_ICON_D={lanzamiento:"🚀",campana:"📣",recuperacion:"🔄",expansion:"📈",otro:"📌"};
+// Color por equipo: antes era `eq==="WIKUK"?verde:ámbar`, así que FRANCIA y
+// DISTRIBUIDOR salían del mismo color que INTERKEY.
+const COLOR_EQUIPO=(eq)=>({WIKUK:T.green,INTERKEY:T.amber,FRANCIA:T.blue,DISTRIBUIDOR:T.purple})[String(eq||"").toUpperCase()]||T.navy;
+
 
 const ESTADOS={
   prospecto:     {label:"🌱 Prospecto",    color:T.muted,  bg:"#F8FAFC"},
@@ -30599,278 +30682,10 @@ function App(props){
   const nav=esCompras?NAV_COMPRAS:esTipologia?NAV_TIPOLOGIA:esAgente?NAV_AGENTE:esJefe?NAV_JEFE:NAV_DIR;
 
   // Dashboard del jefe: solo su equipo
-  const DashJefe=()=>{
-    const agentesEquipo=USUARIOS.filter(u=>u.rol==="agente"&&u.equipo===miEquipo);
-    const n=agentesEquipo.length||1;
-    const semana=getSemanaISO();
-    // Leer datos del equipo desde AGENTES_DATA (poblado desde Firebase al arrancar)
-    const _delEq=AGENTES_DATA.filter(a=>a.equipo===miEquipo);
-    const vMesEq    =_delEq.reduce((s,a)=>s+(a.vMes   ||0),0);
-    const vMesObjEq =_delEq.reduce((s,a)=>s+(a.oMes   ||0),0);
-    const vAnualEq  =_delEq.reduce((s,a)=>s+(a.vAnual ||0),0);
-    const vAnualObjEq=_delEq.reduce((s,a)=>s+(a.oAnual||0),0);
-    // Margen promedio del equipo (ponderación simple)
-    const _mbs=_delEq.filter(a=>a.mb>0);
-    const mbMesEq    =_mbs.length?_mbs.reduce((s,a)=>s+a.mb,0)/_mbs.length:0;
-    const mbMesObjEq =_mbs.length?_mbs.reduce((s,a)=>s+a.oMb,0)/_mbs.length:0;
-    const mbAnualEq=mbMesEq, mbAnualObjEq=mbMesObjEq;
-    // Guard: si objetivo=0 devuelve 0% en vez de NaN% (evita 0/0)
-    const pctVM=vMesObjEq>0?Math.round(vMesEq/vMesObjEq*100):0;
-    const pctVA=vAnualObjEq>0?Math.round(vAnualEq/vAnualObjEq*100):0;
-    const pctMM=mbMesObjEq>0?Math.round(mbMesEq/mbMesObjEq*100):0;
-    const pctMA=mbAnualObjEq>0?Math.round(mbAnualEq/mbAnualObjEq*100):0;
-
-    const opsEq=(oportunidadesDB||OPORTUNIDADES_SEED).filter(o=>{
-      const ag=agentesEquipo.find(a=>a.id===o.agente||a.id===o.agenteId);
-      return ag&&!["ganada","perdida","cerrada_ganada","cerrada_perdida"].some(e=>o.etapa===e||o.estado===e);
-    });
-    const incEq=incidenciasDB.filter(i=>i.equipo===miEquipo&&i.estado==="abierta");
-    const estEq=estrategiasDB.filter(e=>e.estado==="aprobada"&&agentesEquipo.find(a=>a.id===e.agente));
-    const mEq=muestrasDB.filter(m=>agentesEquipo.find(a=>a.id===m.agente));
-    const proyEq=PROYECTOS_SEED.filter(p=>p.estado==="activo"&&agentesEquipo.find(a=>p.equipo&&p.equipo.includes(a.id)));
-
-    const Ring=({pct,size=52,stroke=5})=>{
-      const r=size/2-stroke;
-      const circ=2*Math.PI*r;
-      const fill=circ*(1-Math.min(pct,100)/100);
-      const c=pct>=100?"#22C55E":pct>=80?"#F59E0B":"#EF4444";
-      return(
-        <svg width={size} height={size} style={{flexShrink:0,transform:"rotate(-90deg)"}}>
-          <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#E2E8F0" strokeWidth={stroke}/>
-          <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={c} strokeWidth={stroke}
-            strokeDasharray={circ} strokeDashoffset={fill}
-            strokeLinecap="round" style={{transition:"stroke-dashoffset .8s ease"}}/>
-        </svg>
-      );
-    };
-
-    const MetricCard=({label,value,obj,pct,suffix="€",note})=>{
-      const c=pct>=100?"#22C55E":pct>=80?"#F59E0B":"#EF4444";
-      return(
-        <div style={{flex:1,background:"#fff",borderRadius:16,padding:"18px 16px",
-          border:"1px solid #E2E8F0",
-          boxShadow:"0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06)"}}>
-          <p style={{margin:"0 0 12px",fontSize:10,fontWeight:700,color:"#94A3B8",
-            textTransform:"uppercase",letterSpacing:".1em"}}>{label}</p>
-          <div style={{display:"flex",gap:12,alignItems:"center",marginBottom:14}}>
-            <div style={{position:"relative",flexShrink:0}}>
-              <Ring pct={pct}/>
-              <span style={{position:"absolute",top:"50%",left:"50%",
-                transform:"translate(-50%,-50%)",fontSize:10,fontWeight:800,color:c}}>{pct}%</span>
-            </div>
-            <div style={{flex:1}}>
-              <p style={{margin:0,fontSize:22,fontWeight:800,color:"#0F172A",
-                letterSpacing:"-0.03em",lineHeight:1}}>
-                {typeof value==="number"&&value>999?fmt(value):value}{suffix}
-              </p>
-              <p style={{margin:"3px 0 0",fontSize:11,color:"#94A3B8"}}>
-                obj. {typeof obj==="number"&&obj>999?fmt(obj):obj}{suffix}
-              </p>
-            </div>
-          </div>
-          <div style={{height:2,borderRadius:99,background:"#F1F5F9",overflow:"hidden"}}>
-            <div style={{height:"100%",width:`${Math.min(pct,100)}%`,borderRadius:99,
-              background:c,transition:"width .8s ease"}}/>
-          </div>
-          {note&&<p style={{margin:"8px 0 0",fontSize:10,color:"#94A3B8"}}>{note}</p>}
-        </div>
-      );
-    };
-
-    const MODS=[
-      {icon:"🎯",label:"Estrategias en curso",sub:`${n} comerciales`,count:estEq.length,nav:"estrategias",bg:"#EFF6FF",ic:"#3B82F6"},
-      {icon:"📁",label:"Proyectos activos",sub:proyEq.map(p=>p.nombre).join(", ")||"",count:proyEq.length,nav:"proyectos",bg:"#FFFBEB",ic:"#D97706"},
-      {icon:"💼",label:"Oportunidades abiertas",sub:`${fmt(opsEq.reduce((s,o)=>s+(o.valor||0),0))}€ pipeline`,count:opsEq.length,nav:"oportunidades",bg:"#F0F9FF",ic:"#0EA5E9"},
-      {icon:"🚨",label:"Incidencias abiertas",sub:"Pendientes de resolución",count:incEq.length,nav:"incidencias",bg:"#FFF1F2",ic:"#F43F5E",urgent:true},
-      {icon:"📦",label:"Muestras en curso",sub:`${mEq.length} muestra${mEq.length!==1?"s":""} activa${mEq.length!==1?"s":""}`,count:mEq.length,nav:"muestras",bg:"#F5F3FF",ic:"#7C3AED"},
-    ].filter(m=>m.count>0);
-
-    return(
-      <div style={{background:"#F1F5F9",minHeight:"100vh",paddingBottom:100}}>
-        <style>{`.pend-row2:hover{background:#F8FAFC!important}`}</style>
-
-        {/* Header */}
-        <div style={{background:"linear-gradient(135deg,#0F172A 0%,#1E293B 60%,#1E3A5F 100%)",
-          padding:"32px 20px 28px",position:"relative",overflow:"hidden"}}>
-          <div style={{position:"absolute",right:-40,top:-40,width:180,height:180,borderRadius:"50%",background:"rgba(255,255,255,.03)"}}/>
-          <div style={{position:"absolute",right:40,bottom:-60,width:120,height:120,borderRadius:"50%",background:"rgba(255,255,255,.04)"}}/>
-
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
-            <div>
-              <div style={{display:"flex",gap:6,marginBottom:10}}>
-                <span style={{background:"rgba(255,255,255,.1)",color:"rgba(255,255,255,.7)",
-                  fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:99,
-                  textTransform:"uppercase",letterSpacing:".08em"}}>{miEquipo}</span>
-                <span style={{background:"rgba(99,102,241,.3)",color:"#A5B4FC",
-                  fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:99}}>Sem. {semana}</span>
-                <span style={{background:"rgba(255,255,255,.08)",color:"rgba(255,255,255,.5)",
-                  fontSize:10,fontWeight:600,padding:"3px 10px",borderRadius:99}}>{n} comerciales</span>
-              </div>
-              <p style={{margin:0,fontSize:24,fontWeight:800,color:"#FFFFFF",
-                letterSpacing:"-0.03em",lineHeight:1.1}}>
-                {usuario.nombre.split(" ").slice(0,2).join(" ")}
-              </p>
-            </div>
-            <div style={{background:"rgba(255,255,255,.08)",backdropFilter:"blur(8px)",
-              border:"1px solid rgba(255,255,255,.12)",borderRadius:14,
-              padding:"12px 16px",textAlign:"center",flexShrink:0}}>
-              <p style={{margin:"0 0 2px",fontSize:9,fontWeight:700,color:"rgba(255,255,255,.5)",
-                textTransform:"uppercase",letterSpacing:".1em"}}>Equipo mes</p>
-              <p style={{margin:0,fontSize:28,fontWeight:900,lineHeight:1,
-                color:pctVM>=100?"#4ADE80":pctVM>=80?"#FCD34D":"#FB7185"}}>{pctVM}%</p>
-              <p style={{margin:"2px 0 0",fontSize:9,color:"rgba(255,255,255,.4)"}}>del objetivo</p>
-            </div>
-          </div>
-          <div>
-            <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
-              <span style={{fontSize:11,color:"rgba(255,255,255,.5)"}}>Ventas equipo mes</span>
-              <span style={{fontSize:11,color:"rgba(255,255,255,.7)",fontWeight:600}}>
-                {fmt(vMesEq)}€ / {fmt(vMesObjEq)}€
-              </span>
-            </div>
-            <div style={{height:4,borderRadius:99,background:"rgba(255,255,255,.12)",overflow:"hidden"}}>
-              <div style={{height:"100%",width:`${Math.min(pctVM,100)}%`,borderRadius:99,
-                background:pctVM>=100?"#4ADE80":pctVM>=80?"#FCD34D":"#FB7185",transition:"width .8s"}}/>
-            </div>
-          </div>
-        </div>
-
-        <div style={{padding:"20px 16px 0"}}>
-          {/* 1 · Este mes */}
-          <p style={{margin:"0 0 10px",fontSize:10,fontWeight:700,color:"#64748B",
-            textTransform:"uppercase",letterSpacing:".12em"}}>Este mes — equipo</p>
-          <div style={{display:"flex",gap:10,marginBottom:12}}>
-            <MetricCard label="Ventas" value={vMesEq} obj={vMesObjEq} pct={pctVM}/>
-            <MetricCard label="Margen bruto" value={mbMesEq} obj={mbMesObjEq} pct={pctMM} suffix="%"/>
-          </div>
-
-          {/* 1b · Promo + Liquidación + Σ — agregado del equipo (mes) */}
-          {(()=>{
-            const delEq=AGENTES_DATA.filter(a=>a.equipo===miEquipo);
-            const promoR=delEq.reduce((s,a)=>s+(a.promoMes||0),0);
-            const promoO=delEq.reduce((s,a)=>s+(a.oPromoMes||0),0);
-            const liqR  =delEq.reduce((s,a)=>s+(a.liqMes||0),0);
-            const liqO  =delEq.reduce((s,a)=>s+(a.oLiqMes||0),0);
-            const totalPL=promoR+liqR, totalPLObj=promoO+liqO;
-            const pctP=promoO>0?Math.round(promoR/promoO*100):0;
-            const pctL=liqO>0?Math.round(liqR/liqO*100):0;
-            const pctT=totalPLObj>0?Math.round(totalPL/totalPLObj*100):0;
-            return(
-              <div style={{display:"flex",gap:8,marginBottom:22}}>
-                {[
-                  {l:"🎯 Promoción",  v:`${fmt(promoR)}€`,  sub:`obj. ${fmt(promoO)}€`,    c:PL_COLOR(pctP)},
-                  {l:"📋 Liquidación",v:`${fmt(liqR)}€`,    sub:`obj. ${fmt(liqO)}€`,      c:PL_COLOR(pctL)},
-                  {l:"Σ Total",       v:`${fmt(totalPL)}€`, sub:`obj. ${fmt(totalPLObj)}€`,c:PL_COLOR(pctT)},
-                ].map(k=>(
-                  <div key={k.l} style={{flex:1,background:"#F8FAFC",borderRadius:10,
-                    padding:"10px 12px",border:"1px solid #E2E8F0"}}>
-                    <p style={{margin:"0 0 2px",fontSize:9,color:"#94A3B8",textTransform:"uppercase",fontWeight:700}}>{k.l}</p>
-                    <p style={{margin:0,fontSize:15,fontWeight:800,color:k.c}}>{k.v}</p>
-                    <p style={{margin:0,fontSize:9,color:"#94A3B8"}}>{k.sub}</p>
-                  </div>
-                ))}
-              </div>
-            );
-          })()}
-
-          {/* 2 · Año */}
-          <p style={{margin:"0 0 10px",fontSize:10,fontWeight:700,color:"#64748B",
-            textTransform:"uppercase",letterSpacing:".12em"}}>Acumulado año — equipo</p>
-          <div style={{display:"flex",gap:10,marginBottom:22}}>
-            <MetricCard label="Ventas" value={vAnualEq} obj={vAnualObjEq} pct={pctVA}
-              note={`Proy. ${fmt(Math.round(vAnualEq/semana*52))}€`}/>
-            <MetricCard label="Margen bruto" value={mbAnualEq} obj={mbAnualObjEq} pct={pctMA} suffix="%"
-              note={`${mbAnualEq>=mbAnualObjEq?"+":""}${(mbAnualEq-mbAnualObjEq).toFixed(1)}pp`}/>
-          </div>
-
-          {/* ── PANEL SEGUIMIENTO ACTIVO (v3.24.0) ── */}
-          <PanelSeguimiento usuario={usuario} oportunidadesDB={oportunidadesDB}
-            muestrasDB={muestrasDB} estrategiasDB={estrategiasDB}
-            incidenciasDB={incidenciasDB} onNav={setSection}/>
-
-          {/* 3 · Pendientes */}
-          {MODS.length>0&&(
-            <>
-              <p style={{margin:"0 0 10px",fontSize:10,fontWeight:700,color:"#64748B",
-                textTransform:"uppercase",letterSpacing:".12em"}}>Pendientes — equipo</p>
-              <div style={{background:"#fff",borderRadius:16,overflow:"hidden",
-                border:"1px solid #E2E8F0",
-                boxShadow:"0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06)",marginBottom:22}}>
-                {MODS.map((m,i)=>(
-                  <div key={m.nav} className="pend-row2" onClick={()=>setSection(m.nav)}
-                    style={{display:"flex",alignItems:"center",gap:14,padding:"14px 16px",
-                      borderBottom:i<MODS.length-1?"1px solid #F1F5F9":"none",
-                      cursor:"pointer",transition:"background .15s"}}>
-                    <div style={{width:38,height:38,borderRadius:11,background:m.bg,
-                      display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{m.icon}</div>
-                    <div style={{flex:1,minWidth:0}}>
-                      <p style={{margin:0,fontSize:13,fontWeight:600,color:"#0F172A"}}>{m.label}</p>
-                      {m.sub&&<p style={{margin:"2px 0 0",fontSize:11,color:"#94A3B8",
-                        overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{m.sub}</p>}
-                    </div>
-                    <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
-                      <span style={{fontSize:12,fontWeight:800,color:m.urgent?"#F43F5E":m.ic,
-                        background:m.bg,borderRadius:99,padding:"3px 10px"}}>{m.count}</span>
-                      <span style={{color:"#CBD5E1",fontSize:16}}>›</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-
-          {/* Equipo */}
-          <p style={{margin:"0 0 10px",fontSize:10,fontWeight:700,color:"#64748B",
-            textTransform:"uppercase",letterSpacing:".12em"}}>Equipo · {miEquipo}</p>
-          <div style={{background:"#fff",borderRadius:16,overflow:"hidden",
-            border:"1px solid #E2E8F0",
-            boxShadow:"0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06)"}}>
-            {agentesEquipo.map((a,i)=>{
-              const mA=muestrasDB.filter(m=>m.agente===a.id).length;
-              const pctA=85;
-              const cA=pctA>=100?"#22C55E":pctA>=80?"#F59E0B":"#EF4444";
-              return(
-                <div key={a.id} style={{display:"flex",gap:12,alignItems:"center",
-                  padding:"14px 16px",
-                  borderBottom:i<agentesEquipo.length-1?"1px solid #F1F5F9":"none"}}>
-                  {/* Avatar gradiente */}
-                  <div style={{width:40,height:40,borderRadius:12,flexShrink:0,
-                    background:"linear-gradient(135deg,#1E293B,#334155)",
-                    display:"flex",alignItems:"center",justifyContent:"center",
-                    fontSize:13,fontWeight:700,color:"#fff",letterSpacing:"-.01em"}}>
-                    {a.nombre.split(" ").map(w=>w[0]).slice(0,2).join("")}
-                  </div>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:5}}>
-                      <p style={{margin:0,fontSize:13,fontWeight:600,color:"#0F172A",
-                        overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.nombre}</p>
-                      {mA>0&&(
-                        <span style={{background:"#FFFBEB",color:"#D97706",fontSize:9,
-                          fontWeight:700,padding:"2px 7px",borderRadius:99,flexShrink:0}}>
-                          {mA} muestras
-                        </span>
-                      )}
-                    </div>
-                    <div style={{display:"flex",alignItems:"center",gap:8}}>
-                      <div style={{height:3,flex:1,borderRadius:99,background:"#F1F5F9",overflow:"hidden"}}>
-                        <div style={{height:"100%",width:`${pctA}%`,borderRadius:99,
-                          background:cA,transition:"width .8s"}}/>
-                      </div>
-                      <span style={{fontSize:10,fontWeight:700,color:cA,flexShrink:0}}>{pctA}%</span>
-                    </div>
-                  </div>
-                  <div style={{textAlign:"right",flexShrink:0}}>
-                    <p style={{margin:0,fontSize:13,fontWeight:700,color:"#0F172A"}}>24.5k€</p>
-                    <p style={{margin:"1px 0 0",fontSize:10,color:"#94A3B8"}}>ventas</p>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-    );
-  };
+  // (v4.54) DashJefe eliminado: el responsable usa ahora DashMando, el mismo
+  // panel que dirección pero acotado a su equipo. Antes eran dos pantallas con
+  // criterios distintos para contar lo mismo, y una de ellas pintaba las
+  // ventas por comercial con valores escritos a mano (85 % y 24,5k€).
 
 
 
@@ -31304,11 +31119,11 @@ function App(props){
         {esJefeOmas&&section==="muestras"&&  <MisMuestras usuario={usuario} clientesFB={misClientesFB} onAbrirCliente={onAbrirCliente} onIrASeccion={onIrASeccion}/>}
 
         {/* JEFE — dashboard filtrado a su equipo */}
-        {esJefe&&section==="dashboard"&&    <DashJefe key={"jefe"}/>}
+        {esJefe&&section==="dashboard"&&    <DashMando key="mando-jefe" usuario={usuario} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} muestrasDB={muestrasDB} incidenciasDB={incidenciasDB}/>}
         {esJefeOmas&&section==="clientes_eq"&& <GestorClientes usuario={usuario} actividad={actividadSemana} onActividad={onActividad} onBack={function(){setHideNav(false);setClienteDirecto(null);setSection(prevSectionRef.current||"dashboard");}} clientesFB={misClientesFB} muestrasDB={muestrasDB} oportunidadesDB={oportunidadesDB} incidenciasDB={incidenciasDB} estrategiasDB={estrategiasDB} ofertasDB={ofertasDB} clienteDirecto={clienteDirecto} onClienteDirectoUsado={()=>setClienteDirecto(null)} onNewIncidencia={function(inc){setIncidenciasDB(function(prev){return [inc].concat(prev);});}} onNewMuestra={function(m){setMuestrasDB(function(prev){return [m].concat(prev);});}} onNewEstrategia={function(e){setEstrategiasDB(function(prev){return [e].concat(prev);});}} onNewOferta={function(o){setOfertasDB(function(prev){return [o].concat(prev||[]);});}} onNavegar={setSection}/>}
 
         {/* DIRECTOR / CEO — dashboard global */}
-        {esDir&&section==="dashboard"&&     <DashDirector usuario={usuario} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} muestrasDB={muestrasDB} incidenciasDB={incidenciasDB}/>}
+        {esDir&&section==="dashboard"&&     <DashMando key="mando-dir" usuario={usuario} onNav={setSection} estrategiasDB={estrategiasDB} oportunidadesDB={oportunidadesDB} muestrasDB={muestrasDB} incidenciasDB={incidenciasDB} forzarGlobal={true}/>}
 
         {/* (v3.23.91) RESPONSABLE TIPOLOGÍA — dashboard de pendientes de su departamento */}
         {esTipologia&&section==="dashboard"&& <DashTipologia usuario={usuario} onNav={setSection} incidenciasDB={incidenciasDB}/>}
