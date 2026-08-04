@@ -104,6 +104,7 @@ const TOPE=10;
 const MINIMO_CLIENTES=5;
 
 const R={}; let ELEGIDA=null, PEND=[];
+const NOMBRES={};   // codigo → nombre, para precargar los formularios
 
 function val(f){
   if(!f) return null;
@@ -175,8 +176,10 @@ window.verArticulos=async (cli,destino)=>{
         <div style="text-align:right;flex-shrink:0">
           <span class="imp dn">${dif?eur(dif):""}</span>
           <div style="display:flex;gap:5px;margin-top:5px">
-            <button class="chip mini" onclick="pedir('${cli}','${cod}','oferta')">Oferta</button>
-            <button class="chip mini" onclick="pedir('${cli}','${cod}','estrategia')">Estrategia</button>
+            <button class="chip mini" onclick="pedir('${cli}','${cod}','oferta','${
+              String(a.descripcion||a.articulo||"").replace(/'/g,"")}','${NOMBRES[cli]||""}')">Oferta</button>
+            <button class="chip mini" onclick="pedir('${cli}','${cod}','estrategia','${
+              String(a.descripcion||a.articulo||"").replace(/'/g,"")}','${NOMBRES[cli]||""}')">Estrategia</button>
           </div>
         </div>
       </div>`;}).join("")}
@@ -184,13 +187,24 @@ window.verArticulos=async (cli,destino)=>{
         ${sube.map(a=>a.descripcion||a.articulo).join(", ")}</p>`:""}`;
   }catch(e){ d.innerHTML='<p class="sub" style="margin:8px 0 0">No se ha podido consultar.</p>'; }
 };
-window.pedir=(cli,art,tipo)=>{
-  // Se anota aqui y se crea al abrir la semana: asi no se generan documentos
-  // sueltos si el comercial cambia de idea antes de terminar.
-  const k=tipo+"Nueva:"+cli+"_"+art;
-  R[k]={accion:tipo==="oferta"?"Preparar oferta":"Pedir estrategia", articulo:art, cliente:cli};
-  alert(tipo==="oferta"?"Oferta anotada. Se crea al abrir la semana."
-    :"Estrategia anotada. Se crea al abrir la semana.");
+window.pedir=(cli,art,tipo,desc,nomCli)=>{
+  // El CRM ya sabe precargar sus formularios: se le deja el prefill en
+  // sessionStorage y se navega. Asi el comercial no reescribe lo que el
+  // sistema ya sabe.
+  const pre={ cliente:nomCli||"", clienteId:cli, clienteCodigo:cli,
+    producto:desc||art, calibre:"", 
+    objetivo: tipo==="oferta" ? "Oferta de "+(desc||art)
+      : "Recuperar "+(desc||art)+" en "+(nomCli||cli) };
+  try{
+    sessionStorage.setItem(tipo==="oferta"?"ofertaPrefill":"estrategiaPrefill",
+      JSON.stringify(pre));
+    sessionStorage.setItem("volverASeccion","plan_semanal");
+  }catch(e){}
+  // Se anota tambien en el plan, por si vuelve sin llegar a crearla
+  R[tipo+"Nueva:"+cli+"_"+art]={
+    accion: tipo==="oferta"?"Preparar oferta":"Pedir estrategia",
+    articulo:art, cliente:cli, texto:desc||"" };
+  location.href = "/crm.html?ir="+(tipo==="oferta"?"ofertas":"estrategias");
 };
 
 window.marcar=(k,v,el)=>{
@@ -354,6 +368,7 @@ function pintarAcciones(r){
           :`Hace ${uv} días que nadie le visita y va por debajo.`; }
       const vTxt = uv==null ? "sin visita registrada"
         : uv===0 ? "visitado hoy" : `última visita hace ${uv} días`;
+      NOMBRES[id]=String(c.nombre||id).replace(/'/g,"");
       cand.push({tipo:"cliente", id, nom:c.nombre||id,
         sub:(c.poblacion?c.poblacion+" · ":"")+vTxt,
         cifra:eur(v), rojo:cae||parado, motivo, peso,
@@ -365,6 +380,9 @@ function pintarAcciones(r){
     const viejas=(l,tipo,d0,cerrados,nom,opciones,prop,pide)=>{
       for(const o of l){
         if(!esMio(o)) continue;
+        // Las eliminadas no existen: se estaban mostrando igual porque solo
+        // se miraba el estado.
+        if(o.eliminada||o.eliminado||o.borrada) continue;
         const e=String(o.estado||"").toLowerCase();
         if(cerrados.includes(e)) continue;
         const d=dias(fecha(o.fecha||o.fechaCreacion));
@@ -375,9 +393,11 @@ function pintarAcciones(r){
         let prods=[];
         try{ const a = typeof o.productos==="string"?JSON.parse(o.productos):o.productos;
           if(Array.isArray(a)) prods=a; }catch(e){}
-        const desc = o.estrategia || o.titulo || o.descripcion
+        // El texto util es "objetivo"; producto y calibre van aparte.
+        const artic = [o.producto||o.articulo, o.calibre].filter(Boolean).join(" ");
+        const desc = o.objetivo || o.estrategia || o.titulo || o.descripcion
           || (prods.length?prods.map(x=>x.nombre||x.producto||x.descripcion).filter(Boolean).join(", "):"")
-          || o.producto || o.articulo || "";
+          || artic || "";
         // Precio: el ofrecido frente al de tarifa, que es lo que se negocia
         const pr = prods.find(x=>x&&(x.precioObjetivo||x.precioActual||x.precio));
         const precio = pr
@@ -386,9 +406,9 @@ function pintarAcciones(r){
             : `${pr.precioObjetivo||pr.precio||pr.precioActual} €`
           : (o.precio?o.precio+" €":"");
         cand.push({tipo, id:o._id, nom:o.clienteNombre||o.cliente||"(sin cliente)",
-          sub:`${nom}${desc?" · "+String(desc).slice(0,70):""}`,
+          sub:`${nom}${artic?" · "+artic:""}`,
           cifra:imp?eur(imp):d+" d", rojo:d>60,
-          motivo:`${desc?String(desc).slice(0,90):nom} · ${d} días sin respuesta`
+          motivo:`${desc?String(desc).slice(0,110):nom} · ${d} días sin respuesta`
             +`${precio?" · "+precio:""}`,
           // Una oferta de 8.000 € parada pesa como un cliente que cae 8.000
           peso: imp ? imp*0.5 : d*40,
