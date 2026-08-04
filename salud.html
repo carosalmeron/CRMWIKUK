@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Salud del sistema</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;700&family=Instrument+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{--papel:#F2F4F7;--tinta:#14181F;--tenue:#6B7684;--linea:#DCE1E7;
+        --ok:#0E7C5A;--mal:#C2263D;--med:#B07908}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--papel);color:var(--tinta);max-width:620px;
+    margin-inline:auto;padding:20px 14px 50px;
+    font:400 15px/1.5 "Instrument Sans",-apple-system,sans-serif}
+  h1{margin:0 0 3px;font-size:21px;font-weight:800;letter-spacing:-.02em}
+  .sub{margin:0 0 16px;font-size:13px;color:var(--tenue)}
+  .aviso{border-radius:5px;padding:14px;margin-bottom:16px;font-size:14px;line-height:1.5}
+  .aviso.bien{background:#EDF7F3;color:var(--ok)}
+  .aviso.mal{background:#FEF2F4;color:var(--mal);font-weight:600}
+  .f{background:#fff;border:1px solid var(--linea);border-radius:5px;
+    padding:13px 14px;margin-bottom:8px;display:flex;justify-content:space-between;
+    align-items:center;gap:12px}
+  .f b{font-size:15px} .f small{display:block;font-size:12px;color:var(--tenue);margin-top:2px}
+  .e{font-family:"IBM Plex Mono",monospace;font-size:12px;font-weight:700;
+    white-space:nowrap;text-align:right}
+  .e.ok{color:var(--ok)} .e.mal{color:var(--mal)} .e.med{color:var(--med)}
+  .estado{padding:34px 4px;color:var(--tenue)}
+</style></head><body>
+
+<h1>Salud del sistema</h1>
+<p class="sub">Cuándo corrió cada proceso por última vez.</p>
+<div id="app"><p class="estado">Leyendo…</p></div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+// Cada cuánto DEBE correr cada uno, en horas. Si pasa del doble, algo va mal.
+const ESPERADO={ full:12, resumen:12, pedidos:24, mesescliente:24,
+                 estacionalidad:24, maestro:24, cierre:168 };
+const NOMBRE={ full:"Ventas y clientes", resumen:"Resumen por comercial",
+  pedidos:"Pedidos planificados", mesescliente:"Desglose mensual",
+  estacionalidad:"Estacionalidad", maestro:"Maestro de clientes",
+  cierre:"Cierre semanal" };
+
+function val(f){
+  if(!f) return null;
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  return null;
+}
+(async()=>{
+  try{
+    const r=await fetch(`${FB}/pbi_latidos?pageSize=50`);
+    const j=r.ok?await r.json():{documents:[]};
+    const lat={};
+    for(const d of j.documents||[]){
+      const o={_id:d.name.split("/").pop()};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      lat[o._id]=o;
+    }
+    const ahora=Date.now();
+    const filas=Object.keys(ESPERADO).map(k=>{
+      const l=lat[k];
+      const horas = l&&l.cuando ? (ahora-new Date(l.cuando))/3600000 : null;
+      const tarde = horas===null || horas > ESPERADO[k]*2;
+      return {k, l, horas, tarde, conError:!!(l&&l.errores)};
+    });
+    const malos=filas.filter(f=>f.tarde||f.conError);
+    document.getElementById("app").innerHTML=`
+      ${malos.length
+        ? `<div class="aviso mal">${malos.length===1?"Hay 1 proceso":"Hay "+malos.length+" procesos"}
+             que necesita${malos.length===1?"":"n"} atención.</div>`
+        : `<div class="aviso bien">Todo al día. Ningún proceso se ha saltado su turno.</div>`}
+      ${filas.map(f=>{
+        const l=f.l;
+        const cuando = f.horas===null ? "nunca ha corrido"
+          : f.horas<1 ? "hace "+Math.round(f.horas*60)+" min"
+          : f.horas<48 ? "hace "+Math.round(f.horas)+" h"
+          : "hace "+Math.round(f.horas/24)+" días";
+        const cl = f.horas===null||f.tarde ? "mal" : f.conError ? "med" : "ok";
+        return `<div class="f">
+          <div><b>${NOMBRE[f.k]}</b>
+            <small>${cuando}${l&&l.segundos?" · "+l.segundos+" s":""}${
+              l&&l.errores?" · <b>"+l.errores+" errores</b>":""}</small>
+            ${l&&l.detalleErrores?`<small style="color:var(--mal)">${l.detalleErrores}</small>`:""}
+          </div>
+          <span class="e ${cl}">${f.horas===null?"SIN DATOS":f.tarde?"TARDE":f.conError?"CON ERRORES":"AL DÍA"}</span>
+        </div>`;
+      }).join("")}
+      <p class="sub" style="margin-top:16px">Se marca <b>TARDE</b> cuando pasa más
+        del doble de lo previsto sin correr. Los latidos se escriben solos en cada
+        ejecución.</p>`;
+  }catch(e){
+    document.getElementById("app").innerHTML=`<p class="estado">Error: ${e.message}</p>`;
+  }
+})();
+</script></body></html>
