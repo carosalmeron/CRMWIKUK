@@ -3455,6 +3455,20 @@ EVALUATE
       log.ventaEnHuerfanos = num(docs.filter((d) => d.huerfano)
         .reduce((t, d) => t + d.ventasAntFull, 0));
 
+      // Quienes son: 119.087 € repartidos en 266 codigos que el resumen suma
+      // por agente pero que no aparecen en la cartera de nadie. Sin verlos no
+      // se puede saber si son clientes nuevos sin ficha, de otra empresa, o
+      // codigos que el enriquecimiento no supo casar.
+      log.ejemplosHuerfanos = docs.filter((d) => d.huerfano && num(d.ventasAct) > 0)
+        .sort((a, b) => num(b.ventasAct) - num(a.ventasAct))
+        .slice(0, 15)
+        .map((d) => ({
+          codigo: d._id, nombre: d.nombre || "(sin nombre)",
+          ventas: Math.round(num(d.ventasAct)),
+          agente: d.agente || "(sin agente)",
+          vendedor: d.vendedor || null, empresa: d.empresa || null,
+        }));
+
       // ── Resumen por comercial, para el dashboard ──
       // Se cruza cada cliente con su grupoAgente segun el CRM, porque el
       // codigo de vendedor de Power BI ("1201") no coincide con los
@@ -3649,6 +3663,35 @@ EVALUATE
           .sort((a, b) => b.ventas2026 - a.ventas2026)
           .slice(0, 25)
           .map((h) => ({ ...h, ventas2026: num(h.ventas2026), ventas2025: num(h.ventas2025) }));
+        // Por diseño el resumen y la suma de clientes deben coincidir: los dos
+        // excluyen intercompany y fusionados y agrupan por el mismo agente. Si
+        // no cuadran, el hueco esta entre "universo" y los clientes escritos.
+        try{
+          const escritos = new Set(docs.map((d) => String(d._id)));
+          const fuera = [];
+          for (const d of universo) {
+            if (d.intercompany || d.fusionadoEn) continue;
+            if (num(d.ventasAct) <= 0) continue;
+            if (escritos.has(String(d.cliente))) continue;
+            fuera.push({ codigo: d.cliente, nombre: d.nombre || null,
+              agente: d.agente || null, ventas: Math.round(num(d.ventasAct)) });
+          }
+          log.enResumenPeroNoEnClientes = fuera.length;
+          log.ventaEnEsosClientes = Math.round(
+            fuera.reduce((t, x) => t + x.ventas, 0));
+          log.ejemplosDescuadre = fuera
+            .sort((a, b) => b.ventas - a.ventas).slice(0, 15);
+          // Y el descuadre por comercial, que es como se ve en las pantallas
+          const porAg = {};
+          for (const x of fuera) {
+            const a = x.agente || "SIN AGENTE";
+            porAg[a] = (porAg[a] || 0) + x.ventas;
+          }
+          log.descuadrePorAgente = Object.entries(porAg)
+            .sort((a, b) => b[1] - a[1]).slice(0, 10)
+            .map(([agente, ventas]) => ({ agente, ventas }));
+        }catch(e){ log.errores.push(`descuadre: ${e.message}`); }
+
         log.resumenAgentes = dry
           ? resumen
           : await fbCommit("pbi_resumen_agente", resumen);
