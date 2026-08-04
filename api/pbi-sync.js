@@ -3407,6 +3407,12 @@ EVALUATE
 
         for (const d of grupo) {
           if (d === principal) continue;
+          // Y tampoco si es el MISMO codigo en otro objeto: la tabla tiene una
+          // fila por sociedad, asi que el principal puede aparecer repetido. Sin
+          // esto se fusionaba consigo mismo, se ponia a cero y desaparecia del
+          // desglose por cliente aunque el resumen si lo contaba: era el caso de
+          // LORIENTE PIQUERAS, 81.527 € que no cuadraban en CARLOSG.
+          if (String(d.cliente) === String(principal.cliente)) continue;
           d.fusionadoEn = principal.cliente;   // el CRM puede redirigir aqui
           d.ventasAntFull = 0; d.margenAntFull = 0;
           d.ventasAntYTD = 0;  d.margenAntYTD = 0;
@@ -3442,6 +3448,9 @@ EVALUATE
       // graban en el propio cliente: lo demás solo tiene que leer "cuenta" y
       // "agenteFinal", sin volver a razonarlo.
       for (const d of docs) {
+        // Red de seguridad: fusionado en si mismo no es fusionado
+        if (d.fusionadoEn && String(d.fusionadoEn) === String(d._id || d.cliente))
+          delete d.fusionadoEn;
         d.cuenta = !d.intercompany && !d.fusionadoEn;
         d.agenteFinal = d.agente || "SIN AGENTE";
         // Los códigos fusionados no cuentan, pero conviene saber dónde fue su
