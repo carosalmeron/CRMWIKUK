@@ -4230,6 +4230,31 @@ EVALUATE
       }]);
     }
 
+    // Latido: queda constancia de cada ejecucion. Si un cron deja de correr
+    // nadie se entera hasta que alguien nota que los datos estan viejos, y
+    // para entonces lleva dias mal.
+    try {
+      if (!dry) {
+        const modo = req.query.full ? "full"
+          : req.query.resumen ? "resumen"
+          : req.query.solopedidos ? "pedidos"
+          : req.query.mesescliente ? "mesescliente"
+          : req.query.estacionalidad ? "estacionalidad"
+          : req.query.cierre ? "cierre"
+          : req.query.maestro ? "maestro" : "otro";
+        await fbCommit("pbi_latidos", [{
+          _id: modo,
+          modo,
+          cuando: new Date().toISOString(),
+          segundos: log.segundos,
+          errores: log.errores.length,
+          detalleErrores: log.errores.slice(0, 3).join(" | ") || null,
+          ventas: typeof log.ventas === "number" ? log.ventas : null,
+          clientes: log.clientesQueCuentan || null,
+        }]);
+      }
+    } catch (e) { /* el latido nunca debe romper la sincronizacion */ }
+
     return res.status(log.errores.length ? 207 : 200).json({ ok: true, ...log });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message, ...log });
