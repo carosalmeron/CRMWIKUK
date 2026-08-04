@@ -183,7 +183,8 @@ window.verArticulos=async (cli,destino)=>{
         const ant=num(a.ventasAnt), act=num(a.ventasAct), dif=num(a.diferencia);
         const cod=String(a.articulo||"").replace(/'/g,"");
         const base={cli, cod, desc:String(a.descripcion||a.articulo||""),
-                    nom:NOMBRES[cli]||""};
+                    nom:NOMBRES[cli]||"", perdido:Math.max(0,ant-act),
+                    pct:a.variacionPct||0};
         const iOf=ARTS.push(Object.assign({},base,{tipo:"oferta"}))-1;
         const iEs=ARTS.push(Object.assign({},base,{tipo:"estrategia"}))-1;
         return `<div class="art">
@@ -205,50 +206,36 @@ window.verArticulos=async (cli,destino)=>{
         ${sube.map(a=>a.descripcion||a.articulo).join(", ")}</p>`:""}`;
   }catch(e){ d.innerHTML='<p class="sub" style="margin:8px 0 0">No se ha podido consultar.</p>'; }
 };
-window.pedir=async (i)=>{
+window.pedir=(i)=>{
   const a=ARTS[i]; if(!a) return;
-  // Se crea aqui mismo. Navegar al CRM con un prefill a medias hacia que
-  // reventara al arrancar, y el comercial se quedaba sin la oferta y sin el
-  // plan a medio rellenar.
-  const el=event&&event.target; if(el){ el.disabled=true; el.textContent="…"; }
-  const ahora=new Date();
-  const id=(a.tipo==="oferta"?"of_":"e_")+Date.now();
-  const doc = a.tipo==="oferta" ? {
-    id, cliente:a.nom||a.cli, clienteId:a.cli,
-    producto:a.desc||a.cod, articulo:a.cod,
-    estado:"pendiente", agente:AGENTE, semana:SEMANA,
-    fecha:ahora.toLocaleDateString("es-ES"),
-    fechaCreacion:ahora.toISOString(),
-    origen:"apertura_semana",
-    objetivo:"Recuperar "+(a.desc||a.cod),
-  } : {
-    id, cliente:a.nom||a.cli, clienteId:a.cli,
-    producto:a.desc||a.cod, articulo:a.cod, calibre:"",
-    objetivo:"Recuperar "+(a.desc||a.cod)+" en "+(a.nom||a.cli),
-    texto:"", tipo:"recuperacion", origen:"apertura_semana",
-    estado:"en_curso", agente:AGENTE, semana:SEMANA,
-    fecha:ahora.toLocaleDateString("es-ES"),
-    fechaCreacion:ahora.toISOString(),
-  };
-  const f={};
-  for(const [k,v] of Object.entries(doc))
-    f[k]= typeof v==="number" ? {doubleValue:v} : {stringValue:String(v)};
+  // Se abre el formulario del CRM con TODOS los campos que espera. La vez
+  // anterior fallaba por dejarselo a medias: arts, perdida y pct faltaban y
+  // el CRM reventaba al arrancar.
   try{
-    const col=a.tipo==="oferta"?"ofertas":"estrategias";
-    const r=await fetch(`${FB}/${col}/${encodeURIComponent(id)}`,{
-      method:"PATCH",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({fields:f})});
-    if(!r.ok) throw new Error("HTTP "+r.status);
-    if(el){ el.textContent = a.tipo==="oferta" ? "Oferta creada ✓" : "Estrategia creada ✓";
-      el.classList.add("on"); }
-    R[a.tipo+"Nueva:"+a.cli+"_"+a.cod]={
-      accion:a.tipo==="oferta"?"Oferta creada":"Estrategia creada",
-      articulo:a.cod, cliente:a.cli, texto:a.desc||"" };
-  }catch(e){
-    if(el){ el.disabled=false;
-      el.textContent=a.tipo==="oferta"?"Oferta":"Estrategia"; }
-    alert("No se ha podido crear: "+e.message);
-  }
+    if(a.tipo==="oferta"){
+      sessionStorage.setItem("ofertaDesdeAnalisis", JSON.stringify({
+        cliente:a.cli, nombreCliente:a.nom||a.cli,
+        articulo:a.cod, descripcion:a.desc||"",
+        calibre:"", metros:"", precioBase:"",
+        solicitadoPor:AGENTE,
+      }));
+    } else {
+      sessionStorage.setItem("estrategia_recup_cliente", JSON.stringify({
+        nombre:a.nom||a.cli, codigo:a.cli, agente:AGENTE,
+        // arts con la forma que espera el CRM: {p, cal, v25}
+        arts:[{p:a.desc||a.cod, cal:"", v25:a.perdido||0}],
+        perdida:a.perdido||0, pct:a.pct||0,
+        cls: a.pct<=-30 ? "risk" : "down",
+        origen:"apertura", solicitud:false, solicitadoPor:AGENTE,
+        articulo:a.cod, articuloDesc:a.desc||"",
+      }));
+    }
+    sessionStorage.setItem("volverASeccion","plan_semanal");
+  }catch(e){}
+  // Se guarda el plan a medias para no perderlo al salir
+  try{ sessionStorage.setItem("aperturaBorrador",
+    JSON.stringify({semana:SEMANA, agente:AGENTE, ruta:ELEGIDA, R})); }catch(e){}
+  location.href="/crm.html";
 };
 
 window.marcar=(k,v,el)=>{
@@ -355,6 +342,15 @@ function pintarAcciones(r){
 }
 
 (async()=>{
+  // Si viene de crear una oferta en el CRM, se recupera lo que ya habia escrito
+  try{
+    const b=JSON.parse(sessionStorage.getItem("aperturaBorrador")||"null");
+    if(b && b.semana===SEMANA && b.agente===AGENTE){
+      Object.assign(R,b.R||{});
+      sessionStorage.removeItem("aperturaBorrador");
+      window.__ruta=b.ruta;
+    }
+  }catch(e){}
   const sal=document.getElementById("salir");
   if(VUELVE) sal.href=VUELVE; else sal.style.display="none";
   if(!AGENTE||!SEMANA){ document.getElementById("app").innerHTML=
