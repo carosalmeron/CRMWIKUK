@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Clientes sin ficha</title>
+<style>
+  body{margin:0;background:#EEF1F5;color:#0F1E33;max-width:700px;margin-inline:auto;
+    padding:20px 14px 50px;font:400 15px/1.5 -apple-system,BlinkMacSystemFont,sans-serif}
+  h1{margin:0 0 4px;font-size:21px;font-weight:800}
+  .sub{margin:0 0 14px;font-size:13px;color:#5C6B80}
+  .aviso{font-size:12.5px;color:#5C6B80;line-height:1.55;border-left:2px solid #CFD8E3;
+    padding-left:12px;margin:0 0 16px}
+  .aviso b{color:#0F1E33;font-weight:600}
+  .k{background:#fff;border:1px solid #CFD8E3;border-radius:3px;padding:13px;margin-bottom:10px}
+  .k b{font-size:23px;font-variant-numeric:tabular-nums;display:block}
+  .k span{font-size:12px;color:#5C6B80}
+  table{width:100%;border-collapse:collapse;font-size:13px;background:#fff}
+  th{text-align:left;font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+    color:#5C6B80;padding:8px;border-bottom:1px solid #CFD8E3}
+  td{padding:7px 8px;border-bottom:1px solid #EEF1F5}
+  td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  small{display:block;color:#5C6B80;font-size:11px}
+  .cp{width:100%;padding:11px;border:none;border-radius:3px;background:#0F1E33;
+    color:#fff;font:700 14px inherit;cursor:pointer;margin-bottom:14px}
+  .estado{padding:34px 4px;color:#5C6B80}
+</style></head><body>
+
+<h1>Clientes sin ficha</h1>
+<p class="sub">Códigos con venta o pedido que no están en el maestro del ERP.</p>
+
+<p class="aviso">
+  Tienen movimiento real pero <b>ningún nombre</b>, así que el CRM no puede
+  asignarlos a la cartera de nadie. Es la causa de que las ventas por comercial
+  no cuadren con el total.<br><br>
+  No se arregla desde aquí: hay que <b>darlos de alta en el maestro de clientes</b>.
+</p>
+
+<button class="cp" onclick="copiar()">Copiar la lista para sistemas</button>
+<div id="app"><p class="estado">Leyendo…</p></div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const N=(n)=>Number(n)||0;
+const EUR=(n)=>Math.round(n).toLocaleString("es-ES")+" €";
+let L=[];
+
+function val(f){
+  if(!f) return null;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  return null;
+}
+async function leer(col){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<40);
+  return t;
+}
+window.copiar=()=>{
+  const txt="CODIGO\tVENTAS 2026\tPEDIDOS\tAGENTE\n"+
+    L.map(c=>`${c.id}\t${Math.round(c.v)}\t${Math.round(c.ped)}\t${c.ag||""}`).join("\n");
+  navigator.clipboard.writeText(txt).then(()=>alert(L.length+" códigos copiados"));
+};
+(async()=>{
+  try{
+    const [cli,peds]=await Promise.all([leer("pbi_ventas_cliente"),leer("pbi_pedidos")]);
+    // Pedidos sin nombre: el codigo no esta en el maestro
+    const porPed={};
+    for(const p of peds){
+      if(p.nombre && p.nombre!==p.cliente) continue;
+      const c=p.cliente; if(!c) continue;
+      porPed[c]=porPed[c]||{ped:0,ag:p.agente||null};
+      porPed[c].ped+=N(p.importe);
+    }
+    const mapa={};
+    for(const c of cli){
+      if(!c.huerfano) continue;
+      mapa[c._id]={id:c._id, v:N(c.ventasAct), ped:0, ag:c.agente||null};
+    }
+    for(const [c,d] of Object.entries(porPed)){
+      if(mapa[c]) mapa[c].ped=d.ped;
+      else mapa[c]={id:c, v:0, ped:d.ped, ag:d.ag};
+    }
+    L=Object.values(mapa).filter(c=>c.v>0||c.ped>0)
+      .sort((a,b)=>(b.v+b.ped)-(a.v+a.ped));
+    const tv=L.reduce((s,c)=>s+c.v,0), tp=L.reduce((s,c)=>s+c.ped,0);
+    document.getElementById("app").innerHTML=`
+      <div class="k"><b>${L.length}</b><span>códigos sin ficha con movimiento</span></div>
+      <div class="k"><b>${EUR(tv)}</b><span>en ventas de 2026 que no llegan a ningún comercial</span></div>
+      ${tp?`<div class="k"><b>${EUR(tp)}</b><span>en pedidos planificados sin nombre</span></div>`:""}
+      <table><tr><th>Código</th><th>Ventas</th><th>Pedidos</th></tr>
+      ${L.slice(0,60).map(c=>`<tr>
+        <td>${c.id}<small>${c.ag||"sin agente"}</small></td>
+        <td class="n">${c.v?EUR(c.v):"—"}</td>
+        <td class="n">${c.ped?EUR(c.ped):"—"}</td></tr>`).join("")}
+      </table>
+      ${L.length>60?`<p class="sub" style="margin-top:10px">Y ${L.length-60} más.
+        El botón de arriba copia la lista completa.</p>`:""}`;
+  }catch(e){
+    document.getElementById("app").innerHTML=`<p class="estado">Error: ${e.message}</p>`;
+  }
+})();
+</script></body></html>
