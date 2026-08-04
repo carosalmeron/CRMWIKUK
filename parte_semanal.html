@@ -784,6 +784,65 @@ function desvHTML(pct, etqMenos, etqMas){
   </select>
 </div>`;
 
+    // ── (fix) Número de semana en curso, en entero ──────────────────────
+    // La plantilla usaba _nSem y COMPROMISOS, pero ninguno de los dos llegaba a
+    // existir: _nSem no se declaraba en ninguna parte y COMPROMISOS se calculaba
+    // dentro del IIFE de "Clasificación de comerciales", que va DESPUÉS en la
+    // misma plantilla y además tiene su propio ámbito. Al evaluar la sección
+    // "Lo prometido y lo cumplido" reventaba con "COMPROMISOS is not defined" y
+    // el catch de arriba dejaba el parte sin montar. Se declaran aquí, antes de
+    // la plantilla, que es donde los ve todo el documento.
+    // semanaHoy viene como "2026-W31"; los planes guardan la semana como número.
+    const _nSem=Number(String(fSemana||semanaHoy).split("-W")[1])||0;
+
+    // ── Prometido y cumplido ────────────────────────────────────────────
+    // No se declara: se cruza lo que dijo el lunes con las visitas, ofertas y
+    // pedidos registrados durante la semana.
+    const COMPROMISOS=(function(){
+      const out=[];
+      const semRef=_nSem;
+      for(const a of vivos){
+        const ag=arriba(a._id);
+        const pl=planes.find(p=>arriba(p.agente)===ag && Number(p.semana)===semRef);
+        if(!pl||!pl.acciones) continue;
+        let A={}; try{ A=JSON.parse(pl.acciones); }catch(e){ continue; }
+        const inf=informes.find(i=>arriba(i.agente)===ag && Number(i.semana)===semRef);
+        let RES={}; try{ RES=JSON.parse((inf||{}).respuestas||"{}"); }catch(e){}
+        const visSem=visitas.filter(v=>Number(v.semana)===semRef
+          && arriba(v.agente)===ag);
+        const det=[]; let hech=0, ped=0;
+        for(const [k,v] of Object.entries(A)){
+          if(!v||(!v.accion&&!v.texto)) continue;
+          if(k==="prioridad"||/Esta semana no/i.test(v.accion||"")) continue;
+          const [t,id]=k.split(/:(.+)/);
+          let ok=false, r="Sin rastro";
+          if(t==="cliente"){
+            const vv=visSem.filter(x=>arriba(x.clienteId)===arriba(id));
+            if(vv.length){ ok=true;
+              const cp=vv.some(x=>/pedido/i.test(x.resultado||""));
+              if(cp) ped++;
+              r=cp?"Visitado y con pedido"
+                :`${vv.length} contacto${vv.length>1?"s":""} registrado${vv.length>1?"s":""}`;
+            } else r="Sin rastro de contacto";
+          } else {
+            const o=[...ofertas,...muestras,...estrategias].find(x=>x._id===id);
+            if(!o){ ok=true; r="Ya no está abierta"; }
+            else { const e=String(o.estado||"").toLowerCase();
+              ok=/pedido|perdida|aceptada|rechazada|completada|ko|cerrada|positivo/.test(e);
+              if(/pedido|aceptada/.test(e)) ped++;
+              r=ok?`Cerrada como ${e}`:"Sigue igual que el lunes"; }
+          }
+          if(ok) hech++;
+          // La respuesta que dio en el cierre, si la dio
+          const rp=RES["promesa:"+k]||{};
+          det.push({c:v.cliente||id, a:v.accion||"", ok, r,
+            dijo:v.texto||"", contesto:rp.texto||rp.accion||""});
+        }
+        if(det.length) out.push({ag, eq:a.equipo||"", prom:det.length, hech, ped, det});
+      }
+      return out.sort((a,b)=>(b.hech/b.prom)-(a.hech/a.prom));
+    })();
+
     app.innerHTML=barra+`
 <header>
   ${window.parent!==window?"":'<a class="volver" href="index.html">← Volver al portal</a>'}
@@ -1191,53 +1250,6 @@ function desvHTML(pct, etqMenos, etqMas){
     // semana cerrada seleccionada, "mios" trae la foto congelada de esa semana
     // y CARLOSG salía con 562.312 € en vez de sus 643.839 € reales.
     const idsVistos=new Set(mios.map(a=>arriba(a._id)));
-    // ── Prometido y cumplido ────────────────────────────────────────────
-    // No se declara: se cruza lo que dijo el lunes con las visitas, ofertas y
-    // pedidos registrados durante la semana.
-    const COMPROMISOS=(function(){
-      const out=[];
-      const semRef=_nSem;
-      for(const a of vivos){
-        const ag=arriba(a._id);
-        const pl=planes.find(p=>arriba(p.agente)===ag && Number(p.semana)===semRef);
-        if(!pl||!pl.acciones) continue;
-        let A={}; try{ A=JSON.parse(pl.acciones); }catch(e){ continue; }
-        const inf=informes.find(i=>arriba(i.agente)===ag && Number(i.semana)===semRef);
-        let RES={}; try{ RES=JSON.parse((inf||{}).respuestas||"{}"); }catch(e){}
-        const visSem=visitas.filter(v=>Number(v.semana)===semRef
-          && arriba(v.agente)===ag);
-        const det=[]; let hech=0, ped=0;
-        for(const [k,v] of Object.entries(A)){
-          if(!v||(!v.accion&&!v.texto)) continue;
-          if(k==="prioridad"||/Esta semana no/i.test(v.accion||"")) continue;
-          const [t,id]=k.split(/:(.+)/);
-          let ok=false, r="Sin rastro";
-          if(t==="cliente"){
-            const vv=visSem.filter(x=>arriba(x.clienteId)===arriba(id));
-            if(vv.length){ ok=true;
-              const cp=vv.some(x=>/pedido/i.test(x.resultado||""));
-              if(cp) ped++;
-              r=cp?"Visitado y con pedido"
-                :`${vv.length} contacto${vv.length>1?"s":""} registrado${vv.length>1?"s":""}`;
-            } else r="Sin rastro de contacto";
-          } else {
-            const o=[...ofertas,...muestras,...estrategias].find(x=>x._id===id);
-            if(!o){ ok=true; r="Ya no está abierta"; }
-            else { const e=String(o.estado||"").toLowerCase();
-              ok=/pedido|perdida|aceptada|rechazada|completada|ko|cerrada|positivo/.test(e);
-              if(/pedido|aceptada/.test(e)) ped++;
-              r=ok?`Cerrada como ${e}`:"Sigue igual que el lunes"; }
-          }
-          if(ok) hech++;
-          // La respuesta que dio en el cierre, si la dio
-          const rp=RES["promesa:"+k]||{};
-          det.push({c:v.cliente||id, a:v.accion||"", ok, r,
-            dijo:v.texto||"", contesto:rp.texto||rp.accion||""});
-        }
-        if(det.length) out.push({ag, eq:a.equipo||"", prom:det.length, hech, ped, det});
-      }
-      return out.sort((a,b)=>(b.hech/b.prom)-(a.hech/a.prom));
-    })();
 
     const fs=calcular(vivos.filter(a=>idsVistos.has(arriba(a._id))));
     // Los rivales salen de TODOS los comerciales, no de los filtrados: si no,
