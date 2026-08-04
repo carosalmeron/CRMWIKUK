@@ -87,6 +87,31 @@ function val(f){
   if(f.booleanValue!==undefined) return f.booleanValue;
   return null;
 }
+// pbi_pedidos son LINEAS de pedido, decenas de miles. Leer la coleccion
+// entera se corta por paginacion, asi que se pregunta solo por las suyas.
+async function pedidosDe(ag){
+  const t=[]; let tok=null,v=0;
+  do{
+    const body={ structuredQuery:{
+      from:[{collectionId:"pbi_pedidos"}],
+      where:{fieldFilter:{field:{fieldPath:"agente"},op:"EQUAL",
+             value:{stringValue:ag}}},
+      limit:5000 }};
+    const r=await fetch(`${FB}:runQuery`,{method:"POST",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j){
+      if(!d.document) continue;
+      const o={_id:decodeURIComponent(d.document.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.document.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    break;                       // runQuery devuelve todo de una
+  }while(v++<3);
+  return t;
+}
+
 async function leer(col){
   const t=[]; let tok=null,v=0;
   do{
@@ -206,10 +231,10 @@ async function enviar(){
     '<p class="estado">Falta indicar el comercial: añade <b>?agente=CARLOSG</b> a la dirección.</p>';
     return; }
   try{
-    const [res,cli,mesesRaw,mu,of,es,estac,objs]=await Promise.all([
+    const [res,cli,mesesRaw,mu,of,es,estac,objs,peds]=await Promise.all([
       leer("pbi_resumen_agente"), leer("pbi_ventas_cliente"),
       leer("pbi_meses_cliente"), leer("muestras"), leer("ofertas"), leer("estrategias"),
-      leer("pbi_estacionalidad"), leer("pbi_objetivos"),
+      leer("pbi_estacionalidad"), leer("pbi_objetivos"), pedidosDe(AGENTE),
     ]);
     const yo=res.find(a=>ARR(a._id)===AGENTE);
     if(!yo){ document.getElementById("app").innerHTML=
@@ -304,12 +329,28 @@ async function enviar(){
       const anual=num(o.objAnual)||num(yo.ventasAntFull);
       mObj = anual * (num(e["peso_"+mNum]) || 1/12);
     }
+    const diaHoy=new Date().getDate();
     // Laborables que quedan del mes, para que el "te faltan" sea accionable
     let diasHabiles=0;
     for(let d=new Date().getDate(); d<=new Date(ANIO,mNum,0).getDate(); d++){
       const w=new Date(ANIO,mNum-1,d).getDay();
       if(w!==0&&w!==6) diasHabiles++;
     }
+    // Pedidos ya planificados: venta casi segura que aun no ha facturado.
+    // Sin esto, un mes recien empezado parece un desastre cuando en realidad
+    // ya hay medio objetivo comprometido.
+    const finMes=new Date(ANIO,mNum,0);
+    const misPed=peds;              // ya vienen filtradas por agente
+    let planif=0, planifMes=0;
+    const refs=new Set();
+    for(const x of misPed){
+      if(x.intercompany) continue;
+      const i=num(x.importe); if(!i) continue;
+      planif+=i;
+      const f=fecha(x.fecha);
+      if(f && f<=finMes){ planifMes+=i; refs.add(x.pedido||x._id); }
+    }
+    const nPed=refs.size;         // pedidos, no lineas
     const act=num(yo.ventasAct), ant=num(yo.ventasAntYTD);
     PENDIENTES.push("semana"); PENDIENTES.push("prioridad");
 
@@ -323,11 +364,24 @@ async function enviar(){
           <div><b>${eur(mAct)}</b><span>${MESES[mNum-1]} · vendido</span></div>
           <div><b class="${mObj&&mAct>=mObj?"up":"dn"}">${mObj?Math.round(mAct/mObj*100)+" %":"·"}</b>
             <span>de su objetivo${mObj?" · "+eur(mObj):""}</span></div>
-          <div><b class="${mAct>=mAnt?"up":"dn"}">${mAnt?(mAct>=mAnt?"+":"")+((mAct-mAnt)/mAnt*100).toFixed(0)+" %":"·"}</b>
-            <span>vs ${MESES[mNum-1]} de ${ANIO-1}</span></div>
+          <div><b class="${mAct>=mAnt?"up":"dn"}">${mAnt?eur(mAnt):"·"}</b>
+            <span>${MESES[mNum-1]} de ${ANIO-1}${mAnt?" · "+(mAct>=mAnt?"+":"")
+              +((mAct-mAnt)/mAnt*100).toFixed(0)+" %":""}</span></div>
         </div></div>
-        ${mObj&&mAct<mObj?`<p class="sub" style="margin:-4px 0 12px">
-          Te faltan <b>${eur(mObj-mAct)}</b> para el objetivo del mes.
+        ${planifMes?`<div class="dato" style="border-left-color:var(--ok)">
+          <div class="dg">
+            <div><b class="up">${eur(planifMes)}</b>
+              <span>ya planificado para ${MESES[mNum-1]} · ${nPed} pedidos</span></div>
+            <div><b>${eur(mAct+planifMes)}</b>
+              <span>vendido + planificado${mObj?" · "+Math.round((mAct+planifMes)/mObj*100)+" % del objetivo":""}</span></div>
+          </div></div>`:""}
+        ${diaHoy<=5?`<p class="sub" style="margin:-4px 0 12px">
+          <b>${MESES[mNum-1].charAt(0).toUpperCase()+MESES[mNum-1].slice(1)} acaba
+          de empezar</b>, así que estas cifras dicen poco todavía. Lo que cuenta
+          esta semana es el año y lo que tienes abierto.</p>`
+        : mObj&&mAct<mObj?`<p class="sub" style="margin:-4px 0 12px">
+          Te faltan <b>${eur(Math.max(0,mObj-mAct-planifMes))}</b> para el objetivo
+          del mes${planifMes?" contando lo ya planificado":""}.
           Quedan ${diasHabiles} días laborables.</p>`:""}
 
         <p class="rot" style="margin-top:4px">Y así va el año</p>
