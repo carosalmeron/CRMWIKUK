@@ -342,7 +342,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.54.0";
+const CRM_VERSION = "4.55.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -5029,6 +5029,17 @@ function PanelSeguimiento({usuario, oportunidadesDB, muestrasDB, estrategiasDB, 
   var miEquipo=usuario.equipo;
   var appMisIds=resolverMisIds(usuario);
 
+  // (v4.55) Vista de mando. Un responsable no necesita una cola de 700 fichas
+  // ordenada por antigüedad: lo más viejo es lo más muerto y le tapa lo que se
+  // ha estropeado esta semana. Para jefe/dirección se agrupa por comercial y se
+  // aparta el histórico. Los hooks van arriba del todo porque más abajo hay un
+  // return condicional ("Todo al día").
+  var esMando=["jefe","director","ceo","crm_director"].includes(String(usuario.rol||"").toLowerCase());
+  var _h1=React.useState(180); var cortHist=_h1[0], setCortHist=_h1[1];
+  var _h2=React.useState(null); var agAbierto=_h2[0], setAgAbierto=_h2[1];
+  var _h3=React.useState(false); var verTodosAg=_h3[0], setVerTodosAg=_h3[1];
+  var _h4=React.useState(false); var histAbierto=_h4[0], setHistAbierto=_h4[1];
+
   // Helpers de fecha
   function parseAnyDate(d){
     if(!d) return null;
@@ -5097,6 +5108,7 @@ function PanelSeguimiento({usuario, oportunidadesDB, muestrasDB, estrategiasDB, 
     return {tipo:"oportunidad",icon:"\uD83D\uDCBC",color:"#3B82F6",bg:"#EFF6FF",
       titulo:o.prod||o.cliente||"Oportunidad",sub:o.prod?o.cliente:"",
       dias:diasDesde(fechaRef),etapa:o.etapa||"",valor:o.valor||0,
+      agente:o.agenteId||o.agente||"",umbral:UMBRAL.oportunidad,
       nav:"oportunidades",id:o.id};
   });
 
@@ -5121,10 +5133,15 @@ function PanelSeguimiento({usuario, oportunidadesDB, muestrasDB, estrategiasDB, 
     var fechaRef=m.fecha||semanaAFecha(m.semana);
     return diasDesde(fechaRef)>=UMBRAL.muestra;
   }).map(function(m){
-    var fechaRef=m.fecha||semanaAFecha(m.semana);
+    // Una muestra en seguimiento largo que ya toca revisar cuenta los días
+    // desde SU fecha de revisión, no desde que se envió: si no, reaparecía
+    // con 400 días y se iba directa al histórico en la vista de mando.
+    var fechaRef=(m.estado==="seguimiento"&&m.revisarEl)
+      ? m.revisarEl : (m.fecha||semanaAFecha(m.semana));
     return {tipo:"muestra",icon:"\uD83D\uDCE6",color:"#7C3AED",bg:"#F5F3FF",
       titulo:m.prod||m.prodNombre||"Muestra",sub:m.cliente||m.clienteNombre||"",
-      dias:diasDesde(fechaRef),nav:"muestras",id:m.id};
+      dias:diasDesde(fechaRef),agente:m.agente||"",umbral:UMBRAL.muestra,
+      nav:"muestras",id:m.id};
   });
 
   // ── 3. Incidencias abiertas envejecidas ──
@@ -5139,9 +5156,14 @@ function PanelSeguimiento({usuario, oportunidadesDB, muestrasDB, estrategiasDB, 
                prio==="media"?UMBRAL.incidencia_media:UMBRAL.incidencia_baja;
     return diasDesde(inc.fecha)>=umbral;
   }).map(function(inc){
+    var _p=inc.prioridad||"media";
+    var _u=_p==="urgente"?UMBRAL.incidencia_urgente:
+           _p==="alta"?UMBRAL.incidencia_alta:
+           _p==="media"?UMBRAL.incidencia_media:UMBRAL.incidencia_baja;
     return {tipo:"incidencia",icon:"\uD83D\uDEA8",color:"#EF4444",bg:"#FEF2F2",
       titulo:inc.tipo?(inc.tipo.charAt(0).toUpperCase()+inc.tipo.slice(1)):"Incidencia",
       sub:inc.clienteNombre||"",dias:diasDesde(inc.fecha),
+      agente:inc.agente||inc.autor||"",umbral:_u,
       prioridad:inc.prioridad||"media",nav:"incidencias",id:inc.id};
   });
 
@@ -5161,7 +5183,8 @@ function PanelSeguimiento({usuario, oportunidadesDB, muestrasDB, estrategiasDB, 
     var fechaRef=e.fecha||semanaAFecha(e.semana);
     return {tipo:"estrategia",icon:"\uD83C\uDFAF",color:"#3B82F6",bg:"#EFF6FF",
       titulo:e.estrategia||(e.clienteNombre||"Estrategia"),sub:e.clienteNombre||e.cliente||"",
-      dias:diasDesde(fechaRef),nav:"estrategias",id:e.id};
+      dias:diasDesde(fechaRef),agente:e.agente||"",umbral:UMBRAL.estrategia,
+      nav:"estrategias",id:e.id};
   });
 
   // Combinar y ordenar
@@ -5177,6 +5200,219 @@ function PanelSeguimiento({usuario, oportunidadesDB, muestrasDB, estrategiasDB, 
         <div>
           <p style={{margin:0,fontSize:13,fontWeight:700,color:"#15803D"}}>Todo al día</p>
           <p style={{margin:"2px 0 0",fontSize:11,color:"#22C55E"}}>Sin elementos pendientes que requieran atención urgente</p>
+        </div>
+      </div>
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // (v4.55) VISTA DE MANDO — agrupada por comercial, con el histórico aparte
+  // ═══════════════════════════════════════════════════════════════════════
+  if(esMando){
+    // El corte separa lo gestionable de lo que ya es histórico sin depurar.
+    // Sin esto, muestras de hace 14 meses ocupaban las 6 filas visibles todos
+    // los días y el resto no se veía nunca.
+    var vivos=todos.filter(function(t){return t.dias<cortHist;});
+    var historico=todos.filter(function(t){return t.dias>=cortHist;});
+
+    // "Nuevo" = ha cruzado su umbral en los últimos 7 días. Es lo único sobre
+    // lo que un responsable puede actuar hoy, y es el criterio de orden:
+    // se prioriza por deterioro reciente, no por antigüedad acumulada.
+    function esNuevo(t){ return t.dias < (t.umbral||14)+7; }
+    var nuevos=vivos.filter(esNuevo).length;
+
+    function claveAg(x){ return String(x||"").toUpperCase().trim(); }
+    function fichaAg(clave){
+      var k=claveAg(clave);
+      if(!k) return null;
+      return USUARIOS.find(function(u){
+        return claveAg(u.id)===k||claveAg(u.grupoAgente)===k
+            ||claveAg(u.catalogoVendedor)===k||claveAg(u.nombre)===k;
+      })||null;
+    }
+
+    var porAg={};
+    vivos.forEach(function(t){
+      var f=fichaAg(t.agente);
+      var k=f?f.id:(claveAg(t.agente)||"_sin");
+      if(!porAg[k]) porAg[k]={id:k,nombre:f?f.nombre:(t.agente||"Sin asignar"),
+        equipo:f?(f.equipo||""):"",items:[],nuevos:0,masViejo:0};
+      porAg[k].items.push(t);
+      if(esNuevo(t)) porAg[k].nuevos++;
+      if(t.dias>porAg[k].masViejo) porAg[k].masViejo=t.dias;
+    });
+    var filas=Object.keys(porAg).map(function(k){return porAg[k];})
+      .sort(function(a,b){ return (b.nuevos-a.nuevos)||(b.items.length-a.items.length); });
+    var filasVis=verTodosAg?filas:filas.slice(0,6);
+
+    var TIPOS=[{k:"muestra",i:"\uD83D\uDCE6"},{k:"oportunidad",i:"\uD83D\uDCBC"},
+               {k:"incidencia",i:"\uD83D\uDEA8"},{k:"estrategia",i:"\uD83C\uDFAF"}];
+    var CORTES=[{d:90,l:"3 meses"},{d:180,l:"6 meses"},{d:365,l:"1 año"}];
+
+    return(
+      <div style={{marginBottom:16}}>
+        <div style={{background:"#fff",borderRadius:16,overflow:"hidden",
+          border:"1px solid "+(nuevos>0?"#FECACA":"#E2E8F0"),
+          boxShadow:"0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06)"}}>
+
+          {/* Cabecera */}
+          <div style={{padding:"14px 18px",background:nuevos>0?"#FEF2F2":"#F8FAFC",
+            borderBottom:"1px solid "+(nuevos>0?"#FECACA":"#E2E8F0")}}>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:20}}>{nuevos>0?"\u26A0\uFE0F":"\uD83D\uDC40"}</span>
+              <div style={{flex:1,minWidth:0}}>
+                <p style={{margin:0,fontSize:14,fontWeight:800,color:"#0F172A"}}>Seguimiento del equipo</p>
+                <p style={{margin:"2px 0 0",fontSize:11,color:"#64748B"}}>
+                  {vivos.length} en seguimiento · {filas.length} comercial{filas.length!==1?"es":""}
+                </p>
+              </div>
+              {nuevos>0&&(
+                <div style={{textAlign:"right",flexShrink:0}}>
+                  <p style={{margin:0,fontSize:20,fontWeight:900,color:"#DC2626",lineHeight:1}}>{nuevos}</p>
+                  <p style={{margin:0,fontSize:9.5,fontWeight:700,color:"#DC2626"}}>nuevos (7 días)</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Filas por comercial */}
+          {filasVis.length===0&&(
+            <p style={{margin:0,padding:"16px 18px",fontSize:12,color:"#94A3B8",textAlign:"center"}}>
+              Nada en seguimiento por debajo de {cortHist} días.
+            </p>
+          )}
+          {filasVis.map(function(f,i){
+            var abierto=agAbierto===f.id;
+            return(
+              <div key={f.id} style={{borderBottom:i<filasVis.length-1?"1px solid #F1F5F9":"none"}}>
+                <div onClick={function(){setAgAbierto(abierto?null:f.id);}}
+                  className="pend-row"
+                  style={{display:"flex",alignItems:"center",gap:12,padding:"12px 16px",cursor:"pointer"}}>
+                  <div style={{width:36,height:36,borderRadius:10,flexShrink:0,
+                    background:"linear-gradient(135deg,#1E293B,#334155)",display:"flex",
+                    alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#fff"}}>
+                    {String(f.nombre||"?").split(" ").map(function(w){return w[0];}).slice(0,2).join("")}
+                  </div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{display:"flex",alignItems:"center",gap:6}}>
+                      <p style={{margin:0,fontSize:12.5,fontWeight:700,color:"#0F172A",
+                        overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.nombre}</p>
+                      {f.equipo&&<span style={{background:"#F1F5F9",color:"#64748B",fontSize:9,
+                        fontWeight:700,padding:"1px 6px",borderRadius:99,flexShrink:0}}>{f.equipo}</span>}
+                    </div>
+                    <div style={{display:"flex",gap:7,marginTop:3,flexWrap:"wrap"}}>
+                      {TIPOS.map(function(tp){
+                        var n=f.items.filter(function(x){return x.tipo===tp.k;}).length;
+                        if(!n) return null;
+                        return <span key={tp.k} style={{fontSize:10,color:"#64748B",fontWeight:600}}>
+                          {tp.i} {n}
+                        </span>;
+                      })}
+                      <span style={{fontSize:10,color:"#94A3B8"}}>· más antiguo {f.masViejo} d</span>
+                    </div>
+                  </div>
+                  {f.nuevos>0&&(
+                    <span style={{background:"#FEE2E2",color:"#DC2626",fontSize:10,fontWeight:800,
+                      padding:"3px 9px",borderRadius:99,whiteSpace:"nowrap",flexShrink:0}}>
+                      +{f.nuevos} nuevos
+                    </span>
+                  )}
+                  <span style={{fontSize:13,fontWeight:800,color:"#334155",flexShrink:0,minWidth:22,
+                    textAlign:"right"}}>{f.items.length}</span>
+                  <span style={{color:"#CBD5E1",fontSize:15,flexShrink:0,
+                    transform:abierto?"rotate(90deg)":"none",display:"inline-block",
+                    transition:"transform .2s"}}>{"\u203A"}</span>
+                </div>
+
+                {/* Detalle del comercial: primero lo que acaba de cruzar el umbral */}
+                {abierto&&(
+                  <div style={{background:"#FAFBFC",padding:"4px 0 8px"}}>
+                    {f.items.slice().sort(function(a,b){
+                        return (esNuevo(b)?1:0)-(esNuevo(a)?1:0)||b.dias-a.dias;
+                      }).slice(0,6).map(function(item,j){
+                      return(
+                        <div key={item.id||("d"+j)} onClick={function(){onNav(item.nav);}}
+                          style={{display:"flex",alignItems:"center",gap:10,
+                            padding:"8px 16px 8px 60px",cursor:"pointer"}}>
+                          <span style={{fontSize:14,flexShrink:0}}>{item.icon}</span>
+                          <div style={{flex:1,minWidth:0}}>
+                            <p style={{margin:0,fontSize:11.5,fontWeight:600,color:"#0F172A",
+                              overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.titulo}</p>
+                            <p style={{margin:0,fontSize:10,color:"#94A3B8",
+                              overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.sub}</p>
+                          </div>
+                          <span style={{fontSize:10,fontWeight:700,flexShrink:0,
+                            color:esNuevo(item)?"#DC2626":"#94A3B8"}}>{item.dias} d</span>
+                        </div>
+                      );
+                    })}
+                    {f.items.length>6&&(
+                      <p style={{margin:"2px 0 0",padding:"0 16px 0 60px",fontSize:10,color:"#94A3B8"}}>
+                        +{f.items.length-6} más de {f.nombre}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {filas.length>6&&(
+            <div onClick={function(){setVerTodosAg(function(v){return !v;});}}
+              style={{padding:"9px 18px",background:"#FAFAFA",textAlign:"center",cursor:"pointer",
+                borderTop:"1px solid #F1F5F9"}}>
+              <p style={{margin:0,fontSize:11,fontWeight:700,color:"#64748B"}}>
+                {verTodosAg?"Ver solo los 6 primeros":"Ver los "+filas.length+" comerciales"}
+              </p>
+            </div>
+          )}
+
+          {/* Histórico sin depurar — fuera del contador principal */}
+          {historico.length>0&&(
+            <div style={{borderTop:"1px solid #E2E8F0",background:"#F8FAFC"}}>
+              <div onClick={function(){setHistAbierto(function(v){return !v;});}}
+                style={{padding:"11px 18px",display:"flex",alignItems:"center",gap:10,cursor:"pointer"}}>
+                <span style={{fontSize:15}}>{"\uD83D\uDDC4\uFE0F"}</span>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{margin:0,fontSize:12,fontWeight:700,color:"#475569"}}>
+                    {historico.length} sin depurar
+                  </p>
+                  <p style={{margin:0,fontSize:10,color:"#94A3B8"}}>
+                    Más de {cortHist} días. No cuentan arriba.
+                  </p>
+                </div>
+                <span style={{color:"#CBD5E1",fontSize:15,flexShrink:0,
+                  transform:histAbierto?"rotate(90deg)":"none",display:"inline-block",
+                  transition:"transform .2s"}}>{"\u203A"}</span>
+              </div>
+              {histAbierto&&(
+                <div style={{padding:"0 18px 12px"}}>
+                  <div style={{display:"flex",gap:6,marginBottom:10,alignItems:"center",flexWrap:"wrap"}}>
+                    <span style={{fontSize:10,color:"#94A3B8",fontWeight:700}}>Considerar histórico a partir de:</span>
+                    {CORTES.map(function(c){
+                      return <button key={c.d} onClick={function(ev){ev.stopPropagation();setCortHist(c.d);}}
+                        style={{padding:"3px 10px",borderRadius:99,fontSize:10,fontWeight:700,cursor:"pointer",
+                          border:"1.5px solid "+(cortHist===c.d?"#475569":"#E2E8F0"),
+                          background:cortHist===c.d?"#475569":"#fff",
+                          color:cortHist===c.d?"#fff":"#64748B"}}>{c.l}</button>;
+                    })}
+                  </div>
+                  {TIPOS.map(function(tp){
+                    var n=historico.filter(function(x){return x.tipo===tp.k;}).length;
+                    if(!n) return null;
+                    return(
+                      <div key={tp.k} onClick={function(){onNav(historico.find(function(x){return x.tipo===tp.k;}).nav);}}
+                        style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",cursor:"pointer"}}>
+                        <span style={{fontSize:13}}>{tp.i}</span>
+                        <span style={{flex:1,fontSize:11.5,color:"#475569",textTransform:"capitalize"}}>{tp.k}s</span>
+                        <span style={{fontSize:11.5,fontWeight:800,color:"#475569"}}>{n}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     );
