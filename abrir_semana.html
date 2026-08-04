@@ -196,8 +196,27 @@ function pintarClientes(r){
       </div>
       <div class="acc">${["Le visito","Le llamo","Le mando oferta","Esta semana no"]
         .map(x=>`<button class="chip${x===q.p?" prop":""}"
-          onclick="actuar('${k}','${x}',this)">${x}${x===q.p?" ·":""}</button>`).join("")}</div>
+          onclick="actuar('${k}','${x}',this)">${x}</button>`).join("")}</div>
+      <textarea placeholder="Cuándo y con qué argumento" oninput="nota('${k}',this)"></textarea>
     </div>`;
+  };
+
+  const pend=(l,tipo,tit,sub,opciones)=>{
+    if(!l.length) return "";
+    return `<p class="rot">${tit} · ${l.length}</p>
+      <p style="font-size:12px;color:var(--tenue);margin:-4px 0 10px">${sub}</p>
+      ${l.map(o=>{
+        const k=tipo+":"+o.id; PEND.push(k);
+        return `<div class="cli">
+          <div class="cc">
+            <div class="cn">${o.cli}<small>${o.tit||""}${o.tit?" · ":""}${o.d} días abierta</small></div>
+            <div class="cv ${o.d>60?"dn":""}">${o.imp?eur(o.imp):o.d+" d"}</div>
+          </div>
+          <div class="acc">${opciones.map(x=>
+            `<button class="chip" onclick="actuar('${k}','${x}',this)">${x}</button>`).join("")}</div>
+          <textarea placeholder="¿Qué vas a hacer?" oninput="nota('${k}',this)"></textarea>
+        </div>`;
+      }).join("")}`;
   };
 
   cont.innerHTML=`
@@ -208,21 +227,30 @@ function pintarClientes(r){
       ${deRuta.sort((a,b)=>b.riesgo-a.riesgo).map(c=>tarjeta(c,"ruta")).join("")}`:""}
 
     ${fuera.length?`<p class="rot">${r==="libre"
-        ? "A quién deberías ir esta semana"
-        : "Y esto no puede esperar, aunque no sea de tu ruta"}</p>
+        ? "Clientes en riesgo" : "Y esto no puede esperar"}</p>
       <p style="font-size:12px;color:var(--tenue);margin:-4px 0 10px">
-        ${r==="libre"
-          ? "Tus clientes con más en juego ahora mismo."
+        ${r==="libre" ? "Los que caen, los que han dejado de comprar y los que se enfrían."
           : "Solo lo muy urgente: el resto puede esperar a su semana."}</p>
       ${fuera.map(c=>tarjeta(c,"extra")).join("")}`:""}
 
-    ${!deRuta.length&&!fuera.length?`<p style="font-size:13px;color:var(--tenue);margin:0">
-      Nada urgente esta semana. Buen momento para prospección.</p>`:""}
+    ${pend(DATOS.of||[],"oferta","Ofertas sin respuesta",
+      "Llevan tiempo paradas y nadie ha vuelto sobre ellas.",
+      ["La reclamo","Bajo el precio","La doy por perdida","Esta semana no"])}
+
+    ${pend(DATOS.mu||[],"muestra","Muestras sin cerrar",
+      "Enviadas hace tiempo y sin resultado.",
+      ["Le llamo","Le visito","La doy por perdida","Esta semana no"])}
+
+    ${pend(DATOS.es||[],"estrategia","Estrategias abiertas",
+      "Proyectos que no avanzan.",
+      ["Doy un paso esta semana","La replanteo","La cierro","Esta semana no"])}
+
+    ${!deRuta.length&&!fuera.length&&!(DATOS.of||[]).length&&!(DATOS.mu||[]).length
+      ?`<p style="font-size:13px;color:var(--tenue);margin:0">
+        Nada urgente esta semana. Buen momento para prospección.</p>`:""}
 
     <p class="rot">Tu prioridad</p>
-    <textarea style="width:100%;border:1.5px solid var(--linea);border-radius:4px;
-      padding:10px 11px;font:400 14.5px/1.5 inherit;min-height:60px"
-      placeholder="Lo que de verdad quieres conseguir esta semana"
+    <textarea placeholder="Lo que de verdad quieres conseguir esta semana"
       oninput="nota('prioridad',this)"></textarea>`;
   PEND.push("prioridad");
   contar();
@@ -238,10 +266,11 @@ const R={};                      // sus respuestas
   if(!AGENTE||!SEMANA){ document.getElementById("app").innerHTML=
     '<p class="estado">Añade <b>?agente=RICARDO&semana=32</b> a la dirección.</p>'; return; }
   try{
-    const [cli,vis,mu,of,mesesRaw,perf,portal,usus,res,fichas]=await Promise.all([
+    const [cli,vis,mu,of,mesesRaw,perf,portal,usus,res,fichas,es]=await Promise.all([
       leer("pbi_ventas_cliente"), leer("visitas"), leer("muestras"), leer("ofertas"),
       leer("pbi_meses_cliente"), leer("pbi_perfiles"), leer("portal_users"),
       leer("usuarios"), leer("pbi_resumen_agente"), leer("clientes"),
+      leer("estrategias"),
     ]);
     const yo=res.find(a=>ARR(a._id)===AGENTE)||{};
 
@@ -326,12 +355,39 @@ const R={};                      // sus respuestas
       const a=num(c.ventasAntYTD); if(a) vs=(num(c.ventasAct)-a)/a*100;
       const uv=ultVis[id]?dias(ultVis[id]):null;
       const v=num(c.ventasAct);
-      const riesgo=(vs!=null&&vs<0?-vs*v/100:0) + (seco>=2?v*0.3:0)
-        + (uv==null||uv>90?v*0.1:0) + ((nOf[id]||0)*1500);
+      // Lo que de verdad esta en riesgo. Quien crece y factura bien NO entra
+      // aunque no tenga visita registrada: eso es un hueco de datos, no un
+      // problema comercial, y llenaba la lista de falsos positivos.
+      const cae   = vs!=null && vs<-10;
+      const parado= seco>=2;
+      const frio  = (uv==null||uv>120) && vs!=null && vs<0;
+      let riesgo=0;
+      if(cae)    riesgo += -vs*v/100;
+      if(parado) riesgo += v*0.4;
+      if(frio)   riesgo += v*0.15;
+      if(!cae&&!parado&&!frio) riesgo=0;   // sano: fuera de la lista
       if(v>0) todos.push({id, nom:c.nombre||id, pob:c.poblacion||"", v, vs, seco,
         caida:Math.max(0,a-v), ultVis:uv, mu:nMu[id]||0, of:nOf[id]||0, riesgo});
     }
-    DATOS={porRuta, todos};
+    // Lo que lleva demasiado tiempo abierto, con los mismos umbrales del cierre
+    const REG={oferta:{d:5,n:6}, muestra:{d:30,n:6}, estrategia:{d:15,n:5}};
+    const viejas=(lista,tipo,cerrados)=>{
+      const g=REG[tipo];
+      return lista.filter(o=>{
+        if(!esMio(o)) return false;
+        const e=String(o.estado||"").toLowerCase();
+        if(cerrados.includes(e)) return false;
+        const d=dias(fecha(o.fecha||o.fechaCreacion));
+        return d!=null && d>g.d;
+      }).map(o=>({id:o._id, cli:o.clienteNombre||o.cliente||"(sin cliente)",
+        d:dias(fecha(o.fecha||o.fechaCreacion)), imp:num(o.importe||o.total),
+        tit:o.titulo||o.producto||""}))
+       .sort((a,b)=> tipo==="oferta" ? b.imp-a.imp : b.d-a.d).slice(0,g.n);
+    };
+    DATOS={porRuta, todos,
+      of:viejas(of,"oferta",["pedido","perdida","aceptada","rechazada"]),
+      mu:viejas(mu,"muestra",["positivo","pedido","ko","negativo"]),
+      es:viejas(es,"estrategia",["completada","ko","cerrada"])};
 
     // Lo que prometió al cerrar la anterior
     const inf=await leerDoc(`informes/${AGENTE}_s${SEMANA-1}`)
