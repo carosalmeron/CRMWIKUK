@@ -3839,6 +3839,11 @@ EVALUATE
         // Se actualizan los datos que son del ERP y NO se toca lo que solo
         // sabe el comercial: SEMANAVISITA, contactos, telefonos y notas.
         if (req.query.maestro === "1" || req.query.maestro === "dry") {
+          // Con el tiempo justo se prefiere no empezar a escribir: mejor no
+          // hacerlo que dejarlo a medias.
+          if (margen() < 12 && req.query.maestro === "1") {
+            log.maestroCambios = `omitido, quedaban ${margen()} s`;
+          } else
           try {
             const soloVer = req.query.maestro === "dry";
             const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
@@ -3870,11 +3875,19 @@ EVALUATE
               if (!d.nombre || d.huerfano) continue;
               const a = actual.get(String(d._id));
               if (!a) continue;                     // alta nueva: no toca aqui
+              // Se compara sin espacios sobrantes: " ALICANTE" y "ALICANTE " no
+              // son un cambio real y reescribian 14 fichas cada dia.
+              const lim = (x) => String(x || "").replace(/\s+/g, " ").trim();
               const dif = {};
-              if (d.nombre    && a.nombre    !== d.nombre)    dif.NOMBRE = d.nombre;
-              if (d.poblacion && a.poblacion !== d.poblacion) dif.POBLACION = d.poblacion;
-              if (d.provincia && a.provincia !== d.provincia) dif.PROVINCIA = d.provincia;
-              if (d.codconta  && a.codconta  !== d.codconta)  dif.CODCONTA = d.codconta;
+              const poner = (campo, clave, valor) => {
+                const v = lim(valor);
+                if (!v || lim(a[clave]) === v) return;
+                dif[campo] = v;
+              };
+              poner("NOMBRE", "nombre", d.nombre);
+              poner("POBLACION", "poblacion", d.poblacion);
+              poner("PROVINCIA", "provincia", d.provincia);
+              poner("CODCONTA", "codconta", d.codconta);
               if (Object.keys(dif).length) cambios.push({ id: d._id, dif, antes: a });
             }
             log.maestroCambios = cambios.length;
