@@ -112,8 +112,15 @@ function fecha(v){
 }
 const dias=(d)=>d?Math.floor((Date.now()-d)/86400000):null;
 
+// Marcar "la doy por perdida" tiene que cerrarla de verdad: si la semana
+// siguiente vuelve a salir, el comercial deja de fiarse del formulario.
+const CIERRA={
+  "La doy por perdida":"perdida", "La cierro como perdida":"ko",
+  "La doy por cerrada":"completada",
+};
 window.marcar=(k,v,el)=>{
   R[k]=R[k]||{}; R[k].accion=v;
+  R[k].cierra = CIERRA[v] || null;
   [...el.parentNode.children].forEach(x=>x.classList.remove("on"));
   el.classList.add("on"); refrescar();
 };
@@ -148,6 +155,36 @@ async function enviar(){
   const f={};
   for(const [k,v] of Object.entries(doc))
     f[k]= typeof v==="number" ? {doubleValue:v} : {stringValue:String(v)};
+  // Primero se cierran los documentos marcados. Si algo falla se avisa y no
+  // se cierra la semana: mejor repetir que dar por cerrado lo que sigue abierto.
+  const cerrar=[];
+  for(const [k,v] of Object.entries(R)){
+    if(!v.cierra) continue;
+    const [col,id]=k.split(/:(.+)/);
+    if(!col||!id||col==="cliente") continue;
+    cerrar.push({col,id,estado:v.cierra});
+  }
+  let fallos=0;
+  for(const c of cerrar){
+    try{
+      const r=await fetch(`${FB}/${c.col}/${encodeURIComponent(c.id)}`
+        +`?updateMask.fieldPaths=estado&updateMask.fieldPaths=cerradoEn`
+        +`&updateMask.fieldPaths=cerradoPor`,{
+        method:"PATCH",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({fields:{
+          estado:{stringValue:c.estado},
+          cerradoEn:{stringValue:new Date().toISOString()},
+          cerradoPor:{stringValue:"cierre_semanal_s"+SEMANA}}})});
+      if(!r.ok) throw new Error("HTTP "+r.status);
+    }catch(e){ fallos++; }
+  }
+  if(fallos){
+    b.disabled=false; b.textContent="Reintentar";
+    alert(fallos+" no se han podido cerrar. No se ha cerrado la semana.");
+    return;
+  }
+  doc.cerrados = cerrar.length;
+
   try{
     const r=await fetch(`${FB}/informes/${encodeURIComponent(doc.id)}`,{
       method:"PATCH",headers:{"Content-Type":"application/json"},
@@ -155,7 +192,8 @@ async function enviar(){
     if(!r.ok) throw new Error("HTTP "+r.status);
     document.getElementById("app").innerHTML=
       `<div class="listo"><b>Semana ${SEMANA} cerrada</b>
-       Lo que has escrito queda guardado y se te preguntará por ello.</div>`;
+       ${cerrar.length?cerrar.length+" cerradas en el sistema. ":""}Lo que has
+       escrito queda guardado y se te preguntará por ello.</div>`;
     document.getElementById("pie").innerHTML="";
   }catch(e){
     b.disabled=false; b.textContent="Reintentar";
@@ -168,9 +206,10 @@ async function enviar(){
     '<p class="estado">Falta indicar el comercial: añade <b>?agente=CARLOSG</b> a la dirección.</p>';
     return; }
   try{
-    const [res,cli,mesesRaw,mu,of,es]=await Promise.all([
+    const [res,cli,mesesRaw,mu,of,es,estac,objs]=await Promise.all([
       leer("pbi_resumen_agente"), leer("pbi_ventas_cliente"),
       leer("pbi_meses_cliente"), leer("muestras"), leer("ofertas"), leer("estrategias"),
+      leer("pbi_estacionalidad"), leer("pbi_objetivos"),
     ]);
     const yo=res.find(a=>ARR(a._id)===AGENTE);
     if(!yo){ document.getElementById("app").innerHTML=
@@ -250,6 +289,27 @@ async function enviar(){
           para las próximas semanas.</p>`:""}`;
     };
 
+    // El mes es donde todavia se puede actuar; el año solo dice si vas bien.
+    const MESES=["enero","febrero","marzo","abril","mayo","junio","julio",
+                 "agosto","septiembre","octubre","noviembre","diciembre"];
+    const ANIO=new Date().getFullYear();
+    const mNum=new Date().getMonth()+1;
+    const e=estac.find(x=>ARR(x.agente||x._id)===AGENTE)||{};
+    const o=objs.find(x=>ARR(x._id)===AGENTE)||{};
+    const mAct=num(e["act_"+mNum]), mAnt=num(e["mes_"+mNum]);
+    // Objetivo del mes: el del Excel si lo hay; si no, se reparte el anual
+    // con el peso que tuvo ese mes el año pasado.
+    let mObj=num(o["mes_"+mNum]);
+    if(!mObj){
+      const anual=num(o.objAnual)||num(yo.ventasAntFull);
+      mObj = anual * (num(e["peso_"+mNum]) || 1/12);
+    }
+    // Laborables que quedan del mes, para que el "te faltan" sea accionable
+    let diasHabiles=0;
+    for(let d=new Date().getDate(); d<=new Date(ANIO,mNum,0).getDate(); d++){
+      const w=new Date(ANIO,mNum-1,d).getDay();
+      if(w!==0&&w!==6) diasHabiles++;
+    }
     const act=num(yo.ventasAct), ant=num(yo.ventasAntYTD);
     PENDIENTES.push("semana"); PENDIENTES.push("prioridad");
 
@@ -257,16 +317,28 @@ async function enviar(){
       `${yo.agente||AGENTE} · ${yo.equipo||""} · semana ${SEMANA}`;
     document.getElementById("app").innerHTML=`
       <div class="paso">
-        <p class="tit"><span class="num">1</span>Cómo va tu año</p>
+        <p class="tit"><span class="num">1</span>Cómo vas</p>
         <p class="sub">Sale del CRM. No hay que teclear nada.</p>
         <div class="dato"><div class="dg">
+          <div><b>${eur(mAct)}</b><span>${MESES[mNum-1]} · vendido</span></div>
+          <div><b class="${mObj&&mAct>=mObj?"up":"dn"}">${mObj?Math.round(mAct/mObj*100)+" %":"·"}</b>
+            <span>de su objetivo${mObj?" · "+eur(mObj):""}</span></div>
+          <div><b class="${mAct>=mAnt?"up":"dn"}">${mAnt?(mAct>=mAnt?"+":"")+((mAct-mAnt)/mAnt*100).toFixed(0)+" %":"·"}</b>
+            <span>vs ${MESES[mNum-1]} de ${ANIO-1}</span></div>
+        </div></div>
+        ${mObj&&mAct<mObj?`<p class="sub" style="margin:-4px 0 12px">
+          Te faltan <b>${eur(mObj-mAct)}</b> para el objetivo del mes.
+          Quedan ${diasHabiles} días laborables.</p>`:""}
+
+        <p class="rot" style="margin-top:4px">Y así va el año</p>
+        <div class="dato"><div class="dg">
           <div><b>${eur(act)}</b><span>vendido</span></div>
-          <div><b class="${act>=ant?"up":"dn"}">${ant?((act-ant)/ant*100).toFixed(1)+" %":"·"}</b>
-            <span>vs ${new Date().getFullYear()-1}</span></div>
+          <div><b class="${act>=ant?"up":"dn"}">${ant?(act>=ant?"+":"")+((act-ant)/ant*100).toFixed(1)+" %":"·"}</b>
+            <span>vs ${ANIO-1}</span></div>
           <div><b>${yo.margenPctAct?yo.margenPctAct.toFixed(1)+" %":"·"}</b>
             <span>margen · objetivo ${yo.objetivoMargen||"—"} %</span></div>
         </div></div>
-        <textarea placeholder="¿Qué explica cómo va el año? ¿Qué vas a hacer distinto?"
+        <textarea placeholder="¿Cómo vas a cerrar el mes? ¿Qué te está faltando?"
           oninput="texto('semana',this)"></textarea>
         <p class="obl">Obligatorio para cerrar</p>
       </div>
@@ -289,7 +361,9 @@ async function enviar(){
 
       <div class="paso">
         <p class="tit"><span class="num">3</span>Lo que se está enfriando</p>
-        <p class="sub">Cerrar o descartar, pero no dejar.</p>
+        <p class="sub">Cerrar o descartar, pero no dejar.
+          <b>Lo que marques como perdido o cerrado se cierra en el CRM</b>, así
+          que no volverá a salir la semana que viene.</p>
         ${bloque("Ofertas",vOf,"ofertas",["Insisto","La doy por perdida","Sigue viva"],
           "Si sigue viva, ¿qué falta para cerrarla?")}
         ${bloque("Estrategias",vEs,"estrategias",["Sigo con ella","La doy por cerrada","La replanteo"],"")}
