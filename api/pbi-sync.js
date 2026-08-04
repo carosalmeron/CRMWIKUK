@@ -3753,6 +3753,77 @@ EVALUATE
             .map(([agente, ventas]) => ({ agente, ventas }));
         }catch(e){ log.errores.push(`descuadre: ${e.message}`); }
 
+        // ── Maestro de clientes: Power BI manda ──────────────────────────
+        // El CRM arrastra fichas cargadas hace años; Power BI viene del ERP.
+        // Se actualizan los datos que son del ERP y NO se toca lo que solo
+        // sabe el comercial: SEMANAVISITA, contactos, telefonos y notas.
+        if (req.query.maestro === "1" || req.query.maestro === "dry") {
+          try {
+            const soloVer = req.query.maestro === "dry";
+            const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+            const key = ENV.FB_API_KEY ? `&key=${ENV.FB_API_KEY}` : "";
+            // Ficha actual del CRM, para comparar y no escribir de mas
+            const actual = new Map();
+            let tok = null, v = 0;
+            do {
+              const r = await fetch(`https://firestore.googleapis.com/v1/${base}/clientes`
+                + `?pageSize=300${tok ? `&pageToken=${tok}` : ""}${key}`);
+              if (!r.ok) break;
+              const j = await r.json();
+              for (const d of j.documents || []) {
+                const f = d.fields || {};
+                const g = (k) => f[k]?.stringValue ?? null;
+                const id = d.name.split("/").pop();
+                actual.set(String(id), {
+                  nombre: g("NOMBRE") || g("nombre"),
+                  poblacion: g("POBLACION") || g("poblacion"),
+                  provincia: g("PROVINCIA") || g("provincia"),
+                  codconta: g("CODCONTA") || g("codconta"),
+                });
+              }
+              tok = j.nextPageToken || null; v++;
+            } while (tok && v < 200);
+
+            const cambios = [];
+            for (const d of docs) {
+              if (!d.nombre || d.huerfano) continue;
+              const a = actual.get(String(d._id));
+              if (!a) continue;                     // alta nueva: no toca aqui
+              const dif = {};
+              if (d.nombre    && a.nombre    !== d.nombre)    dif.NOMBRE = d.nombre;
+              if (d.poblacion && a.poblacion !== d.poblacion) dif.POBLACION = d.poblacion;
+              if (d.provincia && a.provincia !== d.provincia) dif.PROVINCIA = d.provincia;
+              if (d.codconta  && a.codconta  !== d.codconta)  dif.CODCONTA = d.codconta;
+              if (Object.keys(dif).length) cambios.push({ id: d._id, dif, antes: a });
+            }
+            log.maestroCambios = cambios.length;
+            log.maestroEjemplos = cambios.slice(0, 12).map((c) => ({
+              codigo: c.id,
+              nombre: c.dif.NOMBRE ? `${c.antes.nombre || "(vacio)"} → ${c.dif.NOMBRE}` : undefined,
+              poblacion: c.dif.POBLACION ? `${c.antes.poblacion || "(vacio)"} → ${c.dif.POBLACION}` : undefined,
+            }));
+
+            if (!soloVer && !dry) {
+              let ok = 0;
+              for (const c of cambios) {
+                const campos = Object.entries(c.dif)
+                  .map(([k]) => `updateMask.fieldPaths=${k}`).join("&");
+                const fields = {};
+                for (const [k, val] of Object.entries(c.dif)) fields[k] = { stringValue: String(val) };
+                const r = await fetch(`https://firestore.googleapis.com/v1/${base}`
+                  + `/clientes/${encodeURIComponent(c.id)}?${campos}${key ? "&" + key.slice(1) : ""}`, {
+                  method: "PATCH", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ fields }),
+                });
+                if (r.ok) ok++;
+              }
+              log.maestroActualizados = ok;
+            } else {
+              log.maestroActualizados = "solo lectura · lanza con &maestro=1";
+            }
+          } catch (e) { log.errores.push(`maestro: ${e.message}`); }
+        }
+
         log.resumenAgentes = dry
           ? resumen
           : await fbCommit("pbi_resumen_agente", resumen);
