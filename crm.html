@@ -342,7 +342,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.55.0";
+const CRM_VERSION = "4.56.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -14241,6 +14241,40 @@ function PlanificacionCompras({usuario, clientesFB}){
 
   function toggleMes(k){ setMesAbierto(function(m){var n=Object.assign({},m); if(n[k]) delete n[k]; else n[k]=true; return n;}); }
 
+  // (v4.56) Ámbito. El módulo leía TODA la colección sin filtrar, y a la vez el
+  // responsable no tenía entrada de menú, así que en la práctica no veía nada.
+  // Ahora sí la tiene, y para que eso no signifique ver la planificación de
+  // toda la empresa, se acota: compras, resp. de stock y dirección ven todo;
+  // el responsable, su equipo; el comercial, lo suyo.
+  var _rolPC=String(usuario.rol||"").toLowerCase();
+  var _verTodoPC=["compras","director","ceo","crm_director","admin"].includes(_rolPC)
+    || String(usuario.tipologia||"").toLowerCase()==="stock";
+  var _esJefePC=!_verTodoPC&&(_rolPC==="jefe"||_rolPC==="crm_jefe");
+  var _miEqPC=String(usuario.equipo||"").toUpperCase().trim();
+
+  var _idsPC=React.useMemo(function(){
+    if(_verTodoPC) return null;
+    var set=new Set();
+    var add=function(x){ if(x) set.add(String(x).toUpperCase().trim()); };
+    if(_esJefePC){
+      USUARIOS.forEach(function(u){
+        if(String(u.equipo||"").toUpperCase().trim()!==_miEqPC) return;
+        add(u.id); add(u._docId); add(u.grupoAgente); add(u.catalogoVendedor); add(u.nombre);
+      });
+    }
+    resolverMisIds(usuario).forEach(function(x){ add(x); });
+    return set;
+  },[_verTodoPC,_esJefePC,_miEqPC,usuario.id]);
+
+  function _enAmbitoPC(p){
+    if(!_idsPC) return true;
+    // El responsable ve también lo marcado con su equipo aunque el agente no se
+    // pueda resolver (líneas antiguas sin agente canónico).
+    if(_esJefePC&&String(p.equipo||"").toUpperCase().trim()===_miEqPC) return true;
+    return _idsPC.has(String(p.agente||"").toUpperCase().trim())
+        || _idsPC.has(String(p.agenteNombre||"").toUpperCase().trim());
+  }
+
   React.useEffect(function(){
     fbLeer("planificacion").then(function(d){
       setPlanes((d||[]).filter(function(p){return !p.eliminado;}));
@@ -14291,10 +14325,11 @@ function PlanificacionCompras({usuario, clientesFB}){
     setPlanes(function(prev){return prev.map(function(p){return p.id===pid?Object.assign({},p,{estado:nuevoEstado}):p;});});
   }
 
-  var _activosBase=planes.filter(function(p){return p.estado!=="servido";});
+  var planesAmb=planes.filter(_enAmbitoPC);
+  var _activosBase=planesAmb.filter(function(p){return p.estado!=="servido";});
   // (v4.04) Filtro por tipologia de producto (tripa natural / deshidratado / especias / otros).
   var activos = filtroTipo==="todas" ? _activosBase : _activosBase.filter(function(p){return prodTipo(p.producto,p.codigoProducto)===filtroTipo;});
-  var servidos=planes.filter(function(p){return p.estado==="servido";});
+  var servidos=planesAmb.filter(function(p){return p.estado==="servido";});
   var hoy=new Date().toISOString().substring(0,10);
   var en7d=(function(){var d=new Date();d.setDate(d.getDate()+7);return d.toISOString().substring(0,10);})();
   var en14d=(function(){var d=new Date();d.setDate(d.getDate()+14);return d.toISOString().substring(0,10);})();
@@ -14576,18 +14611,9 @@ function PlanificacionCompras({usuario, clientesFB}){
           </p>
         </div>}
 
-    {/* ALERTAS urgentes */}
-    {totalUrgente>0&&<div style={{background:"#FEF2F2",borderRadius:12,padding:"12px 14px",marginBottom:14,border:"2px solid #FECACA"}}>
-      <p style={{margin:0,fontSize:14,fontWeight:800,color:"#DC2626"}}>🚨 {totalUrgente.toLocaleString("es-ES")} uds necesarias esta semana</p>
-      <div style={{marginTop:6}}>
-        {productos.filter(function(p){return p.urgente>0;}).map(function(p){
-          return <div key={p.producto} style={{display:"flex",justifyContent:"space-between",padding:"4px 0",fontSize:12}}>
-            <span style={{fontWeight:700,color:"#991B1B"}}>{prodCodNom(p.producto,p.codigoProducto).label}</span>
-            <span style={{fontWeight:800,color:"#DC2626"}}>{p.urgente.toLocaleString("es-ES")} uds</span>
-          </div>;
-        })}
-      </div>
-    </div>}
+    {/* (v4.56) Se retira el listado de urgentes de la cabecera: eran decenas de
+        filas antes de llegar a nada operativo. El total sigue en el KPI
+        "UDS URGENTES (≤7d)" y el detalle está en la lista de productos. */}
 
     {/* KPIs */}
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
@@ -30848,6 +30874,7 @@ function App(props){
     {id:"estrategias",  icon:"🎯",label:"Estrategias", color:T.green, badge:estEnCurso},
     {id:"oportunidades",icon:"💼",label:"Ops",         color:T.navy,  badge:opsAbiertas},
     {id:"ofertas",      icon:"💰",label:"Ofertas",     color:T.amber, badge:ofertasPendCount},
+    {id:"planif_compras",icon:"📋",label:"Planif.",     color:"#3B82F6"},
     {id:"incidencias",  icon:"🚨",label:"Incidencias", color:T.red,   badge:incAbiertas},
     {id:"reporting",    icon:"🧾",label:"Reporting",    color:T.navy},
     {id:"proyectos",    icon:"📁",label:"Proyectos",   color:T.purple},
