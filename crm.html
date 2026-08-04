@@ -5036,13 +5036,21 @@ function PanelSeguimiento({usuario, oportunidadesDB, muestrasDB, estrategiasDB, 
   // ── 2. Muestras pendientes de feedback ──
   var mDB=muestrasDB||[];
   var muestrasVencidas=mDB.filter(function(m){
-    if(m.estado!=="pendiente") return false;
+    // (v4.30) Estado silenciado:
+    //  · "seguimiento" → no alerta hasta que llega su fecha de revisión
     if(m.eliminada) return false;
+    var _tocaRevisar=false;
+    if(m.estado==="seguimiento"){
+      if(!m.revisarEl) return false;
+      if(new Date(m.revisarEl).getTime()>Date.now()) return false;
+      _tocaRevisar=true; // ha llegado la fecha → vuelve a alertar
+    } else if(m.estado!=="pendiente") return false;
     if(esAgente&&!esDelUsuario(m.agente,appMisIds)) return false;
     if(!esAgente&&usuario.rol==="jefe"){
       var ag=USUARIOS.find(function(u){return u.id===m.agente;});
       if(!ag||ag.equipo!==miEquipo) return false;
     }
+    if(_tocaRevisar) return true;
     var fechaRef=m.fecha||semanaAFecha(m.semana);
     return diasDesde(fechaRef)>=UMBRAL.muestra;
   }).map(function(m){
@@ -8860,6 +8868,8 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
   const [fb,setFb]=useState("positivo");
   const [nota,setNota]=useState("");
   const [motivo,setMotivo]=useState("");
+  // (v4.30) Fecha de próxima revisión para muestras en seguimiento largo
+  const [revisarEl,setRevisarEl]=useState("");
   const [comentario,setComentario]=useState("");
   const [filtro,setFiltro]=useState("pendiente");
   const [showInsights,setShowInsights]=useState(false); // (v3.92) vista de análisis OK/KO por producto
@@ -8944,6 +8954,9 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
     {k:"pedido",    icon:"🛒",label:"Ha pedido",          color:T.blue},
     {k:"proyecto",  icon:"🚀",label:"Enviar a Proyecto",  color:T.purple},
     {k:"ko",        icon:"❌",label:"No le gusta",        color:T.red},
+    // (v4.30) Estados "silenciados" — la muestra sigue viva pero deja de dar la lata
+    {k:"seguimiento",icon:"🕓",label:"En seguimiento largo", color:T.amber,
+     sub:"Sigue viva, pero no me avises hasta la fecha que yo diga"},
   ];
 
   const [proyForm,setProyForm]=useState({nombre:"",deptos:[],nota:""});
@@ -8997,7 +9010,14 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
     }
     const _histFb=(Array.isArray(sel.historialEstado)?sel.historialEstado.slice():[]);
     _histFb.push({estado:fb,fecha:new Date().toISOString(),por:usuario.nombre||"Comercial",fuente:"feedback"});
-    const updated={...sel,estado:fb,nota,motivo:motivo||"",fechaFeedback:new Date().toLocaleDateString("es-ES"),historialEstado:_histFb};
+    // (v4.30) Si es seguimiento largo, guardamos la fecha en la que debe volver a avisar.
+    // Si no se indica fecha, por defecto dentro de 60 días.
+    var _rev="";
+    if(fb==="seguimiento"){
+      if(revisarEl) _rev=revisarEl;
+      else { var _d=new Date(); _d.setDate(_d.getDate()+60); _rev=_d.toISOString().slice(0,10); }
+    }
+    const updated={...sel,estado:fb,nota,motivo:motivo||"",revisarEl:_rev,fechaFeedback:new Date().toLocaleDateString("es-ES"),historialEstado:_histFb};
     setMuestras(mm=>mm.map(m=>m.id===sel.id?updated:m));
     fbEscribir("muestras",sel.id,updated);
     // Notificar resultado positivo al jefe
@@ -9009,7 +9029,7 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
           destinatarioId:jefe.id,prioridad:"alta",creadoPor:usuario.id});
       }
     }
-    setSel(null); setNota(""); setMotivo("");
+    setSel(null); setNota(""); setMotivo(""); setRevisarEl("");
   };
 
   const visiblesPorAg=(filtroAgente==="todos"?muestras:muestras.filter(m=>(m.agente||"").toUpperCase()===filtroAgente.toUpperCase()))
@@ -9034,6 +9054,8 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
   const pend=visiblesPorAgGama.filter(m=>m.estado==="pendiente").length;
   const pos=visiblesPorAgGama.filter(m=>m.estado==="positivo"||m.estado==="pedido").length;
   const ko=visiblesPorAgGama.filter(m=>m.estado==="ko").length;
+  // (v4.30) Nuevos estados silenciados
+  const nSeg=visiblesPorAgGama.filter(m=>m.estado==="seguimiento").length;
 
   // Contar muestras por agente (para jefe/director)
   const muestrasPorAg=useMemo(()=>{
@@ -9164,6 +9186,7 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
       pedido:   {icon:"🛒",color:T.blue,  label:"Ha pedido"},
       ko:       {icon:"❌",color:T.red,   label:"No le gusta"},
       proyecto: {icon:"🚀",color:T.purple,label:"Enviado a proyecto"},
+      seguimiento:{icon:"🕓",color:T.amber,label:sel.revisarEl?("En seguimiento · revisar "+sel.revisarEl.split("-").reverse().join("/")):"En seguimiento largo"},
     }[sel.estado]||{icon:"⏳",color:T.muted,label:sel.estado};
     const fbObj=FEEDBACK.find(f=>f.k===fb);
     // (v3.22.37) Permisos: solo el creador, su jefe directo, director o CEO pueden editar/borrar
@@ -9595,7 +9618,10 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
                 background:fb===f.k?f.color+"12":"#fff",display:"flex",gap:14,alignItems:"center",
                 cursor:"pointer",marginBottom:10}}>
               <span style={{fontSize:28}}>{f.icon}</span>
-              <p style={{margin:0,fontSize:16,fontWeight:fb===f.k?800:500,color:fb===f.k?f.color:T.text}}>{f.label}</p>
+              <div style={{textAlign:"left",flex:1,minWidth:0}}>
+                <p style={{margin:0,fontSize:16,fontWeight:fb===f.k?800:500,color:fb===f.k?f.color:T.text}}>{f.label}</p>
+                {f.sub&&<p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{f.sub}</p>}
+              </div>
               {fb===f.k&&<span style={{marginLeft:"auto",color:f.color,fontSize:20}}>✓</span>}
             </button>
           ))}
@@ -9619,6 +9645,28 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
                 <option value="">— Seleccionar motivo —</option>
                 {MUESTRA_MOTIVO_OK.map(m=>(<option key={m} value={m}>{m}</option>))}
               </select>
+            </div>
+          )}
+
+          {/* (v4.30) Seguimiento largo → cuándo quiero que me vuelva a avisar */}
+          {fb==="seguimiento"&&(
+            <div style={{background:"#FFFBEB",borderRadius:12,padding:14,marginTop:10,
+              border:"1.5px solid "+T.amber}}>
+              <p style={{margin:"0 0 4px",fontSize:13,fontWeight:800,color:T.amber}}>🕓 Volver a avisarme el…</p>
+              <p style={{margin:"0 0 8px",fontSize:11,color:T.muted}}>
+                Hasta esa fecha la muestra desaparece de “Requiere tu atención”, pero sigue en tu listado.
+              </p>
+              <input type="date" value={revisarEl} onChange={e=>setRevisarEl(e.target.value)}
+                style={{width:"100%",padding:"10px 12px",borderRadius:9,border:"1.5px solid "+T.border,
+                  fontSize:13,outline:"none",boxSizing:"border-box",fontFamily:"inherit",marginBottom:8}}/>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                {[{d:30,l:"1 mes"},{d:90,l:"3 meses"},{d:180,l:"6 meses"},{d:365,l:"1 año"}].map(function(o){
+                  return <button key={o.d} onClick={function(){
+                    var x=new Date();x.setDate(x.getDate()+o.d);setRevisarEl(x.toISOString().slice(0,10));
+                  }} style={{padding:"5px 11px",borderRadius:99,fontSize:11,fontWeight:700,cursor:"pointer",
+                    border:"1.5px solid "+T.amber,background:"#fff",color:T.amber}}>+{o.l}</button>;
+                })}
+              </div>
             </div>
           )}
 
@@ -9653,7 +9701,10 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
               style={{width:"100%",border:`1.5px solid ${T.border}`,borderRadius:10,padding:"12px",fontSize:14,resize:"none",outline:"none",boxSizing:"border-box"}}/>
           </div>
           <Btn full color={fbObj?fbObj.color:T.purple} onClick={guardar} disabled={fb==="ko"&&!motivo}>
-            {fb==="proyecto"?"🚀 Crear proyecto y cerrar muestra":fb==="ko"&&!motivo?"Selecciona motivo de rechazo":"Guardar feedback"}
+            {fb==="proyecto"?"🚀 Crear proyecto y cerrar muestra"
+             :fb==="ko"&&!motivo?"Selecciona motivo de rechazo"
+             :fb==="seguimiento"?"🕓 Poner en seguimiento y silenciar"
+             :"Guardar feedback"}
           </Btn>
         </>)}
 
@@ -9661,7 +9712,7 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
         {!esPendiente&&(
           <div style={{marginTop:8}}>
             <Btn full outline color={T.amber} onClick={()=>{
-              const updated={...sel,estado:"pendiente",nota:"",fechaFeedback:""};
+              const updated={...sel,estado:"pendiente",nota:"",revisarEl:"",fechaFeedback:""};
               setMuestras(mm=>mm.map(m=>m.id===sel.id?updated:m));
               fbEscribir("muestras",sel.id,updated);
               setSel(updated);
@@ -10227,6 +10278,57 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
         ))}
       </div>
 
+      {/* (v4.30) Muestras en seguimiento largo + silenciado masivo */}
+      <div style={{display:"flex",gap:8,marginBottom:20,alignItems:"stretch",flexWrap:"wrap"}}>
+        <div onClick={()=>setFiltro(x=>x==="seguimiento"?"todas":"seguimiento")}
+          style={{flex:"1 1 130px",background:filtro==="seguimiento"?T.amber+"15":T.white,
+            border:`1.5px solid ${filtro==="seguimiento"?T.amber:T.border}`,
+            borderRadius:11,padding:"9px 10px",cursor:"pointer",textAlign:"center"}}>
+          <p style={{margin:0,fontSize:11,fontWeight:700,color:T.muted}}>🕓 En seguimiento</p>
+          <p style={{margin:"2px 0 0",fontSize:16,fontWeight:900,color:T.amber}}>{nSeg}</p>
+        </div>
+        <button onClick={function(){
+          var txt=prompt("Poner en SEGUIMIENTO LARGO todas las muestras pendientes con más de X días.\n\n¿A partir de cuántos días?","180");
+          if(txt===null) return;
+          var lim=parseInt(txt,10);
+          if(isNaN(lim)||lim<1){alert("Introduce un número de días válido.");return;}
+          var txt2=prompt("¿Dentro de cuántos días quieres que vuelvan a avisarte de ellas?","180");
+          if(txt2===null) return;
+          var espera=parseInt(txt2,10);
+          if(isNaN(espera)||espera<1){alert("Introduce un número de días válido.");return;}
+          function _diasM(m){
+            var f=m.fecha||null;
+            if(!f&&m.semana){var d=new Date(2026,0,1);d.setDate(d.getDate()+(parseInt(m.semana)-1)*7);f=d.toISOString();}
+            if(!f) return -1;
+            var pd=typeof f==="string"&&f.match(/^\d{4}-/)?new Date(f):
+              typeof f==="string"&&f.includes("/")?
+              (function(){var p=f.split("/");var yr=p[2]?+p[2]:2026;if(yr<100)yr+=2000;return new Date(yr,+p[1]-1,+p[0]);})():null;
+            if(!pd||isNaN(pd)) return -1;
+            return Math.floor((Date.now()-pd.getTime())/(1000*60*60*24));
+          }
+          var objetivo=muestras.filter(function(m){return m.estado==="pendiente"&&!m.eliminada&&_diasM(m)>=lim;});
+          if(objetivo.length===0){alert("No hay muestras pendientes con más de "+lim+" días.");return;}
+          var _r=new Date();_r.setDate(_r.getDate()+espera);
+          var revISO=_r.toISOString().slice(0,10);
+          var revES=revISO.split("-").reverse().join("/");
+          if(!confirm(objetivo.length+" muestra(s) pasarán a seguimiento largo.\n\nDejarán de aparecer en las alertas y volverán a avisarte el "+revES+".\n\n¿Continuar?")) return;
+          var hoy=new Date().toLocaleDateString("es-ES");
+          var ids=new Set(objetivo.map(function(m){return m.id;}));
+          setMuestras(function(prev){return prev.map(function(m){
+            if(!ids.has(m.id)) return m;
+            var h=(Array.isArray(m.historialEstado)?m.historialEstado.slice():[]);
+            h.push({estado:"seguimiento",fecha:new Date().toISOString(),por:usuario.nombre||"Comercial",fuente:"silenciado_masivo"});
+            var up=Object.assign({},m,{estado:"seguimiento",revisarEl:revISO,fechaFeedback:hoy,historialEstado:h});
+            fbEscribir("muestras",m.id,up);
+            return up;
+          });});
+          alert("✅ "+objetivo.length+" muestra(s) en seguimiento hasta el "+revES+".");
+        }} style={{flex:"1 1 150px",borderRadius:11,border:"1.5px dashed "+T.amber,
+          background:"#fff",color:T.amber,fontSize:12,fontWeight:700,cursor:"pointer",padding:"9px 10px"}}>
+          🕓 Silenciar antiguas
+        </button>
+      </div>
+
       {visibles.length===0?(
         <div style={{textAlign:"center",padding:32,color:T.muted}}>
           <span style={{fontSize:40,display:"block",marginBottom:8}}>📭</span>
@@ -10296,6 +10398,7 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
                 positivo: {icon:"✅",color:T.green, label:"Positivo", bg:T.greenL},
                 pedido:   {icon:"🛒",color:T.blue,  label:"Ha pedido",bg:T.blueL},
                 ko:       {icon:"❌",color:T.red,   label:"KO",       bg:T.redL},
+                seguimiento:{icon:"🕓",color:T.amber,label:"Seguimiento",bg:"#FFFBEB"},
               }[m.estado]||{icon:"⏳",color:T.muted,label:"",bg:T.bg};
               return(
                 <Card key={m.id} onClick={()=>{setSel(m);setComentario("");}}
@@ -21997,6 +22100,8 @@ function DashDirector({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasD
         });
         (muestrasDB||[]).forEach(m=>{
           if(m.estado==="cerrada"||m.resultado) return;
+          // (v4.30) Estado silenciado
+          if(m.estado==="seguimiento"&&(!m.revisarEl||new Date(m.revisarEl).getTime()>Date.now())) return;
           items.push({t:"Muestra sin respuesta", n:m.cliente||m.clienteNombre||"—",
             d:dias(m.fecha||m.enviada), dest:"muestras"});
         });
