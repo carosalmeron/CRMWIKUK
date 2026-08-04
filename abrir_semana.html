@@ -105,6 +105,9 @@ const MINIMO_CLIENTES=5;
 
 const R={}; let ELEGIDA=null, PEND=[];
 const NOMBRES={};   // codigo → nombre, para precargar los formularios
+// Los textos NO viajan por el atributo onclick: una comilla o un parentesis en
+// la descripcion rompe el HTML y el navegador solo dice "Script error".
+const ARTS=[];
 
 function val(f){
   if(!f) return null;
@@ -176,10 +179,12 @@ window.verArticulos=async (cli,destino)=>{
         <div style="text-align:right;flex-shrink:0">
           <span class="imp dn">${dif?eur(dif):""}</span>
           <div style="display:flex;gap:5px;margin-top:5px">
-            <button class="chip mini" onclick="pedir('${cli}','${cod}','oferta','${
-              String(a.descripcion||a.articulo||"").replace(/'/g,"")}','${NOMBRES[cli]||""}')">Oferta</button>
-            <button class="chip mini" onclick="pedir('${cli}','${cod}','estrategia','${
-              String(a.descripcion||a.articulo||"").replace(/'/g,"")}','${NOMBRES[cli]||""}')">Estrategia</button>
+            <button class="chip mini" onclick="pedir(${ARTS.push({cli,cod,
+              desc:String(a.descripcion||a.articulo||""),nom:NOMBRES[cli]||"",
+              tipo:"oferta"})-1})">Oferta</button>
+            <button class="chip mini" onclick="pedir(${ARTS.push({cli,cod,
+              desc:String(a.descripcion||a.articulo||""),nom:NOMBRES[cli]||"",
+              tipo:"estrategia"})-1})">Estrategia</button>
           </div>
         </div>
       </div>`;}).join("")}
@@ -187,7 +192,9 @@ window.verArticulos=async (cli,destino)=>{
         ${sube.map(a=>a.descripcion||a.articulo).join(", ")}</p>`:""}`;
   }catch(e){ d.innerHTML='<p class="sub" style="margin:8px 0 0">No se ha podido consultar.</p>'; }
 };
-window.pedir=(cli,art,tipo,desc,nomCli)=>{
+window.pedir=(i)=>{
+  const a=ARTS[i]; if(!a) return;
+  const cli=a.cli, art=a.cod, tipo=a.tipo, desc=a.desc, nomCli=a.nom;
   // El CRM ya sabe precargar sus formularios: se le deja el prefill en
   // sessionStorage y se navega. Asi el comercial no reescribe lo que el
   // sistema ya sabe.
@@ -248,49 +255,63 @@ window.volver=()=>{
 function pintarAcciones(r){
   PEND=[];
   const deRuta=new Set((DATOS.porRuta[r]||[]).map(c=>c.id));
-  // Todo junto en una sola lista: lo urgente es urgente venga de donde venga.
-  // Si toca ruta, lo suyo pesa mas porque ya va a estar por allí.
   const conPeso=DATOS.cand.map(x=>Object.assign({},x,{
     peso: x.tipo==="cliente" && deRuta.has(x.id) ? x.peso*2.5 : x.peso,
     enRuta: x.tipo==="cliente" && deRuta.has(x.id),
   })).sort((a,b)=>b.peso-a.peso);
 
-  // Primero se reservan las plazas de clientes que bajan; el resto se reparte
-  // por peso entre todo lo demas.
+  // Se reservan MINIMO_CLIENTES plazas para clientes que bajan; el resto se
+  // reparte por peso entre todo lo demas.
   const clientes=conPeso.filter(x=>x.tipo==="cliente");
   const resto   =conPeso.filter(x=>x.tipo!=="cliente");
   const fijos   =clientes.slice(0,MINIMO_CLIENTES);
   const libres  =[...clientes.slice(MINIMO_CLIENTES),...resto]
                    .sort((a,b)=>b.peso-a.peso)
                    .slice(0,Math.max(0,TOPE-fijos.length));
-  const bolsa=[...fijos,...libres].sort((a,b)=>b.peso-a.peso);
+  const bolsa=[...fijos,...libres];
 
   const cont=document.getElementById("acciones");
   if(!bolsa.length){ cont.innerHTML=
     '<p class="sub" style="margin:0">Nada urgente. Buena semana para prospección.</p>';
     PEND.push("prioridad"); refrescar(); return; }
 
-  cont.innerHTML = bolsa.map((x,i)=>{
-    const k=x.tipo+":"+x.id; PEND.push(k);
-    return `<div class="item" style="display:block;padding:13px 0">
-      <div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline">
-        <div style="min-width:0">
-          <b style="font-size:14.5px">${i+1}. ${x.nom}</b>
-          ${x.enRuta?'<span class="tag">de tu ruta</span>':""}
-          <small>${x.sub}</small>
-        </div>
-        <span class="imp ${x.rojo?"dn":"pd"}">${x.cifra}</span>
-      </div>
-      <p style="margin:7px 0 0;font-size:13.5px">${x.motivo}</p>
-      ${x.tipo==="cliente"?`<p style="margin:5px 0 0">
-        <a href="#" onclick="verArticulos('${x.id}','a${i}');return false"
-           style="font-size:12.5px;color:var(--tenue)">▸ En qué productos cae</a></p>
-        <div id="a${i}" class="arts"></div>`:""}
-      <div class="acc">${x.opciones.map(o=>
-        `<button class="chip${o===x.propone?" prop":""}"
-          onclick="marcar('${k}','${o}',this)">${o}</button>`).join("")}</div>
-      <textarea placeholder="${x.pide}" oninput="texto('${k}',this)"></textarea>
-    </div>`;
+  // Agrupadas por tipo: mezclarlas obliga a cambiar de chip mental en cada
+  // tarjeta y se lee mucho peor.
+  const GRUPOS=[
+    {t:"cliente",   tit:"Clientes que bajan",    sub:"Lo que más pesa de tu cartera."},
+    {t:"oferta",    tit:"Ofertas sin respuesta", sub:"Llevan tiempo paradas."},
+    {t:"muestra",   tit:"Muestras sin cerrar",   sub:"Enviadas y sin resultado."},
+    {t:"estrategia",tit:"Estrategias abiertas",  sub:"Proyectos que no avanzan."},
+  ];
+  let n=0;
+  cont.innerHTML = GRUPOS.map(g=>{
+    const l=bolsa.filter(x=>x.tipo===g.t).sort((a,b)=>b.peso-a.peso);
+    if(!l.length) return "";
+    return `<p class="rot">${g.tit} · ${l.length}</p>
+      <p class="sub" style="margin:-4px 0 9px">${g.sub}</p>
+      ${l.map(x=>{
+        const k=x.tipo+":"+x.id; PEND.push(k); n++;
+        const art = x.tipo==="cliente"
+          ? `<p style="margin:5px 0 0"><a href="#" onclick="verArticulos('${x.id}','a${n}');return false"
+               style="font-size:12.5px;color:var(--tenue)">▸ En qué productos cae</a></p>
+             <div id="a${n}" class="arts"></div>` : "";
+        return `<div class="item" style="display:block;padding:13px 0">
+          <div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline">
+            <div style="min-width:0">
+              <b style="font-size:14.5px">${n}. ${x.nom}</b>
+              ${x.enRuta?'<span class="tag">de tu ruta</span>':""}
+              <small>${x.sub}</small>
+            </div>
+            <span class="imp ${x.rojo?"dn":"pd"}">${x.cifra}</span>
+          </div>
+          <p style="margin:7px 0 0;font-size:13.5px">${x.motivo}</p>
+          ${art}
+          <div class="acc">${x.opciones.map(o=>
+            `<button class="chip${o===x.propone?" prop":""}"
+              onclick="marcar('${k}','${o}',this)">${o}</button>`).join("")}</div>
+          <textarea placeholder="${x.pide}" oninput="texto('${k}',this)"></textarea>
+        </div>`;
+      }).join("")}`;
   }).join("");
   PEND.push("prioridad");
   refrescar();
