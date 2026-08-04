@@ -69,7 +69,7 @@
   .chip.prop{border-color:var(--tinta);color:var(--tinta);font-weight:700}
   .chip.mini{padding:4px 9px;font-size:11px}
   .arts{margin-top:6px}
-  .art{display:flex;justify-content:space-between;align-items:center;gap:8px;
+  .art{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;
     padding:8px 10px;background:#F7F9FB;border-radius:4px;margin-bottom:5px;font-size:12.5px}
   .art b{font-size:13px} .art small{display:block;color:var(--tenue);font-size:11px}
   .tag{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;
@@ -99,6 +99,9 @@ const ANIO=new Date().getFullYear();
 // las mas urgentes de todo lo que tiene, mezclando clientes, ofertas, muestras
 // y estrategias en una sola lista ordenada. Mismo criterio con ruta y en libre.
 const TOPE=10;
+// Una semana de reclamar ofertas no recupera un cliente que se va. Se reservan
+// cinco plazas para clientes que bajan, aunque una oferta gorda pese mas.
+const MINIMO_CLIENTES=5;
 
 const R={}; let ELEGIDA=null, PEND=[];
 
@@ -159,17 +162,26 @@ window.verArticulos=async (cli,destino)=>{
     if(!baja.length&&!sube.length){ d.innerHTML=
       '<p class="sub" style="margin:8px 0 0">Sin desglose por producto.</p>'; return; }
     d.innerHTML=`
-      ${baja.map(a=>`<div class="art">
-        <div style="min-width:0"><b>${a.nombre||a.descripcion||a.codigo}</b>
-          <small>${a.ant?eur(a.ant)+" → ":""}${eur(a.act||0)}</small></div>
-        <div style="display:flex;gap:5px;align-items:center">
-          <span class="imp dn">${a.dif?eur(a.dif):""}</span>
-          <button class="chip mini" onclick="pedir('${cli}','${(a.codigo||"").replace(/'/g,"")}','oferta')">Oferta</button>
-          <button class="chip mini" onclick="pedir('${cli}','${(a.codigo||"").replace(/'/g,"")}','estrategia')">Estrategia</button>
+      ${baja.map(a=>{
+        const ant=num(a.ventasAnt), act=num(a.ventasAct), dif=num(a.diferencia);
+        const cod=String(a.articulo||"").replace(/'/g,"");
+        return `<div class="art">
+        <div style="min-width:0">
+          <b>${a.descripcion||a.articulo}</b>
+          <small>${ant?eur(ant)+" en "+(ANIO-1):"nuevo"} → ${
+            act?eur(act)+" este año":"<b style='color:var(--mal)'>nada este año</b>"}
+            ${a.variacionPct!=null?" · "+Math.round(a.variacionPct)+" %":""}</small>
         </div>
-      </div>`).join("")}
+        <div style="text-align:right;flex-shrink:0">
+          <span class="imp dn">${dif?eur(dif):""}</span>
+          <div style="display:flex;gap:5px;margin-top:5px">
+            <button class="chip mini" onclick="pedir('${cli}','${cod}','oferta')">Oferta</button>
+            <button class="chip mini" onclick="pedir('${cli}','${cod}','estrategia')">Estrategia</button>
+          </div>
+        </div>
+      </div>`;}).join("")}
       ${sube.length?`<p class="sub" style="margin:7px 0 0">Sube en:
-        ${sube.map(a=>a.nombre||a.codigo).join(", ")}</p>`:""}`;
+        ${sube.map(a=>a.descripcion||a.articulo).join(", ")}</p>`:""}`;
   }catch(e){ d.innerHTML='<p class="sub" style="margin:8px 0 0">No se ha podido consultar.</p>'; }
 };
 window.pedir=(cli,art,tipo)=>{
@@ -224,10 +236,20 @@ function pintarAcciones(r){
   const deRuta=new Set((DATOS.porRuta[r]||[]).map(c=>c.id));
   // Todo junto en una sola lista: lo urgente es urgente venga de donde venga.
   // Si toca ruta, lo suyo pesa mas porque ya va a estar por allí.
-  const bolsa=DATOS.cand.map(x=>Object.assign({},x,{
+  const conPeso=DATOS.cand.map(x=>Object.assign({},x,{
     peso: x.tipo==="cliente" && deRuta.has(x.id) ? x.peso*2.5 : x.peso,
     enRuta: x.tipo==="cliente" && deRuta.has(x.id),
-  })).sort((a,b)=>b.peso-a.peso).slice(0,TOPE);
+  })).sort((a,b)=>b.peso-a.peso);
+
+  // Primero se reservan las plazas de clientes que bajan; el resto se reparte
+  // por peso entre todo lo demas.
+  const clientes=conPeso.filter(x=>x.tipo==="cliente");
+  const resto   =conPeso.filter(x=>x.tipo!=="cliente");
+  const fijos   =clientes.slice(0,MINIMO_CLIENTES);
+  const libres  =[...clientes.slice(MINIMO_CLIENTES),...resto]
+                   .sort((a,b)=>b.peso-a.peso)
+                   .slice(0,Math.max(0,TOPE-fijos.length));
+  const bolsa=[...fijos,...libres].sort((a,b)=>b.peso-a.peso);
 
   const cont=document.getElementById("acciones");
   if(!bolsa.length){ cont.innerHTML=
@@ -285,9 +307,22 @@ function pintarAcciones(r){
     for(const d of mesesRaw){ try{ for(const f of JSON.parse(d.datos||"[]")) mes[f[0]]=f; }catch(e){} }
     const ultimo=new Date().getMonth();
 
+    // Las visitas guardan el codigo ANTIGUO (U431880) y el documento de ventas
+    // el recodificado (U4301880): 2.012 codigos cambiaron en 2026. Sin cruzar
+    // por los alias, ninguna visita encontraba a su cliente.
+    const alias={};
+    for(const c of cli){
+      const id=ARR(c._id);
+      alias[id]=id;
+      if(c.cliente) alias[ARR(c.cliente)]=id;
+      if(c.canonico) alias[ARR(c.canonico)]=id;
+      if(c.codigosFusionados) String(c.codigosFusionados).split(/[,;]/)
+        .forEach(x=>{ const k=ARR(x); if(k) alias[k]=id; });
+    }
     const ultVis={};
     for(const v of vis){
-      const c=ARR(v.clienteId); if(!c) continue;
+      const bruto=ARR(v.clienteId); if(!bruto) continue;
+      const c=alias[bruto]||bruto;
       const f=fecha(v.fecha); if(!f) continue;
       if(!ultVis[c]||f>ultVis[c]) ultVis[c]=f;
     }
@@ -335,10 +370,26 @@ function pintarAcciones(r){
         const d=dias(fecha(o.fecha||o.fechaCreacion));
         if(d==null||d<=d0) continue;
         const imp=num(o.importe||o.total);
+        // Qué es exactamente: sin producto y precio, dos estrategias del mismo
+        // cliente se ven idénticas y el comercial no sabe cuál está mirando.
+        let prods=[];
+        try{ const a = typeof o.productos==="string"?JSON.parse(o.productos):o.productos;
+          if(Array.isArray(a)) prods=a; }catch(e){}
+        const desc = o.estrategia || o.titulo || o.descripcion
+          || (prods.length?prods.map(x=>x.nombre||x.producto||x.descripcion).filter(Boolean).join(", "):"")
+          || o.producto || o.articulo || "";
+        // Precio: el ofrecido frente al de tarifa, que es lo que se negocia
+        const pr = prods.find(x=>x&&(x.precioObjetivo||x.precioActual||x.precio));
+        const precio = pr
+          ? (pr.precioObjetivo||pr.precio) && pr.precioActual
+            ? `${pr.precioActual} → ${pr.precioObjetivo||pr.precio} €`
+            : `${pr.precioObjetivo||pr.precio||pr.precioActual} €`
+          : (o.precio?o.precio+" €":"");
         cand.push({tipo, id:o._id, nom:o.clienteNombre||o.cliente||"(sin cliente)",
-          sub:`${nom}${o.titulo||o.producto?" · "+(o.titulo||o.producto):""}`,
+          sub:`${nom}${desc?" · "+String(desc).slice(0,70):""}`,
           cifra:imp?eur(imp):d+" d", rojo:d>60,
-          motivo:`${nom} de hace ${d} días sin respuesta.`,
+          motivo:`${desc?String(desc).slice(0,90):nom} · ${d} días sin respuesta`
+            +`${precio?" · "+precio:""}`,
           // Una oferta de 8.000 € parada pesa como un cliente que cae 8.000
           peso: imp ? imp*0.5 : d*40,
           propone:prop, pide, opciones});
@@ -424,7 +475,8 @@ function pintarAcciones(r){
 
       <div class="paso">
         <p class="tit"><span class="num">2</span>Tus ${TOPE} acciones de la semana</p>
-        <p class="sub">De todo lo que tienes abierto, esto es lo que más pesa.
+        <p class="sub">Al menos ${MINIMO_CLIENTES} son clientes que bajan;
+          el resto, lo que más pesa de todo lo que tienes abierto.
           La opción marcada es la que propone el sistema. <b>Lo que des por
           perdido o cerrado se cierra en el CRM.</b></p>
         <div id="acciones"><p class="sub" style="margin:0">Elige arriba cómo vas a
