@@ -207,9 +207,13 @@
 </style>
 </head>
 <body>
-<div id="app"><p class="estado">Leyendo… v1.54</p></div>
+<div id="app"><p class="estado">Leyendo… v1.55</p></div>
 
 <script>
+window.verComp=function(i){
+  var d=document.getElementById("comp"+i);
+  if(d) d.style.display = d.style.display==="block" ? "none" : "block";
+};
 const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
 const $=(id)=>document.getElementById(id);
 const eur=(n)=>Math.round(n||0).toLocaleString("es-ES")+" €";
@@ -461,7 +465,8 @@ function desvHTML(pct, etqMenos, etqMas){
     const mando=rol.includes("director")||rol==="admin"||rol==="ceo";
 
     const [agentes,objetivos,usuarios,portal,
-           muestras,ofertas,estrategias,incidencias,semanas,estacion,clientesFB,mesesCli]=await Promise.all([
+           muestras,ofertas,estrategias,incidencias,semanas,estacion,clientesFB,mesesCli,
+           informes,planes,visitas]=await Promise.all([
       leerCol("pbi_resumen_agente"),
       leerCol("pbi_objetivos"),
       leerCol("usuarios"),
@@ -474,6 +479,9 @@ function desvHTML(pct, etqMenos, etqMas){
       leerCol("pbi_estacionalidad"),
       leerCol("pbi_ventas_cliente"),
       leerCol("pbi_meses_cliente").catch(()=>[]),
+      leerCol("informes").catch(()=>[]),
+      leerCol("planes_semanales").catch(()=>[]),
+      leerCol("visitas").catch(()=>[]),
     ]);
     if(!agentes.length) throw new Error(
       "no se ha podido leer pbi_resumen_agente"+(FALLOS.length?" · "+FALLOS.join(" · "):""));
@@ -1037,6 +1045,41 @@ function desvHTML(pct, etqMenos, etqMas){
 </section>
 
 <section>
+  ${COMPROMISOS.length?`
+  <p class="rot">Lo prometido y lo cumplido · semana ${_nSem}</p>
+  <p class="sub" style="margin:-4px 0 10px">Cada lunes dicen qué van a hacer.
+    Esto es lo que el sistema ha podido comprobar.</p>
+  ${(()=>{ const T=COMPROMISOS.reduce((s,x)=>s+x.prom,0),
+                H=COMPROMISOS.reduce((s,x)=>s+x.hech,0),
+                P=COMPROMISOS.reduce((s,x)=>s+x.ped,0);
+    return `<div class="dato"><div class="dg">
+      <div><b>${H} de ${T}</b><span>acciones cumplidas</span></div>
+      <div><b class="${H/T>=.7?"up":"dn"}">${Math.round(H/T*100)} %</b><span>de cumplimiento</span></div>
+      <div><b>${P}</b><span>acabaron en pedido</span></div>
+    </div></div>`; })()}
+  ${COMPROMISOS.map((x,i)=>{ const p=Math.round(x.hech/x.prom*100);
+    const cl=p>=80?"up":p>=60?"pd":"dn";
+    return `<div class="fila" onclick="verComp(${i})" style="cursor:pointer">
+      <div class="fn">${x.ag}<small>${x.eq} · ${p} % cumplido${
+        x.ped?` · ${x.ped} en pedido`:""}</small></div>
+      <div class="fv ${cl}">${x.hech}/${x.prom}</div>
+    </div>
+    <div id="comp${i}" style="display:none;padding:2px 0 10px 12px;
+      border-left:2px solid var(--linea);margin:-4px 0 8px">
+      ${x.det.map(d=>`<div style="padding:7px 0">
+        <div style="display:flex;justify-content:space-between;gap:8px">
+          <b style="font-size:13px">${d.c}</b>
+          <span style="font-size:10.5px;font-weight:700;white-space:nowrap;
+            color:${d.ok?"var(--ok)":"var(--med)"}">${d.ok?"✓ HECHO":"PENDIENTE"}</span>
+        </div>
+        <small style="display:block;font-size:11.5px;color:var(--tenue)">${d.a}${
+          d.dijo?" · "+d.dijo:""}</small>
+        <small style="display:block;font-size:11.5px;color:var(--tenue)">${d.r}${
+          d.contesto?" — dijo: "+d.contesto:""}</small>
+      </div>`).join("")}
+    </div>`;
+  }).join("")}`:""}
+
   <p class="rot">Actividad</p>
   ${actividadHTML||`<div class="falta">No hay muestras, ofertas, estrategias ni
     incidencias registradas${clave?" a tu nombre":""}.</div>`}
@@ -1148,6 +1191,54 @@ function desvHTML(pct, etqMenos, etqMas){
     // semana cerrada seleccionada, "mios" trae la foto congelada de esa semana
     // y CARLOSG salía con 562.312 € en vez de sus 643.839 € reales.
     const idsVistos=new Set(mios.map(a=>arriba(a._id)));
+    // ── Prometido y cumplido ────────────────────────────────────────────
+    // No se declara: se cruza lo que dijo el lunes con las visitas, ofertas y
+    // pedidos registrados durante la semana.
+    const COMPROMISOS=(function(){
+      const out=[];
+      const semRef=_nSem;
+      for(const a of vivos){
+        const ag=arriba(a._id);
+        const pl=planes.find(p=>arriba(p.agente)===ag && Number(p.semana)===semRef);
+        if(!pl||!pl.acciones) continue;
+        let A={}; try{ A=JSON.parse(pl.acciones); }catch(e){ continue; }
+        const inf=informes.find(i=>arriba(i.agente)===ag && Number(i.semana)===semRef);
+        let RES={}; try{ RES=JSON.parse((inf||{}).respuestas||"{}"); }catch(e){}
+        const visSem=visitas.filter(v=>Number(v.semana)===semRef
+          && arriba(v.agente)===ag);
+        const det=[]; let hech=0, ped=0;
+        for(const [k,v] of Object.entries(A)){
+          if(!v||(!v.accion&&!v.texto)) continue;
+          if(k==="prioridad"||/Esta semana no/i.test(v.accion||"")) continue;
+          const [t,id]=k.split(/:(.+)/);
+          let ok=false, r="Sin rastro";
+          if(t==="cliente"){
+            const vv=visSem.filter(x=>arriba(x.clienteId)===arriba(id));
+            if(vv.length){ ok=true;
+              const cp=vv.some(x=>/pedido/i.test(x.resultado||""));
+              if(cp) ped++;
+              r=cp?"Visitado y con pedido"
+                :`${vv.length} contacto${vv.length>1?"s":""} registrado${vv.length>1?"s":""}`;
+            } else r="Sin rastro de contacto";
+          } else {
+            const o=[...ofertas,...muestras,...estrategias].find(x=>x._id===id);
+            if(!o){ ok=true; r="Ya no está abierta"; }
+            else { const e=String(o.estado||"").toLowerCase();
+              ok=/pedido|perdida|aceptada|rechazada|completada|ko|cerrada|positivo/.test(e);
+              if(/pedido|aceptada/.test(e)) ped++;
+              r=ok?`Cerrada como ${e}`:"Sigue igual que el lunes"; }
+          }
+          if(ok) hech++;
+          // La respuesta que dio en el cierre, si la dio
+          const rp=RES["promesa:"+k]||{};
+          det.push({c:v.cliente||id, a:v.accion||"", ok, r,
+            dijo:v.texto||"", contesto:rp.texto||rp.accion||""});
+        }
+        if(det.length) out.push({ag, eq:a.equipo||"", prom:det.length, hech, ped, det});
+      }
+      return out.sort((a,b)=>(b.hech/b.prom)-(a.hech/a.prom));
+    })();
+
     const fs=calcular(vivos.filter(a=>idsVistos.has(arriba(a._id))));
     // Los rivales salen de TODOS los comerciales, no de los filtrados: si no,
     // al mirar a uno solo la comparativa se quedaba sin equipo.
@@ -1246,7 +1337,7 @@ function desvHTML(pct, etqMenos, etqMas){
   ${FALLOS.join(" · ")}.<br>`:""}
   <span style="font-size:11px">Páginas leídas: ${
     Object.entries(PAGINAS).map(([k,v])=>k+" "+v).join(" · ")}</span><br>
-  <b>Parte semanal v1.54.</b> Lee Firestore en directo y no escribe nada.
+  <b>Parte semanal v1.55.</b> Lee Firestore en directo y no escribe nada.
   El «hoy tocaría» sale de <b>pbi_objetivos</b>, que
   suma los meses ya cerrados, no un prorrateo. No se puede retroceder de semana
   porque <b>pbi_resumen_agente</b> solo guarda la semana en curso.
