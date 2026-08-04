@@ -3908,9 +3908,13 @@ EVALUATE
             for (const [, a] of actual) if (a.codconta) conta.add(String(a.codconta).toUpperCase());
             const altas = [];
             for (const d of docs) {
-              if (d.huerfano || d.intercompany || d.fusionadoEn) continue;
-              if (!d.agente || d.agente === "SIN AGENTE") continue;   // sin dueno, no
-              if (num(d.ventasAct) <= 0) continue;                    // sin venta, tampoco
+              if (d.intercompany || d.fusionadoEn) continue;
+              // Los huerfanos SI entran si tienen comercial y venta: son los 266
+              // codigos franceses con 119.087 € que hoy no llegan a ninguna
+              // cartera. Les falta ficha en el maestro, no dueno. El nombre se
+              // corregira solo cuando sistemas los de de alta en el ERP.
+              if (!d.agente || d.agente === "SIN AGENTE") continue;
+              if (num(d.ventasAct) <= 0) continue;
               const cod = String(d._id).toUpperCase();
               if (actual.has(cod)) continue;
               const v = viejoDe(cod);
@@ -3919,6 +3923,7 @@ EVALUATE
               altas.push(d);
             }
             log.maestroAltas = altas.length;
+            log.maestroAltasSinFicha = altas.filter((d) => d.huerfano).length;
             log.maestroAltasEjemplos = altas.slice(0, 8)
               .map((d) => ({ codigo: d._id, nombre: d.nombre, agente: d.agente,
                              ventas: Math.round(num(d.ventasAct)) }));
@@ -3936,7 +3941,7 @@ EVALUATE
                     PROVINCIA: { stringValue: String(d.provincia || "") },
                     CODCONTA: { stringValue: String(d.codconta || "") },
                     GRUPOAGENTE: { stringValue: String(d.agente || "") },
-                    origen: { stringValue: "powerbi" },
+                    origen: { stringValue: d.huerfano ? "powerbi_sin_ficha" : "powerbi" },
                     creadoEl: { stringValue: new Date().toISOString() },
                   }}),
                 });
