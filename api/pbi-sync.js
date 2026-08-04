@@ -3676,6 +3676,34 @@ EVALUATE
             fuera.push({ codigo: d.cliente, nombre: d.nombre || null,
               agente: d.agente || null, ventas: Math.round(num(d.ventasAct)) });
           }
+          // No falta ninguno, asi que el hueco esta en el IMPORTE: se compara
+          // cliente a cliente lo que suma el resumen con lo que se escribe.
+          const porCod = {};
+          for (const d of docs) porCod[String(d._id)] = d;
+          const dif = [];
+          for (const d of universo) {
+            if (d.intercompany || d.fusionadoEn) continue;
+            const w = porCod[String(d.cliente)];
+            const a = num(d.ventasAct), b = w ? num(w.ventasAct) : 0;
+            if (Math.abs(a - b) < 1) continue;
+            dif.push({ codigo: d.cliente, nombre: d.nombre || null,
+              agente: d.agente || null, enResumen: Math.round(a),
+              enCliente: Math.round(b), dif: Math.round(a - b),
+              cuenta: w ? w.cuenta : null, escrito: !!w });
+          }
+          log.clientesConImporteDistinto = dif.length;
+          log.difImporteTotal = Math.round(dif.reduce((t,x)=>t+x.dif,0));
+          log.ejemplosImporte = dif
+            .sort((a,b)=>Math.abs(b.dif)-Math.abs(a.dif)).slice(0,15);
+          const porAg2 = {};
+          for (const x of dif) {
+            const k = x.agente || "SIN AGENTE";
+            porAg2[k] = (porAg2[k] || 0) + x.dif;
+          }
+          log.difImportePorAgente = Object.entries(porAg2)
+            .sort((a,b)=>Math.abs(b[1])-Math.abs(a[1])).slice(0,10)
+            .map(([agente,dif])=>({agente,dif}));
+
           log.enResumenPeroNoEnClientes = fuera.length;
           log.ventaEnEsosClientes = Math.round(
             fuera.reduce((t, x) => t + x.ventas, 0));
