@@ -3174,6 +3174,8 @@ EVALUATE
           });
         }
         log.fichasCliente = fichas.size;
+        log.tiempos = log.tiempos || {};
+        log.tiempos.fichas = margen();
       } catch (e) {
         log.errores.push(`clientes: ${e.message}`);
       }
@@ -3482,6 +3484,8 @@ EVALUATE
         if (d.fusionadoEn) d.agenteFinal = d.agente || "SIN AGENTE";
       }
       log.clientesQueCuentan = docs.filter((d) => d.cuenta).length;
+      log.tiempos = log.tiempos || {};
+      log.tiempos.clientesListos = margen();
 
       log.intercompanyMarcados = docs.filter((d) => d.intercompany).length;
       log.codigosHuerfanos = docs.filter((d) => d.huerfano).length;
@@ -3966,6 +3970,8 @@ EVALUATE
           } catch (e) { log.errores.push(`maestro: ${e.message}`); }
         }
 
+        log.tiempos = log.tiempos || {};
+        log.tiempos.antesDeEscribirResumen = margen();
         log.resumenAgentes = dry
           ? resumen
           : await fbCommit("pbi_resumen_agente", resumen);
@@ -4015,6 +4021,8 @@ EVALUATE
           actualizado: new Date().toISOString(),
         })));
         log.indiceBusqueda = { clientes: compacta.length, partes: trozos.length };
+        log.tiempos = log.tiempos || {};
+        log.tiempos.indiceListo = margen();
       } catch (e) {
         log.errores.push(`indice busqueda: ${e.message}`);
       }
