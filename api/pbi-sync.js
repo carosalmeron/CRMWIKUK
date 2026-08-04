@@ -3884,6 +3884,54 @@ EVALUATE
               poblacion: c.dif.POBLACION ? `${c.antes.poblacion || "(vacio)"} → ${c.dif.POBLACION}` : undefined,
             }));
 
+            // Altas: clientes con venta en Power BI que no existen en el CRM.
+            // Se cruzan por codigo nuevo, antiguo y contable para no duplicar
+            // lo que ya esta: DOHR figura como U431468 y no como U4301468.
+            const viejoDe = (cod) => {
+              const m = String(cod).match(/^([A-Z])(\d{2})0(\d{4})$/i);
+              return m ? (m[1] + m[2] + m[3]).toUpperCase() : null;
+            };
+            const conta = new Set();
+            for (const [, a] of actual) if (a.codconta) conta.add(String(a.codconta).toUpperCase());
+            const altas = [];
+            for (const d of docs) {
+              if (d.huerfano || d.intercompany || d.fusionadoEn) continue;
+              if (!d.agente || d.agente === "SIN AGENTE") continue;   // sin dueno, no
+              if (num(d.ventasAct) <= 0) continue;                    // sin venta, tampoco
+              const cod = String(d._id).toUpperCase();
+              if (actual.has(cod)) continue;
+              const v = viejoDe(cod);
+              if (v && actual.has(v)) continue;
+              if (d.codconta && conta.has(String(d.codconta).toUpperCase())) continue;
+              altas.push(d);
+            }
+            log.maestroAltas = altas.length;
+            log.maestroAltasEjemplos = altas.slice(0, 8)
+              .map((d) => ({ codigo: d._id, nombre: d.nombre, agente: d.agente,
+                             ventas: Math.round(num(d.ventasAct)) }));
+
+            if (!soloVer && !dry) {
+              let creados = 0;
+              for (const d of altas) {
+                const r = await fetch(`https://firestore.googleapis.com/v1/${base}`
+                  + `/clientes/${encodeURIComponent(d._id)}${key ? "?" + key.slice(1) : ""}`, {
+                  method: "PATCH", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ fields: {
+                    CODIGO: { stringValue: String(d._id) },
+                    NOMBRE: { stringValue: String(d.nombre || d._id) },
+                    POBLACION: { stringValue: String(d.poblacion || "") },
+                    PROVINCIA: { stringValue: String(d.provincia || "") },
+                    CODCONTA: { stringValue: String(d.codconta || "") },
+                    GRUPOAGENTE: { stringValue: String(d.agente || "") },
+                    origen: { stringValue: "powerbi" },
+                    creadoEl: { stringValue: new Date().toISOString() },
+                  }}),
+                });
+                if (r.ok) creados++;
+              }
+              log.maestroCreados = creados;
+            }
+
             if (!soloVer && !dry) {
               let ok = 0;
               for (const c of cambios) {
