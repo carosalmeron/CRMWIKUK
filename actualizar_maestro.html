@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Actualizar clientes desde Power BI</title>
+<style>
+  :root{--papel:#F2F4F7;--tinta:#14181F;--tenue:#6B7684;--linea:#DCE1E7;
+        --ok:#0E7C5A;--mal:#C2263D;--med:#B07908}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--papel);color:var(--tinta);max-width:760px;
+    margin-inline:auto;padding:20px 14px 60px;
+    font:400 15px/1.5 -apple-system,BlinkMacSystemFont,sans-serif}
+  h1{margin:0 0 4px;font-size:21px;font-weight:800;letter-spacing:-.02em}
+  .sub{margin:0 0 14px;font-size:13px;color:var(--tenue)}
+  .aviso{font-size:12.5px;line-height:1.55;border-left:2px solid var(--linea);
+    padding-left:12px;margin:0 0 18px;color:var(--tenue)}
+  .aviso b{color:var(--tinta);font-weight:600}
+  .g{background:#fff;border:1px solid var(--linea);border-radius:5px;
+    margin-bottom:10px;overflow:hidden}
+  .gh{padding:14px;display:flex;justify-content:space-between;align-items:center;gap:12px}
+  .gt b{display:block;font-size:15.5px}
+  .gt span{display:block;font-size:12px;color:var(--tenue);margin-top:2px}
+  .n{font-variant-numeric:tabular-nums;font-size:19px;font-weight:700;white-space:nowrap}
+  button{border:none;border-radius:3px;padding:9px 15px;font:700 13.5px inherit;
+    cursor:pointer;background:var(--tinta);color:#fff}
+  button.sec{background:#fff;color:var(--tinta);border:1px solid var(--linea)}
+  button:disabled{opacity:.4}
+  .det{display:none;border-top:1px solid var(--linea);max-height:340px;overflow:auto}
+  .r{padding:9px 14px;border-bottom:1px solid #F2F4F7;font-size:12.5px}
+  .r b{font-size:13px}
+  .r small{display:block;color:var(--tenue);margin-top:2px}
+  .an{color:var(--mal)} .de{color:var(--ok)}
+  .estado{padding:34px 4px;color:var(--tenue)}
+  .barra{background:var(--tinta);color:#fff;border-radius:5px;padding:12px 14px;
+    font-size:12.5px;margin-bottom:14px}
+</style></head><body>
+
+<h1>Actualizar clientes desde Power BI</h1>
+<p class="sub">Fase 1 · poner al día los que ya existen en el CRM.</p>
+
+<p class="aviso">
+  Power BI manda en <b>nombre, población, provincia y código contable</b>.
+  No se toca lo que solo sabe el comercial: semana de visita, contactos,
+  teléfonos ni notas.<br><br>
+  Antes de escribir se guarda el valor anterior en <b>pbiAnterior</b>, así que
+  todo esto se puede deshacer.
+</p>
+
+<div id="app"><p class="estado">Leyendo…</p></div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const ARR=(s)=>String(s||"").trim();
+let GRUPOS={};
+
+function val(f){
+  if(!f) return null;
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.doubleValue!==undefined) return String(f.doubleValue);
+  if(f.integerValue!==undefined) return String(f.integerValue);
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  return null;
+}
+async function leer(col){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<200);
+  return t;
+}
+window.ver=(k)=>{
+  const d=document.getElementById("d"+k);
+  d.style.display = d.style.display==="block" ? "none" : "block";
+};
+window.aplicar=async (k)=>{
+  const l=GRUPOS[k].lista;
+  if(!confirm(`Se van a actualizar ${l.length} fichas.\n\nSe guarda el valor anterior y se puede deshacer. ¿Seguir?`)) return;
+  const b=document.getElementById("b"+k); b.disabled=true;
+  let ok=0, err=0;
+  for(let i=0;i<l.length;i++){
+    const c=l[i];
+    const campos=Object.keys(c.dif).map(x=>`updateMask.fieldPaths=${x}`).join("&");
+    const fields={};
+    for(const [x,v] of Object.entries(c.dif)) fields[x]={stringValue:String(v)};
+    // El valor anterior, para poder deshacerlo
+    fields.pbiAnterior={stringValue:JSON.stringify(c.antes)};
+    try{
+      const r=await fetch(`${FB}/clientes/${encodeURIComponent(c.id)}`
+        +`?${campos}&updateMask.fieldPaths=pbiAnterior`,{
+        method:"PATCH",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({fields})});
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      ok++;
+    }catch(e){ err++; }
+    if(i%40===0) b.textContent=`${i} de ${l.length}…`;
+  }
+  b.textContent=`✓ ${ok} actualizadas${err?` · ${err} con error`:""}`;
+};
+
+(async()=>{
+  try{
+    const [pbi,crm]=await Promise.all([leer("pbi_ventas_cliente"),leer("clientes")]);
+    const ficha={};
+    for(const c of crm){
+      const id=ARR(c.CODIGO||c.codigo||c._id);
+      ficha[id]={ _doc:c._id,
+        nombre:ARR(c.NOMBRE||c.nombre), poblacion:ARR(c.POBLACION||c.poblacion),
+        provincia:ARR(c.PROVINCIA||c.provincia), codconta:ARR(c.CODCONTA||c.codconta) };
+    }
+    const g={ poblacion:{tit:"Solo población",sub:"Rellena poblaciones vacías o corrige la que hay.",lista:[]},
+              nombre:{tit:"Solo nombre",sub:"Razones sociales normalizadas.",lista:[]},
+              ambos:{tit:"Nombre y población",sub:"Cambian los dos campos.",lista:[]},
+              otros:{tit:"Provincia o código contable",sub:"Datos administrativos.",lista:[]} };
+    for(const p of pbi){
+      if(p.huerfano) continue;
+      const f=ficha[ARR(p._id)]; if(!f) continue;
+      const dif={}, antes={};
+      const cmp=(campo,clave,valor)=>{
+        const v=ARR(valor); if(!v) return;
+        if(ARR(f[clave])===v) return;
+        dif[campo]=v; antes[campo]=f[clave]||"";
+      };
+      cmp("NOMBRE","nombre",p.nombre);
+      cmp("POBLACION","poblacion",p.poblacion);
+      cmp("PROVINCIA","provincia",p.provincia);
+      cmp("CODCONTA","codconta",p.codconta);
+      const n=Object.keys(dif);
+      if(!n.length) continue;
+      const item={id:f._doc, dif, antes, nom:p.nombre||p._id};
+      const soloNom = n.length===1 && n[0]==="NOMBRE";
+      const soloPob = n.length===1 && n[0]==="POBLACION";
+      const nomYpob = n.length===2 && n.includes("NOMBRE") && n.includes("POBLACION");
+      if(soloPob) g.poblacion.lista.push(item);
+      else if(soloNom) g.nombre.lista.push(item);
+      else if(nomYpob) g.ambos.lista.push(item);
+      else g.otros.lista.push(item);
+    }
+    GRUPOS=g;
+    const tot=Object.values(g).reduce((s,x)=>s+x.lista.length,0);
+    document.getElementById("app").innerHTML=`
+      <div class="barra">${tot.toLocaleString("es-ES")} fichas cambiarían.
+        Aplica un grupo cada vez y comprueba antes de seguir.</div>
+      ${Object.entries(g).map(([k,x])=>x.lista.length?`
+        <div class="g">
+          <div class="gh">
+            <div class="gt"><b>${x.tit}</b><span>${x.sub}</span></div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <span class="n">${x.lista.length}</span>
+              <button class="sec" onclick="ver('${k}')">Ver</button>
+              <button id="b${k}" onclick="aplicar('${k}')">Aplicar</button>
+            </div>
+          </div>
+          <div class="det" id="d${k}">
+            ${x.lista.slice(0,300).map(c=>`<div class="r">
+              <b>${c.nom}</b>
+              ${Object.entries(c.dif).map(([campo,v])=>`<small>${campo}:
+                <span class="an">${c.antes[campo]||"(vacío)"}</span> →
+                <span class="de">${v}</span></small>`).join("")}
+            </div>`).join("")}
+            ${x.lista.length>300?`<div class="r"><small>Y ${x.lista.length-300} más.
+              Al aplicar se hacen todas.</small></div>`:""}
+          </div>
+        </div>`:"").join("")}`;
+  }catch(e){
+    document.getElementById("app").innerHTML=`<p class="estado">Error: ${e.message}</p>`;
+  }
+})();
+</script></body></html>
