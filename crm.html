@@ -342,7 +342,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.61.0";
+const CRM_VERSION = "4.62.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -29652,6 +29652,25 @@ async function cargarVentasPBI(){
     const semNum=(typeof getSemanaISO==='function')?getSemanaISO():1;
     const mesNum=new Date().getMonth()+1;
 
+    // (v4.62) Correspondencia semana → mes, invirtiendo la misma fórmula que
+    // usa getSemanaISO(). Hace falta porque los documentos de pbi_objetivos no
+    // traen siempre las dos granularidades: unos tienen mes_1..mes_12 y otros
+    // solo sem_1..sem_53. Leer únicamente mes_N dejaba a esos comerciales con
+    // objetivo del mes 0 aunque tuvieran presupuesto semanal cargado.
+    const _anioObj=new Date().getFullYear();
+    const _jan1=new Date(_anioObj,0,1);
+    const _offDia=_jan1.getDay();
+    const mesDeSem=(w)=>{
+      const di=7*(w-1)-_offDia+3;              // día central de esa semana
+      return new Date(_anioObj,0,1+di).getMonth()+1;
+    };
+    const semanasDeMes=(m)=>{
+      const out=[];
+      for(let w=1; w<=53; w++) if(mesDeSem(w)===m) out.push(w);
+      return out;
+    };
+    const _semsMesAct=semanasDeMes(mesNum);
+
     // Segunda pasada: quien factura y no tiene ficha en el portal. Recorriendo
     // solo USUARIOS se perdian JBRAVO, CATALUÑA y XAVIER, 17.016 € que Analisis
     // si contaba y el dashboard no. Se dan de alta con su clave del resumen.
@@ -29749,12 +29768,27 @@ async function cargarVentasPBI(){
           }
         }
         ag.oAnualHoy = Math.round(acum);
-        ag.oMes   = Math.round(estimado
-          ? (ob.objMesRef || d.ventasMesAnt || 0)
-          : (ob['mes_'+mesNum]||0));
-        ag.oSem   = Math.round(estimado
-          ? (ob.objSemRef || d.ventasSemAnt || 0)
-          : (ob['sem_'+semNum]||0));
+
+        // Objetivo del mes y de la semana, con salto entre granularidades:
+        // si falta mes_N se suman sus semanas, y si falta sem_N se reparte el
+        // mes entre las semanas que le corresponden. Antes cada uno leía solo
+        // su campo y, si el importador no lo había escrito, quedaba en cero:
+        // de ahí que el presupuesto del mes se quedara corto respecto al anual.
+        let _oMes=0, _oSem=0;
+        if(estimado){
+          _oMes = ob.objMesRef || d.ventasMesAnt || ((d.ventasAntFull||0)/12);
+          _oSem = ob.objSemRef || d.ventasSemAnt || ((d.ventasAntFull||0)/52);
+        }else{
+          _oMes = Number(ob['mes_'+mesNum]||0);
+          if(!_oMes) _oMes = _semsMesAct.reduce((t,w)=>t+Number(ob['sem_'+w]||0),0);
+          _oSem = Number(ob['sem_'+semNum]||0);
+          if(!_oSem && _oMes && _semsMesAct.length) _oSem = _oMes/_semsMesAct.length;
+        }
+        ag.oMes = Math.round(_oMes);
+        ag.oSem = Math.round(_oSem);
+        // Se deja rastro de dónde salió cada cifra, para poder auditarlo.
+        ag.origenObjMes = estimado ? "estimado"
+          : (Number(ob['mes_'+mesNum]||0) ? "mes" : (_oMes ? "semanas" : "vacio"));
         const mg  = ob['mgMes_'+mesNum];
         if(mg) ag.oMb = Math.round(mg*10)/10;
         // Se marca para poder distinguir en pantalla un presupuesto real
@@ -29789,6 +29823,26 @@ async function cargarVentasPBI(){
         fuera.slice(0,15).join(", "));
     }
     window.__PBI_FUERA_CRM__=fuera;
+
+    // (v4.62) Auditoría del presupuesto: quién aporta al objetivo del mes y
+    // quién se queda a cero. Es lo primero que hay que mirar cuando el total
+    // del mes no cuadra con el presupuesto oficial.
+    try{
+      const _res={mes:0,semanas:0,estimado:0,vacio:0};
+      const _sinMes=[];
+      let _sumaMes=0, _sumaAnual=0;
+      for(const a of AGENTES_DATA){
+        _sumaMes+=(a.oMes||0); _sumaAnual+=(a.oAnual||0);
+        const o=a.origenObjMes||"vacio";
+        if(_res[o]!==undefined) _res[o]++;
+        if(!a.oMes) _sinMes.push(a.nombre||a.id);
+      }
+      console.log(`[PRESUPUESTO] mes ${mesNum}: ${Math.round(_sumaMes).toLocaleString("es-ES")} € `
+        +`· anual ${Math.round(_sumaAnual).toLocaleString("es-ES")} € `
+        +`· origen: ${_res.mes} por mes, ${_res.semanas} sumando semanas, `
+        +`${_res.estimado} estimados, ${_res.vacio} sin dato`);
+      if(_sinMes.length) console.log(`[PRESUPUESTO] sin objetivo de mes (${_sinMes.length}):`,_sinMes.join(", "));
+    }catch(e){}
 
     console.log(`[PBI] ventas reales en ${n} agentes · objetivos en ${conObj}`);
     if(n===0) console.warn('[PBI] ningun agente cuadro. Revisa que USUARIOS[].grupoAgente coincida con los ids de pbi_resumen_agente');
