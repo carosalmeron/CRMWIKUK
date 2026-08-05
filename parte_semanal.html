@@ -471,7 +471,7 @@ function desvHTML(pct, etqMenos, etqMas){
 
     const [agentes,objetivos,usuarios,portal,
            muestras,ofertas,estrategias,incidencias,semanas,estacion,clientesFB,mesesCli,
-           informes,planes,visitas]=await Promise.all([
+           informes,planes,visitas,ajustes]=await Promise.all([
       leerCol("pbi_resumen_agente"),
       leerCol("pbi_objetivos"),
       leerCol("usuarios"),
@@ -487,6 +487,7 @@ function desvHTML(pct, etqMenos, etqMas){
       leerCol("informes").catch(()=>[]),
       leerCol("planes_semanales").catch(()=>[]),
       leerCol("visitas").catch(()=>[]),
+      leerCol("pbi_ajustes").catch(()=>[]),
     ]);
     if(!agentes.length) throw new Error(
       "no se ha podido leer pbi_resumen_agente"+(FALLOS.length?" · "+FALLOS.join(" · "):""));
@@ -496,12 +497,31 @@ function desvHTML(pct, etqMenos, etqMas){
     // sumando. Una clave repetida suma su venta dos veces, y el descuadre
     // aparece solo cuando entra una foto con repetidos. Se conserva la entrada
     // con más venta anual, que es la completa.
+    // (fix) Mismo perímetro de agentes que el resto del CRM. El parte solo
+    // descartaba "_TOTAL", mientras que el panel de Análisis aplica tres
+    // exclusiones más, las mismas que Power BI: la lista manual de pbi_ajustes,
+    // los códigos de intercompany (traspasos entre empresas, no venta a
+    // cliente) y los agentes sin venta ni este año ni el pasado. Por eso el
+    // parte contaba 70 comerciales donde el CRM cuenta 61, y la venta del mes
+    // salía inflada: no es una cifra que se lea, es una suma sobre esa lista.
+    const AJ={};
+    for(const x of (ajustes||[])) AJ[arriba(x._id)]=x;
+    function enPerimetro(a){
+      const k=arriba(a._id||a.id||"");
+      if(!k||k==="_TOTAL") return false;
+      const x=AJ[k];
+      if(x&&x.equipo==="_EXCLUIR") return false;
+      if(/INTERC/.test(k+" "+arriba(a.agente))) return false;
+      return num(a.ventasAct)>0||num(a.ventasAntYTD)>0;
+    }
+
     function dedup(lista){
       const porClave=new Map();
-      let repes=0;
+      let repes=0, fuera=0;
       for(const a of (lista||[])){
         const k=arriba(a._id||a.id||"");
         if(!k) continue;
+        if(!enPerimetro(a)){ fuera++; continue; }
         const prev=porClave.get(k);
         if(!prev){ porClave.set(k,a); continue; }
         repes++;
@@ -509,6 +529,7 @@ function desvHTML(pct, etqMenos, etqMas){
       }
       const out=[...porClave.values()];
       out._repetidos=repes;
+      out._fuera=fuera;
       return out;
     }
 
@@ -890,8 +911,8 @@ function desvHTML(pct, etqMenos, etqMas){
   <h1>${clave?titulo:(fAgente?(mios[0]&&mios[0].agente)||fAgente:(fEquipo||titulo))}</h1>
   <p class="equipo">${clave?sub:(fAgente?(mios[0]&&mios[0].equipo)||"":(fEquipo?"Equipo":sub))}</p>
   <div class="rango m"><span>${mios.length} comercial${mios.length===1?"":"es"}${
-    wSel?" · foto cerrada":""}${(fuente()._repetidos)?` · ${fuente()._repetidos} duplicado${
-      fuente()._repetidos===1?"":"s"} descartado${fuente()._repetidos===1?"":"s"}`:""}</span>
+    wSel?" · foto cerrada":""}${(()=>{const f=fuente(),n=(f._repetidos||0)+(f._fuera||0);
+      return n?` · ${n} código${n===1?"":"s"} fuera de perímetro`:"";})()}</span>
     <span>${wSel?`${wSel.desde||""} a ${wSel.hasta||""}`
       :`${hoy.getDate()} ${MESES[hoy.getMonth()]} ${hoy.getFullYear()}`}</span></div>
 </header>
