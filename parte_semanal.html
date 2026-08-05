@@ -207,7 +207,7 @@
 </style>
 </head>
 <body>
-<div id="app"><p class="estado">Leyendo… v1.55</p></div>
+<div id="app"><p class="estado">Leyendo… v1.57</p></div>
 
 <script>
 window.verComp=function(i){
@@ -250,12 +250,23 @@ async function leerCol(col){
   const todo=[]; let tok=null, pag=0;
   do{
     let j=null;
+    // (fix) El tiempo limite que anuncia el comentario de arriba no estaba
+    // implementado: un fetch que no vuelve dejaba la pagina en "Leyendo…" para
+    // siempre, sin catch ni mensaje, porque el await de Promise.all se quedaba
+    // colgado. Ahora se aborta de verdad a los 12 s y la coleccion culpable
+    // aparece en la linea "No se han podido leer" del pie.
+    const ctrl=(typeof AbortController!=="undefined")?new AbortController():null;
+    const reloj=ctrl?setTimeout(()=>ctrl.abort(),12000):null;
     try{
       const r=await fetch(`${FB}/${col}?pageSize=300`
-        +(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+        +(tok?`&pageToken=${encodeURIComponent(tok)}`:""),
+        ctrl?{signal:ctrl.signal}:undefined);
       if(!r.ok){ FALLOS.push(`${col} pag.${pag+1} HTTP ${r.status}`); break; }
       j=await r.json();
-    }catch(e){ FALLOS.push(`${col} pag.${pag+1}: ${e.message}`); break; }
+    }catch(e){
+      FALLOS.push(`${col} pag.${pag+1}: ${e&&e.name==="AbortError"?"sin respuesta en 12 s":(e.message||e)}`);
+      break;
+    }finally{ if(reloj) clearTimeout(reloj); }
     const docs=(j.documents||[]).map(plano);
     todo.push(...docs);
     pag++;
@@ -780,13 +791,21 @@ function desvHTML(pct, etqMenos, etqMas){
     // Con un mes anterior elegido, la cifra sale del historico mensual que
     // guarda pbi_estacionalidad; el mes en curso sigue viniendo del resumen.
     let mesAct=t.ventasMes, mesAnt=t.ventasMesAnt, rotMes="del mes";
+    // (diag) La cifra de un mes cerrado NO se lee: se suma agente a agente
+    // sobre pbi_estacionalidad. Se guarda de qué está hecha para poder
+    // cuadrarla con Power BI sin abrir la consola.
+    const DIAG={agentes:0, conDato:0, sinDato:0, top:[]};
     if(fMes){
       mesAct=0; mesAnt=0;
       for(const a of mios){
+        DIAG.agentes++;
         const e=porEstacion[arriba(a._id)];
-        if(!e) continue;
-        mesAct+=num(e["act_"+fMes]); mesAnt+=num(e["mes_"+fMes]);
+        if(!e){ DIAG.sinDato++; continue; }
+        const v=num(e["act_"+fMes]);
+        mesAct+=v; mesAnt+=num(e["mes_"+fMes]);
+        if(v) { DIAG.conDato++; DIAG.top.push([a.agente||a._id, v]); }
       }
+      DIAG.top.sort((x,y)=>y[1]-x[1]);
       rotMes="de "+MESES[fMes-1];
     }
     const PER={
@@ -920,6 +939,11 @@ function desvHTML(pct, etqMenos, etqMas){
 <section>
   <p class="rot">Ventas ${P.rot} · ${ANIO}</p>
   <p class="cifra m">${eur(P.act)}</p>
+  ${periodo==="mes"&&fMes?`<p class="mflujo m" style="margin:2px 0 0;font-size:11px">
+    suma de ${DIAG.conDato} comerciales con estacionalidad${
+      DIAG.sinDato?` · ${DIAG.sinDato} sin dato`:""} · de ${DIAG.agentes} en el ámbito ·
+    ajustes ${AJ&&Object.keys(AJ).length?`leídos (${Object.keys(AJ).length})`:"NO leídos"} ·
+    mayores: ${DIAG.top.slice(0,5).map(t=>`${t[0]} ${eur(t[1])}`).join(" · ")}</p>`:""}
   <p class="pie">${P.ant
     ? `${P.frase} de ${ANIO-1} fueron ${eur(P.ant)}.`
     : `No hay dato del mismo periodo de ${ANIO-1}.`}</p>
@@ -1411,7 +1435,7 @@ function desvHTML(pct, etqMenos, etqMas){
   ${FALLOS.join(" · ")}.<br>`:""}
   <span style="font-size:11px">Páginas leídas: ${
     Object.entries(PAGINAS).map(([k,v])=>k+" "+v).join(" · ")}</span><br>
-  <b>Parte semanal v1.55.</b> Lee Firestore en directo y no escribe nada.
+  <b>Parte semanal v1.57.</b> Lee Firestore en directo y no escribe nada.
   El «hoy tocaría» sale de <b>pbi_objetivos</b>, que
   suma los meses ya cerrados, no un prorrateo. No se puede retroceder de semana
   porque <b>pbi_resumen_agente</b> solo guarda la semana en curso.
