@@ -1671,6 +1671,7 @@ ${med.join(",\n")}
 
       // A quien pertenece cada cliente: lo decide la sincronizacion
       const duenoDe = {};
+      const bloqueadoDe = {};
       let leidos = 0, contables = 0;
       for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
         leidos++;
@@ -1680,7 +1681,41 @@ ${med.join(",\n")}
         contables++;
         const ag = String(c.agenteFinal || c.agente || "SIN AGENTE").toUpperCase();
         duenoDe[String(c._id).toUpperCase()] = ag;
+        bloqueadoDe[String(c._id).toUpperCase()] = c.bloqueado === true;
       }
+
+      // (v4.65) Por que el CRM no cuadra con el Panel Principal.
+      // Power BI filtra su dataset con cuatro reglas y el CRM solo aplica una
+      // (fuera intercompany). Aqui se mide, mes a mes, cuanto aporta cada una
+      // de las que faltan, para poder decidir con numeros si se adoptan.
+      //   GRUPOAGENTE no es (En blanco), - o CAMPOFRIO  → cajon sin comercial
+      //   BLQ es NO                                     → clientes bloqueados
+      const FUERA_PBI = new Set(["SIN AGENTE", "-", "", "CAMPOFRIO", "WIKUK"]);
+      const critPBI = { total:[], sinCajon:[], sinBloqueados:[], comoPBI:[] };
+      for (let m = 0; m < 12; m++)
+        for (const k in critPBI) critPBI[k][m] = 0;
+      for (const [cli, fila] of Object.entries(mesesDe)) {
+        const ag = duenoDe[cli];
+        if (!ag) continue;
+        const enCajon = FUERA_PBI.has(ag);
+        const blq = bloqueadoDe[cli] === true;
+        for (let m = 0; m < 12; m++) {
+          const v = Number(fila[1 + m]) || 0;
+          if (!v) continue;
+          critPBI.total[m] += v;
+          if (!enCajon) critPBI.sinCajon[m] += v;
+          if (!blq)     critPBI.sinBloqueados[m] += v;
+          if (!enCajon && !blq) critPBI.comoPBI[m] += v;
+        }
+      }
+      out.criterioPowerBI = critPBI.total.map((v, i) => ({
+        mes: i + 1,
+        crm: num(v),
+        quitandoSinComercial: num(critPBI.sinCajon[i]),
+        quitandoBloqueados: num(critPBI.sinBloqueados[i]),
+        comoPowerBI: num(critPBI.comoPBI[i]),
+        diferencia: num(v - critPBI.comoPBI[i]),
+      })).filter((x) => x.crm);
       out.clientesLeidos = leidos;
       out.clientesContables = contables;
 
