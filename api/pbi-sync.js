@@ -1672,6 +1672,7 @@ ${med.join(",\n")}
       // A quien pertenece cada cliente: lo decide la sincronizacion
       const duenoDe = {};
       const bloqueadoDe = {};
+      const empresaDe = {};
       let leidos = 0, contables = 0;
       for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
         leidos++;
@@ -1682,6 +1683,7 @@ ${med.join(",\n")}
         const ag = String(c.agenteFinal || c.agente || "SIN AGENTE").toUpperCase();
         duenoDe[String(c._id).toUpperCase()] = ag;
         bloqueadoDe[String(c._id).toUpperCase()] = c.bloqueado === true;
+        empresaDe[String(c._id).toUpperCase()] = String(c.empresa || "").trim() || "(vacia)";
       }
 
       // (v4.65) Por que el CRM no cuadra con el Panel Principal.
@@ -1708,6 +1710,28 @@ ${med.join(",\n")}
           if (!enCajon && !blq) critPBI.comoPBI[m] += v;
         }
       }
+      // (v4.66) Reparto por EMPRESA. Power BI excluye Alm.Marruecos y las filas
+      // sin empresa; el CRM no excluye ninguna. La desviacion contra el Panel
+      // Principal es del 1,4% en todo el ano, repartida por igual mes a mes:
+      // eso apunta a una regla constante, no a operaciones sueltas.
+      const porEmpresa = {};
+      for (const [cli, fila] of Object.entries(mesesDe)) {
+        if (!duenoDe[cli]) continue;
+        const emp = empresaDe[cli] || "(sin dato)";
+        const g = porEmpresa[emp] = porEmpresa[emp] || { ano: 0, jul: 0, clientes: 0 };
+        let tuvo = false;
+        for (let m = 0; m < 12; m++) {
+          const v = Number(fila[1 + m]) || 0;
+          g.ano += v;
+          if (m === 6) g.jul += v;
+          if (v) tuvo = true;
+        }
+        if (tuvo) g.clientes++;
+      }
+      out.porEmpresa = Object.entries(porEmpresa)
+        .map(([emp, g]) => ({ empresa: emp, ano: num(g.ano), julio: num(g.jul), clientes: g.clientes }))
+        .sort((a, b) => b.ano - a.ano);
+
       out.criterioPowerBI = critPBI.total.map((v, i) => ({
         mes: i + 1,
         crm: num(v),
