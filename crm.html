@@ -1815,6 +1815,34 @@ function Compromisos({usuario,semana,T,plegable}){
       }
     }).catch(function(){});
   },[semana]);
+
+  // Objetivos que le ha puesto su responsable desde "Objetivos del equipo".
+  // Se mezclan con los suyos y se marcan con ⭐ para que se distingan.
+  React.useEffect(function(){
+    if(typeof fbLeer!=="function") return;
+    fbLeer("objetivos_semana").then(function(docs){
+      var claves=[usuario.id,(typeof idCanonico==="function"?idCanonico(usuario):null),
+        usuario.grupoAgente,usuario.username].filter(Boolean)
+        .map(function(x){return String(x).toUpperCase();});
+      var mios=(docs||[]).filter(function(o){
+        if(o.eliminado) return false;
+        if(Number(o.semana)!==Number(semana)) return false;
+        if(o.origen!=="jefe") return false;
+        return claves.indexOf(String(o.agente||"").toUpperCase())>=0;
+      });
+      if(!mios.length) return;
+      setC(function(prev){
+        var base=prev||{lista:[],prio:""};
+        var yaIds={}; base.lista.forEach(function(x){ if(x.id) yaIds[x.id]=1; });
+        var nuevos=mios.filter(function(o){return !yaIds[o.id];}).map(function(o){
+          return {tipo:"jefe",id:o.id,accion:"",texto:o.texto,nom:"",
+            delJefe:true,porQuien:o.creadoPorNombre||""};
+        });
+        if(!nuevos.length) return base;
+        return {lista:nuevos.concat(base.lista),prio:base.prio};
+      });
+    }).catch(function(){});
+  },[semana]);
   if(!c) return null;
   return <div style={{background:"#FFFBEB",border:"2px solid #F59E0B",borderRadius:16,
     padding:16,marginBottom:18}}>
@@ -1855,12 +1883,13 @@ function Compromisos({usuario,semana,T,plegable}){
                      : x.tipo==="ofertas" ? "💰 Oferta"
                      : x.tipo==="muestras" ? "📦 Muestra"
                      : x.tipo==="estrategias" ? "🎯 Estrategia"
+                     : x.tipo==="jefe" ? "⭐ Del jefe"
                      : x.tipo==="semana" ? "🗓️ La semana en general"
                      : x.tipo==="prioridad" ? "⭐ Prioridad"
                      : x.tipo;
         // "semana"/"prioridad" son respuestas generales, no van atadas a ninguna
         // ficha: no tiene sentido buscarles cliente ni avisar de que falta.
-        var _sinFicha = (x.tipo==="semana"||x.tipo==="prioridad"||!x.id);
+        var _sinFicha = (x.tipo==="semana"||x.tipo==="prioridad"||x.tipo==="jefe"||!x.id);
         var _est = estados[x.tipo+":"+x.id];
         // Verde = comprobado y hecho · Ámbar = aún pendiente · Gris = sin comprobar
         var _col = _sinFicha ? "#CBD5E1" : (!_est ? "#CBD5E1" : (_est.hecho ? "#22C55E" : "#F59E0B"));
@@ -1871,7 +1900,7 @@ function Compromisos({usuario,semana,T,plegable}){
           <div style={{minWidth:0,flex:1}}>
             <p style={{margin:"0 0 1px",fontSize:10.5,fontWeight:700,color:"#92400E",
               textTransform:"uppercase",letterSpacing:.3}}>
-              {_tipoLbl}{x.accion?" · "+x.accion:""}</p>
+              {_tipoLbl}{x.accion?" · "+x.accion:""}{x.porQuien?" · "+x.porQuien:""}</p>
             {!_sinFicha&&<p style={{margin:0,fontSize:13,fontWeight:700,color:T.navy,
               textDecoration:(_est&&_est.hecho)?"line-through":"none",
               opacity:(_est&&_est.hecho)?.6:1}}>
@@ -1898,6 +1927,7 @@ function Compromisos({usuario,semana,T,plegable}){
     </div>}
   </div>;
 }
+
 
 
 function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB,oportunidadesDB,incidenciasDB,muestrasDB,ofertasDB,setOfertasDB,portalUsersDB,actividad,onAbrirCliente,onAbrirProyecto,onNewCliente,onAbrirOportunidad}){
@@ -1995,6 +2025,13 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
   var appMisIds=resolverMisIds(usuario);
 
   var esAgenteMS=usuario.rol==="crm_agente"||usuario.rol==="agente";
+  // (ago 2026) Los responsables siguen el mismo ciclo que los comerciales:
+  // si no han cerrado la semana anterior, no pueden abrir una nueva. Su cierre
+  // es distinto (eligen las 10 cosas del equipo en objetivos_equipo.html), pero
+  // la obligación de cerrar antes de seguir es la misma para todos.
+  var esRespMS=["jefe","crm_jefe","director","crm_director"]
+    .indexOf((usuario.rol||"").toLowerCase())>=0;
+  var _cierraSemanaMS=esAgenteMS||esRespMS;
   var _sinf=React.useState([]);var informesMiSem=_sinf[0],setInformesMiSem=_sinf[1];
   var _splns=React.useState([]);var todosPlanes=_splns[0],setTodosPlanes=_splns[1];
   // (v3.28.1) Modal revisión para crear estrategia desde vamos caros
@@ -2418,7 +2455,7 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
     return _clavesMS.indexOf(_a)>=0;
   };
   var semanaSinCerrar=null;
-  if(esAgenteMS){
+  if(_cierraSemanaMS){
     var anioCheck=new Date().getFullYear();
     for(var sc=semana-1;sc>=Math.max(semana-4,1);sc--){
       var planAnterior=todosPlanes.find(function(p){return _esMiPlan(p)&&parseInt(p.semana)===sc&&parseInt(p.anio)===anioCheck;});
@@ -3641,7 +3678,14 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
           // Cierre nuevo: el comercial no teclea cifras, solo explica y decide.
           // Vive aparte para poder cambiarlo sin tocar el CRM.
           var ag=encodeURIComponent(agenteCanonico(usuario)||idCanonico(usuario));
-          window.location.href="/cierre_semanal.html?agente="+ag+"&uid="+encodeURIComponent(usuario.id)+"&semana="+semana
+          // Un responsable no cierra con clientes propios: cierra eligiendo las
+          // 10 cosas más importantes de su equipo, que es otra pantalla.
+          var _rol=(usuario.rol||"").toLowerCase();
+          var _esResp=["jefe","crm_jefe","director","crm_director"].indexOf(_rol)>=0;
+          window.location.href=(_esResp?"/objetivos_equipo.html?":"/cierre_semanal.html?")
+            +"agente="+ag+"&uid="+encodeURIComponent(usuario.id)+"&semana="+semana
+            +(_esResp?"&rol="+encodeURIComponent(usuario.rol||"")
+                     +"&equipo="+encodeURIComponent(usuario.equipo||""):"")
             +"&vuelve="+encodeURIComponent(window.location.pathname);
         }} style={{width:"100%",padding:"14px",borderRadius:14,border:"2px solid #F59E0B",background:"#FFFBEB",cursor:"pointer",marginBottom:14,display:"flex",alignItems:"center",justifyContent:"center",gap:10}}>
           <span style={{fontSize:20}}>📋</span>
@@ -5022,7 +5066,12 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
           <div style={{marginTop:20}}>
             <button onClick={function(){
               var ag=encodeURIComponent(agenteCanonico(usuario)||idCanonico(usuario));
-              window.location.href="/cierre_semanal.html?agente="+ag+"&uid="+encodeURIComponent(usuario.id)+"&semana="+semana
+              var _rol2=(usuario.rol||"").toLowerCase();
+              var _esResp2=["jefe","crm_jefe","director","crm_director"].indexOf(_rol2)>=0;
+              window.location.href=(_esResp2?"/objetivos_equipo.html?":"/cierre_semanal.html?")
+                +"agente="+ag+"&uid="+encodeURIComponent(usuario.id)+"&semana="+semana
+                +(_esResp2?"&rol="+encodeURIComponent(usuario.rol||"")
+                          +"&equipo="+encodeURIComponent(usuario.equipo||""):"")
                 +"&vuelve="+encodeURIComponent(window.location.pathname);
             }} style={{width:"100%",padding:16,borderRadius:14,border:"none",background:T.navy,color:"#fff",fontWeight:700,fontSize:14,cursor:"pointer",textAlign:"center"}}>Cerrar la semana</button>
           </div>
@@ -31551,6 +31600,7 @@ function App(props){
     {id:"dashboard",    icon:"📊",label:"Mi equipo",   color:usuario.color},
     {id:"sala_mandos",  icon:"🎯",label:"Mandos",      color:"#6366F1"},
     {id:"plan_semanal", icon:"📅",label:"Mi semana",   color:T.blue},
+    {id:"objetivos_eq", icon:"🎯",label:"Objetivos",   color:"#F59E0B"},
     {id:"analisis",     icon:"📈",label:"Análisis",   color:"#1F5FA8"},
     {id:"calendario",   icon:"🗓️",label:"Agenda",       color:T.blue},
     {id:"tareas",       icon:"📌",label:"Tareas",      color:T.red,   badge:urgCount},
@@ -31570,6 +31620,7 @@ function App(props){
     {id:"dashboard",    icon:"📊",label:"Dashboard",    color:usuario.color},
     {id:"sala_mandos",  icon:"🎯",label:"Mandos",       color:"#6366F1"},
     {id:"plan_semanal", icon:"📅",label:"Mi semana",    color:T.blue},
+    {id:"objetivos_eq", icon:"🎯",label:"Objetivos",   color:"#F59E0B"},
     {id:"analisis",     icon:"📈",label:"Análisis",    color:"#1F5FA8"},
     {id:"calendario",   icon:"🗓️",label:"Agenda",        color:T.blue},
     {id:"tareas",       icon:"📌",label:"Tareas",       color:T.red,   badge:urgCount},
@@ -32016,6 +32067,16 @@ function App(props){
         {section==="analisis_ofertas"&& <AnalisisOfertas usuario={usuario} ofertasDB={ofertasDB} portalUsersDB={portalUsersDB} onBack={function(){setSection("dashboard");}}/>}
         {section==="analisis_estrategias"&& <AnalisisEstrategias usuario={usuario} estrategiasDB={estrategiasDB} ofertasDB={ofertasDB} portalUsersDB={portalUsersDB} onBack={function(){setSection("estrategias");}}/>}
         {section==="config_notif"&& <ConfigNotificaciones usuario={usuario}/>}
+        {section==="objetivos_eq"&&(()=>{
+          // Vive en su propia página para no engordar el CRM, igual que el
+          // cierre semanal o los pedidos planificados.
+          var ag=encodeURIComponent(agenteCanonico(usuario)||idCanonico(usuario));
+          window.location.href="/objetivos_equipo.html?uid="+encodeURIComponent(usuario.id)
+            +"&agente="+ag+"&rol="+encodeURIComponent(usuario.rol||"")
+            +"&equipo="+encodeURIComponent(usuario.equipo||"")
+            +"&vuelve="+encodeURIComponent(window.location.pathname);
+          return null;
+        })()}
         {section==="planif_compras"&& <PlanificacionCompras usuario={usuario} clientesFB={misClientesFB}/>}
         {/* (v3.23.1) Incidencias Stock y Calidad - para Compras (sustituye Resp. Stock) */}
         {section==="inc_stock"&& <IncidenciasCompras usuario={usuario} incidenciasDB={incidenciasDB} setIncidenciasDB={setIncidenciasDB} clientesFB={misClientesFB} tipoFijo="stock" onBack={function(){setSection(usuario.rol==="compras"?"inc_stock":"dashboard");}}/>}
