@@ -2143,7 +2143,15 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
     var _onVis=function(){ if(!document.hidden) _recargar(); };
     window.addEventListener("crm_visita_guardada",_onVisita);
     document.addEventListener("visibilitychange",_onVis);
-    var _iv=setInterval(_recargar,60000);
+    // (fix consumo Firebase — ago 2026) Este intervalo disparaba una consulta SIN
+    // caché de hasta 20.000 documentos de "visitas" cada 60s, incluso con la
+    // pestaña en segundo plano — con varios comerciales conectados todo el día,
+    // esto era probablemente el mayor origen de lecturas de Firestore de toda la
+    // app. Ahora solo recarga si la pestaña está visible, y cada 5 minutos en
+    // vez de cada minuto (la llegada de una visita nueva ya se refresca al
+    // instante vía el evento "crm_visita_guardada", así que este intervalo es
+    // solo una red de seguridad, no la vía principal de actualización).
+    var _iv=setInterval(function(){ if(!document.hidden) _recargar(); },300000);
     return function(){
       window.removeEventListener("crm_visita_guardada",_onVisita);
       document.removeEventListener("visibilitychange",_onVis);
@@ -20403,15 +20411,27 @@ async function sincronizarCola(){
 // en memoria sin tocar Firestore. Las escrituras invalidan la cache (fbInvalidarCache).
 var _FBMEM = {};
 var _FBMEM_TTL = {
-  visitas:20000, muestras:20000, ofertas:20000, oportunidades:20000,
-  estrategias:30000, incidencias:30000, informes:60000, ventas:120000,
+  // (fix consumo Firebase — ago 2026) Con 20s de caché, cualquier colección
+  // grande se releía entera hasta 3 veces por minuto por cada persona con la
+  // app abierta. Se sube el tiempo de caché de las colecciones más pesadas
+  // para cortar lecturas sin notarse apenas en la frescura de los datos.
+  visitas:120000, muestras:120000, ofertas:90000, oportunidades:90000,
+  estrategias:90000, incidencias:90000, informes:120000, ventas:180000,
   ventas_anuales:300000, portal_users:300000, usuarios:300000,
-  configuracion:300000, clientes:120000, planes_semanales:60000,
-  _default:45000
+  configuracion:300000, clientes:180000, planes_semanales:90000,
+  _default:90000
 };
 function _fbTtl(c){ return _FBMEM_TTL[c]!=null ? _FBMEM_TTL[c] : _FBMEM_TTL._default; }
 function fbInvalidarCache(coleccion){
-  try{ if(coleccion){ delete _FBMEM[coleccion]; } else { _FBMEM={}; } }catch(e){}
+  try{
+    if(coleccion){
+      delete _FBMEM[coleccion];
+      // "visitas" también vive cacheada bajo claves derivadas (visitas_recientes_N)
+      if(coleccion==="visitas"){
+        Object.keys(_FBMEM).forEach(function(k){ if(k.indexOf("visitas_recientes_")===0) delete _FBMEM[k]; });
+      }
+    } else { _FBMEM={}; }
+  }catch(e){}
 }
 
 async function fbLeer(coleccion, pageSize=200){
@@ -20525,6 +20545,29 @@ async function fbQueryGrupoAgente(grupoAgente){
 // Los informes/históricos siguen usando fbLeer("visitas") (traen todo).
 async function fbLeerVisitasRecientes(nSemanas){
   nSemanas = nSemanas || 8;
+  // (fix consumo Firebase — ago 2026) Esta consulta NO pasaba por la caché en
+  // memoria de fbLeer: se disparaba sin control en cada montaje, cada cambio de
+  // pestaña, cada visita guardada y cada 5 minutos, por comercial conectado.
+  // Con la colección "visitas" devolviendo miles de documentos por llamada,
+  // esto es el sospechoso principal de los millones de lecturas diarias.
+  // Se cachea igual que el resto: si se pidió el mismo rango hace menos del
+  // TTL de "visitas", se devuelve sin tocar Firestore.
+  var _key = "visitas_recientes_"+nSemanas;
+  try{
+    var _c=_FBMEM[_key];
+    if(_c){
+      if(_c.data && (Date.now()-_c.ts) < _fbTtl("visitas")) return _c.data;
+      if(_c.promesa && (Date.now()-_c.ts) < _fbTtl("visitas")) return await _c.promesa;
+    }
+  }catch(e){}
+  var _prom = _fbLeerVisitasRecientesReal(nSemanas);
+  _FBMEM[_key] = {ts:Date.now(), data:null, promesa:_prom};
+  var _res = await _prom;
+  try{ if(_res) _FBMEM[_key] = {ts:Date.now(), data:_res, promesa:null}; }catch(e){}
+  return _res;
+}
+
+async function _fbLeerVisitasRecientesReal(nSemanas){
   try{
     var semActual = (typeof getSemanaISO==="function") ? getSemanaISO() : 0;
     var semDesde = semActual - nSemanas;
