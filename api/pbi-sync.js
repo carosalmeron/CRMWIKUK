@@ -1673,6 +1673,7 @@ ${med.join(",\n")}
       const duenoDe = {};
       const bloqueadoDe = {};
       const empresaDe = {};
+      const huerfanoDe = {};
       let leidos = 0, contables = 0;
       for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
         leidos++;
@@ -1684,6 +1685,7 @@ ${med.join(",\n")}
         duenoDe[String(c._id).toUpperCase()] = ag;
         bloqueadoDe[String(c._id).toUpperCase()] = c.bloqueado === true;
         empresaDe[String(c._id).toUpperCase()] = String(c.empresa || "").trim() || "(vacia)";
+        huerfanoDe[String(c._id).toUpperCase()] = c.huerfano === true;
       }
 
       // (v4.65) Por que el CRM no cuadra con el Panel Principal.
@@ -1693,7 +1695,7 @@ ${med.join(",\n")}
       //   GRUPOAGENTE no es (En blanco), - o CAMPOFRIO  → cajon sin comercial
       //   BLQ es NO                                     → clientes bloqueados
       const FUERA_PBI = new Set(["SIN AGENTE", "-", "", "CAMPOFRIO", "WIKUK"]);
-      const critPBI = { total:[], sinCajon:[], sinBloqueados:[], comoPBI:[] };
+      const critPBI = { total:[], sinCajon:[], sinBloqueados:[], sinHuerfanos:[], comoPBI:[] };
       for (let m = 0; m < 12; m++)
         for (const k in critPBI) critPBI[k][m] = 0;
       for (const [cli, fila] of Object.entries(mesesDe)) {
@@ -1701,13 +1703,18 @@ ${med.join(",\n")}
         if (!ag) continue;
         const enCajon = FUERA_PBI.has(ag);
         const blq = bloqueadoDe[cli] === true;
+        // Huerfano = codigo que no esta en el maestro de clientes. El Panel
+        // Principal cruza ventas con esa dimension, asi que esas filas no le
+        // llegan; el CRM en cambio las suma porque si traen agente.
+        const huer = huerfanoDe[cli] === true;
         for (let m = 0; m < 12; m++) {
           const v = Number(fila[1 + m]) || 0;
           if (!v) continue;
           critPBI.total[m] += v;
           if (!enCajon) critPBI.sinCajon[m] += v;
           if (!blq)     critPBI.sinBloqueados[m] += v;
-          if (!enCajon && !blq) critPBI.comoPBI[m] += v;
+          if (!huer)    critPBI.sinHuerfanos[m] += v;
+          if (!enCajon && !blq && !huer) critPBI.comoPBI[m] += v;
         }
       }
       // (v4.66) Reparto por EMPRESA. Power BI excluye Alm.Marruecos y las filas
@@ -1728,6 +1735,26 @@ ${med.join(",\n")}
         }
         if (tuvo) g.clientes++;
       }
+      // Quienes son y cuanto valen ESTE ano (el log de la sincronizacion los
+      // media sobre ventasAntFull, la venta del ano pasado).
+      const listaHuer = [];
+      for (const [cli, fila] of Object.entries(mesesDe)) {
+        if (!duenoDe[cli] || !huerfanoDe[cli]) continue;
+        let ano = 0, jul = 0;
+        for (let m = 0; m < 12; m++) {
+          const v = Number(fila[1 + m]) || 0;
+          ano += v; if (m === 6) jul += v;
+        }
+        if (ano) listaHuer.push({ codigo: cli, agente: duenoDe[cli], ano: num(ano), julio: num(jul) });
+      }
+      listaHuer.sort((a, b) => b.ano - a.ano);
+      out.huerfanos = {
+        cuantos: listaHuer.length,
+        ano: num(listaHuer.reduce((t, x) => t + x.ano, 0)),
+        julio: num(listaHuer.reduce((t, x) => t + x.julio, 0)),
+        mayores: listaHuer.slice(0, 20),
+      };
+
       out.porEmpresa = Object.entries(porEmpresa)
         .map(([emp, g]) => ({ empresa: emp, ano: num(g.ano), julio: num(g.jul), clientes: g.clientes }))
         .sort((a, b) => b.ano - a.ano);
@@ -1737,6 +1764,8 @@ ${med.join(",\n")}
         crm: num(v),
         quitandoSinComercial: num(critPBI.sinCajon[i]),
         quitandoBloqueados: num(critPBI.sinBloqueados[i]),
+        quitandoHuerfanos: num(critPBI.sinHuerfanos[i]),
+        soloHuerfanos: num(v - critPBI.sinHuerfanos[i]),
         comoPowerBI: num(critPBI.comoPBI[i]),
         diferencia: num(v - critPBI.comoPBI[i]),
       })).filter((x) => x.crm);
