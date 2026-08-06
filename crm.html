@@ -1602,6 +1602,8 @@ function ModalHiloVisita({visita, usuario, onClose, onGuardado}){
 // Aparece al abrir la semana nueva, que es cuando sirve de algo.
 function Compromisos({usuario,semana,T,plegable}){
   const [c,setC]=React.useState(null);
+  const [nombres,setNombres]=React.useState({});
+  const [estados,setEstados]=React.useState({});
   // Cuando se usa durante la semana (ya con plan elegido) arranca plegado, para
   // tenerlo a mano sin comerse la pantalla. Al programar la semana va abierto.
   const [abierto,setAbierto]=React.useState(!plegable);
@@ -1622,7 +1624,105 @@ function Compromisos({usuario,semana,T,plegable}){
         var p=k.split(/:(.+)/);
         l.push({tipo:p[0],id:p[1]||"",accion:v.accion||"",texto:v.texto||""});
       }
-      if(l.length) setC({lista:l,prio:(R.prioridad||{}).texto||""});
+      if(l.length){
+        setC({lista:l,prio:(R.prioridad||{}).texto||""});
+        // (fix ago 2026) Sin esto cada línea ponía solo "· cliente" / "· ofertas",
+        // sin decir DE QUIÉN, así que el comercial no sabía a quién visitar.
+        // Resolvemos el id guardado a su nombre real.
+        var porTipo={};
+        l.forEach(function(x){
+          if(!x.id) return;
+          var col = x.tipo==="cliente" ? "clientes"
+                  : x.tipo==="ofertas" ? "ofertas"
+                  : x.tipo==="estrategias" ? "estrategias"
+                  : x.tipo==="muestras" ? "muestras" : null;
+          if(!col) return;
+          if(!porTipo[col]) porTipo[col]=[];
+          porTipo[col].push(x.id);
+        });
+        Object.keys(porTipo).forEach(function(col){
+          fbLeer(col).then(function(docs){
+            var mapa={};
+            (docs||[]).forEach(function(d){
+              if(!d.id) return;
+              mapa[d.id]=d.nombre||d.NOMBRE||d.cliente||d.clienteNombre||d.prod||"";
+            });
+            setNombres(function(prev){
+              var nuevo=Object.assign({},prev);
+              porTipo[col].forEach(function(idc){ if(mapa[idc]) nuevo[col+":"+idc]=mapa[idc]; });
+              return nuevo;
+            });
+          }).catch(function(){});
+        });
+
+        // ── Semáforo en vivo ──────────────────────────────────────────────
+        // Misma comprobación que hace el cierre del viernes, pero durante la
+        // semana: no se pregunta nada, se mira el dato real. Cliente → ¿hay
+        // visita registrada esta semana? Oferta/muestra/estrategia → ¿cambió
+        // ya a un estado cerrado? Así ve al momento qué le queda por hacer.
+        var _misIds=(typeof resolverMisIds==="function")?resolverMisIds(usuario):null;
+        var _esMio=function(ag){
+          if(!_misIds) return true;
+          return _misIds.has(String(ag||"").toUpperCase());
+        };
+        var _cerrado=/pedido|perdida|aceptada|rechazada|completada|ko|cerrada|positivo/;
+        var hayCli=l.some(function(x){return x.tipo==="cliente";});
+        var otras=l.filter(function(x){return x.tipo!=="cliente"&&x.id;});
+
+        if(hayCli){
+          fbLeerVisitasRecientes(4).then(function(vis){
+            var visSem={};
+            (vis||[]).forEach(function(v){
+              if(!_esMio(v.agente)) return;
+              if(Number(v.semana)!==Number(semana)) return;
+              var cid=String(v.clienteId||"").toUpperCase(); if(!cid) return;
+              (visSem[cid]=visSem[cid]||[]).push(v);
+            });
+            setEstados(function(prev){
+              var nuevo=Object.assign({},prev);
+              l.filter(function(x){return x.tipo==="cliente";}).forEach(function(x){
+                var v=visSem[String(x.id).toUpperCase()]||[];
+                if(v.length){
+                  var conPedido=v.some(function(z){return /pedido/i.test(z.resultado||"");});
+                  nuevo[x.tipo+":"+x.id]={hecho:true,
+                    detalle:conPedido?"Visitado y con pedido":v.length+" contacto"+(v.length>1?"s":"")+" registrado"+(v.length>1?"s":"")};
+                } else {
+                  nuevo[x.tipo+":"+x.id]={hecho:false,detalle:"Sin rastro de contacto esta semana"};
+                }
+              });
+              return nuevo;
+            });
+          }).catch(function(){});
+        }
+
+        var colsOtras={};
+        otras.forEach(function(x){
+          var col = x.tipo==="ofertas" ? "ofertas"
+                  : x.tipo==="estrategias" ? "estrategias"
+                  : x.tipo==="muestras" ? "muestras" : null;
+          if(!col) return;
+          if(!colsOtras[col]) colsOtras[col]=[];
+          colsOtras[col].push(x);
+        });
+        Object.keys(colsOtras).forEach(function(col){
+          fbLeer(col).then(function(docs){
+            var porId={};
+            (docs||[]).forEach(function(d){ if(d.id) porId[d.id]=d; });
+            setEstados(function(prev){
+              var nuevo=Object.assign({},prev);
+              colsOtras[col].forEach(function(x){
+                var o=porId[x.id];
+                if(!o){ nuevo[x.tipo+":"+x.id]={hecho:true,detalle:"Ya no está abierta"}; return; }
+                var e=String(o.estado||"").toLowerCase();
+                var cerr=_cerrado.test(e);
+                nuevo[x.tipo+":"+x.id]={hecho:cerr,
+                  detalle:cerr?("Cerrada como "+e):"Sigue igual que el lunes"};
+              });
+              return nuevo;
+            });
+          }).catch(function(){});
+        });
+      }
     }).catch(function(){});
   },[semana]);
   if(!c) return null;
@@ -1636,7 +1736,10 @@ function Compromisos({usuario,semana,T,plegable}){
           {plegable?"🎯 Mis objetivos de esta semana":"Lo que dijiste al cerrar la semana "+(semana-1)}</p>
         <p style={{margin:0,fontSize:11.5,color:"#92400E",opacity:.85}}>
           {plegable
-            ? "Lo que te comprometiste a hacer al cerrar la semana "+(semana-1)+" · "+c.lista.length+" cosa(s)"
+            ? (function(){
+                var _h=c.lista.filter(function(x){var e=estados[x.tipo+":"+x.id];return e&&e.hecho;}).length;
+                return "Llevas "+_h+" de "+c.lista.length+" · de lo que prometiste al cerrar la semana "+(semana-1);
+              })()
             : "Tenlo delante al programar esta."}</p>
       </div>
       {plegable&&<span style={{fontSize:15,color:"#92400E",flexShrink:0}}>{abierto?"▾":"▸"}</span>}
@@ -1645,13 +1748,33 @@ function Compromisos({usuario,semana,T,plegable}){
       {c.prio&&<p style={{margin:"0 0 11px",fontSize:13.5,color:T.navy,
         background:"#fff",borderRadius:10,padding:"9px 11px"}}>
         <b>Tu prioridad:</b> {c.prio}</p>}
-      {c.lista.slice(0,8).map(function(x,i){
-        return <div key={i} style={{padding:"8px 0",
-          borderTop:i?"1px solid #FDE68A":"none"}}>
-          <p style={{margin:0,fontSize:13,fontWeight:700,color:T.navy}}>
-            {x.accion||"Pendiente"}
-            <span style={{fontWeight:400,color:T.muted}}> · {x.tipo}</span></p>
-          {x.texto&&<p style={{margin:"2px 0 0",fontSize:12,color:T.muted}}>{x.texto}</p>}
+      {c.lista.slice().sort(function(a,b){
+        // Lo pendiente primero: durante la semana es lo que hay que atacar.
+        var ea=estados[a.tipo+":"+a.id], eb=estados[b.tipo+":"+b.id];
+        var ha=ea&&ea.hecho?1:0, hb=eb&&eb.hecho?1:0;
+        return ha-hb;
+      }).slice(0,8).map(function(x,i){
+        var _nom = nombres[
+          (x.tipo==="cliente"?"clientes":x.tipo)+":"+x.id
+        ] || "";
+        var _est = estados[x.tipo+":"+x.id];
+        // Verde = comprobado y hecho · Ámbar = aún pendiente · Gris = sin comprobar
+        var _col = !_est ? "#CBD5E1" : (_est.hecho ? "#22C55E" : "#F59E0B");
+        return <div key={i} style={{padding:"8px 0",display:"flex",gap:9,
+          alignItems:"flex-start",borderTop:i?"1px solid #FDE68A":"none"}}>
+          <span style={{width:10,height:10,borderRadius:99,background:_col,
+            flexShrink:0,marginTop:4}} title={_est?_est.detalle:"Sin comprobar"}/>
+          <div style={{minWidth:0,flex:1}}>
+            <p style={{margin:0,fontSize:13,fontWeight:700,color:T.navy,
+              textDecoration:(_est&&_est.hecho)?"line-through":"none",
+              opacity:(_est&&_est.hecho)?.6:1}}>
+              {_nom||x.accion||"Pendiente"}
+              {_nom&&<span style={{fontWeight:400,color:T.muted}}> · {x.accion}</span>}
+              {!_nom&&<span style={{fontWeight:400,color:T.muted}}> · {x.tipo}</span>}</p>
+            {_est&&<p style={{margin:"2px 0 0",fontSize:11.5,fontWeight:600,
+              color:_est.hecho?"#15803D":"#B45309"}}>{_est.hecho?"✓ ":"○ "}{_est.detalle}</p>}
+            {x.texto&&<p style={{margin:"2px 0 0",fontSize:12,color:T.muted}}>{x.texto}</p>}
+          </div>
         </div>;
       })}
       {c.lista.length>8&&<p style={{margin:"8px 0 0",fontSize:11.5,color:"#92400E"}}>
