@@ -456,21 +456,70 @@ async function pintarDiario(){
       // cogemos de la lista de pedidos, que si las tiene, cruzando por pedido
       // + articulo. Sin esto, el "1 U" del nombre del articulo (que es su
       // formato) se confunde con la cantidad pedida.
-      const UDS={}, PRE={};
+      // Power BI trae unidades pedidas y servidas, pero el nombre del campo
+      // varia segun la extraccion. Se prueban las variantes conocidas en vez
+      // de fijar una sola y quedarnos sin dato si cambia.
+      const numDe=(o,nombres)=>{
+        for(const n of nombres){
+          if(o[n]!=null&&o[n]!==""){ const v=Number(o[n]); if(!isNaN(v)) return v; }
+        }
+        return null;
+      };
+      const PEDIDAS=["unidadesPedidas","udsPedidas","cantidadPedida","cantPedida",
+        "pedidas","unidades","uds","cantidad"];
+      const SERVIDAS=["unidadesServidas","udsServidas","cantidadServida",
+        "cantServida","servidas","unidadesEntregadas","entregadas"];
+
+      const UDS={}, SRV={}, PRE={}, PRE_ART={};
       (TODOS||[]).forEach(l=>{
-        const k=(l.pedido||"")+"||"+(l.articulo||l.descripcion||"");
-        if(l.unidades!=null) UDS[k]=(UDS[k]||0)+Number(l.unidades||0);
-        if(l.precio!=null&&PRE[k]==null) PRE[k]=Number(l.precio);
+        const art=l.articulo||l.descripcion||"";
+        const k=(l.pedido||"")+"||"+art;
+        const up=numDe(l,PEDIDAS), us=numDe(l,SERVIDAS);
+        if(up!=null) UDS[k]=(UDS[k]||0)+up;
+        if(us!=null) SRV[k]=(SRV[k]||0)+us;
+        if(l.precio!=null){
+          if(PRE[k]==null) PRE[k]=Number(l.precio);
+          // Precio por articulo suelto: sirve para los pedidos ya servidos,
+          // que han desaparecido de la lista de pendientes.
+          if(art&&PRE_ART[art]==null) PRE_ART[art]=Number(l.precio);
+        }
       });
       const claveDe=(m)=>(m.pedido||"")+"||"+(m.articulo||m.descripcion||"");
-      const udsDe=(m)=>{const v=UDS[claveDe(m)]; return v!=null?v:null;};
-      const preDe=(m)=>{const v=PRE[claveDe(m)]; return v!=null?v:null;};
+      const preDe=(m)=>{
+        const v=PRE[claveDe(m)];
+        if(v!=null) return v;
+        const a=m.articulo||m.descripcion||"";
+        return PRE_ART[a]!=null?PRE_ART[a]:null;
+      };
+      const udsDe=(m)=>{
+        // 1) Si el propio movimiento las trae, mandan
+        const propio=numDe(m,PEDIDAS);
+        if(propio!=null) return {u:propio,srv:numDe(m,SERVIDAS),aprox:false};
+        // 2) Cruce exacto con la lista de pedidos
+        const k=claveDe(m);
+        if(UDS[k]!=null) return {u:UDS[k],srv:SRV[k]!=null?SRV[k]:null,aprox:false};
+        // 3) Servidos y anulados que ya no estan en la lista: se deducen del
+        //    importe y el precio conocido del articulo. Marcado con ~ porque
+        //    es un calculo, no un dato.
+        const p=preDe(m);
+        if(p&&m.importe) return {u:Math.round(Math.abs(m.importe)/p),srv:null,aprox:true};
+        return null;
+      };
       // Unidades y precio dicen mas que el importe de cada linea: el total
       // ya esta en la cabecera del pedido, repetirlo por linea es ruido.
       const detArt=(m)=>{
-        const u=udsDe(m), p=preDe(m);
+        const uu=udsDe(m), p=preDe(m);
         const t=[];
-        if(u!=null) t.push(u.toLocaleString("es-ES")+" uds");
+        if(uu){
+          const ped=(uu.aprox?"~":"")+uu.u.toLocaleString("es-ES");
+          // Si sabemos lo servido y no coincide con lo pedido, se ve el
+          // desfase: es justo lo que interesa mirar en un pedido servido.
+          if(uu.srv!=null&&uu.srv!==uu.u){
+            t.push(uu.srv.toLocaleString("es-ES")+" de "+ped+" uds");
+          } else {
+            t.push(ped+" uds");
+          }
+        }
         if(p!=null) t.push(p.toLocaleString("es-ES",
           {minimumFractionDigits:2,maximumFractionDigits:2})+" €/u");
         return t.join(" · ");
