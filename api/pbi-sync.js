@@ -3185,7 +3185,7 @@ EVALUATE
       const agentes = new Map();
       try {
         for (const a of await pbiQuery(token, Q.agentes, true)) {
-          const cod = String(pick(a, "CODIGO") || "").trim();
+          const cod = String(pick(a, "CODIGO") || "").trim().toUpperCase();
           if (!cod) continue;
           agentes.set(cod, {
             grupo: String(pick(a, "GRUPOAGENTE") || "").trim() || null,
@@ -3210,11 +3210,21 @@ EVALUATE
         log.errores.push(`agentes: ${e.message}`);
       }
 
+      // (fix) Busqueda del vendedor normalizada. Antes cada uso repetia
+      // String(...).trim() sin mayusculas, asi que un codigo de vendedor con
+      // otra caja no encontraba a su comercial: el cliente quedaba sin agente
+      // y su venta se iba al cajon "SIN AGENTE".
+      const buscaAgente = (v) => agentes.get(String(v || "").trim().toUpperCase());
+
       // Ficha de cliente: primera aparicion de cada codigo
       const fichas = new Map();
       try {
         for (const c of await pbiQuery(token, Q.clientes)) {
-          const cod = String(pick(c, "CODIGO") || "").trim();
+          // (fix) Clave normalizada. La tabla de ventas devuelve el codigo en
+          // mayusculas y el maestro no siempre: con .trim() a secas, "Guery"
+          // y "GUERY" no casaban y el cliente se quedaba sin ficha, es decir
+          // marcado como huerfano y sin nombre ni poblacion.
+          const cod = String(pick(c, "CODIGO") || "").trim().toUpperCase();
           if (!cod || fichas.has(cod)) continue;
           fichas.set(cod, {
             nombre: pick(c, "NOMBRE"),
@@ -3233,8 +3243,8 @@ EVALUATE
         const cliente = pick(r, "CLIENTE");
         // Si el codigo ya no existe en el maestro, se busca su equivalente
         // recodificado para no dejar el cliente sin nombre ni poblacion.
-        const ficha = fichas.get(String(cliente).trim())
-          || fichas.get(canonico(cliente))
+        const ficha = fichas.get(String(cliente).trim().toUpperCase())
+          || fichas.get(String(canonico(cliente)).trim().toUpperCase())
           || {};
 
         const vAntFull = num(pick(r, "VentaAntFull"));
@@ -3277,15 +3287,15 @@ EVALUATE
           // contado alli. El nombre solo vale si el vendedor no esta en la
           // tabla de agentes y no hay forma de saberlo por GRUPONIVEL1.
           intercompany: (() => {
-            const a = agentes.get(String(pick(r, "VENDEDOR") || "").trim());
+            const a = buscaAgente(pick(r, "VENDEDOR"));
             if (a && a.nivel1) return a.nivel1 === "Intercompany";
             return esIntercompany(ficha.nombre);
           })(),
-          agente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.grupo || null,
-          tipoAgente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.tipo || null,
-          ambitoAgente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.ambito || null,
-          equipoAgente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.equipo || null,
-          objetivoMargen: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.objetivoMargen ?? null,
+          agente: buscaAgente(pick(r, "VENDEDOR"))?.grupo || null,
+          tipoAgente: buscaAgente(pick(r, "VENDEDOR"))?.tipo || null,
+          ambitoAgente: buscaAgente(pick(r, "VENDEDOR"))?.ambito || null,
+          equipoAgente: buscaAgente(pick(r, "VENDEDOR"))?.equipo || null,
+          objetivoMargen: buscaAgente(pick(r, "VENDEDOR"))?.objetivoMargen ?? null,
           poblacion: ficha.poblacion,
           provincia: ficha.provincia,
           bloqueado: ficha.bloqueado === true,
@@ -3498,6 +3508,28 @@ EVALUATE
       // comercial) y cada vista nueva las replicaba mal. Se deciden aquí y se
       // graban en el propio cliente: lo demás solo tiene que leer "cuenta" y
       // "agenteFinal", sin volver a razonarlo.
+      // (fix) Asignacion del CRM, para los clientes cuyo vendedor no esta en
+      // la tabla de Agentes. Antes su venta caia en "SIN AGENTE" aunque el
+      // comercial estuviera perfectamente asignado en la ficha del CRM, y el
+      // bloque de estacionalidad los descartaba con un continue silencioso.
+      // Se lee una sola vez y se reutiliza mas abajo en el resumen.
+      let asignacionCRM = new Map();
+      try {
+        asignacionCRM = await fbLeerClientes();
+        log.clientesCrmLeidos = asignacionCRM.size;
+      } catch (e) {
+        log.errores.push(`asignacion CRM: ${e.message}`);
+      }
+      const agenteDelCRM = (d) => {
+        const id = String(d._id || d.cliente || "").trim();
+        return asignacionCRM.get(id)
+          || asignacionCRM.get(id.toUpperCase())
+          || asignacionCRM.get(String(canonico(id)).trim())
+          || (d.codconta ? asignacionCRM.get("CC:" + String(d.codconta).trim()) : null)
+          || null;
+      };
+      let rescatadosCRM = 0;
+
       for (const d of docs) {
       // Un mismo codigo puede venir en varias filas (una por sociedad). Todas
       // escriben en el MISMO documento, asi que la ultima pisa a las demas: si
@@ -3527,12 +3559,23 @@ EVALUATE
         if (d.fusionadoEn && String(d.fusionadoEn) === String(d._id || d.cliente))
           delete d.fusionadoEn;
         d.cuenta = !d.intercompany && !d.fusionadoEn;
-        d.agenteFinal = d.agente || "SIN AGENTE";
-        // Los códigos fusionados no cuentan, pero conviene saber dónde fue su
-        // venta para poder auditarla desde cualquier vista.
-        if (d.fusionadoEn) d.agenteFinal = d.agente || "SIN AGENTE";
+        // El comercial lo manda el ERP; si ahi no consta, se pregunta al CRM
+        // antes de rendirse y mandarlo a "SIN AGENTE".
+        if (!d.agente) {
+          const delCRM = agenteDelCRM(d);
+          if (delCRM) { d.agenteFinal = delCRM; d.origenAgente = "crm"; rescatadosCRM++; }
+          else d.agenteFinal = "SIN AGENTE";
+        } else {
+          d.agenteFinal = d.agente;
+          d.origenAgente = "erp";
+        }
       }
       log.clientesQueCuentan = docs.filter((d) => d.cuenta).length;
+      log.agenteRescatadoDelCrm = rescatadosCRM;
+      log.ventaRescatadaDelCrm = num(docs
+        .filter((d) => d.cuenta && d.origenAgente === "crm")
+        .reduce((t, d) => t + num(d.ventasAct), 0));
+      log.siguenSinAgente = docs.filter((d) => d.cuenta && d.agenteFinal === "SIN AGENTE").length;
 
       log.intercompanyMarcados = docs.filter((d) => d.intercompany).length;
       log.codigosHuerfanos = docs.filter((d) => d.huerfano).length;
@@ -3564,7 +3607,9 @@ EVALUATE
       if (!dry && margen() < 8) {
         log.resumenAgentes = `omitido, quedaban ${margen()} s · lánzalo con ?resumen=1`;
       } else try {
-        const asignacion = await fbLeerClientes();
+        // Ya leida arriba: se reutiliza en vez de volver a recorrer los 16.000
+        // documentos de la coleccion "clientes".
+        const asignacion = asignacionCRM.size ? asignacionCRM : await fbLeerClientes();
         log.clientesCrmLeidos = asignacion.size;
 
         // En modo incremental, "docs" solo trae los clientes con movimiento.
