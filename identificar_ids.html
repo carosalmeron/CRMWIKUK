@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Identificar IDs sueltos (U_...)</title>
+<style>
+  :root{ --navy:#0F172A; --muted:#64748B; --border:#E2E8F0; --green:#22C55E; --greenL:#F0FDF4;
+         --red:#EF4444; --redL:#FEF2F2; --amber:#F59E0B; --amberL:#FFFBEB; }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+       background:#F8FAFC;color:var(--navy)}
+  header{padding:18px 16px 14px;background:#fff;border-bottom:1px solid var(--border)}
+  h1{margin:0 0 4px;font-size:19px;font-weight:800}
+  .sub{margin:0;font-size:12px;color:var(--muted)}
+  main{padding:16px;max-width:820px;margin:0 auto}
+  .estado{padding:40px 20px;text-align:center;color:var(--muted);font-size:14px}
+  .card{background:#fff;border:1px solid var(--border);border-radius:14px;padding:14px 16px;
+        margin-bottom:14px}
+  .nombre{font-size:15px;font-weight:800;margin:0 0 8px}
+  .meta{margin:2px 0;font-size:12.5px;color:var(--muted)}
+  .fila{display:flex;justify-content:space-between;gap:10px;padding:6px 0;
+        border-top:1px solid var(--border);font-size:12.5px}
+  .fila:first-of-type{border-top:none}
+  h2{font-size:14px;margin:22px 0 8px}
+  .nota{font-size:12px;color:var(--muted);margin:6px 0 14px}
+  .err{padding:14px;background:var(--redL);color:var(--red);border-radius:10px;font-size:13px}
+  code{background:#F1F5F9;padding:1px 6px;border-radius:5px;font-size:11.5px}
+  .destacado{background:var(--amberL);border-color:var(--amber)}
+</style>
+</head>
+<body>
+<header>
+  <h1>🔍 ¿De quién son estos IDs sueltos?</h1>
+  <p class="sub">Busca U_1779125048046 y U_1779125110944 en portal_users, usuarios,
+    muestras y visitas — y comprueba si Agustín tiene algo bajo esos códigos.</p>
+</header>
+<main><div class="estado" id="app">Buscando…</div></main>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const OBJETIVO=["U_1779125048046","U_1779125110944"];
+
+function val(f){
+  if(!f) return null;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  return null;
+}
+const norm=(s)=>String(s||"").toUpperCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+
+async function leer(col){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<60);
+  return t;
+}
+
+function coincide(u, id){
+  return norm(u._id)===norm(id) || norm(u.id)===norm(id) || norm(u.crmId)===norm(id)
+    || norm(u.username)===norm(id);
+}
+
+async function iniciar(){
+  const app=document.getElementById("app");
+  try{
+    const [portal, usuarios, muestras, visitas] = await Promise.all([
+      leer("portal_users"), leer("usuarios"), leer("muestras"), leer("visitas")
+    ]);
+
+    let html="";
+    OBJETIVO.forEach(id=>{
+      const enPortal=portal.filter(u=>coincide(u,id));
+      const enUsuarios=usuarios.filter(u=>coincide(u,id));
+      const mSample=muestras.filter(m=>norm(m.agente)===norm(id));
+      const vSample=visitas.filter(v=>norm(v.agente)===norm(id));
+
+      html+=`<div class="card ${(mSample.length||vSample.length)?"destacado":""}">
+        <p class="nombre">🔑 ${id}</p>`;
+
+      if(enPortal.length){
+        html+=`<p class="meta"><b>Encontrado en portal_users:</b></p>`;
+        enPortal.forEach(u=>{
+          html+=`<div class="fila"><span>Nombre: <b>${u.nombre||"—"}</b>
+            · usuario: <code>${u.username||"—"}</code>
+            · vendedor: <code>${u.catalogoVendedor||"—"}</code>
+            · equipo: ${u.equipo||"—"} · rol: ${u.rol||"—"}</span></div>`;
+        });
+      } else {
+        html+=`<p class="meta">❌ No hay ningún documento en portal_users con este id.</p>`;
+      }
+
+      if(enUsuarios.length){
+        html+=`<p class="meta"><b>Encontrado en usuarios (CRM):</b></p>`;
+        enUsuarios.forEach(u=>{
+          html+=`<div class="fila"><span>Nombre: <b>${u.nombre||"—"}</b>
+            · rol: ${u.rol||"—"} · equipo: ${u.equipo||"—"}</span></div>`;
+        });
+      }
+
+      html+=`<div class="fila"><span>📦 Muestras con agente="${id}"</span><b>${mSample.length}</b></div>`;
+      if(mSample.length){
+        html+=mSample.slice(0,10).map(m=>`<div class="fila">
+          <span>${m.prod||m.prodNombre||"(sin producto)"} — ${m.cliente||m.clienteNombre||"—"}</span>
+          <span>${m.fecha||m.fechaCreacion||""}</span></div>`).join("");
+      }
+      html+=`<div class="fila"><span>🚗 Visitas con agente="${id}"</span><b>${vSample.length}</b></div>`;
+      if(vSample.length){
+        html+=vSample.slice(0,10).map(v=>`<div class="fila">
+          <span>${v.clienteNombre||v.cliente||"—"}</span>
+          <span>${v.fecha||""}</span></div>`).join("");
+      }
+      html+="</div>";
+    });
+
+    // Extra: cualquier muestra de Agustín que NO esté bajo "AGUSTIN" pero sí
+    // mencione su nombre en el cliente o en notas — última red de seguridad.
+    const posiblesAgustin = muestras.filter(m=>{
+      const txt = norm([m.agente,m.agenteNombre,m.notaInicial,m.obs].filter(Boolean).join(" "));
+      return txt.indexOf("AGUSTIN")>=0 && norm(m.agente)!=="AGUSTIN";
+    });
+    html+=`<h2>🕵️ Muestras que mencionan "Agustín" pero con OTRO código de agente</h2>`;
+    if(posiblesAgustin.length===0){
+      html+=`<p class="nota">Ninguna. No parece que tenga muestras escondidas bajo otro código.</p>`;
+    } else {
+      html+=`<div class="card destacado">`+posiblesAgustin.map(m=>`
+        <div class="fila"><span>${m.prod||m.prodNombre||"(sin producto)"} — ${m.cliente||m.clienteNombre||"—"}
+          <br><span class="meta">agente guardado como: <code>${m.agente}</code></span></span>
+          <span>${m.fecha||m.fechaCreacion||""}</span></div>`).join("")+`</div>`;
+    }
+
+    app.innerHTML=html;
+  }catch(e){
+    app.innerHTML = `<div class="err">No se ha podido leer: ${e.message}</div>`;
+  }
+}
+iniciar();
+</script>
+</body>
+</html>
