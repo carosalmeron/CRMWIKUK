@@ -9212,6 +9212,12 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
   // (v3.23.89) Chat con el cliente y gestión de sugerencias de cierre
   const [chatTxt,setChatTxt]=useState("");
   const [chatEnviando,setChatEnviando]=useState(false);
+  // Panel de decisión (CEO / jefe de equipo)
+  const [vistaPanelM,setVistaPanelM]=useState(false);
+  const [respExpandidoM,setRespExpandidoM]=useState(null);
+  const [soloVencidosM,setSoloVencidosM]=useState(false);
+  const respSectionRefM=useRef(null);
+  const revisionSectionRefM=useRef(null);
 
   const esAgente=usuario.rol==="agente";
   const esJefe=usuario.rol==="jefe";
@@ -9359,6 +9365,59 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
   const ko=visiblesPorAgGama.filter(m=>m.estado==="ko").length;
   // (v4.30) Nuevos estados silenciados
   const nSeg=visiblesPorAgGama.filter(m=>m.estado==="seguimiento").length;
+
+  // ── Panel de decisión: cálculos ──
+  const _parseFechaMuestra=function(f){
+    if(!f) return null;
+    var s=String(f).trim();
+    if(/^\d{4}-\d{2}-\d{2}/.test(s)){var d=new Date(s);return isNaN(d.getTime())?null:d;}
+    if(/^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(s)){
+      var p=s.split(" ")[0].split("/");
+      var yr=p[2]?parseInt(p[2]):new Date().getFullYear(); if(yr<100) yr+=2000;
+      var d2=new Date(yr,parseInt(p[1])-1,parseInt(p[0]));
+      return isNaN(d2.getTime())?null:d2;
+    }
+    var d3=new Date(s); return isNaN(d3.getTime())?null:d3;
+  };
+  const _diasDesdeM=function(f){
+    var d=_parseFechaMuestra(f);
+    if(!d) return null;
+    return Math.floor((new Date()-d)/86400000);
+  };
+  const hoyISOm=new Date().toISOString().slice(0,10);
+  const pendientesConDias=visiblesPorAgGama.filter(function(m){return m.estado==="pendiente";})
+    .map(function(m){return {muestra:m,dias:_diasDesdeM(m.fecha||m.fechaCreacion)};})
+    .sort(function(a,b){return (b.dias||0)-(a.dias||0);});
+  const antiguosCount=pendientesConDias.filter(function(x){return (x.dias||0)>=15;}).length;
+  const seguimientosVencidosM=visiblesPorAgGama.filter(function(m){
+    return m.estado==="seguimiento"&&m.revisarEl&&m.revisarEl<hoyISOm;
+  }).map(function(m){
+    var dv=Math.round((new Date(hoyISOm)-new Date(m.revisarEl))/86400000);
+    return {muestra:m,dias:dv};
+  }).sort(function(a,b){return b.dias-a.dias;});
+
+  // Carga por comercial: pendientes de feedback + seguimientos vencidos
+  const cargaPorAgenteM={};
+  pendientesConDias.forEach(function(x){
+    var key=x.muestra.agenteNombre||x.muestra.agente||"Sin asignar";
+    if(!cargaPorAgenteM[key]) cargaPorAgenteM[key]={nombre:key,total:0,vencidos:0,items:[]};
+    var venc=(x.dias||0)>=15;
+    cargaPorAgenteM[key].total++;
+    if(venc) cargaPorAgenteM[key].vencidos++;
+    cargaPorAgenteM[key].items.push({muestra:x.muestra,dias:x.dias,tipo:"pendiente",vencido:venc});
+  });
+  seguimientosVencidosM.forEach(function(x){
+    var key=x.muestra.agenteNombre||x.muestra.agente||"Sin asignar";
+    if(!cargaPorAgenteM[key]) cargaPorAgenteM[key]={nombre:key,total:0,vencidos:0,items:[]};
+    cargaPorAgenteM[key].total++;
+    cargaPorAgenteM[key].vencidos++;
+    cargaPorAgenteM[key].items.push({muestra:x.muestra,dias:x.dias,tipo:"seguimiento",vencido:true});
+  });
+  const respListM=Object.values(cargaPorAgenteM).sort(function(a,b){
+    if(b.vencidos!==a.vencidos) return b.vencidos-a.vencidos;
+    return b.total-a.total;
+  });
+  respListM.forEach(function(r){r.items.sort(function(a,b){return (b.dias||0)-(a.dias||0);});});
 
   // Contar muestras por agente (para jefe/director)
   const muestrasPorAg=useMemo(()=>{
@@ -10028,6 +10087,119 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
     );
   }
 
+  // ── Pantalla dedicada: Panel de decisión de Muestras (formato tabla ejecutiva) ──
+  if(vistaPanelM){
+    const rowStyleM={display:"flex",alignItems:"center",gap:10,padding:"12px 4px",
+      borderBottom:"1px solid "+T.border,cursor:"pointer"};
+    const irASeccionM=function(ref,vencidosOnly){
+      setSoloVencidosM(!!vencidosOnly);
+      setTimeout(function(){if(ref&&ref.current) ref.current.scrollIntoView({behavior:"smooth",block:"start"});},50);
+    };
+    return(
+      <div style={{padding:"20px 16px 100px"}}>
+        <BackBar label="Volver a muestras" onBack={()=>setVistaPanelM(false)}/>
+
+        <p style={{margin:"0 0 4px",fontSize:19,fontWeight:800,color:T.text}}>Panel de decisión</p>
+        <p style={{margin:"0 0 14px",fontSize:12,color:T.muted}}>Quién tiene muestras pendientes de dar feedback o revisar</p>
+
+        {/* KPIs — franja de indicadores, clicables */}
+        <div style={{display:"flex",border:"1px solid "+T.border,borderRadius:12,overflow:"hidden",marginBottom:22,background:T.white}}>
+          {[
+            {val:pend,label:"Pendientes de feedback",sub:antiguosCount>0?antiguosCount+" con +15 días":null,onClick:function(){irASeccionM(respSectionRefM,false);}},
+            {val:seguimientosVencidosM.length,label:"Seguimientos a revisar",sub:null,onClick:function(){irASeccionM(revisionSectionRefM,false);}},
+            {val:respListM.length,label:"Comerciales con tareas",sub:null,onClick:function(){irASeccionM(respSectionRefM,false);}},
+            {val:antiguosCount,label:"Muestras +15 días sin resolver",sub:null,onClick:function(){irASeccionM(respSectionRefM,true);}},
+          ].map(function(k,i){
+            return(
+              <div key={i} onClick={k.onClick} style={{flex:1,padding:"14px 10px",borderRight:i<3?"1px solid "+T.border:"none",cursor:"pointer"}}>
+                <p style={{margin:0,fontSize:20,fontWeight:900,color:T.text}}>{k.val}</p>
+                <p style={{margin:"3px 0 0",fontSize:9,fontWeight:700,color:T.muted,textTransform:"uppercase",letterSpacing:.2}}>{k.label}</p>
+                {k.sub&&<p style={{margin:"3px 0 0",fontSize:10,color:T.amber}}>{k.sub}</p>}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Carga por comercial */}
+        <div ref={respSectionRefM} style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end"}}>
+          <div>
+            <p style={{margin:"0 0 2px",fontSize:13,fontWeight:800,color:T.text}}>Carga por comercial</p>
+            <p style={{margin:"0 0 8px",fontSize:11,color:T.muted}}>Muestras pendientes de feedback o de revisión, por persona</p>
+          </div>
+          {soloVencidosM&&(
+            <button onClick={function(){setSoloVencidosM(false);}}
+              style={{marginBottom:8,padding:"4px 10px",borderRadius:99,border:"1px solid "+T.amber,
+                background:T.amberL,color:T.amber,fontSize:11,fontWeight:700,cursor:"pointer"}}>
+              Solo +15 días ✕
+            </button>
+          )}
+        </div>
+        <Card style={{marginBottom:22,padding:"6px 16px"}}>
+          {(function(){
+            const listaM=soloVencidosM?respListM.filter(function(r){return r.items.some(function(it){return it.vencido;});}):respListM;
+            if(listaM.length===0) return <p style={{margin:"10px 0",fontSize:12,color:T.muted,textAlign:"center"}}>Sin tareas pendientes</p>;
+            return listaM.map(function(r,i){
+              const abierto=respExpandidoM===r.nombre;
+              const itemsM=soloVencidosM?r.items.filter(function(it){return it.vencido;}):r.items;
+              return(
+                <div key={r.nombre}>
+                  <div onClick={function(){setRespExpandidoM(abierto?null:r.nombre);}}
+                    style={{...rowStyleM,borderBottom:(i===listaM.length-1&&!abierto)?"none":rowStyleM.borderBottom}}>
+                    <span style={{fontSize:11,color:T.muted,width:16,flexShrink:0}}>{abierto?"▾":"▸"}</span>
+                    <div style={{flex:1,minWidth:0}}>
+                      <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{r.nombre}</p>
+                    </div>
+                    <span style={{fontSize:12,color:T.muted,flexShrink:0}}>{r.total} pendiente{r.total===1?"":"s"}</span>
+                    {r.vencidos>0&&<span style={{fontSize:11,fontWeight:800,color:T.amber,flexShrink:0,minWidth:70,textAlign:"right"}}>{r.vencidos} +15d/revisar</span>}
+                    {r.vencidos===0&&<span style={{fontSize:11,color:T.border,flexShrink:0,minWidth:70,textAlign:"right"}}>—</span>}
+                  </div>
+                  {abierto&&(
+                    <div style={{padding:"0 0 10px 26px"}}>
+                      {itemsM.map(function(it,ix){
+                        return(
+                          <div key={ix} onClick={function(){setSel(it.muestra);setVistaPanelM(false);}}
+                            style={{display:"flex",justifyContent:"space-between",gap:8,padding:"6px 0",cursor:"pointer"}}>
+                            <p style={{margin:0,fontSize:12,color:T.text}}>
+                              {it.muestra.prod||it.muestra.prodNombre} <span style={{color:T.muted}}>— {it.muestra.cliente||it.muestra.clienteNombre}</span>
+                            </p>
+                            <span style={{fontSize:11,fontWeight:700,color:it.vencido?T.amber:T.muted,flexShrink:0}}>
+                              {it.tipo==="seguimiento"?"revisar hace "+it.dias+"d":(it.dias!=null?it.dias+"d sin feedback":"")}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            });
+          })()}
+        </Card>
+
+        {/* Seguimientos que tocan revisar */}
+        <p ref={revisionSectionRefM} style={{margin:"0 0 2px",fontSize:13,fontWeight:800,color:T.text}}>Seguimientos que tocan revisar</p>
+        <p style={{margin:"0 0 8px",fontSize:11,color:T.muted}}>Muestras "en seguimiento largo" cuya fecha de revisión ya pasó</p>
+        <Card style={{padding:"6px 16px"}}>
+          {seguimientosVencidosM.length===0?(
+            <p style={{margin:"10px 0",fontSize:12,color:T.muted,textAlign:"center"}}>Ningún seguimiento pendiente de revisar</p>
+          ):seguimientosVencidosM.map(function(x,i){
+            const m=x.muestra;
+            return(
+              <div key={m.id||i} onClick={function(){setSel(m);setVistaPanelM(false);}}
+                style={{...rowStyleM,borderBottom:i===seguimientosVencidosM.length-1?"none":rowStyleM.borderBottom}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{m.prod||m.prodNombre}</p>
+                  <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{m.cliente||m.clienteNombre} · {m.agenteNombre||m.agente||"Sin asignar"}</p>
+                </div>
+                <span style={{fontSize:11,fontWeight:700,color:T.amber,flexShrink:0}}>{x.dias}d de retraso</span>
+              </div>
+            );
+          })}
+        </Card>
+      </div>
+    );
+  }
+
   return(
     <div style={{padding:"20px 16px 100px"}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
@@ -10568,6 +10740,23 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
           </div>;
         })}
       </div>
+
+      {/* ── Acceso al Panel de decisión (CEO / jefe de equipo) ── */}
+      {esJefeOmas&&(
+        <Card onClick={function(){setVistaPanelM(true);}}
+          style={{marginBottom:16,cursor:"pointer",border:"1.5px solid "+T.blue+"33",
+            background:T.blueL,display:"flex",alignItems:"center",gap:14,padding:"16px 18px"}}>
+          <div style={{width:44,height:44,borderRadius:12,background:"#fff",display:"flex",
+            alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>📊</div>
+          <div style={{flex:1,minWidth:0}}>
+            <p style={{margin:"0 0 2px",fontSize:14,fontWeight:800,color:T.text}}>Panel de decisión</p>
+            <p style={{margin:0,fontSize:11,color:T.muted}}>
+              {pend} pendientes de feedback{seguimientosVencidosM.length>0?" · "+seguimientosVencidosM.length+" seguimientos a revisar":""}
+            </p>
+          </div>
+          <span style={{fontSize:20,color:T.blue,flexShrink:0}}>›</span>
+        </Card>
+      )}
 
       {/* KPIs — MisMuestras */}
       <div style={{display:"flex",gap:10,marginBottom:20}}>
@@ -24177,14 +24366,12 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
   const visibles=(filtro==="todos"?proyectos:proyectos.filter(function(p){return p.estado===filtro;}))
     .filter(function(p){
       if(filtroEquipoProy==="todos") return true;
-      try{
-        var pEq=(p.equipo||"").toUpperCase();
-        if(pEq===filtroEquipoProy.toUpperCase()) return true;
-        var agId=p.responsableComercial||p.agente||p.creadoPor||"";
-        if(typeof agId!=="string") return true;
-        var usr=USUARIOS.find(function(u){return u.id===agId;});
-        return usr&&usr.equipo&&usr.equipo.toUpperCase()===filtroEquipoProy.toUpperCase();
-      }catch(e){return true;}
+      var pEq=(p.equipo||"").toUpperCase();
+      var agId=p.responsableComercial||p.agente||p.creadoPor||"";
+      var usr=(typeof agId==="string"&&agId)?USUARIOS.find(function(u){return u.id===agId;}):null;
+      var equipoResuelto=pEq||(usr&&usr.equipo?usr.equipo.toUpperCase():"");
+      if(filtroEquipoProy==="sin_equipo") return !equipoResuelto;
+      return equipoResuelto===filtroEquipoProy.toUpperCase();
     })
     .filter(function(p){
       if(!agenteSelProy) return true;
@@ -25107,20 +25294,17 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
           <FiltroEquipo value={filtroEquipoProy} onChange={setFiltroEquipoProy} agenteSel={agenteSelProy} onAgenteSel={setAgenteSelProy} items={proyectos} getAgente={p=>p.responsableComercial||p.agente||p.creadoPor}/>
         </div>
 
-        {/* KPIs — franja de indicadores sobria, clicables para filtrar */}
+        {/* KPIs — franja de indicadores sobria (informativos, sin filtro) */}
         <div style={{display:"flex",border:"1px solid "+T.border,borderRadius:12,overflow:"hidden",marginBottom:22,background:T.white}}>
           {[
-            {val:potencialTotalActivo.toLocaleString("es-ES")+" €",label:"Potencial activo",sub:sinPotencialCount>0?sinPotencialCount+" sin definir":null,onClick:function(){irASeccionPanel(potencialSectionRef,false);}},
-            {val:alertasHitos.length,label:"Hitos vencidos",sub:sinResponsableCount>0?sinResponsableCount+" sin responsable":null,onClick:function(){irASeccionPanel(respSectionRef,true);}},
-            {val:proyectosEnDecision.length,label:"Esperando decisión",sub:null,onClick:function(){irASeccionPanel(decisionSectionRef,false);}},
-            {val:respList.reduce((a,r)=>a+r.total,0),label:"Tareas pendientes",sub:respList.length+" responsables",onClick:function(){irASeccionPanel(respSectionRef,false);}},
+            {val:potencialTotalActivo.toLocaleString("es-ES")+" €",label:"Potencial activo",sub:sinPotencialCount>0?sinPotencialCount+" sin definir":null},
+            {val:alertasHitos.length,label:"Hitos vencidos",sub:sinResponsableCount>0?sinResponsableCount+" sin responsable":null},
+            {val:proyectosEnDecision.length,label:"Esperando decisión",sub:null},
+            {val:respList.reduce((a,r)=>a+r.total,0),label:"Tareas pendientes",sub:respList.length+" responsables"},
           ].map(function(k,i){
             return(
-              <div key={i} onClick={k.onClick}
-                style={{flex:1,padding:"14px 12px",borderRight:i<3?"1px solid "+T.border:"none",
-                  cursor:"pointer"}}
-                onMouseDown={function(e){e.currentTarget.style.background=T.bg;}}
-                onMouseUp={function(e){e.currentTarget.style.background="transparent";}}>
+              <div key={i}
+                style={{flex:1,padding:"14px 12px",borderRight:i<3?"1px solid "+T.border:"none"}}>
                 <p style={{margin:0,fontSize:20,fontWeight:900,color:T.text}}>{k.val}</p>
                 <p style={{margin:"3px 0 0",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase",letterSpacing:.3}}>{k.label}</p>
                 {k.sub&&<p style={{margin:"3px 0 0",fontSize:10,color:T.amberD||T.amber}}>{k.sub}</p>}
