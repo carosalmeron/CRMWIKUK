@@ -68,6 +68,9 @@
  .err{padding:14px;background:var(--redL);color:var(--red);border-radius:10px;font-size:13px}
  .vacio{color:var(--muted);font-size:12.5px;margin:0;padding:6px 0}
  .buscador{position:relative}
+ .lupa{position:absolute;left:11px;top:50%;transform:translateY(-50%);
+       font-size:14px;opacity:.5;pointer-events:none}
+ input.conlupa{padding-left:34px}
  .sug{position:absolute;left:0;right:0;top:100%;z-index:20;background:#fff;
       border:1.5px solid var(--border);border-radius:10px;margin-top:3px;
       max-height:230px;overflow-y:auto;box-shadow:0 6px 18px #0000001f}
@@ -172,7 +175,10 @@ async function escribir(col,id,doc){
 
 let USUARIOS=[], OBJETIVOS=[], CIERRES={}, VISTA="lista", SEL=null, CERRADA=false;
 // Catálogos para los buscadores. Se cargan una vez y se reutilizan.
-let CLIENTES=[], PRODUCTOS=[], ELEGIDO=null;
+let CLIENTES=[], PRODUCTOS=[];
+// Cliente y producto son independientes: un objetivo puede llevar los dos
+// ("a este cliente, ofrécele este producto"), solo uno, o ninguno.
+let SEL_CLI=null, SEL_PROD=null;
 
 // Comprueba si un objetivo ya se ha cumplido, con el mismo criterio que usa
 // el cierre del viernes: para clientes, si hay visita esa semana; para el
@@ -181,14 +187,24 @@ let VISITAS_SEM={}, ESTADOS_DOC={};
 
 async function cargarSeguimiento(){
   VISITAS_SEM={}; ESTADOS_DOC={};
+  // Solo las visitas de ESTA semana. Leer la colección entera son miles de
+  // documentos por cada carga y dispara la factura de Firestore.
   try{
-    const vis=await leer("visitas");
-    vis.forEach(v=>{
-      if(Number(v.semana)!==SEMANA) return;
-      const cid=U(v.clienteId||v.clienteCodigo);
-      if(!cid) return;
-      (VISITAS_SEM[cid]=VISITAS_SEM[cid]||[]).push(v);
-    });
+    const body={structuredQuery:{from:[{collectionId:"visitas"}],
+      where:{fieldFilter:{field:{fieldPath:"semana"},op:"EQUAL",
+             value:{doubleValue:SEMANA}}},limit:3000}};
+    const r=await fetch(FB+":runQuery",{method:"POST",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(r.ok){
+      const j=await r.json();
+      (Array.isArray(j)?j:[]).forEach(x=>{
+        if(!x.document) return;
+        const v={};
+        for(const [k,f] of Object.entries(x.document.fields||{})) v[k]=val(f);
+        const cid=U(v.clienteId||v.clienteCodigo); if(!cid) return;
+        (VISITAS_SEM[cid]=VISITAS_SEM[cid]||[]).push(v);
+      });
+    }
   }catch(e){}
   try{
     const [of,mu,es]=await Promise.all([leer("ofertas"),leer("muestras"),leer("estrategias")]);
@@ -213,7 +229,7 @@ function variantesCod(c){
 
 function estadoObjetivo(o){
   const cod=o.refCodigo||o.id;
-  if(o.tipo==="cliente"||o.tipo==="ofertas"&&!ESTADOS_DOC[U(cod)]){
+  if(o.tipo==="cliente"){
     const vs=variantesCod(o.refCodigo);
     for(const v of vs){
       const vis=VISITAS_SEM[v];
@@ -261,38 +277,50 @@ async function cargarCatalogos(){
   }catch(e){ PRODUCTOS=[]; }
 }
 
-// Qué catálogo toca según la tipología elegida
-function catalogoDe(tipo){
-  return (tipo==="muestras") ? PRODUCTOS : CLIENTES;
-}
+window.cambiarTipo=()=>{};   // los buscadores ya no dependen de la tipología
 
-window.cambiarTipo=()=>{ ELEGIDO=null; pintar(); };
-
-window.buscarRef=(txt)=>{
-  const tipo=(document.getElementById("ob-tipo")||{}).value||"cliente";
-  const cont=document.getElementById("ob-sug");
+// Busca en el catálogo que toque y pinta las sugerencias sin repintar la
+// pantalla entera (repintar perdería el foco y lo escrito en el otro campo).
+window.buscarEn=(campo,txt)=>{
+  const cont=document.getElementById("sug-"+campo);
   if(!cont) return;
   const q=U(txt).trim();
   if(q.length<2){ cont.innerHTML=""; cont.style.display="none"; return; }
-  const lista=catalogoDe(tipo)
-    .filter(x=>U(x.nom).indexOf(q)>=0||U(x.cod).indexOf(q)>=0)
-    .slice(0,25);
+  const cat = campo==="prod" ? PRODUCTOS : CLIENTES;
+  if(!cat.length){
+    cont.innerHTML='<div style="color:var(--muted)">Cargando catálogo…</div>';
+    cont.style.display="block"; return;
+  }
+  // Primero los que empiezan por lo tecleado, luego los que lo contienen
+  const empieza=[], contiene=[];
+  for(const x of cat){
+    const n=U(x.nom), c=U(x.cod);
+    if(n.indexOf(q)===0||c.indexOf(q)===0) empieza.push(x);
+    else if(n.indexOf(q)>=0||c.indexOf(q)>=0) contiene.push(x);
+    if(empieza.length>=30) break;
+  }
+  const lista=empieza.concat(contiene).slice(0,30);
   if(!lista.length){
-    cont.innerHTML='<div style="color:var(--muted)">Sin resultados</div>';
+    cont.innerHTML='<div style="color:var(--muted)">Sin resultados para "'+txt+'"</div>';
     cont.style.display="block"; return;
   }
   cont.innerHTML=lista.map(x=>
-    '<div onclick="elegirRef(\''+esc2(x.cod)+'\',\''+esc2(x.nom)+'\')">'
-    +x.nom+'<small>'+x.cod+(x.pob?" · "+x.pob:"")+(x.det?" · "+x.det:"")+'</small></div>'
+    '<div onclick="elegir(\''+campo+'\',\''+esc2(x.cod)+'\',\''+esc2(x.nom)+'\')">'
+    +'<b>'+x.nom+'</b><small>'+x.cod
+    +(x.pob?" · "+x.pob:"")+(x.det?" · "+x.det:"")+'</small></div>'
   ).join("");
   cont.style.display="block";
 };
 
-window.elegirRef=(cod,nom)=>{
-  ELEGIDO={cod:cod,nom:nom};
+window.elegir=(campo,cod,nom)=>{
+  if(campo==="prod") SEL_PROD={cod:cod,nom:nom};
+  else SEL_CLI={cod:cod,nom:nom};
   pintar();
 };
-window.quitarRef=()=>{ ELEGIDO=null; pintar(); };
+window.quitar=(campo)=>{
+  if(campo==="prod") SEL_PROD=null; else SEL_CLI=null;
+  pintar();
+};
 
 async function cargarUsuarios(){
   const [us,pu]=await Promise.all([leer("usuarios"),leer("portal_users")]);
@@ -359,22 +387,23 @@ window.nuevoObjetivo=async(agId)=>{
   const txt=(document.getElementById("ob-txt").value||"").trim();
   const tipo=document.getElementById("ob-tipo").value;
   if(!txt){ alert("Escribe el objetivo."); return; }
-  if(!ELEGIDO&&tipo!=="otro"){
-    alert("Elige un "+(tipo==="muestras"?"producto":"cliente")+" de la lista.");
+  if(!SEL_CLI&&!SEL_PROD&&tipo!=="otro"){
+    alert("Elige al menos un cliente o un producto de la lista.");
     return;
   }
   const btn=document.getElementById("ob-btn");
   btn.disabled=true; btn.textContent="Guardando…";
   const id="obj_"+agId+"_"+ANIO+"_s"+SEMANA+"_"+Date.now();
   const doc={id,agente:agId,semana:SEMANA,anio:ANIO,texto:txt,tipo:tipo,
-    // refCodigo es la clave que permite relacionarlo luego; refNombre es solo
-    // para poder enseñarlo sin volver a buscar.
-    refCodigo:ELEGIDO?ELEGIDO.cod:"", refNombre:ELEGIDO?ELEGIDO.nom:"",
+    // refCodigo es la clave que permite relacionarlo luego (el cliente manda,
+    // porque es lo que llevan visitas y ofertas); el resto se guarda aparte.
+    refCodigo:SEL_CLI?SEL_CLI.cod:"", refNombre:SEL_CLI?SEL_CLI.nom:"",
+    prodCodigo:SEL_PROD?SEL_PROD.cod:"", prodNombre:SEL_PROD?SEL_PROD.nom:"",
     origen:"jefe",creadoPor:UID,creadoPorNombre:AGENTE,
     equipo:EQUIPO,fechaCreacion:new Date().toISOString()};
   try{
     await escribir("objetivos_semana",id,doc);
-    OBJETIVOS.push(doc); ELEGIDO=null; pintar();
+    OBJETIVOS.push(doc); SEL_CLI=null; SEL_PROD=null; pintar();
   }catch(e){
     btn.disabled=false; btn.textContent="Añadir objetivo";
     alert("No se ha podido guardar: "+e.message);
@@ -617,28 +646,33 @@ function pintarDetalle(){
 
   // 4 · Alta de objetivo con tipología
   const tipoAct=(document.getElementById("ob-tipo")||{}).value||"cliente";
-  const esProd=tipoAct==="muestras";
+  // Un campo de búsqueda con lupa. Si ya hay algo elegido, se muestra fijado.
+  const campoBusca=(campo,lbl,sel,ph)=>{
+    if(sel){
+      return '<label>'+lbl+'</label>'
+        +'<div class="elegido"><span>'+sel.nom
+        +'<small style="display:block;font-weight:400;color:var(--muted)">'
+        +sel.cod+'</small></span>'
+        +'<button onclick="quitar(\''+campo+'\')" title="Quitar">✕</button></div>';
+    }
+    const n=campo==="prod"?PRODUCTOS.length:CLIENTES.length;
+    return '<label>'+lbl+(n?' <span style="font-weight:400">('+n+')</span>':'')+'</label>'
+      +'<div class="buscador">'
+      +'<span class="lupa">🔍</span>'
+      +'<input type="text" id="in-'+campo+'" class="conlupa" autocomplete="off"'
+      +' placeholder="'+ph+'" oninput="buscarEn(\''+campo+'\',this.value)">'
+      +'<div class="sug" id="sug-'+campo+'" style="display:none"></div></div>';
+  };
+
   h+='<h3>Añadir objetivo</h3><div class="card">'
     +'<label>Tipología</label><select id="ob-tipo" onchange="cambiarTipo()">'
     +TIPOS.map(t=>'<option value="'+t.k+'"'+(t.k===tipoAct?" selected":"")+'>'
       +t.lbl+'</option>').join("")
     +'</select>'
-    +'<label>'+(esProd?"Producto":"Cliente")+'</label>';
-  if(ELEGIDO){
-    // Guardamos el código real, no el texto que se teclee: es lo que permite
-    // relacionar el objetivo con visitas, ofertas y pedidos después.
-    h+='<div class="elegido"><span>'+ELEGIDO.nom
-      +'<small style="display:block;font-weight:400;color:var(--muted)">'
-      +ELEGIDO.cod+'</small></span>'
-      +'<button onclick="quitarRef()">✕</button></div>';
-  } else {
-    h+='<div class="buscador">'
-      +'<input type="text" id="ob-ref" autocomplete="off"'
-      +' placeholder="Busca por nombre o código…"'
-      +' oninput="buscarRef(this.value)">'
-      +'<div class="sug" id="ob-sug" style="display:none"></div></div>';
-  }
-  h+='<label>Qué tiene que hacer</label>'
+    // Cliente y producto son independientes: se puede indicar uno, otro o ambos
+    +campoBusca("cli","Cliente",SEL_CLI,"Busca por nombre o código…")
+    +campoBusca("prod","Producto",SEL_PROD,"Busca por nombre o código…")
+    +'<label>Qué tiene que hacer</label>'
     +'<textarea id="ob-txt" rows="3" placeholder="Describe el objetivo para '
     +a.nombre+'"></textarea>'
     +'<button class="btn" id="ob-btn" onclick="nuevoObjetivo(\''+esc2(a.id)
@@ -655,9 +689,11 @@ async function recargar(){
   const objs=await leer("objetivos_semana");
   OBJETIVOS=objs.filter(o=>!o.eliminado&&Number(o.semana)===SEMANA&&Number(o.anio)===ANIO);
   CIERRES=await cargarCierres();
-  await cargarSeguimiento();
   await comprobarCerrada();
-  pintar();
+  pintar();                       // ya se ve algo aquí
+  // El seguimiento y los catálogos son pesados: se cargan detrás y se
+  // repinta cuando llegan, para que la pantalla no se quede en blanco.
+  cargarSeguimiento().then(pintar).catch(()=>{});
 }
 
 (async()=>{
@@ -668,13 +704,25 @@ async function recargar(){
     document.getElementById("sub").textContent =
       esJefe?("Equipo "+(EQUIPO||"")):esDir?"Todos los equipos":"Vista de dirección";
     USUARIOS=await cargarUsuarios();
-    await cargarCatalogos();
     await recargar();
+    cargarCatalogos().catch(()=>{});   // para los buscadores, sin bloquear
   }catch(e){
     document.getElementById("app").innerHTML=
-      '<div class="err">No se ha podido cargar: '+e.message+'</div>';
+      '<div class="err"><b>No se ha podido cargar</b><br>'+e.message
+      +'<br><small>Recarga la página; si sigue, avisa.</small></div>';
+    console.error("[objetivos_equipo]",e);
   }
 })();
+
+// Si algo revienta de forma inesperada, que se vea en pantalla en vez de
+// dejar un "Cargando…" eterno.
+window.addEventListener("error",function(ev){
+  var app=document.getElementById("app");
+  if(app&&/Cargando/.test(app.textContent||"")){
+    app.innerHTML='<div class="err"><b>Error al cargar</b><br>'
+      +(ev.message||"")+'</div>';
+  }
+});
 </script>
 </body>
 </html>
