@@ -1674,6 +1674,7 @@ ${med.join(",\n")}
       const bloqueadoDe = {};
       const empresaDe = {};
       const huerfanoDe = {};
+      const vendedorDe = {};
       let leidos = 0, contables = 0;
       for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
         leidos++;
@@ -1686,6 +1687,7 @@ ${med.join(",\n")}
         bloqueadoDe[String(c._id).toUpperCase()] = c.bloqueado === true;
         empresaDe[String(c._id).toUpperCase()] = String(c.empresa || "").trim() || "(vacia)";
         huerfanoDe[String(c._id).toUpperCase()] = c.huerfano === true;
+        vendedorDe[String(c._id).toUpperCase()] = String(c.vendedor || "").trim() || null;
       }
 
       // (v4.65) Por que el CRM no cuadra con el Panel Principal.
@@ -1745,14 +1747,23 @@ ${med.join(",\n")}
           const v = Number(fila[1 + m]) || 0;
           ano += v; if (m === 6) jul += v;
         }
-        if (ano) listaHuer.push({ codigo: cli, agente: duenoDe[cli], ano: num(ano), julio: num(jul) });
+        if (ano) listaHuer.push({
+          codigo: cli,
+          agente: duenoDe[cli],
+          vendedor: vendedorDe[cli] || null,
+          empresa: empresaDe[cli] || null,
+          ano: num(ano),
+          julio: num(jul),
+        });
       }
       listaHuer.sort((a, b) => b.ano - a.ano);
       out.huerfanos = {
         cuantos: listaHuer.length,
         ano: num(listaHuer.reduce((t, x) => t + x.ano, 0)),
         julio: num(listaHuer.reduce((t, x) => t + x.julio, 0)),
-        mayores: listaHuer.slice(0, 20),
+        // La lista entera: son 60, caben de sobra, y hacen falta completos
+        // para poder darlos de alta en el maestro de clientes.
+        lista: listaHuer,
       };
 
       out.porEmpresa = Object.entries(porEmpresa)
