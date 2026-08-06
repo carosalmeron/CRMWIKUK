@@ -73,6 +73,13 @@ const ARR=(s)=>String(s||"").toUpperCase().trim();
 const num=(n)=>Number(n)||0;
 const eur=(n)=>Math.round(n||0).toLocaleString("es-ES")+" €";
 const AGENTE=ARR(P.get("agente")||"");
+// Identificador REAL que usa el CRM para el documento del plan semanal
+// (plan_{usuario.id}_...). AGENTE es el código comercial (grupoAgente) y sirve
+// para cruzar visitas/estrategias/PBI, pero NO es el mismo valor que usuario.id,
+// así que escribir "cerrado" bajo AGENTE creaba un documento distinto del que
+// el CRM comprueba, y la semana siguiente seguía apareciendo "sin cerrar".
+// Si el enlace es antiguo y no trae uid, se cae a AGENTE como hacía antes.
+const UID=(P.get("uid")||"").trim()||AGENTE;
 const SEMANA=Number(P.get("semana")||0);
 const VUELVE=P.get("vuelve")||"";
 
@@ -258,14 +265,28 @@ async function enviar(){
     if(!r.ok) throw new Error("HTTP "+r.status);
     // Marcar el plan como cerrado: es lo que desbloquea la semana siguiente
     // en el CRM. Sin esto el comercial rellena el cierre y sigue bloqueado.
+    // IMPORTANTE: el CRM guarda y comprueba el plan como "plan_{usuario.id}_...",
+    // no como "plan_{código comercial}_...". Hay que escribir en el mismo
+    // documento que el CRM lee, si no, el cierre queda invisible para el CRM.
     try{
       const anio=new Date().getFullYear();
-      await fetch(`${FB}/planes_semanales/plan_${AGENTE.toLowerCase()}_${anio}_s${SEMANA}`
+      await fetch(`${FB}/planes_semanales/plan_${UID}_${anio}_s${SEMANA}`
         +`?updateMask.fieldPaths=estado&updateMask.fieldPaths=fechaCierre`,{
         method:"PATCH",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({fields:{
           estado:{stringValue:"cerrado"},
           fechaCierre:{stringValue:new Date().toISOString()}}})});
+      // Red de seguridad: si el enlace era antiguo (uid=agente) o UID no
+      // coincide con lo que de verdad usa el CRM, se marca también bajo el
+      // código comercial en minúsculas, como hacía antes.
+      if(UID!==AGENTE.toLowerCase()){
+        await fetch(`${FB}/planes_semanales/plan_${AGENTE.toLowerCase()}_${anio}_s${SEMANA}`
+          +`?updateMask.fieldPaths=estado&updateMask.fieldPaths=fechaCierre`,{
+          method:"PATCH",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({fields:{
+            estado:{stringValue:"cerrado"},
+            fechaCierre:{stringValue:new Date().toISOString()}}})}).catch(()=>{});
+      }
     }catch(e){}
 
     document.getElementById("app").innerHTML=
@@ -437,7 +458,8 @@ async function enviar(){
     // ── Lo que prometió el lunes, y si se hizo ──────────────────────────
     // No se le pregunta: se comprueba. Si hay visita, si la oferta cambió, si
     // hubo pedido. Preguntar por algo que el sistema ya sabe es perder tiempo.
-    const plan=await leerDoc(`planes_semanales/plan_${AGENTE}_${ANIO}_s${SEMANA}`)
+    const plan=await leerDoc(`planes_semanales/plan_${UID}_${ANIO}_s${SEMANA}`)
+      || await leerDoc(`planes_semanales/plan_${AGENTE}_${ANIO}_s${SEMANA}`)
       || await leerDoc(`planes_semanales/plan_${AGENTE.toLowerCase()}_${ANIO}_s${SEMANA}`);
     let prometido=[];
     if(plan&&plan.acciones){
