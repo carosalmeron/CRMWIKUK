@@ -63,7 +63,8 @@
   .linea{display:flex;gap:11px;padding:10px 15px;border-top:1px solid #EFF2F5;font-size:13.5px}
   .linea .nom{font-weight:600}
   .linea .det{font-size:11.5px;color:var(--tenue);margin-top:1px}
-  .linea .der{margin-left:auto;text-align:right;font-variant-numeric:tabular-nums}
+  .linea .der{margin-left:auto;text-align:right;font-variant-numeric:tabular-nums;
+    flex:none;white-space:nowrap}
   /* Filtros: agente e intercompania */
   .filtros{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
   .filtros select{flex:1;min-width:150px;font:inherit;font-size:13px;padding:10px 11px;
@@ -83,21 +84,29 @@
   .art:first-child{border-top:none}
   /* Articulos de un pedido agrupado dentro del diario */
   .arts{margin-top:6px;border-left:2px solid #DDE5EC;padding-left:9px}
-  .arts div{display:flex;justify-content:space-between;gap:10px;
-    font-size:12.5px;padding:2px 0;font-variant-numeric:tabular-nums}
-  .arts span{color:var(--tenue);min-width:0}
-  .arts b{font-weight:700;flex:none;color:var(--tenue);font-size:12px}
+  /* Descripcion flexible + unidades y precio en columnas fijas a la derecha,
+     para que los numeros queden en vertical y se puedan comparar de un vistazo */
+  .arts div.a{display:grid;grid-template-columns:1fr auto auto;gap:4px 10px;
+    align-items:baseline;font-size:12.5px;padding:3px 0;
+    font-variant-numeric:tabular-nums}
+  .arts .n{color:var(--tenue);min-width:0;overflow-wrap:anywhere}
+  .arts .u,.arts .p{font-weight:700;color:var(--tenue);font-size:12px;
+    text-align:right;white-space:nowrap}
+  .arts .u{min-width:74px}
+  .arts .p{min-width:70px}
   /* Cabecera de cada pedido dentro de un cliente: agrupa sus lineas */
   .pedcab{display:flex;gap:10px;align-items:baseline;justify-content:space-between;
     padding:9px 15px 7px 20px;background:#EDF2F7;border-top:1px solid #DDE5EC;
     font-variant-numeric:tabular-nums}
   .pedcab b{font-size:13px;font-weight:800}
+  .pedcab > b{white-space:nowrap;flex:none}
   .pedcab span{display:block;font-size:11.5px;color:var(--tenue);margin-top:2px}
   .detalle > .pedcab:first-child{border-top:none}
   .pedcab + .art{border-top:none}
   .art .c{font-weight:800;font-size:15px;letter-spacing:-.01em}
   .art .s{font-size:12.5px;color:var(--tenue);margin-top:3px;line-height:1.45}
-  .art .d{margin-left:auto;text-align:right;font-variant-numeric:tabular-nums;flex:none}
+  .art .d{margin-left:auto;text-align:right;font-variant-numeric:tabular-nums;
+    flex:none;white-space:nowrap}
   .art .d b{font-size:16px;font-weight:800}
   .art .u{font-size:12.5px;color:var(--tenue);margin-top:3px}
   .vacio{padding:34px 16px;text-align:center;color:var(--tenue);font-size:14px}
@@ -160,6 +169,55 @@ let TODOS=[], PEDIDOS=[], MODO="dia";
 let F_AGENTE="", SIN_INTER=false;
 // Comercial al que se limita la vista. null = mando, lo ve todo.
 let CLAVE=null;
+
+// ── Memoria de unidades por linea ──────────────────────────────────────
+// Una linea servida desaparece de pbi_pedidos, asi que despues no hay de
+// donde sacar cuantas unidades tenia. Se guarda en Firestore (compartido
+// entre todos, no por navegador) repartido en pocos documentos: guardar
+// una linea por documento serian miles de escrituras cada dia.
+let MEM={};
+const MEM_COL="pbi_uds_memoria";
+const MEM_BLOQUES=12;
+function bloqueDe(k){
+  let h=0; for(let i=0;i<k.length;i++){ h=((h<<5)-h)+k.charCodeAt(i); h|=0; }
+  return "b"+(Math.abs(h)%MEM_BLOQUES);
+}
+async function cargarMemoriaUds(){
+  try{
+    const r=await fetch(`${BASE}/${MEM_COL}?pageSize=${MEM_BLOQUES+5}`);
+    if(!r.ok) return;
+    const j=await r.json();
+    (j.documents||[]).forEach(d=>{
+      const f=d.fields||{};
+      if(!f.datos||!f.datos.stringValue) return;
+      try{ Object.assign(MEM,JSON.parse(f.datos.stringValue)); }catch(e){}
+    });
+  }catch(e){}
+}
+// Escribe solo los bloques que han cambiado, y como mucho una vez por carga
+let memGuardando=false;
+async function guardarMemoriaUds(nuevas){
+  const claves=Object.keys(nuevas||{});
+  if(!claves.length||memGuardando) return;
+  memGuardando=true;
+  // Agrupar lo nuevo por bloque y reescribir solo esos
+  const porBloque={};
+  claves.forEach(k=>{ (porBloque[bloqueDe(k)]=porBloque[bloqueDe(k)]||[]).push(k); });
+  for(const b of Object.keys(porBloque)){
+    // El bloque completo = lo que ya habia de ese bloque + lo nuevo
+    const datos={};
+    Object.keys(MEM).forEach(k=>{ if(bloqueDe(k)===b) datos[k]=MEM[k]; });
+    try{
+      await fetch(`${BASE}/${MEM_COL}/${b}`,{
+        method:"PATCH",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({fields:{
+          datos:{stringValue:JSON.stringify(datos)},
+          lineas:{doubleValue:Object.keys(datos).length},
+          actualizado:{stringValue:new Date().toISOString()}}})});
+    }catch(e){}
+  }
+  memGuardando=false;
+}
 let EQUIPO_CLAVES=null; // códigos de agente del equipo, cuando quien mira es un responsable
 let INICIADO=false;            // ya se ha abierto el primer grupo
 const ABIERTOS=new Set();      // grupos de fecha desplegados
@@ -307,6 +365,9 @@ async function cargar(){
     if(equipoClaves){
       TODOS = TODOS.filter(p=>equipoClaves.has(norm(p.agente)));
     }
+
+    // Memoria compartida de unidades, para las líneas que ya se han servido
+    await cargarMemoriaUds();
 
     // El filtro de agente solo tiene sentido para quien ve varios
     if(!clave){
@@ -456,34 +517,35 @@ async function pintarDiario(){
       // cogemos de la lista de pedidos, que si las tiene, cruzando por pedido
       // + articulo. Sin esto, el "1 U" del nombre del articulo (que es su
       // formato) se confunde con la cantidad pedida.
-      // Power BI trae unidades pedidas y servidas, pero el nombre del campo
-      // varia segun la extraccion. Se prueban las variantes conocidas en vez
-      // de fijar una sola y quedarnos sin dato si cambia.
-      const numDe=(o,nombres)=>{
-        for(const n of nombres){
-          if(o[n]!=null&&o[n]!==""){ const v=Number(o[n]); if(!isNaN(v)) return v; }
-        }
-        return null;
-      };
-      const PEDIDAS=["unidadesPedidas","udsPedidas","cantidadPedida","cantPedida",
-        "pedidas","unidades","uds","cantidad"];
-      const SERVIDAS=["unidadesServidas","udsServidas","cantidadServida",
-        "cantServida","servidas","unidadesEntregadas","entregadas"];
+      // pbi_pedidos tiene exactamente tres campos numericos: unidades, precio
+      // e importe. No hay unidades servidas, asi que no se puede mostrar el
+      // desfase pedido/servido: lo que se ve son las unidades del pedido.
+      const num=(v)=>{ if(v==null||v==="") return null;
+        const n=Number(v); return isNaN(n)?null:n; };
 
-      const UDS={}, SRV={}, PRE={}, PRE_ART={};
+      // MEM ya viene cargada de Firestore (cargarMemoriaUds), compartida entre
+      // todos los usuarios: una linea servida desaparece de pbi_pedidos y sin
+      // esto no habria de donde sacar cuantas unidades eran.
+      const UDS={}, PRE={}, PRE_ART={};
+      const nuevasMem={};
       (TODOS||[]).forEach(l=>{
         const art=l.articulo||l.descripcion||"";
         const k=(l.pedido||"")+"||"+art;
-        const up=numDe(l,PEDIDAS), us=numDe(l,SERVIDAS);
-        if(up!=null) UDS[k]=(UDS[k]||0)+up;
-        if(us!=null) SRV[k]=(SRV[k]||0)+us;
-        if(l.precio!=null){
-          if(PRE[k]==null) PRE[k]=Number(l.precio);
+        const u=num(l.unidades);
+        if(u!=null){
+          UDS[k]=(UDS[k]||0)+u;
+          if(MEM[k]!==UDS[k]) nuevasMem[k]=UDS[k];   // solo lo que cambia
+        }
+        const pr=num(l.precio);
+        if(pr!=null){
+          if(PRE[k]==null) PRE[k]=pr;
           // Precio por articulo suelto: sirve para los pedidos ya servidos,
           // que han desaparecido de la lista de pendientes.
-          if(art&&PRE_ART[art]==null) PRE_ART[art]=Number(l.precio);
+          if(art&&PRE_ART[art]==null) PRE_ART[art]=pr;
         }
       });
+      Object.assign(MEM,nuevasMem);
+      guardarMemoriaUds(nuevasMem);
       const claveDe=(m)=>(m.pedido||"")+"||"+(m.articulo||m.descripcion||"");
       const preDe=(m)=>{
         const v=PRE[claveDe(m)];
@@ -491,38 +553,26 @@ async function pintarDiario(){
         const a=m.articulo||m.descripcion||"";
         return PRE_ART[a]!=null?PRE_ART[a]:null;
       };
+      // Solo unidades reales del pedido. Nada de estimar a partir del
+      // importe: un numero calculado que parece un dato acaba usandose
+      // como si lo fuera. Si no consta, no se enseña.
       const udsDe=(m)=>{
-        // 1) Si el propio movimiento las trae, mandan
-        const propio=numDe(m,PEDIDAS);
-        if(propio!=null) return {u:propio,srv:numDe(m,SERVIDAS),aprox:false};
-        // 2) Cruce exacto con la lista de pedidos
+        const propio=num(m.unidades);
+        if(propio!=null) return propio;
         const k=claveDe(m);
-        if(UDS[k]!=null) return {u:UDS[k],srv:SRV[k]!=null?SRV[k]:null,aprox:false};
-        // 3) Servidos y anulados que ya no estan en la lista: se deducen del
-        //    importe y el precio conocido del articulo. Marcado con ~ porque
-        //    es un calculo, no un dato.
-        const p=preDe(m);
-        if(p&&m.importe) return {u:Math.round(Math.abs(m.importe)/p),srv:null,aprox:true};
-        return null;
+        if(UDS[k]!=null) return UDS[k];
+        // Ya no esta en el pedido (servida o anulada): las que tenia
+        return MEM[k]!=null?MEM[k]:null;
       };
       // Unidades y precio dicen mas que el importe de cada linea: el total
       // ya esta en la cabecera del pedido, repetirlo por linea es ruido.
       const detArt=(m)=>{
         const uu=udsDe(m), p=preDe(m);
-        const t=[];
-        if(uu){
-          const ped=(uu.aprox?"~":"")+uu.u.toLocaleString("es-ES");
-          // Si sabemos lo servido y no coincide con lo pedido, se ve el
-          // desfase: es justo lo que interesa mirar en un pedido servido.
-          if(uu.srv!=null&&uu.srv!==uu.u){
-            t.push(uu.srv.toLocaleString("es-ES")+" de "+ped+" uds");
-          } else {
-            t.push(ped+" uds");
-          }
-        }
-        if(p!=null) t.push(p.toLocaleString("es-ES",
-          {minimumFractionDigits:2,maximumFractionDigits:2})+" €/u");
-        return t.join(" · ");
+        return {
+          uds: uu!=null ? uu.toLocaleString("es-ES")+" uds" : "",
+          pre: p!=null ? p.toLocaleString("es-ES",
+            {minimumFractionDigits:2,maximumFractionDigits:2})+" €/u" : ""
+        };
       };
 
       const agrupar=(l)=>{
@@ -549,10 +599,15 @@ async function pintarDiario(){
           ${n>1
             ? `<div class="arts">${arts.map(x=>{
                 const d=detArt(x);
-                return `<div><span>${x.descripcion||x.articulo||"—"}</span>
-                 <b>${d||eur(x.importe)}</b></div>`;}).join("")}</div>`
+                return `<div class="a">
+                  <span class="n">${x.descripcion||x.articulo||"—"}</span>
+                  <span class="u">${d.uds}</span>
+                  <span class="p">${d.pre||eur(x.importe)}</span>
+                </div>`;}).join("")}</div>`
             : `<div class="det">${m.descripcion||m.articulo||""}${
-                (()=>{const d=detArt(m); return d?" · "+d:"";})()}</div>`}
+                (()=>{const d=detArt(m);
+                  const t=[d.uds,d.pre].filter(Boolean).join(" · ");
+                  return t?" · "+t:"";})()}</div>`}
         </div>
         <div class="der">
           <div style="font-weight:800">${
