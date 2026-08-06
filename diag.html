@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>¿Por qué no encuentra el cliente?</title>
+<style>
+ :root{--navy:#0F172A;--muted:#64748B;--border:#E2E8F0;--green:#22C55E;--greenL:#F0FDF4;
+       --red:#EF4444;--redL:#FEF2F2;--amber:#F59E0B;--amberL:#FFFBEB}
+ *{box-sizing:border-box}
+ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+      background:#F8FAFC;margin:0;padding:18px;color:var(--navy)}
+ h1{font-size:19px;margin:0 0 4px}
+ .sub{font-size:12.5px;color:var(--muted);margin:0 0 14px}
+ .card{background:#fff;border:1px solid var(--border);border-radius:12px;padding:13px;
+       margin-bottom:10px;font-size:12.5px}
+ .card.ok{border-color:var(--green);background:var(--greenL)}
+ .card.no{border-color:var(--red);background:var(--redL)}
+ code{background:#F1F5F9;padding:1px 6px;border-radius:5px;font-size:11.5px;word-break:break-all}
+ .meta{color:var(--muted);font-size:11.5px;margin-top:5px}
+ h2{font-size:14px;margin:20px 0 8px}
+ label{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px}
+ input{width:100%;padding:9px 11px;border-radius:9px;border:1.5px solid var(--border);font-size:13px}
+ button{width:100%;padding:12px;border-radius:11px;border:none;background:var(--navy);
+        color:#fff;font-weight:700;font-size:13.5px;cursor:pointer;margin-top:10px}
+ pre{background:#F1F5F9;padding:10px;border-radius:8px;font-size:11px;overflow-x:auto}
+</style>
+</head>
+<body>
+<h1>🔬 ¿Por qué no encuentra el cliente?</h1>
+<p class="sub">Compara los ids guardados en el informe con los de la colección clientes.</p>
+
+<label>Código del comercial (ej: RICARDO)</label>
+<input id="ag" value="RICARDO">
+<label>Semana del informe</label>
+<input id="sem" type="number" value="31">
+<button onclick="analizar()">Analizar</button>
+
+<div id="app"></div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+function val(f){
+  if(!f) return null;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  if(f.arrayValue!==undefined) return (f.arrayValue.values||[]).map(val);
+  return null;
+}
+const U=(s)=>String(s||"").toUpperCase().trim();
+
+async function leer(col){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_docId:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<60);
+  return t;
+}
+
+async function analizar(){
+  const app=document.getElementById("app");
+  const ag=U(document.getElementById("ag").value);
+  const sem=Number(document.getElementById("sem").value);
+  app.innerHTML="<p>Analizando…</p>";
+  try{
+    const r=await fetch(`${FB}/informes/informe_${encodeURIComponent(ag)}_s${sem}`);
+    if(!r.ok) throw new Error("No existe informe_"+ag+"_s"+sem);
+    const j=await r.json();
+    let R={}; try{ R=JSON.parse(j.fields.respuestas.stringValue||"{}"); }catch(e){}
+
+    const clientes=await leer("clientes");
+
+    // Todas las claves por las que un cliente podría estar indexado
+    const idx={};
+    clientes.forEach(c=>{
+      [c._docId,c.id,c.codigo,c.CODIGO,c.clienteId,c.clienteCodigo]
+        .filter(Boolean).forEach(k=>{ if(!idx[U(k)]) idx[U(k)]=c; });
+    });
+
+    const claves=Object.keys(R).filter(k=>k.startsWith("cliente:"));
+    let html=`<h2>Ids de cliente guardados en el informe (${claves.length})</h2>`;
+
+    html+=claves.map(k=>{
+      const id=k.split(/:(.+)/)[1]||"";
+      const hit=idx[U(id)];
+      return `<div class="card ${hit?"ok":"no"}">
+        <b>${hit?"✅ Encontrado":"❌ NO encontrado"}</b><br>
+        id guardado: <code>${id}</code>
+        ${hit?`<p class="meta">→ ${hit.nombre||hit.NOMBRE||"(sin nombre)"}
+              · casó por: ${[hit._docId===id?"_docId":"",hit.id===id?"id":"",
+                 U(hit.codigo)===U(id)?"codigo":"",U(hit.clienteId)===U(id)?"clienteId":""]
+                 .filter(Boolean).join(", ")||"variante"}</p>`
+            :`<p class="meta">Ningún cliente tiene ese valor en _docId / id / codigo /
+               clienteId / clienteCodigo.</p>`}
+      </div>`;
+    }).join("") || "<p>No hay compromisos de tipo cliente en este informe.</p>";
+
+    // Muestra de cómo son los ids reales, para comparar formatos a ojo
+    html+=`<h2>Ejemplo de 5 clientes reales (para comparar formato)</h2>`;
+    html+=`<pre>`+clientes.slice(0,5).map(c=>JSON.stringify({
+      _docId:c._docId, id:c.id, codigo:c.codigo, clienteId:c.clienteId,
+      nombre:c.nombre||c.NOMBRE
+    })).join("\n")+`</pre>`;
+
+    app.innerHTML=html;
+  }catch(e){
+    app.innerHTML=`<div class="card no">Error: ${e.message}</div>`;
+  }
+}
+</script>
+</body>
+</html>
