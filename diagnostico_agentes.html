@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diagnóstico de códigos de vendedor</title>
+<style>
+  :root{ --navy:#0F172A; --muted:#64748B; --border:#E2E8F0; --green:#22C55E; --greenL:#F0FDF4;
+         --red:#EF4444; --redL:#FEF2F2; --amber:#F59E0B; --amberL:#FFFBEB; }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+       background:#F8FAFC;color:var(--navy)}
+  header{padding:18px 16px 14px;background:#fff;border-bottom:1px solid var(--border)}
+  h1{margin:0 0 4px;font-size:19px;font-weight:800}
+  .sub{margin:0;font-size:12px;color:var(--muted)}
+  main{padding:16px;max-width:820px;margin:0 auto}
+  .estado{padding:40px 20px;text-align:center;color:var(--muted);font-size:14px}
+  table{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(--border);
+        border-radius:12px;overflow:hidden;font-size:13px}
+  th{background:#F1F5F9;text-align:left;padding:9px 12px;font-size:11px;text-transform:uppercase;
+     letter-spacing:.3px;color:var(--muted)}
+  td{padding:9px 12px;border-top:1px solid var(--border)}
+  .tag{display:inline-block;padding:2px 9px;border-radius:99px;font-size:10.5px;font-weight:700}
+  .ok{background:var(--greenL);color:var(--green)}
+  .no{background:var(--redL);color:var(--red)}
+  h2{font-size:14px;margin:26px 0 8px}
+  .nota{font-size:12px;color:var(--muted);margin:6px 0 0}
+  .err{padding:14px;background:var(--redL);color:var(--red);border-radius:10px;font-size:13px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🔎 Diagnóstico de códigos de vendedor</h1>
+  <p class="sub">Lee "muestras", "visitas" y "pedidos" y agrupa por código de agente y nombre,
+    para ver qué código usa cada persona y quién no está dado de alta en el CRM.</p>
+</header>
+<main><div class="estado" id="app">Leyendo colecciones…</div></main>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+
+// Lista actual de agentes dados de alta en USUARIOS dentro de crm.html.
+// Si un código no está aquí, esas muestras/visitas no se ven en "Mis muestras",
+// en los filtros de equipo, ni en el Panel de decisión — aunque existan en Firestore.
+const REGISTRADOS = new Set(["DAVIDMAG","VERONICA","SILVIA","CARLOSG","RICARDO","AZARCO","RPIEDRA","JLGARCIA"]);
+
+function val(f){
+  if(!f) return null;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  return null;
+}
+const norm=(s)=>String(s||"").toUpperCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+
+async function leer(col){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<60);
+  return t;
+}
+
+function agrupar(docs, campoCodigo, campoNombre){
+  const map={};
+  docs.forEach(d=>{
+    const cod=norm(d[campoCodigo]||"SIN CÓDIGO");
+    const nom=d[campoNombre]||d.agenteNombre||d.cliente||"";
+    if(!map[cod]) map[cod]={codigo:cod, nombres:new Set(), n:0, eliminadas:0};
+    if(nom) map[cod].nombres.add(nom);
+    map[cod].n++;
+    if(d.eliminada) map[cod].eliminadas++;
+  });
+  return Object.values(map).sort((a,b)=>b.n-a.n);
+}
+
+function tabla(filas, tituloExtra){
+  if(filas.length===0) return `<p class="nota">Sin datos.</p>`;
+  return `<table><thead><tr><th>Código en Firestore</th><th>Nombre(s) visto(s)</th>
+    <th>Docs</th>${tituloExtra||""}<th>¿Dado de alta?</th></tr></thead><tbody>`
+    + filas.map(f=>`<tr>
+        <td><b>${f.codigo}</b></td>
+        <td>${[...f.nombres].join(", ")||"—"}</td>
+        <td>${f.n}</td>
+        ${tituloExtra?`<td>${f.eliminadas||0}</td>`:""}
+        <td>${REGISTRADOS.has(f.codigo)?'<span class="tag ok">Sí</span>':'<span class="tag no">NO — falta en USUARIOS</span>'}</td>
+      </tr>`).join("") + "</tbody></table>";
+}
+
+async function iniciar(){
+  const app=document.getElementById("app");
+  try{
+    const [muestras, visitas] = await Promise.all([leer("muestras"), leer("visitas")]);
+    let pedidos=[];
+    try{ pedidos = await leer("pbi_pedidos"); }catch(e){}
+
+    const gMuestras=agrupar(muestras, "agente", "agenteNombre");
+    const gVisitas=agrupar(visitas, "agente", "agenteNombre");
+    const faltan=gMuestras.filter(f=>!REGISTRADOS.has(f.codigo));
+
+    app.innerHTML = `
+      ${faltan.length?`
+        <h2>⚠️ Códigos con muestras que NO están dados de alta</h2>
+        <p class="nota">Estos son los que hay que añadir a USUARIOS en crm.html. El nombre de la
+          columna "Nombre(s) visto(s)" es literalmente lo que hay guardado en agenteNombre.</p>
+        ${tabla(faltan, "<th>Eliminadas</th>")}
+      `:`<h2>✅ Todos los códigos de "muestras" están dados de alta</h2>`}
+
+      <h2>📦 Todos los códigos en "muestras" (${muestras.length} documentos)</h2>
+      ${tabla(gMuestras, "<th>Eliminadas</th>")}
+
+      <h2>🚗 Todos los códigos en "visitas" (${visitas.length} documentos)</h2>
+      ${tabla(gVisitas)}
+    `;
+  }catch(e){
+    app.innerHTML = `<div class="err">No se ha podido leer: ${e.message}</div>`;
+  }
+}
+iniciar();
+</script>
+</body>
+</html>
