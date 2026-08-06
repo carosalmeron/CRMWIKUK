@@ -1698,6 +1698,25 @@ ${med.join(",\n")}
       }
       out.clientesSinDueno = sinDueno;
 
+      // ── Consolidado _TOTAL ──────────────────────────────────────────────
+      // El parte y el CRM reconstruian el mes cerrado sumando ficha a ficha.
+      // Eso obliga a que el censo de comerciales sea identico al de Power BI
+      // en cada carga, y no lo es: cambia con altas, bajas, traspasos y con
+      // que la clave este escrita distinto en cada coleccion (PEPE / R-PEPE).
+      // Un comercial que no case desaparece de la suma en silencio.
+      //
+      // Este documento suma directamente por CLIENTE, sobre pbi_meses_cliente,
+      // que ya viene filtrado a contables. No depende de que el cliente tenga
+      // dueno resoluble, asi que tambien recoge lo que hoy se pierde en
+      // "clientesSinDueno". Es la cifra estable: leerla en vez de rehacerla.
+      const tot = { act: new Array(12).fill(0), ant: new Array(12).fill(0) };
+      for (const fila of Object.values(mesesDe)) {
+        for (let m = 0; m < 12; m++) {
+          tot.act[m] += Number(fila[1 + m]) || 0;
+          tot.ant[m] += Number(fila[13 + m]) || 0;
+        }
+      }
+
       const anoAnt = new Date().getFullYear() - 1;
       const docs = Object.entries(porAgente).map(([ag, g]) => {
         const total = g.ant.reduce((a, b) => a + b, 0);
@@ -1712,6 +1731,38 @@ ${med.join(",\n")}
         }
         return o;
       });
+
+      {
+        const totalAnt = tot.ant.reduce((x, y) => x + y, 0);
+        const totalAct = tot.act.reduce((x, y) => x + y, 0);
+        const doc = { _id: "_TOTAL", agente: "_TOTAL", anio: anoAnt,
+                      total: num(totalAnt), totalAct: num(totalAct),
+                      fuente: "suma por cliente sobre pbi_meses_cliente",
+                      actualizado: new Date().toISOString() };
+        for (let m = 1; m <= 12; m++) {
+          doc["mes_" + m] = num(tot.ant[m - 1]);
+          doc["act_" + m] = num(tot.act[m - 1]);
+          doc["peso_" + m] = totalAnt
+            ? Math.round(tot.ant[m - 1] / totalAnt * 10000) / 10000 : 0;
+        }
+        docs.push(doc);
+
+        // Cuanto se perdia al reconstruir por agentes, mes a mes. Si esto no
+        // es cero, hay clientes contables cuyo comercial no se resuelve.
+        const sumaAg = docs.filter((d) => d._id !== "_TOTAL")
+          .reduce((t, d) => t + num(d.totalAct), 0);
+        out.consolidado = {
+          totalActPorCliente: num(totalAct),
+          totalActPorAgente: num(sumaAg),
+          diferencia: num(totalAct - sumaAg),
+          porMes: tot.act.map((v, i) => ({
+            mes: i + 1,
+            porCliente: num(v),
+            porAgente: num(docs.filter((d) => d._id !== "_TOTAL")
+              .reduce((t, d) => t + num(d["act_" + (i + 1)]), 0)),
+          })).filter((x) => x.porCliente || x.porAgente),
+        };
+      }
 
       if (!req.query.dry) {
         await fbCommit("pbi_estacionalidad", docs);
