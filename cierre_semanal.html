@@ -170,11 +170,22 @@ const CIERRA={
 window.marcar=(k,v,el)=>{
   R[k]=R[k]||{}; R[k].accion=v;
   R[k].cierra = CIERRA[v] || null;
+  // (fix ago 2026) Los clientes de esta pantalla vienen de pbi_resumen (SAP),
+  // así que la clave queda como "cliente:U4301468" — un código que no existe
+  // en la colección "clientes" del CRM. Guardamos también el nombre para que
+  // quien lea el informe después no tenga que adivinar de quién se trata.
+  if(window.NOMBRES_CLAVE&&window.NOMBRES_CLAVE[k]) R[k].nom=window.NOMBRES_CLAVE[k];
+  if(window.CRMID_CLAVE&&window.CRMID_CLAVE[k]) R[k].crmId=window.CRMID_CLAVE[k];
   [...el.parentNode.children].forEach(x=>x.classList.remove("on"));
   el.classList.add("on"); refrescar();
 };
 window.texto=(k,el)=>{ R[k]=R[k]||{}; R[k].texto=el.value.trim();
+  if(window.NOMBRES_CLAVE&&window.NOMBRES_CLAVE[k]) R[k].nom=window.NOMBRES_CLAVE[k];
+  if(window.CRMID_CLAVE&&window.CRMID_CLAVE[k]) R[k].crmId=window.CRMID_CLAVE[k];
   el.classList.toggle("falta",false); refrescar(); };
+// Diccionarios clave → nombre / id del CRM, rellenados al pintar cada bloque
+window.NOMBRES_CLAVE={};
+window.CRMID_CLAVE={};
 
 let PENDIENTES=[];
 function refrescar(){
@@ -363,7 +374,12 @@ async function enviar(){
         grav=ritmo*seco; }
       else if(caida<=-45){ motivo=`compraba ${eur(ritmo)} al mes y ahora ${eur(ahora)}, `
         +`un ${Math.round(-caida)} % menos`; grav=(ritmo-ahora)*2; }
-      if(motivo) avisos.push({id:c._id,nom:c.nombre||c._id,motivo,grav});
+      if(motivo) avisos.push({id:c._id,nom:c.nombre||c._id,motivo,grav,
+        // Guardamos el nombre normalizado para poder emparejarlo luego con la
+        // ficha del CRM: el id de aquí es el código SAP y no vale para eso.
+        _k:String(c.nombre||"").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+             .replace(/\b(S\.?L\.?U?|S\.?A\.?U?|SCL|LDA|SARL|SAS|GMBH|SRL|CB|SAT|COOP|SOC|UNIPESSOAL)\b/g,"")
+             .replace(/[^A-Z0-9]/g,"")});
     }
     avisos.sort((a,b)=>b.grav-a.grav);
     const av=avisos.slice(0,5);
@@ -522,6 +538,20 @@ async function enviar(){
     let duplicados=[];
     try{
       const fichas=await leer("clientes");
+      // (fix ago 2026) Puente SAP ↔ CRM. Los avisos de bajada traen el código
+      // SAP (U4301468), pero cualquier oferta/visita que se cree después usará
+      // el id de la ficha del CRM. Sin este cruce, el compromiso y la acción
+      // que lo cumple nunca se reconocerían entre sí. Se emparejan por nombre
+      // normalizado, que es lo único que ambos sistemas comparten.
+      const fichaPorNom={};
+      for(const f of fichas){
+        const k=norm(f.NOMBRE||f.nombre); if(!k||k.length<5) continue;
+        if(!fichaPorNom[k]) fichaPorNom[k]=f;
+      }
+      av.forEach(a=>{
+        const f=a._k?fichaPorNom[a._k]:null;
+        if(f) a.crmId=f._id||f.id||"";
+      });
       const porNom={};
       for(const p of cli){
         if(p.fusionadoEn) continue;
@@ -637,6 +667,10 @@ async function enviar(){
           Di qué vas a hacer con cada uno.</p>
         ${av.length? av.map(c=>{
           const k="cliente:"+c.id; PENDIENTES.push(k);
+          window.NOMBRES_CLAVE[k]=c.nom;
+          // El id equivalente en el CRM, para que una oferta o visita creada
+          // después se reconozca como cumplimiento de este compromiso.
+          if(c.crmId) window.CRMID_CLAVE[k]=c.crmId;
           return `<div class="item">
             <div>${c.nom}<small>${c.motivo}</small></div>
             <div class="imp pd">${eur(c.grav)}</div></div>
