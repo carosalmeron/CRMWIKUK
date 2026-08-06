@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diagnóstico completo — perfiles sin asignar</title>
+<style>
+  :root{ --navy:#0F172A; --muted:#64748B; --border:#E2E8F0; --green:#22C55E; --greenL:#F0FDF4;
+         --red:#EF4444; --redL:#FEF2F2; --amber:#F59E0B; --amberL:#FFFBEB; --blue:#2563EB; --blueL:#EFF6FF; }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+       background:#F8FAFC;color:var(--navy)}
+  header{padding:18px 16px 14px;background:#fff;border-bottom:1px solid var(--border)}
+  h1{margin:0 0 4px;font-size:19px;font-weight:800}
+  .sub{margin:0;font-size:12px;color:var(--muted)}
+  main{padding:16px;max-width:820px;margin:0 auto}
+  .estado{padding:40px 20px;text-align:center;color:var(--muted);font-size:14px}
+  .card{background:#fff;border:1px solid var(--border);border-radius:14px;padding:14px 16px;
+        margin-bottom:12px}
+  .card.hay-datos{border-color:var(--amber);background:var(--amberL)}
+  .nombre{font-size:15px;font-weight:800;margin:0 0 6px;display:flex;align-items:center;gap:8px}
+  .meta{margin:2px 0;font-size:12.5px;color:var(--muted)}
+  .tag{display:inline-block;padding:2px 9px;border-radius:99px;font-size:10.5px;font-weight:700}
+  .tag.warn{background:var(--amberL);color:var(--amber)}
+  .tag.ok{background:var(--greenL);color:var(--green)}
+  .fila-datos{display:flex;justify-content:space-between;gap:10px;padding:6px 10px;
+              background:#fff;border-radius:8px;margin-top:6px;font-size:12.5px}
+  .sugerido{margin-top:10px;padding:9px 12px;background:var(--blueL);border-radius:9px;font-size:12.5px}
+  .sugerido code{background:#fff;padding:1px 6px;border-radius:5px;font-weight:700}
+  h2{font-size:14px;margin:24px 0 8px}
+  .nota{font-size:12px;color:var(--muted);margin:6px 0 14px}
+  .err{padding:14px;background:var(--redL);color:var(--red);border-radius:10px;font-size:13px}
+  table{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(--border);
+        border-radius:12px;overflow:hidden;font-size:12.5px}
+  th{background:#F1F5F9;text-align:left;padding:8px 10px;font-size:10.5px;text-transform:uppercase;color:var(--muted)}
+  td{padding:8px 10px;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+<header>
+  <h1>🧩 Diagnóstico completo de altas</h1>
+  <p class="sub">Cruza portal_users (quién no tiene "Perfil en el CRM" asignado) con los
+    datos reales que ya tiene en muestras/visitas, para decidir el alta de todos a la vez.</p>
+</header>
+<main><div class="estado" id="app">Leyendo portal_users, muestras y visitas…</div></main>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+function val(f){
+  if(!f) return null;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  return null;
+}
+const norm=(s)=>String(s||"").toUpperCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+
+// Códigos ya dados de alta ahora mismo en USUARIOS dentro de crm.html (id).
+// Si el crmId de alguien ya está aquí, no hace falta tocar nada.
+const IDS_YA_DADOS_DE_ALTA = new Set(["ceo","dir","rw1","ri1","wk1","wk2","wk3","ik1","ik2","ik4","rpiedra","jl"]);
+
+async function leer(col){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<60);
+  return t;
+}
+
+function agruparPorAgente(docs){
+  const map={};
+  docs.forEach(d=>{
+    const cod=norm(d.agente||"SIN CÓDIGO");
+    if(!map[cod]) map[cod]={codigo:cod, n:0, eliminadas:0};
+    map[cod].n++;
+    if(d.eliminada) map[cod].eliminadas++;
+  });
+  return map;
+}
+
+async function iniciar(){
+  const app=document.getElementById("app");
+  try{
+    const [portal, muestras, visitas] = await Promise.all([
+      leer("portal_users"), leer("muestras"), leer("visitas")
+    ]);
+
+    const mMuestras=agruparPorAgente(muestras);
+    const mVisitas=agruparPorAgente(visitas);
+
+    // Solo agentes/comerciales del portal (no admins, no roles internos)
+    const comerciales=portal.filter(pu=>{
+      const rol=norm(pu.rol);
+      return rol==="AGENTE"||rol==="CRM_AGENTE"||rol==="COMERCIAL";
+    });
+
+    const sinAsignar=comerciales.filter(pu=>!pu.crmId);
+    const yaAsignados=comerciales.filter(pu=>pu.crmId);
+
+    let html="";
+
+    html+=`<h2>🟠 Sin "Perfil en el CRM" asignado (${sinAsignar.length})</h2>`;
+    if(sinAsignar.length===0){
+      html+=`<p class="nota">Todos los comerciales del portal tienen ya un crmId. El problema
+        no está aquí.</p>`;
+    } else {
+      html+=sinAsignar.map(pu=>{
+        // Posibles códigos bajo los que puede haber quedado su actividad:
+        // username, catalogoVendedor, nombre — es lo que el CRM usaría de respaldo
+        // cuando no hay crmId.
+        const candidatos=[pu.username, pu.catalogoVendedor, pu.nombre]
+          .filter(Boolean).map(norm);
+        const vistosMuestras=[...new Set(candidatos)]
+          .map(c=>mMuestras[c]).filter(Boolean);
+        const vistosVisitas=[...new Set(candidatos)]
+          .map(c=>mVisitas[c]).filter(Boolean);
+        const totalMuestras=vistosMuestras.reduce((a,x)=>a+x.n,0);
+        const totalVisitas=vistosVisitas.reduce((a,x)=>a+x.n,0);
+        const hayDatos=totalMuestras>0||totalVisitas>0;
+        const idSugerido=norm(pu.username||pu.nombre).toLowerCase().replace(/[^a-z0-9]/g,"");
+
+        return `<div class="card ${hayDatos?"hay-datos":""}">
+          <p class="nombre">${pu.nombre||pu.username||"(sin nombre)"}
+            <span class="tag warn">sin crmId</span></p>
+          <p class="meta">usuario: <code>${pu.username||"—"}</code>
+            · vendedor: <code>${pu.catalogoVendedor||"—"}</code>
+            · equipo: <b>${pu.equipo||"—"}</b></p>
+          ${hayDatos?`
+            <div class="fila-datos"><span>📦 Muestras encontradas bajo su código</span>
+              <b>${totalMuestras}</b></div>
+            <div class="fila-datos"><span>🚗 Visitas encontradas bajo su código</span>
+              <b>${totalVisitas}</b></div>
+          `:`<p class="meta">Sin actividad detectada bajo username/vendedor/nombre.</p>`}
+          <div class="sugerido">
+            Alta sugerida en <code>USUARIOS</code>: <code>id:"${idSugerido}"</code>,
+            <code>grupoAgente:"${norm(pu.catalogoVendedor||pu.username||pu.nombre)}"</code>,
+            <code>equipo:"${pu.equipo||"?"}"</code>
+          </div>
+        </div>`;
+      }).join("");
+    }
+
+    html+=`<h2>✅ Ya tienen Perfil en el CRM asignado (${yaAsignados.length})</h2>`;
+    html+=`<table><thead><tr><th>Nombre</th><th>Usuario</th><th>crmId</th><th>¿Existe en USUARIOS?</th></tr></thead><tbody>`
+      + yaAsignados.map(pu=>`<tr>
+          <td>${pu.nombre||"—"}</td>
+          <td><code>${pu.username||"—"}</code></td>
+          <td><code>${pu.crmId}</code></td>
+          <td>${IDS_YA_DADOS_DE_ALTA.has(norm(pu.crmId).toLowerCase())?'<span class="tag ok">Sí</span>':'<span class="tag warn">Revisar</span>'}</td>
+        </tr>`).join("") + "</tbody></table>";
+
+    app.innerHTML=html;
+  }catch(e){
+    app.innerHTML = `<div class="err">No se ha podido leer: ${e.message}</div>`;
+  }
+}
+iniciar();
+</script>
+</body>
+</html>
