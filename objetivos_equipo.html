@@ -67,6 +67,18 @@
  .estado{text-align:center;color:var(--muted);font-size:13.5px;padding:30px}
  .err{padding:14px;background:var(--redL);color:var(--red);border-radius:10px;font-size:13px}
  .vacio{color:var(--muted);font-size:12.5px;margin:0;padding:6px 0}
+ .buscador{position:relative}
+ .sug{position:absolute;left:0;right:0;top:100%;z-index:20;background:#fff;
+      border:1.5px solid var(--border);border-radius:10px;margin-top:3px;
+      max-height:230px;overflow-y:auto;box-shadow:0 6px 18px #0000001f}
+ .sug div{padding:9px 12px;font-size:12.5px;cursor:pointer;border-top:1px solid #F1F5F9}
+ .sug div:first-child{border-top:none}
+ .sug div:hover,.sug div.act{background:var(--blueL)}
+ .sug small{display:block;color:var(--muted);font-size:10.5px;margin-top:1px}
+ .elegido{display:flex;justify-content:space-between;align-items:center;gap:8px;
+          padding:9px 12px;border-radius:9px;background:var(--greenL);
+          border:1.5px solid var(--green);font-size:12.5px;font-weight:700}
+ .elegido button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px}
 </style>
 </head>
 <body>
@@ -159,6 +171,62 @@ async function escribir(col,id,doc){
 }
 
 let USUARIOS=[], OBJETIVOS=[], CIERRES={}, VISTA="lista", SEL=null, CERRADA=false;
+// Catálogos para los buscadores. Se cargan una vez y se reutilizan.
+let CLIENTES=[], PRODUCTOS=[], ELEGIDO=null;
+
+async function cargarCatalogos(){
+  try{
+    const cli=await leer("clientes");
+    CLIENTES=cli.map(c=>({
+      // El código real del cliente, que es lo que hay que guardar para
+      // poder relacionarlo después con visitas, ofertas y pedidos.
+      cod:String(c.id||c._id||c.CODIGO||c.codigo||"").trim(),
+      nom:String(c.nombre||c.NOMBRE||"").trim(),
+      pob:String(c.poblacion||c.POBLACION||"").trim()
+    })).filter(c=>c.cod&&c.nom);
+  }catch(e){ CLIENTES=[]; }
+  try{
+    const pr=await leer("productos");
+    PRODUCTOS=pr.map(p=>({
+      cod:String(p.codigo||p._id||"").trim(),
+      nom:String(p.nombre||"").trim(),
+      det:[p.calibre,p.medida||p.metros,p.formato].filter(Boolean).join(" · ")
+    })).filter(p=>p.cod);
+  }catch(e){ PRODUCTOS=[]; }
+}
+
+// Qué catálogo toca según la tipología elegida
+function catalogoDe(tipo){
+  return (tipo==="muestras") ? PRODUCTOS : CLIENTES;
+}
+
+window.cambiarTipo=()=>{ ELEGIDO=null; pintar(); };
+
+window.buscarRef=(txt)=>{
+  const tipo=(document.getElementById("ob-tipo")||{}).value||"cliente";
+  const cont=document.getElementById("ob-sug");
+  if(!cont) return;
+  const q=U(txt).trim();
+  if(q.length<2){ cont.innerHTML=""; cont.style.display="none"; return; }
+  const lista=catalogoDe(tipo)
+    .filter(x=>U(x.nom).indexOf(q)>=0||U(x.cod).indexOf(q)>=0)
+    .slice(0,25);
+  if(!lista.length){
+    cont.innerHTML='<div style="color:var(--muted)">Sin resultados</div>';
+    cont.style.display="block"; return;
+  }
+  cont.innerHTML=lista.map(x=>
+    '<div onclick="elegirRef(\''+esc2(x.cod)+'\',\''+esc2(x.nom)+'\')">'
+    +x.nom+'<small>'+x.cod+(x.pob?" · "+x.pob:"")+(x.det?" · "+x.det:"")+'</small></div>'
+  ).join("");
+  cont.style.display="block";
+};
+
+window.elegirRef=(cod,nom)=>{
+  ELEGIDO={cod:cod,nom:nom};
+  pintar();
+};
+window.quitarRef=()=>{ ELEGIDO=null; pintar(); };
 
 async function cargarUsuarios(){
   const [us,pu]=await Promise.all([leer("usuarios"),leer("portal_users")]);
@@ -224,17 +292,23 @@ window.cambiarSemana=async(d)=>{
 window.nuevoObjetivo=async(agId)=>{
   const txt=(document.getElementById("ob-txt").value||"").trim();
   const tipo=document.getElementById("ob-tipo").value;
-  const ref=(document.getElementById("ob-ref").value||"").trim();
   if(!txt){ alert("Escribe el objetivo."); return; }
+  if(!ELEGIDO&&tipo!=="otro"){
+    alert("Elige un "+(tipo==="muestras"?"producto":"cliente")+" de la lista.");
+    return;
+  }
   const btn=document.getElementById("ob-btn");
   btn.disabled=true; btn.textContent="Guardando…";
   const id="obj_"+agId+"_"+ANIO+"_s"+SEMANA+"_"+Date.now();
   const doc={id,agente:agId,semana:SEMANA,anio:ANIO,texto:txt,tipo:tipo,
-    referencia:ref,origen:"jefe",creadoPor:UID,creadoPorNombre:AGENTE,
+    // refCodigo es la clave que permite relacionarlo luego; refNombre es solo
+    // para poder enseñarlo sin volver a buscar.
+    refCodigo:ELEGIDO?ELEGIDO.cod:"", refNombre:ELEGIDO?ELEGIDO.nom:"",
+    origen:"jefe",creadoPor:UID,creadoPorNombre:AGENTE,
     equipo:EQUIPO,fechaCreacion:new Date().toISOString()};
   try{
     await escribir("objetivos_semana",id,doc);
-    OBJETIVOS.push(doc); pintar();
+    OBJETIVOS.push(doc); ELEGIDO=null; pintar();
   }catch(e){
     btn.disabled=false; btn.textContent="Añadir objetivo";
     alert("No se ha podido guardar: "+e.message);
@@ -455,7 +529,8 @@ function pintarDetalle(){
       +'<span class="tag t-'+(o.tipo||"otro")+'">'+(LBL[o.tipo]||"Otro")+'</span>'
       +'<div style="display:flex;gap:9px;align-items:flex-start">'
       +'<div style="flex:1;min-width:0"><p>'+(o.origen==="jefe"?"⭐ ":"")+o.texto+'</p>'
-      +(o.referencia?'<small>Ref: '+o.referencia+'</small>':"")+'</div>'
+      +(o.refNombre?'<small>'+o.refNombre+' · '+(o.refCodigo||"")+'</small>'
+        :(o.referencia?'<small>Ref: '+o.referencia+'</small>':""))+'</div>'
       +(ESCALA_A?'<button class="mini '+(sube?"on":"")+'" '
         +(!sube&&es.length>=MAX?"disabled":"")
         +' onclick="toggleEscalar(\''+esc2(o.id)+'\')">'+(sube?"✓ Sube":"Subir")+'</button>':"")
@@ -466,13 +541,29 @@ function pintarDetalle(){
   h+='</div>';
 
   // 4 · Alta de objetivo con tipología
+  const tipoAct=(document.getElementById("ob-tipo")||{}).value||"cliente";
+  const esProd=tipoAct==="muestras";
   h+='<h3>Añadir objetivo</h3><div class="card">'
-    +'<label>Tipología</label><select id="ob-tipo">'
-    +TIPOS.map(t=>'<option value="'+t.k+'">'+t.lbl+'</option>').join("")
+    +'<label>Tipología</label><select id="ob-tipo" onchange="cambiarTipo()">'
+    +TIPOS.map(t=>'<option value="'+t.k+'"'+(t.k===tipoAct?" selected":"")+'>'
+      +t.lbl+'</option>').join("")
     +'</select>'
-    +'<label>Cliente o referencia (opcional)</label>'
-    +'<input type="text" id="ob-ref" placeholder="Ej: EMBUTIDOS HNOS CANOVAS">'
-    +'<label>Qué tiene que hacer</label>'
+    +'<label>'+(esProd?"Producto":"Cliente")+'</label>';
+  if(ELEGIDO){
+    // Guardamos el código real, no el texto que se teclee: es lo que permite
+    // relacionar el objetivo con visitas, ofertas y pedidos después.
+    h+='<div class="elegido"><span>'+ELEGIDO.nom
+      +'<small style="display:block;font-weight:400;color:var(--muted)">'
+      +ELEGIDO.cod+'</small></span>'
+      +'<button onclick="quitarRef()">✕</button></div>';
+  } else {
+    h+='<div class="buscador">'
+      +'<input type="text" id="ob-ref" autocomplete="off"'
+      +' placeholder="Busca por nombre o código…"'
+      +' oninput="buscarRef(this.value)">'
+      +'<div class="sug" id="ob-sug" style="display:none"></div></div>';
+  }
+  h+='<label>Qué tiene que hacer</label>'
     +'<textarea id="ob-txt" rows="3" placeholder="Describe el objetivo para '
     +a.nombre+'"></textarea>'
     +'<button class="btn" id="ob-btn" onclick="nuevoObjetivo(\''+esc2(a.id)
@@ -501,6 +592,7 @@ async function recargar(){
     document.getElementById("sub").textContent =
       esJefe?("Equipo "+(EQUIPO||"")):esDir?"Todos los equipos":"Vista de dirección";
     USUARIOS=await cargarUsuarios();
+    await cargarCatalogos();
     await recargar();
   }catch(e){
     document.getElementById("app").innerHTML=
