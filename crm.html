@@ -24215,6 +24215,39 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
   const topPotencial=proyActivosVis.filter(function(p){return p.potencial;})
     .sort(function(a,b){return (Number(b.potencial)||0)-(Number(a.potencial)||0);}).slice(0,5);
 
+  // Carga de trabajo por responsable (quién tiene cosas pendientes)
+  const [respExpandido,setRespExpandido]=useState(null);
+  const pendientesPorResp={};
+  proyActivosVis.forEach(function(p){
+    (p.hitos||[]).filter(function(h){return (h.nombre||h.titulo||h.descripcion)&&!h.hecho;}).forEach(function(h){
+      var key=nombreResponsableHito(h.responsable);
+      if(!pendientesPorResp[key]) pendientesPorResp[key]={nombre:key,total:0,vencidos:0,items:[]};
+      var venc=!!(h.fecha&&h.fecha<hoyISO);
+      pendientesPorResp[key].total++;
+      if(venc) pendientesPorResp[key].vencidos++;
+      pendientesPorResp[key].items.push({proyecto:p,hito:h,vencido:venc});
+    });
+  });
+  const respList=Object.values(pendientesPorResp).sort(function(a,b){
+    if(b.vencidos!==a.vencidos) return b.vencidos-a.vencidos;
+    return b.total-a.total;
+  });
+
+  // Proyectos parados esperando una decisión (negociación, aprobación, precio, firma...)
+  const _normTxt=function(s){return (s||"").toString().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"");};
+  const DECISION_KEYS=["decision","negociacion","aprobacion","autorizacion","precio","firma","contrato","validacion","confirmacion","visto bueno"];
+  const proyectosEnDecision=proyActivosVis.map(function(p){
+    var hv=(p.hitos||[]).filter(function(h){return (h.nombre||h.titulo||h.descripcion)&&!h.hecho;})
+      .sort(function(a,b){return (a.fecha||"9999").localeCompare(b.fecha||"9999");});
+    var next=hv[0];
+    if(!next) return null;
+    var txt=_normTxt(next.nombre||next.titulo);
+    var esDecision=DECISION_KEYS.some(function(k){return txt.indexOf(k)>=0;});
+    if(!esDecision) return null;
+    var venc=!!(next.fecha&&next.fecha<hoyISO);
+    return {proyecto:p,hito:next,vencido:venc};
+  }).filter(Boolean);
+
 
   const toggleHito=(proyId,hitoIdx)=>{
     const updProy=p=>({
@@ -25042,86 +25075,113 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
     );
   }
 
-  // ── Pantalla dedicada: Panel de decisión (clara y visual) ──
+  // ── Pantalla dedicada: Panel de decisión (formato tabla ejecutiva) ──
   if(vistaPanel){
+    const rowStyle={display:"flex",alignItems:"center",gap:10,padding:"12px 4px",
+      borderBottom:"1px solid "+T.border,cursor:"pointer"};
     return(
       <div style={{padding:"16px 16px 100px"}}>
         <BackBar label="Volver a proyectos" onBack={()=>setVistaPanel(false)}/>
 
-        <p style={{margin:"0 0 4px",fontSize:20,fontWeight:900,color:T.text}}>📊 Panel de decisión</p>
-        <p style={{margin:"0 0 18px",fontSize:12,color:T.muted}}>Vista rápida para priorizar: dónde está el dinero y qué necesita acción</p>
+        <p style={{margin:"0 0 4px",fontSize:19,fontWeight:800,color:T.text}}>Panel de decisión</p>
+        <p style={{margin:"0 0 18px",fontSize:12,color:T.muted}}>Pipeline activo, carga por responsable y puntos de bloqueo</p>
 
-        {/* KPIs grandes */}
-        <div style={{display:"flex",gap:10,marginBottom:16}}>
-          <Card style={{flex:1,padding:"16px",borderTop:"3px solid "+T.green}}>
-            <p style={{margin:0,fontSize:24,fontWeight:900,color:T.green}}>{potencialTotalActivo.toLocaleString("es-ES")} €</p>
-            <p style={{margin:"4px 0 0",fontSize:11,fontWeight:700,color:T.muted}}>💰 Potencial en activos</p>
-            {sinPotencialCount>0&&<p style={{margin:"6px 0 0",fontSize:10,color:T.amber,fontWeight:700}}>{sinPotencialCount} proyectos sin potencial definido</p>}
-          </Card>
-          <Card style={{flex:1,padding:"16px",borderTop:"3px solid "+T.amber}}>
-            <p style={{margin:0,fontSize:24,fontWeight:900,color:alertasHitos.length>0?T.amber:T.text}}>{alertasHitos.length}</p>
-            <p style={{margin:"4px 0 0",fontSize:11,fontWeight:700,color:T.muted}}>⚠️ Hitos vencidos</p>
-            {sinResponsableCount>0&&<p style={{margin:"6px 0 0",fontSize:10,color:T.amber,fontWeight:700}}>{sinResponsableCount} proyectos con hitos sin responsable</p>}
-          </Card>
+        {/* KPIs — franja de indicadores sobria */}
+        <div style={{display:"flex",border:"1px solid "+T.border,borderRadius:12,overflow:"hidden",marginBottom:22,background:T.white}}>
+          {[
+            {val:potencialTotalActivo.toLocaleString("es-ES")+" €",label:"Potencial activo",sub:sinPotencialCount>0?sinPotencialCount+" sin definir":null},
+            {val:alertasHitos.length,label:"Hitos vencidos",sub:sinResponsableCount>0?sinResponsableCount+" sin responsable":null},
+            {val:proyectosEnDecision.length,label:"Esperando decisión",sub:null},
+            {val:respList.reduce((a,r)=>a+r.total,0),label:"Tareas pendientes",sub:respList.length+" responsables"},
+          ].map(function(k,i){
+            return(
+              <div key={i} style={{flex:1,padding:"14px 12px",borderRight:i<3?"1px solid "+T.border:"none"}}>
+                <p style={{margin:0,fontSize:20,fontWeight:900,color:T.text}}>{k.val}</p>
+                <p style={{margin:"3px 0 0",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase",letterSpacing:.3}}>{k.label}</p>
+                {k.sub&&<p style={{margin:"3px 0 0",fontSize:10,color:T.amberD||T.amber}}>{k.sub}</p>}
+              </div>
+            );
+          })}
         </div>
 
-        {/* Requiere acción */}
-        <p style={{margin:"0 0 10px",fontSize:14,fontWeight:800,color:T.text}}>🔔 Requiere acción ya</p>
-        {alertasHitos.length===0?(
-          <Card style={{marginBottom:20,textAlign:"center",padding:24,color:T.muted}}>
-            <span style={{fontSize:28,display:"block",marginBottom:6}}>✅</span>
-            <p style={{margin:0,fontSize:12}}>No hay hitos vencidos. Todo al día.</p>
-          </Card>
-        ):(
-          <div style={{marginBottom:20}}>
-            {alertasHitos.map(function(a,i){
-              return(
-                <Card key={i} onClick={function(){setSel(a.proyecto);setVistaPanel(false);}}
-                  style={{marginBottom:8,padding:"12px 16px",cursor:"pointer",
-                    borderLeft:"4px solid "+T.amber,background:T.amberL}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10}}>
-                    <div style={{minWidth:0,flex:1}}>
-                      <p style={{margin:"0 0 3px",fontSize:13,fontWeight:800,color:T.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.proyecto.nombre}</p>
-                      <p style={{margin:0,fontSize:12,color:T.text}}>{a.hito.nombre||a.hito.titulo}</p>
-                      <p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>👤 {nombreResponsableHito(a.hito.responsable)}{a.proyecto.cliente?" · "+a.proyecto.cliente:""}</p>
-                    </div>
-                    <div style={{textAlign:"right",flexShrink:0}}>
-                      <span style={{display:"inline-block",fontSize:11,fontWeight:800,color:"#fff",
-                        background:T.amber,borderRadius:99,padding:"3px 10px"}}>{a.dias}d de retraso</span>
-                    </div>
-                  </div>
-                </Card>
-              );
-            })}
-          </div>
-        )}
-
-        {/* Mayor potencial */}
-        <p style={{margin:"0 0 10px",fontSize:14,fontWeight:800,color:T.text}}>💰 Mayor potencial</p>
-        {topPotencial.length===0?(
-          <Card style={{textAlign:"center",padding:24,color:T.muted}}>
-            <span style={{fontSize:28,display:"block",marginBottom:6}}>📈</span>
-            <p style={{margin:0,fontSize:12}}>Todavía no hay proyectos con potencial (€) definido.</p>
-          </Card>
-        ):(
-          <div>
-            {topPotencial.map(function(p,i){
-              return(
-                <Card key={p.id} onClick={function(){setSel(p);setVistaPanel(false);}}
-                  style={{marginBottom:8,padding:"12px 16px",cursor:"pointer",
-                    display:"flex",alignItems:"center",gap:12,borderLeft:"4px solid "+T.green}}>
-                  <div style={{width:28,height:28,borderRadius:99,background:T.greenL,color:T.green,
-                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:900,flexShrink:0}}>{i+1}</div>
+        {/* Carga por responsable — quién tiene cosas pendientes */}
+        <p style={{margin:"0 0 2px",fontSize:13,fontWeight:800,color:T.text}}>Carga por responsable</p>
+        <p style={{margin:"0 0 8px",fontSize:11,color:T.muted}}>Quién tiene tareas abiertas ahora mismo</p>
+        <Card style={{marginBottom:22,padding:"6px 16px"}}>
+          {respList.length===0?(
+            <p style={{margin:"10px 0",fontSize:12,color:T.muted,textAlign:"center"}}>Sin tareas pendientes</p>
+          ):respList.map(function(r,i){
+            const abierto=respExpandido===r.nombre;
+            return(
+              <div key={r.nombre}>
+                <div onClick={function(){setRespExpandido(abierto?null:r.nombre);}}
+                  style={{...rowStyle,borderBottom:(i===respList.length-1&&!abierto)?"none":rowStyle.borderBottom}}>
+                  <span style={{fontSize:11,color:T.muted,width:16,flexShrink:0}}>{abierto?"▾":"▸"}</span>
                   <div style={{flex:1,minWidth:0}}>
-                    <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.nombre}</p>
-                    {p.cliente&&<p style={{margin:0,fontSize:11,color:T.muted}}>{p.cliente}</p>}
+                    <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{r.nombre}</p>
                   </div>
-                  <span style={{fontSize:13,fontWeight:900,color:T.green,flexShrink:0}}>{Number(p.potencial).toLocaleString("es-ES")} €</span>
-                </Card>
-              );
-            })}
-          </div>
-        )}
+                  <span style={{fontSize:12,color:T.muted,flexShrink:0}}>{r.total} pendiente{r.total===1?"":"s"}</span>
+                  {r.vencidos>0&&<span style={{fontSize:11,fontWeight:800,color:T.amberD||T.amber,flexShrink:0,minWidth:52,textAlign:"right"}}>{r.vencidos} vencido{r.vencidos===1?"":"s"}</span>}
+                  {r.vencidos===0&&<span style={{fontSize:11,color:T.border,flexShrink:0,minWidth:52,textAlign:"right"}}>—</span>}
+                </div>
+                {abierto&&(
+                  <div style={{padding:"0 0 10px 26px"}}>
+                    {r.items.map(function(it,ix){
+                      return(
+                        <div key={ix} onClick={function(){setSel(it.proyecto);setVistaPanel(false);}}
+                          style={{display:"flex",justifyContent:"space-between",gap:8,padding:"6px 0",cursor:"pointer"}}>
+                          <p style={{margin:0,fontSize:12,color:T.text}}>{it.proyecto.nombre} <span style={{color:T.muted}}>— {it.hito.nombre||it.hito.titulo}</span></p>
+                          <span style={{fontSize:11,fontWeight:700,color:it.vencido?(T.amberD||T.amber):T.muted,flexShrink:0}}>{it.hito.fecha?_fechaES(it.hito.fecha):"sin fecha"}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </Card>
+
+        {/* Proyectos esperando una decisión */}
+        <p style={{margin:"0 0 2px",fontSize:13,fontWeight:800,color:T.text}}>Esperando decisión</p>
+        <p style={{margin:"0 0 8px",fontSize:11,color:T.muted}}>Proyectos parados por negociación, aprobación, precio o firma</p>
+        <Card style={{marginBottom:22,padding:"6px 16px"}}>
+          {proyectosEnDecision.length===0?(
+            <p style={{margin:"10px 0",fontSize:12,color:T.muted,textAlign:"center"}}>Ningún proyecto está bloqueado a la espera de una decisión</p>
+          ):proyectosEnDecision.map(function(d,i){
+            return(
+              <div key={d.proyecto.id} onClick={function(){setSel(d.proyecto);setVistaPanel(false);}}
+                style={{...rowStyle,borderBottom:i===proyectosEnDecision.length-1?"none":rowStyle.borderBottom}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.proyecto.nombre}</p>
+                  <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{d.hito.nombre||d.hito.titulo} · {nombreResponsableHito(d.hito.responsable)}</p>
+                </div>
+                {d.hito.fecha&&<span style={{fontSize:11,fontWeight:700,color:d.vencido?(T.amberD||T.amber):T.muted,flexShrink:0}}>{d.vencido?"venció ":"objetivo "}{_fechaES(d.hito.fecha)}</span>}
+              </div>
+            );
+          })}
+        </Card>
+
+        {/* Prioridad por potencial */}
+        <p style={{margin:"0 0 2px",fontSize:13,fontWeight:800,color:T.text}}>Prioridad por potencial</p>
+        <p style={{margin:"0 0 8px",fontSize:11,color:T.muted}}>Dónde está el dinero</p>
+        <Card style={{padding:"6px 16px"}}>
+          {topPotencial.length===0?(
+            <p style={{margin:"10px 0",fontSize:12,color:T.muted,textAlign:"center"}}>Todavía no hay proyectos con potencial (€) definido</p>
+          ):topPotencial.map(function(p,i){
+            return(
+              <div key={p.id} onClick={function(){setSel(p);setVistaPanel(false);}}
+                style={{...rowStyle,borderBottom:i===topPotencial.length-1?"none":rowStyle.borderBottom}}>
+                <span style={{fontSize:11,fontWeight:800,color:T.muted,width:16,flexShrink:0}}>{i+1}</span>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.nombre}</p>
+                  {p.cliente&&<p style={{margin:0,fontSize:11,color:T.muted}}>{p.cliente}</p>}
+                </div>
+                <span style={{fontSize:13,fontWeight:800,color:T.text,flexShrink:0}}>{Number(p.potencial).toLocaleString("es-ES")} €</span>
+              </div>
+            );
+          })}
+        </Card>
       </div>
     );
   }
