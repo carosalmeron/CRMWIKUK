@@ -1671,6 +1671,8 @@ ${med.join(",\n")}
 
       // A quien pertenece cada cliente: lo decide la sincronizacion
       const duenoDe = {};
+      const bloqueadoDe = {};
+      const empresaDe = {};
       let leidos = 0, contables = 0;
       for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
         leidos++;
@@ -1680,7 +1682,64 @@ ${med.join(",\n")}
         contables++;
         const ag = String(c.agenteFinal || c.agente || "SIN AGENTE").toUpperCase();
         duenoDe[String(c._id).toUpperCase()] = ag;
+        bloqueadoDe[String(c._id).toUpperCase()] = c.bloqueado === true;
+        empresaDe[String(c._id).toUpperCase()] = String(c.empresa || "").trim() || "(vacia)";
       }
+
+      // (v4.65) Por que el CRM no cuadra con el Panel Principal.
+      // Power BI filtra su dataset con cuatro reglas y el CRM solo aplica una
+      // (fuera intercompany). Aqui se mide, mes a mes, cuanto aporta cada una
+      // de las que faltan, para poder decidir con numeros si se adoptan.
+      //   GRUPOAGENTE no es (En blanco), - o CAMPOFRIO  → cajon sin comercial
+      //   BLQ es NO                                     → clientes bloqueados
+      const FUERA_PBI = new Set(["SIN AGENTE", "-", "", "CAMPOFRIO", "WIKUK"]);
+      const critPBI = { total:[], sinCajon:[], sinBloqueados:[], comoPBI:[] };
+      for (let m = 0; m < 12; m++)
+        for (const k in critPBI) critPBI[k][m] = 0;
+      for (const [cli, fila] of Object.entries(mesesDe)) {
+        const ag = duenoDe[cli];
+        if (!ag) continue;
+        const enCajon = FUERA_PBI.has(ag);
+        const blq = bloqueadoDe[cli] === true;
+        for (let m = 0; m < 12; m++) {
+          const v = Number(fila[1 + m]) || 0;
+          if (!v) continue;
+          critPBI.total[m] += v;
+          if (!enCajon) critPBI.sinCajon[m] += v;
+          if (!blq)     critPBI.sinBloqueados[m] += v;
+          if (!enCajon && !blq) critPBI.comoPBI[m] += v;
+        }
+      }
+      // (v4.66) Reparto por EMPRESA. Power BI excluye Alm.Marruecos y las filas
+      // sin empresa; el CRM no excluye ninguna. La desviacion contra el Panel
+      // Principal es del 1,4% en todo el ano, repartida por igual mes a mes:
+      // eso apunta a una regla constante, no a operaciones sueltas.
+      const porEmpresa = {};
+      for (const [cli, fila] of Object.entries(mesesDe)) {
+        if (!duenoDe[cli]) continue;
+        const emp = empresaDe[cli] || "(sin dato)";
+        const g = porEmpresa[emp] = porEmpresa[emp] || { ano: 0, jul: 0, clientes: 0 };
+        let tuvo = false;
+        for (let m = 0; m < 12; m++) {
+          const v = Number(fila[1 + m]) || 0;
+          g.ano += v;
+          if (m === 6) g.jul += v;
+          if (v) tuvo = true;
+        }
+        if (tuvo) g.clientes++;
+      }
+      out.porEmpresa = Object.entries(porEmpresa)
+        .map(([emp, g]) => ({ empresa: emp, ano: num(g.ano), julio: num(g.jul), clientes: g.clientes }))
+        .sort((a, b) => b.ano - a.ano);
+
+      out.criterioPowerBI = critPBI.total.map((v, i) => ({
+        mes: i + 1,
+        crm: num(v),
+        quitandoSinComercial: num(critPBI.sinCajon[i]),
+        quitandoBloqueados: num(critPBI.sinBloqueados[i]),
+        comoPowerBI: num(critPBI.comoPBI[i]),
+        diferencia: num(v - critPBI.comoPBI[i]),
+      })).filter((x) => x.crm);
       out.clientesLeidos = leidos;
       out.clientesContables = contables;
 
@@ -1698,6 +1757,25 @@ ${med.join(",\n")}
       }
       out.clientesSinDueno = sinDueno;
 
+      // ── Consolidado _TOTAL ──────────────────────────────────────────────
+      // El parte y el CRM reconstruian el mes cerrado sumando ficha a ficha.
+      // Eso obliga a que el censo de comerciales sea identico al de Power BI
+      // en cada carga, y no lo es: cambia con altas, bajas, traspasos y con
+      // que la clave este escrita distinto en cada coleccion (PEPE / R-PEPE).
+      // Un comercial que no case desaparece de la suma en silencio.
+      //
+      // Este documento suma directamente por CLIENTE, sobre pbi_meses_cliente,
+      // que ya viene filtrado a contables. No depende de que el cliente tenga
+      // dueno resoluble, asi que tambien recoge lo que hoy se pierde en
+      // "clientesSinDueno". Es la cifra estable: leerla en vez de rehacerla.
+      const tot = { act: new Array(12).fill(0), ant: new Array(12).fill(0) };
+      for (const fila of Object.values(mesesDe)) {
+        for (let m = 0; m < 12; m++) {
+          tot.act[m] += Number(fila[1 + m]) || 0;
+          tot.ant[m] += Number(fila[13 + m]) || 0;
+        }
+      }
+
       const anoAnt = new Date().getFullYear() - 1;
       const docs = Object.entries(porAgente).map(([ag, g]) => {
         const total = g.ant.reduce((a, b) => a + b, 0);
@@ -1712,6 +1790,38 @@ ${med.join(",\n")}
         }
         return o;
       });
+
+      {
+        const totalAnt = tot.ant.reduce((x, y) => x + y, 0);
+        const totalAct = tot.act.reduce((x, y) => x + y, 0);
+        const doc = { _id: "_TOTAL", agente: "_TOTAL", anio: anoAnt,
+                      total: num(totalAnt), totalAct: num(totalAct),
+                      fuente: "suma por cliente sobre pbi_meses_cliente",
+                      actualizado: new Date().toISOString() };
+        for (let m = 1; m <= 12; m++) {
+          doc["mes_" + m] = num(tot.ant[m - 1]);
+          doc["act_" + m] = num(tot.act[m - 1]);
+          doc["peso_" + m] = totalAnt
+            ? Math.round(tot.ant[m - 1] / totalAnt * 10000) / 10000 : 0;
+        }
+        docs.push(doc);
+
+        // Cuanto se perdia al reconstruir por agentes, mes a mes. Si esto no
+        // es cero, hay clientes contables cuyo comercial no se resuelve.
+        const sumaAg = docs.filter((d) => d._id !== "_TOTAL")
+          .reduce((t, d) => t + num(d.totalAct), 0);
+        out.consolidado = {
+          totalActPorCliente: num(totalAct),
+          totalActPorAgente: num(sumaAg),
+          diferencia: num(totalAct - sumaAg),
+          porMes: tot.act.map((v, i) => ({
+            mes: i + 1,
+            porCliente: num(v),
+            porAgente: num(docs.filter((d) => d._id !== "_TOTAL")
+              .reduce((t, d) => t + num(d["act_" + (i + 1)]), 0)),
+          })).filter((x) => x.porCliente || x.porAgente),
+        };
+      }
 
       if (!req.query.dry) {
         await fbCommit("pbi_estacionalidad", docs);
@@ -3134,7 +3244,7 @@ EVALUATE
       const agentes = new Map();
       try {
         for (const a of await pbiQuery(token, Q.agentes, true)) {
-          const cod = String(pick(a, "CODIGO") || "").trim();
+          const cod = String(pick(a, "CODIGO") || "").trim().toUpperCase();
           if (!cod) continue;
           agentes.set(cod, {
             grupo: String(pick(a, "GRUPOAGENTE") || "").trim() || null,
@@ -3159,11 +3269,21 @@ EVALUATE
         log.errores.push(`agentes: ${e.message}`);
       }
 
+      // (fix) Busqueda del vendedor normalizada. Antes cada uso repetia
+      // String(...).trim() sin mayusculas, asi que un codigo de vendedor con
+      // otra caja no encontraba a su comercial: el cliente quedaba sin agente
+      // y su venta se iba al cajon "SIN AGENTE".
+      const buscaAgente = (v) => agentes.get(String(v || "").trim().toUpperCase());
+
       // Ficha de cliente: primera aparicion de cada codigo
       const fichas = new Map();
       try {
         for (const c of await pbiQuery(token, Q.clientes)) {
-          const cod = String(pick(c, "CODIGO") || "").trim();
+          // (fix) Clave normalizada. La tabla de ventas devuelve el codigo en
+          // mayusculas y el maestro no siempre: con .trim() a secas, "Guery"
+          // y "GUERY" no casaban y el cliente se quedaba sin ficha, es decir
+          // marcado como huerfano y sin nombre ni poblacion.
+          const cod = String(pick(c, "CODIGO") || "").trim().toUpperCase();
           if (!cod || fichas.has(cod)) continue;
           fichas.set(cod, {
             nombre: pick(c, "NOMBRE"),
@@ -3182,8 +3302,8 @@ EVALUATE
         const cliente = pick(r, "CLIENTE");
         // Si el codigo ya no existe en el maestro, se busca su equivalente
         // recodificado para no dejar el cliente sin nombre ni poblacion.
-        const ficha = fichas.get(String(cliente).trim())
-          || fichas.get(canonico(cliente))
+        const ficha = fichas.get(String(cliente).trim().toUpperCase())
+          || fichas.get(String(canonico(cliente)).trim().toUpperCase())
           || {};
 
         const vAntFull = num(pick(r, "VentaAntFull"));
@@ -3226,15 +3346,15 @@ EVALUATE
           // contado alli. El nombre solo vale si el vendedor no esta en la
           // tabla de agentes y no hay forma de saberlo por GRUPONIVEL1.
           intercompany: (() => {
-            const a = agentes.get(String(pick(r, "VENDEDOR") || "").trim());
+            const a = buscaAgente(pick(r, "VENDEDOR"));
             if (a && a.nivel1) return a.nivel1 === "Intercompany";
             return esIntercompany(ficha.nombre);
           })(),
-          agente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.grupo || null,
-          tipoAgente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.tipo || null,
-          ambitoAgente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.ambito || null,
-          equipoAgente: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.equipo || null,
-          objetivoMargen: agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.objetivoMargen ?? null,
+          agente: buscaAgente(pick(r, "VENDEDOR"))?.grupo || null,
+          tipoAgente: buscaAgente(pick(r, "VENDEDOR"))?.tipo || null,
+          ambitoAgente: buscaAgente(pick(r, "VENDEDOR"))?.ambito || null,
+          equipoAgente: buscaAgente(pick(r, "VENDEDOR"))?.equipo || null,
+          objetivoMargen: buscaAgente(pick(r, "VENDEDOR"))?.objetivoMargen ?? null,
           poblacion: ficha.poblacion,
           provincia: ficha.provincia,
           bloqueado: ficha.bloqueado === true,
@@ -3407,6 +3527,12 @@ EVALUATE
 
         for (const d of grupo) {
           if (d === principal) continue;
+          // Y tampoco si es el MISMO codigo en otro objeto: la tabla tiene una
+          // fila por sociedad, asi que el principal puede aparecer repetido. Sin
+          // esto se fusionaba consigo mismo, se ponia a cero y desaparecia del
+          // desglose por cliente aunque el resumen si lo contaba: era el caso de
+          // LORIENTE PIQUERAS, 81.527 € que no cuadraban en CARLOSG.
+          if (String(d.cliente) === String(principal.cliente)) continue;
           d.fusionadoEn = principal.cliente;   // el CRM puede redirigir aqui
           d.ventasAntFull = 0; d.margenAntFull = 0;
           d.ventasAntYTD = 0;  d.margenAntYTD = 0;
@@ -3441,14 +3567,74 @@ EVALUATE
       // comercial) y cada vista nueva las replicaba mal. Se deciden aquí y se
       // graban en el propio cliente: lo demás solo tiene que leer "cuenta" y
       // "agenteFinal", sin volver a razonarlo.
+      // (fix) Asignacion del CRM, para los clientes cuyo vendedor no esta en
+      // la tabla de Agentes. Antes su venta caia en "SIN AGENTE" aunque el
+      // comercial estuviera perfectamente asignado en la ficha del CRM, y el
+      // bloque de estacionalidad los descartaba con un continue silencioso.
+      // Se lee una sola vez y se reutiliza mas abajo en el resumen.
+      let asignacionCRM = new Map();
+      try {
+        asignacionCRM = await fbLeerClientes();
+        log.clientesCrmLeidos = asignacionCRM.size;
+      } catch (e) {
+        log.errores.push(`asignacion CRM: ${e.message}`);
+      }
+      const agenteDelCRM = (d) => {
+        const id = String(d._id || d.cliente || "").trim();
+        return asignacionCRM.get(id)
+          || asignacionCRM.get(id.toUpperCase())
+          || asignacionCRM.get(String(canonico(id)).trim())
+          || (d.codconta ? asignacionCRM.get("CC:" + String(d.codconta).trim()) : null)
+          || null;
+      };
+      let rescatadosCRM = 0;
+
       for (const d of docs) {
+      // Un mismo codigo puede venir en varias filas (una por sociedad). Todas
+      // escriben en el MISMO documento, asi que la ultima pisa a las demas: si
+      // esa trae cero, la venta buena desaparece. Se deja una sola por codigo,
+      // la que mas venta tenga, que es la que ya lleva la suma del grupo.
+      {
+        const mejor = new Map();
+        for (const d of docs) {
+          const k = String(d._id);
+          const a = mejor.get(k);
+          if (!a || num(d.ventasAct) > num(a.ventasAct)
+                 || (num(d.ventasAct) === num(a.ventasAct)
+                     && num(d.ventasAntFull) > num(a.ventasAntFull))) {
+            mejor.set(k, d);
+          }
+        }
+        if (mejor.size !== docs.length) {
+          log.duplicadosDescartados = docs.length - mejor.size;
+          // docs es const: se vacia y se rellena, en vez de reasignar
+          const buenos = [...mejor.values()];
+          docs.length = 0;
+          for (const d of buenos) docs.push(d);
+        }
+      }
+
+        // Red de seguridad: fusionado en si mismo no es fusionado
+        if (d.fusionadoEn && String(d.fusionadoEn) === String(d._id || d.cliente))
+          delete d.fusionadoEn;
         d.cuenta = !d.intercompany && !d.fusionadoEn;
-        d.agenteFinal = d.agente || "SIN AGENTE";
-        // Los códigos fusionados no cuentan, pero conviene saber dónde fue su
-        // venta para poder auditarla desde cualquier vista.
-        if (d.fusionadoEn) d.agenteFinal = d.agente || "SIN AGENTE";
+        // El comercial lo manda el ERP; si ahi no consta, se pregunta al CRM
+        // antes de rendirse y mandarlo a "SIN AGENTE".
+        if (!d.agente) {
+          const delCRM = agenteDelCRM(d);
+          if (delCRM) { d.agenteFinal = delCRM; d.origenAgente = "crm"; rescatadosCRM++; }
+          else d.agenteFinal = "SIN AGENTE";
+        } else {
+          d.agenteFinal = d.agente;
+          d.origenAgente = "erp";
+        }
       }
       log.clientesQueCuentan = docs.filter((d) => d.cuenta).length;
+      log.agenteRescatadoDelCrm = rescatadosCRM;
+      log.ventaRescatadaDelCrm = num(docs
+        .filter((d) => d.cuenta && d.origenAgente === "crm")
+        .reduce((t, d) => t + num(d.ventasAct), 0));
+      log.siguenSinAgente = docs.filter((d) => d.cuenta && d.agenteFinal === "SIN AGENTE").length;
 
       log.intercompanyMarcados = docs.filter((d) => d.intercompany).length;
       log.codigosHuerfanos = docs.filter((d) => d.huerfano).length;
@@ -3480,7 +3666,9 @@ EVALUATE
       if (!dry && margen() < 8) {
         log.resumenAgentes = `omitido, quedaban ${margen()} s · lánzalo con ?resumen=1`;
       } else try {
-        const asignacion = await fbLeerClientes();
+        // Ya leida arriba: se reutiliza en vez de volver a recorrer los 16.000
+        // documentos de la coleccion "clientes".
+        const asignacion = asignacionCRM.size ? asignacionCRM : await fbLeerClientes();
         log.clientesCrmLeidos = asignacion.size;
 
         // En modo incremental, "docs" solo trae los clientes con movimiento.
@@ -3663,6 +3851,281 @@ EVALUATE
           .sort((a, b) => b.ventas2026 - a.ventas2026)
           .slice(0, 25)
           .map((h) => ({ ...h, ventas2026: num(h.ventas2026), ventas2025: num(h.ventas2025) }));
+        // Por diseño el resumen y la suma de clientes deben coincidir: los dos
+        // excluyen intercompany y fusionados y agrupan por el mismo agente. Si
+        // no cuadran, el hueco esta entre "universo" y los clientes escritos.
+        try{
+          const escritos = new Set(docs.map((d) => String(d._id)));
+          const fuera = [];
+          for (const d of universo) {
+            if (d.intercompany || d.fusionadoEn) continue;
+            if (num(d.ventasAct) <= 0) continue;
+            if (escritos.has(String(d.cliente))) continue;
+            fuera.push({ codigo: d.cliente, nombre: d.nombre || null,
+              agente: d.agente || null, ventas: Math.round(num(d.ventasAct)) });
+          }
+          // No falta ninguno, asi que el hueco esta en el IMPORTE: se compara
+          // cliente a cliente lo que suma el resumen con lo que se escribe.
+          const porCod = {};
+          for (const d of docs) porCod[String(d._id)] = d;
+          const dif = [];
+          for (const d of universo) {
+            if (d.intercompany || d.fusionadoEn) continue;
+            const w = porCod[String(d.cliente)];
+            const a = num(d.ventasAct), b = w ? num(w.ventasAct) : 0;
+            if (Math.abs(a - b) < 1) continue;
+            dif.push({ codigo: d.cliente, nombre: d.nombre || null,
+              agente: d.agente || null, enResumen: Math.round(a),
+              enCliente: Math.round(b), dif: Math.round(a - b),
+              cuenta: w ? w.cuenta : null, escrito: !!w });
+          }
+          log.clientesConImporteDistinto = dif.length;
+          log.difImporteTotal = Math.round(dif.reduce((t,x)=>t+x.dif,0));
+          log.ejemplosImporte = dif
+            .sort((a,b)=>Math.abs(b.dif)-Math.abs(a.dif)).slice(0,15);
+          const porAg2 = {};
+          for (const x of dif) {
+            const k = x.agente || "SIN AGENTE";
+            porAg2[k] = (porAg2[k] || 0) + x.dif;
+          }
+          log.difImportePorAgente = Object.entries(porAg2)
+            .sort((a,b)=>Math.abs(b[1])-Math.abs(a[1])).slice(0,10)
+            .map(([agente,dif])=>({agente,dif}));
+
+          log.enResumenPeroNoEnClientes = fuera.length;
+          log.ventaEnEsosClientes = Math.round(
+            fuera.reduce((t, x) => t + x.ventas, 0));
+          log.ejemplosDescuadre = fuera
+            .sort((a, b) => b.ventas - a.ventas).slice(0, 15);
+          // Y el descuadre por comercial, que es como se ve en las pantallas
+          const porAg = {};
+          for (const x of fuera) {
+            const a = x.agente || "SIN AGENTE";
+            porAg[a] = (porAg[a] || 0) + x.ventas;
+          }
+          log.descuadrePorAgente = Object.entries(porAg)
+            .sort((a, b) => b[1] - a[1]).slice(0, 10)
+            .map(([agente, ventas]) => ({ agente, ventas }));
+        }catch(e){ log.errores.push(`descuadre: ${e.message}`); }
+
+        // ── Fusiones confirmadas por los comerciales ────────────────────
+        // El cierre semanal solo ANOTA la equivalencia; aqui se aplica. Las
+        // visitas se mueven al codigo real guardando de donde venian, para
+        // poder deshacerlo si alguien se equivoca.
+        if (req.query.fusiones === "1" || req.query.fusiones === "dry") {
+          try {
+            const soloVer = req.query.fusiones === "dry";
+            const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+            const key = ENV.FB_API_KEY ? `&key=${ENV.FB_API_KEY}` : "";
+            const leerCol = async (col) => {
+              const out = []; let tok = null, v = 0;
+              do {
+                const r = await fetch(`https://firestore.googleapis.com/v1/${base}/${col}`
+                  + `?pageSize=300${tok ? `&pageToken=${tok}` : ""}${key}`);
+                if (!r.ok) break;
+                const j = await r.json();
+                for (const d of j.documents || []) {
+                  const o = { _id: d.name.split("/").pop() };
+                  for (const [k, f] of Object.entries(d.fields || {})) {
+                    o[k] = f.stringValue ?? (f.doubleValue !== undefined ? Number(f.doubleValue)
+                         : f.integerValue !== undefined ? Number(f.integerValue) : null);
+                  }
+                  out.push(o);
+                }
+                tok = j.nextPageToken || null; v++;
+              } while (tok && v < 200);
+              return out;
+            };
+            const props = (await leerCol("fusiones_propuestas"))
+              .filter((f) => f.estado === "confirmada" && !f.aplicada);
+            log.fusionesConfirmadas = props.length;
+
+            if (props.length && !soloVer && !dry) {
+              const visitas = await leerCol("visitas");
+              let movidas = 0, fichas = 0;
+              for (const f of props) {
+                const suyas = visitas.filter((v) => String(v.clienteId) === String(f.crmId));
+                for (const v of suyas) {
+                  const r = await fetch(`https://firestore.googleapis.com/v1/${base}`
+                    + `/visitas/${encodeURIComponent(v._id)}`
+                    + `?updateMask.fieldPaths=clienteId&updateMask.fieldPaths=clienteIdOriginal`
+                    + `${key ? "&" + key.slice(1) : ""}`, {
+                    method: "PATCH", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ fields: {
+                      clienteId: { stringValue: String(f.pbiCodigo) },
+                      clienteIdOriginal: { stringValue: String(f.crmId) },
+                    }}),
+                  });
+                  if (r.ok) movidas++;
+                }
+                // La ficha vieja queda marcada, no se borra
+                await fetch(`https://firestore.googleapis.com/v1/${base}`
+                  + `/clientes/${encodeURIComponent(f.crmId)}`
+                  + `?updateMask.fieldPaths=fusionadoEn&updateMask.fieldPaths=fusionadoEl`
+                  + `${key ? "&" + key.slice(1) : ""}`, {
+                  method: "PATCH", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ fields: {
+                    fusionadoEn: { stringValue: String(f.pbiCodigo) },
+                    fusionadoEl: { stringValue: new Date().toISOString() },
+                  }}),
+                });
+                fichas++;
+                await fetch(`https://firestore.googleapis.com/v1/${base}`
+                  + `/fusiones_propuestas/${encodeURIComponent(f._id)}`
+                  + `?updateMask.fieldPaths=aplicada&updateMask.fieldPaths=visitasMovidas`
+                  + `${key ? "&" + key.slice(1) : ""}`, {
+                  method: "PATCH", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ fields: {
+                    aplicada: { stringValue: new Date().toISOString() },
+                    visitasMovidas: { doubleValue: suyas.length },
+                  }}),
+                });
+              }
+              log.fusionesAplicadas = fichas;
+              log.visitasMovidas = movidas;
+            } else {
+              log.fusionesAplicadas = "solo lectura · lanza con &fusiones=1";
+            }
+          } catch (e) { log.errores.push(`fusiones: ${e.message}`); }
+        }
+
+        // ── Maestro de clientes: Power BI manda ──────────────────────────
+        // El CRM arrastra fichas cargadas hace años; Power BI viene del ERP.
+        // Se actualizan los datos que son del ERP y NO se toca lo que solo
+        // sabe el comercial: SEMANAVISITA, contactos, telefonos y notas.
+        if (req.query.maestro === "1" || req.query.maestro === "dry") {
+          // Con el tiempo justo se prefiere no empezar a escribir: mejor no
+          // hacerlo que dejarlo a medias.
+          if (margen() < 12 && req.query.maestro === "1") {
+            log.maestroCambios = `omitido, quedaban ${margen()} s`;
+          } else
+          try {
+            const soloVer = req.query.maestro === "dry";
+            const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+            const key = ENV.FB_API_KEY ? `&key=${ENV.FB_API_KEY}` : "";
+            // Ficha actual del CRM, para comparar y no escribir de mas
+            const actual = new Map();
+            let tok = null, v = 0;
+            do {
+              const r = await fetch(`https://firestore.googleapis.com/v1/${base}/clientes`
+                + `?pageSize=300${tok ? `&pageToken=${tok}` : ""}${key}`);
+              if (!r.ok) break;
+              const j = await r.json();
+              for (const d of j.documents || []) {
+                const f = d.fields || {};
+                const g = (k) => f[k]?.stringValue ?? null;
+                const id = d.name.split("/").pop();
+                actual.set(String(id), {
+                  nombre: g("NOMBRE") || g("nombre"),
+                  poblacion: g("POBLACION") || g("poblacion"),
+                  provincia: g("PROVINCIA") || g("provincia"),
+                  codconta: g("CODCONTA") || g("codconta"),
+                });
+              }
+              tok = j.nextPageToken || null; v++;
+            } while (tok && v < 200);
+
+            const cambios = [];
+            for (const d of docs) {
+              if (!d.nombre || d.huerfano) continue;
+              const a = actual.get(String(d._id));
+              if (!a) continue;                     // alta nueva: no toca aqui
+              // Se compara sin espacios sobrantes: " ALICANTE" y "ALICANTE " no
+              // son un cambio real y reescribian 14 fichas cada dia.
+              const lim = (x) => String(x || "").replace(/\s+/g, " ").trim();
+              const dif = {};
+              const poner = (campo, clave, valor) => {
+                const v = lim(valor);
+                if (!v || lim(a[clave]) === v) return;
+                dif[campo] = v;
+              };
+              poner("NOMBRE", "nombre", d.nombre);
+              poner("POBLACION", "poblacion", d.poblacion);
+              poner("PROVINCIA", "provincia", d.provincia);
+              poner("CODCONTA", "codconta", d.codconta);
+              if (Object.keys(dif).length) cambios.push({ id: d._id, dif, antes: a });
+            }
+            log.maestroCambios = cambios.length;
+            log.maestroEjemplos = cambios.slice(0, 12).map((c) => ({
+              codigo: c.id,
+              nombre: c.dif.NOMBRE ? `${c.antes.nombre || "(vacio)"} → ${c.dif.NOMBRE}` : undefined,
+              poblacion: c.dif.POBLACION ? `${c.antes.poblacion || "(vacio)"} → ${c.dif.POBLACION}` : undefined,
+            }));
+
+            // Altas: clientes con venta en Power BI que no existen en el CRM.
+            // Se cruzan por codigo nuevo, antiguo y contable para no duplicar
+            // lo que ya esta: DOHR figura como U431468 y no como U4301468.
+            const viejoDe = (cod) => {
+              const m = String(cod).match(/^([A-Z])(\d{2})0(\d{4})$/i);
+              return m ? (m[1] + m[2] + m[3]).toUpperCase() : null;
+            };
+            const conta = new Set();
+            for (const [, a] of actual) if (a.codconta) conta.add(String(a.codconta).toUpperCase());
+            const altas = [];
+            for (const d of docs) {
+              if (d.intercompany || d.fusionadoEn) continue;
+              // Los huerfanos SI entran si tienen comercial y venta: son los 266
+              // codigos franceses con 119.087 € que hoy no llegan a ninguna
+              // cartera. Les falta ficha en el maestro, no dueno. El nombre se
+              // corregira solo cuando sistemas los de de alta en el ERP.
+              if (!d.agente || d.agente === "SIN AGENTE") continue;
+              if (num(d.ventasAct) <= 0) continue;
+              const cod = String(d._id).toUpperCase();
+              if (actual.has(cod)) continue;
+              const v = viejoDe(cod);
+              if (v && actual.has(v)) continue;
+              if (d.codconta && conta.has(String(d.codconta).toUpperCase())) continue;
+              altas.push(d);
+            }
+            log.maestroAltas = altas.length;
+            log.maestroAltasSinFicha = altas.filter((d) => d.huerfano).length;
+            log.maestroAltasEjemplos = altas.slice(0, 8)
+              .map((d) => ({ codigo: d._id, nombre: d.nombre, agente: d.agente,
+                             ventas: Math.round(num(d.ventasAct)) }));
+
+            if (!soloVer && !dry) {
+              let creados = 0;
+              for (const d of altas) {
+                const r = await fetch(`https://firestore.googleapis.com/v1/${base}`
+                  + `/clientes/${encodeURIComponent(d._id)}${key ? "?" + key.slice(1) : ""}`, {
+                  method: "PATCH", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ fields: {
+                    CODIGO: { stringValue: String(d._id) },
+                    NOMBRE: { stringValue: String(d.nombre || d._id) },
+                    POBLACION: { stringValue: String(d.poblacion || "") },
+                    PROVINCIA: { stringValue: String(d.provincia || "") },
+                    CODCONTA: { stringValue: String(d.codconta || "") },
+                    GRUPOAGENTE: { stringValue: String(d.agente || "") },
+                    origen: { stringValue: d.huerfano ? "powerbi_sin_ficha" : "powerbi" },
+                    creadoEl: { stringValue: new Date().toISOString() },
+                  }}),
+                });
+                if (r.ok) creados++;
+              }
+              log.maestroCreados = creados;
+            }
+
+            if (!soloVer && !dry) {
+              let ok = 0;
+              for (const c of cambios) {
+                const campos = Object.entries(c.dif)
+                  .map(([k]) => `updateMask.fieldPaths=${k}`).join("&");
+                const fields = {};
+                for (const [k, val] of Object.entries(c.dif)) fields[k] = { stringValue: String(val) };
+                const r = await fetch(`https://firestore.googleapis.com/v1/${base}`
+                  + `/clientes/${encodeURIComponent(c.id)}?${campos}${key ? "&" + key.slice(1) : ""}`, {
+                  method: "PATCH", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ fields }),
+                });
+                if (r.ok) ok++;
+              }
+              log.maestroActualizados = ok;
+            } else {
+              log.maestroActualizados = "solo lectura · lanza con &maestro=1";
+            }
+          } catch (e) { log.errores.push(`maestro: ${e.message}`); }
+        }
+
         log.resumenAgentes = dry
           ? resumen
           : await fbCommit("pbi_resumen_agente", resumen);
@@ -3716,7 +4179,41 @@ EVALUATE
         log.errores.push(`indice busqueda: ${e.message}`);
       }
 
-      log.ventas = dry ? docs.length : await fbCommit("pbi_ventas_cliente", docs);
+      // Escribir los 6.167 clientes cada vez se lleva casi todo el tiempo del
+      // cron (24 s en seco frente a 70 escribiendo). La mayoria no ha cambiado
+      // de una pasada a otra, asi que se comparan con lo guardado y solo se
+      // escriben los que de verdad son distintos.
+      let aEscribir = docs;
+      if (!dry) {
+        try {
+          const previos = new Map();
+          for (const d of await fbLeerColeccion("pbi_ventas_cliente")) {
+            previos.set(String(d._id), d);
+          }
+          // Campos que deciden si algo cambio. "actualizado" no cuenta: cambia
+          // siempre y haria que se reescribiera todo.
+          const CLAVE = ["ventasAct", "ventasAntYTD", "ventasAntFull", "margenAct",
+                         "margenAntYTD", "ventasMes", "ventasSem", "ventasMesAnt",
+                         "agente", "agenteFinal", "cuenta", "nombre", "poblacion",
+                         "intercompany", "fusionadoEn", "ultimaVenta"];
+          aEscribir = docs.filter((d) => {
+            const a = previos.get(String(d._id));
+            if (!a) return true;                       // nuevo
+            for (const k of CLAVE) {
+              const x = d[k], y = a[k];
+              if (typeof x === "number" || typeof y === "number") {
+                if (Math.abs(num(x) - num(y)) > 0.005) return true;
+              } else if (String(x ?? "") !== String(y ?? "")) return true;
+            }
+            return false;
+          });
+          log.clientesSinCambios = docs.length - aEscribir.length;
+        } catch (e) {
+          aEscribir = docs;                            // ante la duda, todos
+          log.errores.push(`comparar clientes: ${e.message}`);
+        }
+      }
+      log.ventas = dry ? docs.length : await fbCommit("pbi_ventas_cliente", aEscribir);
       if (dry) log.muestraVentas = docs.slice(0, 3);
     } catch (e) {
       log.errores.push(`ventas: ${e.message}`);
@@ -3887,6 +4384,31 @@ EVALUATE
         segundos: log.segundos,
       }]);
     }
+
+    // Latido: queda constancia de cada ejecucion. Si un cron deja de correr
+    // nadie se entera hasta que alguien nota que los datos estan viejos, y
+    // para entonces lleva dias mal.
+    try {
+      if (!dry) {
+        const modo = req.query.full ? "full"
+          : req.query.resumen ? "resumen"
+          : req.query.solopedidos ? "pedidos"
+          : req.query.mesescliente ? "mesescliente"
+          : req.query.estacionalidad ? "estacionalidad"
+          : req.query.cierre ? "cierre"
+          : req.query.maestro ? "maestro" : "otro";
+        await fbCommit("pbi_latidos", [{
+          _id: modo,
+          modo,
+          cuando: new Date().toISOString(),
+          segundos: log.segundos,
+          errores: log.errores.length,
+          detalleErrores: log.errores.slice(0, 3).join(" | ") || null,
+          ventas: typeof log.ventas === "number" ? log.ventas : null,
+          clientes: log.clientesQueCuentan || null,
+        }]);
+      }
+    } catch (e) { /* el latido nunca debe romper la sincronizacion */ }
 
     return res.status(log.errores.length ? 207 : 200).json({ ok: true, ...log });
   } catch (e) {
