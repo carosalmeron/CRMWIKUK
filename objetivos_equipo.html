@@ -185,6 +185,8 @@ let CLIENTES=[], PRODUCTOS=[];
 // Cliente y producto son independientes: un objetivo puede llevar los dos
 // ("a este cliente, ofrécele este producto"), solo uno, o ninguno.
 let SEL_CLI=null, SEL_PROD=null;
+// Objetivo que se está editando (null = alta nueva) y vendedor destino
+let EDITANDO=null, SEL_VEND=null;
 
 // Comprueba si un objetivo ya se ha cumplido, con el mismo criterio que usa
 // el cierre del viernes: para clientes, si hay visita esa semana; para el
@@ -397,21 +399,31 @@ window.nuevoObjetivo=async(agId)=>{
     alert("Elige al menos un cliente o un producto de la lista.");
     return;
   }
+  const destino = SEL_VEND || agId;   // se puede reasignar a otro vendedor
   const btn=document.getElementById("ob-btn");
   btn.disabled=true; btn.textContent="Guardando…";
-  const id="obj_"+agId+"_"+ANIO+"_s"+SEMANA+"_"+Date.now();
-  const doc={id,agente:agId,semana:SEMANA,anio:ANIO,texto:txt,tipo:tipo,
+  // Al editar se conserva el id para no duplicar el documento
+  const id = EDITANDO ? EDITANDO.id
+    : "obj_"+destino+"_"+ANIO+"_s"+SEMANA+"_"+Date.now();
+  const base = EDITANDO || {};
+  const doc=Object.assign({},base,{id,agente:destino,semana:SEMANA,anio:ANIO,
+    texto:txt,tipo:tipo,
     // refCodigo es la clave que permite relacionarlo luego (el cliente manda,
     // porque es lo que llevan visitas y ofertas); el resto se guarda aparte.
     refCodigo:SEL_CLI?SEL_CLI.cod:"", refNombre:SEL_CLI?SEL_CLI.nom:"",
     prodCodigo:SEL_PROD?SEL_PROD.cod:"", prodNombre:SEL_PROD?SEL_PROD.nom:"",
-    origen:"jefe",creadoPor:UID,creadoPorNombre:AGENTE,
-    equipo:EQUIPO,fechaCreacion:new Date().toISOString()};
+    origen:"jefe",creadoPor:base.creadoPor||UID,
+    creadoPorNombre:base.creadoPorNombre||AGENTE,
+    equipo:EQUIPO,
+    fechaCreacion:base.fechaCreacion||new Date().toISOString()});
+  if(EDITANDO) doc.editadoEl=new Date().toISOString();
   try{
     await escribir("objetivos_semana",id,doc);
-    OBJETIVOS.push(doc); SEL_CLI=null; SEL_PROD=null; pintar();
+    if(EDITANDO) OBJETIVOS=OBJETIVOS.map(x=>x.id===id?doc:x);
+    else OBJETIVOS.push(doc);
+    EDITANDO=null; SEL_CLI=null; SEL_PROD=null; SEL_VEND=null; pintar();
   }catch(e){
-    btn.disabled=false; btn.textContent="Añadir objetivo";
+    btn.disabled=false; btn.textContent=EDITANDO?"Guardar cambios":"Añadir objetivo";
     alert("No se ha podido guardar: "+e.message);
   }
 };
@@ -440,6 +452,41 @@ window.escalarItem=async(agId,clave,texto,tipo,nom)=>{
   OBJETIVOS.push(doc); pintar();
   try{ await escribir("objetivos_semana",id,doc); }catch(e){ alert("Error: "+e.message); }
 };
+
+window.editar=(id)=>{
+  const o=OBJETIVOS.find(x=>x.id===id); if(!o) return;
+  EDITANDO=o;
+  SEL_CLI = o.refCodigo ? {cod:o.refCodigo,nom:o.refNombre||o.refCodigo} : null;
+  SEL_PROD= o.prodCodigo? {cod:o.prodCodigo,nom:o.prodNombre||o.prodCodigo} : null;
+  SEL_VEND= o.agente || null;
+  pintar();
+  setTimeout(()=>{
+    const t=document.getElementById("ob-txt");
+    if(t){ t.value=o.texto||""; t.focus(); }
+    const ti=document.getElementById("ob-tipo");
+    if(ti&&o.tipo) ti.value=o.tipo;
+    const f=document.getElementById("form-obj");
+    if(f) f.scrollIntoView({behavior:"smooth",block:"center"});
+  },40);
+};
+window.cancelarEdicion=()=>{
+  EDITANDO=null; SEL_CLI=null; SEL_PROD=null; SEL_VEND=null; pintar();
+};
+
+// Buscador de vendedor: permite reasignar el objetivo a otro comercial
+window.buscarVend=(txt)=>{
+  const cont=document.getElementById("sug-vend");
+  if(!cont) return;
+  const q=U(txt).trim();
+  if(!q){ cont.innerHTML=""; cont.style.display="none"; return; }
+  const l=USUARIOS.filter(u=>U(u.nombre).indexOf(q)>=0||U(u.id).indexOf(q)>=0).slice(0,20);
+  cont.innerHTML = l.length
+    ? l.map(u=>'<div onclick="elegirVend(\''+esc2(u.id)+'\')"><b>'+u.nombre
+        +'</b><small>'+u.id+(u.equipo?" · "+u.equipo:"")+'</small></div>').join("")
+    : '<div style="color:var(--muted)">Sin resultados</div>';
+  cont.style.display="block";
+};
+window.elegirVend=(id)=>{ SEL_VEND=id; pintar(); };  // "" abre el buscador
 
 window.borrar=async(id)=>{
   if(!confirm("¿Eliminar este objetivo?")) return;
@@ -644,8 +691,10 @@ function pintarDetalle(){
       +(ESCALA_A?'<button class="mini '+(sube?"on":"")+'" '
         +(!sube&&es.length>=MAX?"disabled":"")
         +' onclick="toggleEscalar(\''+esc2(o.id)+'\')">'+(sube?"✓ Sube":"Subir")+'</button>':"")
-      +(U(o.creadoPor)===U(UID)?'<button class="mini" onclick="borrar(\''+esc2(o.id)
-        +'\')">🗑️</button>':"")
+      +(U(o.creadoPor)===U(UID)
+        ?'<button class="mini" onclick="editar(\''+esc2(o.id)+'\')" title="Editar">✏️</button>'
+         +'<button class="mini" onclick="borrar(\''+esc2(o.id)+'\')" title="Eliminar">🗑️</button>'
+        :"")
       +'</div></div>';
   }).join("") : '<p class="vacio">Todavía no le has puesto ninguno.</p>';
   h+='</div>';
@@ -670,7 +719,26 @@ function pintarDetalle(){
       +'<div class="sug" id="sug-'+campo+'" style="display:none"></div></div>';
   };
 
-  h+='<h3>Añadir objetivo</h3><div class="card">'
+  // Vendedor destino: por defecto el de la ficha, pero se puede cambiar
+  const vendId=SEL_VEND||a.id;
+  const vend=USUARIOS.find(u=>U(u.id)===U(vendId))||a;
+  const campoVend=
+    '<label>Vendedor</label>'
+    +'<div class="elegido" style="background:var(--blueL);border-color:var(--blue)">'
+    +'<span>'+vend.nombre+'<small style="display:block;font-weight:400;'
+    +'color:var(--muted)">'+vend.id+(vend.equipo?" · "+vend.equipo:"")+'</small></span>'
+    +'<button onclick="elegirVend(\'\')" title="Cambiar">✎</button></div>'
+    +(SEL_VEND===""
+      ?'<div class="buscador" style="margin-top:6px">'
+       +'<span class="lupa">🔍</span>'
+       +'<input type="text" class="conlupa" autocomplete="off" autofocus'
+       +' placeholder="Busca un vendedor…" oninput="buscarVend(this.value)">'
+       +'<div class="sug" id="sug-vend" style="display:none"></div></div>'
+      :"");
+
+  h+='<h3 id="form-obj">'+(EDITANDO?"Editar objetivo":"Añadir objetivo")+'</h3>'
+    +'<div class="card"'+(EDITANDO?' style="border-color:var(--blue)"':'')+'>'
+    +campoVend
     +'<label>Tipología</label><select id="ob-tipo" onchange="cambiarTipo()">'
     +TIPOS.map(t=>'<option value="'+t.k+'"'+(t.k===tipoAct?" selected":"")+'>'
       +t.lbl+'</option>').join("")
@@ -680,9 +748,13 @@ function pintarDetalle(){
     +campoBusca("prod","Producto",SEL_PROD,"Busca por nombre o código…")
     +'<label>Qué tiene que hacer</label>'
     +'<textarea id="ob-txt" rows="3" placeholder="Describe el objetivo para '
-    +a.nombre+'"></textarea>'
+    +vend.nombre+'"></textarea>'
     +'<button class="btn" id="ob-btn" onclick="nuevoObjetivo(\''+esc2(a.id)
-    +'\')">Añadir objetivo</button></div>';
+    +'\')">'+(EDITANDO?"Guardar cambios":"Añadir objetivo")+'</button>'
+    +(EDITANDO?'<button class="btn" onclick="cancelarEdicion()" '
+      +'style="background:#fff;border:1.5px solid var(--border);color:var(--muted)">'
+      +'Cancelar</button>':"")
+    +'</div>';
   return h;
 }
 
