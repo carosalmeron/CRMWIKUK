@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Equivalencia de códigos CRM / SAP</title>
+<style>
+ :root{--navy:#0F172A;--muted:#64748B;--border:#E2E8F0;--green:#22C55E;--greenL:#F0FDF4;
+       --red:#EF4444;--redL:#FEF2F2;--amber:#F59E0B;--amberL:#FFFBEB}
+ *{box-sizing:border-box}
+ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+      background:#F8FAFC;margin:0;padding:18px;color:var(--navy)}
+ h1{font-size:19px;margin:0 0 4px}
+ .sub{font-size:12.5px;color:var(--muted);margin:0 0 14px}
+ .card{background:#fff;border:1px solid var(--border);border-radius:12px;padding:13px;
+       margin-bottom:10px;font-size:12.5px}
+ .card.ok{border-color:var(--green);background:var(--greenL)}
+ .card.no{border-color:var(--red);background:var(--redL)}
+ code{background:#F1F5F9;padding:1px 6px;border-radius:5px;font-size:11.5px;word-break:break-all}
+ .meta{color:var(--muted);font-size:11.5px;margin-top:5px}
+ h2{font-size:14px;margin:20px 0 8px}
+ label{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px}
+ input{width:100%;padding:9px 11px;border-radius:9px;border:1.5px solid var(--border);font-size:13px}
+ button{width:100%;padding:12px;border-radius:11px;border:none;background:var(--navy);
+        color:#fff;font-weight:700;font-size:13.5px;cursor:pointer;margin-top:10px}
+ pre{background:#F1F5F9;padding:10px;border-radius:8px;font-size:11px;overflow-x:auto}
+ table{width:100%;border-collapse:collapse;font-size:12px;background:#fff}
+ th{background:#F1F5F9;text-align:left;padding:7px;font-size:10.5px;color:var(--muted)}
+ td{padding:7px;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+<h1>🔗 Equivalencia de códigos CRM / SAP</h1>
+<p class="sub">Prueba variantes del código (ceros, prefijo U, guiones) para encontrar
+  la regla que relaciona ambos sistemas.</p>
+
+<label>Código a buscar (el que guarda el informe)</label>
+<input id="cod" value="U4301468">
+<button onclick="buscar()">Buscar equivalencias</button>
+
+<div id="app"></div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+function val(f){
+  if(!f) return null;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  if(f.arrayValue!==undefined) return (f.arrayValue.values||[]).map(val);
+  return null;
+}
+const U=(s)=>String(s||"").toUpperCase().trim();
+
+async function leer(col){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_docId:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<60);
+  return t;
+}
+
+// Variantes plausibles del mismo código
+function variantes(c){
+  c=U(c);
+  const soloNum=c.replace(/[^0-9]/g,"");        // 4301468
+  const sinCeros=soloNum.replace(/^0+/,"");      // sin ceros a la izquierda
+  const v=new Set([c, soloNum, sinCeros,
+    "U"+soloNum, "U0"+soloNum, "U"+sinCeros,
+    soloNum.replace(/^/,"0"), "0"+c,
+    c.replace(/^U/,""), c.replace(/^U0*/,""),
+  ]);
+  // Con ceros de relleno a distintas longitudes
+  for(let n=6;n<=10;n++) v.add(soloNum.padStart(n,"0"));
+  for(let n=6;n<=10;n++) v.add("U"+soloNum.padStart(n,"0"));
+  return [...v].filter(Boolean);
+}
+
+async function buscar(){
+  const app=document.getElementById("app");
+  const cod=U(document.getElementById("cod").value);
+  app.innerHTML="<p>Buscando en clientes y visitas…</p>";
+  try{
+    const [clientes, visitas]=await Promise.all([leer("clientes"), leer("visitas")]);
+    const vars=variantes(cod);
+
+    // Índice de clientes por CUALQUIER campo de texto
+    const idx={};
+    clientes.forEach(c=>{
+      Object.values(c).forEach(v=>{
+        if(typeof v==="string"&&v.length<40){ if(!idx[U(v)]) idx[U(v)]=c; }
+      });
+    });
+
+    let html=`<h2>Variantes probadas (${vars.length})</h2>`;
+    const hits=vars.filter(v=>idx[v]);
+    html+=`<table><thead><tr><th>Variante</th><th>¿Existe?</th><th>Cliente</th></tr></thead><tbody>`
+      + vars.map(v=>`<tr><td><code>${v}</code></td>
+          <td>${idx[v]?"✅":"—"}</td>
+          <td>${idx[v]?(idx[v].nombre||idx[v].NOMBRE||idx[v]._docId):""}</td></tr>`).join("")
+      + `</tbody></table>`;
+
+    if(hits.length){
+      html+=`<div class="card ok"><b>¡Encontrada la equivalencia!</b>
+        <p class="meta">El código <code>${cod}</code> corresponde a
+        <b>${idx[hits[0]].nombre||idx[hits[0]].NOMBRE}</b> vía la variante
+        <code>${hits[0]}</code>.</p>
+        <pre>${JSON.stringify(idx[hits[0]],null,1)}</pre></div>`;
+    } else {
+      html+=`<div class="card no">Ninguna variante existe en "clientes".</div>`;
+    }
+
+    // ¿Y en las visitas? Ahí conviven código y nombre
+    const enVis=visitas.filter(v=>vars.includes(U(v.clienteId))||vars.includes(U(v.clienteCodigo)));
+    html+=`<h2>¿Aparece en las visitas? (${enVis.length})</h2>`;
+    if(enVis.length){
+      html+=`<div class="card ok">Sí. Las visitas sí relacionan ese código con un nombre:
+        <p class="meta"><b>${enVis[0].clienteNombre||enVis[0].cliente||"(sin nombre)"}</b>
+        · clienteId: <code>${enVis[0].clienteId||""}</code>
+        · fecha: ${enVis[0].fecha||""}</p></div>`;
+    } else {
+      html+=`<div class="card no">Tampoco hay visitas con ese código.</div>`;
+    }
+
+    // Cómo son los clienteId de las visitas, para ver el formato que usan
+    const ejemplos=[...new Set(visitas.map(v=>v.clienteId).filter(Boolean))].slice(0,10);
+    html+=`<h2>Ejemplos de clienteId en visitas</h2><pre>${ejemplos.join("\n")}</pre>`;
+
+    // Y cuántos clientes empiezan por U, por si el formato existe pero con otro número
+    const conU=clientes.filter(c=>/^U\d/i.test(c._docId||"")).slice(0,10);
+    html+=`<h2>Clientes cuyo id empieza por U + dígito (${conU.length} de muestra)</h2>`;
+    html+=`<pre>${conU.map(c=>c._docId+"  →  "+(c.nombre||c.NOMBRE||"")).join("\n")||"(ninguno)"}</pre>`;
+
+    app.innerHTML=html;
+  }catch(e){
+    app.innerHTML=`<div class="card no">Error: ${e.message}</div>`;
+  }
+}
+</script>
+</body>
+</html>
