@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recuperar cierre de semana</title>
+<style>
+ :root{--navy:#0F172A;--muted:#64748B;--border:#E2E8F0;--green:#22C55E;--greenL:#F0FDF4;
+       --red:#EF4444;--redL:#FEF2F2;--amber:#F59E0B;--amberL:#FFFBEB}
+ *{box-sizing:border-box}
+ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+      background:#F8FAFC;margin:0;padding:18px;color:var(--navy)}
+ h1{font-size:19px;margin:0 0 4px}
+ .sub{font-size:12.5px;color:var(--muted);margin:0 0 16px}
+ .card{background:#fff;border:1px solid var(--border);border-radius:12px;padding:14px;
+       margin-bottom:11px;font-size:13px}
+ .card.hallado{border-color:var(--green);background:var(--greenL)}
+ .card.falta{border-color:var(--amber);background:var(--amberL)}
+ .card.err{border-color:var(--red);background:var(--redL)}
+ code{background:#F1F5F9;padding:1px 6px;border-radius:5px;font-size:11.5px}
+ .meta{color:var(--muted);font-size:11.5px;margin-top:5px}
+ button{width:100%;padding:12px;border-radius:11px;border:none;background:var(--navy);
+        color:#fff;font-weight:700;font-size:13.5px;cursor:pointer;margin-top:10px}
+ button:disabled{background:#94A3B8;cursor:default}
+ h2{font-size:14px;margin:20px 0 8px}
+ label{display:block;font-size:12px;color:var(--muted);margin:12px 0 4px}
+ input{width:100%;padding:9px 11px;border-radius:9px;border:1.5px solid var(--border);font-size:13px}
+</style>
+</head>
+<body>
+<h1>🔧 Recuperar un cierre de semana</h1>
+<p class="sub">Busca el informe ya escrito y marca el plan como cerrado, para no tener
+  que rellenar el cierre otra vez.</p>
+
+<label>Nombre o código del comercial (ej: ricardo, ik2)</label>
+<input id="quien" value="ricardo">
+<label>Semana</label>
+<input id="sem" type="number" value="31">
+<button onclick="buscar()">Buscar su cierre</button>
+
+<div id="app"></div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+function val(f){
+  if(!f) return null;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  if(f.arrayValue!==undefined) return (f.arrayValue.values||[]).map(val);
+  return null;
+}
+const norm=(s)=>String(s||"").toUpperCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+
+async function leer(col){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<40);
+  return t;
+}
+
+let PLANES_ABIERTOS=[];
+
+async function buscar(){
+  const app=document.getElementById("app");
+  const q=norm(document.getElementById("quien").value);
+  const sem=Number(document.getElementById("sem").value);
+  app.innerHTML="<p>Buscando…</p>";
+  try{
+    const [informes, planes]=await Promise.all([leer("informes"), leer("planes_semanales")]);
+
+    // Cualquier informe de esa semana cuyo agente se parezca a lo buscado
+    const susInformes=informes.filter(i=>!i.eliminado
+      && parseInt(i.semana)===sem
+      && (norm(i.agente).indexOf(q)>=0 || norm(i.agenteId).indexOf(q)>=0
+          || norm(i._id).indexOf(q)>=0));
+
+    // Sus planes de esa semana (para ver cuáles siguen sin cerrar)
+    const susPlanes=planes.filter(p=>parseInt(p.semana)===sem
+      && (norm(p.agente).indexOf(q)>=0 || norm(p._id).indexOf(q)>=0));
+
+    let html=`<h2>📄 Informes de cierre encontrados (${susInformes.length})</h2>`;
+    if(susInformes.length===0){
+      html+=`<div class="card err">No hay ningún informe de la semana ${sem} para "${q}".
+        El cierre no llegó a guardarse, así que sí habría que rehacerlo.</div>`;
+    } else {
+      html+=susInformes.map(i=>`<div class="card hallado">
+        <b>${i._id}</b>
+        <p class="meta">agente: <code>${i.agente||i.agenteId||"—"}</code>
+          · estado: ${i.estado||"—"} · enviado: ${i.fechaEnvio?new Date(i.fechaEnvio).toLocaleString("es-ES"):"—"}
+          · cerrados: ${i.cerrados!=null?i.cerrados:"—"}</p>
+        <p class="meta">✅ El trabajo está guardado. No hace falta reescribir el cierre.</p>
+      </div>`).join("");
+    }
+
+    PLANES_ABIERTOS=susPlanes.filter(p=>p.estado!=="cerrado");
+    html+=`<h2>📋 Sus planes de la semana ${sem} (${susPlanes.length})</h2>`;
+    html+=susPlanes.map(p=>`<div class="card ${p.estado==="cerrado"?"hallado":"falta"}">
+      <b>${p._id}</b>
+      <p class="meta">agente: <code>${p.agente||"—"}</code> · estado: <b>${p.estado||"—"}</b></p>
+    </div>`).join("") || `<div class="card">Ningún plan encontrado.</div>`;
+
+    if(susInformes.length>0 && PLANES_ABIERTOS.length>0){
+      html+=`<button id="btnCerrar" onclick="cerrarPlanes()">
+        Marcar como cerrado (${PLANES_ABIERTOS.length} plan/es)</button>
+        <p class="meta">El informe ya existe, así que esto solo pone el plan al día —
+          no inventa datos ni pisa nada de lo que escribió.</p>`;
+    } else if(susInformes.length>0){
+      html+=`<div class="card hallado">Todo correcto: el informe existe y el plan ya
+        figura como cerrado. No hay nada que hacer.</div>`;
+    }
+
+    app.innerHTML=html;
+  }catch(e){
+    app.innerHTML=`<div class="card err">Error: ${e.message}</div>`;
+  }
+}
+
+async function cerrarPlanes(){
+  const btn=document.getElementById("btnCerrar");
+  btn.disabled=true; btn.textContent="Aplicando…";
+  let ok=0,fallos=0;
+  for(const p of PLANES_ABIERTOS){
+    try{
+      const r=await fetch(`${FB}/planes_semanales/${encodeURIComponent(p._id)}`
+        +`?updateMask.fieldPaths=estado&updateMask.fieldPaths=fechaCierre`,{
+        method:"PATCH", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({fields:{
+          estado:{stringValue:"cerrado"},
+          fechaCierre:{stringValue:new Date().toISOString()}
+        }})});
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      ok++;
+    }catch(e){ fallos++; }
+  }
+  btn.textContent = fallos ? `Hecho con ${fallos} error(es)` : `✓ ${ok} plan(es) cerrados`;
+  if(fallos) btn.disabled=false;
+}
+</script>
+</body>
+</html>
