@@ -174,6 +174,72 @@ let USUARIOS=[], OBJETIVOS=[], CIERRES={}, VISTA="lista", SEL=null, CERRADA=fals
 // Catálogos para los buscadores. Se cargan una vez y se reutilizan.
 let CLIENTES=[], PRODUCTOS=[], ELEGIDO=null;
 
+// Comprueba si un objetivo ya se ha cumplido, con el mismo criterio que usa
+// el cierre del viernes: para clientes, si hay visita esa semana; para el
+// resto, si el documento ya está en un estado cerrado.
+let VISITAS_SEM={}, ESTADOS_DOC={};
+
+async function cargarSeguimiento(){
+  VISITAS_SEM={}; ESTADOS_DOC={};
+  try{
+    const vis=await leer("visitas");
+    vis.forEach(v=>{
+      if(Number(v.semana)!==SEMANA) return;
+      const cid=U(v.clienteId||v.clienteCodigo);
+      if(!cid) return;
+      (VISITAS_SEM[cid]=VISITAS_SEM[cid]||[]).push(v);
+    });
+  }catch(e){}
+  try{
+    const [of,mu,es]=await Promise.all([leer("ofertas"),leer("muestras"),leer("estrategias")]);
+    [...of,...mu,...es].forEach(d=>{
+      const id=U(d.id||d._id); if(!id) return;
+      ESTADOS_DOC[id]=String(d.estado||"").toLowerCase();
+    });
+  }catch(e){}
+}
+
+const CERRADO_RE=/pedido|perdida|aceptada|rechazada|completada|ko|cerrada|positivo/;
+
+// Variantes del código: el CRM y SAP no siempre coinciden (un 0 de más)
+function variantesCod(c){
+  c=U(c); if(!c) return [];
+  const out=[c];
+  for(let i=0;i<c.length;i++){ if(c.charAt(i)==="0") out.push(c.slice(0,i)+c.slice(i+1)); }
+  const m=c.match(/^([A-Z]*)(\d+)$/);
+  if(m){ out.push(m[1]+"0"+m[2]); out.push(m[2]); out.push("U"+m[2]); }
+  return out.filter((v,i,a)=>v&&a.indexOf(v)===i);
+}
+
+function estadoObjetivo(o){
+  const cod=o.refCodigo||o.id;
+  if(o.tipo==="cliente"||o.tipo==="ofertas"&&!ESTADOS_DOC[U(cod)]){
+    const vs=variantesCod(o.refCodigo);
+    for(const v of vs){
+      const vis=VISITAS_SEM[v];
+      if(vis&&vis.length){
+        const ped=vis.some(x=>/pedido/i.test(x.resultado||""));
+        return {hecho:true,txt:ped?"Visitado y con pedido"
+          :vis.length+" contacto"+(vis.length>1?"s":"")+" registrado"+(vis.length>1?"s":"")};
+      }
+    }
+    return {hecho:false,txt:"Sin rastro de contacto esta semana"};
+  }
+  const est=ESTADOS_DOC[U(o.refCodigo)];
+  if(est===undefined) return null;      // no se puede comprobar
+  if(!est) return {hecho:false,txt:"Sigue abierta"};
+  return CERRADO_RE.test(est)
+    ? {hecho:true,txt:"Cerrada como "+est}
+    : {hecho:false,txt:"Sigue en "+est};
+}
+
+function pintaSemaforo(o){
+  const e=estadoObjetivo(o);
+  if(!e) return "";
+  return '<small style="color:'+(e.hecho?"var(--green)":"var(--amber)")
+    +';font-weight:600">'+(e.hecho?"✓ ":"○ ")+e.txt+'</small>';
+}
+
 async function cargarCatalogos(){
   try{
     const cli=await leer("clientes");
@@ -396,6 +462,13 @@ function cabeceraSemana(){
     +'</div>';
 }
 
+// Cuántos objetivos de este comercial ya están cumplidos
+function hechosDe(agId){
+  const l=OBJETIVOS.filter(o=>U(o.agente)===U(agId)&&o.refCodigo);
+  if(!l.length) return null;
+  return l.filter(o=>{ const e=estadoObjetivo(o); return e&&e.hecho; }).length;
+}
+
 function pintarLista(){
   let h=cabeceraSemana();
   const sinCerrar=USUARIOS.filter(a=>!CIERRES[a.id]);
@@ -425,6 +498,7 @@ function pintarLista(){
       +(c ? c.propuesto.length+" propuesto(s)"
             +(c.obviado.length?" · "+c.obviado.length+" sin contestar":"")
             +(nObj?" · "+nObj+" tuyo(s)":"")
+            +(hechosDe(a.id)!==null?" · "+hechosDe(a.id)+" cumplido(s)":"")
           : "Todavía no ha cerrado")
       +'</small></div>'
       +'<span class="pill '+(c?"ok":"no")+'">'+(c?"Cerrado":"Pendiente")+'</span>'
@@ -530,7 +604,8 @@ function pintarDetalle(){
       +'<div style="display:flex;gap:9px;align-items:flex-start">'
       +'<div style="flex:1;min-width:0"><p>'+(o.origen==="jefe"?"⭐ ":"")+o.texto+'</p>'
       +(o.refNombre?'<small>'+o.refNombre+' · '+(o.refCodigo||"")+'</small>'
-        :(o.referencia?'<small>Ref: '+o.referencia+'</small>':""))+'</div>'
+        :(o.referencia?'<small>Ref: '+o.referencia+'</small>':""))
+      +pintaSemaforo(o)+'</div>'
       +(ESCALA_A?'<button class="mini '+(sube?"on":"")+'" '
         +(!sube&&es.length>=MAX?"disabled":"")
         +' onclick="toggleEscalar(\''+esc2(o.id)+'\')">'+(sube?"✓ Sube":"Subir")+'</button>':"")
@@ -580,6 +655,7 @@ async function recargar(){
   const objs=await leer("objetivos_semana");
   OBJETIVOS=objs.filter(o=>!o.eliminado&&Number(o.semana)===SEMANA&&Number(o.anio)===ANIO);
   CIERRES=await cargarCierres();
+  await cargarSeguimiento();
   await comprobarCerrada();
   pintar();
 }
