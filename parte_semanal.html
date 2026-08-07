@@ -232,9 +232,10 @@
   .dg.jefe .dgf{background:#7C3AED}
   .dgn{font-size:11px;font-weight:700;text-align:right;
     font-variant-numeric:tabular-nums}
-  .dgsep{margin:10px 0 2px;font-size:10.5px;font-weight:700;color:var(--tenue);
-    text-transform:uppercase;letter-spacing:.3px}
-  .dgsep:first-child{margin-top:0}
+  .dgsep{font-size:10px!important;font-weight:700;color:var(--tenue);
+    text-transform:uppercase;letter-spacing:.4px;padding:12px 0 3px!important;
+    border-bottom:1px solid var(--linea)}
+  .dicho{font-style:italic;opacity:.8}
   @media(max-width:520px){ .dg{grid-template-columns:112px 1fr 38px} }
   .falta{background:var(--hueco);border:1px dashed var(--linea);border-radius:3px;
     padding:14px 15px;font-size:12.5px;line-height:1.55;color:var(--tenue)}
@@ -251,7 +252,7 @@ window.toggleObj=function(i){
 </script>
 </head>
 <body>
-<div id="app"><p class="estado">Leyendo… v1.65</p></div>
+<div id="app"><p class="estado">Leyendo… v1.66</p></div>
 
 <script>
 window.verComp=function(i){
@@ -1027,27 +1028,59 @@ function desvHTML(pct, etqMenos, etqMas){
 
         // Comprueba una promesa contra la realidad. Mismo criterio para las
         // tres fuentes, si no los porcentajes no serian comparables.
+        // Resuelve el nombre real de un cliente a partir de su codigo, probando
+        // las variantes SAP/CRM. Sin esto el parte enseñaba "U4301468".
+        const nombreCli=(id,nomDado)=>{
+          if(nomDado) return nomDado;
+          const cods=_varCod(id);
+          const c=(clientesFB||[]).find(x=>cods.includes(arriba(x._id))
+            ||cods.includes(arriba(x.codigo))||cods.includes(arriba(x.id)));
+          if(c) return c.nombre||c.NOMBRE||id;
+          const v=(visitas||[]).find(x=>cods.includes(arriba(x.clienteId)));
+          return (v&&(v.clienteNombre||v.cliente))||id;
+        };
+
         const comprobar=(tipo,id,nom)=>{
           if(tipo==="cliente"){
             const cods=_varCod(id);
             let vv=visSem.filter(x=>cods.includes(arriba(x.clienteId)));
-            if(!vv.length&&nom){
-              const nn=_normNom(nom);
+            const nomReal=nombreCli(id,nom);
+            if(!vv.length&&nomReal){
+              const nn=_normNom(nomReal);
               vv=visSem.filter(x=>_normNom(x.clienteNombre||x.cliente)===nn);
             }
             if(vv.length){
               const cp=vv.some(x=>/pedido/i.test(x.resultado||""));
-              return {ok:true,ped:cp,
-                r:cp?"Visitado y con pedido"
-                  :`${vv.length} contacto${vv.length>1?"s":""} registrado${vv.length>1?"s":""}`};
+              const ult=vv.slice().sort((a,b)=>
+                String(b.fecha||"").localeCompare(String(a.fecha||"")))[0];
+              return {ok:true,ped:cp,cli:nomReal,tipo:"Visita",det:"",
+                r:(cp?"Visitado y con pedido"
+                  :`${vv.length} contacto${vv.length>1?"s":""}`)
+                  +(ult.fecha?" · "+String(ult.fecha).slice(0,10).split("-").reverse().join("/"):"")};
             }
-            return {ok:false,ped:false,r:"Sin rastro de contacto"};
+            return {ok:false,ped:false,cli:nomReal,tipo:"Visita",det:"",
+              r:"Sin rastro de contacto"};
           }
           const o=[...ofertas,...muestras,...estrategias]
             .find(x=>x._id===id||x.id===id);
-          if(!o) return {ok:true,ped:false,r:"Ya no está abierta"};
+          const lbl=tipo==="ofertas"?"Oferta":tipo==="muestras"?"Muestra"
+            :tipo==="estrategias"?"Estrategia":tipo;
+          if(!o) return {ok:true,ped:false,cli:nom||"—",tipo:lbl,det:"",
+            r:"Ya no está abierta"};
+          // Que es exactamente: producto, importe y fecha
+          const ls=Array.isArray(o.lineas)?o.lineas
+            :(Array.isArray(o.productos)?o.productos:[]);
+          const prods=ls.map(l=>l.producto||l.prod||l.nombre).filter(Boolean);
+          const que=o.prod||o.prodNombre||o.estrategia||o.titulo
+            ||(prods.length?prods.slice(0,2).join(", ")
+              +(prods.length>2?" +"+(prods.length-2):""):"");
+          const imp=(o.importe!=null&&o.importe!=="")?eur(o.importe):"";
+          const fch=o.fecha||o.fechaCreacionStr||String(o.fechaCreacion||"").slice(0,10);
           const e=String(o.estado||"").toLowerCase();
           return {ok:CERR.test(e),ped:/pedido|aceptada/.test(e),
+            cli:o.cliente||o.clienteNombre||nom||"—", tipo:lbl,
+            det:[que,imp,fch?String(fch).slice(0,10).split("-").reverse().join("/"):""]
+              .filter(Boolean).join(" · "),
             r:CERR.test(e)?`Cerrada como ${e}`:"Sigue igual que el lunes"};
         };
 
@@ -1070,7 +1103,8 @@ function desvHTML(pct, etqMenos, etqMas){
           const [t,id]=k.split(/:(.+)/);
           const c=comprobar(t,id,v.cliente||v.nom);
           const rp=RES["promesa:"+k]||{};
-          B.apertura.det.push({c:v.cliente||id,a:v.accion||"",ok:c.ok,ped:c.ped,r:c.r,
+          B.apertura.det.push({c:c.cli||v.cliente||id,tipo:c.tipo,extra:c.det,
+            a:v.accion||"",ok:c.ok,ped:c.ped,r:c.r,
             dijo:v.texto||"",contesto:rp.texto||rp.accion||"",origen:"apertura"});
         }
 
@@ -1084,7 +1118,8 @@ function desvHTML(pct, etqMenos, etqMas){
           const [t,id]=k.split(/:(.+)/);
           if(t==="dup") continue;
           const c=comprobar(t,id,v.nom);
-          B.cierre.det.push({c:v.nom||id,a:v.accion||"",ok:c.ok,ped:c.ped,r:c.r,
+          B.cierre.det.push({c:c.cli||v.nom||id,tipo:c.tipo,extra:c.det,
+            a:v.accion||"",ok:c.ok,ped:c.ped,r:c.r,
             dijo:v.texto||"",contesto:"",origen:"cierre"});
         }
 
@@ -1096,7 +1131,8 @@ function desvHTML(pct, etqMenos, etqMas){
         ).forEach(o=>{
           const c=comprobar(o.tipo==="cliente"?"cliente":o.tipo,
             o.docId||o.refCodigo,o.refNombre);
-          B.jefe.det.push({c:o.refNombre||o.docNombre||"—",a:o.texto||"",
+          B.jefe.det.push({c:o.refNombre||c.cli||o.docNombre||"—",
+            tipo:c.tipo,extra:c.det||o.prodNombre||"",a:o.texto||"",
             ok:c.ok,ped:c.ped,r:c.r,dijo:"",contesto:"",origen:"jefe",
             deJefe:true,quien:o.creadoPorNombre||""});
         });
@@ -1446,24 +1482,25 @@ function desvHTML(pct, etqMenos, etqMas){
     </div>
     <div id="comp${i}" style="display:none;padding:2px 0 10px 12px;
       border-left:2px solid var(--linea);margin:-4px 0 8px">
-      ${x.det.map((d,j)=>`${
-        // Separador cuando cambia el origen del compromiso
+      <table>${x.det.map((d,j)=>`${
+        // Cabecera cuando cambia el origen del compromiso
         (j===0||x.det[j-1].origen!==d.origen)
-          ? `<p class="dgsep">${d.origen==="jefe"?"⭐ Le puso el responsable"
+          ? `<tr><td colspan="2" class="dgsep">${
+              d.origen==="jefe"?"⭐ Le puso el responsable"
               :d.origen==="cierre"?"Prometió al cerrar la semana anterior"
-              :"Se puso él al abrir la semana"}</p>` : ""
-      }<div style="padding:7px 0">
-        <div style="display:flex;justify-content:space-between;gap:8px">
-          <b style="font-size:13px">${d.c}${d.deJefe
-            ?' <span class="objorig jefe">⭐ del responsable</span>':""}</b>
-          <span style="font-size:10.5px;font-weight:700;white-space:nowrap;
-            color:${d.ok?"var(--ok)":"var(--med)"}">${d.ok?"✓ HECHO":"PENDIENTE"}</span>
-        </div>
-        <small style="display:block;font-size:11.5px;color:var(--tenue)">${d.a}${
-          d.dijo?" · "+d.dijo:""}</small>
-        <small style="display:block;font-size:11.5px;color:var(--tenue)">${d.r}${
-          d.contesto?" — dijo: "+d.contesto:""}</small>
-      </div>`).join("")}
+              :"Se puso él al abrir la semana"}</td></tr>` : ""
+      }<tr>
+        <td class="cli">${d.c}
+          <small>${d.tipo||""}${d.tipo&&d.a?" · ":""}${d.a}${
+            d.extra?" · "+d.extra:""}</small>
+          ${d.dijo?`<small class="dicho">“${d.dijo}”</small>`:""}
+        </td>
+        <td style="text-align:right;white-space:nowrap">
+          <span class="imp" style="font-size:11px;color:${
+            d.ok?"var(--ok)":"var(--pendiente)"}">${d.ok?"✓ HECHO":"PENDIENTE"}</span>
+          <span class="var">${d.r}</span>
+        </td>
+      </tr>`).join("")}</table>
     </div>`;
   }).join("")}`:""}
 
@@ -1677,7 +1714,7 @@ function desvHTML(pct, etqMenos, etqMas){
   ${FALLOS.join(" · ")}.<br>`:""}
   <span style="font-size:11px">Páginas leídas: ${
     Object.entries(PAGINAS).map(([k,v])=>k+" "+v).join(" · ")}</span><br>
-  <b>Parte semanal v1.65.</b> Lee Firestore en directo y no escribe nada.
+  <b>Parte semanal v1.66.</b> Lee Firestore en directo y no escribe nada.
   El «hoy tocaría» sale de <b>pbi_objetivos</b>, que
   suma los meses ya cerrados, no un prorrateo. No se puede retroceder de semana
   porque <b>pbi_resumen_agente</b> solo guarda la semana en curso.
