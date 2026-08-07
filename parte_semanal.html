@@ -199,15 +199,44 @@
   .var{font-family:"IBM Plex Mono",monospace;font-size:11.5px;display:block;
     margin-top:3px;color:var(--tenue)}
 
+  /* Marca de objetivo en el aviso temprano: distingue el cliente que ya
+     tiene a alguien encima del que nadie ha mirado */
+  .marcaobj{display:inline-block;font-size:10px;font-weight:700;padding:1px 7px;
+    border-radius:99px;background:#EEF2FF;color:#4338CA;margin-left:7px;
+    vertical-align:middle}
+  .sinobj{display:inline-block;font-size:10px;font-weight:600;padding:1px 7px;
+    border-radius:99px;background:#FEF3C7;color:#92400E;margin-left:7px;
+    vertical-align:middle}
+  .avfila:hover .cli{text-decoration:underline}
+  .avdet td{background:#F8FAFC;padding:10px 12px!important}
+  .objlin{display:flex;gap:9px;align-items:flex-start;padding:6px 0}
+  .objlin+.objlin{border-top:1px solid var(--linea)}
+  .objpunto{width:9px;height:9px;border-radius:99px;flex-shrink:0;margin-top:5px}
+  .objpunto.ok{background:#22C55E}
+  .objpunto.pend{background:#F59E0B}
+  .objlin b{font-size:12.5px}
+  .objlin small{display:block;font-size:11.5px;color:var(--tenue);margin-top:2px}
+  .objorig{font-size:10px;font-weight:700;padding:1px 6px;border-radius:99px;
+    background:#F1F5F9;color:var(--tenue);margin-left:6px}
+  .objorig.jefe{background:#F5F3FF;color:#7C3AED}
+  .objok{color:#15803D!important;font-weight:600}
+  .objpend{color:#B45309!important;font-weight:600}
   .falta{background:var(--hueco);border:1px dashed var(--linea);border-radius:3px;
     padding:14px 15px;font-size:12.5px;line-height:1.55;color:var(--tenue)}
   .falta b{color:var(--tinta);font-weight:600}
   .estado{padding:40px 20px;font-size:14.5px;color:var(--tenue)}
   @media (prefers-reduced-motion:reduce){.barra,.apista>i,.llena i,.mbar i{animation:none}}
 </style>
+<script>
+// Desplegar los objetivos de un cliente del aviso temprano
+window.toggleObj=function(i){
+  var f=document.getElementById("obj-"+i);
+  if(f) f.style.display = f.style.display==="none" ? "table-row" : "none";
+};
+</script>
 </head>
 <body>
-<div id="app"><p class="estado">Leyendo… v1.62</p></div>
+<div id="app"><p class="estado">Leyendo… v1.63</p></div>
 
 <script>
 window.verComp=function(i){
@@ -482,7 +511,7 @@ function desvHTML(pct, etqMenos, etqMas){
 
     const [agentes,objetivos,usuarios,portal,
            muestras,ofertas,estrategias,incidencias,semanas,estacion,clientesFB,mesesCli,
-           informes,planes,visitas,ajustes]=await Promise.all([
+           informes,planes,visitas,ajustes,objSemana]=await Promise.all([
       leerCol("pbi_resumen_agente"),
       leerCol("pbi_objetivos"),
       leerCol("usuarios"),
@@ -499,6 +528,7 @@ function desvHTML(pct, etqMenos, etqMas){
       leerCol("planes_semanales").catch(()=>[]),
       leerCol("visitas").catch(()=>[]),
       leerCol("pbi_ajustes").catch(()=>[]),
+      leerCol("objetivos_semana").catch(()=>[]),
     ]);
     if(!agentes.length) throw new Error(
       "no se ha podido leer pbi_resumen_agente"+(FALLOS.length?" · "+FALLOS.join(" · "):""));
@@ -914,6 +944,53 @@ function desvHTML(pct, etqMenos, etqMas){
     // semanaHoy viene como "2026-W31"; los planes guardan la semana como número.
     const _nSem=Number(String(fSemana||semanaHoy).split("-W")[1])||0;
 
+    // ── Objetivos por cliente ───────────────────────────────────────────
+    // Un cliente que da senales de bajada pero ya tiene un objetivo asignado
+    // no es lo mismo que uno al que nadie ha mirado: se marca para poder
+    // distinguirlos de un vistazo.
+    const _normNom=(n)=>String(n||"").toUpperCase().normalize("NFD")
+      .replace(/[\u0300-\u036f]/g,"")
+      .replace(/\b(S\.?L\.?U?|S\.?A\.?U?|SCL|LDA|SARL|SAS|GMBH|SRL|CB|SAT|COOP|SOC|CO|KG|DOO|SPA)\b/g,"")
+      .replace(/[^A-Z0-9]/g,"");
+    const _varCod=(c)=>{
+      c=arriba(c); if(!c) return [];
+      const out=[c];
+      for(let i=0;i<c.length;i++){ if(c.charAt(i)==="0") out.push(c.slice(0,i)+c.slice(i+1)); }
+      const m=c.match(/^([A-Z]*)(\d+)$/);
+      if(m){ out.push(m[1]+"0"+m[2]); out.push(m[2]); out.push("U"+m[2]); }
+      return out.filter((v,i,a)=>v&&a.indexOf(v)===i);
+    };
+    const OBJ_CLI={};   // codigo o nombre normalizado -> [objetivos]
+    const _meterObj=(k,o)=>{ if(!k) return; (OBJ_CLI[k]=OBJ_CLI[k]||[]).push(o); };
+    (objSemana||[]).filter(o=>!o.eliminado&&Number(o.semana)>=_nSem-1).forEach(o=>{
+      _varCod(o.refCodigo).forEach(v=>_meterObj(v,o));
+      _meterObj(_normNom(o.refNombre),o);
+    });
+    // Los compromisos del propio cierre tambien cuentan como objetivo
+    (informes||[]).forEach(inf=>{
+      if(Number(inf.semana)<_nSem-1) return;
+      let R={}; try{ R=JSON.parse(inf.respuestas||"{}"); }catch(e){ return; }
+      for(const [k,v] of Object.entries(R)){
+        if(!k.startsWith("cliente:")||!v) continue;
+        if(!v.accion&&!v.texto) continue;
+        if(/ya lo s|es normal|por cerrad|por perdid|es el mismo/i.test(v.accion||"")) continue;
+        const o={texto:v.texto||v.accion||"",tipo:"cliente",accion:v.accion||"",
+          origen:"cierre",agente:inf.agente,refNombre:v.nom||"",semana:inf.semana};
+        _varCod(k.split(/:(.+)/)[1]||"").forEach(x=>_meterObj(x,o));
+        _meterObj(_normNom(v.nom),o);
+      }
+    });
+    const objsDe=(cliId,cliNom)=>{
+      const vistos=new Set(); const res=[];
+      [..._varCod(cliId),_normNom(cliNom)].forEach(k=>{
+        (OBJ_CLI[k]||[]).forEach(o=>{
+          const f=(o.texto||"")+"|"+(o.agente||"");
+          if(vistos.has(f)) return; vistos.add(f); res.push(o);
+        });
+      });
+      return res;
+    };
+
     // ── Prometido y cumplido ────────────────────────────────────────────
     // No se declara: se cruza lo que dijo el lunes con las visitas, ofertas y
     // pedidos registrados durante la semana.
@@ -1210,8 +1287,10 @@ function desvHTML(pct, etqMenos, etqMas){
         if(caidaAnt<=-30&&Math.abs(caidaAnt-caida)<25) continue;
       }
 
-      avisos.push({ nombre:c.nombre||c._id, agente:c.agenteFinal||c.agente,
-        act, ant, ritmo, ahora, motivo, grav, seco });
+      avisos.push({ nombre:c.nombre||c._id, id:c._id,
+        agente:c.agenteFinal||c.agente,
+        act, ant, ritmo, ahora, motivo, grav, seco,
+        objs:objsDe(c._id,c.nombre) });
     }
     avisos.sort((a,b)=>b.grav-a.grav);
     if(!avisos.length)
@@ -1220,11 +1299,38 @@ function desvHTML(pct, etqMenos, etqMas){
     return `
       <p class="mflujo m" style="margin-bottom:9px">${avisos.length} clientes ·
         en riesgo unos ${eur(avisos.reduce((s,a)=>s+a.grav,0))}</p>
-      <table>${avisos.slice(0,12).map(a=>`<tr>
-        <td class="cli">${a.nombre}<small>${a.agente} · ${a.motivo}</small></td>
+      <table>${avisos.slice(0,12).map((a,i)=>`<tr class="avfila"
+          ${a.objs.length?`onclick="toggleObj(${i})" style="cursor:pointer"`:""}>
+        <td class="cli">${a.nombre}
+          ${a.objs.length
+            ? `<span class="marcaobj">🎯 ${a.objs.length}</span>`
+            : `<span class="sinobj">sin objetivo</span>`}
+          <small>${a.agente} · ${a.motivo}</small></td>
         <td><span class="imp" style="color:var(--pendiente)">${eur(a.grav)}</span>
           <span class="var">en juego</span></td>
-      </tr>`).join("")}</table>
+      </tr>
+      ${a.objs.length?`<tr class="avdet" id="obj-${i}" style="display:none">
+        <td colspan="2">
+          ${a.objs.map(o=>{
+            // Estado del objetivo: hecho si ya hay contacto esta semana
+            const vv=visitas.filter(v=>Number(v.semana)>=_nSem
+              && _varCod(v.clienteId).some(x=>_varCod(a.id).includes(x)));
+            const ok=vv.length>0;
+            return `<div class="objlin">
+              <span class="objpunto ${ok?"ok":"pend"}"></span>
+              <div>
+                <b>${o.accion||"Objetivo"}</b>
+                ${o.origen==="cierre"
+                  ? `<span class="objorig">se lo puso él</span>`
+                  : `<span class="objorig jefe">⭐ del responsable</span>`}
+                ${o.texto?`<small>${o.texto}</small>`:""}
+                <small class="${ok?"objok":"objpend"}">
+                  ${ok?`✓ ${vv.length} contacto${vv.length>1?"s":""} esta semana`
+                      :"○ Sin contacto todavía"}</small>
+              </div>
+            </div>`;
+          }).join("")}
+        </td></tr>`:""}`).join("")}</table>
       <div class="falta" style="margin-top:14px">
         Solo clientes que <b>todavía no caen en el año</b> —los que ya caen salen
         en el desglose de arriba— pero cuyos dos últimos meses se han apartado de
@@ -1480,7 +1586,7 @@ function desvHTML(pct, etqMenos, etqMas){
   ${FALLOS.join(" · ")}.<br>`:""}
   <span style="font-size:11px">Páginas leídas: ${
     Object.entries(PAGINAS).map(([k,v])=>k+" "+v).join(" · ")}</span><br>
-  <b>Parte semanal v1.62.</b> Lee Firestore en directo y no escribe nada.
+  <b>Parte semanal v1.63.</b> Lee Firestore en directo y no escribe nada.
   El «hoy tocaría» sale de <b>pbi_objetivos</b>, que
   suma los meses ya cerrados, no un prorrateo. No se puede retroceder de semana
   porque <b>pbi_resumen_agente</b> solo guarda la semana en curso.
