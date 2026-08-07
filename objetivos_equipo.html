@@ -213,7 +213,14 @@ let EDITANDO=null, SEL_VEND=null;
 // Comprueba si un objetivo ya se ha cumplido, con el mismo criterio que usa
 // el cierre del viernes: para clientes, si hay visita esa semana; para el
 // resto, si el documento ya está en un estado cerrado.
-let VISITAS_SEM={}, ESTADOS_DOC={};
+let VISITAS_SEM={}, VISITAS_NOM={}, ESTADOS_DOC={};
+// Nombre de empresa normalizado: sin tildes, sin S.L./S.A. y sin puntuacion,
+// para poder cruzar "DOHR GMBH & CO.KG" con "DOHR GMBH CO KG"
+function normNom(n){
+  return U(n).normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+    .replace(/\b(S\.?L\.?U?|S\.?A\.?U?|SCL|LDA|SARL|SAS|GMBH|SRL|CB|SAT|COOP|SOC|CO|KG|DOO|SPA)\b/g,"")
+    .replace(/[^A-Z0-9]/g,"");
+}
 // Ofertas, muestras y estrategias que siguen abiertas, para poder apuntar un
 // objetivo a una en concreto en vez de describirla a mano.
 let ABIERTOS={ofertas:[],muestras:[],estrategias:[]};
@@ -221,32 +228,58 @@ let DOCS={};   // id -> documento, de cualquier coleccion y estado
 let SEL_DOC=null, VER_TODAS_DOC=false;
 
 async function cargarSeguimiento(){
-  VISITAS_SEM={}; ESTADOS_DOC={};
+  VISITAS_SEM={}; VISITAS_NOM={}; ESTADOS_DOC={};
   // Solo las visitas de ESTA semana. Leer la colección entera son miles de
   // documentos por cada carga y dispara la factura de Firestore.
   // Se piden la semana del cierre y la siguiente: lo que el comercial promete
   // al cerrar la semana 31 lo ejecuta en la 32, asi que mirar solo la 31
   // marcaba como "sin contacto" cosas que si se habian hecho.
-  const pedirVisitas=async(sem)=>{
+  // El campo "semana" puede estar guardado como numero o como texto segun
+  // quien creara la visita, asi que se prueban los dos tipos. Buscar solo
+  // uno devolvia cero resultados y todo salia como "sin contacto".
+  const meterVisita=(v,sem)=>{
+    if(v.semana==null) v.semana=sem;
+    const cid=U(v.clienteId||v.clienteCodigo);
+    if(cid) (VISITAS_SEM[cid]=VISITAS_SEM[cid]||[]).push(v);
+    // Tambien por nombre: los codigos de SAP y del CRM no siempre casan,
+    // pero el nombre del cliente si esta en los dos sitios.
+    const nom=normNom(v.clienteNombre||v.cliente);
+    if(nom) (VISITAS_NOM[nom]=VISITAS_NOM[nom]||[]).push(v);
+  };
+  const pedirVisitas=async(sem,comoTexto)=>{
     try{
       const body={structuredQuery:{from:[{collectionId:"visitas"}],
         where:{fieldFilter:{field:{fieldPath:"semana"},op:"EQUAL",
-               value:{doubleValue:sem}}},limit:3000}};
+               value:comoTexto?{stringValue:String(sem)}:{doubleValue:sem}}},
+        limit:3000}};
       const r=await fetch(FB+":runQuery",{method:"POST",
         headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-      if(!r.ok) return;
+      if(!r.ok) return 0;
       const j=await r.json();
+      let n=0;
       (Array.isArray(j)?j:[]).forEach(x=>{
         if(!x.document) return;
         const v={};
         for(const [k,f] of Object.entries(x.document.fields||{})) v[k]=val(f);
-        if(v.semana==null) v.semana=sem;
-        const cid=U(v.clienteId||v.clienteCodigo); if(!cid) return;
-        (VISITAS_SEM[cid]=VISITAS_SEM[cid]||[]).push(v);
+        meterVisita(v,sem); n++;
+      });
+      return n;
+    }catch(e){ return 0; }
+  };
+  const res=await Promise.all([
+    pedirVisitas(SEMANA,false), pedirVisitas(SEMANA+1,false),
+    pedirVisitas(SEMANA,true),  pedirVisitas(SEMANA+1,true)
+  ]);
+  // Si por lo que sea no vino nada, se cae a leer y filtrar por fecha
+  if(res.reduce((a,b)=>a+b,0)===0){
+    try{
+      const todas=await leer("visitas");
+      todas.forEach(v=>{
+        const sm=Number(v.semana);
+        if(sm===SEMANA||sm===SEMANA+1) meterVisita(v,sm);
       });
     }catch(e){}
-  };
-  await Promise.all([pedirVisitas(SEMANA),pedirVisitas(SEMANA+1)]);
+  }
   try{
     const [of,mu,es]=await Promise.all([leer("ofertas"),leer("muestras"),leer("estrategias")]);
     [...of,...mu,...es].forEach(d=>{
@@ -517,21 +550,30 @@ function estadoItem(x){
   try{
   if(NO_ACCION.test(x.accion||"")) return {hecho:null,txt:"No requiere acción"};
   if(x.tipo==="cliente"){
+    // Vale cualquier contacto de la semana del cierre o de la siguiente:
+    // la accion puede hacerse antes de cerrar y registrarse despues.
+    const enSemana=(l)=>(l||[]).filter(z=>{
+      const sm=Number(z.semana);
+      return sm===SEMANA||sm===SEMANA+1;
+    });
+    const resultado=(vis,via)=>{
+      const ult=vis.slice().sort((a,b)=>
+        String(b.fecha||"").localeCompare(String(a.fecha||"")))[0];
+      const que=ult.resultado||ult.tipo||"";
+      return {hecho:true,txt:vis.length+" contacto"+(vis.length>1?"s":"")
+        +(ult.fecha?" · "+_fecha(ult.fecha):"")+(que?" · "+que:"")+via};
+    };
+    // 1) Por codigo, probando las variantes SAP/CRM
     for(const v of variantesCod(x.id)){
-      // Vale cualquier contacto de la semana del cierre o de la siguiente:
-      // la accion puede hacerse antes de cerrar y registrarse despues, o al
-      // reves. Lo que importa es que el cliente se haya trabajado.
-      const vis=(VISITAS_SEM[v]||[]).filter(z=>{
-        const sm=Number(z.semana);
-        return sm===SEMANA||sm===SEMANA+1;
-      });
-      if(vis.length){
-        const ult=vis.slice().sort((a,b)=>
-          String(b.fecha||"").localeCompare(String(a.fecha||"")))[0];
-        const que=ult.resultado||ult.tipo||"";
-        return {hecho:true,txt:vis.length+" contacto"+(vis.length>1?"s":"")
-          +(ult.fecha?" · "+_fecha(ult.fecha):"")+(que?" · "+que:"")};
-      }
+      const vis=enSemana(VISITAS_SEM[v]);
+      if(vis.length) return resultado(vis,"");
+    }
+    // 2) Por nombre del cliente: los codigos de SAP y del CRM no siempre
+    //    casan, pero el nombre esta guardado en el propio compromiso.
+    const nom=normNom(x.nom||nombreItem(x));
+    if(nom){
+      const vis=enSemana(VISITAS_NOM[nom]);
+      if(vis.length) return resultado(vis," · por nombre");
     }
     return {hecho:false,txt:"Sin contacto registrado"};
   }
