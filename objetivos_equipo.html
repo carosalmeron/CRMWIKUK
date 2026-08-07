@@ -44,6 +44,10 @@
  .item small{display:block;color:var(--muted);font-size:11px;margin-top:2px}
  .tag{display:inline-block;font-size:10px;font-weight:700;padding:2px 8px;
       border-radius:99px;margin-bottom:4px;text-transform:uppercase;letter-spacing:.3px}
+ .acc{font-size:11px;font-weight:700;color:var(--muted);margin-left:7px;
+      text-transform:uppercase;letter-spacing:.3px}
+ .punto{width:9px;height:9px;border-radius:99px;flex-shrink:0;margin-top:6px}
+ .dicho{font-style:italic;margin-top:3px!important}
  .t-cliente{background:var(--blueL);color:var(--blue)}
  .t-ofertas{background:var(--amberL);color:var(--amber)}
  .t-muestras{background:var(--purpleL);color:var(--purple)}
@@ -213,6 +217,7 @@ let VISITAS_SEM={}, ESTADOS_DOC={};
 // Ofertas, muestras y estrategias que siguen abiertas, para poder apuntar un
 // objetivo a una en concreto en vez de describirla a mano.
 let ABIERTOS={ofertas:[],muestras:[],estrategias:[]};
+let DOCS={};   // id -> documento, de cualquier coleccion y estado
 let SEL_DOC=null, VER_TODAS_DOC=false;
 
 async function cargarSeguimiento(){
@@ -241,6 +246,7 @@ async function cargarSeguimiento(){
     [...of,...mu,...es].forEach(d=>{
       const id=U(d.id||d._id); if(!id) return;
       ESTADOS_DOC[id]=String(d.estado||"").toLowerCase();
+      DOCS[id]=d;
     });
     // Los que siguen abiertos, para poder referenciarlos en un objetivo:
     // "cierra esta oferta", "haz seguimiento de esta muestra"...
@@ -460,6 +466,54 @@ async function cargarCierres(){
     }catch(e){ res[a.id]=null; }
   }));
   return res;
+}
+
+// Nombre legible de una linea del cierre: sin esto solo se ve "Cliente ·
+// Le visito" y no hay forma de saber de quien habla.
+function nombreItem(x){
+  if(x.nom) return x.nom;                       // lo guardo el propio cierre
+  const id=U(x.id);
+  if(!id) return "";
+  if(x.tipo==="cliente"){
+    for(const v of variantesCod(x.id)){
+      const c=CLIENTES.find(c=>U(c.cod)===v);
+      if(c) return c.nom;
+    }
+    return "";
+  }
+  const d=DOCS[id];
+  if(!d) return "";
+  return d.cliente||d.clienteNombre||d.nombre||d.titulo||d.prod||d.prodNombre||"";
+}
+// Que mas se sabe de esa linea: producto, importe, fecha
+function detalleItem(x){
+  const d=DOCS[U(x.id)];
+  if(!d) return "";
+  const ls=Array.isArray(d.lineas)?d.lineas:(Array.isArray(d.productos)?d.productos:[]);
+  const prods=ls.map(l=>l.producto||l.prod||l.nombre).filter(Boolean);
+  const que=d.prod||d.prodNombre||d.estrategia||d.titulo
+    ||(prods.length?prods.slice(0,2).join(", ")+(prods.length>2?" +"+(prods.length-2):""):"");
+  const imp=(d.importe!=null&&d.importe!=="")
+    ? Number(d.importe).toLocaleString("es-ES")+" €" : "";
+  const fecha=d.fecha||d.fechaCreacionStr||(d.fechaCreacion||"").slice(0,10);
+  return [que,imp,_fecha(fecha)].filter(Boolean).join(" · ");
+}
+// Semaforo de la linea, con el mismo criterio que el resto de la app
+function estadoItem(x){
+  if(x.tipo==="cliente"){
+    for(const v of variantesCod(x.id)){
+      const vis=VISITAS_SEM[v];
+      if(vis&&vis.length) return {hecho:true,txt:vis.length+" contacto"
+        +(vis.length>1?"s":"")+" esta semana"};
+    }
+    return {hecho:false,txt:"Sin contacto esta semana"};
+  }
+  if(["ofertas","muestras","estrategias"].indexOf(x.tipo)<0) return null;
+  const est=ESTADOS_DOC[U(x.id)];
+  if(est===undefined) return null;
+  return CERRADO_RE.test(est)
+    ? {hecho:true,txt:"Cerrada como "+est}
+    : {hecho:false,txt:est?"Sigue en "+est:"Sigue abierta"};
 }
 
 function escalados(){ return OBJETIVOS.filter(o=>o.escaladoA===ESCALA_A); }
@@ -937,20 +991,39 @@ function pintarDetalle(){
   } else {
     // 1 · Lo que él propuso
     h+='<h3>Lo que ha propuesto ('+c.propuesto.length+')</h3><div class="card">';
-    h+= c.propuesto.length ? c.propuesto.map(x=>{
+    // Ordenado por tipo y con lo pendiente primero: 31 lineas mezcladas no
+    // hay quien las lea
+    const ordenTipo={cliente:1,ofertas:2,muestras:3,estrategias:4,promesa:5,
+      dup:6,semana:7,prioridad:8};
+    const propOrd=c.propuesto.slice().sort((p,q)=>{
+      const ep=estadoItem(p), eq=estadoItem(q);
+      const hp=ep&&ep.hecho?1:0, hq=eq&&eq.hecho?1:0;
+      if(hp!==hq) return hp-hq;
+      return (ordenTipo[p.tipo]||9)-(ordenTipo[q.tipo]||9);
+    });
+    h+= c.propuesto.length ? propOrd.map(x=>{
       const ya=OBJETIVOS.find(o=>o.claveOrigen===x.clave&&U(o.agente)===U(a.id));
       const sube=ya&&ya.escaladoA===ESCALA_A;
       const txt=(x.accion||"")+(x.texto?": "+x.texto:"");
+      const nom=nombreItem(x);
+      const det=detalleItem(x);
+      const est=estadoItem(x);
+      const col=!est?"var(--border)":(est.hecho?"var(--green)":"var(--amber)");
       return '<div class="item">'
-        +'<span class="tag t-'+x.tipo+'">'+(LBL[x.tipo]||x.tipo)+'</span>'
         +'<div style="display:flex;gap:9px;align-items:flex-start">'
-        +'<div style="flex:1;min-width:0"><p>'
-        +(x.nom?"<b>"+x.nom+"</b> — ":"")+x.accion+'</p>'
-        +(x.texto?'<small>'+x.texto+'</small>':"")+'</div>'
+        +'<span class="punto" style="background:'+col+'"></span>'
+        +'<div style="flex:1;min-width:0">'
+        +'<span class="tag t-'+x.tipo+'">'+(LBL[x.tipo]||x.tipo)+'</span>'
+        +'<span class="acc">'+x.accion+'</span>'
+        +'<p>'+(nom?"<b>"+nom+"</b>":'<span style="color:var(--muted)">(sin identificar)</span>')+'</p>'
+        +(det?'<small>'+det+'</small>':"")
+        +(est?'<small style="color:'+(est.hecho?"var(--green)":"var(--amber)")
+          +';font-weight:600">'+(est.hecho?"✓ ":"○ ")+est.txt+'</small>':"")
+        +(x.texto?'<small class="dicho">“'+x.texto+'”</small>':"")+'</div>'
         +(ESCALA_A?'<button class="mini '+(sube?"on":"")+'" '
           +(!sube&&es.length>=MAX?"disabled":"")
           +' onclick="escalarItem(\''+esc2(a.id)+'\',\''+esc2(x.clave)+'\',\''
-          +esc2(txt)+'\',\''+esc2(x.tipo)+'\',\''+esc2(x.nom)+'\')">'
+          +esc2(txt)+'\',\''+esc2(x.tipo)+'\',\''+esc2(nom)+'\')">'
           +(sube?"✓ Sube":"Subir")+'</button>':"")
         +'</div></div>';
     }).join("") : '<p class="vacio">No ha propuesto nada.</p>';
