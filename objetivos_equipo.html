@@ -368,28 +368,56 @@ window.quitar=(campo)=>{
 
 async function cargarUsuarios(){
   const [us,pu]=await Promise.all([leer("usuarios"),leer("portal_users")]);
-  // La misma persona sale en las dos colecciones con ids distintos (wk4 en
-  // usuarios, agustin en portal_users), asi que indexar por id la duplicaba.
-  // Se agrupa por nombre normalizado y gana la ficha de "usuarios", que es
-  // la que lleva el id canonico con el que se guardan los informes.
+  // La misma persona aparece en las dos colecciones con datos distintos:
+  // "Alex Cruz" con id wk?? en usuarios y "acruz" con username alex en
+  // portal_users. Agrupar solo por nombre no los unia. Se fusiona cualquier
+  // par de fichas que comparta ALGUN identificador (id, username, codigo de
+  // vendedor o nombre), que es lo unico fiable con estos datos.
   const clave=(n)=>U(n).normalize("NFD").replace(/[\u0300-\u036f]/g,"")
     .replace(/[^A-Z0-9]/g,"");
-  const map={};
-  const meter=(u,prioritario)=>{
+  const fichas=[];
+  const meter=(u,deUsuarios)=>{
     const rol=String(u.rol||"").toLowerCase();
     if(rol!=="agente"&&rol!=="crm_agente"&&rol!=="comercial") return;
     const id=u.id||u._id||u.username; if(!id) return;
     const nom=u.nombre||u.username||id;
-    const k=clave(nom); if(!k) return;
-    const ficha={id:id,nombre:nom,equipo:U(u.equipo||""),
-      cod:U(u.grupoAgente||u.catalogoVendedor||id)};
-    if(!map[k]) map[k]=ficha;
-    else if(prioritario) map[k]=Object.assign({},map[k],ficha);
+    const ids=new Set([u.id,u._id,u.username,u.grupoAgente,u.catalogoVendedor,
+      u.crmId,nom].filter(Boolean).map(clave).filter(Boolean));
+    fichas.push({ids,deUsuarios,
+      id:id,nombre:nom,equipo:U(u.equipo||""),
+      cod:U(u.grupoAgente||u.catalogoVendedor||id)});
   };
-  us.forEach(u=>meter(u,true));      // usuarios manda
-  pu.forEach(u=>meter(u,false));     // portal_users solo rellena huecos
-  let l=Object.values(map);
-  if(esJefe&&EQUIPO) l=l.filter(u=>u.equipo===EQUIPO);
+  us.forEach(u=>meter(u,true));
+  pu.forEach(u=>meter(u,false));
+
+  // Fusion: dos fichas son la misma persona si comparten un identificador
+  const grupos=[];
+  fichas.forEach(f=>{
+    const enc=grupos.find(g=>[...f.ids].some(x=>g.ids.has(x)));
+    if(enc){
+      f.ids.forEach(x=>enc.ids.add(x));
+      enc.items.push(f);
+    } else {
+      grupos.push({ids:new Set(f.ids),items:[f]});
+    }
+  });
+
+  const l=grupos.map(g=>{
+    // Gana la ficha de "usuarios": lleva el id canonico con el que se
+    // guardan los informes y los objetivos.
+    const base=g.items.find(x=>x.deUsuarios)||g.items[0];
+    const nombre=g.items.map(x=>x.nombre)
+      .sort((a,b)=>b.length-a.length)[0]||base.nombre;   // el mas descriptivo
+    return {
+      id:base.id,
+      nombre:/^[a-z]+$/.test(base.nombre)?nombre:base.nombre,
+      equipo:base.equipo||(g.items.find(x=>x.equipo)||{}).equipo||"",
+      cod:base.cod,
+      // Todos sus identificadores, para cruzar informes y documentos
+      alias:[...g.ids]
+    };
+  }).filter(u=>!esJefe||!EQUIPO||u.equipo===EQUIPO);
+
   l.sort((a,b)=>a.nombre.localeCompare(b.nombre));
   return l;
 }
@@ -399,8 +427,14 @@ async function cargarCierres(){
   const res={};
   await Promise.all(USUARIOS.map(async a=>{
     try{
-      const r=await fetch(`${FB}/informes/informe_${encodeURIComponent(a.cod)}_s${SEMANA}`);
-      if(!r.ok){ res[a.id]=null; return; }
+      // El informe puede estar bajo cualquiera de sus codigos
+      let r=null;
+      for(const c of [a.cod,...(a.alias||[])]){
+        if(!c) continue;
+        const t=await fetch(`${FB}/informes/informe_${encodeURIComponent(c)}_s${SEMANA}`);
+        if(t.ok){ r=t; break; }
+      }
+      if(!r){ res[a.id]=null; return; }
       const j=await r.json();
       const o={};
       for(const [k,x] of Object.entries(j.fields||{})) o[k]=val(x);
@@ -556,7 +590,7 @@ window.elegirVend=(id)=>{ SEL_VEND=id; SEL_DOC=null; VER_TODAS_DOC=false; pintar
 function clavesVendedor(agId){
   const ag=USUARIOS.find(u=>U(u.id)===U(agId));
   if(!ag) return [];
-  const c=[ag.id,ag.cod,ag.nombre].filter(Boolean).map(U);
+  const c=[ag.id,ag.cod,ag.nombre,...(ag.alias||[])].filter(Boolean).map(U);
   return c.filter((v,i,a)=>a.indexOf(v)===i);
 }
 function esDelVendedor(d,claves){
