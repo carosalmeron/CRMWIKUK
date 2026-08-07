@@ -180,6 +180,7 @@ async function escribir(col,id,doc){
 }
 
 let USUARIOS=[], OBJETIVOS=[], CIERRES={}, VISTA="lista", SEL=null, CERRADA=false;
+let FILTRO="";   // buscador de vendedores de la lista
 // Catálogos para los buscadores. Se cargan una vez y se reutilizan.
 let CLIENTES=[], PRODUCTOS=[];
 // Cliente y producto son independientes: un objetivo puede llevar los dos
@@ -192,6 +193,10 @@ let EDITANDO=null, SEL_VEND=null;
 // el cierre del viernes: para clientes, si hay visita esa semana; para el
 // resto, si el documento ya está en un estado cerrado.
 let VISITAS_SEM={}, ESTADOS_DOC={};
+// Ofertas, muestras y estrategias que siguen abiertas, para poder apuntar un
+// objetivo a una en concreto en vez de describirla a mano.
+let ABIERTOS={ofertas:[],muestras:[],estrategias:[]};
+let SEL_DOC=null;
 
 async function cargarSeguimiento(){
   VISITAS_SEM={}; ESTADOS_DOC={};
@@ -220,6 +225,12 @@ async function cargarSeguimiento(){
       const id=U(d.id||d._id); if(!id) return;
       ESTADOS_DOC[id]=String(d.estado||"").toLowerCase();
     });
+    // Los que siguen abiertos, para poder referenciarlos en un objetivo:
+    // "cierra esta oferta", "haz seguimiento de esta muestra"...
+    const abierto=(d)=>!CERRADO_RE.test(String(d.estado||"").toLowerCase());
+    ABIERTOS.ofertas    = of.filter(abierto);
+    ABIERTOS.muestras   = mu.filter(abierto);
+    ABIERTOS.estrategias= es.filter(abierto);
   }catch(e){}
 }
 
@@ -236,6 +247,14 @@ function variantesCod(c){
 }
 
 function estadoObjetivo(o){
+  // Si apunta a un documento concreto, ese manda: es lo mas fiable
+  if(o.docId){
+    const est=ESTADOS_DOC[U(o.docId)];
+    if(est===undefined) return {hecho:true,detalle:"Ya no está abierta"};
+    return CERRADO_RE.test(est)
+      ? {hecho:true,detalle:"Cerrada como "+est}
+      : {hecho:false,detalle:est?"Sigue en "+est:"Sigue abierta"};
+  }
   const cod=o.refCodigo||o.id;
   if(o.tipo==="cliente"){
     const vs=variantesCod(o.refCodigo);
@@ -285,7 +304,7 @@ async function cargarCatalogos(){
   }catch(e){ PRODUCTOS=[]; }
 }
 
-window.cambiarTipo=()=>{};   // los buscadores ya no dependen de la tipología
+window.cambiarTipo=()=>{ SEL_DOC=null; pintar(); };  // el doc sí depende del tipo
 
 // Busca en el catálogo que toque y pinta las sugerencias sin repintar la
 // pantalla entera (repintar perdería el foco y lo escrito en el otro campo).
@@ -332,14 +351,26 @@ window.quitar=(campo)=>{
 
 async function cargarUsuarios(){
   const [us,pu]=await Promise.all([leer("usuarios"),leer("portal_users")]);
+  // La misma persona sale en las dos colecciones con ids distintos (wk4 en
+  // usuarios, agustin en portal_users), asi que indexar por id la duplicaba.
+  // Se agrupa por nombre normalizado y gana la ficha de "usuarios", que es
+  // la que lleva el id canonico con el que se guardan los informes.
+  const clave=(n)=>U(n).normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+    .replace(/[^A-Z0-9]/g,"");
   const map={};
-  [...us,...pu].forEach(u=>{
+  const meter=(u,prioritario)=>{
     const rol=String(u.rol||"").toLowerCase();
     if(rol!=="agente"&&rol!=="crm_agente"&&rol!=="comercial") return;
     const id=u.id||u._id||u.username; if(!id) return;
-    if(!map[U(id)]) map[U(id)]={id:id,nombre:u.nombre||u.username||id,
-      equipo:U(u.equipo||""),cod:U(u.grupoAgente||u.catalogoVendedor||id)};
-  });
+    const nom=u.nombre||u.username||id;
+    const k=clave(nom); if(!k) return;
+    const ficha={id:id,nombre:nom,equipo:U(u.equipo||""),
+      cod:U(u.grupoAgente||u.catalogoVendedor||id)};
+    if(!map[k]) map[k]=ficha;
+    else if(prioritario) map[k]=Object.assign({},map[k],ficha);
+  };
+  us.forEach(u=>meter(u,true));      // usuarios manda
+  pu.forEach(u=>meter(u,false));     // portal_users solo rellena huecos
   let l=Object.values(map);
   if(esJefe&&EQUIPO) l=l.filter(u=>u.equipo===EQUIPO);
   l.sort((a,b)=>a.nombre.localeCompare(b.nombre));
@@ -383,6 +414,14 @@ async function cargarCierres(){
 function escalados(){ return OBJETIVOS.filter(o=>o.escaladoA===ESCALA_A); }
 
 window.irLista=()=>{ VISTA="lista"; SEL=null; pintar(); };
+window.filtrar=(t)=>{
+  FILTRO=t;
+  // Se repinta solo la lista para no perder el foco del campo mientras escribe
+  const cont=document.getElementById("lista-vend");
+  if(cont) cont.innerHTML=filasVendedores();
+  const c=document.getElementById("cuenta-cierres");
+  if(c) c.textContent=textoCuenta();
+};
 window.abrir=(id)=>{ VISTA="detalle"; SEL=id; pintar(); };
 window.cambiarSemana=async(d)=>{
   const n=SEMANA+d; if(n<1||n>SEM_ACTUAL) return;
@@ -395,8 +434,9 @@ window.nuevoObjetivo=async(agId)=>{
   const txt=(document.getElementById("ob-txt").value||"").trim();
   const tipo=document.getElementById("ob-tipo").value;
   if(!txt){ alert("Escribe el objetivo."); return; }
-  if(!SEL_CLI&&!SEL_PROD&&tipo!=="otro"){
-    alert("Elige al menos un cliente o un producto de la lista.");
+  if(!SEL_CLI&&!SEL_PROD&&!SEL_DOC&&tipo!=="otro"){
+    alert("Elige un cliente, un producto o una "+(LBL[tipo]||tipo).toLowerCase()
+      +" concreta.");
     return;
   }
   const destino = SEL_VEND || agId;   // se puede reasignar a otro vendedor
@@ -412,6 +452,8 @@ window.nuevoObjetivo=async(agId)=>{
     // porque es lo que llevan visitas y ofertas); el resto se guarda aparte.
     refCodigo:SEL_CLI?SEL_CLI.cod:"", refNombre:SEL_CLI?SEL_CLI.nom:"",
     prodCodigo:SEL_PROD?SEL_PROD.cod:"", prodNombre:SEL_PROD?SEL_PROD.nom:"",
+    // Documento concreto (oferta/muestra/estrategia) al que apunta el objetivo
+    docId:SEL_DOC?SEL_DOC.cod:"", docNombre:SEL_DOC?SEL_DOC.nom:"",
     origen:"jefe",creadoPor:base.creadoPor||UID,
     creadoPorNombre:base.creadoPorNombre||AGENTE,
     equipo:EQUIPO,
@@ -421,7 +463,7 @@ window.nuevoObjetivo=async(agId)=>{
     await escribir("objetivos_semana",id,doc);
     if(EDITANDO) OBJETIVOS=OBJETIVOS.map(x=>x.id===id?doc:x);
     else OBJETIVOS.push(doc);
-    EDITANDO=null; SEL_CLI=null; SEL_PROD=null; SEL_VEND=null; pintar();
+    EDITANDO=null; SEL_CLI=null; SEL_PROD=null; SEL_VEND=null; SEL_DOC=null; pintar();
   }catch(e){
     btn.disabled=false; btn.textContent=EDITANDO?"Guardar cambios":"Añadir objetivo";
     alert("No se ha podido guardar: "+e.message);
@@ -458,6 +500,7 @@ window.editar=(id)=>{
   EDITANDO=o;
   SEL_CLI = o.refCodigo ? {cod:o.refCodigo,nom:o.refNombre||o.refCodigo} : null;
   SEL_PROD= o.prodCodigo? {cod:o.prodCodigo,nom:o.prodNombre||o.prodCodigo} : null;
+  SEL_DOC = o.docId     ? {cod:o.docId,nom:o.docNombre||o.docId} : null;
   SEL_VEND= o.agente || null;
   pintar();
   setTimeout(()=>{
@@ -470,7 +513,7 @@ window.editar=(id)=>{
   },40);
 };
 window.cancelarEdicion=()=>{
-  EDITANDO=null; SEL_CLI=null; SEL_PROD=null; SEL_VEND=null; pintar();
+  EDITANDO=null; SEL_CLI=null; SEL_PROD=null; SEL_VEND=null; SEL_DOC=null; pintar();
 };
 
 // Buscador de vendedor: permite reasignar el objetivo a otro comercial
@@ -487,6 +530,44 @@ window.buscarVend=(txt)=>{
   cont.style.display="block";
 };
 window.elegirVend=(id)=>{ SEL_VEND=id; pintar(); };  // "" abre el buscador
+
+// Buscador de ofertas/muestras/estrategias abiertas del vendedor elegido
+window.buscarDoc=(txt)=>{
+  const cont=document.getElementById("sug-doc");
+  if(!cont) return;
+  const tipo=(document.getElementById("ob-tipo")||{}).value||"";
+  const lista=ABIERTOS[tipo]||[];
+  const q=U(txt).trim();
+  const agId=SEL_VEND||SEL||"";
+  const ag=USUARIOS.find(u=>U(u.id)===U(agId));
+  const codsAg=ag?[U(ag.id),U(ag.cod)]:[];
+  // Primero las del vendedor al que se le pone el objetivo
+  const suyas=[], otras=[];
+  lista.forEach(d=>{
+    const txtD=U([d.cliente,d.clienteNombre,d.nombre,d.titulo,d.prod,
+      d.prodNombre,d.id].filter(Boolean).join(" "));
+    if(q&&txtD.indexOf(q)<0) return;
+    const mio=codsAg.length&&codsAg.indexOf(U(d.agente))>=0;
+    (mio?suyas:otras).push(d);
+  });
+  const res=suyas.concat(otras).slice(0,25);
+  if(!res.length){
+    cont.innerHTML='<div style="color:var(--muted)">'
+      +(lista.length?'Sin resultados':'No hay '+(LBL[tipo]||tipo).toLowerCase()+' abiertas')
+      +'</div>';
+    cont.style.display="block"; return;
+  }
+  cont.innerHTML=res.map(d=>{
+    const nom=d.cliente||d.clienteNombre||d.nombre||d.titulo||d.prod||d.id;
+    const det=[d.prod||d.prodNombre||d.titulo,d.estado,d.fecha||d.fechaCreacion]
+      .filter(Boolean).join(" · ");
+    return '<div onclick="elegirDoc(\''+esc2(d.id||d._id)+'\',\''+esc2(nom)+'\')">'
+      +'<b>'+nom+'</b><small>'+det+'</small></div>';
+  }).join("");
+  cont.style.display="block";
+};
+window.elegirDoc=(id,nom)=>{ SEL_DOC={cod:id,nom:nom}; pintar(); };
+window.quitarDoc=()=>{ SEL_DOC=null; pintar(); };
 
 window.borrar=async(id)=>{
   if(!confirm("¿Eliminar este objetivo?")) return;
@@ -551,6 +632,36 @@ function hechosDe(agId){
   return l.filter(o=>{ const e=estadoObjetivo(o); return e&&e.hecho; }).length;
 }
 
+function vendedoresFiltrados(){
+  const q=U(FILTRO).trim();
+  if(!q) return USUARIOS;
+  return USUARIOS.filter(u=>U(u.nombre).indexOf(q)>=0||U(u.id).indexOf(q)>=0);
+}
+function textoCuenta(){
+  const l=vendedoresFiltrados();
+  const cerrados=l.filter(a=>CIERRES[a.id]).length;
+  return "Cierres recibidos ("+cerrados+" de "+l.length+")"
+    +(FILTRO?" · filtrando":"");
+}
+function filasVendedores(){
+  const l=vendedoresFiltrados();
+  if(!l.length) return '<p class="vacio">Ningún vendedor coincide.</p>';
+  return l.map(a=>{
+    const c=CIERRES[a.id];
+    const nObj=OBJETIVOS.filter(o=>U(o.agente)===U(a.id)).length;
+    return '<div class="card '+(c?"cerr":"abierto")+'" onclick="abrir(\''+esc2(a.id)+'\')">'
+      +'<div class="fila"><div style="min-width:0"><b>'+a.nombre+'</b><small>'
+      +(c ? c.propuesto.length+" propuesto(s)"
+            +(c.obviado.length?" · "+c.obviado.length+" sin contestar":"")
+            +(nObj?" · "+nObj+" tuyo(s)":"")
+            +(hechosDe(a.id)!==null?" · "+hechosDe(a.id)+" cumplido(s)":"")
+          : "Todavía no ha cerrado")
+      +'</small></div>'
+      +'<span class="pill '+(c?"ok":"no")+'">'+(c?"Cerrado":"Pendiente")+'</span>'
+      +'</div></div>';
+  }).join("");
+}
+
 function pintarLista(){
   let h=cabeceraSemana();
   const sinCerrar=USUARIOS.filter(a=>!CIERRES[a.id]);
@@ -563,29 +674,23 @@ function pintarLista(){
   }
 
   if(sinCerrar.length){
+    // Con muchos pendientes, listarlos todos ocupa media pantalla y no se lee
+    const muestra=sinCerrar.slice(0,12).map(a=>a.nombre).join(" · ");
     h+='<div class="card" style="border-color:var(--amber);background:var(--amberL)">'
       +'<b style="font-size:13.5px;color:var(--amber)">⚠️ '+sinCerrar.length
       +' sin cerrar la semana '+SEMANA+'</b>'
-      +'<p style="margin:6px 0 0;font-size:12.5px">'
-      +sinCerrar.map(a=>a.nombre).join(" · ")+'</p></div>';
+      +'<p style="margin:6px 0 0;font-size:12.5px">'+muestra
+      +(sinCerrar.length>12?' <span style="color:var(--muted)">y '
+        +(sinCerrar.length-12)+' más</span>':'')+'</p></div>';
   }
 
-  h+='<h3>Cierres recibidos ('+(USUARIOS.length-sinCerrar.length)
-    +' de '+USUARIOS.length+')</h3>';
-  USUARIOS.forEach(a=>{
-    const c=CIERRES[a.id];
-    const nObj=OBJETIVOS.filter(o=>U(o.agente)===U(a.id)).length;
-    h+='<div class="card '+(c?"cerr":"abierto")+'" onclick="abrir(\''+esc2(a.id)+'\')">'
-      +'<div class="fila"><div style="min-width:0"><b>'+a.nombre+'</b><small>'
-      +(c ? c.propuesto.length+" propuesto(s)"
-            +(c.obviado.length?" · "+c.obviado.length+" sin contestar":"")
-            +(nObj?" · "+nObj+" tuyo(s)":"")
-            +(hechosDe(a.id)!==null?" · "+hechosDe(a.id)+" cumplido(s)":"")
-          : "Todavía no ha cerrado")
-      +'</small></div>'
-      +'<span class="pill '+(c?"ok":"no")+'">'+(c?"Cerrado":"Pendiente")+'</span>'
-      +'</div></div>';
-  });
+  h+='<h3 id="cuenta-cierres">'+textoCuenta()+'</h3>'
+    +'<div class="buscador" style="margin-bottom:11px">'
+    +'<span class="lupa">🔍</span>'
+    +'<input type="text" class="conlupa" id="buscaVend" autocomplete="off"'
+    +' placeholder="Buscar vendedor…" value="'+esc2(FILTRO)+'"'
+    +' oninput="filtrar(this.value)"></div>'
+    +'<div id="lista-vend">'+filasVendedores()+'</div>';
 
   if(MI_NIVEL){
     const recib=OBJETIVOS.filter(o=>o.escaladoA===MI_NIVEL);
@@ -743,6 +848,24 @@ function pintarDetalle(){
     +TIPOS.map(t=>'<option value="'+t.k+'"'+(t.k===tipoAct?" selected":"")+'>'
       +t.lbl+'</option>').join("")
     +'</select>'
+    // Si el objetivo va sobre una oferta/muestra/estrategia que ya existe,
+    // se referencia la abierta en concreto en vez de describirla a mano.
+    +(ABIERTOS[tipoAct]
+      ? (SEL_DOC
+          ? '<label>'+(LBL[tipoAct]||tipoAct)+' concreta</label>'
+            +'<div class="elegido"><span>'+SEL_DOC.nom
+            +'<small style="display:block;font-weight:400;color:var(--muted)">'
+            +SEL_DOC.cod+'</small></span>'
+            +'<button onclick="quitarDoc()" title="Quitar">✕</button></div>'
+          : '<label>'+(LBL[tipoAct]||tipoAct)+' abierta '
+            +'<span style="font-weight:400">('+(ABIERTOS[tipoAct]||[]).length
+            +') — opcional</span></label>'
+            +'<div class="buscador"><span class="lupa">🔍</span>'
+            +'<input type="text" class="conlupa" autocomplete="off"'
+            +' placeholder="Busca una '+(LBL[tipoAct]||tipoAct).toLowerCase()
+            +' abierta…" oninput="buscarDoc(this.value)" onfocus="buscarDoc(this.value)">'
+            +'<div class="sug" id="sug-doc" style="display:none"></div></div>')
+      : "")
     // Cliente y producto son independientes: se puede indicar uno, otro o ambos
     +campoBusca("cli","Cliente",SEL_CLI,"Busca por nombre o código…")
     +campoBusca("prod","Producto",SEL_PROD,"Busca por nombre o código…")
