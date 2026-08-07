@@ -224,23 +224,29 @@ async function cargarSeguimiento(){
   VISITAS_SEM={}; ESTADOS_DOC={};
   // Solo las visitas de ESTA semana. Leer la colección entera son miles de
   // documentos por cada carga y dispara la factura de Firestore.
-  try{
-    const body={structuredQuery:{from:[{collectionId:"visitas"}],
-      where:{fieldFilter:{field:{fieldPath:"semana"},op:"EQUAL",
-             value:{doubleValue:SEMANA}}},limit:3000}};
-    const r=await fetch(FB+":runQuery",{method:"POST",
-      headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-    if(r.ok){
+  // Se piden la semana del cierre y la siguiente: lo que el comercial promete
+  // al cerrar la semana 31 lo ejecuta en la 32, asi que mirar solo la 31
+  // marcaba como "sin contacto" cosas que si se habian hecho.
+  const pedirVisitas=async(sem)=>{
+    try{
+      const body={structuredQuery:{from:[{collectionId:"visitas"}],
+        where:{fieldFilter:{field:{fieldPath:"semana"},op:"EQUAL",
+               value:{doubleValue:sem}}},limit:3000}};
+      const r=await fetch(FB+":runQuery",{method:"POST",
+        headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      if(!r.ok) return;
       const j=await r.json();
       (Array.isArray(j)?j:[]).forEach(x=>{
         if(!x.document) return;
         const v={};
         for(const [k,f] of Object.entries(x.document.fields||{})) v[k]=val(f);
+        if(v.semana==null) v.semana=sem;
         const cid=U(v.clienteId||v.clienteCodigo); if(!cid) return;
         (VISITAS_SEM[cid]=VISITAS_SEM[cid]||[]).push(v);
       });
-    }
-  }catch(e){}
+    }catch(e){}
+  };
+  await Promise.all([pedirVisitas(SEMANA),pedirVisitas(SEMANA+1)]);
   try{
     const [of,mu,es]=await Promise.all([leer("ofertas"),leer("muestras"),leer("estrategias")]);
     [...of,...mu,...es].forEach(d=>{
@@ -507,11 +513,19 @@ function estadoItem(x){
   try{
   if(x.tipo==="cliente"){
     for(const v of variantesCod(x.id)){
-      const vis=VISITAS_SEM[v];
-      if(vis&&vis.length) return {hecho:true,txt:vis.length+" contacto"
-        +(vis.length>1?"s":"")+" esta semana"};
+      const vis=VISITAS_SEM[v]||[];
+      // Lo prometido al cerrar la semana N se cumple en la N+1
+      const sig=vis.filter(z=>Number(z.semana)===SEMANA+1);
+      if(sig.length){
+        const ult=sig.sort((a,b)=>String(b.fecha||"").localeCompare(String(a.fecha||"")))[0];
+        const que=ult.resultado||ult.tipo||"";
+        return {hecho:true,txt:sig.length+" contacto"+(sig.length>1?"s":"")
+          +(ult.fecha?" · "+_fecha(ult.fecha):"")+(que?" · "+que:"")};
+      }
+      if(vis.length) return {hecho:false,
+        txt:"Solo contacto en la propia semana "+SEMANA};
     }
-    return {hecho:false,txt:"Sin contacto esta semana"};
+    return {hecho:false,txt:"Sin contacto en la semana "+(SEMANA+1)};
   }
   if(["ofertas","muestras","estrategias"].indexOf(x.tipo)<0) return null;
   const est=ESTADOS_DOC[U(x.id)];
