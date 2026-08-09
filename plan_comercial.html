@@ -143,7 +143,17 @@ const FB_BASE="https://firestore.googleapis.com/v1/projects/grupo-consolidado-cr
 const EQUIPO={INSIDE:["VERONICA"], KA:["CARLOSG","AGUSTIN"]};
 const MESES=["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
 const eur=n=>Math.round(n||0).toLocaleString("es-ES");
-const val=f=>f?.stringValue??(f?.integerValue!=null?+f.integerValue:(f?.doubleValue!=null?+f.doubleValue:(f?.booleanValue??null)));
+const val=f=>f?.stringValue??f?.timestampValue??(f?.integerValue!=null?+f.integerValue:(f?.doubleValue!=null?+f.doubleValue:(f?.booleanValue??null)));
+// Fechas del CRM: acepta ISO, timestamps y dd/mm/aaaa (el orden español rompe a Date())
+function parseFecha(v){
+  if(v==null||v==="") return null;
+  const s=String(v).trim();
+  const m=s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+  if(m){ const d=+m[1], mes=+m[2];
+    // dd/mm salvo que el "día" sea >12 en la otra posición (entonces era mm/dd)
+    return (mes<=12&&d<=31)?new Date(+m[3],mes-1,d):null; }
+  const d=new Date(s); return isNaN(d)?null:d;
+}
 
 let CARTERA=[], PLAN=[], ESTAC={}, MESCLI={}, mesActual=new Date().getMonth()+1;
 
@@ -392,14 +402,21 @@ async function cruzarVisitas(){
   const equipo=[...EQUIPO.KA,...EQUIPO.INSIDE];
   const visPorAgente={}; equipo.forEach(a=>visPorAgente[a]=0);
   const visPorCli={}; let totalVis=0, sinCasar=0, nextPage=null, pags=0;
+  let docsLeidos=0, sinFecha=0; const porMes={}, agentesVistos={};
   do{
     const r=await fetch(`${FB_BASE}/visitas?pageSize=300${nextPage?"&pageToken="+nextPage:""}`);
     if(!r.ok) throw new Error(`Firestore ${r.status} en visitas`);
     const j=await r.json();
     for(const d of (j.documents||[])){
       const f={}; for(const[k,v]of Object.entries(d.fields||{})) f[k]=val(v);
-      const fecha=new Date(f.fecha||f.fechaVisita||f.fechaCreacion||"");
-      if(isNaN(fecha)||fecha<ini||fecha>=fin) continue;
+      docsLeidos++;
+      const fecha=parseFecha(f.fecha)||parseFecha(f.fechaVisita)||parseFecha(f.fechaCreacion);
+      if(!fecha){ sinFecha++; continue; }
+      if(fecha.getFullYear()===ini.getFullYear())
+        porMes[fecha.getMonth()+1]=(porMes[fecha.getMonth()+1]||0)+1;
+      const rawAg0=String(f.agente||f.usuario||"?").toUpperCase().trim();
+      agentesVistos[rawAg0]=(agentesVistos[rawAg0]||0)+1;
+      if(fecha<ini||fecha>=fin) continue;
       totalVis++;
       const cod=String(f.clienteId||f.codigoERP||f.codigo||"").toUpperCase().trim();
       if(cod) (visPorCli[cod]=visPorCli[cod]||[]).push(1); else sinCasar++;
@@ -467,6 +484,11 @@ async function cruzarVisitas(){
     <div style="font-size:11.5px;color:var(--gris);font-style:italic;margin-top:10px">
       ${totalVis} visitas registradas en el CRM en ${etiqueta}${sinCasar?` · ${sinCasar} sin código de cliente`:""}
       · evolución sobre los mismos dos meses del año pasado · el Excel incluye ahora la columna de visitas por cliente.
+    </div>
+    <div style="font-size:11px;color:var(--gris);margin-top:8px;background:#F5F5F5;border-radius:8px;padding:8px 12px">
+      <b>Diagnóstico de lectura:</b> ${docsLeidos} registros totales en la colección · ${sinFecha} sin fecha interpretable ·
+      visitas de este año por mes: ${Object.keys(porMes).sort((a,b)=>a-b).map(m=>`${MESES[m-1]} ${porMes[m]}`).join(" · ")||"ninguna"} ·
+      valores de "agente" más vistos: ${Object.entries(agentesVistos).sort((a,b)=>b[1]-a[1]).slice(0,6).map(([k,v])=>`${k} (${v})`).join(", ")}
     </div>`;
   pintarTabla();
 }
