@@ -100,6 +100,10 @@
     <div class="h2sub" id="periodoTxt">Ventas del año en curso frente al mismo periodo del año pasado, mes a mes</div>
     <div class="fila f3" id="radiografia"></div>
 
+    <h2 id="cruceTitulo">¿La visita mueve la venta?</h2>
+    <div class="h2sub" id="cruceSub">Cruce de las visitas registradas en el CRM con la evolución de compra de cada cliente</div>
+    <div id="cruceSec"><div class="cargando" style="padding:26px 0"><div class="spin"></div>Leyendo la colección de visitas…</div></div>
+
     <h2>La cartera viva, segmentada</h2>
     <div class="h2sub">Solo clientes con compra este año o el pasado · corte automático por ventas del año en curso</div>
     <div class="segfila" id="segmentos"></div>
@@ -141,7 +145,7 @@ const MESES=["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","
 const eur=n=>Math.round(n||0).toLocaleString("es-ES");
 const val=f=>f?.stringValue??(f?.integerValue!=null?+f.integerValue:(f?.doubleValue!=null?+f.doubleValue:(f?.booleanValue??null)));
 
-let CARTERA=[], PLAN=[], ESTAC={}, mesActual=new Date().getMonth()+1;
+let CARTERA=[], PLAN=[], ESTAC={}, MESCLI={}, mesActual=new Date().getMonth()+1;
 
 async function fbGet(ruta){
   const r=await fetch(`${FB_BASE}/${ruta}`);
@@ -190,6 +194,11 @@ async function cargar(){
     construir();
     document.getElementById("cargando").style.display="none";
     document.getElementById("app").style.display="block";
+    // Venta mensual por cliente + visitas: el cruce se carga en segundo plano
+    cruzarVisitas().catch(e=>{
+      document.getElementById("cruceSec").innerHTML=
+        `<div class="aviso error" style="display:block">No se ha podido hacer el cruce: ${e.message}</div>`;
+    });
   }catch(e){
     document.getElementById("cargando").style.display="none";
     const av=document.getElementById("aviso");
@@ -346,9 +355,95 @@ function pintarTabla(){
     +(f.length>600?`<tr><td colspan="9" style="text-align:center;color:var(--gris)">…y ${f.length-600} más (usa filtros o descarga el Excel)</td></tr>`:"");
 }
 
+async function cruzarVisitas(){
+  // Ventana: los dos últimos meses COMPLETOS (con datos parciales el cruce mentiría)
+  const m2=mesActual-1, m1=mesActual-2;
+  if(m1<1){ document.getElementById("cruceSec").innerHTML=
+    `<div class="aviso" style="display:block">Aún no hay dos meses completos este año para cruzar.</div>`; return; }
+  const etiqueta=`${MESES[m1-1]}–${MESES[m2-1]}`;
+  document.getElementById("cruceTitulo").textContent=`¿La visita mueve la venta? · ${etiqueta}`;
+
+  // 1. Venta mensual por cliente: pbi_meses_cliente → [codigo, a1..a12, m1..m12]
+  const mc=await fbGet("pbi_meses_cliente?pageSize=30");
+  for(const d of (mc.documents||[])){
+    const datos=d.fields?.datos?.stringValue;
+    if(!datos) continue;
+    for(const fila of JSON.parse(datos)){
+      MESCLI[String(fila[0]).toUpperCase()]={a:fila.slice(1,13).map(Number), m:fila.slice(13,25).map(Number)};
+    }
+  }
+  if(!Object.keys(MESCLI).length) throw new Error("pbi_meses_cliente vacío");
+
+  // 2. Visitas del CRM en la ventana (colección grande: se pagina)
+  const ini=new Date(new Date().getFullYear(),m1-1,1), fin=new Date(new Date().getFullYear(),m2,1);
+  const visPorCli={}; let totalVis=0, sinCasar=0, nextPage=null, pags=0;
+  do{
+    const r=await fetch(`${FB_BASE}/visitas?pageSize=300${nextPage?"&pageToken="+nextPage:""}`);
+    if(!r.ok) throw new Error(`Firestore ${r.status} en visitas`);
+    const j=await r.json();
+    for(const d of (j.documents||[])){
+      const f={}; for(const[k,v]of Object.entries(d.fields||{})) f[k]=val(v);
+      const fecha=new Date(f.fecha||f.fechaVisita||f.fechaCreacion||"");
+      if(isNaN(fecha)||fecha<ini||fecha>=fin) continue;
+      totalVis++;
+      const cod=String(f.clienteId||f.codigoERP||f.codigo||"").toUpperCase().trim();
+      if(cod) (visPorCli[cod]=visPorCli[cod]||[]).push(1); else sinCasar++;
+    }
+    nextPage=j.nextPageToken; pags++;
+  }while(nextPage&&pags<40);
+
+  // 3. El cruce sobre la cartera viva
+  const filas=[];
+  for(const c of PLAN){
+    const mm=MESCLI[String(c.codigo).toUpperCase()];
+    if(!mm) continue;
+    const vAct2=mm.a[m1-1]+mm.a[m2-1], vAnt2=mm.m[m1-1]+mm.m[m2-1];
+    const nVis=(visPorCli[String(c.codigo).toUpperCase()]||[]).length;
+    c._vis=nVis;
+    filas.push({seg:c.segmento, vis:nVis>0, nVis, vAct2, vAnt2});
+  }
+  const grupo=(cond)=>{
+    const g=filas.filter(cond);
+    const a=g.reduce((s,x)=>s+x.vAct2,0), p=g.reduce((s,x)=>s+x.vAnt2,0);
+    const crecen=g.filter(x=>x.vAct2>x.vAnt2).length;
+    return {n:g.length, a, p, evol:p?(a/p-1)*100:null, crecen};
+  };
+  const V=grupo(x=>x.vis), NV=grupo(x=>!x.vis);
+  const tarjeta=(t,g,col)=>`
+    <div class="seg" style="border-top:4px solid ${col}">
+      <div class="tag" style="color:${col}">${t}</div>
+      <div class="n">${g.evol==null?"—":(g.evol>=0?"+":"")+g.evol.toFixed(0)+"%"}</div>
+      <div class="det"><b>${g.n} clientes</b> · ${eur(g.a)} € en ${etiqueta} (antes ${eur(g.p)} €)<br>
+      ${g.crecen} de ${g.n} crecen (${g.n?Math.round(g.crecen/g.n*100):0}%)</div>
+    </div>`;
+  // desglose por segmento
+  const filaSeg=(sg)=>{
+    const v=grupo(x=>x.vis&&x.seg===sg), nv=grupo(x=>!x.vis&&x.seg===sg);
+    const fmt=g=>g.n?`${g.evol==null?"—":(g.evol>=0?"+":"")+g.evol.toFixed(0)}% (${g.n} cl)`:"—";
+    return `<tr><td><span class="pill p${sg}">${sg}</span></td>
+      <td class="num" style="color:var(--verde);font-weight:700">${fmt(v)}</td>
+      <td class="num">${fmt(nv)}</td></tr>`;
+  };
+  document.getElementById("cruceSec").innerHTML=`
+    <div class="segfila">
+      ${tarjeta("CON visita en "+etiqueta, V, "var(--verde)")}
+      ${tarjeta("SIN visita en "+etiqueta, NV, "var(--gris)")}
+      <div class="seg"><div class="tag">Por segmento (evolución ${etiqueta})</div>
+        <table style="margin-top:6px"><tr><th style="position:static">Seg</th>
+        <th style="position:static" class="num">Con visita</th><th style="position:static" class="num">Sin visita</th></tr>
+        ${filaSeg("A")}${filaSeg("B")}${filaSeg("C")}</table></div>
+    </div>
+    <div style="font-size:11.5px;color:var(--gris);font-style:italic;margin-top:10px">
+      ${totalVis} visitas registradas en el CRM en ${etiqueta}${sinCasar?` · ${sinCasar} sin código de cliente`:""}
+      · evolución sobre los mismos dos meses del año pasado · el Excel incluye ahora la columna de visitas por cliente.
+    </div>`;
+  pintarTabla();
+}
+
 function descargarExcel(){
   const wb=XLSX.utils.book_new();
   const filas=PLAN.map(c=>({CODIGO:c.codigo,CLIENTE:c.nombre,"AGENTE ACTUAL":c.agente,"VISITA A CARGO DE":c.ka,
+    "VISITAS 2 MESES":c._vis??"",
     SEGMENTO:c.segmento,"VENTAS AÑO (€)":Math.round(c.vAct),"MISMO PERIODO ANT (€)":Math.round(c.vAnt),
     POBLACION:c.poblacion,"MES 1":c.m1,"MES 2":c.m2,"MES 3":c.m3}));
   XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(filas),"Rueda 3 meses");
