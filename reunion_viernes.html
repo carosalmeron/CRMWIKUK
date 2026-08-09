@@ -72,7 +72,10 @@
     <div class="sub">El informe no termina en los datos: termina en acciones</div>
   </div>
   <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
-    <select id="selEquipo" style="padding:7px 10px;border-radius:8px;border:none"></select>
+    <div style="display:flex;gap:8px">
+      <select id="selEquipo" style="padding:7px 10px;border-radius:8px;border:none"></select>
+      <select id="selDuplo" style="padding:7px 10px;border-radius:8px;border:none"></select>
+    </div>
     <div class="sub" id="sync">conectando…</div>
   </div>
 </div>
@@ -142,15 +145,25 @@ const val=f=>f?.stringValue??f?.timestampValue??(f?.integerValue!=null?+f.intege
 const dlg=document.getElementById("dlg");
 let CARTERA=[],MESCLI={},ACCIONES=[],mesActual=new Date().getMonth()+1;
 
+let DUPLO=new URLSearchParams(location.search).get("duplo")||"TODOS";
 (function(){
   const s=document.getElementById("selEquipo");
   Object.keys(EQUIPOS).forEach((k,i)=>{const o=document.createElement("option");
     o.value=i+1;o.textContent=k;if(k===EQ_NOMBRE)o.selected=true;s.appendChild(o);});
   s.onchange=()=>{location.search="?equipo="+s.value;};
-  document.getElementById("titulo").textContent="Reunión del Viernes · "+EQ_NOMBRE.split("·")[0].trim();
+  const sd=document.getElementById("selDuplo");
+  const ops=[["TODOS","Equipo completo (director)"]].concat(CFG.KA.map(k=>[k,`Duplo ${k} + ${CFG.INSIDE[0]}`]));
+  ops.forEach(([v,t])=>{const o=document.createElement("option");o.value=v;o.textContent=t;
+    if(v===DUPLO)o.selected=true;sd.appendChild(o);});
+  sd.onchange=()=>{DUPLO=sd.value;pintar();actualizarTitulo();};
+  actualizarTitulo();
   const r=document.getElementById("dResp");
   EQUIPO.forEach(a=>{const o=document.createElement("option");o.textContent=a;r.appendChild(o);});
 })();
+function actualizarTitulo(){
+  document.getElementById("titulo").textContent="Reunión del Viernes · "+
+    (DUPLO==="TODOS"?EQ_NOMBRE.split("·")[0].trim():`Duplo ${DUPLO} + ${CFG.INSIDE[0]}`);
+}
 
 function serial(obj){
   const f={};
@@ -169,6 +182,15 @@ async function cargar(){
       let ag=String(agente||"").toUpperCase().trim(); if(FUSION[ag])ag=FUSION[ag];
       return{codigo,nombre,agente:ag,vAct:+vAct||0,vAnt:+vAnt||0};})
       .filter(c=>EQUIPO.includes(c.agente));
+    // rueda: segmentación y reparto de la cartera de la Inside (misma lógica que plan_comercial)
+    const vivos=CARTERA.filter(c=>c.vAct>0||c.vAnt>0).sort((a,b)=>b.vAct-a.vAct);
+    const nA=Math.round(vivos.length*0.30), nB=Math.round(vivos.length*0.30);
+    vivos.forEach((c,i)=>c.segmento=i<nA?"A":i<nA+nB?"B":"C");
+    const peso=c=>c.segmento==="A"?0.5:1/3;
+    const carga={};CFG.KA.forEach(k=>carga[k]=0);
+    for(const c of vivos) if(CFG.KA.includes(c.agente)){c.ka=c.agente;carga[c.ka]+=peso(c);}
+    const sueltos=vivos.filter(c=>!c.ka).sort((a,b)=>peso(b)-peso(a)||b.vAct-a.vAct);
+    for(const c of sueltos){c.ka=CFG.KA.reduce((m,k)=>carga[k]<carga[m]?k:m,CFG.KA[0]);carga[c.ka]+=peso(c);}
     // ventas mensuales por cliente
     const mc=await fbGet("pbi_meses_cliente?pageSize=30");
     for(const d of(mc.documents||[])){const s=d.fields?.datos?.stringValue;if(!s)continue;
@@ -194,10 +216,13 @@ async function cargar(){
   }
 }
 
+function miCartera(){
+  return DUPLO==="TODOS"?CARTERA:CARTERA.filter(c=>c.ka===DUPLO||(!c.ka&&c.agente===DUPLO));
+}
 function calcularRiesgo(){
   const M=mesActual-1, riesgos=[];
   if(M<4) return riesgos;
-  for(const c of CARTERA){
+  for(const c of miCartera()){
     const mm=MESCLI[String(c.codigo).toUpperCase()]; if(!mm)continue;
     const prev=mm.a.slice(0,M-2).filter(x=>x>0);
     if(prev.length<2)continue;
@@ -215,14 +240,15 @@ function calcularRiesgo(){
 }
 
 function pintar(){
-  const M=mesActual;
+  const M=mesActual, CART=miCartera();
   // FOTO
-  const vAct=CARTERA.reduce((s,c)=>s+c.vAct,0), vAnt=CARTERA.reduce((s,c)=>s+c.vAnt,0);
-  const mesA=CARTERA.reduce((s,c)=>s+(MESCLI[String(c.codigo).toUpperCase()]?.a[M-1]||0),0);
-  const mesP=CARTERA.reduce((s,c)=>s+(MESCLI[String(c.codigo).toUpperCase()]?.m[M-1]||0),0);
+  const vAct=CART.reduce((s,c)=>s+c.vAct,0), vAnt=CART.reduce((s,c)=>s+c.vAnt,0);
+  const mesA=CART.reduce((s,c)=>s+(MESCLI[String(c.codigo).toUpperCase()]?.a[M-1]||0),0);
+  const mesP=CART.reduce((s,c)=>s+(MESCLI[String(c.codigo).toUpperCase()]?.m[M-1]||0),0);
   const riesgos=calcularRiesgo();
   const totR=riesgos.reduce((s,r)=>s+r.enJuego,0);
-  const abiertas=ACCIONES.filter(a=>a.estado==="abierta");
+  const abiertas=accVisibles().filter(a=>a.estado==="abierta");
+  const planTxt=DUPLO==="TODOS"?`${18*CFG.KA.length} + 45`:"18 + ~23";
   document.getElementById("foto").innerHTML=`
     <div class="kpi"><div class="t">Año en curso</div><div class="v">${eur(vAct)} €</div>
       <div class="d">antes ${eur(vAnt)} € · ${vAnt?((vAct/vAnt-1)*100).toFixed(1):0}%</div></div>
@@ -232,14 +258,15 @@ function pintar(){
       <div class="v" style="color:var(--rojo)">${eur(totR)} €</div>
       <div class="d">${riesgos.length} clientes apartados de su ritmo</div></div>
     <div class="kpi" style="border-left:4px solid var(--verde)"><div class="t">Plan semana siguiente</div>
-      <div class="v">18 + 45</div><div class="d">visitas por KA + llamadas Inside · ${abiertas.length} acciones abiertas</div></div>`;
-  // RIESGO por responsable
-  const porResp={};EQUIPO.forEach(a=>porResp[a]={n:0,e:0});
+      <div class="v">${planTxt}</div><div class="d">visitas + llamadas · ${abiertas.length} acciones abiertas</div></div>`;
+  // RIESGO por cartera de origen (en vista duplo: KA propio vs cedidos de la Inside)
+  const grupos=DUPLO==="TODOS"?EQUIPO:[DUPLO,CFG.INSIDE[0]];
+  const porResp={};grupos.forEach(a=>porResp[a]={n:0,e:0});
   riesgos.forEach(r=>{if(porResp[r.agente]){porResp[r.agente].n++;porResp[r.agente].e+=r.enJuego;}});
-  document.getElementById("riesgoResp").innerHTML=EQUIPO.map(a=>`
-    <div class="kpi"><div class="t">${a}</div>
+  document.getElementById("riesgoResp").innerHTML=grupos.map(a=>`
+    <div class="kpi"><div class="t">${DUPLO!=="TODOS"&&a===CFG.INSIDE[0]?"cartera "+a+" (cedida al duplo)":"cartera "+a}</div>
       <div class="v" style="color:var(--rojo)">${eur(porResp[a].e)} €</div>
-      <div class="d">${porResp[a].n} clientes de su cartera</div></div>`).join("");
+      <div class="d">${porResp[a].n} clientes en riesgo</div></div>`).join("");
   document.getElementById("riesgoLista").innerHTML=riesgos.slice(0,15).map((r,i)=>`
     <div class="riesgo-item">
       <div><div class="nom">${r.nombre} <span style="color:var(--gris);font-weight:400">· ${r.agente}</span></div>
@@ -255,11 +282,14 @@ function pintar(){
   pintarAcciones();
 }
 
+function accVisibles(){
+  return DUPLO==="TODOS"?ACCIONES:ACCIONES.filter(a=>!a.duplo||a.duplo===DUPLO);
+}
 function pintarAcciones(){
-  const abiertas=ACCIONES.filter(a=>a.estado==="abierta")
+  const abiertas=accVisibles().filter(a=>a.estado==="abierta")
     .sort((a,b)=>String(a.fecha).localeCompare(String(b.fecha)));
   const hoy=new Date().toISOString().slice(0,10);
-  const cerradas=ACCIONES.filter(a=>a.estado==="cerrada")
+  const cerradas=accVisibles().filter(a=>a.estado==="cerrada")
     .sort((a,b)=>String(b.cerrada||"").localeCompare(String(a.cerrada||""))).slice(0,8);
   const nAb=abiertas.length;
   document.getElementById("contadorAcc").innerHTML=
@@ -283,8 +313,8 @@ function sugerirEjecutor(){
   const esTel=/Llamada|Seguimiento|cita/i.test(acc);
   if(esTel){ sel.value=CFG.INSIDE[0]; }
   else{
-    // visita u oferta: por defecto el KA; si la cartera es de un KA, ese; si es de la Inside, el primero
-    sel.value=CFG.KA.includes(_carteraActual)?_carteraActual:CFG.KA[0];
+    // visita u oferta: el KA del duplo activo; si es vista de equipo, el KA de la cartera
+    sel.value=DUPLO!=="TODOS"?DUPLO:(CFG.KA.includes(_carteraActual)?_carteraActual:CFG.KA[0]);
   }
 }
 function abrirDialogo(pre){
@@ -307,6 +337,9 @@ async function guardarAccion(){
   const a={equipo:EQ_NOMBRE,cliente:nom,
     senal:document.getElementById("dSenal").value.trim(),
     cartera:_carteraActual||"",
+    duplo:(function(){ // el duplo de la acción = el KA del cliente en la rueda, o el seleccionado
+      const c=CARTERA.find(x=>x.nombre.toUpperCase()===nom.toUpperCase()||String(x.codigo).toUpperCase()===nom.toUpperCase());
+      return (c&&c.ka)||(DUPLO!=="TODOS"?DUPLO:CFG.KA[0]);})(),
     responsable:document.getElementById("dResp").value,
     accion:document.getElementById("dAccion").value,
     fecha:document.getElementById("dFecha").value,
