@@ -111,6 +111,10 @@
     <div class="h2sub">Solo clientes con compra este año o el pasado · corte automático por ventas del año en curso</div>
     <div class="segfila" id="segmentos"></div>
 
+    <h2>La cartera de producto: del gancho al valor</h2>
+    <div class="h2sub">Qué línea compra cada cliente vivo · enero–hoy frente al mismo periodo del año pasado · el gancho (tripa fresca) abre la puerta; el valor (deshidratadas · ingredientes · envases) paga el viaje</div>
+    <div id="prodSec"><div class="cargando" style="padding:26px 0"><div class="spin"></div>Leyendo pbi_familias_cliente…</div></div>
+
     <h2>La rueda de 3 meses</h2>
     <div class="h2sub">A: visita cada 2 meses · B: visita cada 3 + llamadas · C: visita + llamada + descanso · nunca visita y llamada el mismo mes</div>
     <div class="barra-acciones">
@@ -280,6 +284,11 @@ async function cargar(){
     cruzarVisitas().catch(e=>{
       document.getElementById("cruceSec").innerHTML=
         `<div class="aviso error" style="display:block">No se ha podido hacer el cruce: ${e.message}</div>`;
+    });
+    carteraProducto().catch(e=>{
+      document.getElementById("prodSec").innerHTML=
+        `<div class="aviso error" style="display:block">No se ha podido leer la cartera de producto: ${e.message}.
+         Lanza una vez <b>/api/pbi-sync?familias=1</b> para generar la colección.</div>`;
     });
   }catch(e){
     document.getElementById("cargando").style.display="none";
@@ -453,6 +462,145 @@ function pintarTabla(){
     <td class="num">${eur(c.vAct)}</td><td class="num">${eur(c.vAnt)}</td>
     ${celdaMes(c.m1)}${celdaMes(c.m2)}${celdaMes(c.m3)}</tr>`).join("")
     +(f.length>600?`<tr><td colspan="9" style="text-align:center;color:var(--gris)">…y ${f.length-600} más (usa filtros o descarga el Excel)</td></tr>`:"");
+}
+
+// ═══ CARTERA DE PRODUCTO: qué línea compra cada cliente (pbi_familias_cliente) ═══
+async function carteraProducto(){
+  // 1. Mapeo familia → línea comercial (lo escribe /api/pbi-sync?familias=1)
+  const gm=await fbGet("pbi_config/familias_lineas");
+  const MAPEO=JSON.parse(gm?.fields?.datos?.stringValue||"{}");
+  if(!Object.keys(MAPEO).length) throw new Error("pbi_config/familias_lineas vacío");
+  const lineaDe=f=>{for(const[l,lista]of Object.entries(MAPEO))if(lista.includes(f))return l;return"SIN CLASIFICAR";};
+  const VALOR=["ENVOLT. DESHIDRATADAS","INGREDIENTES","ENVASES"];
+  const IGNORAR=["NO PRODUCTO","AUXILIARES","SIN CLASIFICAR"];
+
+  // 2. Índice código→cliente del plan (códigos agrupados + variante del cero)
+  const idx={};
+  for(const c of PLAN) for(const k of (c.codigos||[c.codigo])){
+    const K=String(k).toUpperCase(); idx[K]=c;
+    const m=K.match(/^([A-Z])430(\d{4})$/); if(m&&!idx[m[1]+"43"+m[2]]) idx[m[1]+"43"+m[2]]=c;
+    const m2=K.match(/^([A-Z])43(\d{4})$/); if(m2&&!idx[m2[1]+"430"+m2[2]]) idx[m2[1]+"430"+m2[2]]=c;
+  }
+
+  // 3. Venta por cliente × familia → acumular por cliente × línea
+  let docsF=[], np=null, pg=0;
+  do{
+    const j=await fbGet(`pbi_familias_cliente?pageSize=50${np?"&pageToken="+np:""}`);
+    docsF=docsF.concat(j.documents||[]); np=j.nextPageToken; pg++;
+  }while(np&&pg<10);
+  if(!docsF.length) throw new Error("pbi_familias_cliente vacío");
+  let filasLeidas=0, filasMias=0;
+  for(const d of docsF){
+    const datos=d.fields?.datos?.stringValue; if(!datos) continue;
+    for(const [cli,fam,act,ant] of JSON.parse(datos)){
+      filasLeidas++;
+      const L=lineaDe(fam); if(IGNORAR.includes(L)) continue;
+      const c=idx[String(cli).toUpperCase()]; if(!c) continue;
+      filasMias++;
+      c._lin=c._lin||{};
+      const g=c._lin[L]=c._lin[L]||{act:0,ant:0};
+      g.act+=act||0; g.ant+=ant||0;
+    }
+  }
+
+  // 4. Agregados por vendedor (visita a cargo de) y por línea
+  const porKA={}, porLinea={};
+  const soloGancho=[];   // A/B que solo compran fresca/artificial: la lista de la venta guiada
+  let abTotal=0, abConValor=0;
+  for(const c of PLAN){
+    const lin=c._lin||{};
+    let valor=0, gancho=0;
+    for(const[L,g]of Object.entries(lin)){
+      const pl=porLinea[L]=porLinea[L]||{act:0,ant:0};
+      pl.act+=g.act; pl.ant+=g.ant;
+      if(VALOR.includes(L)) valor+=g.act; else gancho+=g.act;
+    }
+    const ka=c.ka||c.agente;
+    const pk=porKA[ka]=porKA[ka]||{valor:0,gancho:0,abSolo:0,abSoloEur:0,ab:0,abValor:0};
+    pk.valor+=valor; pk.gancho+=gancho;
+    if(c.segmento==="A"||c.segmento==="B"){
+      abTotal++; pk.ab++;
+      if(valor>0){abConValor++; pk.abValor++;}
+      else if(gancho>0){
+        pk.abSolo++; pk.abSoloEur+=gancho;
+        soloGancho.push({c,gancho});
+      }
+    }
+  }
+  soloGancho.sort((a,b)=>b.gancho-a.gancho);
+
+  // 5. Pintar
+  const eu=n=>Math.round(n).toLocaleString("es-ES");
+  const evol=(a,p)=>p?((a/p-1)*100):null;
+  const ORDEN=["TRIPA FRESCA","ENVOLT. DESHIDRATADAS","INGREDIENTES","ENVASES","TRIPAS ARTIFICIALES"];
+  const tarjetas=ORDEN.filter(L=>porLinea[L]).map(L=>{
+    const g=porLinea[L], e=evol(g.act,g.ant), esValor=VALOR.includes(L);
+    const col=esValor?"var(--verde)":(L==="TRIPA FRESCA"?"var(--carbon)":"var(--gris)");
+    return `<div class="seg" style="border-top:4px solid ${col}">
+      <div class="tag" style="color:${col}">${L}${esValor?" · VALOR":(L==="TRIPA FRESCA"?" · GANCHO":"")}</div>
+      <div class="n">${eu(g.act)} €</div>
+      <div style="font-size:12px;color:${e==null?"var(--gris)":(e>=0?"var(--verde)":"var(--rojo)")}">
+        ${e==null?"sin venta el año pasado":(e>=0?"+":"")+e.toFixed(1)+"% vs mismo periodo"}</div>
+    </div>`;
+  }).join("");
+
+  const totValor=VALOR.reduce((s,L)=>s+(porLinea[L]?.act||0),0);
+  const totGancho=ORDEN.filter(L=>!VALOR.includes(L)).reduce((s,L)=>s+(porLinea[L]?.act||0),0);
+  const pctValor=totValor+totGancho?100*totValor/(totValor+totGancho):0;
+  const pctPen=abTotal?100*abConValor/abTotal:0;
+
+  const filaKA=Object.entries(porKA).sort((a,b)=>(b[1].valor+b[1].gancho)-(a[1].valor+a[1].gancho))
+    .map(([ka,p])=>{
+      const tot=p.valor+p.gancho, pv=tot?100*p.valor/tot:0;
+      return `<tr><td><b>${ka}</b></td>
+        <td class="num">${pv.toFixed(1)}%</td>
+        <td class="num" style="color:var(--verde)">${(pv+5).toFixed(0)}%</td>
+        <td class="num">${p.abValor} de ${p.ab}</td>
+        <td class="num" style="color:var(--burdeos)"><b>${p.abSolo}</b> · ${eu(p.abSoloEur)} €</td></tr>`;
+    }).join("");
+
+  const filaSolo=soloGancho.map(({c,gancho})=>`<tr>
+      <td>${c.codigo}</td><td>${c.nombre}</td><td>${c.ka||c.agente}</td>
+      <td style="text-align:center"><b>${c.segmento}</b></td>
+      <td class="num">${eu(gancho)} €</td>
+      <td style="font-size:11.5px;color:var(--verde)">deshidratada · ingredientes · envases</td>
+    </tr>`).join("");
+
+  document.getElementById("prodSec").innerHTML=`
+    <div class="segfila">${tarjetas}</div>
+    <div class="segfila" style="margin-top:10px">
+      <div class="seg" style="border-top:4px solid var(--verde)">
+        <div class="tag" style="color:var(--verde)">VENTA DE VALOR HOY</div>
+        <div class="n">${pctValor.toFixed(1)}%</div>
+        <div style="font-size:12px;color:var(--gris)">del producto de la cartera viva · objetivo 12 meses: <b style="color:var(--verde)">${(pctValor+5).toFixed(0)}%</b></div>
+      </div>
+      <div class="seg" style="border-top:4px solid var(--ambar)">
+        <div class="tag" style="color:var(--ambar)">PENETRACIÓN A+B</div>
+        <div class="n">${pctPen.toFixed(0)}%</div>
+        <div style="font-size:12px;color:var(--gris)">${abConValor} de ${abTotal} clientes A/B ya compran alguna línea de valor · objetivo: <b style="color:var(--verde)">50%+</b></div>
+      </div>
+      <div class="seg" style="border-top:4px solid var(--burdeos)">
+        <div class="tag" style="color:var(--burdeos)">LA LISTA DE LA VENTA GUIADA</div>
+        <div class="n">${soloGancho.length}</div>
+        <div style="font-size:12px;color:var(--gris)">clientes A/B que HOY solo compran gancho: cada visita de la rueda les lleva UNA línea de valor propuesta</div>
+      </div>
+    </div>
+    <div style="margin:14px 0 6px;font-size:13px"><b>Por vendedor: mezcla de hoy → objetivo</b></div>
+    <div class="tabla-scroll" style="max-height:220px"><table>
+      <thead><tr><th>Visita a cargo de</th><th class="num">% valor hoy</th><th class="num">Objetivo</th>
+      <th class="num">A/B con valor</th><th class="num">A/B solo gancho (€ en juego)</th></tr></thead>
+      <tbody>${filaKA}</tbody></table></div>
+    <div style="margin:14px 0 6px;font-size:13px"><b>Los ${soloGancho.length} clientes A/B monoproducto</b>
+      <span style="color:var(--gris);font-size:11.5px"> — ordenados por lo que ya nos compran de gancho: cuanto más gastan, más fácil el sí a la segunda línea</span></div>
+    <div class="tabla-scroll" style="max-height:340px"><table>
+      <thead><tr><th>Código</th><th>Cliente</th><th>Visita a cargo de</th><th>Seg.</th>
+      <th class="num">Compra gancho (€)</th><th>Líneas a proponer</th></tr></thead>
+      <tbody>${filaSolo}</tbody></table></div>
+    <div style="font-size:11.5px;color:var(--gris);font-style:italic;margin-top:10px">
+      ${filasMias.toLocaleString("es-ES")} cruces cliente×línea de esta cartera (de ${filasLeidas.toLocaleString("es-ES")} totales) ·
+      excluidos del %: auxiliares, no-producto y sin clasificar · mapeo editable en pbi_config/familias_lineas ·
+      se actualiza lanzando /api/pbi-sync?familias=1 tras la sincronización nocturna.
+    </div>`;
 }
 
 async function cruzarVisitas(){
