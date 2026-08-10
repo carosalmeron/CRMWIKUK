@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diagnóstico del "FUERA" · cruce de visitas</title>
+<style>
+  :root{--burdeos:#7A1F2B;--carbon:#2B2B2B;--gris:#777;--crema:#FAF5F0;--linea:#E4DCD4;--verde:#3E6B3A;--ambar:#B07D2B;--rojo:#B03030;}
+  *{box-sizing:border-box}
+  body{font-family:Cambria,Georgia,serif;background:var(--crema);color:var(--carbon);margin:0;padding:24px}
+  .wrap{max-width:1000px;margin:0 auto}
+  h1{font-size:26px;color:var(--burdeos);margin:0 0 4px}
+  .sub{color:var(--gris);font-size:14px;margin-bottom:18px}
+  h2{font-size:19px;color:var(--burdeos);border-bottom:2px solid var(--linea);padding-bottom:4px;margin:26px 0 10px}
+  .caja{background:#fff;border:1px solid var(--linea);border-radius:12px;padding:14px 16px;margin-bottom:12px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;color:var(--gris);font-weight:normal;border-bottom:1px solid var(--linea);padding:4px 8px;font-size:12px}
+  td{padding:4px 8px;border-bottom:1px solid #F1EBE4}
+  .num{text-align:right;font-variant-numeric:tabular-nums}
+  .tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff}
+  .cargando{padding:40px;text-align:center;color:var(--gris)}
+  .spin{display:inline-block;width:22px;height:22px;border:3px solid var(--linea);border-top-color:var(--burdeos);border-radius:50%;animation:g 1s linear infinite;vertical-align:middle;margin-right:10px}
+  @keyframes g{to{transform:rotate(360deg)}}
+  .kpi{display:inline-block;background:#fff;border:1px solid var(--linea);border-radius:12px;padding:10px 18px;margin:0 8px 8px 0;text-align:center}
+  .kpi b{display:block;font-size:24px}
+  .kpi span{font-size:11.5px;color:var(--gris)}
+  code{background:#F1EBE4;padding:1px 5px;border-radius:4px;font-size:12px}
+  .aviso{background:#FDF3E3;border:1px solid #E8D5A8;border-radius:10px;padding:10px 14px;font-size:13px;margin-bottom:12px}
+  select{font-family:inherit;font-size:14px;padding:5px 10px;border:1px solid var(--linea);border-radius:8px;background:#fff}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>¿Qué hay dentro del "FUERA"?</h1>
+  <div class="sub">Desmonta la categoría "fuera" del cruce de visitas, contacto a contacto ·
+    equipo: <select id="selEq"><option value="1">Equipo 1</option><option value="2">Equipo 2</option></select>
+    · ventana: <select id="selVent"><option value="6-7">Jun–Jul</option><option value="5-6">May–Jun</option><option value="7-8">Jul–Ago</option></select>
+  </div>
+  <div class="cargando" id="cargando"><div class="spin"></div>Leyendo pbi_indice_clientes y visitas…</div>
+  <div id="app" style="display:none"></div>
+</div>
+<script>
+const FB_BASE="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const EQUIPOS={
+  "1":{INSIDE:["VERONICA"],KA:["CARLOSG","AGUSTIN"],FUSION:{}},
+  "2":{INSIDE:["ESTHER"],KA:["JLGARCIA","KA UNIFICADO"],
+    FUSION:{"JOSEPMARIA":"KA UNIFICADO","JOSEPMARIAPIRINEUS":"KA UNIFICADO","IVAIN":"KA UNIFICADO",
+      "JPUJOLA":"KA UNIFICADO","PUJOLA MONTER":"KA UNIFICADO","GUSTOG":"KA UNIFICADO",
+      "PEDROANT":"KA UNIFICADO","JREY":"KA UNIFICADO"}},
+};
+const ALIAS={"WK2":"VERONICA","IK1":"CARLOSG","WK1":"DAVIDMAG","WK3":"SILVIA"};
+const val=f=>f?.stringValue??f?.timestampValue??(f?.integerValue!=null?+f.integerValue:(f?.doubleValue!=null?+f.doubleValue:(f?.booleanValue??null)));
+function parseFecha(v){
+  if(v==null||v==="") return null;
+  const s=String(v).trim();
+  const m=s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+  if(m){const d=+m[1],mes=+m[2];let a=+m[3];if(a<100)a+=2000;
+    return (mes<=12&&d<=31)?new Date(a,mes-1,d):null;}
+  const d=new Date(s);return isNaN(d)?null:d;
+}
+function lunesISO(anio,sem){const s=new Date(anio,0,4);const dia=(s.getDay()+6)%7;return new Date(anio,0,4-dia+(sem-1)*7);}
+async function fbGet(ruta){const r=await fetch(`${FB_BASE}/${ruta}`);if(!r.ok)throw new Error(`Firestore ${r.status} en ${ruta}`);return r.json();}
+const norm=t=>String(t||"").toUpperCase()
+  .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+  .replace(/[.,;:'"()\-\/&]/g," ")
+  .replace(/\b(S\.?L\.?U?|S\.?A\.?U?|S\.?C\.?A|S\.?C\.?L|S\.?COOP\.?L?|SOC\.? ?COOP|COOP|C\.?B|S\.?L\.?L|S\.?R\.?L|SDAD|CIA)\b/g," ")
+  .replace(/\s+/g," ").trim();
+
+async function correr(){
+  document.getElementById("app").style.display="none";
+  document.getElementById("cargando").style.display="block";
+  const CFG=EQUIPOS[document.getElementById("selEq").value];
+  const [m1,m2]=document.getElementById("selVent").value.split("-").map(Number);
+  const equipo=[...CFG.KA,...CFG.INSIDE];
+  try{
+    // ─── 1. TODA la cartera (todos los equipos) para distinguir "de otro agente" de "desconocido"
+    const idx=await fbGet("pbi_indice_clientes?pageSize=50");
+    let TODOS=[];
+    for(const d of (idx.documents||[])){
+      const datos=d.fields?.datos?.stringValue; if(!datos) continue;
+      for(const f of JSON.parse(datos))
+        TODOS.push({codigo:String(f[0]).toUpperCase(),nombre:f[1],agente:String(f[2]||"").toUpperCase(),
+          vAct:+f[3]||0,vAnt:+f[4]||0,poblacion:f[5]||""});
+    }
+    if(!TODOS.length) throw new Error("pbi_indice_clientes vacío");
+    // fusión de agentes del KA unificado
+    for(const c of TODOS) if(CFG.FUSION[c.agente]) c.agente=CFG.FUSION[c.agente];
+    // unificación NOMBRE+POBLACIÓN (mismo criterio que plan_comercial)
+    const grupos={};
+    for(const c of TODOS){const k=norm(c.nombre)+"|"+norm(c.poblacion);(grupos[k]=grupos[k]||[]).push(c);}
+    const CART=Object.values(grupos).map(g=>{
+      g.sort((a,b)=>b.vAct-a.vAct||b.vAnt-a.vAnt);const p=g[0];
+      return {...p,vAct:g.reduce((s,x)=>s+x.vAct,0),vAnt:g.reduce((s,x)=>s+x.vAnt,0),codigos:g.map(x=>x.codigo)};
+    });
+    // segmentación SOLO de los vivos del equipo (igual que la web)
+    const mios=CART.filter(c=>equipo.includes(c.agente));
+    const vivos=mios.filter(c=>c.vAct>0||c.vAnt>0).sort((a,b)=>b.vAct-a.vAct);
+    const nA=Math.round(vivos.length*.30),nB=Math.round(vivos.length*.30);
+    vivos.forEach((c,i)=>c.seg=i<nA?"A":i<nA+nB?"B":"C");
+    // mapas: código → info (del equipo, de otro agente, dormido)
+    const M={}; // cod → {tipo, seg, agente, nombre}
+    for(const c of vivos) for(const k of c.codigos) M[k]={tipo:"EQUIPO",seg:c.seg,agente:c.agente,nombre:c.nombre};
+    for(const c of mios) if(c.vAct===0&&c.vAnt===0) for(const k of c.codigos) if(!M[k]) M[k]={tipo:"NUEVO",agente:c.agente,nombre:c.nombre};
+    for(const c of CART) if(!equipo.includes(c.agente)) for(const k of c.codigos) if(!M[k]) M[k]={tipo:"OTRO",agente:c.agente,nombre:c.nombre,vivo:(c.vAct>0||c.vAnt>0)};
+    // nombre normalizado → código (para rescatar registros cuyo código no casa pero el nombre sí)
+    const porNombre={};
+    for(const c of CART){const k=norm(c.nombre);if(k&&!porNombre[k])porNombre[k]=c;}
+
+    // ─── 2. Visitas de la ventana
+    const anio=new Date().getFullYear();
+    const ini=new Date(anio,m1-1,1),fin=new Date(anio,m2,1);
+    const esLlamada=r=>{r=String(r||"");return r.startsWith("llamada")||r==="no_contesta";};
+    let nextPage=null,pags=0;
+    const cont={A:0,B:0,C:0,NUEVO:0}; // dentro del equipo
+    const fuera={OTRO_VIVO:0,OTRO_DORMIDO:0,ID_TAPA:0,NOMBRE_RESCATA:0,SIN_CODIGO:0,DESCONOCIDO:0};
+    const desconocidos={}, otros={}, muestras=[];
+    let total=0, tapadas=[];
+    do{
+      const r=await fetch(`${FB_BASE}/visitas?pageSize=300${nextPage?"&pageToken="+nextPage:""}`);
+      if(!r.ok) throw new Error(`Firestore ${r.status} en visitas`);
+      const j=await r.json();
+      for(const d of (j.documents||[])){
+        const f={};for(const[k,v]of Object.entries(d.fields||{}))f[k]=val(v);
+        let fecha=parseFecha(f.fecha)||parseFecha(f.fechaVisita)||parseFecha(f.fechaCreacion);
+        if(!fecha&&f.semana!=null&&Number(f.semana)>0)fecha=lunesISO(Number(f.anio)||anio,Number(f.semana));
+        if(!fecha||fecha<ini||fecha>=fin)continue;
+        // ¿es de alguien del equipo? (mismo criterio que la web: agente directo o alias; el fallback
+        // por agente-del-cliente no aplica aquí porque justo estamos analizando códigos que no casan)
+        const rawAg=String(f.agente||f.usuario||"").toUpperCase().trim();
+        const quien=equipo.includes(rawAg)?rawAg:(ALIAS[rawAg]&&equipo.includes(ALIAS[rawAg])?ALIAS[rawAg]:null);
+        // el código, con las TRES fuentes por separado para detectar el "clienteId tapa a codigoERP"
+        const cId=String(f.clienteId||"").toUpperCase().trim();
+        const cERP=String(f.codigoERP||"").toUpperCase().trim();
+        const cCod=String(f.codigo||"").toUpperCase().trim();
+        const cod=cId||cERP||cCod; // prioridad idéntica a plan_comercial.html
+        // atribución de la web: si no hay agente del equipo, usa el agente del cliente
+        const dueno=M[cod]?.tipo==="EQUIPO"||M[cod]?.tipo==="NUEVO"?M[cod].agente:null;
+        if(!quien&&!dueno) continue; // no es actividad de este equipo se mire como se mire
+        total++;
+        const info=M[cod];
+        if(info&&(info.tipo==="EQUIPO")){cont[info.seg]++;continue;}
+        if(info&&info.tipo==="NUEVO"){cont.NUEVO++;continue;}
+        // ══ aquí empieza lo que la web llama FUERA ══
+        // ¿el clienteId tapa a un codigoERP que SÍ casa?
+        const alt=(cId&&M[cERP])?cERP:(cId&&M[cCod])?cCod:(cERP&&M[cCod]&&!M[cERP])?cCod:null;
+        if(alt){
+          const ia=M[alt];
+          fuera.ID_TAPA++;
+          if(tapadas.length<12)tapadas.push({usado:cod,bueno:alt,seg:ia.seg||ia.tipo,nombre:ia.nombre,quien:quien||dueno});
+          continue;
+        }
+        if(info&&info.tipo==="OTRO"){
+          fuera[info.vivo?"OTRO_VIVO":"OTRO_DORMIDO"]++;
+          const k=info.agente||"?";otros[k]=(otros[k]||0)+1;continue;
+        }
+        if(!cod){fuera.SIN_CODIGO++;
+          if(muestras.length<12)muestras.push({cod:"(vacío)",cliente:f.cliente||f.nombreCliente||f.nombre||"?",quien,res:f.resultado});
+          continue;}
+        // último intento: casar por NOMBRE del cliente escrito en la visita
+        const nv=norm(f.cliente||f.nombreCliente||f.nombre||"");
+        if(nv&&porNombre[nv]){fuera.NOMBRE_RESCATA++;
+          if(muestras.length<12)muestras.push({cod,cliente:(f.cliente||f.nombreCliente||f.nombre),quien,res:"→ casa por NOMBRE con "+porNombre[nv].codigo});
+          continue;}
+        fuera.DESCONOCIDO++;
+        const k=cod;desconocidos[k]=desconocidos[k]||{n:0,cliente:f.cliente||f.nombreCliente||f.nombre||"?",quien:quien||"?",campos:`clienteId:${cId||"—"} · codigoERP:${cERP||"—"} · codigo:${cCod||"—"}`};
+        desconocidos[k].n++;
+      }
+      nextPage=j.nextPageToken;pags++;
+    }while(nextPage&&pags<80);
+
+    // ─── 3. Pintar
+    const totFuera=Object.values(fuera).reduce((s,x)=>s+x,0);
+    const totDentro=cont.A+cont.B+cont.C+cont.NUEVO;
+    const pc=n=>total?Math.round(100*n/total)+"%":"—";
+    const filasOtros=Object.entries(otros).sort((a,b)=>b[1]-a[1])
+      .map(([a,n])=>`<tr><td>${a}</td><td class="num">${n}</td></tr>`).join("");
+    const filasDesc=Object.entries(desconocidos).sort((a,b)=>b[1].n-a[1].n).slice(0,25)
+      .map(([c,d])=>`<tr><td><code>${c}</code></td><td>${d.cliente}</td><td>${d.quien}</td><td class="num">${d.n}</td><td style="font-size:11px;color:var(--gris)">${d.campos}</td></tr>`).join("");
+    const filasTapa=tapadas.map(t=>`<tr><td><code>${t.usado}</code></td><td><code>${t.bueno}</code></td><td>${t.seg}</td><td>${t.nombre}</td><td>${t.quien}</td></tr>`).join("");
+    const filasMue=muestras.map(m=>`<tr><td><code>${m.cod}</code></td><td>${m.cliente||"?"}</td><td>${m.quien||"?"}</td><td style="font-size:11px">${m.res||""}</td></tr>`).join("");
+    document.getElementById("app").innerHTML=`
+      <div class="kpi"><b>${total}</b><span>contactos del equipo en la ventana</span></div>
+      <div class="kpi"><b style="color:var(--verde)">${totDentro} (${pc(totDentro)})</b><span>casan con la cartera (A/B/C/NUEVO)</span></div>
+      <div class="kpi"><b style="color:var(--rojo)">${totFuera} (${pc(totFuera)})</b><span>lo que la web llama "FUERA"</span></div>
+      <h2>El "fuera", desmontado</h2>
+      <div class="caja"><table>
+        <tr><th>Qué es en realidad</th><th class="num">Contactos</th><th class="num">% del total</th><th>Lectura</th></tr>
+        <tr><td>🔵 Cliente vivo de OTRO agente</td><td class="num">${fuera.OTRO_VIVO}</td><td class="num">${pc(fuera.OTRO_VIVO)}</td><td style="font-size:12px">Actividad real, cartera ajena (desglose abajo). No es desenfoque: es apoyo o traspaso pendiente.</td></tr>
+        <tr><td>🟣 Cliente dormido de otro agente</td><td class="num">${fuera.OTRO_DORMIDO}</td><td class="num">${pc(fuera.OTRO_DORMIDO)}</td><td style="font-size:12px">Dormidos que la web solo cuenta como NUEVOS si son del propio equipo.</td></tr>
+        <tr><td>🟠 clienteId TAPA a un código que sí casa</td><td class="num">${fuera.ID_TAPA}</td><td class="num">${pc(fuera.ID_TAPA)}</td><td style="font-size:12px"><b>Bug de la web:</b> la visita lleva el código bueno en otro campo. Arreglo de una línea.</td></tr>
+        <tr><td>🟡 El código no casa pero el NOMBRE sí</td><td class="num">${fuera.NOMBRE_RESCATA}</td><td class="num">${pc(fuera.NOMBRE_RESCATA)}</td><td style="font-size:12px">Rescatable casando por nombre (mismo criterio de unificación).</td></tr>
+        <tr><td>⚪ Sin código de cliente</td><td class="num">${fuera.SIN_CODIGO}</td><td class="num">${pc(fuera.SIN_CODIGO)}</td><td style="font-size:12px">Registro sin cliente: disciplina de registro.</td></tr>
+        <tr><td>⚫ Código realmente desconocido</td><td class="num">${fuera.DESCONOCIDO}</td><td class="num">${pc(fuera.DESCONOCIDO)}</td><td style="font-size:12px">Prospectos solo-CRM aún sin sincronizar a Power BI, o códigos mal tecleados (lista abajo).</td></tr>
+      </table></div>
+      ${fuera.ID_TAPA?`<h2>🟠 Muestras del "clienteId tapa al bueno"</h2>
+      <div class="caja"><table><tr><th>Código usado</th><th>Código bueno</th><th>Seg.</th><th>Cliente</th><th>Vendedor</th></tr>${filasTapa}</table></div>`:""}
+      ${fuera.OTRO_VIVO+fuera.OTRO_DORMIDO?`<h2>🔵 ¿De qué agentes son los clientes "de otros"?</h2>
+      <div class="caja"><table><tr><th>Agente dueño del cliente</th><th class="num">Contactos</th></tr>${filasOtros}</table></div>`:""}
+      ${fuera.DESCONOCIDO?`<h2>⚫ Los códigos desconocidos más repetidos</h2>
+      <div class="caja"><table><tr><th>Código</th><th>Cliente (según la visita)</th><th>Vendedor</th><th class="num">Veces</th><th>Campos crudos</th></tr>${filasDesc}</table></div>`:""}
+      ${muestras.length?`<h2>Muestras sueltas (sin código / rescatados por nombre)</h2>
+      <div class="caja"><table><tr><th>Código</th><th>Cliente</th><th>Vendedor</th><th>Nota</th></tr>${filasMue}</table></div>`:""}
+      <div class="aviso"><b>Cómo leerlo:</b> el "fuera real" (desenfoque de verdad) es solo ⚫ + ⚪.
+      🟠 y 🟡 son arreglos de código en <code>plan_comercial.html</code>; 🔵 y 🟣 son una decisión de negocio
+      (¿cuenta el apoyo a carteras ajenas o se traspasa el cliente?), no un error del vendedor.</div>`;
+    document.getElementById("cargando").style.display="none";
+    document.getElementById("app").style.display="block";
+  }catch(e){
+    document.getElementById("cargando").innerHTML=`<b style="color:var(--rojo)">Error:</b> ${e.message}.
+      Si lo abres en local (file://) y falla, súbelo al mismo proyecto de Vercel que el CRM.`;
+  }
+}
+document.getElementById("selEq").addEventListener("change",correr);
+document.getElementById("selVent").addEventListener("change",correr);
+correr();
+</script>
+</body>
+</html>
