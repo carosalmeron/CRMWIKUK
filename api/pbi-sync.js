@@ -2913,18 +2913,50 @@ EVALUATE
     '00 Plu Global'[SUBFAMILIA],
     '00 Plu Global'[DESCRIPCION]
   )`, true);
+      const descArt = new Map();
+      // Tripa artificial repartida por varias familias (la 2012 mezcla equino
+      // natural con FIBROUS): se reclasifica POR DESCRIPCION, mande quien mande.
+      const RE_ARTIFICIAL = /FIBROUS|NOJAX|FIBRAN|COLAGENO|COL.GENO|COLEX|EDICAS|FIBROSA|POLIAM|ARTIFICIAL|MULTIBAR/i;
       for (const r of filasPlu) {
         const cod = String(pick(r, "CODIGO") || "").trim();
         if (!cod) continue;
-        const f = String(pick(r, "FAMILIA") || "").trim() || "SIN_FAMILIA";
-        if (!fam.has(cod)) fam.set(cod, f);
         const d = String(pick(r, "DESCRIPCION") || "").trim();
+        let f = String(pick(r, "FAMILIA") || "").trim() || "SIN_FAMILIA";
+        if (d && RE_ARTIFICIAL.test(d)) f = "ARTIF";
+        if (!fam.has(cod)) fam.set(cod, f);
+        if (d && !descArt.has(cod)) descArt.set(cod, d);
         if (d) {
           const lista = famDesc.get(f) || [];
           if (lista.length < 5 && !lista.includes(d)) { lista.push(d); famDesc.set(f, lista); }
         }
       }
       out.articulosEnMaestro = fam.size;
+
+      // 1b) Catalogo comercial (coleccion productos del CRM): segunda
+      //     oportunidad para los articulos que no estan en el maestro Plu.
+      //     Se clasifican como CAT:<categoriaKey> y el mapeo los recoge.
+      const catalogo = new Map();
+      try {
+        for (const p of await fbLeerColeccion("productos")) {
+          const c = String(p.codigo || "").toUpperCase().trim();
+          const k = String(p.categoriaKey || "").trim();
+          if (!c || !k) continue;
+          if (!catalogo.has(c)) catalogo.set(c, k);
+          const base = c.replace(/\.[A-Z0-9]+$/i, ""); // sin sufijo de envase
+          if (base !== c && !catalogo.has(base)) catalogo.set(base, k);
+        }
+        out.productosEnCatalogo = catalogo.size;
+      } catch (e) { out.avisoCatalogo = String(e.message || e).slice(0, 160); }
+      const famDeArt = (art) => {
+        if (fam.has(art)) return fam.get(art);
+        if (catalogo.has(art)) return "CAT:" + catalogo.get(art);
+        const base = art.replace(/\.[A-Z0-9]+$/i, "");
+        if (base !== art) {
+          if (fam.has(base)) return fam.get(base);
+          if (catalogo.has(base)) return "CAT:" + catalogo.get(base);
+        }
+        return "SIN_FAMILIA";
+      };
 
       // 2) Empresas presentes en ventas: se consulta por empresa para no
       //    acercarse al limite de 100.000 filas por consulta de la API.
@@ -2937,6 +2969,7 @@ EVALUATE
       //    sync principal: sin blancos y descartando costes >3x la base
       //    (errores de maestro que reventarian el margen).
       const acum = new Map(); // cliente|familia → {act, ant, cAct, cAnt}
+      const sinFam = new Map(); // articulo sin clasificar → {act, clientes}
       let filasLeidas = 0;
       for (const emp of (emps.length ? emps : [null])) {
         const base = emp === null ? T : `FILTER(${T}, ${M.vEmpresa} = "${emp}")`;
@@ -2971,7 +3004,12 @@ EVALUATE
           const cli = String(pick(r, "CLIENTE") || "").trim();
           const art = String(pick(r, "CODIGO") || "").trim();
           if (!cli) continue;
-          const f = fam.get(art) || "SIN_FAMILIA";
+          const f = famDeArt(art);
+          if (f === "SIN_FAMILIA" && art) {
+            const s = sinFam.get(art) || { act: 0, clientes: new Set() };
+            s.act += Number(pick(r, "Act")) || 0; s.clientes.add(cli);
+            sinFam.set(art, s);
+          }
           const k = cli + "|" + f;
           const a = acum.get(k) || { act: 0, ant: 0, cAct: 0, cAnt: 0 };
           a.act += Number(pick(r, "Act")) || 0;
@@ -3044,6 +3082,57 @@ EVALUATE
         actualizado: new Date().toISOString(),
       }]);
       out.familias = resumen;
+
+      // 6) Lineas comerciales: mapeo por defecto (decidido 10-ago-2026).
+      //    Editable en pbi_config/familias_lineas sin tocar codigo; este
+      //    bloque solo lo crea si no existe (o con &remapear=1 lo repone).
+      const MAPEO_DEFECTO = {
+        "TRIPA FRESCA":       ["2001","2002","2003","2004","2012","1037","1077 - SECA UNITED CARO","1097 - SECA UNITED CARO VACUNO","1108 - MAT.PRIMA SHORTS SECA","1109 - MAT.PRIMA SECA","1124 - CERDO RASPADO SHORT","1009","CAT:tripas_naturales","CAT:promo_tripas"],
+        "ENVOLT. DESHIDRATADAS": ["2006","2005","2007","1089 - ENVOL. COMESTIBLE VEGETAL"],
+        "INGREDIENTES":       ["4016","4017","4018","4019","3013","3014","3015","1008","9033","1007","CAT:wikuk_esp","CAT:wikuk_prep","CAT:ceylan_gen","CAT:ceylan_prep","CAT:taberner_esp","CAT:taberner_prep","CAT:campana_gen","CAT:aditivos","CAT:spot_wikuk","CAT:spot_ceylan","CAT:spot_taberner","CAT:spot_campana","CAT:spot_frumen","CAT:promo_especias"],
+        "ENVASES":            ["9027","5019","5020","5021","5022","5023","5024","5025","5026","6024","1020","1043","8011","1007 - BOLSAS DE VACIO","CAT:envases","CAT:promo_envases","CAT:spot_merkapack","CAT:spot_cui","CAT:spot_el_carmen","CAT:spot_sierra"],
+        "TRIPAS ARTIFICIALES": ["ARTIF","1033","1024","1021","1035","1034","1036","ARTIFPP","GAINEA"],
+        "AUXILIARES":         ["7024","7025","6025","6022","1002","1003","1006","HABIT","PROD","1088 - MUESTRAS TRIPAS","CAT:accesorios"],
+        "NO PRODUCTO":        ["1017","1013","1012","9028","9999 - VARIOS"],
+      };
+      let mapeo = null;
+      try {
+        if (req.query.remapear !== "1") {
+          const g = await fbLeerDocumento("pbi_config", "familias_lineas");
+          if (g && g.datos) mapeo = JSON.parse(g.datos);
+        }
+      } catch (e) { /* no existe: se crea */ }
+      if (!mapeo) {
+        mapeo = MAPEO_DEFECTO;
+        await fbCommit("pbi_config", [{
+          _id: "familias_lineas",
+          datos: JSON.stringify(mapeo),
+          actualizado: new Date().toISOString(),
+        }]);
+        out.mapeoCreado = true;
+      }
+      const lineaDe = (f) => {
+        for (const [linea, lista] of Object.entries(mapeo)) if (lista.includes(f)) return linea;
+        return "SIN CLASIFICAR";
+      };
+      const porLinea = new Map();
+      for (const r of resumen) {
+        const L = lineaDe(r.familia);
+        const g = porLinea.get(L) || { act: 0, ant: 0 };
+        g.act += r.act; g.ant += r.ant;
+        porLinea.set(L, g);
+      }
+      out.lineas = [...porLinea.entries()]
+        .map(([linea, g]) => ({ linea, act: num(g.act), ant: num(g.ant),
+          evolPct: g.ant ? num((100 * (g.act - g.ant)) / g.ant) : null }))
+        .sort((x, y) => y.act - x.act);
+
+      // 7) Los articulos que siguen sin clasificar, por venta: la lista
+      //    corta para sistemas (dar de alta la familia en el maestro).
+      out.sinClasificarTop = [...sinFam.entries()]
+        .map(([art, s]) => ({ articulo: art, act: num(s.act), clientes: s.clientes.size }))
+        .sort((x, y) => y.act - x.act).slice(0, 40);
+
       out.segundos = Math.round((Date.now() - t1) / 1000);
     } catch (e) {
       out.ok = false;
