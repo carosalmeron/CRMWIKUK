@@ -220,6 +220,29 @@ async function cargar(){
       return {codigo, nombre, agente:ag, agenteOrigen:origen,
         vAct:+vAct||0, vAnt:+vAnt||0, poblacion:poblacion||""};});
 
+    // ═══ UNIFICACIÓN DE CLIENTES (criterio estándar del sistema) ═══
+    // Un mismo cliente puede tener códigos en varias empresas (U/C/W…).
+    // Cliente comercial = NOMBRE normalizado + POBLACIÓN. Se suman sus ventas,
+    // el código principal es el de más venta este año y el grupo hereda su agente.
+    // 1 cliente = 1 fila = 1 contacto al mes, en TODOS los informes.
+    const normaliza=s=>String(s||"").toUpperCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+      .replace(/[.,;:()\-\/]/g," ")
+      .replace(/\b(S\.?L\.?U?|S\.?A\.?|SCA|SCAND|SCL|SLL|SOC\s+COOP\w*|COOP\w*|C\.?B\.?)\b/g," ")
+      .replace(/\s+/g," ").trim();
+    const _grupos={};
+    for(const c of CARTERA){
+      const clave=normaliza(c.nombre)+"|"+normaliza(c.poblacion);
+      (_grupos[clave]=_grupos[clave]||[]).push(c);
+    }
+    CARTERA=Object.values(_grupos).map(g=>{
+      g.sort((a,b)=>b.vAct-a.vAct||b.vAnt-a.vAnt);
+      const p=g[0];
+      return {...p,
+        vAct:g.reduce((s,x)=>s+x.vAct,0), vAnt:g.reduce((s,x)=>s+x.vAnt,0),
+        codigos:g.map(x=>x.codigo), nCodigos:g.length};
+    });
+
     // 3. Estacionalidad por agente (mes a mes, año actual vs anterior)
     const est=await fbGet("pbi_estacionalidad?pageSize=100");
     for(const d of (est.documents||[])){
@@ -383,7 +406,15 @@ function construir(){
   document.getElementById("resumenCarga").innerHTML=
     `Mes 1: ${EQUIPO.KA.map(k=>`<b>${k}</b> ${visM1(k)} visitas`).join(" · ")} ·
      <b>${EQUIPO.INSIDE[0]}</b> ${llamM1} llamadas · ${PLAN.filter(c=>c.m1==="—").length} en descanso<br>
-     <span style="font-size:12px">Reparto de la cartera de ${EQUIPO.INSIDE[0]} (${deInside.length} clientes): ${repHtml}</span>`;
+     <span style="font-size:12px">Reparto de la cartera de ${EQUIPO.INSIDE[0]} (${deInside.length} clientes): ${repHtml}</span><br>
+     <span style="display:inline-block;margin-top:8px;background:#E8F0E4;border-radius:8px;padding:7px 12px;font-size:12px">
+       <b style="color:var(--verde)">PATRÓN SEMANAL</b> · ${EQUIPO.KA.map(k=>{
+         const g=PLAN.filter(c=>c.ka===k);
+         const a=Math.round(g.filter(c=>c.segmento==="A").length/2/4);
+         const b=Math.round(g.filter(c=>c.segmento==="B").length/3/4);
+         const cc=Math.round(g.filter(c=>c.segmento==="C").length/3/4);
+         return `<b>${k}</b>: ${a} A + ${b} B + ${cc} C + 1-2 nuevos ≈ ${a+b+cc+1}/sem`;
+       }).join(" · ")} · <b>${EQUIPO.INSIDE[0]}</b>: ~${Math.round(PLAN.filter(c=>c.m1==="Llamada").length/4)} llamadas + 5 cualificación/sem</span>`;
 
   // filtros
   const selKA=document.getElementById("fKA");
@@ -441,7 +472,7 @@ async function cruzarVisitas(){
   const ini=new Date(new Date().getFullYear(),m1-1,1), fin=new Date(new Date().getFullYear(),m2,1);
   // el campo agente de la visita puede venir como grupo (VERONICA) o como id de usuario (wk2…)
   const ALIAS={"WK2":"VERONICA","IK1":"CARLOSG","WK1":"DAVIDMAG","WK3":"SILVIA"};
-  const agenteDeCliente={}; for(const c of CARTERA) agenteDeCliente[String(c.codigo).toUpperCase()]=c.agente;
+  const agenteDeCliente={}; for(const c of CARTERA) for(const k of (c.codigos||[c.codigo])) agenteDeCliente[String(k).toUpperCase()]=c.agente;
   const equipo=[...EQUIPO.KA,...EQUIPO.INSIDE];
   const visPorAgente={}, llamPorAgente={};
   equipo.forEach(a=>{visPorAgente[a]=0; llamPorAgente[a]=0;});
@@ -496,10 +527,11 @@ async function cruzarVisitas(){
   // 3. El cruce sobre la cartera viva
   const filas=[];
   for(const c of PLAN){
-    const mm=MESCLI[String(c.codigo).toUpperCase()];
-    if(!mm) continue;
-    const vAct2=mm.a[m1-1]+mm.a[m2-1], vAnt2=mm.m[m1-1]+mm.m[m2-1];
-    const nVis=(visPorCli[String(c.codigo).toUpperCase()]||[]).length;
+    const cods=(c.codigos||[c.codigo]).map(x=>String(x).toUpperCase());
+    let vAct2=0,vAnt2=0,hayMes=false;
+    for(const k of cods){const mm=MESCLI[k];if(mm){hayMes=true;vAct2+=mm.a[m1-1]+mm.a[m2-1];vAnt2+=mm.m[m1-1]+mm.m[m2-1];}}
+    if(!hayMes) continue;
+    const nVis=cods.reduce((s,k)=>s+((visPorCli[k]||[]).length),0);
     c._vis=nVis;
     filas.push({seg:c.segmento, vis:nVis>0, nVis, vAct2, vAnt2});
   }
@@ -550,7 +582,7 @@ async function cruzarVisitas(){
 
 function descargarExcel(){
   const wb=XLSX.utils.book_new();
-  const filas=PLAN.map(c=>({CODIGO:c.codigo,CLIENTE:c.nombre,"AGENTE ACTUAL":c.agente,"AGENTE ORIGEN":c.agenteOrigen||c.agente,"VISITA A CARGO DE":c.ka,
+  const filas=PLAN.map(c=>({CODIGO:c.codigo,CLIENTE:c.nombre,"AGENTE ACTUAL":c.agente,"AGENTE ORIGEN":c.agenteOrigen||c.agente,"CODIGOS AGRUPADOS":(c.codigos||[c.codigo]).join(" + "),"VISITA A CARGO DE":c.ka,
     "VISITAS 2 MESES":c._vis??"",
     SEGMENTO:c.segmento,"VENTAS AÑO (€)":Math.round(c.vAct),"MISMO PERIODO ANT (€)":Math.round(c.vAnt),
     POBLACION:c.poblacion,"MES 1":c.m1,"MES 2":c.m2,"MES 3":c.m3}));
