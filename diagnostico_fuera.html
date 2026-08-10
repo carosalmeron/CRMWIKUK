@@ -103,8 +103,35 @@ async function correr(){
     for(const c of mios) if(c.vAct===0&&c.vAnt===0) for(const k of c.codigos) if(!M[k]) M[k]={tipo:"NUEVO",agente:c.agente,nombre:c.nombre};
     for(const c of CART) if(!equipo.includes(c.agente)) for(const k of c.codigos) if(!M[k]) M[k]={tipo:"OTRO",agente:c.agente,nombre:c.nombre,vivo:(c.vAct>0||c.vAnt>0)};
     // nombre normalizado → código (para rescatar registros cuyo código no casa pero el nombre sí)
-    const porNombre={};
-    for(const c of CART){const k=norm(c.nombre);if(k&&!porNombre[k])porNombre[k]=c;}
+    const porNombre={}, porNombrePob={};
+    for(const c of CART){
+      const k=norm(c.nombre);if(k&&!porNombre[k])porNombre[k]=c;
+      const kp=k+"|"+norm(c.poblacion);if(k&&!porNombrePob[kp])porNombrePob[kp]=c;
+    }
+
+    // ─── 1b. Fichas del CRM (colección clientes): para cruzar los CLI_ por nombre
+    const FICHAS={}; let fichasLeidas=0, fichaMuestra=null;
+    try{
+      let np=null,pg=0;
+      do{
+        const r=await fetch(`${FB_BASE}/clientes?pageSize=300${np?"&pageToken="+np:""}`);
+        if(!r.ok) break;
+        const j=await r.json();
+        for(const d of (j.documents||[])){
+          const f={};for(const[k,v]of Object.entries(d.fields||{}))f[k]=val(v);
+          fichasLeidas++;
+          if(!fichaMuestra)fichaMuestra=f;
+          const docId=d.name.split("/").pop().toUpperCase();
+          const nombre=f.nombre||f.nombreCliente||f.razonSocial||f.nombreComercial||f.cliente||"";
+          const pob=f.poblacion||f.localidad||f.ciudad||f.municipio||"";
+          const codERP=String(f.codigoERP||f.codigo||f.codigoCliente||"").toUpperCase().trim();
+          const ficha={nombre,pob,codERP};
+          FICHAS[docId]=ficha;
+          for(const kk of [f.id,f.clienteId]) if(kk)FICHAS[String(kk).toUpperCase()]=ficha;
+        }
+        np=j.nextPageToken;pg++;
+      }while(np&&pg<40);
+    }catch(e){/* si la colección se llama distinto, se ve en el aviso de abajo */}
 
     // ─── 2. Visitas de la ventana
     const anio=new Date().getFullYear();
@@ -113,7 +140,7 @@ async function correr(){
     let nextPage=null,pags=0;
     const cont={A:0,B:0,C:0,NUEVO:0}; // dentro del equipo
     const fuera={OTRO_VIVO:0,OTRO_DORMIDO:0,ID_TAPA:0,NOMBRE_RESCATA:0,SIN_CODIGO:0,DESCONOCIDO:0};
-    const desconocidos={}, otros={}, muestras=[];
+    const desconocidos={}, otros={}, muestras=[], cliRes={};
     let total=0, tapadas=[];
     do{
       const r=await fetch(`${FB_BASE}/visitas?pageSize=300${nextPage?"&pageToken="+nextPage:""}`);
@@ -132,7 +159,13 @@ async function correr(){
         const cId=String(f.clienteId||"").toUpperCase().trim();
         const cERP=String(f.codigoERP||"").toUpperCase().trim();
         const cCod=String(f.codigo||"").toUpperCase().trim();
-        const cod=cId||cERP||cCod; // prioridad idéntica a plan_comercial.html
+        let cod=cId||cERP||cCod; // prioridad idéntica a plan_comercial.html
+        // mismo arreglo que la web nueva: el cero perdido U43XXXX ↔ U430XXXX
+        if(cod&&!M[cod]){
+          const mc=cod.match(/^([A-Z])43(\d{4})$/);
+          if(mc&&M[mc[1]+"430"+mc[2]]) cod=mc[1]+"430"+mc[2];
+          else{const ml=cod.match(/^([A-Z])430(\d{4})$/); if(ml&&M[ml[1]+"43"+ml[2]]) cod=ml[1]+"43"+ml[2];}
+        }
         // atribución de la web: si no hay agente del equipo, usa el agente del cliente
         const dueno=M[cod]?.tipo==="EQUIPO"||M[cod]?.tipo==="NUEVO"?M[cod].agente:null;
         if(!quien&&!dueno) continue; // no es actividad de este equipo se mire como se mire
@@ -140,6 +173,27 @@ async function correr(){
         const info=M[cod];
         if(info&&(info.tipo==="EQUIPO")){cont[info.seg]++;continue;}
         if(info&&info.tipo==="NUEVO"){cont.NUEVO++;continue;}
+        if(cod.startsWith("CLI_")){
+          const fi=FICHAS[cod];
+          let veredicto=null;
+          if(fi){
+            // 1º por código ERP apuntado en la propia ficha; 2º por nombre+población; 3º solo nombre
+            if(fi.codERP&&M[fi.codERP])veredicto=M[fi.codERP];
+            if(!veredicto&&fi.nombre){
+              const kn=norm(fi.nombre);
+              veredicto=porNombrePob[kn+"|"+norm(fi.pob)]||porNombre[kn]||null;
+              if(veredicto&&!veredicto.seg)veredicto={seg:veredicto.tipo||"?",agente:veredicto.agente,nombre:veredicto.nombre};
+            }
+          }
+          if(veredicto&&veredicto.seg&&["A","B","C"].includes(veredicto.seg)){
+            fuera.CLI_DUP=(fuera.CLI_DUP||0)+1;
+            cliRes[cod]=cliRes[cod]||{n:0,ficha:fi,match:veredicto};cliRes[cod].n++;
+          }else{
+            cont.NUEVO++;
+            cliRes[cod]=cliRes[cod]||{n:0,ficha:fi,match:null};cliRes[cod].n++;
+          }
+          continue;
+        }
         // ══ aquí empieza lo que la web llama FUERA ══
         // ¿el clienteId tapa a un codigoERP que SÍ casa?
         const alt=(cId&&M[cERP])?cERP:(cId&&M[cCod])?cCod:(cERP&&M[cCod]&&!M[cERP])?cCod:null;
@@ -162,7 +216,13 @@ async function correr(){
           if(muestras.length<12)muestras.push({cod,cliente:(f.cliente||f.nombreCliente||f.nombre),quien,res:"→ casa por NOMBRE con "+porNombre[nv].codigo});
           continue;}
         fuera.DESCONOCIDO++;
-        const k=cod;desconocidos[k]=desconocidos[k]||{n:0,cliente:f.cliente||f.nombreCliente||f.nombre||"?",quien:quien||"?",campos:`clienteId:${cId||"—"} · codigoERP:${cERP||"—"} · codigo:${cCod||"—"}`};
+        const k=cod;
+        if(!desconocidos[k]){
+          // volcado crudo COMPLETO de la primera visita con este código: aquí se ve todo lo que guarda el CRM
+          const crudo=Object.entries(f).filter(([kk,vv])=>vv!=null&&vv!=="")
+            .map(([kk,vv])=>`<b>${kk}</b>: ${String(vv).slice(0,60)}`).join(" · ");
+          desconocidos[k]={n:0,quien:quien||"?",crudo};
+        }
         desconocidos[k].n++;
       }
       nextPage=j.nextPageToken;pags++;
@@ -175,7 +235,7 @@ async function correr(){
     const filasOtros=Object.entries(otros).sort((a,b)=>b[1]-a[1])
       .map(([a,n])=>`<tr><td>${a}</td><td class="num">${n}</td></tr>`).join("");
     const filasDesc=Object.entries(desconocidos).sort((a,b)=>b[1].n-a[1].n).slice(0,25)
-      .map(([c,d])=>`<tr><td><code>${c}</code></td><td>${d.cliente}</td><td>${d.quien}</td><td class="num">${d.n}</td><td style="font-size:11px;color:var(--gris)">${d.campos}</td></tr>`).join("");
+      .map(([c,d])=>`<tr><td><code>${c}</code><br><span style="font-size:11px;color:var(--gris)">${d.quien} · ${d.n}×</span></td><td style="font-size:11px;line-height:1.7">${d.crudo}</td></tr>`).join("");
     const filasTapa=tapadas.map(t=>`<tr><td><code>${t.usado}</code></td><td><code>${t.bueno}</code></td><td>${t.seg}</td><td>${t.nombre}</td><td>${t.quien}</td></tr>`).join("");
     const filasMue=muestras.map(m=>`<tr><td><code>${m.cod}</code></td><td>${m.cliente||"?"}</td><td>${m.quien||"?"}</td><td style="font-size:11px">${m.res||""}</td></tr>`).join("");
     document.getElementById("app").innerHTML=`
@@ -190,14 +250,27 @@ async function correr(){
         <tr><td>🟠 clienteId TAPA a un código que sí casa</td><td class="num">${fuera.ID_TAPA}</td><td class="num">${pc(fuera.ID_TAPA)}</td><td style="font-size:12px"><b>Bug de la web:</b> la visita lleva el código bueno en otro campo. Arreglo de una línea.</td></tr>
         <tr><td>🟡 El código no casa pero el NOMBRE sí</td><td class="num">${fuera.NOMBRE_RESCATA}</td><td class="num">${pc(fuera.NOMBRE_RESCATA)}</td><td style="font-size:12px">Rescatable casando por nombre (mismo criterio de unificación).</td></tr>
         <tr><td>⚪ Sin código de cliente</td><td class="num">${fuera.SIN_CODIGO}</td><td class="num">${pc(fuera.SIN_CODIGO)}</td><td style="font-size:12px">Registro sin cliente: disciplina de registro.</td></tr>
+        <tr><td>🟢 Ficha CLI_ de un cliente que YA existe en el ERP</td><td class="num">${fuera.CLI_DUP||0}</td><td class="num">${pc(fuera.CLI_DUP||0)}</td><td style="font-size:12px">Ficha duplicada: recupera su segmento real y hay que fusionarla (lista abajo).</td></tr>
         <tr><td>⚫ Código realmente desconocido</td><td class="num">${fuera.DESCONOCIDO}</td><td class="num">${pc(fuera.DESCONOCIDO)}</td><td style="font-size:12px">Prospectos solo-CRM aún sin sincronizar a Power BI, o códigos mal tecleados (lista abajo).</td></tr>
       </table></div>
       ${fuera.ID_TAPA?`<h2>🟠 Muestras del "clienteId tapa al bueno"</h2>
       <div class="caja"><table><tr><th>Código usado</th><th>Código bueno</th><th>Seg.</th><th>Cliente</th><th>Vendedor</th></tr>${filasTapa}</table></div>`:""}
       ${fuera.OTRO_VIVO+fuera.OTRO_DORMIDO?`<h2>🔵 ¿De qué agentes son los clientes "de otros"?</h2>
       <div class="caja"><table><tr><th>Agente dueño del cliente</th><th class="num">Contactos</th></tr>${filasOtros}</table></div>`:""}
-      ${fuera.DESCONOCIDO?`<h2>⚫ Los códigos desconocidos más repetidos</h2>
-      <div class="caja"><table><tr><th>Código</th><th>Cliente (según la visita)</th><th>Vendedor</th><th class="num">Veces</th><th>Campos crudos</th></tr>${filasDesc}</table></div>`:""}
+      ${Object.keys(cliRes).length?`<h2>🟢 Fichas CLI_ del CRM, cruzadas por nombre con el ERP</h2>
+      <div class="caja" style="font-size:12px;color:var(--gris);margin-bottom:6px">
+        ${fichasLeidas} fichas leídas de la colección <code>clientes</code>${fichasLeidas?"":" — ⚠ no se ha podido leer: dime cómo se llama la colección de fichas del CRM"}
+        ${fichaMuestra?`<br>Campos de una ficha de muestra: <span style="font-size:11px">${Object.keys(fichaMuestra).join(" · ")}</span>`:""}
+      </div>
+      <div class="caja"><table><tr><th>Ficha CLI_</th><th>Nombre en la ficha</th><th class="num">Contactos</th><th>Veredicto</th></tr>
+      ${Object.entries(cliRes).sort((a,b)=>b[1].n-a[1].n).slice(0,30).map(([c,d])=>`<tr>
+        <td><code style="font-size:10.5px">${c}</code></td>
+        <td>${d.ficha?(d.ficha.nombre||"(ficha sin nombre)")+(d.ficha.pob?" · "+d.ficha.pob:""):"(sin ficha encontrada)"}</td>
+        <td class="num">${d.n}</td>
+        <td style="font-size:12px">${d.match?`<b style="color:var(--ambar)">YA EXISTE en ERP</b>: ${d.match.nombre} (${d.match.seg}·${d.match.agente}) → fusionar ficha`:`<b style="color:var(--verde)">prospecto genuino</b> → NUEVO`}</td>
+      </tr>`).join("")}</table></div>`:""}
+      ${fuera.DESCONOCIDO?`<h2>⚫ Desconocidos de verdad · volcado completo de una visita de muestra</h2>
+      <div class="caja"><table><tr><th style="width:130px">Código</th><th>TODOS los campos de la visita en el CRM</th></tr>${filasDesc}</table></div>`:""}
       ${muestras.length?`<h2>Muestras sueltas (sin código / rescatados por nombre)</h2>
       <div class="caja"><table><tr><th>Código</th><th>Cliente</th><th>Vendedor</th><th>Nota</th></tr>${filasMue}</table></div>`:""}
       <div class="aviso"><b>Cómo leerlo:</b> el "fuera real" (desenfoque de verdad) es solo ⚫ + ⚪.
