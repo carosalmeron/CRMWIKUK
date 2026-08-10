@@ -505,6 +505,7 @@ async function carteraProducto(){
 
   // 4. Agregados por vendedor (visita a cargo de) y por línea
   const porKA={}, porLinea={};
+  const detLinea={}; // por línea: clientes que la compran, A/B que la compran, top
   const soloGancho=[];   // A/B que solo compran fresca/artificial: la lista de la venta guiada
   let abTotal=0, abConValor=0;
   for(const c of PLAN){
@@ -513,6 +514,11 @@ async function carteraProducto(){
     for(const[L,g]of Object.entries(lin)){
       const pl=porLinea[L]=porLinea[L]||{act:0,ant:0};
       pl.act+=g.act; pl.ant+=g.ant;
+      if(g.act>0){
+        const dl=detLinea[L]=detLinea[L]||{cl:0,ab:0,top:[]};
+        dl.cl++; if(c.segmento==="A"||c.segmento==="B")dl.ab++;
+        dl.top.push([c.nombre,g.act,c.segmento,c.ka||c.agente]);
+      }
       if(VALOR.includes(L)) valor+=g.act; else gancho+=g.act;
     }
     const ka=c.ka||c.agente;
@@ -559,11 +565,32 @@ async function carteraProducto(){
         <td class="num" style="color:var(--burdeos)"><b>${p.abSolo}</b> · ${eu(p.abSoloEur)} €</td></tr>`;
     }).join("");
 
+  // ── Mezcla por vendedor Y LÍNEA (para la radiografía de producto de los decks) ──
+  const porKALinea={};
+  for(const c of PLAN){
+    const ka=c.ka||c.agente;
+    const g=porKALinea[ka]=porKALinea[ka]||{};
+    for(const[L,x]of Object.entries(c._lin||{})){ g[L]=(g[L]||0)+x.act; }
+  }
+  const filaKALinea=Object.entries(porKALinea)
+    .sort((a,b)=>Object.values(b[1]).reduce((s,x)=>s+x,0)-Object.values(a[1]).reduce((s,x)=>s+x,0))
+    .map(([ka,g])=>{
+      const tot=Object.values(g).reduce((s,x)=>s+x,0)||1;
+      const celda=L=>{const p=100*(g[L]||0)/tot;return `<td class="num">${p>=0.05?p.toFixed(1)+"%":"—"}</td>`;};
+      return `<tr><td><b>${ka}</b></td>${celda("TRIPA FRESCA")}${celda("ENVOLT. DESHIDRATADAS")}${celda("INGREDIENTES")}${celda("ENVASES")}${celda("TRIPAS ARTIFICIALES")}<td class="num" style="color:var(--gris)">${eu(tot)} €</td></tr>`;
+    }).join("");
+
+  const sugerida=(c)=>{
+    // heurística simple y explicable: al grande, deshidratada (calibre/servicio);
+    // al mediano, ingredientes (pedido recurrente); a todos, envases como 2ª propuesta
+    return (c._lin&&c._lin["TRIPA FRESCA"]&&c._lin["TRIPA FRESCA"].act>15000)
+      ?"1º deshidratada · 2º envases":"1º ingredientes · 2º envases";
+  };
   const filaSolo=soloGancho.map(({c,gancho})=>`<tr>
       <td>${c.codigo}</td><td>${c.nombre}</td><td>${c.ka||c.agente}</td>
       <td style="text-align:center"><b>${c.segmento}</b></td>
       <td class="num">${eu(gancho)} €</td>
-      <td style="font-size:11.5px;color:var(--verde)">deshidratada · ingredientes · envases</td>
+      <td style="font-size:11.5px;color:var(--verde)">${sugerida(c)}</td>
     </tr>`).join("");
 
   document.getElementById("prodSec").innerHTML=`
@@ -585,11 +612,33 @@ async function carteraProducto(){
         <div style="font-size:12px;color:var(--gris)">clientes A/B que HOY solo compran gancho: cada visita de la rueda les lleva UNA línea de valor propuesta</div>
       </div>
     </div>
+    <div style="margin:14px 0 6px;font-size:13px"><b>La ficha de cada línea</b>
+      <span style="color:var(--gris);font-size:11.5px"> — clientes que la compran, penetración en A/B y sus grandes (para las diapositivas por línea)</span></div>
+    <div class="tabla-scroll" style="max-height:260px"><table>
+      <thead><tr><th>Línea</th><th class="num">Venta (€)</th><th class="num">Evol.</th>
+      <th class="num">Clientes que la compran</th><th class="num">Penetración A/B</th><th>Top 5 de la línea</th></tr></thead>
+      <tbody>${ORDEN.filter(L=>porLinea[L]).map(L=>{
+        const g=porLinea[L], d=detLinea[L]||{cl:0,ab:0,top:[]};
+        d.top.sort((a,b)=>b[1]-a[1]);
+        const e=evol(g.act,g.ant);
+        return `<tr><td><b>${L}</b></td>
+          <td class="num">${eu(g.act)}</td>
+          <td class="num" style="color:${e==null?"var(--gris)":(e>=0?"var(--verde)":"var(--rojo)")}">${e==null?"—":(e>=0?"+":"")+e.toFixed(1)+"%"}</td>
+          <td class="num">${d.cl}</td>
+          <td class="num">${abTotal?Math.round(100*d.ab/abTotal):0}% (${d.ab} de ${abTotal})</td>
+          <td style="font-size:11px">${d.top.slice(0,5).map(t=>`${t[0]} (${eu(t[1])} € · ${t[2]})`).join(" · ")}</td></tr>`;
+      }).join("")}</tbody></table></div>
     <div style="margin:14px 0 6px;font-size:13px"><b>Por vendedor: mezcla de hoy → objetivo</b></div>
     <div class="tabla-scroll" style="max-height:220px"><table>
       <thead><tr><th>Visita a cargo de</th><th class="num">% valor hoy</th><th class="num">Objetivo</th>
       <th class="num">A/B con valor</th><th class="num">A/B solo gancho (€ en juego)</th></tr></thead>
       <tbody>${filaKA}</tbody></table></div>
+    <div style="margin:14px 0 6px;font-size:13px"><b>Por vendedor: % de venta de CADA línea</b>
+      <span style="color:var(--gris);font-size:11.5px"> — la radiografía de producto que usan los decks</span></div>
+    <div class="tabla-scroll" style="max-height:200px"><table>
+      <thead><tr><th>Visita a cargo de</th><th class="num">Fresca</th><th class="num">Deshidrat.</th>
+      <th class="num">Ingredientes</th><th class="num">Envases</th><th class="num">Artificiales</th><th class="num">Venta producto</th></tr></thead>
+      <tbody>${filaKALinea}</tbody></table></div>
     <div style="margin:14px 0 6px;font-size:13px"><b>Los ${soloGancho.length} clientes A/B monoproducto</b>
       <span style="color:var(--gris);font-size:11.5px"> — ordenados por lo que ya nos compran de gancho: cuanto más gastan, más fácil el sí a la segunda línea</span></div>
     <div class="tabla-scroll" style="max-height:340px"><table>
