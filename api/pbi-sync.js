@@ -2879,6 +2879,179 @@ EVALUATE
     return res.status(200).json(out);
   }
 
+  // ?familias=1 → venta por CLIENTE × FAMILIA, año actual frente a año
+  // anterior A MISMA FECHA (mismo criterio vAct/vAnt del resto del sistema),
+  // cruzando la tabla de ventas con el maestro '00 Plu Global' (la tabla de
+  // ventas no tiene columna FAMILIA: solo el codigo de articulo).
+  // Escribe en Firestore:
+  //   pbi_familias_cliente/parte1..N  → JSON [cliente, familia, act, ant, costeAct, costeAnt]
+  //   pbi_familias_resumen/estado     → resumen por familia, para decidir el
+  //                                     mapeo familia → linea comercial
+  // El mapeo familia → linea (TRIPA FRESCA / DESHIDRATADA / INGREDIENTES /
+  // ENVASES) se guarda A MANO en pbi_config/familias_lineas y este bloque
+  // no lo toca: los codigos de familia son estables, se decide una vez.
+  // Se lanza a mano tras la sync nocturna, o se anade al cron como paso 2.
+  // Si Vercel corta por tiempo (60 s), lanzar por empresas sueltas con
+  // &empresa=4 (una llamada por empresa NO sobreescribe a las demas: en ese
+  // modo acumula sobre lo ya guardado solo si se pasa &acumular=1).
+  if (req.query.familias === "1") {
+    const t1 = Date.now();
+    const out = { ok: true };
+    try {
+      const { token, modo } = await getToken(req);
+      out.modoAuth = modo;
+      const T = M.ventas;
+
+      // 1) Maestro de articulos → familia por codigo, con descripciones de
+      //    ejemplo para poder reconocer cada familia al mapearla.
+      const fam = new Map(), famDesc = new Map();
+      const filasPlu = await pbiQuery(token, `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    '00 Plu Global'[CODIGO],
+    '00 Plu Global'[FAMILIA],
+    '00 Plu Global'[SUBFAMILIA],
+    '00 Plu Global'[DESCRIPCION]
+  )`, true);
+      for (const r of filasPlu) {
+        const cod = String(pick(r, "CODIGO") || "").trim();
+        if (!cod) continue;
+        const f = String(pick(r, "FAMILIA") || "").trim() || "SIN_FAMILIA";
+        if (!fam.has(cod)) fam.set(cod, f);
+        const d = String(pick(r, "DESCRIPCION") || "").trim();
+        if (d) {
+          const lista = famDesc.get(f) || [];
+          if (lista.length < 5 && !lista.includes(d)) { lista.push(d); famDesc.set(f, lista); }
+        }
+      }
+      out.articulosEnMaestro = fam.size;
+
+      // 2) Empresas presentes en ventas: se consulta por empresa para no
+      //    acercarse al limite de 100.000 filas por consulta de la API.
+      let emps = (await pbiQuery(token, `EVALUATE VALUES(${M.vEmpresa})`, true))
+        .map((r) => String(pick(r, "EMPRESA") || "").trim()).filter(Boolean);
+      if (req.query.empresa) emps = [String(req.query.empresa).trim()];
+      out.empresas = emps;
+
+      // 3) Venta por cliente × articulo. El coste se depura igual que en la
+      //    sync principal: sin blancos y descartando costes >3x la base
+      //    (errores de maestro que reventarian el margen).
+      const acum = new Map(); // cliente|familia → {act, ant, cAct, cAnt}
+      let filasLeidas = 0;
+      for (const emp of (emps.length ? emps : [null])) {
+        const base = emp === null ? T : `FILTER(${T}, ${M.vEmpresa} = "${emp}")`;
+        const fEmp = emp === null ? "" : `${M.vEmpresa} = "${emp}",`;
+        const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+  VAR _iniAct = DATE(_anoAct, 1, 1)
+  VAR _iniAnt = DATE(_anoAnt, 1, 1)
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
+EVALUATE
+  FILTER(
+    ADDCOLUMNS(
+      SUMMARIZE(${base}, ${M.vCliente}, ${T}[CODIGO]),
+      "Act", CALCULATE(SUM(${M.vBase}), ${fEmp}
+        ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy),
+      "Ant", CALCULATE(SUM(${M.vBase}), ${fEmp}
+        ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt),
+      "CAct", CALCULATE(SUM(${M.vCoste}), ${fEmp}
+        ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy,
+        NOT ISBLANK(${M.vCoste}), ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3),
+      "CAnt", CALCULATE(SUM(${M.vCoste}), ${fEmp}
+        ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt,
+        NOT ISBLANK(${M.vCoste}), ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)
+    ),
+    [Act] <> 0 || [Ant] <> 0
+  )`, false);
+        filasLeidas += filas.length;
+        for (const r of filas) {
+          const cli = String(pick(r, "CLIENTE") || "").trim();
+          const art = String(pick(r, "CODIGO") || "").trim();
+          if (!cli) continue;
+          const f = fam.get(art) || "SIN_FAMILIA";
+          const k = cli + "|" + f;
+          const a = acum.get(k) || { act: 0, ant: 0, cAct: 0, cAnt: 0 };
+          a.act += Number(pick(r, "Act")) || 0;
+          a.ant += Number(pick(r, "Ant")) || 0;
+          a.cAct += Number(pick(r, "CAct")) || 0;
+          a.cAnt += Number(pick(r, "CAnt")) || 0;
+          acum.set(k, a);
+        }
+      }
+      out.filasClienteArticulo = filasLeidas;
+      out.filasClienteFamilia = acum.size;
+
+      // Modo por empresa suelta con &acumular=1: se cargan las partes ya
+      // guardadas y se suman, para poder trocear si Vercel corta por tiempo.
+      if (req.query.empresa && req.query.acumular === "1") {
+        try {
+          const previas = await fbLeerColeccion("pbi_familias_cliente");
+          for (const p of previas) {
+            if (!p.datos) continue;
+            for (const [cli, f, act, ant, cAct, cAnt] of JSON.parse(p.datos)) {
+              const k = cli + "|" + f;
+              const a = acum.get(k) || { act: 0, ant: 0, cAct: 0, cAnt: 0 };
+              a.act += act; a.ant += ant; a.cAct += cAct || 0; a.cAnt += cAnt || 0;
+              acum.set(k, a);
+            }
+          }
+        } catch (e) { out.avisoAcumular = e.message.slice(0, 160); }
+      }
+
+      // 4) Partes JSON (mismo patron de lectura que pbi_indice_clientes)
+      const filasOut = [];
+      for (const [k, a] of acum) {
+        const i = k.indexOf("|");
+        filasOut.push([k.slice(0, i), k.slice(i + 1),
+          num(a.act), num(a.ant), num(a.cAct), num(a.cAnt)]);
+      }
+      filasOut.sort((x, y) => y[2] - x[2]);
+      const partes = [];
+      const TAM = 900;
+      for (let i = 0; i < filasOut.length; i += TAM) {
+        partes.push({
+          _id: "parte" + (partes.length + 1),
+          datos: JSON.stringify(filasOut.slice(i, i + TAM)),
+          filas: Math.min(TAM, filasOut.length - i),
+          actualizado: new Date().toISOString(),
+        });
+      }
+      out.partes = partes.length;
+      await fbCommit("pbi_familias_cliente", partes);
+
+      // 5) Resumen por familia: la chuleta para decidir el mapeo a lineas
+      const porFam = new Map();
+      for (const [k, a] of acum) {
+        const f = k.slice(k.indexOf("|") + 1);
+        const g = porFam.get(f) || { act: 0, ant: 0, cAct: 0, clientes: 0 };
+        g.act += a.act; g.ant += a.ant; g.cAct += a.cAct; g.clientes++;
+        porFam.set(f, g);
+      }
+      const resumen = [...porFam.entries()].map(([f, g]) => ({
+        familia: f,
+        act: num(g.act),
+        ant: num(g.ant),
+        margenPct: g.act ? num((100 * (g.act - g.cAct)) / g.act) : null,
+        clientes: g.clientes,
+        ejemplos: (famDesc.get(f) || []).join(" · ").slice(0, 300),
+      })).sort((x, y) => y.act - x.act);
+      await fbCommit("pbi_familias_resumen", [{
+        _id: "estado",
+        datos: JSON.stringify(resumen),
+        actualizado: new Date().toISOString(),
+      }]);
+      out.familias = resumen;
+      out.segundos = Math.round((Date.now() - t1) / 1000);
+    } catch (e) {
+      out.ok = false;
+      out.error = String(e.message || e).slice(0, 600);
+    }
+    return res.status(200).json(out);
+  }
+
   // ?solopedidos=1 → sincroniza unicamente los pedidos planificados.
   // La sincronizacion completa consume casi los 60 s de Vercel con las
   // ventas y nunca llega a este bloque, asi que se puede lanzar aparte.
