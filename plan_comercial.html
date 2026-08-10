@@ -474,8 +474,10 @@ async function cruzarVisitas(){
   const ALIAS={"WK2":"VERONICA","IK1":"CARLOSG","WK1":"DAVIDMAG","WK3":"SILVIA"};
   const agenteDeCliente={}; for(const c of CARTERA) for(const k of (c.codigos||[c.codigo])) agenteDeCliente[String(k).toUpperCase()]=c.agente;
   const equipo=[...EQUIPO.KA,...EQUIPO.INSIDE];
-  const visPorAgente={}, llamPorAgente={};
+  const visPorAgente={}, llamPorAgente={}, mixVis={}, mixLlam={};
   equipo.forEach(a=>{visPorAgente[a]=0; llamPorAgente[a]=0;});
+  const segPorCod={};
+  for(const c of PLAN) for(const k of (c.codigos||[c.codigo])) segPorCod[String(k).toUpperCase()]=c.segmento;
   // mismo criterio que el CRM: resultado llamada* o no_contesta = teléfono
   const esLlamada=r=>{r=String(r||"");return r.startsWith("llamada")||r==="no_contesta";};
   const visPorCli={}; let totalVis=0, sinCasar=0, nextPage=null, pags=0;
@@ -506,7 +508,13 @@ async function cruzarVisitas(){
       // atribución al vendedor: agente directo → alias → agente del cliente
       const rawAg=String(f.agente||f.usuario||"").toUpperCase().trim();
       const quien=equipo.includes(rawAg)?rawAg:(ALIAS[rawAg]&&equipo.includes(ALIAS[rawAg])?ALIAS[rawAg]:agenteDeCliente[cod]);
-      if(quien&&visPorAgente[quien]!=null){ if(llamada) llamPorAgente[quien]++; else visPorAgente[quien]++; }
+      if(quien&&visPorAgente[quien]!=null){
+        if(llamada) llamPorAgente[quien]++; else visPorAgente[quien]++;
+        const seg=segPorCod[cod]||"FUERA";
+        const dest=llamada?mixLlam:mixVis;
+        dest[quien]=dest[quien]||{A:0,B:0,C:0,FUERA:0};
+        dest[quien][seg]++;
+      }
     }
     nextPage=j.nextPageToken; pags++;
   }while(nextPage&&pags<80);
@@ -557,7 +565,50 @@ async function cruzarVisitas(){
       <td class="num" style="color:var(--verde);font-weight:700">${fmt(v)}</td>
       <td class="num">${fmt(nv)}</td></tr>`;
   };
-  document.getElementById("cruceSec").innerHTML=`
+  // Mezcla POR VENDEDOR: hoy (medido) vs SU objetivo (calculado de su rueda)
+  const barra=(partes)=>{
+    const tot=partes.reduce((s,p)=>s+p.v,0)||1;
+    return `<div style="display:flex;height:26px;border-radius:7px;overflow:hidden;margin:3px 0 2px">`+
+      partes.filter(p=>p.v>0).map(p=>`<div style="width:${p.v/tot*100}%;background:${p.col};color:#fff;
+        font-size:10.5px;font-weight:700;display:flex;align-items:center;justify-content:center;min-width:26px">
+        ${p.lab} ${Math.round(p.v/tot*100)}%</div>`).join("")+`</div>`;
+  };
+  const bloqueVendedor=(a)=>{
+    const esKA=EQUIPO.KA.includes(a);
+    const hoy=(esKA?mixVis:mixLlam)[a]||{A:0,B:0,C:0,FUERA:0};
+    const nHoy=hoy.A+hoy.B+hoy.C+hoy.FUERA;
+    // objetivo personal desde SU rueda
+    let obj;
+    if(esKA){
+      const g=PLAN.filter(c=>c.ka===a);
+      const oa=g.filter(c=>c.segmento==="A").length/2, ob=g.filter(c=>c.segmento==="B").length/3,
+            oc=g.filter(c=>c.segmento==="C").length/3, on=(oa+ob+oc)*0.06/0.94;
+      obj=[{v:oa,lab:"A",col:"var(--verde)"},{v:ob,lab:"B",col:"var(--ambar)"},
+           {v:oc,lab:"C",col:"var(--burdeos)"},{v:on,lab:"NUEVOS",col:"var(--carbon)"}];
+    }else{
+      const l=PLAN.filter(c=>c.m1==="Llamada");
+      const oa=l.filter(c=>c.segmento==="A").length, ob=l.filter(c=>c.segmento==="B").length,
+            oc=l.filter(c=>c.segmento==="C").length, on=(oa+ob+oc)*0.10/0.90;
+      obj=[{v:oa,lab:"A",col:"var(--verde)"},{v:ob,lab:"B",col:"var(--ambar)"},
+           {v:oc,lab:"C",col:"var(--burdeos)"},{v:on,lab:"CUALIF.",col:"var(--carbon)"}];
+    }
+    return `<div style="background:#fff;border:1px solid var(--linea);border-radius:12px;padding:12px 14px;margin-bottom:10px">
+      <b>${a}</b> <span style="color:var(--gris);font-size:11.5px">· ${esKA?"visitas":"llamadas"} en ${etiqueta}</span>
+      <div style="font-size:11px;color:var(--gris);margin:4px 0 0">HOY · ${nHoy} registradas
+        ${hoy.FUERA?` · ${hoy.FUERA} a dormidos/fuera de los ${PLAN.length} vivos (candidatos a NUEVOS o códigos sin unificar)`:""}</div>
+      ${nHoy?barra([{v:hoy.A,lab:"A",col:"var(--verde)"},{v:hoy.B,lab:"B",col:"var(--ambar)"},
+        {v:hoy.C,lab:"C",col:"var(--burdeos)"},{v:hoy.FUERA,lab:"dorm/fuera",col:"#9A9A9A"}])
+        :`<div style="color:var(--gris);font-size:11.5px;font-style:italic;margin:4px 0">sin registros: el punto de partida es registrar</div>`}
+      <div style="font-size:11px;color:var(--verde);margin-top:6px"><b>SU OBJETIVO</b> · de su propia rueda</div>
+      ${barra(obj)}
+    </div>`;
+  };
+  const mixHtml=`<div style="margin-bottom:14px">
+    <div style="font-size:13px;margin-bottom:8px"><b>La mezcla, vendedor a vendedor · hoy → su objetivo</b>
+      <span style="color:var(--gris);font-size:11.5px"> — el objetivo del KA es de visitas y el del Inside de llamadas: no son el mismo</span></div>
+    ${[...EQUIPO.KA,...EQUIPO.INSIDE].map(bloqueVendedor).join("")}
+  </div>`;
+  document.getElementById("cruceSec").innerHTML=mixHtml+`
     <div class="segfila">
       ${tarjeta("CON visita en "+etiqueta, V, "var(--verde)")}
       ${tarjeta("SIN visita en "+etiqueta, NV, "var(--gris)")}
