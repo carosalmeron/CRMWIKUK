@@ -235,15 +235,51 @@ async function cargar(){
     // Cliente comercial = NOMBRE normalizado + POBLACIÓN. Se suman sus ventas,
     // el código principal es el de más venta este año y el grupo hereda su agente.
     // 1 cliente = 1 fila = 1 contacto al mes, en TODOS los informes.
-    const normaliza=s=>String(s||"").toUpperCase()
-      .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
-      .replace(/[.,;:()\-\/]/g," ")
-      .replace(/\b(S\.?L\.?U?|S\.?A\.?|SCA|SCAND|SCL|SLL|SOC\s+COOP\w*|COOP\w*|C\.?B\.?)\b/g," ")
-      .replace(/\s+/g," ").trim();
+    // v4.1: sufijos societarios token a token (S.L→"S L", S.C.AND, C.B…),
+    // abreviaturas comunes y emparejado difuso por población (más abajo).
+    const SUFIJOS=new Set(["S","L","U","A","C","B","SL","SLU","SA","SAU","SCA","SCAND","SCL","SLL","CB","SC","AND","CAND","COOP","SOC","LDA","ESPJ","SCP","SCOOP","SAT","CIA"]);
+    const ABREV={IND:"INDUSTRIAS",INDUSTRIA:"INDUSTRIAS",HNOS:"HERMANOS",PROD:"PRODUCTOS",PRODUCTO:"PRODUCTOS",EMB:"EMBUTIDOS",CARNICA:"CARNICAS",MAT:"MATADERO"};
+    const normaliza=s=>{
+      let toks=String(s||"").toUpperCase()
+        .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+        .replace(/[.,;:()\-\/&]/g," ")
+        .split(/\s+/).filter(Boolean).map(t=>ABREV[t]||t);
+      while(toks.length&&SUFIJOS.has(toks[toks.length-1]))toks.pop();
+      return toks.join(" ");
+    };
+    // parecido por bigramas (Dice) para cazar variantes de nombre en la misma población
+    const parecido=(a,b)=>{
+      if(a===b)return 1; if(a.length<4||b.length<4)return 0;
+      const bg=x=>{const m=new Map();for(let i=0;i<x.length-1;i++){const g=x.slice(i,i+2);m.set(g,(m.get(g)||0)+1);}return m;};
+      const A=bg(a),B=bg(b);let inter=0,tot=0;
+      for(const[g,c]of A){tot+=c;if(B.has(g))inter+=Math.min(c,B.get(g));}
+      for(const c of B.values())tot+=c;
+      return 2*inter/tot;
+    };
     const _grupos={};
     for(const c of CARTERA){
       const clave=normaliza(c.nombre)+"|"+normaliza(c.poblacion);
       (_grupos[clave]=_grupos[clave]||[]).push(c);
+    }
+    // pasada difusa: misma población + nombres casi iguales → mismo cliente
+    {
+      const porPobl={};
+      for(const k of Object.keys(_grupos)){
+        const pobl=k.split("|")[1];
+        (porPobl[pobl]=porPobl[pobl]||[]).push(k);
+      }
+      for(const ks of Object.values(porPobl)){
+        for(let i=0;i<ks.length;i++){
+          if(!_grupos[ks[i]])continue;
+          for(let j=i+1;j<ks.length;j++){
+            if(!_grupos[ks[j]])continue;
+            if(parecido(ks[i].split("|")[0],ks[j].split("|")[0])>=0.90){
+              _grupos[ks[i]].push(..._grupos[ks[j]]);
+              delete _grupos[ks[j]];
+            }
+          }
+        }
+      }
     }
     CARTERA=Object.values(_grupos).map(g=>{
       g.sort((a,b)=>b.vAct-a.vAct||b.vAnt-a.vAnt);
