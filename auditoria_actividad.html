@@ -58,8 +58,33 @@ const esLlamadaCruce=r=>{r=String(r||"");return r.startsWith("llamada")||r==="no
 const esTelefono=r=>{r=String(r||"").toLowerCase();return r.startsWith("llamada")||r==="no_contesta"||r.includes("tfno")||r.includes("telef")||r.includes("phone");};
 
 const MESES=["E","F","M","A","M","J","J","A","S","O","N","D"];
-let DOCS=[];
+let DOCS=[]; let AGDE={}, NOMDE={};   // código→agente PBI · nombre-normalizado→agente
+const normN=s=>String(s||"").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+  .replace(/[.,;:()\-\/]/g," ").replace(/\s+/g," ").trim();
+async function cargarCartera(){
+  // pbi_indice_clientes va empaquetado: pocos docs con campo datos = JSON de
+  // [codigo, nombre, agente, vAct, vAnt, poblacion]
+  const r=await fetch(`${FB_BASE}/pbi_indice_clientes?pageSize=10`);
+  if(!r.ok) return;
+  const j=await r.json();
+  for(const d of (j.documents||[])){
+    const datos=d.fields?.datos?.stringValue;
+    if(!datos) continue;
+    for(const [codigo,nombre,agente] of JSON.parse(datos)){
+      const cod=String(codigo||"").toUpperCase().trim();
+      const ag=String(agente||"").toUpperCase().trim();
+      if(cod&&ag){AGDE[cod]=ag; const kn=normN(nombre); if(kn&&!NOMDE[kn])NOMDE[kn]=ag;}
+    }
+  }
+}
+function agenteDe(d){
+  if(d.cod&&AGDE[d.cod]) return AGDE[d.cod];
+  // códigos sin el 0 (U432109 ↔ U4302109)
+  const m=d.cod.match(/^([A-Z])43(\d{4})$/); if(m&&AGDE[m[1]+"430"+m[2]]) return AGDE[m[1]+"430"+m[2]];
+  const kn=normN(d.nom); return kn&&NOMDE[kn]?NOMDE[kn]:null;
+}
 async function cargar(){
+  await cargarCartera();
   const est=document.getElementById("estado");
   let nextPage=null,pags=0;
   do{
@@ -110,7 +135,30 @@ function auditar(){
   // ── 4 · últimas filas crudas ──
   const ult=[...delAnio].sort((a,b)=>b.fecha-a.fecha).slice(0,15).map(d=>
     `<tr><td>${d.fecha.toLocaleDateString("es-ES")}</td><td>${d.res}</td><td>${d.cod||'<span style="color:var(--rojo)">—</span>'}</td><td>${d.nom||'<span style="color:var(--rojo)">—</span>'}</td><td><small>${d.txt}</small></td></tr>`).join("");
+  // ¿Quién es cada usuario? — por el agente PBI de los clientes que registra
+  const porUser={};
+  for(const d of DOCS.filter(x=>x.fecha&&x.fecha.getFullYear()===anio)){
+    const u=porUser[d.ag]=porUser[d.ag]||{n:0,ag:{},ej:new Set()};
+    u.n++;
+    const a=agenteDe(d);
+    if(a){u.ag[a]=(u.ag[a]||0)+1; if(u.ej.size<3&&d.nom)u.ej.add(d.nom.slice(0,24));}
+  }
+  const filasId=Object.entries(porUser).sort((a,b)=>b[1].n-a[1].n).map(([u,x])=>{
+    const tot=Object.values(x.ag).reduce((s,v)=>s+v,0);
+    const top=Object.entries(x.ag).sort((a,b)=>b[1]-a[1])[0];
+    const pct=top&&tot?Math.round(100*top[1]/tot):0;
+    const veredicto=top&&pct>=60?`<b style="color:var(--verde)">${top[0]}</b> <small>(${pct}% de sus clientes)</small>`
+      :(top?`<span style="color:var(--ambar)">quizá ${top[0]} (${pct}%)</span>`:'<span style="color:var(--rojo)">sin pista (clientes sin casar)</span>');
+    const alias=top&&pct>=60?`<code>"${u}":"${top[0]}",</code>`:"";
+    return `<tr><td><b>${u}</b></td><td class="num">${x.n}</td><td>${veredicto}</td><td><small>${[...x.ej].join(" · ")}</small></td><td>${alias}</td></tr>`;
+  }).join("");
   document.getElementById("out").innerHTML=`
+  <div class="card">
+    <h2>0 · ¿Quién es cada usuario? · identificación por sus huellas</h2>
+    <div class="h2sub">Para cada login del CRM: a qué agente de Power BI pertenecen los clientes que registra · si ≥60% son de uno, ese es · la última columna es la línea lista para pegar en el mapa ALIAS de la web</div>
+    <table><thead><tr><th>Usuario CRM</th><th class="num">Registros ${anio}</th><th>Vendedor inferido</th><th>Ejemplos de sus clientes</th><th>Línea ALIAS</th></tr></thead>
+    <tbody>${filasId}</tbody></table>
+  </div>
   <div class="card">
     <h2>1 · Qué registra ${ag||"todo el equipo"} · ${anio}, mes a mes y por tipo de resultado</h2>
     <div class="h2sub">El dato crudo: cada valor de «resultado» tal cual está en el CRM · la etiqueta dice cómo lo clasifica HOY el cruce del plan</div>
