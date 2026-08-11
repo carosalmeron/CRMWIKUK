@@ -1549,10 +1549,147 @@ EVALUATE
   // el detalle por cliente solo puede ser anual, y al mirar un mes concreto no
   // habia forma de saber que clientes estaban detras. Se guarda comprimido en
   // pocos documentos: 6.500 clientes por 24 cifras serian 6.500 escrituras.
+  // ?dax=1&cliente=U434434 → por que un cliente concreto no sale en la
+  // consulta mensual. Prueba varias formas de pedir su venta para ver cual
+  // devuelve dato y cual no, sin tener que desplegar en cada intento.
+  if (req.query.dax === "1") {
+    const out = { ok: true, version: "dax-3-motivos" };
+    try {
+      const { token } = await getToken(req);
+      const cli = String(req.query.cliente || "").toUpperCase().trim();
+
+      // ?dax=1&mes=7 → total del mes tal y como lo ve Power BI, y de que
+      // clientes sale. Es lo unico que permite comparar de verdad contra el
+      // titular del panel: por cliente y por año no era comparable.
+      if (req.query.mes) {
+        const m = parseInt(req.query.mes, 10);
+        const a = parseInt(req.query.anio, 10) || new Date().getFullYear();
+        const filas = await pbiQuery(token, `
+EVALUATE
+  FILTER(
+    SUMMARIZECOLUMNS(
+      ${M.vCliente},
+      "v", CALCULATE(SUM(${M.vBase}),
+        FILTER(${M.ventas}, YEAR(${M.vFecha}) = ${a} && MONTH(${M.vFecha}) = ${m}))
+    ),
+    NOT ISBLANK([v])
+  )`, true);
+        let total = 0;
+        const porCli = filas.map((r) => {
+          const c = String(pick(r, "CLIENTE") || "").toUpperCase();
+          const v = num(pick(r, "v"));
+          total += v;
+          return { cliente: c, venta: Math.round(v) };
+        }).sort((x, y) => y.venta - x.venta);
+        out.mes = m; out.anio = a;
+        out.totalPowerBI = Math.round(total);
+        out.clientesConVenta = porCli.length;
+        out.top = porCli.slice(0, 30);
+        // Cuales de esos NO estan en el detalle guardado
+        const partes = await fbLeerColeccion("pbi_meses_cliente");
+        const enDetalle = new Set();
+        for (const d of partes) {
+          let f = []; try { f = JSON.parse(d.datos || "[]"); } catch (e) {}
+          for (const fila of f) enDetalle.add(String(fila[0]).toUpperCase());
+        }
+        // Por que cada uno se queda fuera: sin el motivo, la lista no dice
+        // si es un descarte correcto (intercompany) o una perdida real.
+        const fichaDe = {};
+        for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
+          fichaDe[String(c._id).toUpperCase()] = c;
+        }
+        const fuera = porCli.filter((x) => !enDetalle.has(x.cliente))
+          .map((x) => {
+            const f = fichaDe[x.cliente];
+            return Object.assign({}, x, {
+              nombre: f ? (f.nombre || "") : "",
+              empresa: f ? (f.empresa || "") : "",
+              agente: f ? (f.agenteFinal || f.agente || "") : "",
+              motivo: !f ? "no esta en pbi_ventas_cliente"
+                : f.intercompany ? "intercompany"
+                : f.fusionadoEn ? "fusionado en " + f.fusionadoEn
+                : f.cuenta === false ? "cuenta=false"
+                : "cuenta, deberia estar",
+            });
+          });
+        const porMotivo = {};
+        for (const x of fuera) {
+          porMotivo[x.motivo] = (porMotivo[x.motivo] || 0) + x.venta;
+        }
+        out.fueraDelDetalle = {
+          cuantos: fuera.length,
+          importe: Math.round(fuera.reduce((t, x) => t + x.venta, 0)),
+          porMotivo: Object.fromEntries(
+            Object.entries(porMotivo).map(([k, v]) => [k, Math.round(v)])),
+          lista: fuera.slice(0, 40),
+        };
+        return res.status(200).json(out);
+      }
+
+      if (!cli) { out.ok = false; out.error = "falta &cliente=CODIGO o &mes=N"; }
+      else {
+        const anoAct = new Date().getFullYear();
+        const anoAnt = anoAct - 1;
+        const F = `FILTER(${M.ventas}, ${M.vCliente} = "${cli}")`;
+
+        // 1 · Sus lineas tal cual, para ver fechas y empresa reales
+        out.lineas = (await pbiQuery(token,
+          `EVALUATE TOPN(20, ${F}, ${M.vFecha}, DESC)`, true))
+          .map((r) => ({
+            fecha: pick(r, "FECHA"), base: pick(r, "BASE"),
+            empresa: pick(r, "EMPRESA"), vendedor: pick(r, "VENDEDOR"),
+            ano: pick(r, "ANO"), factura: pick(r, "FACTURA"),
+          }));
+
+        // 2 · Total del año por FECHA (lo que usa la consulta mensual)
+        out.porFecha = await pbiQuery(token, `
+EVALUATE
+  ROW(
+    "actFecha", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, ${M.vCliente} = "${cli}" && YEAR(${M.vFecha}) = ${anoAct})),
+    "antFecha", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, ${M.vCliente} = "${cli}" && YEAR(${M.vFecha}) = ${anoAnt})),
+    "julio", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, ${M.vCliente} = "${cli}" &&
+        YEAR(${M.vFecha}) = ${anoAct} && MONTH(${M.vFecha}) = 7)),
+    "sinFiltro", CALCULATE(SUM(${M.vBase}), ${F}),
+    "lineas", CALCULATE(COUNTROWS(${M.ventas}), ${F})
+  )`, true);
+
+        // 3 · Total del año por la columna ANO (por si FECHA viene vacia)
+        try {
+          out.porColumnaAno = await pbiQuery(token, `
+EVALUATE
+  ROW(
+    "actAno", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, ${M.vCliente} = "${cli}" && ${M.ventas}[ANO] = "${anoAct}")),
+    "antAno", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, ${M.vCliente} = "${cli}" && ${M.ventas}[ANO] = "${anoAnt}"))
+  )`, true);
+        } catch (e) { out.porColumnaAno = { error: e.message }; }
+
+        // 4 · ¿Sale en la misma consulta que alimenta el detalle mensual?
+        const filas = await pbiQuery(token, `
+EVALUATE
+  FILTER(
+    SUMMARIZECOLUMNS(
+      ${M.vCliente},
+      "a7", CALCULATE(SUM(${M.vBase}),
+        FILTER(${M.ventas}, YEAR(${M.vFecha}) = ${anoAct} && MONTH(${M.vFecha}) = 7))
+    ),
+    ${M.vCliente} = "${cli}"
+  )`, true);
+        out.saleEnSummarize = filas.length > 0;
+        out.filaSummarize = filas[0] || null;
+      }
+    } catch (e) { out.ok = false; out.error = e.message; }
+    return res.status(out.ok ? 200 : 500).json(out);
+  }
+
   if (req.query.mesescliente === "1") {
     const t1 = Date.now();
     // Sello para saber que version esta corriendo de verdad tras desplegar
-    const out = { ok: true, version: "2026-08-11-empresa" };
+    const out = { ok: true, version: "v3-diagnostico" };
     try {
       const { token } = await getToken(req);
       const anoAnt = new Date().getFullYear() - 1;
