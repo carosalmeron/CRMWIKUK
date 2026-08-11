@@ -79,31 +79,42 @@ window.conciliar=async()=>{
       leer("pbi_meses_cliente"), leer("pbi_ajustes").catch(()=>[])
     ]);
 
-    // 1 · Estacionalidad: la fuente que usa el parte
-    let totalEst=0; const porAgEst={};
+    // Los campos reales son mes_N (año anterior) y act_N (año en curso),
+    // con N = número de mes. No "2026-07" como supuse al principio.
+    const nMes=parseInt(mm,10);
+    const anioSel=parseInt(anio,10);
+
+    // 1 · Estacionalidad, año en curso (act_N)
+    let totalEst=0, totalEstAnt=0;
+    const porAgEst={}, porAgEstAnt={};
     est.forEach(d=>{
-      // Busca el campo del mes: puede llamarse "2026-07", "m07", "julio"...
-      const claves=Object.keys(d).filter(k=>k.includes(mes)||k===("m"+mm)||k===mm);
-      claves.forEach(k=>{
-        const v=num(d[k]);
-        if(!v) return;
-        totalEst+=v;
-        const ag=U(d.agente||d._id);
-        porAgEst[ag]=(porAgEst[ag]||0)+v;
-      });
+      if(d._id==="_TOTAL") return;
+      const ag=U(d.agente||d._id);
+      const vAct=num(d["act_"+nMes]);
+      const vAnt=num(d["mes_"+nMes]);
+      // "anio" dice a qué ejercicio corresponde act_N
+      const anioDoc=num(d.anio)||anioSel;
+      if(anioDoc===anioSel){
+        totalEst+=vAct; porAgEst[ag]=(porAgEst[ag]||0)+vAct;
+        totalEstAnt+=vAnt; porAgEstAnt[ag]=(porAgEstAnt[ag]||0)+vAnt;
+      } else if(anioDoc===anioSel+1){
+        // Si el documento es del año siguiente, mes_N es el año pedido
+        totalEst+=vAnt; porAgEst[ag]=(porAgEst[ag]||0)+vAnt;
+      }
     });
 
-    // 2 · Desglose mensual por cliente
+    // 2 · Resumen por agente, mismo mes (para contrastar)
     let totalMes=0; const porAgMes={};
-    mesCli.forEach(d=>{
-      const claves=Object.keys(d).filter(k=>k.includes(mes)||k===("m"+mm));
-      claves.forEach(k=>{
-        const v=num(d[k]); if(!v) return;
-        totalMes+=v;
-        const ag=U(d.agente||"");
-        if(ag) porAgMes[ag]=(porAgMes[ag]||0)+v;
-      });
+    res.filter(d=>d._id!=="_TOTAL").forEach(d=>{
+      // Solo sirve si el mes pedido es el mes en curso
+      const hoy=new Date();
+      if(hoy.getMonth()+1!==nMes||hoy.getFullYear()!==anioSel) return;
+      const v=num(d.ventasMes);
+      if(!v) return;
+      totalMes+=v;
+      porAgMes[U(d._id)]=(porAgMes[U(d._id)]||0)+v;
     });
+    const mesEnCurso=Object.keys(porAgMes).length>0;
 
     // 3 · Resumen por comercial (cifra viva, no del mes concreto)
     let totalRes=0; const porAgRes={};
@@ -130,7 +141,7 @@ window.conciliar=async()=>{
     };
 
     let h='';
-    if(totalEst===0||totalMes===0){
+    if(totalEst===0){
       h+='<div class="card mal"><b>No se ha encontrado el campo del mes.</b> '
         +'Abajo están los campos reales de cada colección.</div>'
         +'<h2>Estructura real</h2>'
@@ -147,25 +158,27 @@ window.conciliar=async()=>{
       +'<td class="n">'+Object.keys(porAgEst).length+'</td></tr>'
       +'<tr><td>Desglose mensual</td><td><code>pbi_meses_cliente</code></td>'
       +'<td class="n">'+eur(totalMes)+'</td><td class="n">'+Object.keys(porAgMes).length+'</td></tr>'
-      +'<tr><td>Resumen vivo <small>(mes en curso)</small></td>'
-      +'<td><code>pbi_resumen_agente</code></td><td class="n">'+eur(totalRes)+'</td>'
-      +'<td class="n">'+Object.keys(porAgRes).length+'</td></tr>'
       +'</tbody></table>';
 
-    const dif=Math.abs(totalEst-totalMes);
-    h+='<div class="card '+(dif<1?"ok":"mal")+'">'
-      +(dif<1
-        ? "Estacionalidad y desglose mensual cuadran."
-        : "<b>Diferencia de "+eur(dif)+"</b> entre estacionalidad y desglose mensual. "
-          +"Una de las dos no está completa.")
-      +'</div>';
+    if(mesEnCurso){
+      const dif=Math.abs(totalEst-totalMes);
+      h+='<div class="card '+(dif<1?"ok":"mal")+'">'
+        +(dif<1
+          ? "Estacionalidad y resumen vivo cuadran."
+          : "<b>Diferencia de "+eur(dif)+"</b> entre estacionalidad y resumen vivo.")
+        +'</div>';
+    } else {
+      h+='<div class="card">Mes cerrado: solo hay una fuente '
+        +'(<code>pbi_estacionalidad</code>). El resumen vivo únicamente sirve '
+        +'para el mes en curso.</div>';
+    }
 
     // Comparativa por agente
-    const ags=[...new Set([...Object.keys(porAgEst),...Object.keys(porAgMes)])];
+    const ags=[...new Set([...Object.keys(porAgEst),...Object.keys(porAgEstAnt)])];
     h+='<h2>Por comercial</h2>'
       +'<table><thead><tr><th>Agente</th><th>Estacionalidad</th>'
-      +'<th>Desglose mensual</th><th>Diferencia</th></tr></thead><tbody>'
-      +ags.map(a=>({a,e:porAgEst[a]||0,m:porAgMes[a]||0}))
+      +'<th>Mismo mes año anterior</th><th>Diferencia</th></tr></thead><tbody>'
+      +ags.map(a=>({a,e:porAgEst[a]||0,m:porAgEstAnt[a]||0}))
         .map(x=>({...x,d:x.e-x.m}))
         .sort((x,y)=>Math.abs(y.d)-Math.abs(x.d))
         .map(x=>'<tr><td>'+x.a+'</td><td class="n">'+eur(x.e)+'</td>'
