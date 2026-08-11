@@ -7,6 +7,7 @@
   <meta name="description" content="CRM comercial para gestión de clientes, estrategias, oportunidades e incidencias"/>
   
   <!-- React + ReactDOM -->
+  <script src="agentes.js"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <!-- Babel standalone para JSX -->
@@ -498,46 +499,46 @@ function nombreDeAgente(idAgente){
 // Esta función devuelve un Set con todos los posibles IDs para comparar.
 function resolverMisIds(usuario){
   if(!usuario) return new Set();
-  // (v3.23.33) Incluir TODOS los identificadores posibles del usuario
-  const ids=new Set([
-    (usuario.id||"").toUpperCase(),
-    (usuario._docId||"").toUpperCase(),
-    (usuario.user||"").toUpperCase(),
-    (usuario.username||"").toUpperCase(),
-    (usuario.grupoAgente||"").toUpperCase(),
-    (usuario.catalogoVendedor||"").toUpperCase(),
-    (usuario.portalId||"").toUpperCase(),
-    (usuario.portalDocId||"").toUpperCase(),
-    (usuario.nombre||"").toUpperCase(),
-  ].filter(Boolean));
-  if(usuario.grupoAgente){
-    const match=USUARIOS.find(u=>u.grupoAgente&&u.grupoAgente.toUpperCase()===(usuario.grupoAgente||"").toUpperCase());
-    if(match) ids.add(match.id.toUpperCase());
-  }
-  // (v3.23.33) Si tiene catalogoVendedor, buscar usuario CRM con grupoAgente=catalogoVendedor
-  if(usuario.catalogoVendedor){
-    const match=USUARIOS.find(u=>u.grupoAgente&&u.grupoAgente.toUpperCase()===(usuario.catalogoVendedor||"").toUpperCase());
-    if(match) ids.add(match.id.toUpperCase());
-  }
-  // (fix) Incluir el id canónico con el que se GUARDAN las visitas (idCanonico).
-  // Sin esto, si idCanonico(usuario) no coincidía con ninguno de los ids de arriba,
-  // las visitas del comercial se guardaban en Firebase pero el filtro las descartaba.
-  try{ var _ic=idCanonico(usuario); if(_ic) ids.add(String(_ic).toUpperCase()); }catch(e){}
+  // (ago 2026) Antes esto eran 40 lineas de parches acumulados: nueve campos
+  // distintos, dos busquedas cruzadas en USUARIOS y un puente con perfiles
+  // antiguos. Cada arreglo tapaba un caso y destapaba otro. Ahora la
+  // identidad la resuelve agentes_alias, que es una sola fuente de verdad.
+  const ids=new Set();
+  const add=(x)=>{ if(x) ids.add(String(x).toUpperCase()); };
 
-  // (fix 3/8/2026) Al unificar los usuarios desaparecieron las fichas que hacían
-  // de puente entre el perfil con el que se GUARDA una visita (wk4, wk6, ik3...)
-  // y el comercial. Sin ellas las visitas se guardaban bien pero no se le
-  // asignaban a nadie: salían como "(wk6)" y no contaban en Mi semana.
-  // PERFILES_CRM se carga de pbi_perfiles al arrancar.
+  // Todo lo que el propio usuario trae encima
+  [usuario.id,usuario._docId,usuario.user,usuario.username,
+   usuario.grupoAgente,usuario.catalogoVendedor,usuario.portalId,
+   usuario.portalDocId,usuario.nombre].forEach(add);
+  try{ add(idCanonico(usuario)); }catch(e){}
+
+  // Y todos sus alias conocidos, venga por donde venga
   try{
-    var _mios=[];
-    ids.forEach(function(x){ _mios.push(x); });
-    for(var _p in (window.PERFILES_CRM||{})){
-      if(_mios.indexOf(String(window.PERFILES_CRM[_p]).toUpperCase())>=0) ids.add(_p);
+    if(window.Agentes){
+      [usuario.id,usuario.grupoAgente,usuario.catalogoVendedor,usuario.username]
+        .filter(Boolean).forEach(function(k){
+          window.Agentes.alias(k).forEach(add);
+          add(window.Agentes.id(k));
+        });
     }
   }catch(e){}
+
+  // Respaldo mientras la tabla no cubra a alguien: los puentes de siempre
+  try{
+    [usuario.grupoAgente,usuario.catalogoVendedor].filter(Boolean).forEach(function(g){
+      const m=USUARIOS.find(u=>u.grupoAgente
+        &&u.grupoAgente.toUpperCase()===String(g).toUpperCase());
+      if(m) add(m.id);
+    });
+    var _mios=[]; ids.forEach(function(x){ _mios.push(x); });
+    for(var _p in (window.PERFILES_CRM||{})){
+      if(_mios.indexOf(String(window.PERFILES_CRM[_p]).toUpperCase())>=0) add(_p);
+    }
+  }catch(e){}
+
   return ids;
 }
+
 
 // Perfiles antiguos → comercial. Se resolvió por cartera y quedó fijado en
 // pbi_perfiles; aquí solo se lee.
@@ -3077,6 +3078,11 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
   // ── v3.10.0: Datos detallados para 360° ampliado ──
   // Helper para nombre de agente
   function nombreAgenteId(id){
+    // La tabla de alias sabe de quien es cada codigo; lo de abajo queda como
+    // respaldo para los que aun no esten en ella.
+    try{
+      if(window.Agentes&&window.Agentes.conocido(id)) return window.Agentes.nombre(id);
+    }catch(e){}
     if(!id) return "";
     function _nrm(s){
       return String(s||"").toUpperCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
@@ -31264,7 +31270,12 @@ function App(props){
 
   // Cargar USUARIOS desde Firebase al arrancar — antes del login
   useEffect(()=>{
-    cargarUsuariosFB().then(ok=>{
+    // La tabla de alias primero: resolverMisIds y los filtros por comercial
+    // dependen de ella, y sin cargar resuelven peor.
+    var _t = (window.Agentes ? window.Agentes.cargar() : Promise.resolve());
+    _t.catch(function(){}).then(function(){
+      return cargarUsuariosFB();
+    }).then(ok=>{
       if(ok) setUsrVer(v=>v+1);
     });
   },[]);
