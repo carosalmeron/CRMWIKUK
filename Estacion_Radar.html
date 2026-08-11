@@ -177,12 +177,21 @@ const LEGAL=/\b(S\.?L\.?U?\.?|S\.?A\.?U?\.?|S\.?C\.?A\.?|S\.?C\.?P\.?|S\.?C\.?|C
 function norm(s){s=String(s||"").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
   s=s.replace(/[.,;:()\/\-&+'"]/g," ").replace(LEGAL," ").replace(/\bHNOS\b/g,"HERMANOS");
   return s.replace(/\s+/g," ").trim();}
+const GENERICAS=new Set(["CARNICERIA","CARNICERIAS","CARNICAS","CARNES","CARNE","EMBUTIDOS","EMBOTITS","CHACINAS","CHACINERA","JAMONES","JAMON","HERMANOS","DISTRIBUCIONES","DISTRIBUCION","DISTRIBUIDORA","ALIMENTACION","ALIMENTARIA","INDUSTRIAS","INDUSTRIAL","COMERCIAL","GRUPO","PRODUCTOS","ELABORADOS","SALAZONES","MATADERO","MATADEROS","SUPERMERCADO","SUPERMERCADOS","CASA","HIJOS"]);
 function toks(s){return norm(s).split(" ").filter(t=>t.length>=3);}
-function score(a,b){if(!a||!b)return 0;if(a===b)return 1;
+function score(a,b,pobA,pobB){if(!a||!b)return 0;if(a===b)return 1;
   const ta=toks(a),tb=toks(b);if(!ta.length||!tb.length)return 0;
-  const sb=new Set(tb);let inter=0;
-  ta.forEach(t=>{if(sb.has(t))inter++;else if(tb.some(x=>x.startsWith(t)||t.startsWith(x)))inter+=.7;});
-  return inter/Math.min(ta.length,tb.length);}
+  const sb=new Set(tb);let inter=0,peso=0;
+  ta.forEach(t=>{
+    const w=GENERICAS.has(t)?0.25:1;peso+=w;
+    if(sb.has(t))inter+=w;
+    else if(!GENERICAS.has(t)&&tb.some(x=>x.startsWith(t)||t.startsWith(x)))inter+=w*0.7;
+  });
+  const tbPeso=tb.reduce((s,t)=>s+(GENERICAS.has(t)?0.25:1),0);
+  let sc=peso&&tbPeso?inter/Math.min(peso,tbPeso):0;
+  if(pobA!==undefined&&pobA&&pobB){const pa=norm(pobA),pb=norm(pobB);
+    if(pa&&pb){sc+=pa===pb?0.12:-0.15;}}
+  return Math.max(0,Math.min(1,sc));}
 const NP={};Object.keys(D.MP).forEach(k=>NP[norm(k)]=D.MP[k]);
 function provDe(pob,pc){if(pc){const p=norm(pc);for(const pv of Object.values(D.MP))if(norm(pv)===p)return pv;}
   const n=norm(pob);if(NP[n])return NP[n];
@@ -379,9 +388,9 @@ document.getElementById("btnCruce").onclick=async()=>{
       const nombre=String(r[iN]||"").trim();if(!nombre)return;
       const n=norm(nombre);if(!n||vistos.has(n))return;vistos.add(n);
       let bR=0,mR=null,bB=0,mB=null;
-      refR.forEach(x=>{const s=score(n,x.k);if(s>bR){bR=s;mR=x.c;}});
-      refB.forEach(x=>{const s=score(n,x.k);if(s>bB){bB=s;mB=x.c;}});
       const pob=iP>=0?String(r[iP]||"").trim():"";
+      refR.forEach(x=>{const s=score(n,x.k,pob,x.c.p);if(s>bR){bR=s;mR=x.c;}});
+      refB.forEach(x=>{const s=score(n,x.k,pob,x.c.p);if(s>bB){bB=s;mB=x.c;}});
       const prov=provDe(pob,iV>=0?String(r[iV]||""):"");
       const[kap,rutap]=kaDe(prov);
       const imp=iM>=0?parseImp(r[iM]):null;
@@ -421,19 +430,20 @@ document.getElementById("buscar").oninput=pinta;
 function pinta(){
   const q=norm(document.getElementById("buscar").value);
   const lst=res[bucket].filter(x=>!q||norm(x.nombre+" "+x.pob+" "+(x.prov||"")+" "+(x.ka||x.ag||x.kap||"")).includes(q));
+  if(bucket==="dudoso")window._lstDudVisible=lst;
   const w=document.getElementById("tablaWrap");
   if(!lst.length){w.innerHTML='<div class="vacio">Nada en este grupo'+(q?' con ese filtro':'')+'.</div>';return;}
   let h='<table><tr><th>#</th><th>Cliente</th><th>Población</th><th>Provincia</th>';
   if(bucket==="rutas")h+='<th>KA</th><th>Ruta</th><th>Coincide con</th>';
   else if(bucket==="bd")h+='<th>Agente actual</th><th>Venta año</th><th>Coincide con</th>';
-  else if(bucket==="dudoso")h+='<th>Se parece a</th><th>%</th>';
+  else if(bucket==="dudoso")h+='<th>Se parece a</th><th>%</th><th></th>';
   else h+='<th>Clase</th><th>Cifra</th><th>Destino</th><th>KA propuesto</th><th>Ruta propuesta</th>';
   h+='</tr>';
   lst.forEach((x,i)=>{
     h+='<tr><td>'+(i+1)+'</td><td><b>'+x.nombre+'</b></td><td>'+x.pob+'</td><td>'+(x.prov||'<span class="match">sin mapear</span>')+'</td>';
     if(bucket==="rutas")h+='<td><span class="tag '+(x.ka==="AGUSTIN"?"t-ag":x.ka==="CARLOSG"?"t-cg":"t-otro")+'">'+x.ka+'</span></td><td>'+(x.ruta||'—')+'</td><td class="match">'+x.match+' ('+x.sc+'%)</td>';
     else if(bucket==="bd")h+='<td><span class="tag t-otro">'+(x.ag||'?')+'</span></td><td>'+(x.vAct||0).toLocaleString("es-ES")+' €</td><td class="match">'+x.match+' ('+x.sc+'%)</td>';
-    else if(bucket==="dudoso")h+='<td class="match">'+x.match+'</td><td>'+x.sc+'%</td>';
+    else if(bucket==="dudoso")h+='<td class="match">'+x.match+'</td><td>'+x.sc+'%</td><td><button class="mini" style="padding:2px 8px" onclick="aBolsa('+i+')" title="Confirmado nuevo → a la bolsa">→ bolsa</button></td>';
     else h+='<td>'+(x.tipo==="GRAN CUENTA"?'<span class="tag" style="background:var(--burdeos)">GRAN CUENTA</span>':x.tipo==="WIKUK"?'<span class="tag" style="background:#4A6741">WIKUK</span>':'<span class="tag" style="background:#999">SIN CIFRA</span>')+'</td>'+
       '<td>'+(x.imp!=null?(x.imp.toLocaleString("es-ES")+" €"+(x.tipoCifra==="fact"?" fact.":" compra")):"—")+'</td>'+
       '<td class="match">'+(x.tipo==="WIKUK"?"grupo WIKUK (pequeño)":x.tipo==="GRAN CUENTA"?"DUPLO: organiza V/L":"clasificar")+'</td>'+
@@ -621,6 +631,15 @@ async function pintaBolsa(){
     w.innerHTML=t+'</table>';
   }catch(e){w.innerHTML='<div class="vacio">'+ (String(e.message).includes("403")?"Reglas pendientes: allow read, write en radar_prospectos.":e.message)+'</div>';}
 }
+window._lstDudVisible=[];
+window.aBolsa=async(i)=>{
+  const x=window._lstDudVisible[i];if(!x)return;
+  if(!confirm("¿Confirmar que \""+x.nombre+"\" es NUEVO y guardarlo en la bolsa?"))return;
+  await guardaEnBolsa([x]);
+  res.dudoso=res.dudoso.filter(y=>y!==x);
+  document.getElementById("nDud").textContent=res.dudoso.length;
+  pinta();
+};
 window.descarta=async(id)=>{
   if(!confirm("¿Descartar este prospecto de la bolsa para siempre?"))return;
   await fetch(FB+"/radar_prospectos/"+id,{method:"DELETE"});
