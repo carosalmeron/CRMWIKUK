@@ -32,6 +32,10 @@
  .chip{display:inline-block;background:#F1F5F9;border-radius:99px;padding:1px 8px;
    font-size:11px;margin:2px 3px 0 0;font-family:ui-monospace,monospace}
  .n{font-variant-numeric:tabular-nums;text-align:right;font-weight:700}
+ .pistas{background:#F8FAFC;border-left:3px solid var(--azul);border-radius:4px;
+   padding:9px 11px;font-size:12px;line-height:1.6;color:var(--tinta)}
+ .pistas b{color:var(--tenue);font-weight:700;font-size:11px;
+   text-transform:uppercase;letter-spacing:.3px}
  .estado{padding:34px 4px;color:var(--tenue);text-align:center}
  .barra{position:fixed;left:0;right:0;bottom:0;background:#fff;
    border-top:1px solid var(--linea);padding:12px 14px;display:flex;gap:10px;
@@ -64,9 +68,11 @@ const NORM=(s)=>U(s).normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^
 
 // Valores que NO son identificadores de persona aunque aparezcan en el campo:
 // son equipos, roles o marcadores. Meterlos como alias fusiona a gente distinta.
+// Equipos y marcadores: nunca identifican a una persona. Meterlos como alias
+// fusionaba al CEO con el Director y con todo WIKUK.
+// CEO y DIR SI son identidades reales (firman documentos), asi que se quedan.
 const NO_ES_PERSONA=new Set(["WIKUK","INTERKEY","FRANCIA","DISTRIBUIDOR",
-  "TOTAL","_TOTAL","CEO","DIR","DIRECTOR","ADMIN","ADM","SINAGENTE","TIENDA",
-  "TELEFONO","CATALUNA","CATALUÑA","INTERCNACIONAL","INTERCINTERN"]);
+  "TOTAL","_TOTAL","CATALUNA","CATALUÑA","SINAGENTE","TIENDA","TELEFONO"]);
 
 const COLS=[
   {c:"visitas",         campos:["agente"]},
@@ -108,6 +114,30 @@ async function leer(col,max=40){
 }
 
 let PERSONAS=[], USO={}, BRUTO={}, ASIGNA={}, HUERFANOS=[];
+let CONFLICTOS=[], RESUELVE={};   // alias en disputa -> canonico elegido
+let PISTAS={};                    // alias -> clientes, nombres, fechas vistos
+
+// Lo que se sabe de un codigo huerfano, para poder reconocerlo
+function pistasDe(a){
+  const P=PISTAS[a]; if(!P) return "";
+  const top=(o,n)=>Object.entries(o).sort((x,y)=>y[1]-x[1]).slice(0,n);
+  const fs=P.fechas.filter(Boolean).sort();
+  const partes=[];
+  const nom=top(P.nom,2);
+  if(nom.length) partes.push('<b>Aparece como:</b> '
+    +nom.map(x=>x[0]+" ("+x[1]+")").join(", "));
+  const eq=top(P.eq,2);
+  if(eq.length) partes.push('<b>Equipo:</b> '+eq.map(x=>x[0]).join(", "));
+  if(fs.length) partes.push('<b>Actividad:</b> '+fs[0]+" → "+fs[fs.length-1]);
+  const pob=top(P.pob,4);
+  if(pob.length) partes.push('<b>Zonas:</b> '+pob.map(x=>x[0]).join(", "));
+  const cli=top(P.cli,8);
+  if(cli.length) partes.push('<b>Sus clientes:</b> '
+    +cli.map(x=>x[0]+" ("+x[1]+")").join(" · "));
+  return partes.length
+    ? '<div class="pistas">'+partes.join("<br>")+'</div>'
+    : '<div class="pistas" style="color:var(--tenue)">Sin datos que ayuden a identificarlo.</div>';
+}
 
 (async()=>{
   const app=document.getElementById("app");
@@ -147,7 +177,8 @@ let PERSONAS=[], USO={}, BRUTO={}, ASIGNA={}, HUERFANOS=[];
       };
     }).sort((a,b)=>a.nombre.localeCompare(b.nombre));
 
-    // Identificadores realmente usados
+    // Identificadores realmente usados. Se guardan ejemplos concretos:
+    // sin ver a que clientes visita, no hay forma de saber quien es "WK8".
     for(const {c,campos} of COLS){
       const docs=await leer(c,20);
       docs.forEach(d=>campos.forEach(campo=>{
@@ -156,8 +187,30 @@ let PERSONAS=[], USO={}, BRUTO={}, ASIGNA={}, HUERFANOS=[];
         if(!USO[k]) USO[k]={};
         USO[k][c]=(USO[k][c]||0)+1;
         if(!BRUTO[k]) BRUTO[k]=String(v);
+        if(!PISTAS[k]) PISTAS[k]={cli:{},nom:{},fechas:[],pob:{},eq:{}};
+        const P=PISTAS[k];
+        const cli=d.clienteNombre||d.cliente||d.nombre;
+        if(cli&&String(cli).length>2) P.cli[cli]=(P.cli[cli]||0)+1;
+        // El nombre del comercial suele venir al lado del codigo
+        const nm=d.agenteNombre||d.creadoPorNombre||d.responsable;
+        if(nm) P.nom[nm]=(P.nom[nm]||0)+1;
+        if(d.poblacion) P.pob[d.poblacion]=(P.pob[d.poblacion]||0)+1;
+        if(d.equipo) P.eq[d.equipo]=(P.eq[d.equipo]||0)+1;
+        const f=d.fecha||d.fechaCreacion||d.fechaEnvio;
+        if(f&&P.fechas.length<400) P.fechas.push(String(f).slice(0,10));
       }));
     }
+
+    // Un alias no puede pertenecer a dos personas: al escribir, la segunda
+    // pisaria a la primera y sus documentos cambiarian de dueño en silencio.
+    const cuantos={};
+    PERSONAS.forEach(p=>p.alias.forEach(a=>{
+      (cuantos[a]=cuantos[a]||[]).push(p);
+    }));
+    CONFLICTOS=Object.keys(cuantos)
+      .filter(a=>cuantos[a].length>1 && USO[a])
+      .map(a=>({alias:a, personas:cuantos[a],
+        n:Object.values(USO[a]).reduce((x,y)=>x+y,0)}));
 
     const dueño={};
     PERSONAS.forEach(p=>p.alias.forEach(a=>{ dueño[a]=p.canon; }));
@@ -187,6 +240,25 @@ function pintar(){
     +'</b><span>sin asignar</span></div>'
     +'</div>';
 
+  // 0 · Conflictos: hay que resolverlos antes de escribir nada
+  const sinResolver=CONFLICTOS.filter(c=>!RESUELVE[c.alias]);
+  if(CONFLICTOS.length){
+    h+='<h2 style="color:var(--mal)">⚠️ Alias en disputa ('+CONFLICTOS.length+')</h2>'
+      +'<p class="sub">El mismo código apunta a dos personas. Si se escribe así, '
+      +'una pisa a la otra y sus documentos cambian de dueño sin avisar. '
+      +'Elige de quién es cada uno.</p>';
+    h+=CONFLICTOS.map(c=>'<div class="card '+(RESUELVE[c.alias]?"ok":"mal")+'">'
+      +'<b><code>'+(BRUTO[c.alias]||c.alias)+'</code></b> · '+c.n+' documentos'
+      +'<div class="meta">Lo reclaman: '
+      +c.personas.map(p=>p.nombre+" ("+p.canon+")").join(" · ")+'</div>'
+      +'<div style="margin-top:8px"><select onchange="resolver(\''+c.alias+'\',this.value)">'
+      +'<option value="">— elige el dueño —</option>'
+      +c.personas.map(p=>'<option value="'+p.canon+'"'
+        +(RESUELVE[c.alias]===p.canon?" selected":"")+'>'
+        +p.nombre+' ('+p.canon+')</option>').join("")
+      +'</select></div></div>').join("");
+  }
+
   // 1 · Huérfanos importantes (no PBI): son personas de verdad
   const graves=HUERFANOS.filter(x=>!esSoloPBI(x));
   h+='<h2>1 · Identificadores sin dueño, con datos del CRM</h2>'
@@ -202,7 +274,8 @@ function pintar(){
       +PERSONAS.map(p=>'<option value="'+p.canon+'"'
         +(ASIGNA[x.a]===p.canon?" selected":"")+'>'+p.nombre
         +(p.equipo?" ("+p.equipo+")":"")+'</option>').join("")
-      +'</select></td></tr>').join("")
+      +'</select></td></tr>'
+      +'<tr><td colspan="4" style="padding-top:0">'+pistasDe(x.a)+'</td></tr>').join("")
     +'</tbody></table>';
 
   // 2 · Códigos de PBI
@@ -218,7 +291,8 @@ function pintar(){
       +'<option value="">— sin asignar —</option>'
       +PERSONAS.map(p=>'<option value="'+p.canon+'"'
         +(ASIGNA[x.a]===p.canon?" selected":"")+'>'+p.nombre+'</option>').join("")
-      +'</select></td></tr>').join("")
+      +'</select></td></tr>'
+      +(x.n>3?'<tr><td colspan="3" style="padding-top:0">'+pistasDe(x.a)+'</td></tr>':"")).join("")
     +'</tbody></table>';
 
   // 3 · Lo que se va a escribir
@@ -228,7 +302,9 @@ function pintar(){
   h+='<table><thead><tr><th>Canónico</th><th>Nombre</th><th>Equipo</th>'
     +'<th>Alias que se escriben</th></tr></thead><tbody>'
     +conDatos.map(p=>{
-      const suyos=p.alias.filter(a=>USO[a]);
+      const suyos=p.alias.filter(a=>USO[a]
+        && (!RESUELVE.hasOwnProperty(a) ? true : RESUELVE[a]===p.canon)
+        && !(CONFLICTOS.some(c=>c.alias===a) && RESUELVE[a]!==p.canon));
       const extra=Object.keys(ASIGNA).filter(a=>ASIGNA[a]===p.canon);
       return '<tr><td><code>'+p.canon+'</code></td><td>'+p.nombre+'</td>'
         +'<td>'+(p.equipo||"—")+'</td><td>'
@@ -241,10 +317,17 @@ function pintar(){
 
   document.getElementById("app").innerHTML=h;
   document.getElementById("barra").style.display="flex";
-  document.getElementById("txtBarra").textContent=
-    filasFinal+" alias · "+(HUERFANOS.length-asignados)+" sin asignar";
+  const btn=document.getElementById("btnGuardar");
+  btn.disabled = sinResolver.length>0;
+  document.getElementById("txtBarra").textContent= sinResolver.length
+    ? "⚠️ Resuelve los "+sinResolver.length+" alias en disputa antes de escribir"
+    : filasFinal+" alias · "+(HUERFANOS.length-asignados)+" sin asignar";
 }
 
+window.resolver=(alias,canon)=>{
+  if(canon) RESUELVE[alias]=canon; else delete RESUELVE[alias];
+  pintar();
+};
 window.asignar=(alias,canon)=>{
   if(canon) ASIGNA[alias]=canon; else delete ASIGNA[alias];
   pintar();
@@ -259,7 +342,9 @@ window.guardar=async()=>{
   // Una fila por alias: id del documento = alias normalizado
   const filas=[];
   PERSONAS.forEach(p=>{
-    p.alias.filter(a=>USO[a]).forEach(a=>filas.push({
+    p.alias.filter(a=>USO[a]
+      && !(CONFLICTOS.some(c=>c.alias===a) && RESUELVE[a]!==p.canon))
+      .forEach(a=>filas.push({
       alias:a, original:BRUTO[a]||a, canonico:p.canon,
       nombre:p.nombre, equipo:p.equipo, origen:"auto"}));
   });
