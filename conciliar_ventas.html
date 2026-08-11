@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Conciliar ventas</title>
+<style>
+ :root{--papel:#F2F4F7;--tinta:#14181F;--tenue:#6B7684;--linea:#DCE1E7;
+       --ok:#0E7C5A;--mal:#C2263D;--med:#B07908;--okL:#EDF7F3;--malL:#FEF2F4}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--papel);color:var(--tinta);max-width:820px;
+   margin-inline:auto;padding:20px 14px 50px;
+   font:400 15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+ h1{margin:0 0 3px;font-size:21px;font-weight:800}
+ .sub{margin:0 0 16px;font-size:13px;color:var(--tenue)}
+ h2{font-size:15px;margin:24px 0 8px;padding-bottom:5px;border-bottom:2px solid var(--linea)}
+ .card{background:#fff;border:1px solid var(--linea);border-radius:6px;
+   padding:13px 14px;margin-bottom:9px;font-size:13.5px}
+ .card.mal{border-color:var(--mal);background:var(--malL)}
+ .card.ok{border-color:var(--ok);background:var(--okL)}
+ table{width:100%;border-collapse:collapse;font-size:12.5px;background:#fff;
+   border:1px solid var(--linea);border-radius:6px;overflow:hidden}
+ th{background:#F1F5F9;text-align:left;padding:8px;font-size:10.5px;
+   text-transform:uppercase;color:var(--tenue)}
+ td{padding:7px 8px;border-top:1px solid var(--linea)}
+ .n{text-align:right;font-variant-numeric:tabular-nums;font-weight:700}
+ .dif{color:var(--mal);font-weight:700}
+ code{background:#F1F5F9;padding:1px 6px;border-radius:4px;font-size:12px}
+ label{display:block;font-size:12px;color:var(--tenue);margin:10px 0 4px}
+ select,input{padding:8px 10px;border-radius:6px;border:1px solid var(--linea);
+   font-size:13px;font-family:inherit}
+ button{padding:11px 18px;border-radius:8px;border:none;background:var(--tinta);
+   color:#fff;font-weight:700;font-size:13.5px;cursor:pointer;margin-top:12px}
+ .estado{padding:30px 4px;color:var(--tenue);text-align:center}
+</style></head><body>
+<h1>⚖️ Conciliar ventas</h1>
+<p class="sub">De dónde sale cada cifra y en qué se diferencian.</p>
+
+<label>Mes a conciliar</label>
+<input type="month" id="mes" value="2026-07">
+<button onclick="conciliar()">Conciliar</button>
+<div id="app"></div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const U=(s)=>String(s||"").toUpperCase().trim();
+const num=(v)=>{ const n=Number(String(v==null?0:v).replace(",",".")); return isNaN(n)?0:n; };
+const eur=(n)=>Math.round(n).toLocaleString("es-ES")+" €";
+function val(f){
+  if(!f) return null;
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  return null;
+}
+async function leer(col,max=40){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<max);
+  return t;
+}
+
+window.conciliar=async()=>{
+  const app=document.getElementById("app");
+  const mes=document.getElementById("mes").value;   // 2026-07
+  const [anio,mm]=mes.split("-");
+  app.innerHTML='<p class="estado">Leyendo las tres fuentes…</p>';
+  try{
+    const [est,res,mesCli,ajustes]=await Promise.all([
+      leer("pbi_estacionalidad"), leer("pbi_resumen_agente"),
+      leer("pbi_meses_cliente"), leer("pbi_ajustes").catch(()=>[])
+    ]);
+
+    // 1 · Estacionalidad: la fuente que usa el parte
+    let totalEst=0; const porAgEst={};
+    est.forEach(d=>{
+      // Busca el campo del mes: puede llamarse "2026-07", "m07", "julio"...
+      const claves=Object.keys(d).filter(k=>k.includes(mes)||k===("m"+mm)||k===mm);
+      claves.forEach(k=>{
+        const v=num(d[k]);
+        if(!v) return;
+        totalEst+=v;
+        const ag=U(d.agente||d._id);
+        porAgEst[ag]=(porAgEst[ag]||0)+v;
+      });
+    });
+
+    // 2 · Desglose mensual por cliente
+    let totalMes=0; const porAgMes={};
+    mesCli.forEach(d=>{
+      const claves=Object.keys(d).filter(k=>k.includes(mes)||k===("m"+mm));
+      claves.forEach(k=>{
+        const v=num(d[k]); if(!v) return;
+        totalMes+=v;
+        const ag=U(d.agente||"");
+        if(ag) porAgMes[ag]=(porAgMes[ag]||0)+v;
+      });
+    });
+
+    // 3 · Resumen por comercial (cifra viva, no del mes concreto)
+    let totalRes=0; const porAgRes={};
+    res.filter(d=>d._id!=="_TOTAL").forEach(d=>{
+      const v=num(d.ventasMes);
+      totalRes+=v;
+      porAgRes[U(d._id)]=v;
+    });
+
+    let h='<h2>Totales por fuente · '+mes+'</h2>'
+      +'<table><thead><tr><th>Fuente</th><th>Colección</th><th>Total</th>'
+      +'<th>Fichas</th></tr></thead><tbody>'
+      +'<tr><td>Estacionalidad <small>(la que usa el parte)</small></td>'
+      +'<td><code>pbi_estacionalidad</code></td><td class="n">'+eur(totalEst)+'</td>'
+      +'<td class="n">'+Object.keys(porAgEst).length+'</td></tr>'
+      +'<tr><td>Desglose mensual</td><td><code>pbi_meses_cliente</code></td>'
+      +'<td class="n">'+eur(totalMes)+'</td><td class="n">'+Object.keys(porAgMes).length+'</td></tr>'
+      +'<tr><td>Resumen vivo <small>(mes en curso)</small></td>'
+      +'<td><code>pbi_resumen_agente</code></td><td class="n">'+eur(totalRes)+'</td>'
+      +'<td class="n">'+Object.keys(porAgRes).length+'</td></tr>'
+      +'</tbody></table>';
+
+    const dif=Math.abs(totalEst-totalMes);
+    h+='<div class="card '+(dif<1?"ok":"mal")+'">'
+      +(dif<1
+        ? "Estacionalidad y desglose mensual cuadran."
+        : "<b>Diferencia de "+eur(dif)+"</b> entre estacionalidad y desglose mensual. "
+          +"Una de las dos no está completa.")
+      +'</div>';
+
+    // Comparativa por agente
+    const ags=[...new Set([...Object.keys(porAgEst),...Object.keys(porAgMes)])];
+    h+='<h2>Por comercial</h2>'
+      +'<table><thead><tr><th>Agente</th><th>Estacionalidad</th>'
+      +'<th>Desglose mensual</th><th>Diferencia</th></tr></thead><tbody>'
+      +ags.map(a=>({a,e:porAgEst[a]||0,m:porAgMes[a]||0}))
+        .map(x=>({...x,d:x.e-x.m}))
+        .sort((x,y)=>Math.abs(y.d)-Math.abs(x.d))
+        .map(x=>'<tr><td>'+x.a+'</td><td class="n">'+eur(x.e)+'</td>'
+          +'<td class="n">'+eur(x.m)+'</td>'
+          +'<td class="n '+(Math.abs(x.d)>1?"dif":"")+'">'
+          +(Math.abs(x.d)>1?eur(x.d):"—")+'</td></tr>').join("")
+      +'</tbody></table>';
+
+    if(ajustes.length){
+      h+='<h2>Ajustes manuales aplicados ('+ajustes.length+')</h2>'
+        +'<p class="sub">Correcciones que se suman o restan al dato de PBI. '
+        +'Si Power BI no los conoce, explican la diferencia.</p>'
+        +'<table><thead><tr><th>Ajuste</th><th>Importe</th></tr></thead><tbody>'
+        +ajustes.map(a=>'<tr><td>'+(a._id||"")+' '
+          +(a.motivo||a.concepto||"")+'</td>'
+          +'<td class="n">'+eur(num(a.importe||a.valor))+'</td></tr>').join("")
+        +'</tbody></table>';
+    }
+
+    // Frescura del dato
+    h+='<h2>Cuándo se actualizó cada colección</h2><table><tbody>'
+      +[["pbi_estacionalidad",est],["pbi_meses_cliente",mesCli],
+        ["pbi_resumen_agente",res]].map(([n,arr])=>{
+        const fs=arr.map(d=>d.actualizado).filter(Boolean).sort();
+        return '<tr><td><code>'+n+'</code></td><td class="n">'
+          +(fs.length?new Date(fs[fs.length-1]).toLocaleString("es-ES"):"sin marca")
+          +'</td></tr>';
+      }).join("")+'</tbody></table>';
+
+    app.innerHTML=h;
+  }catch(e){
+    app.innerHTML='<div class="card mal">Error: '+e.message+'</div>';
+  }
+};
+</script></body></html>
