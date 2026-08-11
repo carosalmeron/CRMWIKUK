@@ -1552,7 +1552,7 @@ EVALUATE
   if (req.query.mesescliente === "1") {
     const t1 = Date.now();
     // Sello para saber que version esta corriendo de verdad tras desplegar
-    const out = { ok: true, version: "2026-08-11-empresa" };
+    const out = { ok: true, version: "v3-diagnostico" };
     try {
       const { token } = await getToken(req);
       const anoAnt = new Date().getFullYear() - 1;
