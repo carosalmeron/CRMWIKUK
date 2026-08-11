@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tabla de alias de agentes</title>
+<style>
+ :root{--papel:#F2F4F7;--tinta:#14181F;--tenue:#6B7684;--linea:#DCE1E7;
+       --ok:#0E7C5A;--mal:#C2263D;--med:#B07908;--okL:#EDF7F3;--malL:#FEF2F4;
+       --medL:#FFFBEB;--azul:#2563EB;--azulL:#EFF6FF}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--papel);color:var(--tinta);max-width:900px;
+   margin-inline:auto;padding:20px 14px 90px;
+   font:400 15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+ h1{margin:0 0 3px;font-size:21px;font-weight:800}
+ .sub{margin:0 0 16px;font-size:13px;color:var(--tenue)}
+ h2{font-size:15px;margin:26px 0 8px;padding-bottom:5px;border-bottom:2px solid var(--linea)}
+ .card{background:#fff;border:1px solid var(--linea);border-radius:6px;
+   padding:13px 14px;margin-bottom:9px}
+ .card.mal{border-color:var(--mal);background:var(--malL)}
+ .card.med{border-color:var(--med);background:var(--medL)}
+ .card.ok{border-color:var(--ok);background:var(--okL)}
+ .card.azul{border-color:var(--azul);background:var(--azulL)}
+ code{background:#F1F5F9;padding:1px 6px;border-radius:4px;font-size:12px;
+   font-family:ui-monospace,monospace}
+ .meta{color:var(--tenue);font-size:12px;margin-top:4px}
+ table{width:100%;border-collapse:collapse;font-size:12.5px;background:#fff;
+   border:1px solid var(--linea);border-radius:6px;overflow:hidden}
+ th{background:#F1F5F9;text-align:left;padding:8px;font-size:10.5px;
+   text-transform:uppercase;color:var(--tenue);letter-spacing:.3px}
+ td{padding:7px 8px;border-top:1px solid var(--linea);vertical-align:middle}
+ select,input{padding:5px 8px;border-radius:5px;border:1px solid var(--linea);
+   font-size:12.5px;font-family:inherit;background:#fff;max-width:100%}
+ .chip{display:inline-block;background:#F1F5F9;border-radius:99px;padding:1px 8px;
+   font-size:11px;margin:2px 3px 0 0;font-family:ui-monospace,monospace}
+ .n{font-variant-numeric:tabular-nums;text-align:right;font-weight:700}
+ .estado{padding:34px 4px;color:var(--tenue);text-align:center}
+ .barra{position:fixed;left:0;right:0;bottom:0;background:#fff;
+   border-top:1px solid var(--linea);padding:12px 14px;display:flex;gap:10px;
+   align-items:center;justify-content:space-between;
+   box-shadow:0 -2px 12px #0000000f}
+ .barra .txt{font-size:12.5px;color:var(--tenue)}
+ button.pri{padding:11px 20px;border-radius:8px;border:none;background:var(--tinta);
+   color:#fff;font-size:13.5px;font-weight:700;cursor:pointer}
+ button.pri:disabled{background:#94A3B8;cursor:default}
+ .resumen{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));
+   gap:9px;margin-bottom:18px}
+ .rk{background:#fff;border:1px solid var(--linea);border-radius:6px;
+   padding:12px;text-align:center}
+ .rk b{display:block;font-size:23px;font-weight:800;line-height:1}
+ .rk span{display:block;font-size:11px;color:var(--tenue);margin-top:4px}
+</style></head><body>
+<h1>🔗 Tabla de alias de agentes</h1>
+<p class="sub">Una sola fuente de verdad: cada identificador apunta a una persona.
+  Revisa antes de escribir — no se guarda nada hasta que lo confirmes.</p>
+<div id="app"><p class="estado">Analizando identidades…</p></div>
+<div class="barra" id="barra" style="display:none">
+  <span class="txt" id="txtBarra"></span>
+  <button class="pri" id="btnGuardar" onclick="guardar()">Escribir en Firestore</button>
+</div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const U=(s)=>String(s||"").toUpperCase().trim();
+const NORM=(s)=>U(s).normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^A-Z0-9]/g,"");
+
+// Valores que NO son identificadores de persona aunque aparezcan en el campo:
+// son equipos, roles o marcadores. Meterlos como alias fusiona a gente distinta.
+const NO_ES_PERSONA=new Set(["WIKUK","INTERKEY","FRANCIA","DISTRIBUIDOR",
+  "TOTAL","_TOTAL","CEO","DIR","DIRECTOR","ADMIN","ADM","SINAGENTE","TIENDA",
+  "TELEFONO","CATALUNA","CATALUÑA","INTERCNACIONAL","INTERCINTERN"]);
+
+const COLS=[
+  {c:"visitas",         campos:["agente"]},
+  {c:"muestras",        campos:["agente"]},
+  {c:"ofertas",         campos:["agente","responsableComercial"]},
+  {c:"estrategias",     campos:["agente","creadoPor"]},
+  {c:"oportunidades",   campos:["agente"]},
+  {c:"incidencias",     campos:["agente"]},
+  {c:"proyectos",       campos:["responsableComercial","agente"]},
+  {c:"planes_semanales",campos:["agente"]},
+  {c:"informes",        campos:["agente","agenteId"]},
+  {c:"objetivos_semana",campos:["agente"]},
+  {c:"pbi_pedidos",     campos:["agente","vendedor"]},
+  {c:"pbi_resumen_agente",campos:["_id"]},
+];
+
+function val(f){
+  if(!f) return null;
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  return null;
+}
+async function leer(col,max=40){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<max);
+  return t;
+}
+
+let PERSONAS=[], USO={}, BRUTO={}, ASIGNA={}, HUERFANOS=[];
+
+(async()=>{
+  const app=document.getElementById("app");
+  try{
+    const [us,pu]=await Promise.all([leer("usuarios",5),leer("portal_users",5)]);
+
+    // Alias de una ficha, descartando equipos y roles
+    const aliasDe=(u)=>{
+      const nom=u.nombre||u.username||u.id||u._id;
+      return new Set([u.id,u._id,u.username,u.grupoAgente,u.catalogoVendedor,
+        u.crmId,nom].filter(Boolean).map(NORM)
+        .filter(a=>a && !NO_ES_PERSONA.has(a)));
+    };
+    const fichas=[];
+    const meter=(u,fuente)=>{
+      const rol=String(u.rol||"").toLowerCase();
+      const id=u.id||u._id||u.username; if(!id) return;
+      fichas.push({fuente,rol,id,nom:u.nombre||u.username||id,
+        alias:aliasDe(u),equipo:U(u.equipo||"")});
+    };
+    us.forEach(u=>meter(u,"usuarios"));
+    pu.forEach(u=>meter(u,"portal_users"));
+
+    const grupos=[];
+    fichas.forEach(f=>{
+      const g=grupos.find(p=>[...f.alias].some(a=>p.alias.has(a)));
+      if(g){ f.alias.forEach(a=>g.alias.add(a)); g.items.push(f); }
+      else grupos.push({alias:new Set(f.alias),items:[f]});
+    });
+    PERSONAS=grupos.map(p=>{
+      const enUs=p.items.find(x=>x.fuente==="usuarios");
+      return {
+        canon:(enUs?enUs.id:p.items[0].id),
+        nombre:p.items.map(x=>x.nom).sort((a,b)=>b.length-a.length)[0],
+        equipo:(p.items.find(x=>x.equipo)||{}).equipo||"",
+        alias:[...p.alias]
+      };
+    }).sort((a,b)=>a.nombre.localeCompare(b.nombre));
+
+    // Identificadores realmente usados
+    for(const {c,campos} of COLS){
+      const docs=await leer(c,20);
+      docs.forEach(d=>campos.forEach(campo=>{
+        const v=d[campo]; if(!v) return;
+        const k=NORM(v); if(!k) return;
+        if(!USO[k]) USO[k]={};
+        USO[k][c]=(USO[k][c]||0)+1;
+        if(!BRUTO[k]) BRUTO[k]=String(v);
+      }));
+    }
+
+    const dueño={};
+    PERSONAS.forEach(p=>p.alias.forEach(a=>{ dueño[a]=p.canon; }));
+    HUERFANOS=Object.keys(USO).filter(a=>!dueño[a])
+      .map(a=>({a,n:Object.values(USO[a]).reduce((x,y)=>x+y,0),
+        cols:Object.keys(USO[a])}))
+      .sort((x,y)=>y.n-x.n);
+
+    pintar();
+  }catch(e){
+    app.innerHTML='<div class="card mal">Error: '+e.message+'</div>';
+    console.error(e);
+  }
+})();
+
+function esSoloPBI(h){ return h.cols.every(c=>c.startsWith("pbi_")); }
+
+function pintar(){
+  const conDatos=PERSONAS.filter(p=>p.alias.some(a=>USO[a]));
+  const asignados=Object.values(ASIGNA).filter(Boolean).length;
+  const filasFinal=PERSONAS.reduce((s,p)=>s+p.alias.filter(a=>USO[a]).length,0)+asignados;
+
+  let h='<div class="resumen">'
+    +'<div class="rk"><b>'+conDatos.length+'</b><span>personas con datos</span></div>'
+    +'<div class="rk"><b>'+filasFinal+'</b><span>alias a escribir</span></div>'
+    +'<div class="rk"><b style="color:var(--mal)">'+(HUERFANOS.length-asignados)
+    +'</b><span>sin asignar</span></div>'
+    +'</div>';
+
+  // 1 · Huérfanos importantes (no PBI): son personas de verdad
+  const graves=HUERFANOS.filter(x=>!esSoloPBI(x));
+  h+='<h2>1 · Identificadores sin dueño, con datos del CRM</h2>'
+    +'<p class="sub">Son personas reales que no están en <code>usuarios</code>. '
+    +'Asígnalas a alguien o déjalas sin asignar para crearlas después.</p>';
+  h+='<table><thead><tr><th>Código</th><th>Docs</th><th>Dónde</th>'
+    +'<th>Asignar a</th></tr></thead><tbody>'
+    +graves.map(x=>'<tr><td><code>'+BRUTO[x.a]+'</code></td>'
+      +'<td class="n">'+x.n+'</td>'
+      +'<td class="meta">'+x.cols.join(", ")+'</td>'
+      +'<td><select onchange="asignar(\''+x.a+'\',this.value)">'
+      +'<option value="">— sin asignar —</option>'
+      +PERSONAS.map(p=>'<option value="'+p.canon+'"'
+        +(ASIGNA[x.a]===p.canon?" selected":"")+'>'+p.nombre
+        +(p.equipo?" ("+p.equipo+")":"")+'</option>').join("")
+      +'</select></td></tr>').join("")
+    +'</tbody></table>';
+
+  // 2 · Códigos de PBI
+  const pbi=HUERFANOS.filter(esSoloPBI);
+  h+='<h2>2 · Códigos que solo aparecen en PBI ('+pbi.length+')</h2>'
+    +'<p class="sub">Códigos de vendedor de facturación. Si corresponden a '
+    +'alguien del CRM, asígnalos; si son clientes directos o intercompañía, '
+    +'déjalos sin asignar.</p>'
+    +'<table><thead><tr><th>Código</th><th>Docs</th><th>Asignar a</th></tr></thead><tbody>'
+    +pbi.map(x=>'<tr><td><code>'+BRUTO[x.a]+'</code></td>'
+      +'<td class="n">'+x.n+'</td>'
+      +'<td><select onchange="asignar(\''+x.a+'\',this.value)">'
+      +'<option value="">— sin asignar —</option>'
+      +PERSONAS.map(p=>'<option value="'+p.canon+'"'
+        +(ASIGNA[x.a]===p.canon?" selected":"")+'>'+p.nombre+'</option>').join("")
+      +'</select></td></tr>').join("")
+    +'</tbody></table>';
+
+  // 3 · Lo que se va a escribir
+  h+='<h2>3 · Personas y sus alias</h2>'
+    +'<p class="sub">Esto es lo que quedará en la tabla. Los alias sin datos '
+    +'no se escriben.</p>';
+  h+='<table><thead><tr><th>Canónico</th><th>Nombre</th><th>Equipo</th>'
+    +'<th>Alias que se escriben</th></tr></thead><tbody>'
+    +conDatos.map(p=>{
+      const suyos=p.alias.filter(a=>USO[a]);
+      const extra=Object.keys(ASIGNA).filter(a=>ASIGNA[a]===p.canon);
+      return '<tr><td><code>'+p.canon+'</code></td><td>'+p.nombre+'</td>'
+        +'<td>'+(p.equipo||"—")+'</td><td>'
+        +suyos.map(a=>'<span class="chip">'+BRUTO[a]+'</span>').join("")
+        +extra.map(a=>'<span class="chip" style="background:#DBEAFE;color:#1D4ED8">'
+          +BRUTO[a]+' ←</span>').join("")
+        +'</td></tr>';
+    }).join("")
+    +'</tbody></table>';
+
+  document.getElementById("app").innerHTML=h;
+  document.getElementById("barra").style.display="flex";
+  document.getElementById("txtBarra").textContent=
+    filasFinal+" alias · "+(HUERFANOS.length-asignados)+" sin asignar";
+}
+
+window.asignar=(alias,canon)=>{
+  if(canon) ASIGNA[alias]=canon; else delete ASIGNA[alias];
+  pintar();
+};
+
+window.guardar=async()=>{
+  const btn=document.getElementById("btnGuardar");
+  if(!confirm("Se va a escribir la colección agentes_alias.\n\n"
+    +"No borra nada existente ni toca ninguna otra colección. ¿Seguimos?")) return;
+  btn.disabled=true;
+
+  // Una fila por alias: id del documento = alias normalizado
+  const filas=[];
+  PERSONAS.forEach(p=>{
+    p.alias.filter(a=>USO[a]).forEach(a=>filas.push({
+      alias:a, original:BRUTO[a]||a, canonico:p.canon,
+      nombre:p.nombre, equipo:p.equipo, origen:"auto"}));
+  });
+  Object.entries(ASIGNA).forEach(([a,canon])=>{
+    const p=PERSONAS.find(x=>x.canon===canon);
+    filas.push({alias:a, original:BRUTO[a]||a, canonico:canon,
+      nombre:p?p.nombre:canon, equipo:p?p.equipo:"", origen:"manual"});
+  });
+
+  let ok=0,err=0;
+  for(const f of filas){
+    btn.textContent="Escribiendo… "+(ok+err+1)+"/"+filas.length;
+    try{
+      const fields={};
+      for(const [k,v] of Object.entries(f)) fields[k]={stringValue:String(v||"")};
+      fields.actualizado={stringValue:new Date().toISOString()};
+      const r=await fetch(FB+"/agentes_alias/"+encodeURIComponent(f.alias),{
+        method:"PATCH",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({fields})});
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      ok++;
+    }catch(e){ err++; }
+  }
+  btn.textContent = err ? `Hecho con ${err} errores` : `✓ ${ok} alias escritos`;
+  if(!err) btn.style.background="var(--ok)";
+  else btn.disabled=false;
+};
+</script></body></html>
