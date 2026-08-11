@@ -1553,7 +1553,7 @@ EVALUATE
   // consulta mensual. Prueba varias formas de pedir su venta para ver cual
   // devuelve dato y cual no, sin tener que desplegar en cada intento.
   if (req.query.dax === "1") {
-    const out = { ok: true, version: "dax-3-motivos" };
+    const out = { ok: true, version: "dax-4" };
     try {
       const { token } = await getToken(req);
       const cli = String(req.query.cliente || "").toUpperCase().trim();
@@ -4714,13 +4714,29 @@ EVALUATE
         }
       } catch (e) { /* sin maestro se muestra solo el codigo */ }
 
+      // (fix ago 2026) Este bloque usaba "fichas", declarada en otro ambito:
+      // el endpoint de pedidos caia entero con "fichas is not defined".
+      // Se carga aqui su propio maestro de clientes.
+      const fichasPed = new Map();
+      try {
+        for (const c of await pbiQuery(token, Q.clientes, true)) {
+          const cod = String(pick(c, "CODIGO") || "").trim().toUpperCase();
+          if (!cod || fichasPed.has(cod)) continue;
+          fichasPed.set(cod, {
+            nombre: String(pick(c, "NOMBRE") || "").trim(),
+            poblacion: String(pick(c, "POBLACION") || "").trim(),
+          });
+        }
+      } catch (e) { /* sin maestro se muestra solo el codigo */ }
+
       const filas = await pbiQuery(token, Q.pedidos);
       const crudos = filas.map((r, i) => {
         const cli = String(pick(r, "Cliente") || "").trim();
         const ven = String(pick(r, "Vendedor") || "").trim();
         const fec = String(pick(r, "Fecha") || "").slice(0, 10);
         const art = String(pick(r, "Articulo") || "").trim();
-        const ficha = fichas.get(cli) || fichas.get(canonico(cli)) || {};
+        const ficha = fichasPed.get(cli.toUpperCase())
+          || fichasPed.get(String(canonico(cli)).toUpperCase()) || {};
         return {
           // El identificador no puede depender de la posición de la fila: si
           // Power BI devuelve el resultado en otro orden, la misma línea
