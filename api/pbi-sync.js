@@ -1602,7 +1602,14 @@ ${med.join(",\n")}
       for (const r of filas) {
         let cli = String(pick(r, "CLIENTE") || "").trim().toUpperCase();
         if (!cli) continue;
-        const destino = canon[cli] || canonico(cli);
+        // (fix ago 2026) canonico() recodifica el codigo insertando un digito
+        // (U434434 -> U4344340). Si el resultado no esta en "cuentan", el
+        // cliente se descartaba aunque SU codigo original si contara: 124
+        // clientes y 208.874 EUR fuera del detalle, casi todos de exportacion.
+        // Ahora el codigo que cuenta manda sobre la recodificacion.
+        const recod = canon[cli] || canonico(cli);
+        const destino = cuentan.has(recod) ? recod
+                      : (cuentan.has(cli) ? cli : recod);
         // Solo cuenta lo que la sincronización marcó como contable
         if (!cuentan.has(destino) && !cuentan.has(cli)) continue;
         if (destino !== cli) agrupados++;
