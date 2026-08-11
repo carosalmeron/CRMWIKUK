@@ -1,0 +1,4746 @@
+// ─────────────────────────────────────────────────────────────
+//  /api/pbi-sync.js
+//  Sincroniza Power BI (modelo "Global United Caro") → Firestore
+//
+//  Lo lanza el cron de Vercel cada noche. NO se llama desde el
+//  navegador: las credenciales viven solo en variables de entorno.
+//
+//  Colecciones que escribe:
+//    pbi_ventas_cliente/{CODIGO}   ventas y margen por cliente
+//    pbi_pendiente_servir/{CODIGO} pedidos pendientes de servir
+//    pbi_stock/{REFERENCIA}        stock disponible por referencia
+//    pbi_meta/estado               última sincronización y contadores
+//
+//  Variables de entorno necesarias en Vercel:
+//    PBI_TENANT_ID, PBI_CLIENT_ID, PBI_CLIENT_SECRET
+//    PBI_GROUP_ID       (id del workspace, va en la URL de Power BI)
+//    PBI_DATASET_ID     (id del modelo semántico, también en la URL)
+//    FB_PROJECT_ID      (= grupo-consolidado-crm)
+//    FB_API_KEY         (opcional: solo si se cierran las reglas)
+//    CRON_SECRET        (cadena aleatoria, protege el endpoint)
+// ─────────────────────────────────────────────────────────────
+
+// ══════════════════════════════════════════════════════════════
+//  ZONA A REVISAR: nombres de tablas, columnas y medidas
+//  Ábrelos en Power BI (flecha ">" de cada tabla) y ajusta aquí.
+//  Si un nombre no coincide exactamente, el DAX devuelve error 400.
+// ══════════════════════════════════════════════════════════════
+const M = {
+  // ══ VERIFICADO con ?peek=1 el 27/07/2026 ══
+  // OJO: en esta tabla CODIGO es el ARTICULO, no el cliente.
+  // El cliente es la columna CLIENTE ("DELABORI", "BARBELA"...).
+  ventas:     "'00 Ventas Mercancias Global'",
+  vCliente:   "'00 Ventas Mercancias Global'[CLIENTE]",
+  vVendedor:  "'00 Ventas Mercancias Global'[VENDEDOR]",
+  vEmpresa:   "'00 Ventas Mercancias Global'[EMPRESA]",
+  vFecha:     "'00 Ventas Mercancias Global'[FECHA]",
+  vBase:      "'00 Ventas Mercancias Global'[BASE]",             // importe, numerico
+  vCoste:     "'00 Ventas Mercancias Global'[Costo Referencia]", // coste, numerico
+  // NO usar [Margen]: es texto con coma decimal ("22,4360695652174").
+  // El margen se deriva de BASE - Coste, que da el mismo resultado.
+
+  // Pendiente de servir: solo articulo y unidades, sin importe ni cliente.
+  pendiente:  "'00 Stock Pendiente de Servir Global'",
+  pCodigo:    "'00 Stock Pendiente de Servir Global'[CODIGO]",
+  pUni:       "'00 Stock Pendiente de Servir Global'[UNI]",
+  pEstado:    "'00 Stock Pendiente de Servir Global'[ESTADO]",
+
+  // 00 Stock no tiene columna de cantidad. Pendiente de averiguar
+  // donde vive el stock disponible antes de sincronizarlo.
+  stock:      "'00 Stock'",
+
+  clientes:   "'00 Clientes Global'",
+  cNombre:    "'00 Clientes Global'[NOMBRE]",
+  cPoblacion: "'00 Clientes Global'[POBLACION]",
+  cProvincia: "'00 Clientes Global'[PROVINCIA]",
+  cBloqueado: "'00 Clientes Global'[BLQ]",
+  cCodconta:  "'00 Clientes Global'[CODCONTA]",
+};
+
+const DIAS_HISTORICO = 365;
+
+// Bloques que se sincronizan de verdad. "stock" queda fuera a proposito:
+// la tabla '00 Stock' no tiene columna de cantidad, asi que ahora mismo
+// solo devolveria un recuento de registros (13.666 filas sin valor).
+// Reactivar cuando sistemas indique donde vive el stock disponible.
+const ACTIVOS = ["ventas", "pedidos"];
+
+// Ventas intercompania: traspasos entre empresas del propio grupo, no
+// clientes reales. En los informes de Power BI ya se excluyen con el
+// filtro "GRUPONIVEL1 es No Intercompany". Aqui no se borran (el dato
+// es correcto y puede interesar a direccion), se marcan con el campo
+// "intercompany" para que el CRM decida si los muestra.
+// Ampliable sin tocar codigo con la variable INTERCOMPANY en Vercel,
+// separando patrones por comas.
+const PATRONES_INTERCOMPANY = (env("INTERCOMPANY") || "WIKUK,INTERKEY,UNITED CARO,DISCOB,JBOSCH")
+  .split(",")
+  .map((x) => x.trim().toUpperCase())
+  .filter(Boolean);
+
+const esIntercompany = (nombre) => {
+  const n = String(nombre || "").toUpperCase();
+  return PATRONES_INTERCOMPANY.some((pat) => n.includes(pat));
+};
+const activo = (b) => ACTIVOS.includes(b) || false;
+
+// ─────────────── Lectura defensiva de variables de entorno ───────────────
+// Al copiar IDs de un email o un chat es facil arrastrar tabuladores,
+// espacios o saltos de linea invisibles. Azure y Power BI los rechazan
+// sin explicar por que, asi que se limpian aqui de una vez.
+function env(nombre) {
+  const v = process.env[nombre];
+  return v === undefined ? undefined : String(v).trim();
+}
+const ENV = new Proxy({}, { get: (_, k) => env(k) });
+
+// ─────────────── Consultas DAX ───────────────
+function dax(desde) {
+  // Modo incremental: solo se recalculan los clientes que han tenido
+  // movimiento desde la ultima sincronizacion. El resto conserva en
+  // Firestore los valores del dia anterior, que no han cambiado.
+  //
+  // El filtro va como argumento de SUMMARIZECOLUMNS y no envolviendolo
+  // en CALCULATETABLE, porque DAX no permite SUMMARIZECOLUMNS dentro de
+  // un CALCULATETABLE que modifique el contexto de filtro.
+  const filtroIncremental = desde
+    ? `FILTER(VALUES(${M.vCliente}),
+         CALCULATE(COUNTROWS(${M.ventas}),
+           FILTER(${M.ventas}, ${M.vFecha} >= DATE(${desde.getFullYear()}, ${desde.getMonth() + 1}, ${desde.getDate()}))) > 0),`
+    : "";
+  return {
+    // 1) Ventas, coste y margen por cliente: 12 meses + mes en curso.
+    //    Se intenta primero enriqueciendo con nombre y poblacion desde
+    //    '00 Clientes Global'. Si no existe relacion en el modelo, la
+    //    consulta falla y se reintenta con la version simple (ventasSimple).
+    ventas: `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+  VAR _iniMes = DATE(YEAR(_hoy), MONTH(_hoy), 1)
+  VAR _iniSem = _hoy - WEEKDAY(_hoy, 2) + 1
+  // Mismo dia del ano pasado, para comparar periodos equivalentes
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${M.vCliente},
+    ${M.vVendedor},
+    ${M.vEmpresa},
+    ${filtroIncremental}
+
+    // ── Ano anterior COMPLETO: dato de referencia que se guarda ──
+    "VentaAntFull", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAnt)),
+    "VentaAntFullOk", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAnt &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+    "CosteAntFullOk", CALCULATE(SUM(${M.vCoste}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAnt &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+
+    // ── Ano anterior MISMO PERIODO: base de la comparativa ──
+    "VentaAntYTD", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAnt && ${M.vFecha} <= _corteAnt)),
+    "VentaAntYTDOk", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAnt && ${M.vFecha} <= _corteAnt &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+    "CosteAntYTDOk", CALCULATE(SUM(${M.vCoste}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAnt && ${M.vFecha} <= _corteAnt &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+
+    // ── Ano en curso ──
+    "VentaAct", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAct)),
+    "VentaActOk", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAct &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+    "CosteActOk", CALCULATE(SUM(${M.vCoste}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAct &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+
+    // Margen del mes y del mismo mes del ano pasado, con el mismo filtro de
+    // coste limpio que el anual: sin esto no se puede saber si el margen del
+    // mes mejora o empeora respecto al ano anterior.
+    // Margen de la semana en curso: lo necesita el cierre semanal, que hasta
+    // ahora obligaba al comercial a teclearlo de memoria.
+    "VentaSemOk", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, ${M.vFecha} >= _iniSem && ${M.vFecha} <= _hoy &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+    "CosteSemOk", CALCULATE(SUM(${M.vCoste}),
+      FILTER(${M.ventas}, ${M.vFecha} >= _iniSem && ${M.vFecha} <= _hoy &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+
+    "VentaMesOk", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+    "CosteMesOk", CALCULATE(SUM(${M.vCoste}),
+      FILTER(${M.ventas}, ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+    "VentaMesAntOk", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAnt && MONTH(${M.vFecha}) = MONTH(_hoy)
+        && DAY(${M.vFecha}) <= DAY(_hoy) &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+    "CosteMesAntOk", CALCULATE(SUM(${M.vCoste}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAnt && MONTH(${M.vFecha}) = MONTH(_hoy)
+        && DAY(${M.vFecha}) <= DAY(_hoy) &&
+        NOT ISBLANK(${M.vCoste}) && ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)),
+
+    "VentaMes", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
+    "VentaSem", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniSem && ${M.vFecha} <= _hoy),
+    // Mismo mes y misma semana del ano pasado, para poder comparar cuando
+    // no hay presupuesto cargado. Sin esto el CRM solo puede medir contra
+    // objetivo, y si el objetivo esta a cero no hay referencia ninguna.
+    "VentaMesAnt", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, YEAR(${M.vFecha}) = _anoAnt && MONTH(${M.vFecha}) = MONTH(_hoy)
+        && DAY(${M.vFecha}) <= DAY(_hoy))),
+    "VentaSemAnt", CALCULATE(SUM(${M.vBase}),
+      FILTER(${M.ventas}, ${M.vFecha} >= _iniSem - 364 && ${M.vFecha} <= _corteAnt)),
+    "UltimaVenta", CALCULATE(MAX(${M.vFecha}))
+  )
+  ORDER BY [VentaAct] DESC`,
+
+    // Pedidos con entrega planificada de hoy en adelante. Es lo que un
+    // comercial necesita ver: cuando le va a salir cada pedido.
+    // Solo futuro: la tabla conserva entregas desde 2017 sin purgar.
+    pedidos: `
+DEFINE
+  VAR _hoy = TODAY()
+EVALUATE
+  SELECTCOLUMNS(
+    FILTER('00 Pedidos Validados Global',
+      '00 Pedidos Validados Global'[FECHAPLANIFICADA] >= _hoy),
+    "Cliente",  '00 Pedidos Validados Global'[CLIENTE],
+    "Vendedor", '00 Pedidos Validados Global'[VENDEDOR],
+    "Fecha",    '00 Pedidos Validados Global'[FECHAPLANIFICADA],
+    "Articulo", '00 Pedidos Validados Global'[CODIGO],
+    "Familia",  '00 Pedidos Validados Global'[FAMILIA],
+    "Uni",      '00 Pedidos Validados Global'[UNI],
+    "Precio",   '00 Pedidos Validados Global'[PRECIO],
+    "Subfamilia",'00 Pedidos Validados Global'[SUBFAMILIA],
+    "Importe",  '00 Pedidos Validados Global'[BASE],
+    "Pedido",   '00 Pedidos Validados Global'[NumPedido]
+  )`,
+
+    // Dimension de clientes en consulta SEPARADA.
+    // Antes iba dentro del SUMMARIZECOLUMNS de ventas, pero la tabla
+    // tiene codigos repetidos (una fila por sociedad) y eso multiplicaba
+    // las filas de resultado. Aqui se trae una vez y se cruza en JS.
+    clientes: `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${M.clientes}[CODIGO],
+    ${M.cNombre},
+    ${M.cPoblacion},
+    ${M.cProvincia},
+    ${M.cBloqueado},
+    ${M.cCodconta}
+  )`,
+
+    // Entrada de pedidos por vendedor, por FECHA de pedido (no de entrega).
+    // Mide el trabajo comercial de la semana, que es lo que el vendedor
+    // controla: la factura llega semanas despues.
+    entrada: `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _iniSem = _hoy - WEEKDAY(_hoy, 2) + 1
+  VAR _iniMes = DATE(YEAR(_hoy), MONTH(_hoy), 1)
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
+EVALUATE
+  SUMMARIZECOLUMNS(
+    '00 Entrada Pedidos Global'[VENDEDOR],
+    "Sem", CALCULATE(SUM('00 Entrada Pedidos Global'[BASE]),
+      '00 Entrada Pedidos Global'[FECHA] >= _iniSem &&
+      '00 Entrada Pedidos Global'[FECHA] <= _hoy),
+    "Mes", CALCULATE(SUM('00 Entrada Pedidos Global'[BASE]),
+      '00 Entrada Pedidos Global'[FECHA] >= _iniMes &&
+      '00 Entrada Pedidos Global'[FECHA] <= _hoy),
+    "Ano", CALCULATE(SUM('00 Entrada Pedidos Global'[BASE]),
+      FILTER('00 Entrada Pedidos Global',
+        YEAR('00 Entrada Pedidos Global'[FECHA]) = _anoAct)),
+    "SemAnt", CALCULATE(SUM('00 Entrada Pedidos Global'[BASE]),
+      '00 Entrada Pedidos Global'[FECHA] >= _iniSem - 364 &&
+      '00 Entrada Pedidos Global'[FECHA] <= _corteAnt),
+    "AnoAnt", CALCULATE(SUM('00 Entrada Pedidos Global'[BASE]),
+      FILTER('00 Entrada Pedidos Global',
+        YEAR('00 Entrada Pedidos Global'[FECHA]) = _anoAnt &&
+        '00 Entrada Pedidos Global'[FECHA] <= _corteAnt))
+  )`,
+
+    // Maestro de articulos: descripcion, metros y calibre. La tabla de
+    // pedidos solo trae el codigo, asi que sin esto el comercial ve
+    // "ESP60.10" en vez de saber que producto va a salir.
+    articulos: `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    '00 Plu Global'[CODIGO],
+    '00 Plu Global'[DESCRIPCION],
+    '00 Plu Global'[METROS],
+    '00 Plu Global'[CALIBRE],
+    '00 Plu Global'[CALIDAD],
+    '00 Plu Global'[PRODUCTOPADRE]
+  )`,
+
+    // Tabla Agentes: traduce el codigo de vendedor del ERP al comercial
+    // (GRUPOAGENTE) y marca la intercompania (GRUPONIVEL1). Es la misma
+    // logica que usa el Panel Principal, asi que las cifras cuadran.
+    agentes: `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    'Agentes'[CODIGO],
+    'Agentes'[GRUPOAGENTE],
+    'Agentes'[GRUPONIVEL1],
+    'Agentes'[GRUPONIVEL2],
+    'Agentes'[GRUPONIVEL3],
+    'Agentes'[GRUPONIVEL4],
+    'Agentes'[MB]
+  )`,
+
+    // Variante de respaldo: sin datos de la tabla de clientes.
+    ventasSimple: `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _desde = _hoy - ${DIAS_HISTORICO}
+  VAR _iniMes = DATE(YEAR(_hoy), MONTH(_hoy), 1)
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${M.vCliente},
+    ${M.vVendedor},
+    ${M.vEmpresa},
+    "VentasAno", CALCULATE(SUM(${M.vBase}),  ${M.vFecha} >= _desde  && ${M.vFecha} <= _hoy),
+    "CosteAno",  CALCULATE(SUM(${M.vCoste}), ${M.vFecha} >= _desde  && ${M.vFecha} <= _hoy),
+    "VentasMes", CALCULATE(SUM(${M.vBase}),  ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
+    "CosteMes",  CALCULATE(SUM(${M.vCoste}), ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
+    "UltimaVenta", CALCULATE(MAX(${M.vFecha}))
+  )
+  ORDER BY [VentasAno] DESC`,
+
+    // 2) Pendiente de servir: por ARTICULO y unidades.
+    //    Esta tabla no tiene cliente ni importe.
+    pendiente: `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${M.pCodigo},
+    ${M.pEstado},
+    "Unidades", SUM(${M.pUni}),
+    "Lineas",   COUNTROWS(${M.pendiente})
+  )`,
+
+    // 3) Stock: DESACTIVADO. La tabla '00 Stock' no tiene columna de
+    //    cantidad (solo CODIGO, ALMACEN, FECHA, Empresa), asi que de
+    //    momento solo se cuentan registros por articulo y almacen.
+    stock: `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    '00 Stock'[CODIGO],
+    '00 Stock'[ALMACEN],
+    "Registros", COUNTROWS('00 Stock')
+  )`,
+  };
+}
+
+// ─────────────── Power BI: token OAuth2 ───────────────
+//
+//  Soporta dos modos, elegidos automáticamente:
+//
+//  A) SECRETO      → si existe PBI_CLIENT_SECRET.
+//                    Simple, pero caduca y hay que rotarlo a mano.
+//
+//  B) OIDC (federado) → si no hay secreto y Vercel emite token OIDC.
+//                    No hay credencial que guardar ni que caduque.
+//                    Requiere activar en Vercel: Project Settings →
+//                    Security → "Secure backend access with OIDC
+//                    federation", en modo Team, y dar de alta una
+//                    credencial federada en Entra (ver README).
+//
+function oidcToken(req) {
+  // Vercel inyecta el token como cabecera en cada invocación de la función,
+  // y como variable de entorno en build. No requiere paquete adicional.
+  return req.headers["x-vercel-oidc-token"] || process.env.VERCEL_OIDC_TOKEN || null;
+}
+
+async function getToken(req) {
+  const url = `https://login.microsoftonline.com/${ENV.PBI_TENANT_ID}/oauth2/v2.0/token`;
+  const base = {
+    client_id: ENV.PBI_CLIENT_ID,
+    scope: "https://analysis.windows.net/powerbi/api/.default",
+  };
+
+  let body, modo;
+  if (ENV.PBI_USER && ENV.PBI_PASS) {
+    // MODO USUARIO (ROPC). Se autentica como persona, no como aplicacion.
+    // Necesario porque los service principals no pueden consultar modelos
+    // con RLS. Al usuario, si es Miembro/Admin del workspace, el RLS no
+    // se le aplica y ve el total.
+    //
+    // AVISO: flujo deprecado por Microsoft. No funciona si la cuenta
+    // tiene MFA, acceso condicional, ADFS o inicio sin contrasena.
+    modo = "usuario";
+    body = new URLSearchParams({
+      ...base,
+      grant_type: "password",
+      username: ENV.PBI_USER,
+      password: ENV.PBI_PASS,
+      ...(ENV.PBI_CLIENT_SECRET ? { client_secret: ENV.PBI_CLIENT_SECRET } : {}),
+    });
+  } else if (ENV.PBI_CLIENT_SECRET) {
+    modo = "secreto";
+    body = new URLSearchParams({
+      ...base,
+      grant_type: "client_credentials",
+      client_secret: ENV.PBI_CLIENT_SECRET,
+    });
+  } else {
+    const assertion = oidcToken(req);
+    if (!assertion) {
+      throw new Error(
+        "Sin PBI_CLIENT_SECRET y sin token OIDC. Activa OIDC federation " +
+        "en Vercel (Settings → Security) o define el secreto."
+      );
+    }
+    modo = "oidc";
+    body = new URLSearchParams({
+      ...base,
+      grant_type: "client_credentials",
+      client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+      client_assertion: assertion,
+    });
+  }
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  const j = await r.json();
+  if (!r.ok) {
+    throw new Error(`Token Azure AD (modo ${modo}): ${j.error_description || j.error || r.status}`);
+  }
+  return { token: j.access_token, modo };
+}
+
+// ─────────────── Power BI: executeQueries ───────────────
+// Límites de la API: 100.000 filas y 15 MB por consulta.
+// Por eso siempre se agrega en DAX, nunca se piden filas crudas.
+async function pbiQuery(token, query, incluirNulos = false) {
+  const url =
+    `https://api.powerbi.com/v1.0/myorg/groups/${ENV.PBI_GROUP_ID}` +
+    `/datasets/${ENV.PBI_DATASET_ID}/executeQueries`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      queries: [{ query }],
+      // Con includeNulls a false, las columnas vacias en una fila
+      // desaparecen del JSON y parece que no existen en el modelo.
+      // Para inspeccionar esquema hay que pedirlas todas.
+      serializerSettings: { includeNulls: incluirNulos },
+    }),
+  });
+
+  const bruto = await r.text();
+  let j = null;
+  try { j = JSON.parse(bruto); } catch { /* respuesta no JSON */ }
+
+  if (!r.ok) {
+    // Power BI devuelve el motivo real en cabeceras propias, no en el cuerpo.
+    // Sin esto solo se ve "401" y es imposible saber si falta un permiso,
+    // si el tenant lo bloquea o si el modelo tiene RLS.
+    const pistas = {
+      status: r.status,
+      errorInfo: r.headers.get("x-powerbi-error-info"),
+      wwwAuth: r.headers.get("www-authenticate"),
+      requestId: r.headers.get("requestid") || r.headers.get("x-ms-request-id"),
+      codigo: j?.error?.code || j?.error?.["pbi.error"]?.code,
+      detalle: j?.error?.["pbi.error"]?.details?.[0]?.detail?.value || j?.error?.message,
+      // El motivo real (nombre de columna mal, medida inexistente...) suele
+      // venir mas abajo, en un detalle anidado que es facil pasar por alto.
+      detalleDax: JSON.stringify(j?.error?.["pbi.error"]?.details || j?.error?.details || "")
+        .slice(0, 600) || undefined,
+      cuerpo: j ? undefined : bruto.slice(0, 300),
+    };
+    const e = new Error(
+      Object.entries(pistas)
+        .filter(([, v]) => v !== null && v !== undefined)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(" | ")
+    );
+    e.pistas = pistas;
+    throw e;
+  }
+  return j.results[0].tables[0].rows || [];
+}
+
+// Power BI devuelve las claves como "Tabla[Columna]" o "[Alias]".
+// Este helper busca por el nombre final sin importar el prefijo.
+function pick(row, name) {
+  const k = Object.keys(row).find((x) => x.endsWith(`[${name}]`) || x === name);
+  return k === undefined ? null : row[k];
+}
+const num = (v) => (v === null || v === undefined || isNaN(v) ? 0 : Math.round(Number(v) * 100) / 100);
+
+// ─────────────── Firestore: escritura por lotes ───────────────
+function toFields(obj) {
+  const f = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === null || v === undefined) continue;
+    if (typeof v === "number") f[k] = { doubleValue: v };
+    else if (typeof v === "boolean") f[k] = { booleanValue: v };
+    else f[k] = { stringValue: String(v) };
+  }
+  return f;
+}
+
+async function fbCommit(coleccion, docs) {
+  const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+  // El CRM accede a Firestore sin clave (reglas abiertas). Si algún día se
+  // cierran las reglas, basta con definir FB_API_KEY en Vercel.
+  const q = ENV.FB_API_KEY ? `?key=${ENV.FB_API_KEY}` : "";
+  const url = `https://firestore.googleapis.com/v1/${base}:commit${q}`;
+  let escritos = 0;
+
+  // El endpoint :commit admite máximo 500 escrituras por llamada
+  for (let i = 0; i < docs.length; i += 400) {
+    const lote = docs.slice(i, i + 400).map((d) => ({
+      update: {
+        name: `${base}/${coleccion}/${d._id}`,
+        fields: toFields({ ...d, _id: undefined }),
+      },
+      // sin updateMask = reemplaza el documento entero (lo que queremos:
+      // así un cliente que deja de tener ventas se queda a 0, no obsoleto)
+    }));
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ writes: lote }),
+    });
+    if (!r.ok) throw new Error(`Firestore ${coleccion}: ${(await r.text()).slice(0, 200)}`);
+    escritos += lote.length;
+  }
+  return escritos;
+}
+
+// Lee la coleccion "clientes" del CRM para saber que comercial tiene
+// asignado cada cliente. Es la unica fuente fiable: el codigo de vendedor
+// que trae Power BI ("1201", "6668") no se corresponde con los agentes
+// del CRM (AZARCO, CARLOSG...).
+async function fbLeerClientes() {
+  const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+  const key = ENV.FB_API_KEY ? `&key=${ENV.FB_API_KEY}` : "";
+  const mapa = new Map();
+  let pageToken = null, vueltas = 0;
+
+  do {
+    const url = `https://firestore.googleapis.com/v1/${base}/clientes` +
+                `?pageSize=300${pageToken ? `&pageToken=${pageToken}` : ""}${key}`;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`leer clientes: HTTP ${r.status}`);
+    const j = await r.json();
+    for (const d of j.documents || []) {
+      const f = d.fields || {};
+      const val = (k) => f[k]?.stringValue ?? f[k]?.integerValue ?? null;
+      const codigo = val("CODIGO") || val("codigo") || d.name.split("/").pop();
+      const agente = val("GRUPOAGENTE") || val("grupoAgente") || val("agente");
+      const conta = val("CODCONTA") || val("codconta");
+      if (!agente) continue;
+      if (codigo) {
+        const cod = String(codigo).trim();
+        mapa.set(cod, String(agente).trim());
+        // El CRM guarda los codigos antiguos; Power BI ya usa los nuevos.
+        const can = canonico(cod);
+        if (can !== cod && !mapa.has(can)) mapa.set(can, String(agente).trim());
+      }
+      // Segundo indice por codigo contable: en 2026 se recodificaron
+      // clientes (serie U4... -> C0...) y el codigo nuevo no esta en el
+      // CRM, pero el contable no cambia.
+      if (conta) mapa.set("CC:" + String(conta).trim(), String(agente).trim());
+    }
+    pageToken = j.nextPageToken || null;
+    vueltas++;
+  } while (pageToken && vueltas < 60);
+
+  return mapa;
+}
+
+// Lee todos los documentos de una coleccion. Se usa para recalcular el
+// resumen por comercial: las lecturas son mucho mas baratas que las
+// escrituras, asi que compensa releer y escribir solo los ~55 agregados.
+async function fbLeerDocumento(coleccion, id) {
+  const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+  const key = ENV.FB_API_KEY ? `?key=${ENV.FB_API_KEY}` : "";
+  const r = await fetch(`https://firestore.googleapis.com/v1/${base}/${coleccion}/${id}${key}`);
+  if (!r.ok) return null;
+  const j = await r.json();
+  const o = {};
+  for (const [k, v] of Object.entries(j.fields || {})) {
+    o[k] = v.stringValue ?? v.doubleValue ?? v.integerValue ?? v.booleanValue ?? null;
+  }
+  return o;
+}
+
+// Semana ISO 8601: la semana 1 es la que contiene el primer jueves del año.
+function isoSemana(fecha) {
+  const d = new Date(Date.UTC(fecha.getFullYear(), fecha.getMonth(), fecha.getDate()));
+  d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
+  const ini = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const n = Math.ceil(((d - ini) / 86400000 + 1) / 7);
+  return `${d.getUTCFullYear()}-W${String(n).padStart(2, "0")}`;
+}
+
+async function fbLeerDoc(coleccion, id) {
+  const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+  const key = ENV.FB_API_KEY ? `?key=${ENV.FB_API_KEY}` : "";
+  const r = await fetch(`https://firestore.googleapis.com/v1/${base}/${coleccion}/`
+    + `${encodeURIComponent(id)}${key}`);
+  if (!r.ok) return null;
+  const j = await r.json();
+  const o = { _id: id };
+  for (const [k, v] of Object.entries(j.fields || {})) {
+    o[k] = v.doubleValue ?? v.integerValue ?? v.stringValue ?? v.booleanValue ?? null;
+    if (v.integerValue !== undefined) o[k] = Number(o[k]);
+    if (v.doubleValue !== undefined) o[k] = Number(v.doubleValue);
+  }
+  return o;
+}
+
+async function fbLeerColeccion(coleccion) {
+  const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+  const key = ENV.FB_API_KEY ? `&key=${ENV.FB_API_KEY}` : "";
+  const docs = [];
+  let pageToken = null, vueltas = 0;
+  do {
+    const url = `https://firestore.googleapis.com/v1/${base}/${coleccion}` +
+                `?pageSize=300${pageToken ? `&pageToken=${pageToken}` : ""}${key}`;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`leer ${coleccion}: HTTP ${r.status}`);
+    const j = await r.json();
+    for (const d of j.documents || []) {
+      const o = { _id: d.name.split("/").pop() };
+      for (const [k, v] of Object.entries(d.fields || {})) {
+        o[k] = v.doubleValue ?? v.integerValue ?? v.stringValue ??
+               v.booleanValue ?? null;
+        if (o[k] !== null && v.integerValue !== undefined) o[k] = Number(o[k]);
+        if (v.doubleValue !== undefined) o[k] = Number(v.doubleValue);
+      }
+      docs.push(o);
+    }
+    pageToken = j.nextPageToken || null;
+    vueltas++;
+  } while (pageToken && vueltas < 60);
+  return docs;
+}
+
+// Recodificacion de 2026: los codigos U43+4digitos pasaron a U43+0+esos
+// 4 digitos. Verificado cruzando nombres (U433509 -> U4303509 WIKUK EASY,
+// U434210 -> U4304210 LORIENTE PIQUERAS, U431880 -> U4301880 MANACOR).
+// El historico de ventas y el CRM conservan el codigo viejo.
+// La regla se puede sobrescribir desde Firestore (pbi_config/reglas):
+//   recodPrefijo="U43", recodDigitos=4, recodInserta="0"
+// Lo de aqui es solo el valor por defecto verificado en julio de 2026.
+let RECOD = { prefijo: "U43", digitos: 4, inserta: "0" };
+
+// ── Ramas comerciales ──────────────────────────────────────────────
+// Se calculan aqui una sola vez y se escriben en pbi_resumen_agente, para
+// que el CRM y las paginas de analisis no tengan que repetir la regla.
+// Editable en Firestore: pbi_config/ramas
+// ── Equivalencias de artículos ─────────────────────────────────────
+// Al cambiar la codificación, un artículo vendido el año pasado como US45.70
+// hoy se factura como IR18.7N. Sin traducir, el análisis muestra el antiguo
+// perdiendo el 100% y el nuevo creciendo desde cero: dos falsos movimientos
+// por cada artículo recodificado. Se lee de pbi_config/equiv_articulos.
+let EQUIV_ART = null;
+
+async function cargarEquivArticulos() {
+  if (EQUIV_ART) return EQUIV_ART;
+  EQUIV_ART = {};
+  try {
+    const d = await fbLeerDocumento("pbi_config", "equiv_articulos");
+    if (d && d.mapa) {
+      const obj = JSON.parse(d.mapa);
+      for (const [a, b] of Object.entries(obj)) {
+        EQUIV_ART[String(a).toUpperCase().trim()] = String(b).toUpperCase().trim();
+      }
+    }
+  } catch (e) { /* sin tabla se usan los codigos tal cual */ }
+  return EQUIV_ART;
+}
+
+const codArt = (c) => {
+  const x = String(c || "").toUpperCase().trim();
+  return (EQUIV_ART && EQUIV_ART[x]) || x;
+};
+
+let RAMAS = {
+  // valor de Agentes[GRUPONIVEL4] normalizado -> rama final
+  WIKUK: "WIKUK",
+  INTERKEY: "INTERKEY",
+  PORTUGAL: "INTERKEY",     // Portugal se integro en Interkey
+  FRANCIA: "FRANCIA",
+  DISTRIBUIDOR: "DISTRIBUIDOR",
+  // sin GRUPONIVEL4 son los comerciales de Discob
+  "": "FRANCIA",
+  // Agentes[GRUPONIVEL3] = Distribuidor manda sobre la division comercial
+  _porTipo: { DISTRIBUIDOR: "DISTRIBUIDOR" },
+};
+
+const sinTildes = (v) => String(v || "").toUpperCase().trim()
+  .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+function ramaDe(equipo, tipo) {
+  const t = sinTildes(tipo);
+  if (RAMAS._porTipo && RAMAS._porTipo[t]) return RAMAS._porTipo[t];
+  const e = sinTildes(equipo);
+  if (RAMAS[e]) return RAMAS[e];
+  // "Interkey Julio" y similares
+  for (const k of Object.keys(RAMAS)) {
+    if (k && k !== "_porTipo" && e.startsWith(k)) return RAMAS[k];
+  }
+  return e || RAMAS[""] || null;
+}
+
+function canonico(cod) {
+  const c = String(cod || "").trim().toUpperCase();
+  if (!RECOD.prefijo) return c;
+  const re = new RegExp(`^${RECOD.prefijo}(\\d{${RECOD.digitos}})$`);
+  const m = re.exec(c);
+  return m ? RECOD.prefijo + RECOD.inserta + m[1] : c;
+}
+
+// Lee la configuracion editable. Si no existe, se sigue con los valores
+// por defecto: la sincronizacion nunca debe caerse por esto.
+async function cargarReglas() {
+  try {
+    const cfg = await fbLeerDocumento("pbi_config", "reglas");
+    if (!cfg) return false;
+    if (cfg.recodPrefijo !== undefined) RECOD.prefijo = String(cfg.recodPrefijo || "");
+    if (cfg.recodDigitos) RECOD.digitos = Number(cfg.recodDigitos) || 4;
+    if (cfg.recodInserta !== undefined) RECOD.inserta = String(cfg.recodInserta || "");
+
+    // Ramas: campos rama_WIKUK="WIKUK", rama_PORTUGAL="INTERKEY", etc.
+    const ramas = {};
+    for (const [k, v] of Object.entries(cfg)) {
+      if (k.startsWith("rama_") && v) ramas[k.slice(5).toUpperCase()] = String(v);
+      if (k.startsWith("tipo_") && v) {
+        RAMAS._porTipo = RAMAS._porTipo || {};
+        RAMAS._porTipo[k.slice(5).toUpperCase()] = String(v);
+      }
+    }
+    if (Object.keys(ramas).length) Object.assign(RAMAS, ramas);
+    if (cfg.ramaSinEquipo) RAMAS[""] = String(cfg.ramaSinEquipo);
+    return true;
+  } catch (e) { return false; }
+}
+
+// Normaliza el nombre comercial para poder emparejar el mismo cliente
+// dado de alta con codigos distintos en varias sociedades del grupo.
+// Quita acentos, formas juridicas y puntuacion.
+function normNombre(n) {
+  return String(n || "")
+    .toUpperCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")   // acentos
+    .replace(/[.,'"`&\-\/]/g, " ")
+    .replace(/\b(S\s?L\s?U|S\s?L|S\s?A\s?U|S\s?A|SLNE|SCP|SCCL|CB|SC|LDA|GMBH|SRL|CO\s?KG|E\s?I)\b/g, " ")
+    .replace(/\bE\s+HIJOS\b|\bY\s+HIJOS\b|\bHNOS\b|\bHERMANOS\b/g, " HNOS ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Borra documentos por id. Firestore admite hasta 500 operaciones por
+// llamada, asi que se trocea igual que en la escritura.
+async function fbBorrar(coleccion, ids) {
+  if (!ids || !ids.length) return 0;
+  const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+  const q = ENV.FB_API_KEY ? `?key=${ENV.FB_API_KEY}` : "";
+  const url = `https://firestore.googleapis.com/v1/${base}:commit${q}`;
+  let borrados = 0;
+  for (let i = 0; i < ids.length; i += 400) {
+    const lote = ids.slice(i, i + 400).map((id) => ({
+      delete: `${base}/${coleccion}/${id}`,
+    }));
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ writes: lote }),
+    });
+    if (!r.ok) throw new Error(`borrar ${coleccion}: HTTP ${r.status}`);
+    borrados += lote.length;
+  }
+  return borrados;
+}
+
+// Limpia el código para usarlo como id de documento
+const docId = (v) => String(v || "").trim().replace(/[/#?\[\]*]/g, "_") || "SIN_CODIGO";
+
+// ─────────────── Handler ───────────────
+export default async function handler(req, res) {
+  // Consulta de solo lectura que llama la pantalla de análisis desde el
+  // navegador. Va antes del control de acceso porque no se puede poner el
+  // secreto en el código del cliente sin exponerlo. No escribe nada.
+  // ?articulosCliente=CODIGO → los artículos donde ese cliente ha caído más
+  // respecto al año anterior. Se consulta a demanda, no se guarda: 6.597
+  // clientes por cinco artículos serían 33.000 documentos en Firestore.
+  if (req.query.articulosCliente) {
+    const cli = String(req.query.articulosCliente).trim().toUpperCase()
+      .replace(/[^A-Z0-9._-]/g, "");
+    const n = Math.min(parseInt(req.query.top, 10) || 5, 30);
+    const out = { ok: true, cliente: cli, top: n };
+    try {
+      // Los artículos de un cliente solo cambian cuando corre la
+      // sincronización. Se guarda la consulta junto al sello de la última, y
+      // mientras coincidan se devuelve lo guardado sin tocar Power BI.
+      let sello = null;
+      try {
+        const m = await fbLeerDocumento("pbi_meta", "estado");
+        sello = m && m.ultimaSync ? String(m.ultimaSync) : null;
+      } catch (e) { /* sin sello se consulta siempre */ }
+
+      // La clave lleva versión: al cambiar el formato de la respuesta, las
+      // consultas guardadas con el formato viejo dejan de servirse solas y
+      // no hay que acordarse de purgar.
+      const idCache = docId(`${cli}_${n}_v2`);
+      if (sello && req.query.recargar !== "1") {
+        try {
+          const g = await fbLeerDocumento("pbi_articulos_cliente", idCache);
+          if (g && g.basadoEn === sello && g.datos) {
+            out.articulos = JSON.parse(g.datos);
+            out.suben = g.suben ? JSON.parse(g.suben) : [];
+            out.deCache = true;
+            out.basadoEn = sello;
+            out.codigosConsultados = g.codigos ? JSON.parse(g.codigos) : undefined;
+            return res.status(200).json(out);
+          }
+        } catch (e) { /* si falla la lectura se consulta Power BI */ }
+      }
+
+      await cargarEquivArticulos();
+      const { token } = await getToken(req);
+      const T = M.ventas;
+      const Q = dax(null);   // se necesita el maestro de articulos
+
+      // El historico de ventas conserva el codigo antiguo del cliente, asi que
+      // hay que consultar tambien su variante: U4309094 hoy era U439094 antes
+      // de la recodificacion de marzo. Sin esto el ano anterior sale a cero.
+      const variantes = new Set([cli]);
+      const m = /^U430(\d{4})$/.exec(cli);
+      if (m) variantes.add("U43" + m[1]);
+      const canon = canonico(cli);
+      if (canon !== cli) variantes.add(canon);
+      const enLista = [...variantes].map((c) => `"${c}"`).join(", ");
+      out.codigosConsultados = [...variantes];
+
+      // Los filtros van como condiciones simples de columna, no con FILTER
+      // sobre toda la tabla: FILTER sustituye el contexto y devolvia el total
+      // del cliente en todas las filas en vez del importe de cada articulo.
+      const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+  VAR _iniAct = DATE(_anoAct, 1, 1)
+  VAR _iniAnt = DATE(_anoAnt, 1, 1)
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
+EVALUATE
+  TOPN(${Math.min(n * 10, 80)},
+    FILTER(
+      ADDCOLUMNS(
+        CALCULATETABLE(VALUES(${T}[CODIGO]), ${T}[CLIENTE] IN {${enLista}}),
+        "Act", CALCULATE(SUM(${M.vBase}),
+          ${T}[CLIENTE] IN {${enLista}},
+          ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy),
+        "Ant", CALCULATE(SUM(${M.vBase}),
+          ${T}[CLIENTE] IN {${enLista}},
+          ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt),
+        "UniAct", CALCULATE(SUM(${T}[UNI]),
+          ${T}[CLIENTE] IN {${enLista}},
+          ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy)
+      ),
+      [Ant] <> 0 || [Act] <> 0
+    ),
+    [Ant] - [Act], DESC)`, true);
+
+      // Descripción del maestro de artículos
+      const arts = new Map();
+      try {
+        for (const a of await pbiQuery(token, Q.articulos, true)) {
+          const cod = String(pick(a, "CODIGO") || "").trim();
+          if (cod && !arts.has(cod)) arts.set(cod, {
+            descripcion: pick(a, "DESCRIPCION"),
+            calibre: pick(a, "CALIBRE"),
+            metros: pick(a, "METROS"),
+          });
+        }
+      } catch (e) { out.errorMaestro = e.message.slice(0, 160); }
+      out.articulosEnMaestro = arts.size;
+
+      // TOPN recorta por caida pero no garantiza el orden de salida: se
+      // reordena aqui para que el que mas cae salga primero.
+      // Se agrupa por el codigo actual: la venta del codigo antiguo se suma a
+      // la del nuevo, y el falso -100% desaparece. Por eso se piden mas filas
+      // a Power BI de las que se devuelven: el recorte va despues de traducir.
+      // El sufijo tras el ultimo punto es el envase (.C140, .BG). Sin
+      // agrupar, MX248.8-8R2 aparecia cayendo 26.558 € y MX248.8-8R2.C140
+      // subiendo 10.540: el mismo articulo partido en dos lineas, y ninguna
+      // de las dos decia lo que pasa de verdad. Solo se agrupa si el codigo
+      // base existe en el maestro y la descripcion coincide.
+      const RE_ENVASE = /\.[A-Z0-9]+$/i;
+      const desc = (c) => String((arts.get(c) || {}).descripcion || "")
+        .toUpperCase().replace(/\s*\.[A-Z0-9]+$/, "").replace(/\s+/g, " ").trim();
+      // Las descripciones de un mismo articulo difieren en la cola
+      // ("...T2550" y "...R2550"), asi que exigir que una empiece por la otra
+      // no agrupaba nada. Se compara el tronco: los primeros 16 caracteres
+      // utiles, que ya identifican producto y formato.
+      const tronco = (d) => d.replace(/[^A-Z0-9]/g, "").slice(0, 16);
+      const parecidas = (a, b) => {
+        if (!a || !b) return false;
+        const t1 = tronco(a), t2 = tronco(b);
+        return t1.length >= 12 && t1 === t2;
+      };
+      let porEnvase = 0;
+      const conEnvase = (cod) => {
+        const f = arts.get(cod);
+        const p = f && f.padre;
+        if (p && p !== cod) return p;
+        const base = cod.replace(RE_ENVASE, "");
+        if (base !== cod && arts.has(base) && parecidas(desc(base), desc(cod))) {
+          porEnvase++; return base;
+        }
+        return cod;
+      };
+
+      const porCodigo = new Map();
+      let traducidos = 0;
+      for (const r of filas) {
+        const original = String(pick(r, "CODIGO") || "").trim().toUpperCase();
+        if (!original) continue;
+        // Primero el codigo actual, despues su envase padre
+        const actual = codArt(original);
+        const cod = conEnvase(actual);
+        if (actual !== original) traducidos++;
+
+        const g = porCodigo.get(cod) || {
+          articulo: cod, ventasAct: 0, ventasAnt: 0, unidades: 0, codigosOrigen: [],
+        };
+        g.ventasAct += num(pick(r, "Act"));
+        g.ventasAnt += num(pick(r, "Ant"));
+        g.unidades  += num(pick(r, "UniAct"));
+        if (!g.codigosOrigen.includes(original)) g.codigosOrigen.push(original);
+        porCodigo.set(cod, g);
+      }
+      out.codigosTraducidos = traducidos;
+      out.agrupadosPorEnvase = porEnvase;
+
+      out.articulos = [...porCodigo.values()].map((g) => {
+        // La descripcion se busca por el codigo actual y, si no esta en el
+        // maestro, por cualquiera de los antiguos que lo alimentan.
+        let f = arts.get(g.articulo);
+        if (!f) for (const o of g.codigosOrigen) { if (arts.get(o)) { f = arts.get(o); break; } }
+        f = f || {};
+        const act = num(g.ventasAct);
+        const ant = num(g.ventasAnt);
+        return {
+          articulo: g.articulo,
+          descripcion: f.descripcion || null,
+          calibre: f.calibre || null,
+          metros: f.metros || null,
+          ventasAct: act,
+          ventasAnt: ant,
+          diferencia: num(act - ant),
+          variacionPct: ant ? num((100 * (act - ant)) / ant) : null,
+          unidades: num(g.unidades),
+          // Solo se informa si hubo recodificacion, para poder auditarlo
+          codigoAntiguo: g.codigosOrigen.filter((o) => o !== g.articulo).join(", ") || undefined,
+        };
+      });
+
+      const utiles = out.articulos
+        .filter((a) => a.ventasAct !== 0 || a.ventasAnt !== 0)
+        .sort((a, b) => a.diferencia - b.diferencia);
+
+      // También los que crecen: sin esto solo se ve la mitad de la historia
+      // y no se puede saber si lo perdido se ha compensado con otra cosa.
+      out.articulos = utiles.filter((a) => a.diferencia < 0).slice(0, n);
+      out.suben = utiles.filter((a) => a.diferencia > 0)
+        .sort((a, b) => b.diferencia - a.diferencia).slice(0, n);
+      out.balance = {
+        pierde: num(out.articulos.reduce((x, a) => x + a.diferencia, 0)),
+        gana: num(out.suben.reduce((x, a) => x + a.diferencia, 0)),
+      };
+      out.deCache = false;
+      out.basadoEn = sello;
+
+      // Se guarda para las siguientes consultas del mismo cliente, salvo
+      // que venga vacía: ver el motivo en la vista de grupo.
+      if (sello && out.articulos.length) {
+        try {
+          await fbCommit("pbi_articulos_cliente", [{
+            _id: idCache,
+            cliente: cli,
+            basadoEn: sello,
+            datos: JSON.stringify(out.articulos),
+            suben: JSON.stringify(out.suben || []),
+            codigos: JSON.stringify(out.codigosConsultados || []),
+            guardadoEl: new Date().toISOString(),
+          }]);
+        } catch (e) { out.avisoCache = e.message.slice(0, 120); }
+      }
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
+  // ?limpiarArticulos=1 → borra las consultas de artículos guardadas, para que
+  // se recalculen con la tabla de equivalencias actual. Alternativa rápida a
+  // relanzar la sincronización completa, que también las invalida al cambiar
+  // el sello pero tarda casi un minuto.
+  if (req.query.limpiarArticulos === "1") {
+    const out = { ok: true };
+    try {
+      const guardadas = await fbLeerColeccion("pbi_articulos_cliente");
+      out.encontradas = guardadas.length;
+      const ids = guardadas.map((d) => d._id);
+      if (ids.length) {
+        for (let i = 0; i < ids.length; i += 400) {
+          await fbBorrar("pbi_articulos_cliente", ids.slice(i, i + 400));
+        }
+      }
+      out.borradas = ids.length;
+      out.nota = "Las próximas consultas volverán a Power BI y aplicarán las equivalencias.";
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
+  // ?articulosGrupo=1 → artículos con más caída en todo el grupo, o de un
+  // comercial si se pasa &agente=. Hasta ahora solo se podía llegar al
+  // artículo entrando por un cliente concreto.
+  if (req.query.articulosGrupo === "1") {
+    // Se admite uno o varios comerciales (para filtrar por rama). Llegan
+    // como GRUPOAGENTE ("CARLOSG"), no como código de vendedor del ERP.
+    const pedidos = String(req.query.agentes || req.query.agente || "")
+      .split(",").map((x) => x.trim().toUpperCase().replace(/[^A-Z0-9._-]/g, ""))
+      .filter(Boolean);
+    const ag = pedidos.join(",");
+    const n = Math.min(parseInt(req.query.top, 10) || 20, 60);
+    // &orden=suben para ver los que crecen: la caída de unos artículos solo
+    // se interpreta bien sabiendo hacia dónde se ha movido la venta.
+    const suben = req.query.orden === "suben";
+    const out = { ok: true, agente: ag || "todos", top: n,
+      orden: suben ? "los que más suben" : "los que más caen" };
+    try {
+      let sello = null;
+      try {
+        const m = await fbLeerDocumento("pbi_meta", "estado");
+        sello = m && m.ultimaSync ? String(m.ultimaSync) : null;
+      } catch (e) {}
+
+      const idCache = docId(`grupo_${ag || "TODOS"}_${n}_${suben ? "up" : "down"}_v2`
+        + (req.query.sinAgrupar === "1" ? "_sinagrupar" : ""));
+      if (sello && req.query.recargar !== "1") {
+        try {
+          const g = await fbLeerDocumento("pbi_articulos_cliente", idCache);
+          if (g && g.basadoEn === sello && g.datos) {
+            out.articulos = JSON.parse(g.datos);
+            out.deCache = true;
+            return res.status(200).json(out);
+          }
+        } catch (e) {}
+      }
+
+      await cargarEquivArticulos();
+      const { token } = await getToken(req);
+      const T = M.ventas;
+      const Q = dax(null);
+
+      // La tabla de ventas guarda el código de vendedor del ERP, no el
+      // nombre del comercial: hay que traducirlo o el filtro no encuentra
+      // nada. Un comercial puede tener varios códigos.
+      let codigosVend = [];
+      if (pedidos.length) {
+        try {
+          for (const a of await pbiQuery(token, Q.agentes, true)) {
+            const grupo = String(pick(a, "GRUPOAGENTE") || "").trim().toUpperCase();
+            if (grupo && pedidos.includes(grupo)) {
+              const c = String(pick(a, "CODIGO") || "").trim();
+              if (c) codigosVend.push(c);
+            }
+          }
+        } catch (e) { out.avisoAgentes = e.message.slice(0, 120); }
+        out.codigosVendedor = codigosVend;
+        if (!codigosVend.length) {
+          out.articulos = [];
+          out.aviso = `No se han encontrado códigos de vendedor para ${ag}`;
+          return res.status(200).json(out);
+        }
+      }
+      const enVend = codigosVend.map((c) => `"${c}"`).join(", ");
+      const filtroAg = codigosVend.length ? `${T}[VENDEDOR] IN {${enVend}}, ` : "";
+
+      const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+  VAR _iniAct = DATE(_anoAct, 1, 1)
+  VAR _iniAnt = DATE(_anoAnt, 1, 1)
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
+EVALUATE
+  FILTER(
+    ADDCOLUMNS(
+      ${codigosVend.length
+        ? `CALCULATETABLE(VALUES(${T}[CODIGO]), ${T}[VENDEDOR] IN {${enVend}},
+             ${M.vFecha} >= _iniAnt)`
+        : `CALCULATETABLE(VALUES(${T}[CODIGO]), ${M.vFecha} >= _iniAnt)`},
+      "Act", CALCULATE(SUM(${M.vBase}), ${filtroAg}
+        ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy),
+      "Ant", CALCULATE(SUM(${M.vBase}), ${filtroAg}
+        ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt),
+      "Clientes", CALCULATE(DISTINCTCOUNT(${T}[CLIENTE]), ${filtroAg}
+        ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy)
+    ),
+    ABS([Act]) > 2000 || ABS([Ant]) > 2000
+  )`, true);
+      // Sin TOPN: si se recorta en Power BI, un código antiguo puede entrar y
+      // su equivalente nuevo quedarse fuera, con lo que la suma de los dos
+      // años sale a medias. Se traen todos los que se mueven algo y el
+      // recorte se hace aquí, ya con los códigos unificados.
+
+      out.filasDevueltas = filas.length;
+
+      const arts = new Map();
+      try {
+        for (const a of await pbiQuery(token, Q.articulos, true)) {
+          // En mayúsculas los dos: el maestro tiene el mismo código escrito
+          // de varias formas ("1094 Bis" y "1094 BIS") y sin normalizar se
+          // toman por padre e hijo cuando son el mismo artículo.
+          const cod = String(pick(a, "CODIGO") || "").trim().toUpperCase();
+          if (cod && !arts.has(cod)) arts.set(cod, {
+            descripcion: pick(a, "DESCRIPCION"),
+            calibre: pick(a, "CALIBRE"), metros: pick(a, "METROS"),
+            padre: String(pick(a, "PRODUCTOPADRE") || "").trim().toUpperCase() || null,
+          });
+        }
+      } catch (e) { out.errorMaestro = e.message.slice(0, 140); }
+
+      // Los códigos con sufijo (.C140, .BG) son hijos del mismo producto: si
+      // van por separado, la venta de un artículo aparece partida en varias
+      // líneas y ninguna refleja lo que pasa de verdad.
+      // Diagnóstico: cuántos artículos declaran un padre distinto de sí
+      // mismos. Si sale cero, el campo no está informado y agrupar por él
+      // no puede funcionar.
+      let conPadre = 0, ejemplosPadre = [];
+      for (const [cod, f] of arts) {
+        if (f.padre && f.padre !== cod) {
+          conPadre++;
+          if (ejemplosPadre.length < 6) ejemplosPadre.push(`${cod} → ${f.padre}`);
+        }
+      }
+      out.articulosConPadre = conPadre;
+      out.totalMaestro = arts.size;
+      out.ejemplosPadre = ejemplosPadre;
+
+      const agrupado = req.query.sinAgrupar === "1" ? false : true;
+      // El sufijo tras el último punto es el envase (.BG, .C140, .N32...) y
+      // el maestro no informa el producto padre en esos casos. Se agrupa por
+      // el código base, pero solo si ese código existe de verdad Y tiene la
+      // misma descripción: sin esa segunda condición se juntarían artículos
+      // que solo comparten el principio del código.
+      const RE_ENVASE = /\.[A-Z0-9]+$/i;
+      // El ERP a veces repite el envase en la descripción ("... A .BG"), así
+      // que no basta con exigir textos idénticos: se compara si uno empieza
+      // por el otro, con un mínimo de longitud para que no valga cualquiera.
+      const desc = (c) => String((arts.get(c) || {}).descripcion || "")
+        .toUpperCase().replace(/\s*\.[A-Z0-9]+$/, "").replace(/\s+/g, " ").trim();
+      const parecidas = (a, b) => {
+        if (!a || !b) return false;
+        const [c1, c2] = a.length <= b.length ? [a, b] : [b, a];
+        return c1.length >= 12 && c2.startsWith(c1);
+      };
+
+      let porEnvase = 0;
+      const padreDe = (cod) => {
+        if (!agrupado) return cod;
+        const f = arts.get(cod);
+        const p = f && f.padre;
+        if (p && p !== cod) return p;
+        const base = cod.replace(RE_ENVASE, "");
+        if (base !== cod && arts.has(base) && parecidas(desc(base), desc(cod))) {
+          porEnvase++;
+          return base;
+        }
+        return cod;
+      };
+
+      // Se agrupa por el código actual, igual que en la vista por cliente
+      const porCodigo = new Map();
+      for (const r of filas) {
+        const original = String(pick(r, "CODIGO") || "").trim().toUpperCase();
+        if (!original) continue;
+        // Primero se traduce el código antiguo al actual, y después se sube
+        // al producto padre: las dos cosas, en ese orden.
+        const actual = codArt(original);
+        const cod = padreDe(actual);
+        const g = porCodigo.get(cod)
+          || { articulo: cod, ventasAct: 0, ventasAnt: 0, clientes: 0,
+               origen: [], hijos: [] };
+        if (cod !== actual && !g.hijos.includes(actual)) g.hijos.push(actual);
+        g.ventasAct += num(pick(r, "Act"));
+        g.ventasAnt += num(pick(r, "Ant"));
+        g.clientes = Math.max(g.clientes, num(pick(r, "Clientes")));
+        if (!g.origen.includes(original)) g.origen.push(original);
+        porCodigo.set(cod, g);
+      }
+
+      out.agrupadosPorEnvase = porEnvase;
+
+      out.articulos = [...porCodigo.values()].map((g) => {
+        let f = arts.get(g.articulo);
+        if (!f) for (const o of g.origen) { if (arts.get(o)) { f = arts.get(o); break; } }
+        f = f || {};
+        return {
+          articulo: g.articulo,
+          descripcion: f.descripcion || null,
+          calibre: f.calibre || null,
+          ventasAct: num(g.ventasAct),
+          ventasAnt: num(g.ventasAnt),
+          diferencia: num(g.ventasAct - g.ventasAnt),
+          variacionPct: g.ventasAnt ? num((100 * (g.ventasAct - g.ventasAnt)) / g.ventasAnt) : null,
+          clientes: g.clientes,
+          codigoAntiguo: g.origen.filter((o) => o !== g.articulo
+            && !g.hijos.includes(o)).join(", ") || undefined,
+          variantes: g.hijos.length ? g.hijos.join(", ") : undefined,
+        };
+      }).sort((a, b) => suben ? b.diferencia - a.diferencia
+                              : a.diferencia - b.diferencia).slice(0, n);
+
+      // Para poder contrastar: cuánto suman las subidas frente a las bajadas
+      out.sumaMostrada = num(out.articulos.reduce((x, a) => x + a.diferencia, 0));
+
+      // No se guarda una lista vacía: si la consulta falla o el filtro no
+      // resuelve, ese vacío quedaría servido hasta la siguiente
+      // sincronización y parecería un dato ("ningún artículo cae").
+      if (sello && out.articulos.length) {
+        try {
+          await fbCommit("pbi_articulos_cliente", [{
+            _id: idCache, cliente: `_GRUPO_${ag || "TODOS"}`, basadoEn: sello,
+            datos: JSON.stringify(out.articulos),
+            guardadoEl: new Date().toISOString(),
+          }]);
+        } catch (e) {}
+      }
+      out.deCache = false;
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
+  // ?progresionCliente=CODIGO → venta mes a mes de este año y del anterior.
+  // Los totales dicen cuánto cae un cliente; esto dice cuándo empezó.
+  if (req.query.progresionCliente) {
+    const cli = String(req.query.progresionCliente).trim().toUpperCase()
+      .replace(/[^A-Z0-9._-]/g, "");
+    const out = { ok: true, cliente: cli, consulta: "v2-filtro-delante" };
+    try {
+      const { token } = await getToken(req);
+      const T = M.ventas;
+
+      // Igual que en la vista de artículos: hay que incluir el código
+      // antiguo o el año pasado sale a cero.
+      const variantes = new Set([cli]);
+      const m = /^U430(\d{4})$/.exec(cli);
+      if (m) variantes.add("U43" + m[1]);
+      const canon = canonico(cli);
+      if (canon !== cli) variantes.add(canon);
+      const enLista = [...variantes].map((c) => `"${c}"`).join(", ");
+      out.codigosConsultados = [...variantes];
+
+      // El filtro va como argumento de tabla, antes de los pares de
+      // nombre y expresión: al ponerlo al final, DAX lo interpreta como
+      // el nombre de una columna más y rechaza la consulta.
+      const mes = (i) => `    "M${i}", CALCULATE(SUM(${M.vBase}), `
+        + `FILTER(${T}, MONTH(${M.vFecha}) = ${i}))`;
+
+      const filas = await pbiQuery(token, `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${T}[ANO],
+    FILTER(${T}, ${T}[CLIENTE] IN {${enLista}}),
+${[...Array(12)].map((_, i) => mes(i + 1)).join(",\n")}
+  )`, true);
+
+      const anoAct = new Date().getFullYear();
+      const meses = { [anoAct]: Array(12).fill(0), [anoAct - 1]: Array(12).fill(0) };
+      for (const r of filas) {
+        const ano = Number(pick(r, "ANO"));
+        if (!meses[ano]) continue;
+        for (let i = 1; i <= 12; i++) meses[ano][i - 1] = num(pick(r, `M${i}`));
+      }
+
+      const NOMBRES = ["ene","feb","mar","abr","may","jun",
+                       "jul","ago","sep","oct","nov","dic"];
+      const mesActual = new Date().getMonth();   // 0-11
+      out.anoActual = anoAct;
+      out.anoAnterior = anoAct - 1;
+      out.meses = NOMBRES.map((nombre, i) => {
+        const act = meses[anoAct][i];
+        const ant = meses[anoAct - 1][i];
+        return {
+          mes: nombre, numero: i + 1,
+          actual: act, anterior: ant,
+          diferencia: num(act - ant),
+          variacionPct: ant ? num((100 * (act - ant)) / ant) : null,
+          // El mes en curso está incompleto: no se puede comparar igual
+          enCurso: i === mesActual,
+          futuro: i > mesActual,
+        };
+      });
+      out.totalActual = num(meses[anoAct].reduce((a, b) => a + b, 0));
+      out.totalAnterior = num(meses[anoAct - 1].reduce((a, b) => a + b, 0));
+
+      // Desde qué mes cae de forma sostenida: útil para saber si el problema
+      // viene de una decisión concreta o es una erosión lenta.
+      // Solo se avisa si la caída sigue viva: si el último mes cerrado ha
+      // recuperado, la racha terminó y decir "cae desde abril" engaña.
+      let desde = null;
+      const ultimo = out.meses[mesActual - 1];
+      if (ultimo && ultimo.anterior > 0 && ultimo.actual < ultimo.anterior * 0.7) {
+        for (let i = mesActual - 1; i >= 0; i--) {
+          const m2 = out.meses[i];
+          if (m2.anterior > 0 && m2.actual < m2.anterior * 0.7) desde = m2.mes;
+          else break;
+        }
+      }
+      out.caeDesde = desde;
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
+  // ?clientesArticulo=CODIGO → qué clientes han dejado de comprar ese
+  // artículo, de mayor a menor pérdida. Es el paso que faltaba: sabemos qué
+  // producto cae, pero no a quién hay que llamar.
+  if (req.query.clientesArticulo) {
+    const cod = String(req.query.clientesArticulo).trim().toUpperCase()
+      .replace(/[^A-Z0-9._\-]/g, "");
+    const n = Math.min(parseInt(req.query.top, 10) || 20, 60);
+    const out = { ok: true, articulo: cod, top: n };
+    try {
+      await cargarEquivArticulos();
+      const { token } = await getToken(req);
+      const T = M.ventas;
+      const Q = dax(null);
+
+      // Un artículo agrupa varios códigos: el suyo, los antiguos que se
+      // tradujeron a él y sus variantes de formato. Hay que consultarlos
+      // todos o la comparativa sale coja.
+      const familia = new Set([cod]);
+      for (const [viejo, nuevo] of Object.entries(EQUIV_ART || {})) {
+        if (nuevo === cod) familia.add(viejo);
+      }
+      try {
+        const RE_ENVASE = /\.[A-Z0-9]+$/i;
+        const descs = new Map();
+        const filasArt = await pbiQuery(token, Q.articulos, true);
+        for (const a of filasArt) {
+          const c = String(pick(a, "CODIGO") || "").trim().toUpperCase();
+          if (c && !descs.has(c)) descs.set(c,
+            String(pick(a, "DESCRIPCION") || "").toUpperCase()
+              .replace(/\s*\.[A-Z0-9]+$/, "").replace(/\s+/g, " ").trim());
+        }
+        for (const a of filasArt) {
+          const c = String(pick(a, "CODIGO") || "").trim().toUpperCase();
+          if (!c) continue;
+          const padre = String(pick(a, "PRODUCTOPADRE") || "").trim().toUpperCase();
+          const base = c.replace(RE_ENVASE, "");
+          const d1 = descs.get(base) || "", d2 = descs.get(c) || "";
+          const [k1, k2] = d1.length <= d2.length ? [d1, d2] : [d2, d1];
+          const mismoTexto = k1.length >= 12 && k2.startsWith(k1);
+          if (padre === cod || (base === cod && base !== c && mismoTexto)) familia.add(c);
+          // También los códigos antiguos de las variantes
+          if (familia.has(codArt(c))) familia.add(c);
+        }
+      } catch (e) { out.avisoMaestro = e.message.slice(0, 120); }
+
+      out.codigosIncluidos = [...familia];
+      const enLista = [...familia].map((c) => `"${c}"`).join(", ");
+
+      const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+  VAR _iniAct = DATE(_anoAct, 1, 1)
+  VAR _iniAnt = DATE(_anoAnt, 1, 1)
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
+EVALUATE
+  FILTER(
+    ADDCOLUMNS(
+      CALCULATETABLE(VALUES(${T}[CLIENTE]), ${T}[CODIGO] IN {${enLista}}),
+      "Act", CALCULATE(SUM(${M.vBase}), ${T}[CODIGO] IN {${enLista}},
+        ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy),
+      "Ant", CALCULATE(SUM(${M.vBase}), ${T}[CODIGO] IN {${enLista}},
+        ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt),
+      "Vendedor", CALCULATE(MAX(${T}[VENDEDOR]), ${T}[CODIGO] IN {${enLista}})
+    ),
+    [Act] <> 0 || [Ant] <> 0
+  )`, true);
+
+      // Nombre del cliente y comercial que lo lleva
+      const fichas = new Map();
+      try {
+        for (const c of await pbiQuery(token, Q.clientes)) {
+          const k = String(pick(c, "CODIGO") || "").trim();
+          if (k && !fichas.has(k)) fichas.set(k, {
+            nombre: pick(c, "NOMBRE"), poblacion: pick(c, "POBLACION"),
+          });
+        }
+      } catch (e) {}
+      const agentes = new Map();
+      try {
+        for (const a of await pbiQuery(token, Q.agentes, true)) {
+          const k = String(pick(a, "CODIGO") || "").trim();
+          if (k) agentes.set(k, String(pick(a, "GRUPOAGENTE") || "").trim() || null);
+        }
+      } catch (e) {}
+
+      // El mismo cliente puede aparecer con su código viejo y el nuevo
+      const porCli = new Map();
+      for (const r of filas) {
+        const original = String(pick(r, "CLIENTE") || "").trim();
+        if (!original) continue;
+        const k = canonico(original);
+        const g = porCli.get(k) || { cliente: k, act: 0, ant: 0, ven: null, codigos: [] };
+        g.act += num(pick(r, "Act"));
+        g.ant += num(pick(r, "Ant"));
+        g.ven = g.ven || String(pick(r, "Vendedor") || "").trim() || null;
+        if (!g.codigos.includes(original)) g.codigos.push(original);
+        porCli.set(k, g);
+      }
+
+      out.clientes = [...porCli.values()].map((g) => {
+        const f = fichas.get(g.cliente) || fichas.get(g.codigos[0]) || {};
+        return {
+          cliente: g.cliente,
+          nombre: f.nombre || g.cliente,
+          poblacion: f.poblacion || null,
+          agente: agentes.get(g.ven) || null,
+          ventasAct: num(g.act),
+          ventasAnt: num(g.ant),
+          diferencia: num(g.act - g.ant),
+          variacionPct: g.ant ? num((100 * (g.act - g.ant)) / g.ant) : null,
+        };
+      }).sort((a, b) => a.diferencia - b.diferencia).slice(0, n);
+
+      out.totalClientes = porCli.size;
+      out.sumaCaidas = num(out.clientes.filter((c) => c.diferencia < 0)
+        .reduce((x, c) => x + c.diferencia, 0));
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
+  // ?equivalencias=1 → busca códigos recodificados que falten en la tabla.
+  // Si un artículo se dejó de vender y otro con la misma descripción empezó a
+  // venderse por un importe parecido, casi seguro que son el mismo producto.
+  if (req.query.equivalencias === "1") {
+    const out = { ok: true };
+    try {
+      await cargarEquivArticulos();
+      const { token } = await getToken(req);
+      const T = M.ventas;
+      const Q = dax(null);
+
+      const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+  VAR _iniAct = DATE(_anoAct, 1, 1)
+  VAR _iniAnt = DATE(_anoAnt, 1, 1)
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
+EVALUATE
+  FILTER(
+    ADDCOLUMNS(
+      CALCULATETABLE(VALUES(${T}[CODIGO]), ${M.vFecha} >= _iniAnt),
+      "Act", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy),
+      "Ant", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt)
+    ),
+    ABS([Act] - [Ant]) > 15000)`, true);
+
+      const arts = new Map();
+      for (const a of await pbiQuery(token, Q.articulos, true)) {
+        const cod = String(pick(a, "CODIGO") || "").trim().toUpperCase();
+        if (cod && !arts.has(cod)) arts.set(cod, String(pick(a, "DESCRIPCION") || "").trim());
+      }
+
+      const norma = (d) => String(d || "").toUpperCase()
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^A-Z0-9]/g, "");
+
+      const caen = [], suben = [];
+      for (const r of filas) {
+        const cod = String(pick(r, "CODIGO") || "").trim().toUpperCase();
+        if (EQUIV_ART[cod]) continue;           // ya está en la tabla
+        const act = num(pick(r, "Act")), ant = num(pick(r, "Ant"));
+        const dif = num(act - ant);
+        const item = { codigo: cod, descripcion: arts.get(cod) || null,
+          clave: norma(arts.get(cod)), ventasAct: act, ventasAnt: ant, diferencia: dif };
+        if (dif < 0 && act <= Math.abs(ant) * 0.15) caen.push(item);
+        else if (dif > 0 && ant <= act * 0.15) suben.push(item);
+      }
+
+      // Se empareja cada caída con la subida de misma descripción e importe
+      // más parecido. Es una propuesta, no una certeza: hay que revisarla.
+      const usados = new Set();
+      const props = [];
+      for (const c of caen.sort((a, b) => a.diferencia - b.diferencia)) {
+        if (!c.clave) continue;
+        const cands = suben.filter((x) => x.clave === c.clave && !usados.has(x.codigo));
+        if (!cands.length) continue;
+        cands.sort((a, b) =>
+          Math.abs(a.diferencia + c.diferencia) - Math.abs(b.diferencia + c.diferencia));
+        const m = cands[0];
+        usados.add(m.codigo);
+        const encaje = Math.abs(c.diferencia) > 0
+          ? Math.round(100 * Math.min(m.diferencia, -c.diferencia) / -c.diferencia) : 0;
+        props.push({
+          antiguo: c.codigo, nuevo: m.codigo,
+          descripcion: c.descripcion,
+          dejoDeVender: num(-c.diferencia),
+          empezoAVender: num(m.diferencia),
+          encajePct: encaje,
+          fiabilidad: encaje >= 70 ? "alta" : encaje >= 40 ? "media" : "baja",
+        });
+      }
+
+      out.analizados = filas.length;
+      out.caenSinPareja = caen.length - props.length;
+      out.propuestas = props.sort((a, b) => b.dejoDeVender - a.dejoDeVender);
+      out.nota = "Revisa antes de aplicar: la coincidencia es por descripción "
+        + "e importe, no por dato del ERP.";
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
+  // Solo el cron de Vercel (o tú con el secreto) puede lanzarlo
+  const auth = req.headers.authorization || "";
+  const secreto = req.query.secret || auth.replace("Bearer ", "");
+  if (ENV.CRON_SECRET && secreto !== ENV.CRON_SECRET) {
+    return res.status(401).json({ error: "no autorizado" });
+  }
+
+  // ?mesescliente=1 → venta mes a mes de CADA cliente, los dos años. Sin esto
+  // el detalle por cliente solo puede ser anual, y al mirar un mes concreto no
+  // habia forma de saber que clientes estaban detras. Se guarda comprimido en
+  // pocos documentos: 6.500 clientes por 24 cifras serian 6.500 escrituras.
+  if (req.query.mesescliente === "1") {
+    const t1 = Date.now();
+    // Sello para saber que version esta corriendo de verdad tras desplegar
+    const out = { ok: true, version: "2026-08-11-empresa" };
+    try {
+      const { token } = await getToken(req);
+      const anoAnt = new Date().getFullYear() - 1;
+      const anoAct = anoAnt + 1;
+
+      const med = [];
+      for (let m = 1; m <= 12; m++) {
+        med.push(`    "m${m}", CALCULATE(SUM(${M.vBase}),\n`
+          + `      FILTER(${M.ventas}, YEAR(${M.vFecha}) = ${anoAnt} && MONTH(${M.vFecha}) = ${m}))`);
+        med.push(`    "a${m}", CALCULATE(SUM(${M.vBase}),\n`
+          + `      FILTER(${M.ventas}, YEAR(${M.vFecha}) = ${anoAct} && MONTH(${M.vFecha}) = ${m}))`);
+      }
+      // (fix ago 2026) Agrupar SOLO por cliente dejaba fuera a los que facturan
+      // en varias empresas del grupo (exportacion, sobre todo): 124 clientes y
+      // 208.874 EUR que si estan en ?ventas=1, que agrupa por cliente, vendedor
+      // y empresa. Se replica ese agrupamiento y se suma despues por cliente,
+      // asi las dos consultas ven exactamente el mismo universo.
+      const filas = await pbiQuery(token, `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${M.vCliente},
+    ${M.vEmpresa},
+${med.join(",\n")}
+  )`);
+      out.filasDevueltas = filas.length;
+      // Si al agrupar por empresa las filas no aumentan, es que cada cliente
+      // factura en una sola: entonces la causa del descuadre es otra.
+      {
+        const porCli = {};
+        for (const r of filas) {
+          const c = String(pick(r, "CLIENTE") || "").toUpperCase();
+          porCli[c] = (porCli[c] || 0) + 1;
+        }
+        out.clientesDistintos = Object.keys(porCli).length;
+        out.clientesEnVariasEmpresas =
+          Object.values(porCli).filter((n) => n > 1).length;
+      }
+
+
+      // Solo intercompany. Los codigos fusionados NO se excluyen: el codigo
+      // viejo es el que guarda la venta de 2025, y quitarlo hacia que el nuevo
+      // apareciera naciendo de cero y el viejo muriendo. Se agrupan despues.
+      // Solo los clientes que el nivel de comercial cuenta: si aqui entran
+      // ventas sin agente asignado, la suma por cliente no cuadra con el
+      // titular del mes y el desglose no sirve para explicarlo.
+      // Se lee la decisión que ya tomó la sincronización: cuenta y agenteFinal.
+      const canon = {}, cuentan = new Set(), agenteDe = {};
+      let viejos = 0;
+      for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
+        const id = String(c._id).toUpperCase();
+        if (c.cuenta === undefined) viejos++;          // aún sin el campo
+        if (c.fusionadoEn) canon[id] = String(c.fusionadoEn).toUpperCase();
+        // Compatibilidad mientras no se haya relanzado la sincronización
+        const ok = c.cuenta !== undefined ? c.cuenta : (!c.intercompany && !c.fusionadoEn);
+        if (ok) cuentan.add(id);
+        if (c.agenteFinal || c.agente) agenteDe[id] = c.agenteFinal || c.agente;
+      }
+      out.sinCampoCuenta = viejos;
+      out.clientesQueCuentan = cuentan.size;
+      out.codigosFusionados = Object.keys(canon).length;
+
+      // [codigo, a1..a12, m1..m12] en arrays: ocupa un tercio que con claves
+      // El codigo viejo suma sobre el nuevo: asi FOODTURE deja de aparecer
+      // dos veces, una perdiendo 58.608 y otra ganando 22.558.
+      const acum = new Map();
+      let agrupados = 0;
+      for (const r of filas) {
+        let cli = String(pick(r, "CLIENTE") || "").trim().toUpperCase();
+        if (!cli) continue;
+        // (fix ago 2026) canonico() recodifica el codigo insertando un digito
+        // (U434434 -> U4344340). Si el resultado no esta en "cuentan", el
+        // cliente se descartaba aunque SU codigo original si contara: 124
+        // clientes y 208.874 EUR fuera del detalle, casi todos de exportacion.
+        // Ahora el codigo que cuenta manda sobre la recodificacion.
+        const recod = canon[cli] || canonico(cli);
+        const destino = cuentan.has(recod) ? recod
+                      : (cuentan.has(cli) ? cli : recod);
+        // Solo cuenta lo que la sincronización marcó como contable
+        if (!cuentan.has(destino) && !cuentan.has(cli)) continue;
+        if (destino !== cli) agrupados++;
+        const g = acum.get(destino) || new Array(24).fill(0);
+        for (let m = 1; m <= 12; m++) {
+          g[m - 1] += num(pick(r, "a" + m));
+          g[11 + m] += num(pick(r, "m" + m));
+        }
+        acum.set(destino, g);
+      }
+      out.codigosAgrupados = agrupados;
+
+      const compacta = [];
+      for (const [cli, g] of acum) {
+        if (g.some((x) => x)) compacta.push([cli, ...g.map((x) => num(x))]);
+      }
+      out.clientes = compacta.length;
+
+      const trozos = [];
+      let actual = [], bytes = 0;
+      for (const c of compacta) {
+        const t = JSON.stringify(c).length + 1;
+        if (bytes + t > 700000) { trozos.push(actual); actual = []; bytes = 0; }
+        actual.push(c); bytes += t;
+      }
+      if (actual.length) trozos.push(actual);
+
+      if (!req.query.dry) {
+        await fbCommit("pbi_meses_cliente", trozos.map((t, i) => ({
+          _id: `parte${i}`, parte: i, partes: trozos.length,
+          clientes: t.length, anio: anoAct,
+          datos: JSON.stringify(t),
+          actualizado: new Date().toISOString(),
+        })));
+      }
+      out.partes = trozos.length;
+      out.dry = !!req.query.dry;
+    } catch (e) { out.ok = false; out.error = e.message; }
+    out.segundos = Math.round((Date.now() - t1) / 1000);
+    return res.status(out.ok ? 200 : 500).json(out);
+  }
+
+  // ?estacionalidad=1 → ventas mes a mes por comercial. YA NO consulta Power
+  // BI: se agrega desde pbi_meses_cliente, que es la misma fuente que usa el
+  // desglose por cliente. Tenerlas separadas daba dos criterios distintos y
+  // la caida de un comercial no coincidia con la suma de sus clientes:
+  // ANTONIO caia 121.946 € y sus clientes solo explicaban 7.554.
+  if (req.query.estacionalidad === "1") {
+    const t1 = Date.now();
+    const out = { ok: true, fuente: "pbi_meses_cliente" };
+    try {
+      const partes = await fbLeerColeccion("pbi_meses_cliente");
+      if (!partes.length) {
+        out.ok = false;
+        out.error = "no hay pbi_meses_cliente. Lánzalo antes con ?mesescliente=1";
+        return res.status(500).json(out);
+      }
+      // [codigo, a1..a12, m1..m12]
+      const mesesDe = {};
+      for (const d of partes) {
+        let f = [];
+        try { f = JSON.parse(d.datos || "[]"); } catch (e) {}
+        for (const fila of f) mesesDe[String(fila[0]).toUpperCase()] = fila;
+      }
+      out.clientesConMeses = Object.keys(mesesDe).length;
+
+      // A quien pertenece cada cliente: lo decide la sincronizacion
+      const duenoDe = {};
+      const bloqueadoDe = {};
+      const empresaDe = {};
+      const huerfanoDe = {};
+      const vendedorDe = {};
+      let leidos = 0, contables = 0;
+      for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
+        leidos++;
+        const cuenta = c.cuenta !== undefined
+          ? c.cuenta : (!c.intercompany && !c.fusionadoEn);
+        if (!cuenta) continue;
+        contables++;
+        const ag = String(c.agenteFinal || c.agente || "SIN AGENTE").toUpperCase();
+        duenoDe[String(c._id).toUpperCase()] = ag;
+        bloqueadoDe[String(c._id).toUpperCase()] = c.bloqueado === true;
+        empresaDe[String(c._id).toUpperCase()] = String(c.empresa || "").trim() || "(vacia)";
+        huerfanoDe[String(c._id).toUpperCase()] = c.huerfano === true;
+        vendedorDe[String(c._id).toUpperCase()] = String(c.vendedor || "").trim() || null;
+      }
+
+      // (v4.65) Por que el CRM no cuadra con el Panel Principal.
+      // Power BI filtra su dataset con cuatro reglas y el CRM solo aplica una
+      // (fuera intercompany). Aqui se mide, mes a mes, cuanto aporta cada una
+      // de las que faltan, para poder decidir con numeros si se adoptan.
+      //   GRUPOAGENTE no es (En blanco), - o CAMPOFRIO  → cajon sin comercial
+      //   BLQ es NO                                     → clientes bloqueados
+      const FUERA_PBI = new Set(["SIN AGENTE", "-", "", "CAMPOFRIO", "WIKUK"]);
+      const critPBI = { total:[], sinCajon:[], sinBloqueados:[], sinHuerfanos:[], comoPBI:[] };
+      for (let m = 0; m < 12; m++)
+        for (const k in critPBI) critPBI[k][m] = 0;
+      for (const [cli, fila] of Object.entries(mesesDe)) {
+        const ag = duenoDe[cli];
+        if (!ag) continue;
+        const enCajon = FUERA_PBI.has(ag);
+        const blq = bloqueadoDe[cli] === true;
+        // Huerfano = codigo que no esta en el maestro de clientes. El Panel
+        // Principal cruza ventas con esa dimension, asi que esas filas no le
+        // llegan; el CRM en cambio las suma porque si traen agente.
+        const huer = huerfanoDe[cli] === true;
+        for (let m = 0; m < 12; m++) {
+          const v = Number(fila[1 + m]) || 0;
+          if (!v) continue;
+          critPBI.total[m] += v;
+          if (!enCajon) critPBI.sinCajon[m] += v;
+          if (!blq)     critPBI.sinBloqueados[m] += v;
+          if (!huer)    critPBI.sinHuerfanos[m] += v;
+          if (!enCajon && !blq && !huer) critPBI.comoPBI[m] += v;
+        }
+      }
+      // (v4.66) Reparto por EMPRESA. Power BI excluye Alm.Marruecos y las filas
+      // sin empresa; el CRM no excluye ninguna. La desviacion contra el Panel
+      // Principal es del 1,4% en todo el ano, repartida por igual mes a mes:
+      // eso apunta a una regla constante, no a operaciones sueltas.
+      const porEmpresa = {};
+      for (const [cli, fila] of Object.entries(mesesDe)) {
+        if (!duenoDe[cli]) continue;
+        const emp = empresaDe[cli] || "(sin dato)";
+        const g = porEmpresa[emp] = porEmpresa[emp] || { ano: 0, jul: 0, clientes: 0 };
+        let tuvo = false;
+        for (let m = 0; m < 12; m++) {
+          const v = Number(fila[1 + m]) || 0;
+          g.ano += v;
+          if (m === 6) g.jul += v;
+          if (v) tuvo = true;
+        }
+        if (tuvo) g.clientes++;
+      }
+      // Quienes son y cuanto valen ESTE ano (el log de la sincronizacion los
+      // media sobre ventasAntFull, la venta del ano pasado).
+      const listaHuer = [];
+      for (const [cli, fila] of Object.entries(mesesDe)) {
+        if (!duenoDe[cli] || !huerfanoDe[cli]) continue;
+        let ano = 0, jul = 0;
+        for (let m = 0; m < 12; m++) {
+          const v = Number(fila[1 + m]) || 0;
+          ano += v; if (m === 6) jul += v;
+        }
+        if (ano) listaHuer.push({
+          codigo: cli,
+          agente: duenoDe[cli],
+          vendedor: vendedorDe[cli] || null,
+          empresa: empresaDe[cli] || null,
+          ano: num(ano),
+          julio: num(jul),
+        });
+      }
+      listaHuer.sort((a, b) => b.ano - a.ano);
+      out.huerfanos = {
+        cuantos: listaHuer.length,
+        ano: num(listaHuer.reduce((t, x) => t + x.ano, 0)),
+        julio: num(listaHuer.reduce((t, x) => t + x.julio, 0)),
+        // La lista entera: son 60, caben de sobra, y hacen falta completos
+        // para poder darlos de alta en el maestro de clientes.
+        lista: listaHuer,
+      };
+
+      out.porEmpresa = Object.entries(porEmpresa)
+        .map(([emp, g]) => ({ empresa: emp, ano: num(g.ano), julio: num(g.jul), clientes: g.clientes }))
+        .sort((a, b) => b.ano - a.ano);
+
+      out.criterioPowerBI = critPBI.total.map((v, i) => ({
+        mes: i + 1,
+        crm: num(v),
+        quitandoSinComercial: num(critPBI.sinCajon[i]),
+        quitandoBloqueados: num(critPBI.sinBloqueados[i]),
+        quitandoHuerfanos: num(critPBI.sinHuerfanos[i]),
+        soloHuerfanos: num(v - critPBI.sinHuerfanos[i]),
+        comoPowerBI: num(critPBI.comoPBI[i]),
+        diferencia: num(v - critPBI.comoPBI[i]),
+      })).filter((x) => x.crm);
+      out.clientesLeidos = leidos;
+      out.clientesContables = contables;
+
+      const porAgente = {};
+      let sinDueno = 0;
+      for (const [cli, fila] of Object.entries(mesesDe)) {
+        const ag = duenoDe[cli];
+        if (!ag) { sinDueno++; continue; }
+        const g = porAgente[ag] = porAgente[ag]
+          || { act: new Array(12).fill(0), ant: new Array(12).fill(0) };
+        for (let m = 0; m < 12; m++) {
+          g.act[m] += Number(fila[1 + m]) || 0;
+          g.ant[m] += Number(fila[13 + m]) || 0;
+        }
+      }
+      out.clientesSinDueno = sinDueno;
+
+      // ── Consolidado _TOTAL ──────────────────────────────────────────────
+      // El parte y el CRM reconstruian el mes cerrado sumando ficha a ficha.
+      // Eso obliga a que el censo de comerciales sea identico al de Power BI
+      // en cada carga, y no lo es: cambia con altas, bajas, traspasos y con
+      // que la clave este escrita distinto en cada coleccion (PEPE / R-PEPE).
+      // Un comercial que no case desaparece de la suma en silencio.
+      //
+      // Este documento suma directamente por CLIENTE, sobre pbi_meses_cliente,
+      // que ya viene filtrado a contables. No depende de que el cliente tenga
+      // dueno resoluble, asi que tambien recoge lo que hoy se pierde en
+      // "clientesSinDueno". Es la cifra estable: leerla en vez de rehacerla.
+      const tot = { act: new Array(12).fill(0), ant: new Array(12).fill(0) };
+      for (const fila of Object.values(mesesDe)) {
+        for (let m = 0; m < 12; m++) {
+          tot.act[m] += Number(fila[1 + m]) || 0;
+          tot.ant[m] += Number(fila[13 + m]) || 0;
+        }
+      }
+
+      const anoAnt = new Date().getFullYear() - 1;
+      const docs = Object.entries(porAgente).map(([ag, g]) => {
+        const total = g.ant.reduce((a, b) => a + b, 0);
+        const totalAct = g.act.reduce((a, b) => a + b, 0);
+        const o = { _id: ag, agente: ag, anio: anoAnt,
+                    total: num(total), totalAct: num(totalAct),
+                    actualizado: new Date().toISOString() };
+        for (let m = 1; m <= 12; m++) {
+          o["mes_" + m] = num(g.ant[m - 1]);
+          o["act_" + m] = num(g.act[m - 1]);
+          o["peso_" + m] = total ? Math.round(g.ant[m - 1] / total * 10000) / 10000 : 0;
+        }
+        return o;
+      });
+
+      {
+        const totalAnt = tot.ant.reduce((x, y) => x + y, 0);
+        const totalAct = tot.act.reduce((x, y) => x + y, 0);
+        const doc = { _id: "_TOTAL", agente: "_TOTAL", anio: anoAnt,
+                      total: num(totalAnt), totalAct: num(totalAct),
+                      fuente: "suma por cliente sobre pbi_meses_cliente",
+                      actualizado: new Date().toISOString() };
+        for (let m = 1; m <= 12; m++) {
+          doc["mes_" + m] = num(tot.ant[m - 1]);
+          doc["act_" + m] = num(tot.act[m - 1]);
+          doc["peso_" + m] = totalAnt
+            ? Math.round(tot.ant[m - 1] / totalAnt * 10000) / 10000 : 0;
+        }
+        docs.push(doc);
+
+        // Cuanto se perdia al reconstruir por agentes, mes a mes. Si esto no
+        // es cero, hay clientes contables cuyo comercial no se resuelve.
+        const sumaAg = docs.filter((d) => d._id !== "_TOTAL")
+          .reduce((t, d) => t + num(d.totalAct), 0);
+        out.consolidado = {
+          totalActPorCliente: num(totalAct),
+          totalActPorAgente: num(sumaAg),
+          diferencia: num(totalAct - sumaAg),
+          porMes: tot.act.map((v, i) => ({
+            mes: i + 1,
+            porCliente: num(v),
+            porAgente: num(docs.filter((d) => d._id !== "_TOTAL")
+              .reduce((t, d) => t + num(d["act_" + (i + 1)]), 0)),
+          })).filter((x) => x.porCliente || x.porAgente),
+        };
+      }
+
+      if (!req.query.dry) {
+        await fbCommit("pbi_estacionalidad", docs);
+        // Fuera los comerciales que ya no aparecen
+        try {
+          const vivos = new Set(docs.map((d) => d._id));
+          const previos = await fbLeerColeccion("pbi_estacionalidad");
+          const sobran = previos.filter((d) => !vivos.has(d._id)).map((d) => d._id);
+          if (sobran.length) { await fbBorrar("pbi_estacionalidad", sobran);
+            out.borrados = sobran.length; }
+        } catch (e) { out.avisoPurga = e.message.slice(0, 120); }
+      }
+
+      out.agentes = docs.length;
+      out.dry = !!req.query.dry;
+      out.muestra = docs.slice(0, 2);
+    } catch (e) { out.ok = false; out.error = e.message; }
+    out.segundos = Math.round((Date.now() - t1) / 1000);
+    return res.status(out.ok ? 200 : 500).json(out);
+  }
+
+  // ?cierre=1 → congela la foto de la semana. pbi_resumen_agente solo guarda
+  // la semana en curso y se pisa cada mañana: sin esto no hay forma de mirar
+  // atras. No toca Power BI.
+  if (req.query.cierre === "1") {
+    const t1 = Date.now();
+    const out = { ok: true, fuente: "firestore" };
+    try {
+      const ahora = new Date();
+      const sem = isoSemana(ahora);
+      const resumen = await fbLeerColeccion("pbi_resumen_agente");
+      const vivos = resumen.filter((a) => a._id !== "_TOTAL");
+
+      const CAMPOS = ["agente", "equipo", "tipo", "objetivoMargen",
+        "ventasSem", "ventasSemAnt", "margenSem", "baseSem",
+        "ventasMes", "ventasMesAnt", "margenMes", "baseMes",
+        "ventasAct", "ventasAntYTD", "ventasAntFull", "margenAct", "baseAct",
+        "clientes", "clientesConVentaMes"];
+      const foto = vivos.map((a) => {
+        const o = { id: a._id };
+        for (const c of CAMPOS) if (a[c] !== undefined && a[c] !== null) o[c] = a[c];
+        return o;
+      });
+
+      const totales = { salido: 0, retrasado: 0, anulado: 0, nuevo: 0, adelantado: 0,
+                        nSalido: 0, nRetrasado: 0, nAnulado: 0, nNuevo: 0 };
+      const lee = (t) => { try { return JSON.parse(t || "[]"); } catch (e) { return []; } };
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(ahora); d.setDate(d.getDate() - i);
+        const dia = d.toISOString().slice(0, 10);
+        const doc = await fbLeerDoc("pbi_pedidos_cambios", dia).catch(() => null);
+        if (!doc) continue;
+        for (const m of lee(doc.salidas)) {
+          if (m.tipo === "servido") { totales.salido += num(m.importe); totales.nSalido++; }
+          else { totales.anulado += num(m.importe); totales.nAnulado++; }
+        }
+        for (const m of lee(doc.movimientos)) {
+          if (m.tipo === "adelanto") { totales.adelantado += num(m.importe); continue; }
+          if (m.fechaAntes && m.fechaAntes < (doc.fecha || dia)) {
+            totales.retrasado += num(m.importe); totales.nRetrasado++;
+          }
+        }
+        for (const m of lee(doc.entradas)) { totales.nuevo += num(m.importe); totales.nNuevo++; }
+      }
+      for (const k of Object.keys(totales)) totales[k] = num(totales[k]);
+
+      await fbCommit("pbi_semanas", [{
+        _id: sem, semana: sem, cerradoEl: ahora.toISOString(),
+        desde: (() => { const d = new Date(ahora); d.setDate(d.getDate() - 6);
+                        return d.toISOString().slice(0, 10); })(),
+        hasta: ahora.toISOString().slice(0, 10),
+        comerciales: foto.length,
+        ventasSem: num(foto.reduce((x, a) => x + num(a.ventasSem), 0)),
+        agentes: JSON.stringify(foto),
+        pedidos: JSON.stringify(totales),
+      }]);
+
+      out.semana = sem;
+      out.comerciales = foto.length;
+      out.ventasSem = num(foto.reduce((x, a) => x + num(a.ventasSem), 0));
+      out.pedidos = totales;
+    } catch (e) { out.ok = false; out.error = e.message; }
+    out.segundos = Math.round((Date.now() - t1) / 1000);
+    return res.status(out.ok ? 200 : 500).json(out);
+  }
+
+  // ?resumen=1 → recalcula el resumen por comercial y el índice de búsqueda
+  // leyendo de Firestore, sin tocar Power BI. Existe para sacar este trabajo
+  // de la sincronización completa, que ya rozaba los 60 s de Vercel y algún
+  // día se cortaría entera sin escribir nada.
+  if (req.query.resumen === "1") {
+    const t1 = Date.now();
+    const out = { ok: true, fuente: "firestore" };
+    try {
+      await cargarReglas();
+
+      const AJUSTES_RAMA = {};
+      try {
+        for (const a of await fbLeerColeccion("pbi_ajustes")) {
+          if (a.equipo && a.equipo !== "_EXCLUIR")
+            AJUSTES_RAMA[String(a._id).toUpperCase()] = a.equipo;
+        }
+      } catch (e) { out.avisoAjustes = e.message.slice(0, 120); }
+
+      // El equipo se edita en la ficha del usuario. Si solo se miraba
+      // pbi_ajustes, una ficha que ya traia el equipo no generaba ajuste y el
+      // comercial se quedaba en la rama de GRUPONIVEL4: asi acabaron AGUSTIN
+      // y JLGARCIA en Francia.
+      let deFicha = 0;
+      try {
+        for (const col of ["portal_users", "usuarios"]) {
+          for (const u of await fbLeerColeccion(col)) {
+            if (!u.equipo) continue;
+            const clave = String(u.grupoAgente || u.catalogoVendedor || "").toUpperCase().trim();
+            if (!clave) continue;
+            if (AJUSTES_RAMA[clave] !== u.equipo) deFicha++;
+            AJUSTES_RAMA[clave] = u.equipo;
+          }
+        }
+      } catch (e) { out.avisoFichas = e.message.slice(0, 120); }
+      out.ramaDesdeFicha = deFicha;
+      out.ajustesRama = Object.keys(AJUSTES_RAMA).length;
+
+      const todos = await fbLeerColeccion("pbi_ventas_cliente");
+      out.clientesLeidos = todos.length;
+
+      // Documentos que la sincronización ya no toca: códigos que dejaron de
+      // existir en el modelo y quedaron ahí de pasadas anteriores. Se
+      // reconocen por el sello "actualizado", que la sincronización refresca
+      // en todos los que sí escribe.
+      const CADUCA_HORAS = 36;
+      const corte = Date.now() - CADUCA_HORAS * 3600000;
+      const viejo = (d) => {
+        const t = d.actualizado ? Date.parse(d.actualizado) : NaN;
+        return !isNaN(t) && t < corte;
+      };
+      const obsoletos = todos.filter(viejo);
+      const docs = todos.filter((d) => !viejo(d));
+      out.obsoletos = obsoletos.length;
+
+      if (obsoletos.length && req.query.purgar !== "no") {
+        try {
+          await fbBorrar("pbi_ventas_cliente", obsoletos.map((d) => d._id));
+          out.obsoletosBorrados = obsoletos.length;
+          out.ejemplosObsoletos = obsoletos.slice(0, 6)
+            .map((d) => `${d._id} · ${d.nombre || "sin nombre"} · ${
+              (d.actualizado || "").slice(0, 10)}`);
+        } catch (e) { out.avisoPurga = e.message.slice(0, 140); }
+      }
+      const anoAct = new Date().getFullYear();
+      const anoAnt = anoAct - 1;
+
+      const porAgente = new Map();
+      let sinAsignar = 0, ventaSinAsignar = 0, ventaSinAsignarAnt = 0;
+
+      for (const d of docs) {
+        if (d.intercompany || d.fusionadoEn) continue;
+        // Sin comercial, la venta no llegaba a ningun documento: 55.011 €
+        // que Power BI contaba y el CRM no. Van a un cajon con nombre.
+        let agente = d.agente;
+        if (!agente) {
+          sinAsignar++;
+          ventaSinAsignar += d.ventasAct || 0;
+          ventaSinAsignarAnt += d.ventasAntYTD || 0;
+          agente = "SIN AGENTE";
+        }
+        if (!porAgente.has(agente)) {
+          porAgente.set(agente, {
+            _id: docId(agente), agente, anoAnterior: anoAnt, anoActual: anoAct,
+            tipo: d.tipoAgente || null,
+            equipo: AJUSTES_RAMA[String(agente).toUpperCase()]
+              || ramaDe(d.equipoAgente, d.tipoAgente),
+            equipoOriginal: d.equipoAgente || null,
+            ambito: d.ambitoAgente || null,
+            objetivoMargen: d.objetivoMargen ?? null,
+            ventasAntFull: 0, margenAntFull: 0, baseAntFull: 0,
+            ventasAntYTD: 0, margenAntYTD: 0, baseAntYTD: 0,
+            ventasAct: 0, margenAct: 0, baseAct: 0,
+            ventasMes: 0, ventasSem: 0, ventasMesAnt: 0, ventasSemAnt: 0,
+            margenMes: 0, baseMes: 0, margenMesAnt: 0, baseMesAnt: 0,
+            margenSem: 0, baseSem: 0,
+            clientes: 0, clientesConVentaMes: 0,
+          });
+        }
+        const a = porAgente.get(agente);
+        for (const k of ["ventasAntFull","margenAntFull","ventasAntYTD","margenAntYTD",
+                         "ventasAct","margenAct","ventasMes","ventasSem",
+                         "ventasMesAnt","ventasSemAnt","margenSem","baseSem",
+                         "margenMes","baseMes","margenMesAnt","baseMesAnt"]) {
+          a[k] += d[k] || 0;
+        }
+        a.baseAntFull += (d.ventasAntFull || 0) * ((d.coberturaAntFull || 0) / 100);
+        a.baseAntYTD  += (d.ventasAntYTD || 0)  * ((d.coberturaAntYTD || 0) / 100);
+        a.baseAct     += (d.ventasAct || 0)     * ((d.coberturaAct || 0) / 100);
+        a.clientes++;
+        if ((d.ventasMes || 0) > 0) a.clientesConVentaMes++;
+      }
+
+      const cerrar = (a) => {
+        const p = (m, b) => (b ? num((100 * m) / b) : null);
+        const cob = (b, v) => (v ? num((100 * b) / v) : 0);
+        const pctAct = p(a.margenAct, a.baseAct);
+        const pctAntYTD = p(a.margenAntYTD, a.baseAntYTD);
+        return {
+          ...a,
+          ventasAntFull: num(a.ventasAntFull), margenAntFull: num(a.margenAntFull),
+          ventasAntYTD: num(a.ventasAntYTD),   margenAntYTD: num(a.margenAntYTD),
+          ventasAct: num(a.ventasAct),         margenAct: num(a.margenAct),
+          ventasMes: num(a.ventasMes),         ventasSem: num(a.ventasSem),
+          ventasMesAnt: num(a.ventasMesAnt),   ventasSemAnt: num(a.ventasSemAnt),
+          margenPctSem: p(a.margenSem, a.baseSem),
+          margenSem: num(a.margenSem), baseSem: num(a.baseSem),
+          margenPctMes: p(a.margenMes, a.baseMes),
+          margenPctMesAnt: p(a.margenMesAnt, a.baseMesAnt),
+          margenMes: num(a.margenMes), baseMes: num(a.baseMes),
+          margenMesAnt: num(a.margenMesAnt), baseMesAnt: num(a.baseMesAnt),
+          margenPctAntFull: p(a.margenAntFull, a.baseAntFull),
+          margenPctAntYTD: pctAntYTD, margenPctAct: pctAct,
+          variacionPct: a.ventasAntYTD
+            ? num((100 * (a.ventasAct - a.ventasAntYTD)) / a.ventasAntYTD) : null,
+          desviacionObjetivo: (pctAct !== null && a.objetivoMargen)
+            ? num(pctAct - a.objetivoMargen) : null,
+          variacionMargenPts: (pctAct !== null && pctAntYTD !== null)
+            ? num(pctAct - pctAntYTD) : null,
+          coberturaAntFull: cob(a.baseAntFull, a.ventasAntFull),
+          coberturaAntYTD: cob(a.baseAntYTD, a.ventasAntYTD),
+          coberturaAct: cob(a.baseAct, a.ventasAct),
+          baseAntFull: num(a.baseAntFull), baseAntYTD: num(a.baseAntYTD),
+          baseAct: num(a.baseAct),
+          actualizado: new Date().toISOString(),
+        };
+      };
+
+      const resumen = [...porAgente.values()].map(cerrar);
+      const tot = [...porAgente.values()].reduce((t, a) => {
+        for (const k of ["ventasAntFull","margenAntFull","baseAntFull",
+                         "ventasAntYTD","margenAntYTD","baseAntYTD",
+                         "ventasAct","margenAct","baseAct","ventasMes","ventasSem",
+                         "ventasMesAnt","ventasSemAnt",
+                         "margenMes","baseMes","margenMesAnt","baseMesAnt",
+                         "margenSem","baseSem",
+                         "clientes","clientesConVentaMes"]) t[k] += a[k];
+        return t;
+      }, { _id: "_TOTAL", agente: "_TOTAL", anoAnterior: anoAnt, anoActual: anoAct,
+           ventasAntFull:0, margenAntFull:0, baseAntFull:0,
+           ventasAntYTD:0, margenAntYTD:0, baseAntYTD:0,
+           ventasAct:0, margenAct:0, baseAct:0, ventasMes:0, ventasSem:0,
+           ventasMesAnt:0, ventasSemAnt:0,
+           margenMes:0, baseMes:0, margenMesAnt:0, baseMesAnt:0,
+           margenSem:0, baseSem:0, clientes:0, clientesConVentaMes:0 });
+      resumen.push(cerrar(tot));
+
+      out.agentes = resumen.length - 1;
+      out.clientesSinAgente = sinAsignar;
+      out.ventaSinAsignar = num(ventaSinAsignar);
+      out.escritos = await fbCommit("pbi_resumen_agente", resumen);
+
+      // pbi_resumen_agente no se purgaba: un comercial que deja de facturar
+      // conservaba su documento con cifras congeladas y seguia sumando.
+      try {
+        const vivosSet = new Set(resumen.map((r) => String(r._id)));
+        const previos = await fbLeerColeccion("pbi_resumen_agente");
+        const sobran = previos
+          .filter((d) => d._id !== "_TOTAL" && !vivosSet.has(String(d._id)))
+          .map((d) => d._id);
+        out.agentesObsoletos = sobran.length;
+        if (sobran.length && req.query.purgar !== "no") {
+          await fbBorrar("pbi_resumen_agente", sobran);
+          out.agentesBorrados = sobran;
+        }
+      } catch (e) { out.avisoPurgaAgentes = e.message.slice(0, 140); }
+
+      // Índice de búsqueda, con la misma lista ya leída
+      try {
+        const compacta = docs
+          .filter((d) => !d.fusionadoEn && !d.intercompany)
+          .map((d) => [d._id, String(d.nombre || "").slice(0, 60), d.agente || "",
+                       Math.round(d.ventasAct || 0), Math.round(d.ventasAntYTD || 0),
+                       String(d.poblacion || "").slice(0, 28)]);
+        const trozos = [];
+        let actual = [], bytes = 0;
+        for (const c of compacta) {
+          const t = JSON.stringify(c).length + 1;
+          if (bytes + t > 700000) { trozos.push(actual); actual = []; bytes = 0; }
+          actual.push(c); bytes += t;
+        }
+        if (actual.length) trozos.push(actual);
+        await fbCommit("pbi_indice_clientes", trozos.map((t, i) => ({
+          _id: `parte${i}`, parte: i, partes: trozos.length,
+          clientes: t.length, datos: JSON.stringify(t),
+          actualizado: new Date().toISOString(),
+        })));
+        out.indiceBusqueda = { clientes: compacta.length, partes: trozos.length };
+      } catch (e) { out.avisoIndice = e.message.slice(0, 140); }
+
+      out.segundos = Math.round((Date.now() - t1) / 1000);
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(out.ok ? 200 : 500).json(out);
+  }
+
+  // ?diag=1 → lista lo que el service principal REALMENTE ve.
+  // Sirve para demostrar a sistemas si el acceso al workspace está dado.
+  if (req.query.diag === "1") {
+    try {
+      const { token, modo } = await getToken(req);
+      const r = await fetch("https://api.powerbi.com/v1.0/myorg/groups", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const j = await r.json();
+      const ws = (j.value || []).map((g) => ({ id: g.id, nombre: g.name }));
+      const enWs = ws.some((g) => g.id === ENV.PBI_GROUP_ID);
+
+      // Segunda comprobacion: que modelos semanticos hay DENTRO del
+      // workspace, y si el dataset que buscamos esta realmente ahi.
+      // Si el modelo vive en otro workspace y solo esta compartido,
+      // executeQueries devuelve 401 aunque el workspace se vea bien.
+      let ds = null, dsError = null;
+      if (enWs) {
+        try {
+          const r2 = await fetch(
+            `https://api.powerbi.com/v1.0/myorg/groups/${ENV.PBI_GROUP_ID}/datasets`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          const j2 = await r2.json();
+          if (!r2.ok) throw new Error(j2.error?.message || `HTTP ${r2.status}`);
+          ds = (j2.value || []).map((d) => ({
+            id: d.id,
+            nombre: d.name,
+            permisoQuery: d.queryScaleOutSettings === undefined ? undefined : undefined,
+          }));
+        } catch (e) {
+          dsError = e.message;
+        }
+      }
+
+      const dsEncontrado = ds ? ds.some((d) => d.id === ENV.PBI_DATASET_ID) : null;
+
+      let diagnostico;
+      if (ws.length === 0) {
+        diagnostico = "El service principal no ve NINGUN workspace. Falta el ajuste de tenant o el grupo de seguridad.";
+      } else if (!enWs) {
+        diagnostico = "El SP ve workspaces pero NO el de UNITED. Falta anadirlo a ese workspace.";
+      } else if (dsError) {
+        diagnostico = `Workspace OK, pero no se pueden listar sus modelos: ${dsError}`;
+      } else if (dsEncontrado === false) {
+        diagnostico = "AQUI ESTA EL PROBLEMA: el dataset buscado NO esta en este workspace. " +
+                      "Mira la lista 'datasetsEnWorkspace' y usa el id correcto, o el modelo vive en otro workspace.";
+      } else if (dsEncontrado === true) {
+        diagnostico = "Workspace y dataset correctos. Si executeQueries da 401, falta permiso Build " +
+                      "sobre el modelo (rol Viewer no basta) o el ajuste de Execute Queries no ha propagado.";
+      }
+
+      return res.status(200).json({
+        ok: true,
+        modoAuth: modo,
+        workspacesVisibles: ws.length,
+        workspaces: ws,
+        buscado: ENV.PBI_GROUP_ID,
+        encontrado: enWs,
+        datasetBuscado: ENV.PBI_DATASET_ID,
+        datasetEncontrado: dsEncontrado,
+        datasetsEnWorkspace: ds,
+        datasetsError: dsError,
+        diagnostico,
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: e.message });
+    }
+  }
+
+  // ?schema=1 → pregunta al propio modelo como se llama todo.
+  // Elimina el adivinar nombres: devuelve la lista real de medidas y
+  // columnas segun el motor. Usar en cuanto haya permisos.
+  if (req.query.schema === "1") {
+    const out = { ok: true };
+    try {
+      const { token, modo } = await getToken(req);
+      out.modoAuth = modo;
+      // Varias formas de preguntar lo mismo. Los modelos antiguos no
+      // tienen INFO.*, y los de Fabric a veces solo INFO.VIEW.*.
+      // Se prueban en orden y se queda la primera que responda.
+      const variantes = {
+        medidas: [
+          "EVALUATE INFO.VIEW.MEASURES()",
+          "EVALUATE INFO.MEASURES()",
+          'EVALUATE SELECTCOLUMNS(INFO.MEASURES(), "medida", [Name])',
+        ],
+        tablas: [
+          "EVALUATE INFO.VIEW.TABLES()",
+          "EVALUATE INFO.TABLES()",
+        ],
+        columnas: [
+          "EVALUATE INFO.VIEW.COLUMNS()",
+          "EVALUATE INFO.COLUMNS()",
+        ],
+      };
+      for (const [k, lista] of Object.entries(variantes)) {
+        const fallos = [];
+        for (const q of lista) {
+          try {
+            const filas = await pbiQuery(token, q);
+            out[k] = { consultaQueFunciono: q, filas: filas.slice(0, 400) };
+            break;
+          } catch (e) {
+            fallos.push(`${q.slice(0, 40)} -> ${e.message.slice(0, 120)}`);
+          }
+        }
+        if (!out[k]) out[k] = { error: "ninguna variante funciono", intentos: fallos };
+      }
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: e.message });
+    }
+    return res.status(200).json(out);
+  }
+
+  // ?peek=1 → trae UNA fila de cada tabla.
+  // Truco que no depende de las funciones INFO.*: la respuesta incluye
+  // todas las columnas como claves, y un valor de ejemplo de cada una,
+  // asi que revela nombres exactos Y tipos de dato de golpe.
+  // ?medidas=1 → devuelve las medidas del modelo con su fórmula DAX. Es la
+  // forma de saber qué hace exactamente "Ventas Mes Facturado" en vez de
+  // deducirlo por diferencias.
+  if (req.query.medidas === "1") {
+    const out = { ok: true };
+    try {
+      const { token } = await getToken(req);
+
+      // No todos los modelos exponen las funciones INFO.*, y el endpoint de
+      // consultas no admite DMV. Se prueban varias formas y se informa de
+      // cuál ha funcionado, en vez de fallar con un 400 sin explicación.
+      const intentos = [
+        ["INFO.MEASURES con columnas",
+          `EVALUATE SELECTCOLUMNS(INFO.MEASURES(), "Medida", [Name], "Formula", [Expression])`],
+        ["INFO.MEASURES directo", `EVALUATE INFO.MEASURES()`],
+        ["INFO.VIEW.MEASURES",
+          `EVALUATE SELECTCOLUMNS(INFO.VIEW.MEASURES(), "Medida", [Name], "Formula", [Expression])`],
+        ["INFO.VIEW.MEASURES directo", `EVALUATE INFO.VIEW.MEASURES()`],
+      ];
+
+      let filas = null;
+      out.intentos = [];
+      for (const [nombre, q] of intentos) {
+        try {
+          filas = await pbiQuery(token, q, true);
+          out.intentos.push({ via: nombre, resultado: `ok, ${filas.length} filas` });
+          out.via = nombre;
+          break;
+        } catch (e) {
+          out.intentos.push({ via: nombre, resultado: e.message.slice(0, 90) });
+        }
+      }
+
+      if (!filas) {
+        out.ok = false;
+        out.error = "El modelo no permite leer las medidas por consulta.";
+        out.alternativa = "En Power BI, abre el panel, pulsa sobre la medida "
+          + "'Ventas Mes Facturado' en el panel de campos y mira la barra de "
+          + "fórmulas: ahí está la definición completa.";
+        return res.status(200).json(out);
+      }
+
+      const buscar = String(req.query.buscar || "").toUpperCase();
+      const nom = (r) => pick(r, "Medida") ?? pick(r, "Name") ?? pick(r, "MeasureName");
+      const exp = (r) => pick(r, "Formula") ?? pick(r, "Expression");
+      out.total = filas.length;
+      out.medidas = filas
+        .map((r) => ({
+          medida: nom(r),
+          formula: String(exp(r) || "").replace(/\s+/g, " ").trim().slice(0, 900),
+        }))
+        .filter((m) => m.medida && (!buscar || String(m.medida).toUpperCase().includes(buscar)))
+        .sort((a, b) => String(a.medida).localeCompare(String(b.medida)));
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
+  // ?facturas=1 → desglosa la venta del mes por el campo FACTURA. Sirve para
+  // entender por qué "Ventas Mes" y "Ventas Mes Facturado" no coinciden: si
+  // hay líneas sin factura, esas son la diferencia.
+  if (req.query.facturas === "1") {
+    const out = { ok: true };
+    try {
+      const { token } = await getToken(req);
+      const T = M.ventas;
+
+      const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _iniMes = DATE(YEAR(_hoy), MONTH(_hoy), 1)
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${T}[FACTURA],
+    FILTER(${T}, ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
+    "Importe", SUM(${M.vBase}),
+    "Lineas", COUNTROWS(${T})
+  )`, true);
+
+      let total = 0, sinFactura = 0, lineasSin = 0;
+      const prefijos = {};
+      for (const r of filas) {
+        const fac = String(pick(r, "FACTURA") || "").trim();
+        const imp = num(pick(r, "Importe"));
+        const lin = num(pick(r, "Lineas"));
+        total += imp;
+        if (!fac) { sinFactura += imp; lineasSin += lin; continue; }
+        const pre = (fac.match(/^[A-Za-z]+/) || ["(numérica)"])[0].toUpperCase();
+        prefijos[pre] = prefijos[pre] || { importe: 0, lineas: 0, facturas: 0 };
+        prefijos[pre].importe += imp;
+        prefijos[pre].lineas += lin;
+        prefijos[pre].facturas += 1;
+      }
+
+      out.mes = { total: num(total), documentos: filas.length };
+      out.sinFactura = { importe: num(sinFactura), lineas: num(lineasSin) };
+      out.porPrefijo = Object.entries(prefijos)
+        .map(([pre, v]) => ({ prefijo: pre, importe: num(v.importe),
+          lineas: num(v.lineas), facturas: v.facturas }))
+        .sort((a, b) => b.importe - a.importe);
+      out.nota = "Compara 'total' con Ventas Mes y 'total menos sinFactura' con Ventas Mes Facturado.";
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
+  // ?tablas=1 → lista las tablas del modelo y, si se pide, busca una columna
+  // concreta en todas ellas. Util cuando el ERP tiene un campo que no se sabe
+  // si ha llegado al modelo, como VALIDARPRECIO.
+  if (req.query.tablas === "1") {
+    const out = { ok: true };
+    try {
+      const { token } = await getToken(req);
+      const filas = await pbiQuery(token,
+        `EVALUATE SELECTCOLUMNS(INFO.TABLES(), "Tabla", [Name])`, true);
+      out.tablas = filas.map((r) => pick(r, "Tabla")).filter(Boolean).sort();
+      out.total = out.tablas.length;
+
+      // &buscar=VALIDAR → devuelve en que tablas aparece esa columna
+      if (req.query.buscar) {
+        const q = String(req.query.buscar).toUpperCase();
+        const cols = await pbiQuery(token, `
+EVALUATE
+  SELECTCOLUMNS(
+    NATURALLEFTOUTERJOIN(
+      SELECTCOLUMNS(INFO.COLUMNS(), "TableID", [TableID], "Columna", [ExplicitName]),
+      SELECTCOLUMNS(INFO.TABLES(), "TableID", [ID], "Tabla", [Name])
+    ),
+    "Tabla", [Tabla], "Columna", [Columna])`, true);
+        out.coincidencias = cols
+          .filter((c) => String(pick(c, "Columna") || "").toUpperCase().includes(q))
+          .map((c) => `${pick(c, "Tabla")} → ${pick(c, "Columna")}`);
+      }
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
+  if (req.query.peek === "1") {
+    const out = { ok: true };
+    try {
+      const { token, modo } = await getToken(req);
+      out.modoAuth = modo;
+      // ?peek=1&tabla=06 Clientes United SAP  → inspecciona cualquier tabla
+      // del modelo, no solo las cuatro habituales.
+      if (req.query.tabla) {
+        const t = `'${String(req.query.tabla).replace(/'/g, "")}'`;
+        // &filas=N para traer mas de 3, y &col=X&val=Y para filtrar
+        const n = Math.min(parseInt(req.query.filas, 10) || 3, 500);
+        const cf = req.query.col
+          ? `FILTER(${t}, NOT ISBLANK(${t}[${String(req.query.col).replace(/[\[\]"]/g, "")}]))`
+          : t;
+        try {
+          const filas = await pbiQuery(token, `EVALUATE TOPN(${n}, ${cf})`, true);
+          out.tablaSolicitada = {
+            tabla: t,
+            filas: filas.length,
+            datos: filas,
+            columnas: Object.keys(filas[0] || {}).map((c) => ({
+              nombre: c,
+              ejemplos: filas.map((f) => f[c]),
+            })),
+          };
+        } catch (e) {
+          out.tablaSolicitada = { tabla: t, error: e.message.slice(0, 300) };
+        }
+        return res.status(200).json(out);
+      }
+
+      const tablas = {
+        ventas:    M.ventas,
+        pendiente: M.pendiente,
+        stock:     M.stock,
+        clientes:  M.clientes,
+      };
+      // ?peek=1&codigos=C03509,U433509 → ficha completa de esos clientes
+      // en la tabla de clientes, con TODAS las columnas incluidas las
+      // vacias. Sirve para buscar un campo que enlace codigo viejo y nuevo.
+      if (req.query.codigos) {
+        const lista = String(req.query.codigos)
+          .split(",").map((c) => c.trim().replace(/"/g, "")).filter(Boolean);
+        try {
+          out.fichasCliente = await pbiQuery(token, `
+EVALUATE
+  FILTER(${M.clientes}, ${M.clientes}[CODIGO] IN {${lista.map((c) => `"${c}"`).join(", ")}})`,
+            true);
+        } catch (e) {
+          out.fichasCliente = { error: e.message.slice(0, 250) };
+        }
+      }
+
+      for (const [k, tabla] of Object.entries(tablas)) {
+        try {
+          const filas = await pbiQuery(token, `EVALUATE TOPN(1, ${tabla})`, true);
+          const fila = filas[0] || {};
+          out[k] = {
+            tabla,
+            columnas: Object.keys(fila).map((c) => ({
+              nombre: c,
+              ejemplo: fila[c],
+              tipo: typeof fila[c],
+            })),
+          };
+        } catch (e) {
+          out[k] = { tabla, error: e.message.slice(0, 250) };
+        }
+      }
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: e.message });
+    }
+    return res.status(200).json(out);
+  }
+
+  // ?audit=1 → busca las filas que rompen el margen.
+  //   &agente=DAVIDMAG  limita a los clientes de ese comercial (opcional)
+  //   &cliente=B430088  salta directo al detalle de linea de ese cliente
+  //
+  // Existe porque el margen calculado como BASE - Costo Referencia da
+  // valores imposibles en algunos comerciales, mientras que en otros
+  // cuadra al decimal. La causa tiene que estar en filas concretas.
+  if (req.query.audit === "1") {
+    const out = { ok: true };
+    try {
+      const { token } = await getToken(req);
+      const T = M.ventas;
+
+      // A) Los 15 clientes con el coste mas desproporcionado respecto a venta
+      out.peoresClientes = await pbiQuery(token, `
+EVALUATE
+  TOPN(
+    15,
+    FILTER(
+      SUMMARIZECOLUMNS(
+        ${M.vCliente},
+            "Venta",  SUM(${M.vBase}),
+        "Coste",  SUM(${M.vCoste}),
+        "Unidades", SUM(${T}[UNI]),
+        "Lineas",   COUNTROWS(${T})
+      ),
+      [Coste] > [Venta] * 1.5
+    ),
+    [Coste] - [Venta], DESC
+  )`);
+
+      // B) Detalle de linea del cliente indicado, o del peor de la lista
+      const cli = req.query.cliente ||
+        (out.peoresClientes?.[0] ? pick(out.peoresClientes[0], "CLIENTE") : null);
+      out.clienteAnalizado = cli;
+
+      if (cli) {
+        out.lineas = await pbiQuery(token, `
+EVALUATE
+  TOPN(
+    20,
+    SELECTCOLUMNS(
+      FILTER(${T}, ${M.vCliente} = "${String(cli).replace(/"/g, "")}"),
+      "Articulo", ${T}[CODIGO],
+      "Fecha",    ${T}[FECHA],
+      "Uni",      ${T}[UNI],
+      "MetrosTexto", ${T}[METROS],
+      "Precio",   ${T}[PRECIO],
+      "Base",     ${M.vBase},
+      "CosteUnit",${T}[COSTOREFERENCIA],
+      "CosteLinea", ${M.vCoste},
+      "MargenPctFila", ${T}[Margen Referencia por fila]
+    ),
+    [CosteLinea] - [Base], DESC
+  )`, true);
+      }
+
+      // C 0) Lineas crudas de una familia de articulos, con TODAS las
+      // columnas de coste una al lado de otra. Sirve para decidir si
+      // COSTOLINEAL es el coste bueno en los productos por metros.
+      //   ?audit=1&articulo=MX255
+      const pref = String(req.query.articulo || "MX255").replace(/"/g, "");
+      out.familiaAnalizada = pref;
+      out.lineasFamilia = await pbiQuery(token, `
+EVALUATE
+  TOPN(
+    15,
+    SELECTCOLUMNS(
+      FILTER(${T}, LEFT(${T}[CODIGO], ${pref.length}) = "${pref}"),
+      "Articulo",      ${T}[CODIGO],
+      "Fecha",         ${T}[FECHA],
+      "Uni",           ${T}[UNI],
+      "Metros",        ${T}[METROS],
+      "MetrosTotales", ${T}[Metros Totales],
+      "Calibre",       ${T}[CALIBRE],
+      "Precio",        ${T}[PRECIO],
+      "Base",          ${M.vBase},
+      "CosteRefUnit",  ${T}[COSTOREFERENCIA],
+      "CosteRefLinea", ${M.vCoste},
+      "CosteLineal",   ${T}[COSTOLINEAL]
+    ),
+    [Fecha], DESC
+  )`, true);
+
+      // C bis) Articulos con coste de referencia incoherente.
+      // Compara precio medio de venta contra coste medio del maestro.
+      // Un ratio de 3x o mas es un error de maestro, no un producto
+      // vendido a perdida. Esta lista es la que hay que pasar a sistemas.
+      out.articulosDefectuosos = await pbiQuery(token, `
+EVALUATE
+  TOPN(
+    40,
+    FILTER(
+      SUMMARIZECOLUMNS(
+        ${T}[CODIGO],
+        "PrecioMedio", AVERAGE(${T}[PRECIO]),
+        "CosteMedio",  AVERAGE(${T}[COSTOREFERENCIA]),
+        "Lineas",      COUNTROWS(${T}),
+        "VentaTotal",  SUM(${M.vBase}),
+        "CosteTotal",  SUM(${M.vCoste})
+      ),
+      [PrecioMedio] > 0 && [CosteMedio] > [PrecioMedio] * 3
+    ),
+    [CosteTotal], DESC
+  )`);
+
+      // C ter) Cuanta venta no tiene coste de referencia asignado
+      out.sinCoste = await pbiQuery(token, `
+EVALUATE
+  ROW(
+    "VentaSinCoste", CALCULATE(SUM(${M.vBase}), FILTER(${T}, ISBLANK(${M.vCoste}))),
+    "LineasSinCoste", CALCULATE(COUNTROWS(${T}), FILTER(${T}, ISBLANK(${M.vCoste}))),
+    "VentaTotal", SUM(${M.vBase}),
+    "LineasTotal", COUNTROWS(${T})
+  )`);
+
+      // C quater) Rango temporal real de la tabla de hechos.
+      // Necesario para saber sobre que periodo se esta calculando todo.
+      out.porAno = await pbiQuery(token, `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${T}[ANO],
+    "Venta",  SUM(${M.vBase}),
+    "Lineas", COUNTROWS(${T}),
+    "Desde",  MIN(${M.vFecha}),
+    "Hasta",  MAX(${M.vFecha})
+  )
+  ORDER BY ${T}[ANO]`);
+
+      // C) Comparacion global: lo que suma el modelo frente a lo que sumo yo
+      out.totales = await pbiQuery(token, `
+EVALUATE
+  ROW(
+    "VentaTotal",  SUM(${M.vBase}),
+    "CosteTotal",  SUM(${M.vCoste}),
+    "MargenCalc",  SUM(${M.vBase}) - SUM(${M.vCoste}),
+    "MargenPctCalc", DIVIDE(SUM(${M.vBase}) - SUM(${M.vCoste}), SUM(${M.vBase})) * 100,
+    "MargenPctFilaProm", AVERAGE(${T}[Margen Referencia por fila]),
+    "Lineas", COUNTROWS(${T})
+  )`);
+
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
+  // ?ver=RPIEDRA → ficha de ventas de un comercial, leida de Firestore.
+  // No toca Power BI: consulta lo ya sincronizado, asi que es instantanea.
+  if (req.query.ver) {
+    const id = String(req.query.ver).trim().toUpperCase();
+    try {
+      const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+      const key = ENV.FB_API_KEY ? `?key=${ENV.FB_API_KEY}` : "";
+
+      const resumen = await fbLeerDocumento("pbi_resumen_agente", docId(id));
+
+      // Sin orderBy para no exigir indice compuesto en Firestore:
+      // se ordena despues en JavaScript.
+      const r = await fetch(`https://firestore.googleapis.com/v1/${base}:runQuery${key}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          structuredQuery: {
+            from: [{ collectionId: "pbi_ventas_cliente" }],
+            where: { fieldFilter: {
+              field: { fieldPath: "agente" },
+              op: "EQUAL",
+              value: { stringValue: id },
+            }},
+            limit: 500,
+          },
+        }),
+      });
+      const filas = await r.json();
+      const clientes = (Array.isArray(filas) ? filas : [])
+        .filter((f) => f.document)
+        .map((f) => {
+          const o = { _id: f.document.name.split("/").pop() };
+          for (const [k, v] of Object.entries(f.document.fields || {})) {
+            o[k] = v.doubleValue !== undefined ? Number(v.doubleValue)
+                 : v.integerValue !== undefined ? Number(v.integerValue)
+                 : v.stringValue ?? v.booleanValue ?? null;
+          }
+          return o;
+        })
+        .filter((c) => !c.fusionadoEn)
+        .sort((a, b) => (b.ventasAct || 0) - (a.ventasAct || 0));
+
+      const eur = (n) => Number(n || 0).toLocaleString("es-ES",
+        { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
+
+      return res.status(200).json({
+        ok: true,
+        agente: id,
+        resumen: resumen ? {
+          ventas2025completo: eur(resumen.ventasAntFull),
+          ventas2025mismoPeriodo: eur(resumen.ventasAntYTD),
+          ventas2026: eur(resumen.ventasAct),
+          variacion: resumen.variacionPct !== null ? `${resumen.variacionPct} %` : "—",
+          margen2026: resumen.margenPctAct !== null ? `${resumen.margenPctAct} %` : "—",
+          margen2025: resumen.margenPctAntYTD !== null ? `${resumen.margenPctAntYTD} %` : "—",
+          margenMes: resumen.margenPctMes != null ? `${resumen.margenPctMes} %` : "FALTA",
+          margenMesAnt: resumen.margenPctMesAnt != null ? `${resumen.margenPctMesAnt} %` : "FALTA",
+          coberturaAntYTD: resumen.coberturaAntYTD != null ? `${resumen.coberturaAntYTD} %` : "FALTA",
+          ventasMesAnt: resumen.ventasMesAnt != null ? eur(resumen.ventasMesAnt) : "FALTA",
+          baseMesAnt:   resumen.baseMesAnt != null ? eur(resumen.baseMesAnt) : "FALTA",
+          ventasMesActual: eur(resumen.ventasMes),
+          clientes: resumen.clientes,
+          clientesConVentaEsteMes: resumen.clientesConVentaMes,
+          coberturaMargen: `${resumen.coberturaAct} %`,
+        } : "sin datos: lanza primero una sincronizacion real",
+        totalClientes: clientes.length,
+        top20: clientes.slice(0, 20).map((c) => ({
+          codigo: c.cliente,
+          nombre: c.nombre,
+          poblacion: c.poblacion,
+          v2026: eur(c.ventasAct),
+          // Las dos cifras de 2025: la comparable y la del ano cerrado.
+          // La variacion se calcula SIEMPRE contra el mismo periodo.
+          v2025mismoPeriodo: eur(c.ventasAntYTD),
+          v2025completo: eur(c.ventasAntFull),
+          variacion: c.variacionPct !== null && c.variacionPct !== undefined
+            ? `${c.variacionPct} %` : "sin venta en ese periodo",
+          margen: c.margenPctAct !== null && c.margenPctAct !== undefined
+            ? `${c.margenPctAct} %` : "—",
+          ultimaVenta: (c.ultimaVenta || "").slice(0, 10),
+        })),
+        sinVentaEsteAno: clientes.filter((c) => !c.ventasAct).length,
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: e.message });
+    }
+  }
+
+  // ?vendedores=1 → ventas del mes agrupadas por el VENDEDOR del ERP,
+  // que es el mismo campo que usa el Panel Principal de Power BI.
+  // Sirve para comparar cifra a cifra y localizar diferencias, sin que
+  // interfiera el mapeo a los agentes del CRM.
+  if (req.query.vendedores === "1") {
+    try {
+      const { token } = await getToken(req);
+      const T = M.ventas;
+      const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _iniMes = DATE(YEAR(_hoy), MONTH(_hoy), 1)
+  VAR _anoAct = YEAR(_hoy)
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${T}[VENDEDOR],
+    "VentasMes", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniMes && ${M.vFecha} <= _hoy),
+    "VentasAno", CALCULATE(SUM(${M.vBase}), FILTER(${T}, YEAR(${M.vFecha}) = _anoAct))
+  )
+  ORDER BY [VentasMes] DESC`);
+
+      const eur = (n) => Number(n || 0).toLocaleString("es-ES",
+        { maximumFractionDigits: 0 });
+      const lista = filas.map((r) => ({
+        vendedor: pick(r, "VENDEDOR"),
+        ventasMes: num(pick(r, "VentasMes")),
+        ventasAno: num(pick(r, "VentasAno")),
+      })).filter((v) => v.ventasMes || v.ventasAno);
+
+      return res.status(200).json({
+        ok: true,
+        nota: "Mismo campo VENDEDOR que el Panel Principal. Incluye intercompania.",
+        desde: `01/${String(new Date().getMonth() + 1).padStart(2, "0")}`,
+        hasta: new Date().toISOString().slice(0, 10),
+        totalMes: eur(lista.reduce((t, v) => t + v.ventasMes, 0)),
+        totalAno: eur(lista.reduce((t, v) => t + v.ventasAno, 0)),
+        vendedores: lista.map((v) => ({
+          vendedor: v.vendedor,
+          ventasMes: eur(v.ventasMes),
+          ventasAno: eur(v.ventasAno),
+        })),
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: e.message });
+    }
+  }
+
+  // ?pedidos=1 → radiografia de "00 Entrada Pedidos Global".
+  // Antes de construir nada encima hay que saber si tiene importes de
+  // verdad, que periodo cubre y si el pendiente se puede aislar.
+  if (req.query.pedidos === "1") {
+    const T = "'00 Entrada Pedidos Global'";
+    const V = "'00 Pedidos Validados Global'";
+    const out = { ok: true, entrada: T, validados: V };
+    let token;
+    try { ({ token } = await getToken(req)); }
+    catch (e) { return res.status(500).json({ ok: false, error: e.message }); }
+
+    // Cada consulta va aislada: si una falla, las demas siguen. Antes un
+    // error de DAX en el primer bloque dejaba la respuesta a medias.
+    const pedir = async (clave, dax) => {
+      try { out[clave] = await pbiQuery(token, dax, true); }
+      catch (e) { out[clave] = { error: e.message.slice(0, 240) }; }
+    };
+
+    await pedir("totalesEntrada", `
+EVALUATE
+  ROW(
+    "Lineas",        COUNTROWS(${T}),
+    "Importe",       SUM(${T}[BASE]),
+    "LineasConImporte", CALCULATE(COUNTROWS(${T}), FILTER(${T}, ${T}[BASE] > 0)),
+    "Clientes",      DISTINCTCOUNT(${T}[CLIENTE]),
+    "Articulos",     DISTINCTCOUNT(${T}[CODIGO]),
+    "Familias",      DISTINCTCOUNT(${T}[FAMILIA]),
+    "PrimerPedido",  MIN(${T}[FECHA]),
+    "UltimoPedido",  MAX(${T}[FECHA]),
+    "UltimaEntrega", MAX(${T}[FECHAPLANIFICADA])
+  )`);
+
+    await pedir("porAnoEntrada", `
+EVALUATE
+  GROUPBY(
+    ADDCOLUMNS(${T}, "@Ano", YEAR(${T}[FECHA])),
+    [@Ano],
+    "Lineas",  SUMX(CURRENTGROUP(), 1),
+    "Importe", SUMX(CURRENTGROUP(), ${T}[BASE])
+  )
+  ORDER BY [@Ano] DESC`);
+
+    await pedir("esVisita", `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${T}[ESVISITA],
+    "Lineas", COUNTROWS(${T}),
+    "Importe", SUM(${T}[BASE])
+  )`);
+
+    // El Panel Principal muestra "Ped. Pdte de Servir". Si el total de
+    // validados coincide con esa cifra, validado equivale a pendiente y no
+    // hace falta ningun campo de estado.
+    await pedir("totalesValidados", `
+DEFINE
+  VAR _hoy = TODAY()
+EVALUATE
+  ROW(
+    "Lineas",         COUNTROWS(${V}),
+    "Importe",        SUM(${V}[BASE]),
+    "Unidades",       SUM(${V}[UNI]),
+    "Pedidos",        DISTINCTCOUNT(${V}[NumPedido]),
+    "Clientes",       DISTINCTCOUNT(${V}[CLIENTE]),
+    "PrimeraEntrega", MIN(${V}[FECHAPLANIFICADA]),
+    "UltimaEntrega",  MAX(${V}[FECHAPLANIFICADA]),
+    "EntregaFutura",  CALCULATE(SUM(${V}[BASE]), FILTER(${V}, ${V}[FECHAPLANIFICADA] >= _hoy)),
+    "EntregaPasada",  CALCULATE(SUM(${V}[BASE]), FILTER(${V}, ${V}[FECHAPLANIFICADA] < _hoy))
+  )`);
+
+    await pedir("validadosPorCliente", `
+EVALUATE
+  TOPN(10,
+    SUMMARIZECOLUMNS(
+      ${V}[CLIENTE],
+      ${V}[VENDEDOR],
+      "Importe", SUM(${V}[BASE]),
+      "Lineas",  COUNTROWS(${V})
+    ),
+    [Importe], DESC)`);
+
+    await pedir("topFamilias", `
+EVALUATE
+  TOPN(10,
+    SUMMARIZECOLUMNS(
+      ${T}[FAMILIA],
+      "Lineas", COUNTROWS(${T}),
+      "Importe", SUM(${T}[BASE])
+    ),
+    [Importe], DESC)`);
+
+    return res.status(200).json(out);
+  }
+
+  // ?familias=1 → venta por CLIENTE × FAMILIA, año actual frente a año
+  // anterior A MISMA FECHA (mismo criterio vAct/vAnt del resto del sistema),
+  // cruzando la tabla de ventas con el maestro '00 Plu Global' (la tabla de
+  // ventas no tiene columna FAMILIA: solo el codigo de articulo).
+  // Escribe en Firestore:
+  //   pbi_familias_cliente/parte1..N  → JSON [cliente, familia, act, ant, costeAct, costeAnt]
+  //   pbi_familias_resumen/estado     → resumen por familia, para decidir el
+  //                                     mapeo familia → linea comercial
+  // El mapeo familia → linea (TRIPA FRESCA / DESHIDRATADA / INGREDIENTES /
+  // ENVASES) se guarda A MANO en pbi_config/familias_lineas y este bloque
+  // no lo toca: los codigos de familia son estables, se decide una vez.
+  // Se lanza a mano tras la sync nocturna, o se anade al cron como paso 2.
+  // Si Vercel corta por tiempo (60 s), lanzar por empresas sueltas con
+  // &empresa=4 (una llamada por empresa NO sobreescribe a las demas: en ese
+  // modo acumula sobre lo ya guardado solo si se pasa &acumular=1).
+  if (req.query.familias === "1") {
+    const t1 = Date.now();
+    const out = { ok: true };
+    try {
+      const { token, modo } = await getToken(req);
+      out.modoAuth = modo;
+      const T = M.ventas;
+
+      // 1) Maestro de articulos → familia por codigo, con descripciones de
+      //    ejemplo para poder reconocer cada familia al mapearla.
+      const fam = new Map(), famDesc = new Map();
+      const filasPlu = await pbiQuery(token, `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    '00 Plu Global'[CODIGO],
+    '00 Plu Global'[FAMILIA],
+    '00 Plu Global'[SUBFAMILIA],
+    '00 Plu Global'[DESCRIPCION]
+  )`, true);
+      const descArt = new Map();
+      // Tripa artificial repartida por varias familias (la 2012 mezcla equino
+      // natural con FIBROUS): se reclasifica POR DESCRIPCION, mande quien mande.
+      const RE_ARTIFICIAL = /FIBROUS|NOJAX|FIBRAN|COLAGENO|COL.GENO|COLEX|EDICAS|FIBROSA|POLIAM|ARTIFICIAL|MULTIBAR/i;
+      for (const r of filasPlu) {
+        const cod = String(pick(r, "CODIGO") || "").trim();
+        if (!cod) continue;
+        const d = String(pick(r, "DESCRIPCION") || "").trim();
+        let f = String(pick(r, "FAMILIA") || "").trim() || "SIN_FAMILIA";
+        if (d && RE_ARTIFICIAL.test(d)) f = "ARTIF";
+        if (!fam.has(cod)) fam.set(cod, f);
+        if (d && !descArt.has(cod)) descArt.set(cod, d);
+        if (d) {
+          const lista = famDesc.get(f) || [];
+          if (lista.length < 5 && !lista.includes(d)) { lista.push(d); famDesc.set(f, lista); }
+        }
+      }
+      out.articulosEnMaestro = fam.size;
+
+      // 1b) Catalogo comercial (coleccion productos del CRM): segunda
+      //     oportunidad para los articulos que no estan en el maestro Plu.
+      //     Se clasifican como CAT:<categoriaKey> y el mapeo los recoge.
+      const catalogo = new Map();
+      try {
+        for (const p of await fbLeerColeccion("productos")) {
+          const c = String(p.codigo || "").toUpperCase().trim();
+          const k = String(p.categoriaKey || "").trim();
+          if (!c || !k) continue;
+          if (!catalogo.has(c)) catalogo.set(c, k);
+          const base = c.replace(/\.[A-Z0-9]+$/i, ""); // sin sufijo de envase
+          if (base !== c && !catalogo.has(base)) catalogo.set(base, k);
+        }
+        out.productosEnCatalogo = catalogo.size;
+      } catch (e) { out.avisoCatalogo = String(e.message || e).slice(0, 160); }
+      const famDeArt = (art) => {
+        if (fam.has(art)) return fam.get(art);
+        if (catalogo.has(art)) return "CAT:" + catalogo.get(art);
+        const base = art.replace(/\.[A-Z0-9]+$/i, "");
+        if (base !== art) {
+          if (fam.has(base)) return fam.get(base);
+          if (catalogo.has(base)) return "CAT:" + catalogo.get(base);
+        }
+        return "SIN_FAMILIA";
+      };
+
+      // 2) Empresas presentes en ventas: se consulta por empresa para no
+      //    acercarse al limite de 100.000 filas por consulta de la API.
+      let emps = (await pbiQuery(token, `EVALUATE VALUES(${M.vEmpresa})`, true))
+        .map((r) => String(pick(r, "EMPRESA") || "").trim()).filter(Boolean);
+      if (req.query.empresa) emps = [String(req.query.empresa).trim()];
+      out.empresas = emps;
+
+      // 3) Venta por cliente × articulo. El coste se depura igual que en la
+      //    sync principal: sin blancos y descartando costes >3x la base
+      //    (errores de maestro que reventarian el margen).
+      const acum = new Map(); // cliente|familia → {act, ant, cAct, cAnt}
+      const sinFam = new Map(); // articulo sin clasificar → {act, clientes}
+      let filasLeidas = 0;
+      for (const emp of (emps.length ? emps : [null])) {
+        const base = emp === null ? T : `FILTER(${T}, ${M.vEmpresa} = "${emp}")`;
+        const fEmp = emp === null ? "" : `${M.vEmpresa} = "${emp}",`;
+        const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+  VAR _iniAct = DATE(_anoAct, 1, 1)
+  VAR _iniAnt = DATE(_anoAnt, 1, 1)
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
+EVALUATE
+  FILTER(
+    ADDCOLUMNS(
+      SUMMARIZE(${base}, ${M.vCliente}, ${T}[CODIGO]),
+      "Act", CALCULATE(SUM(${M.vBase}), ${fEmp}
+        ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy),
+      "Ant", CALCULATE(SUM(${M.vBase}), ${fEmp}
+        ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt),
+      "CAct", CALCULATE(SUM(${M.vCoste}), ${fEmp}
+        ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy,
+        NOT ISBLANK(${M.vCoste}), ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3),
+      "CAnt", CALCULATE(SUM(${M.vCoste}), ${fEmp}
+        ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt,
+        NOT ISBLANK(${M.vCoste}), ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)
+    ),
+    [Act] <> 0 || [Ant] <> 0
+  )`, false);
+        filasLeidas += filas.length;
+        for (const r of filas) {
+          const cli = String(pick(r, "CLIENTE") || "").trim();
+          const art = String(pick(r, "CODIGO") || "").trim();
+          if (!cli) continue;
+          const f = famDeArt(art);
+          if (f === "SIN_FAMILIA" && art) {
+            const s = sinFam.get(art) || { act: 0, clientes: new Set() };
+            s.act += Number(pick(r, "Act")) || 0; s.clientes.add(cli);
+            sinFam.set(art, s);
+          }
+          const k = cli + "|" + f;
+          const a = acum.get(k) || { act: 0, ant: 0, cAct: 0, cAnt: 0 };
+          a.act += Number(pick(r, "Act")) || 0;
+          a.ant += Number(pick(r, "Ant")) || 0;
+          a.cAct += Number(pick(r, "CAct")) || 0;
+          a.cAnt += Number(pick(r, "CAnt")) || 0;
+          acum.set(k, a);
+        }
+      }
+      out.filasClienteArticulo = filasLeidas;
+      out.filasClienteFamilia = acum.size;
+
+      // Modo por empresa suelta con &acumular=1: se cargan las partes ya
+      // guardadas y se suman, para poder trocear si Vercel corta por tiempo.
+      if (req.query.empresa && req.query.acumular === "1") {
+        try {
+          const previas = await fbLeerColeccion("pbi_familias_cliente");
+          for (const p of previas) {
+            if (!p.datos) continue;
+            for (const [cli, f, act, ant, cAct, cAnt] of JSON.parse(p.datos)) {
+              const k = cli + "|" + f;
+              const a = acum.get(k) || { act: 0, ant: 0, cAct: 0, cAnt: 0 };
+              a.act += act; a.ant += ant; a.cAct += cAct || 0; a.cAnt += cAnt || 0;
+              acum.set(k, a);
+            }
+          }
+        } catch (e) { out.avisoAcumular = e.message.slice(0, 160); }
+      }
+
+      // 4) Partes JSON (mismo patron de lectura que pbi_indice_clientes)
+      const filasOut = [];
+      for (const [k, a] of acum) {
+        const i = k.indexOf("|");
+        filasOut.push([k.slice(0, i), k.slice(i + 1),
+          num(a.act), num(a.ant), num(a.cAct), num(a.cAnt)]);
+      }
+      filasOut.sort((x, y) => y[2] - x[2]);
+      const partes = [];
+      const TAM = 900;
+      for (let i = 0; i < filasOut.length; i += TAM) {
+        partes.push({
+          _id: "parte" + (partes.length + 1),
+          datos: JSON.stringify(filasOut.slice(i, i + TAM)),
+          filas: Math.min(TAM, filasOut.length - i),
+          actualizado: new Date().toISOString(),
+        });
+      }
+      out.partes = partes.length;
+      await fbCommit("pbi_familias_cliente", partes);
+
+      // 5) Resumen por familia: la chuleta para decidir el mapeo a lineas
+      const porFam = new Map();
+      for (const [k, a] of acum) {
+        const f = k.slice(k.indexOf("|") + 1);
+        const g = porFam.get(f) || { act: 0, ant: 0, cAct: 0, clientes: 0 };
+        g.act += a.act; g.ant += a.ant; g.cAct += a.cAct; g.clientes++;
+        porFam.set(f, g);
+      }
+      const resumen = [...porFam.entries()].map(([f, g]) => ({
+        familia: f,
+        act: num(g.act),
+        ant: num(g.ant),
+        margenPct: g.act ? num((100 * (g.act - g.cAct)) / g.act) : null,
+        clientes: g.clientes,
+        ejemplos: (famDesc.get(f) || []).join(" · ").slice(0, 300),
+      })).sort((x, y) => y.act - x.act);
+      await fbCommit("pbi_familias_resumen", [{
+        _id: "estado",
+        datos: JSON.stringify(resumen),
+        actualizado: new Date().toISOString(),
+      }]);
+      out.familias = resumen;
+
+      // 6) Lineas comerciales: mapeo por defecto (decidido 10-ago-2026).
+      //    Editable en pbi_config/familias_lineas sin tocar codigo; este
+      //    bloque solo lo crea si no existe (o con &remapear=1 lo repone).
+      const MAPEO_DEFECTO = {
+        "TRIPA FRESCA":       ["2001","2002","2003","2004","2012","1037","1077 - SECA UNITED CARO","1097 - SECA UNITED CARO VACUNO","1108 - MAT.PRIMA SHORTS SECA","1109 - MAT.PRIMA SECA","1124 - CERDO RASPADO SHORT","1009","CAT:tripas_naturales","CAT:promo_tripas"],
+        "ENVOLT. DESHIDRATADAS": ["2006","2005","2007","1089 - ENVOL. COMESTIBLE VEGETAL"],
+        "INGREDIENTES":       ["4016","4017","4018","4019","3013","3014","3015","1008","9033","1007","CAT:wikuk_esp","CAT:wikuk_prep","CAT:ceylan_gen","CAT:ceylan_prep","CAT:taberner_esp","CAT:taberner_prep","CAT:campana_gen","CAT:aditivos","CAT:spot_wikuk","CAT:spot_ceylan","CAT:spot_taberner","CAT:spot_campana","CAT:spot_frumen","CAT:promo_especias"],
+        "ENVASES":            ["9027","5019","5020","5021","5022","5023","5024","5025","5026","6024","1020","1043","8011","1007 - BOLSAS DE VACIO","CAT:envases","CAT:promo_envases","CAT:spot_merkapack","CAT:spot_cui","CAT:spot_el_carmen","CAT:spot_sierra"],
+        "TRIPAS ARTIFICIALES": ["ARTIF","1033","1024","1021","1035","1034","1036","ARTIFPP","GAINEA"],
+        "AUXILIARES":         ["7024","7025","6025","6022","1002","1003","1006","HABIT","PROD","1088 - MUESTRAS TRIPAS","CAT:accesorios"],
+        "NO PRODUCTO":        ["1017","1013","1012","9028","9999 - VARIOS"],
+      };
+      let mapeo = null;
+      try {
+        if (req.query.remapear !== "1") {
+          const g = await fbLeerDocumento("pbi_config", "familias_lineas");
+          if (g && g.datos) mapeo = JSON.parse(g.datos);
+        }
+      } catch (e) { /* no existe: se crea */ }
+      if (!mapeo) {
+        mapeo = MAPEO_DEFECTO;
+        await fbCommit("pbi_config", [{
+          _id: "familias_lineas",
+          datos: JSON.stringify(mapeo),
+          actualizado: new Date().toISOString(),
+        }]);
+        out.mapeoCreado = true;
+      }
+      const lineaDe = (f) => {
+        for (const [linea, lista] of Object.entries(mapeo)) if (lista.includes(f)) return linea;
+        return "SIN CLASIFICAR";
+      };
+      const porLinea = new Map();
+      for (const r of resumen) {
+        const L = lineaDe(r.familia);
+        const g = porLinea.get(L) || { act: 0, ant: 0 };
+        g.act += r.act; g.ant += r.ant;
+        porLinea.set(L, g);
+      }
+      out.lineas = [...porLinea.entries()]
+        .map(([linea, g]) => ({ linea, act: num(g.act), ant: num(g.ant),
+          evolPct: g.ant ? num((100 * (g.act - g.ant)) / g.ant) : null }))
+        .sort((x, y) => y.act - x.act);
+
+      // 7) Los articulos que siguen sin clasificar, por venta: la lista
+      //    corta para sistemas (dar de alta la familia en el maestro).
+      out.sinClasificarTop = [...sinFam.entries()]
+        .map(([art, s]) => ({ articulo: art, act: num(s.act), clientes: s.clientes.size }))
+        .sort((x, y) => y.act - x.act).slice(0, 40);
+
+      out.segundos = Math.round((Date.now() - t1) / 1000);
+    } catch (e) {
+      out.ok = false;
+      out.error = String(e.message || e).slice(0, 600);
+    }
+    return res.status(200).json(out);
+  }
+
+  // ?solopedidos=1 → sincroniza unicamente los pedidos planificados.
+  // La sincronizacion completa consume casi los 60 s de Vercel con las
+  // ventas y nunca llega a este bloque, asi que se puede lanzar aparte.
+  if (req.query.solopedidos === "1") {
+    const t1 = Date.now();
+    const out = { ok: true };
+    try {
+      const { token, modo } = await getToken(req);
+      out.modoAuth = modo;
+      const Q = dax(null);
+
+      // Ficha de cliente para poner nombre y poblacion
+      const fichas = new Map();
+      for (const c of await pbiQuery(token, Q.clientes)) {
+        const cod = String(pick(c, "CODIGO") || "").trim();
+        if (!cod || fichas.has(cod)) continue;
+        fichas.set(cod, {
+          nombre: pick(c, "NOMBRE"),
+          poblacion: pick(c, "POBLACION"),
+        });
+      }
+
+      // Vendedor -> comercial del CRM
+      const agentes = new Map();
+      for (const a of await pbiQuery(token, Q.agentes, true)) {
+        const cod = String(pick(a, "CODIGO") || "").trim();
+        if (cod) agentes.set(cod, String(pick(a, "GRUPOAGENTE") || "").trim() || null);
+      }
+
+      // Maestro de articulos, para poner descripcion en cada linea
+      const arts = new Map();
+      try {
+        for (const a of await pbiQuery(token, Q.articulos, true)) {
+          const cod = String(pick(a, "CODIGO") || "").trim();
+          if (!cod || arts.has(cod)) continue;
+          arts.set(cod, {
+            descripcion: pick(a, "DESCRIPCION"),
+            metros: pick(a, "METROS"),
+            calibre: pick(a, "CALIBRE"),
+            calidad: pick(a, "CALIDAD"),
+          });
+        }
+      } catch (e) { /* sin maestro se muestra solo el codigo */ }
+
+      const filas = await pbiQuery(token, Q.pedidos);
+      const crudos = filas.map((r, i) => {
+        const cli = String(pick(r, "Cliente") || "").trim();
+        const ven = String(pick(r, "Vendedor") || "").trim();
+        const fec = String(pick(r, "Fecha") || "").slice(0, 10);
+        const art = String(pick(r, "Articulo") || "").trim();
+        const ficha = fichas.get(cli) || fichas.get(canonico(cli)) || {};
+        return {
+          // El identificador no puede depender de la posición de la fila: si
+          // Power BI devuelve el resultado en otro orden, la misma línea
+          // recibe otro id y se duplica en vez de sobrescribirse.
+          _id: docId(`${String(pick(r, "Pedido") || "SP").trim()}_${cli}_${art}_${fec}`),
+          // Clave que no depende de la fecha de entrega: permite reconocer la
+          // misma línea de un día para otro y detectar si se ha movido.
+          linea: docId(`${String(pick(r, "Pedido") || "").trim()}_${cli}_${art}`),
+          cliente: cli,
+          nombre: ficha.nombre || cli,
+          poblacion: ficha.poblacion || null,
+          agente: agentes.get(ven) || null,
+          vendedor: ven,
+          fecha: fec,
+          articulo: art,
+          familia: String(pick(r, "Familia") || "").trim() || null,
+          unidades: num(pick(r, "Uni")),
+          precio: num(pick(r, "Precio")),
+          descripcion: (arts.get(art) || {}).descripcion || null,
+          metros: (arts.get(art) || {}).metros || null,
+          calibre: (arts.get(art) || {}).calibre || null,
+          calidad: (arts.get(art) || {}).calidad || null,
+          subfamilia: String(pick(r, "Subfamilia") || "").trim() || null,
+          importe: num(pick(r, "Importe")),
+          pedido: String(pick(r, "Pedido") || "").trim(),
+          // Traspasos entre empresas del grupo: mismo criterio que en ventas
+          intercompany: esIntercompany(ficha.nombre || cli),
+          actualizado: new Date().toISOString(),
+        };
+      }).filter((d) => d.cliente && d.fecha);
+
+      // Power BI no publica el numero de linea del pedido. Un pedido con dos
+      // lineas del mismo articulo y la misma fecha llega como dos filas
+      // identicas, y se pisaban al escribir porque comparten _id: la coleccion
+      // guardaba menos lineas de las que decia contar. Ademas, al comparar el
+      // importe contra la unica guardada, el diario cantaria un cambio falso
+      // todos los dias. Se suman en una sola linea.
+      const agrupados = new Map();
+      for (const d of crudos) {
+        const previo = agrupados.get(d._id);
+        if (!previo) { agrupados.set(d._id, d); continue; }
+        previo.importe = num(previo.importe + d.importe);
+        previo.unidades = num(previo.unidades + d.unidades);
+      }
+      const docs = [...agrupados.values()];
+      out.filasAgrupadas = crudos.length - docs.length;
+
+      // Aviso: si una misma linea se entrega en dos fechas, sobreviven dos
+      // documentos con la misma clave "linea" y el diario no sabria cual de
+      // los dos se ha movido. Se cuenta para saber si el caso existe de verdad
+      // antes de complicar el codigo por el.
+      const vecesPorLinea = new Map();
+      for (const d of docs) vecesPorLinea.set(d.linea, (vecesPorLinea.get(d.linea) || 0) + 1);
+      out.lineasRepetidas = [...vecesPorLinea.values()].filter((n) => n > 1).length;
+
+      out.lineas = docs.length;
+      out.importe = num(docs.reduce((t, d) => t + d.importe, 0));
+      out.clientes = new Set(docs.map((d) => d.cliente)).size;
+      out.sinAgente = docs.filter((d) => !d.agente).length;
+      out.intercompany = docs.filter((d) => d.intercompany).length;
+      out.importeIntercompany = num(docs.filter((d) => d.intercompany)
+        .reduce((t, d) => t + d.importe, 0));
+      out.conDescripcion = docs.filter((d) => d.descripcion).length;
+      out.pedidosDistintos = new Set(docs.map((d) => d.pedido).filter(Boolean)).size;
+      out.primeraEntrega = docs.map((d) => d.fecha).sort()[0] || null;
+
+      // ── Resumen por comercial: entrada de pedidos y previsión ──
+      // Dos cosas distintas y complementarias:
+      //   entrada*   = pedidos METIDOS en el periodo (trabajo de la semana)
+      //   previsto*  = pedidos que SALEN en el periodo (lo que se facturara)
+      const porAg = {};
+      const dameAg = (a) => (porAg[a] = porAg[a] || {
+        _id: docId(a), agente: a,
+        entradaSem: 0, entradaMes: 0, entradaAno: 0,
+        entradaSemAnt: 0, entradaAnoAnt: 0,
+        previstoEstaSem: 0, previstoProxSem: 0, previstoTotal: 0,
+      });
+
+      try {
+        for (const e of await pbiQuery(token, Q.entrada)) {
+          const ven = String(pick(e, "VENDEDOR") || "").trim();
+          const ag = agentes.get(ven);
+          if (!ag) continue;
+          const a = dameAg(ag);
+          a.entradaSem    += num(pick(e, "Sem"));
+          a.entradaMes    += num(pick(e, "Mes"));
+          a.entradaAno    += num(pick(e, "Ano"));
+          a.entradaSemAnt += num(pick(e, "SemAnt"));
+          a.entradaAnoAnt += num(pick(e, "AnoAnt"));
+        }
+      } catch (e) { out.errorEntrada = e.message.slice(0, 200); }
+
+      // Lo que sale esta semana y la que viene, a partir de los pedidos ya
+      // planificados: permite anticipar si se llegara al objetivo.
+      const hoy0 = new Date(); hoy0.setHours(0, 0, 0, 0);
+      const lunes = new Date(hoy0);
+      lunes.setDate(lunes.getDate() - ((lunes.getDay() + 6) % 7));
+      const finSem = new Date(lunes); finSem.setDate(finSem.getDate() + 6);
+      const finProx = new Date(lunes); finProx.setDate(finProx.getDate() + 13);
+      const iso = (d) => d.toISOString().slice(0, 10);
+
+      for (const d of docs) {
+        if (!d.agente || d.intercompany) continue;
+        const a = dameAg(d.agente);
+        a.previstoTotal += d.importe;
+        if (d.fecha <= iso(finSem)) a.previstoEstaSem += d.importe;
+        else if (d.fecha <= iso(finProx)) a.previstoProxSem += d.importe;
+      }
+
+      const resumen = Object.values(porAg).map((a) => ({
+        ...a,
+        entradaSem: num(a.entradaSem), entradaMes: num(a.entradaMes),
+        entradaAno: num(a.entradaAno), entradaSemAnt: num(a.entradaSemAnt),
+        entradaAnoAnt: num(a.entradaAnoAnt),
+        previstoEstaSem: num(a.previstoEstaSem),
+        previstoProxSem: num(a.previstoProxSem),
+        previstoTotal: num(a.previstoTotal),
+        actualizado: new Date().toISOString(),
+      }));
+
+      if (req.query.dry === "1") {
+        out.dry = true;
+        out.muestra = docs.slice(0, 5);
+        out.resumenAgentes = resumen.slice(0, 8);
+      } else {
+        // ── Movimientos de fecha ───────────────────────────────────────
+        // Antes de sobrescribir se compara la fecha planificada de cada línea
+        // con la que tenía en la sincronización anterior. Un pedido que se
+        // mueve no deja rastro en Power BI: si no se guarda aquí, se pierde.
+        try {
+          const antes = new Map();
+          for (const g of await fbLeerColeccion("pbi_pedidos")) {
+            if (g.linea) antes.set(g.linea, g);
+          }
+
+          const hoy = new Date().toISOString().slice(0, 10);
+          const movs = [];
+          const vistas = new Set();
+          let variacion = 0;   // suma de cambios de importe en líneas vivas
+
+          for (const d of docs) {
+            if (!d.linea) continue;
+            vistas.add(d.linea);
+            const a = antes.get(d.linea);
+            if (!a) {
+              movs.push({ tipo: "nuevo", linea: d.linea, cliente: d.cliente,
+                nombre: d.nombre, agente: d.agente, articulo: d.articulo,
+                descripcion: d.descripcion, importe: d.importe,
+                pedido: d.pedido, fechaNueva: d.fecha, dias: null });
+              continue;
+            }
+            // Toda línea que sobrevive puede haber cambiado de importe. Se
+            // acumula siempre, aunque además se haya movido de fecha: es lo
+            // único que permite cuadrar la cabecera de ayer con la de hoy.
+            variacion += num(d.importe) - num(a.importe);
+
+            if (a.fecha && d.fecha && a.fecha !== d.fecha) {
+              const dias = Math.round(
+                (new Date(d.fecha) - new Date(a.fecha)) / 86400000);
+              movs.push({
+                tipo: dias > 0 ? "retraso" : "adelanto",
+                linea: d.linea, cliente: d.cliente, nombre: d.nombre,
+                agente: d.agente, articulo: d.articulo,
+                descripcion: d.descripcion, importe: d.importe,
+                pedido: d.pedido, fechaAntes: a.fecha, fechaNueva: d.fecha, dias,
+              });
+            } else if (Math.abs(num(d.importe) - num(a.importe)) >= 1) {
+              // Cambia el importe sin moverse de fecha: hasta ahora era
+              // invisible. Se guarda la diferencia, no el importe, para que
+              // el total de la sección sea la variación neta.
+              movs.push({
+                tipo: "cambio",
+                linea: d.linea, cliente: d.cliente, nombre: d.nombre,
+                agente: d.agente, articulo: d.articulo,
+                descripcion: d.descripcion,
+                importe: num(d.importe - a.importe),
+                importeAntes: num(a.importe), importeAhora: num(d.importe),
+                pedido: d.pedido, fechaAntes: a.fecha, fechaNueva: d.fecha,
+                dias: null,
+              });
+            }
+          }
+
+          // Líneas que estaban y ya no. Si su entrega estaba prevista para
+          // ayer o antes, lo normal es que se hayan servido. Si era futura,
+          // el pedido se ha anulado o modificado. No es certeza: Power BI no
+          // dice por qué desaparece una línea, solo que ya no está.
+          const ayer = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+          for (const [k, a] of antes) {
+            if (vistas.has(k)) continue;
+            const servido = a.fecha && a.fecha <= ayer;
+            movs.push({ tipo: servido ? "servido" : "anulado",
+              linea: k, cliente: a.cliente,
+              nombre: a.nombre, agente: a.agente, articulo: a.articulo,
+              descripcion: a.descripcion, importe: a.importe,
+              unidades: a.unidades, pedido: a.pedido,
+              fechaAntes: a.fecha, dias: null });
+          }
+
+          const porTipo = (lista, tipos, tope) => lista
+            .filter((m) => tipos.includes(m.tipo))
+            .sort((x, y) => (y.importe || 0) - (x.importe || 0))
+            .slice(0, tope);
+          // Los cambios de importe se ordenan por magnitud: una bajada de
+          // 20.000 € importa tanto como una subida, y ordenando por signo
+          // el tope se comería justo las caídas.
+          const porMagnitud = (lista, tope) => lista
+            .filter((m) => m.tipo === "cambio")
+            .sort((x, y) => Math.abs(y.importe || 0) - Math.abs(x.importe || 0))
+            .slice(0, tope);
+          const cuenta = (t) => movs.filter((m) => m.tipo === t).length;
+          const suma = (t) => num(movs.filter((m) => m.tipo === t)
+            .reduce((x, m) => x + (m.importe || 0), 0));
+
+          if (antes.size) {
+            await fbCommit("pbi_pedidos_cambios", [{
+              _id: hoy,
+              fecha: hoy,
+              detectadoEl: new Date().toISOString(),
+              lineasAntes: antes.size,
+              lineasAhora: docs.length,
+              // Importe y número de pedidos de cada foto, para la cabecera
+              importeAntes: num([...antes.values()].reduce((x, a) => x + (a.importe || 0), 0)),
+              importeAhora: num(docs.reduce((x, d) => x + (d.importe || 0), 0)),
+              pedidosAntes: new Set([...antes.values()].map((a) => a.pedido).filter(Boolean)).size,
+              pedidosAhora: new Set(docs.map((d) => d.pedido).filter(Boolean)).size,
+              retrasos: cuenta("retraso"),   importeRetrasos: suma("retraso"),
+              adelantos: cuenta("adelanto"), importeAdelantos: suma("adelanto"),
+              nuevos: cuenta("nuevo"),       importeNuevos: suma("nuevo"),
+              servidos: cuenta("servido"),   importeServidos: suma("servido"),
+              anulados: cuenta("anulado"),   importeAnulados: suma("anulado"),
+              variaciones: cuenta("cambio"), importeVariaciones: suma("cambio"),
+              // Variación de TODAS las líneas vivas, incluidas las que además
+              // se movieron de fecha. Con esto la cabecera cuadra:
+              //   importeAntes + nuevos - servidos - anulados + variacion
+              //   = importeAhora
+              importeVariacion: num(variacion),
+
+              // Cada categoría por separado, ordenada por importe. Se limita
+              // el volumen para que el documento no crezca sin control.
+              movimientos: JSON.stringify(porTipo(movs, ["retraso", "adelanto"], 150)),
+              salidas:     JSON.stringify(porTipo(movs, ["servido", "anulado"], 150)),
+              entradas:    JSON.stringify(porTipo(movs, ["nuevo"], 80)),
+              cambios:     JSON.stringify(porMagnitud(movs, 80)),
+            }]);
+            out.cambiosFecha = { retrasos: cuenta("retraso"),
+              adelantos: cuenta("adelanto"), nuevos: cuenta("nuevo"),
+              servidos: cuenta("servido"), anulados: cuenta("anulado"),
+              importeServidos: suma("servido"), importeRetrasos: suma("retraso"),
+              variaciones: cuenta("cambio"), importeVariacion: num(variacion) };
+          } else {
+            out.cambiosFecha = "primera pasada, no hay con qué comparar";
+          }
+        } catch (e) {
+          out.avisoCambios = e.message.slice(0, 160);
+        }
+
+        out.escritos = await fbCommit("pbi_pedidos", docs);
+        out.agentesConEntrada = await fbCommit("pbi_entrada_agente", resumen);
+        // Fuera lo ya servido
+        // Reconciliación completa: la colección debe contener exactamente lo
+        // que hay ahora en Power BI. Borrar solo lo caducado dejaba dentro los
+        // pedidos que habían cambiado de fecha, y el total crecía cada día.
+        const vivos = new Set(docs.map((d) => d._id));
+        const guardados = await fbLeerColeccion("pbi_pedidos");
+        const sobran = guardados.filter((g) => !vivos.has(g._id)).map((g) => g._id);
+        out.sobrantesBorrados = sobran.length;
+        for (let i = 0; i < sobran.length; i += 400) {
+          await fbBorrar("pbi_pedidos", sobran.slice(i, i + 400));
+        }
+      }
+      out.segundos = Math.round((Date.now() - t1) / 1000);
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(out.ok ? 200 : 500).json(out);
+  }
+
+  const dry = req.query.dry === "1"; // ?dry=1 → consulta pero NO escribe
+  const t0 = Date.now();
+  const log = { dry, ventas: 0, pendiente: 0, stock: 0, errores: [] };
+
+  try {
+    const { token, modo } = await getToken(req);
+    log.modoAuth = modo;
+
+    log.reglasDeFirestore = await cargarReglas();
+
+    // Correcciones de rama hechas a mano en la herramienta de estructura.
+    // Mandan sobre la regla general y se resuelven aqui, no en cada pagina.
+    const AJUSTES_RAMA = {};
+    try {
+      for (const a of await fbLeerColeccion("pbi_ajustes")) {
+        if (a.equipo && a.equipo !== "_EXCLUIR")
+          AJUSTES_RAMA[String(a._id).toUpperCase()] = a.equipo;
+      }
+    } catch (e) {
+      log.errores.push(`ajustes de rama: ${e.message}`);
+    }
+    log.ajustesRama = Object.keys(AJUSTES_RAMA).length;
+    globalThis.__AJUSTES_RAMA__ = AJUSTES_RAMA;
+
+    // ── Decidir si toca sincronizacion completa o incremental ──
+    // Se fuerza completa cuando:
+    //   - se pide con ?full=1
+    //   - no hay sincronizacion previa registrada
+    //   - es dia 1 de mes (cambian los acumulados del mes)
+    //   - han pasado mas de 7 dias (por si fallo el cron algun dia)
+    //   - estamos en enero (cambio de ejercicio: se recalcula todo)
+    let desde = null;
+    if (req.query.full !== "1") {
+      try {
+        const meta = await fbLeerDocumento("pbi_meta", "estado");
+        const ultima = meta?.ultimaSync ? new Date(meta.ultimaSync) : null;
+        const hoy = new Date();
+        const dias = ultima ? (hoy - ultima) / 86400000 : 999;
+        const forzar = !ultima || dias > 7 || hoy.getDate() === 1 || hoy.getMonth() === 0;
+        if (!forzar) {
+          // Margen de 3 dias hacia atras: recoge facturas grabadas con
+          // retraso o rectificaciones sobre dias ya sincronizados.
+          desde = new Date(ultima.getTime() - 3 * 86400000);
+        }
+      } catch (e) {
+        log.avisoIncremental = `sin metadatos previos, se hace completa (${e.message})`;
+      }
+    }
+    log.tipoSync = desde ? "incremental" : "completa";
+    if (desde) log.desde = desde.toISOString().slice(0, 10);
+
+    const Q = dax(desde);
+
+    // ── 1. Ventas y margen por cliente ──
+    try {
+      const anoAct = new Date().getFullYear();
+      const anoAnt = anoAct - 1;
+      log.ejercicios = { actual: anoAct, anterior: anoAnt };
+
+      let filas, enriquecido = true;
+      try {
+        filas = await pbiQuery(token, Q.ventas);
+      } catch (e) {
+        // Sin relacion entre ventas y clientes en el modelo: se cae a la
+        // version sin nombre en lugar de perder el bloque entero.
+        log.avisoVentas = `sin datos de cliente (${e.message.slice(0, 120)})`;
+        enriquecido = false;
+        filas = await pbiQuery(token, Q.ventasSimple);
+      }
+      log.ventasEnriquecido = enriquecido;
+
+      // Mapa vendedor -> comercial, desde el propio modelo
+      const agentes = new Map();
+      try {
+        for (const a of await pbiQuery(token, Q.agentes, true)) {
+          const cod = String(pick(a, "CODIGO") || "").trim().toUpperCase();
+          if (!cod) continue;
+          agentes.set(cod, {
+            grupo: String(pick(a, "GRUPOAGENTE") || "").trim() || null,
+            nivel1: String(pick(a, "GRUPONIVEL1") || "").trim() || null,
+            ambito: String(pick(a, "GRUPONIVEL2") || "").trim() || null,
+            tipo: String(pick(a, "GRUPONIVEL3") || "").trim() || null,
+            // GRUPONIVEL4 es el "Grupo Agentes" del Panel Principal:
+            // Wikuk, Interkey, Portugal. Es la division real del negocio.
+            equipo: (() => {
+              const v = String(pick(a, "GRUPONIVEL4") || "").trim();
+              if (!v || v === "-") return null;
+              // "Interkey Julio" parece un apaño puntual; se normaliza
+              return v.startsWith("Interkey") ? "Interkey" : v;
+            })(),
+            // MB es el objetivo de margen (0,26 = 26%). El campo
+            // "MARGEN OBJETIVO" esta casi vacio; el bueno es este.
+            objetivoMargen: pick(a, "MB") ? num(100 * Number(pick(a, "MB"))) : null,
+          });
+        }
+        log.agentesMapeados = agentes.size;
+      } catch (e) {
+        log.errores.push(`agentes: ${e.message}`);
+      }
+
+      // (fix) Busqueda del vendedor normalizada. Antes cada uso repetia
+      // String(...).trim() sin mayusculas, asi que un codigo de vendedor con
+      // otra caja no encontraba a su comercial: el cliente quedaba sin agente
+      // y su venta se iba al cajon "SIN AGENTE".
+      const buscaAgente = (v) => agentes.get(String(v || "").trim().toUpperCase());
+
+      // Ficha de cliente: primera aparicion de cada codigo
+      const fichas = new Map();
+      try {
+        for (const c of await pbiQuery(token, Q.clientes)) {
+          // (fix) Clave normalizada. La tabla de ventas devuelve el codigo en
+          // mayusculas y el maestro no siempre: con .trim() a secas, "Guery"
+          // y "GUERY" no casaban y el cliente se quedaba sin ficha, es decir
+          // marcado como huerfano y sin nombre ni poblacion.
+          const cod = String(pick(c, "CODIGO") || "").trim().toUpperCase();
+          if (!cod || fichas.has(cod)) continue;
+          fichas.set(cod, {
+            nombre: pick(c, "NOMBRE"),
+            poblacion: pick(c, "POBLACION"),
+            provincia: pick(c, "PROVINCIA"),
+            bloqueado: pick(c, "BLQ") === "SI",
+            codconta: String(pick(c, "CODCONTA") || "").trim() || null,
+          });
+        }
+        log.fichasCliente = fichas.size;
+      } catch (e) {
+        log.errores.push(`clientes: ${e.message}`);
+      }
+
+      const docs = filas.map((r) => {
+        const cliente = pick(r, "CLIENTE");
+        // Si el codigo ya no existe en el maestro, se busca su equivalente
+        // recodificado para no dejar el cliente sin nombre ni poblacion.
+        const ficha = fichas.get(String(cliente).trim().toUpperCase())
+          || fichas.get(String(canonico(cliente)).trim().toUpperCase())
+          || {};
+
+        const vAntFull = num(pick(r, "VentaAntFull"));
+        const vAntYTD  = num(pick(r, "VentaAntYTD"));
+        const vAct     = num(pick(r, "VentaAct"));
+        const vMes     = num(pick(r, "VentaMes"));
+        const vSem     = num(pick(r, "VentaSem"));
+        const vMesAnt  = num(pick(r, "VentaMesAnt"));
+        const vSemAnt  = num(pick(r, "VentaSemAnt"));
+
+        // Bases limpias (lineas con coste creible) para cada ventana
+        const bAntFull = num(pick(r, "VentaAntFullOk"));
+        const bAntYTD  = num(pick(r, "VentaAntYTDOk"));
+        const bAct     = num(pick(r, "VentaActOk"));
+        const mAntFull = num(bAntFull - num(pick(r, "CosteAntFullOk")));
+        const mAntYTD  = num(bAntYTD  - num(pick(r, "CosteAntYTDOk")));
+        const mAct     = num(bAct     - num(pick(r, "CosteActOk")));
+        const bSem     = num(pick(r, "VentaSemOk"));
+        const mSem     = num(bSem - num(pick(r, "CosteSemOk")));
+        const bMes     = num(pick(r, "VentaMesOk"));
+        const bMesAnt  = num(pick(r, "VentaMesAntOk"));
+        const mMes     = num(bMes    - num(pick(r, "CosteMesOk")));
+        const mMesAnt  = num(bMesAnt - num(pick(r, "CosteMesAntOk")));
+
+        const p = (m, b) => (b ? num((100 * m) / b) : null);
+        const cob = (b, v) => (v ? num((100 * b) / v) : 0);
+
+        return {
+          _id: docId(cliente),
+          cliente,
+          nombre: ficha.nombre || cliente,
+          // Sin ficha = codigo que ya no existe en el maestro: historico
+          // que quedo huerfano tras la recodificacion de 2026.
+          huerfano: !ficha.nombre,
+          // Intercompania segun GRUPONIVEL1 del modelo, que es el filtro
+          // oficial del Panel Principal. El nombre queda de respaldo.
+          // Power BI decide solo con GRUPONIVEL1. Nosotros añadiamos el
+          // nombre, y los patrones incluyen WIKUK, INTERKEY y UNITED CARO:
+          // un cliente real que lleve esas palabras quedaba excluido aqui y
+          // contado alli. El nombre solo vale si el vendedor no esta en la
+          // tabla de agentes y no hay forma de saberlo por GRUPONIVEL1.
+          intercompany: (() => {
+            const a = buscaAgente(pick(r, "VENDEDOR"));
+            if (a && a.nivel1) return a.nivel1 === "Intercompany";
+            return esIntercompany(ficha.nombre);
+          })(),
+          agente: buscaAgente(pick(r, "VENDEDOR"))?.grupo || null,
+          tipoAgente: buscaAgente(pick(r, "VENDEDOR"))?.tipo || null,
+          ambitoAgente: buscaAgente(pick(r, "VENDEDOR"))?.ambito || null,
+          equipoAgente: buscaAgente(pick(r, "VENDEDOR"))?.equipo || null,
+          objetivoMargen: buscaAgente(pick(r, "VENDEDOR"))?.objetivoMargen ?? null,
+          poblacion: ficha.poblacion,
+          provincia: ficha.provincia,
+          bloqueado: ficha.bloqueado === true,
+          codconta: ficha.codconta || null,
+          vendedor: pick(r, "VENDEDOR"),
+          empresa: pick(r, "EMPRESA"),
+
+          anoAnterior: anoAnt,
+          anoActual: anoAct,
+
+          // Referencia: ano anterior cerrado
+          ventasAntFull: vAntFull,
+          margenAntFull: mAntFull,
+          margenPctAntFull: p(mAntFull, bAntFull),
+
+          // Comparativa homogenea: mismo periodo de ambos anos
+          ventasAntYTD: vAntYTD,
+          margenAntYTD: mAntYTD,
+          margenPctAntYTD: p(mAntYTD, bAntYTD),
+          // Solo se guarda la caída de clientes reales que de verdad bajan:
+          // Firestore excluye de la ordenación los documentos sin el campo, y
+          // así los 418 fusionados no ocupan los primeros puestos con su
+          // caída aparente de todo el histórico.
+          ...(function () {
+            const esInter = (agentes.get(String(pick(r, "VENDEDOR") || "").trim())?.nivel1
+                              === "Intercompany") || esIntercompany(ficha.nombre);
+            const baja = num(vAct - vAntYTD);
+            return (!esInter && baja < 0) ? { caida: baja } : {};
+          })(),
+
+          ventasAct: vAct,
+          margenAct: mAct,
+          margenPctAct: p(mAct, bAct),
+
+          ventasMes: vMes,
+          ventasSem: vSem,
+          ventasMesAnt: vMesAnt,
+          ventasSemAnt: vSemAnt,
+
+          // Margen de la semana, para el cierre semanal
+          margenSem: mSem,       baseSem: bSem,
+          margenPctSem: p(mSem, bSem),
+
+          // Margen del mes, con su referencia del ano anterior
+          margenMes: mMes,       baseMes: bMes,
+          margenPctMes: p(mMes, bMes),
+          margenMesAnt: mMesAnt, baseMesAnt: bMesAnt,
+          margenPctMesAnt: p(mMesAnt, bMesAnt),
+
+          // Variacion sobre el mismo periodo, no sobre el ano cerrado
+          variacionPct: vAntYTD ? num((100 * (vAct - vAntYTD)) / vAntYTD) : null,
+          variacionMargenPts:
+            (p(mAct, bAct) !== null && p(mAntYTD, bAntYTD) !== null)
+              ? num(p(mAct, bAct) - p(mAntYTD, bAntYTD)) : null,
+
+          coberturaAntFull: cob(bAntFull, vAntFull),
+          coberturaAntYTD: cob(bAntYTD, vAntYTD),
+          coberturaAct: cob(bAct, vAct),
+
+          ultimaVenta: pick(r, "UltimaVenta"),
+          actualizado: new Date().toISOString(),
+        };
+      });
+
+      // ── Consolidar clientes recodificados ──
+      // En 2026 se cambio la codificacion (U4... -> C0...). El codigo
+      // viejo conserva el historico y el nuevo solo tiene ventas de este
+      // ano, asi que la comparativa interanual sale rota en ambos.
+      // Se agrupan por CODCONTA y el codigo con mas venta actual pasa a
+      // ser el principal, heredando el historico del grupo.
+      // Clave de agrupacion: codigo contable si existe, y si no,
+      // nombre normalizado + poblacion. Los codigos nuevos creados en la
+      // migracion de sociedad de marzo de 2026 no llevan CODCONTA, asi
+      // que el nombre es la unica via para reconstruir su historico.
+      // ?fusion=no  -> solo agrupa por codigo contable
+      // ?fusion=off -> no agrupa nada, cada codigo es un cliente
+      // Tras corregir los codigos en Power BI (julio 2026) la fusion por
+      // nombre deberia sobrar. Se conserva por si reaparecen duplicados.
+      const modoFusion = String(req.query.fusion || "si").toLowerCase();
+      log.modoFusion = modoFusion;
+
+      let recodificados = 0;
+      for (const d of docs) {
+        const can = canonico(d.cliente);
+        if (can !== d.cliente) { d.canonico = can; recodificados++; }
+      }
+      log.codigosRecodificados = recodificados;
+
+      const claveGrupo = (d) => {
+        // La equivalencia de codigo manda sobre cualquier otra regla
+        if (d.canonico) return "CAN:" + d.canonico;
+        if (docs.some((x) => x.canonico === d.cliente)) return "CAN:" + d.cliente;
+        if (modoFusion === "off") return null;
+        if (d.codconta) return "CC:" + d.codconta;
+        if (modoFusion === "no") return null;
+        const n = normNombre(d.nombre);
+        if (!n || n === String(d.cliente).toUpperCase()) return null;
+        return "NP:" + n + "|" + String(d.poblacion || "").toUpperCase().trim();
+      };
+
+      const porConta = new Map();
+      for (const d of docs) {
+        const k = claveGrupo(d);
+        if (!k) continue;
+        d._clave = k;
+        if (!porConta.has(k)) porConta.set(k, []);
+        porConta.get(k).push(d);
+      }
+
+      let fusionados = 0;
+      for (const [conta, grupo] of porConta) {
+        if (grupo.length < 2) continue;
+        // Principal = el que mas ha vendido este ano; si ninguno vende,
+        // el que tenga mas historico.
+        // En grupos por equivalencia de codigo, el principal es siempre
+        // el codigo NUEVO (el que sigue existiendo en el maestro).
+        const principal = grupo.find((d) => !d.canonico && !d.huerfano)
+          || grupo.slice().sort((a, b) =>
+               (b.ventasAct - a.ventasAct) || (b.ventasAntFull - a.ventasAntFull))[0];
+
+        const suma = (k) => grupo.reduce((t, d) => t + (d[k] || 0), 0);
+
+        // IMPORTANTE: las bases limpias se calculan ANTES de sobrescribir
+        // los importes del principal. Si no, su cobertura se aplicaria al
+        // total del grupo y se contaria dos veces.
+        const base = (k, cob) => grupo.reduce(
+          (t, d) => t + (d[k] || 0) * ((d[cob] || 0) / 100), 0);
+        const bAntFull = base("ventasAntFull", "coberturaAntFull");
+        const bAntYTD  = base("ventasAntYTD", "coberturaAntYTD");
+        const bAct     = base("ventasAct", "coberturaAct");
+
+        principal.ventasAntFull = num(suma("ventasAntFull"));
+        principal.margenAntFull = num(suma("margenAntFull"));
+        principal.ventasAntYTD  = num(suma("ventasAntYTD"));
+        principal.margenAntYTD  = num(suma("margenAntYTD"));
+        principal.ventasAct     = num(suma("ventasAct"));
+        principal.margenAct     = num(suma("margenAct"));
+        principal.ventasMes     = num(suma("ventasMes"));
+        principal.ventasSem     = num(suma("ventasSem"));
+        principal.ventasMesAnt  = num(suma("ventasMesAnt"));
+        principal.ventasSemAnt  = num(suma("ventasSemAnt"));
+        principal.margenSem     = num(suma("margenSem"));
+        principal.baseSem       = num(suma("baseSem"));
+        principal.margenMes     = num(suma("margenMes"));
+        principal.baseMes       = num(suma("baseMes"));
+        principal.margenMesAnt  = num(suma("margenMesAnt"));
+        principal.baseMesAnt    = num(suma("baseMesAnt"));
+
+        const pct = (m, b) => (b ? num((100 * m) / b) : null);
+        const cob = (b, v) => (v ? num((100 * b) / v) : 0);
+
+        principal.margenPctAntFull = pct(principal.margenAntFull, bAntFull);
+        principal.margenPctAntYTD  = pct(principal.margenAntYTD, bAntYTD);
+        principal.margenPctAct     = pct(principal.margenAct, bAct);
+        principal.coberturaAntFull = cob(bAntFull, principal.ventasAntFull);
+        principal.coberturaAntYTD  = cob(bAntYTD, principal.ventasAntYTD);
+        principal.coberturaAct     = cob(bAct, principal.ventasAct);
+        principal.variacionMargenPts =
+          (principal.margenPctAct !== null && principal.margenPctAntYTD !== null)
+            ? num(principal.margenPctAct - principal.margenPctAntYTD) : null;
+        principal.variacionPct = principal.ventasAntYTD
+          ? num((100 * (principal.ventasAct - principal.ventasAntYTD)) / principal.ventasAntYTD)
+          : null;
+
+        principal.codigosFusionados = grupo.map((d) => d.cliente).join(", ");
+        // Se recalcula después de sumar, no antes
+        const bajaP = num((principal.ventasAct || 0) - (principal.ventasAntYTD || 0));
+        if (!principal.intercompany && bajaP < 0) principal.caida = bajaP;
+        else delete principal.caida;
+
+        for (const d of grupo) {
+          if (d === principal) continue;
+          // Y tampoco si es el MISMO codigo en otro objeto: la tabla tiene una
+          // fila por sociedad, asi que el principal puede aparecer repetido. Sin
+          // esto se fusionaba consigo mismo, se ponia a cero y desaparecia del
+          // desglose por cliente aunque el resumen si lo contaba: era el caso de
+          // LORIENTE PIQUERAS, 81.527 € que no cuadraban en CARLOSG.
+          if (String(d.cliente) === String(principal.cliente)) continue;
+          d.fusionadoEn = principal.cliente;   // el CRM puede redirigir aqui
+          d.ventasAntFull = 0; d.margenAntFull = 0;
+          d.ventasAntYTD = 0;  d.margenAntYTD = 0;
+          d.ventasAct = 0;     d.margenAct = 0;
+          // Un fusionado no cae: su venta se ha movido al principal
+          delete d.caida;
+          d.ventasMes = 0;     d.variacionPct = null;
+          d.margenPctAntFull = null; d.margenPctAntYTD = null; d.margenPctAct = null;
+          d.coberturaAntFull = 0; d.coberturaAntYTD = 0; d.coberturaAct = 0;
+          d.variacionMargenPts = null;
+          fusionados++;
+        }
+      }
+      log.codigosFusionados = fusionados;
+      const multi = [...porConta.entries()].filter(([, g]) => g.length > 1);
+      log.gruposPorContable = multi.filter(([k]) => k.startsWith("CC:")).length;
+      log.gruposPorNombre = multi.filter(([k]) => k.startsWith("NP:")).length;
+      log.sinCodconta = docs.filter((d) => !d.codconta).length;
+      // Muestra para revisar a ojo que no se estan fusionando clientes
+      // distintos que se llaman parecido
+      log.ejemplosFusionPorNombre = multi
+        .filter(([k]) => k.startsWith("NP:"))
+        .slice(0, 12)
+        .map(([k, g]) => ({
+          clave: k.slice(3),
+          codigos: g.map((d) => `${d.cliente} (${num(d.ventasAct)}€)`).join(" + "),
+        }));
+
+      // ── Verdad única ──────────────────────────────────────────────
+      // Hasta ahora cada pantalla repetía a mano las tres reglas de qué venta
+      // cuenta (fuera intercompany, fuera códigos fusionados, quién es el
+      // comercial) y cada vista nueva las replicaba mal. Se deciden aquí y se
+      // graban en el propio cliente: lo demás solo tiene que leer "cuenta" y
+      // "agenteFinal", sin volver a razonarlo.
+      // (fix) Asignacion del CRM, para los clientes cuyo vendedor no esta en
+      // la tabla de Agentes. Antes su venta caia en "SIN AGENTE" aunque el
+      // comercial estuviera perfectamente asignado en la ficha del CRM, y el
+      // bloque de estacionalidad los descartaba con un continue silencioso.
+      // Se lee una sola vez y se reutiliza mas abajo en el resumen.
+      let asignacionCRM = new Map();
+      try {
+        asignacionCRM = await fbLeerClientes();
+        log.clientesCrmLeidos = asignacionCRM.size;
+      } catch (e) {
+        log.errores.push(`asignacion CRM: ${e.message}`);
+      }
+      const agenteDelCRM = (d) => {
+        const id = String(d._id || d.cliente || "").trim();
+        return asignacionCRM.get(id)
+          || asignacionCRM.get(id.toUpperCase())
+          || asignacionCRM.get(String(canonico(id)).trim())
+          || (d.codconta ? asignacionCRM.get("CC:" + String(d.codconta).trim()) : null)
+          || null;
+      };
+      let rescatadosCRM = 0;
+
+      for (const d of docs) {
+      // Un mismo codigo puede venir en varias filas (una por sociedad). Todas
+      // escriben en el MISMO documento, asi que la ultima pisa a las demas: si
+      // esa trae cero, la venta buena desaparece. Se deja una sola por codigo,
+      // la que mas venta tenga, que es la que ya lleva la suma del grupo.
+      {
+        const mejor = new Map();
+        for (const d of docs) {
+          const k = String(d._id);
+          const a = mejor.get(k);
+          if (!a || num(d.ventasAct) > num(a.ventasAct)
+                 || (num(d.ventasAct) === num(a.ventasAct)
+                     && num(d.ventasAntFull) > num(a.ventasAntFull))) {
+            mejor.set(k, d);
+          }
+        }
+        if (mejor.size !== docs.length) {
+          log.duplicadosDescartados = docs.length - mejor.size;
+          // docs es const: se vacia y se rellena, en vez de reasignar
+          const buenos = [...mejor.values()];
+          docs.length = 0;
+          for (const d of buenos) docs.push(d);
+        }
+      }
+
+        // Red de seguridad: fusionado en si mismo no es fusionado
+        if (d.fusionadoEn && String(d.fusionadoEn) === String(d._id || d.cliente))
+          delete d.fusionadoEn;
+        d.cuenta = !d.intercompany && !d.fusionadoEn;
+        // El comercial lo manda el ERP; si ahi no consta, se pregunta al CRM
+        // antes de rendirse y mandarlo a "SIN AGENTE".
+        if (!d.agente) {
+          const delCRM = agenteDelCRM(d);
+          if (delCRM) { d.agenteFinal = delCRM; d.origenAgente = "crm"; rescatadosCRM++; }
+          else d.agenteFinal = "SIN AGENTE";
+        } else {
+          d.agenteFinal = d.agente;
+          d.origenAgente = "erp";
+        }
+      }
+      log.clientesQueCuentan = docs.filter((d) => d.cuenta).length;
+      log.agenteRescatadoDelCrm = rescatadosCRM;
+      log.ventaRescatadaDelCrm = num(docs
+        .filter((d) => d.cuenta && d.origenAgente === "crm")
+        .reduce((t, d) => t + num(d.ventasAct), 0));
+      log.siguenSinAgente = docs.filter((d) => d.cuenta && d.agenteFinal === "SIN AGENTE").length;
+
+      log.intercompanyMarcados = docs.filter((d) => d.intercompany).length;
+      log.codigosHuerfanos = docs.filter((d) => d.huerfano).length;
+      log.ventaEnHuerfanos = num(docs.filter((d) => d.huerfano)
+        .reduce((t, d) => t + d.ventasAntFull, 0));
+
+      // Quienes son: 119.087 € repartidos en 266 codigos que el resumen suma
+      // por agente pero que no aparecen en la cartera de nadie. Sin verlos no
+      // se puede saber si son clientes nuevos sin ficha, de otra empresa, o
+      // codigos que el enriquecimiento no supo casar.
+      log.ejemplosHuerfanos = docs.filter((d) => d.huerfano && num(d.ventasAct) > 0)
+        .sort((a, b) => num(b.ventasAct) - num(a.ventasAct))
+        .slice(0, 15)
+        .map((d) => ({
+          codigo: d._id, nombre: d.nombre || "(sin nombre)",
+          ventas: Math.round(num(d.ventasAct)),
+          agente: d.agente || "(sin agente)",
+          vendedor: d.vendedor || null, empresa: d.empresa || null,
+        }));
+
+      // ── Resumen por comercial, para el dashboard ──
+      // Se cruza cada cliente con su grupoAgente segun el CRM, porque el
+      // codigo de vendedor de Power BI ("1201") no coincide con los
+      // agentes del CRM (AZARCO, CARLOSG...).
+      // Si el tiempo aprieta, el resumen se deja para la llamada ?resumen=1:
+      // lo importante de esta pasada es que las ventas por cliente queden
+      // escritas. Antes se intentaba siempre y arriesgaba el conjunto.
+      const margen = () => 44 - Math.round((Date.now() - t0) / 1000);
+      if (!dry && margen() < 8) {
+        log.resumenAgentes = `omitido, quedaban ${margen()} s · lánzalo con ?resumen=1`;
+      } else try {
+        // Ya leida arriba: se reutiliza en vez de volver a recorrer los 16.000
+        // documentos de la coleccion "clientes".
+        const asignacion = asignacionCRM.size ? asignacionCRM : await fbLeerClientes();
+        log.clientesCrmLeidos = asignacion.size;
+
+        // En modo incremental, "docs" solo trae los clientes con movimiento.
+        // El resumen por comercial necesita la cartera completa, asi que se
+        // relee de Firestore y se fusiona: los recien calculados mandan.
+        let universo = docs;
+        if (desde && !dry) {
+          const guardados = await fbLeerColeccion("pbi_ventas_cliente");
+          const nuevos = new Map(docs.map((d) => [d._id, d]));
+
+          // Documentos obsoletos: los que quedaron con el codigo antiguo
+          // (U43XXXX) cuando su venta ya vive bajo el nuevo (U430XXXX).
+          // Si se dejan, la sincronizacion incremental los vuelve a sumar
+          // y el total sale inflado. Se descartan y se borran.
+          const obsoletos = guardados.filter((g) => {
+            const can = canonico(g._id);
+            return can !== g._id && (nuevos.has(can) ||
+              guardados.some((x) => x._id === can));
+          });
+
+          const fuera = new Set(obsoletos.map((o) => o._id));
+          universo = guardados
+            .filter((g) => !fuera.has(g._id))
+            .map((g) => nuevos.get(g._id) || g);
+          for (const [id, d] of nuevos) {
+            if (!guardados.some((g) => g._id === id)) universo.push(d);
+          }
+
+          log.universoResumen = universo.length;
+          log.obsoletosPurgados = obsoletos.length;
+          if (obsoletos.length) {
+            await fbBorrar("pbi_ventas_cliente", obsoletos.map((o) => o._id));
+          }
+        }
+
+        const porAgente = new Map();
+        let sinAsignar = 0, ventaSinAsignar = 0, ventaSinAsignarAnt = 0;
+        const huerfanos = [];
+
+        for (const d of universo) {
+          if (d.intercompany) continue;            // fuera traspasos internos
+          // Los codigos secundarios de una fusion quedan a cero: su venta
+          // ya esta sumada en el principal. Contarlos inflaria la cartera
+          // y falsearia el recuento de clientes sin venta.
+          if (d.fusionadoEn) continue;
+          // Prioridad: el comercial que dice Power BI. El CRM queda como
+          // respaldo para clientes cuyo vendedor no este en la tabla.
+          const agente = d.agente
+            || asignacion.get(String(d.cliente).trim())
+            || (d.codconta ? asignacion.get("CC:" + d.codconta) : null);
+          if (!agente) {
+            sinAsignar++;
+            ventaSinAsignar += d.ventasAct;
+            ventaSinAsignarAnt += d.ventasAntYTD;
+            // Se guardan los mayores para poder darlos de alta en el CRM
+            if (d.ventasAct > 0) huerfanos.push({
+              codigo: d.cliente, nombre: d.nombre, empresa: d.empresa,
+              vendedor: d.vendedor, ventas2026: d.ventasAct,
+              ventas2025: d.ventasAntFull,
+            });
+            continue;
+          }
+          if (!porAgente.has(agente)) {
+            porAgente.set(agente, {
+              _id: docId(agente), agente, anoAnterior: anoAnt, anoActual: anoAct,
+              tipo: d.tipoAgente || null,
+              equipo: (globalThis.__AJUSTES_RAMA__ || {})[String(agente).toUpperCase()]
+                || ramaDe(d.equipoAgente, d.tipoAgente),
+              equipoOriginal: d.equipoAgente || null,
+              ambito: d.ambitoAgente || null,
+              objetivoMargen: d.objetivoMargen ?? null,
+              ventasAntFull: 0, margenAntFull: 0, baseAntFull: 0,
+              ventasAntYTD: 0, margenAntYTD: 0, baseAntYTD: 0,
+              ventasAct: 0, margenAct: 0, baseAct: 0,
+              ventasMes: 0, ventasSem: 0, ventasMesAnt: 0, ventasSemAnt: 0,
+              margenMes: 0, baseMes: 0, margenMesAnt: 0, baseMesAnt: 0,
+              margenSem: 0, baseSem: 0,
+              clientes: 0, clientesConVentaMes: 0,
+            });
+          }
+          d.agente = agente;   // se persiste: permite filtrar por comercial
+          const a = porAgente.get(agente);
+          a.ventasAntFull += d.ventasAntFull; a.margenAntFull += d.margenAntFull;
+          a.ventasAntYTD  += d.ventasAntYTD;  a.margenAntYTD  += d.margenAntYTD;
+          a.ventasAct     += d.ventasAct;     a.margenAct     += d.margenAct;
+          a.ventasMes     += d.ventasMes;
+          a.ventasSem     += d.ventasSem || 0;
+          a.ventasMesAnt  += d.ventasMesAnt || 0;
+          a.ventasSemAnt  += d.ventasSemAnt || 0;
+          a.margenSem     += d.margenSem || 0;
+          a.baseSem       += d.baseSem || 0;
+          a.margenMes     += d.margenMes || 0;
+          a.baseMes       += d.baseMes || 0;
+          a.margenMesAnt  += d.margenMesAnt || 0;
+          a.baseMesAnt    += d.baseMesAnt || 0;
+          a.baseAntFull += d.ventasAntFull * (d.coberturaAntFull / 100);
+          a.baseAntYTD  += d.ventasAntYTD  * (d.coberturaAntYTD / 100);
+          a.baseAct     += d.ventasAct     * (d.coberturaAct / 100);
+          a.clientes++;
+          if (d.ventasMes > 0) a.clientesConVentaMes++;
+        }
+
+        const cerrar = (a) => {
+          const p = (m, b) => (b ? num((100 * m) / b) : null);
+          const cob = (b, v) => (v ? num((100 * b) / v) : 0);
+          const pctAct = p(a.margenAct, a.baseAct);
+          const pctAntYTD = p(a.margenAntYTD, a.baseAntYTD);
+          return {
+            ...a,
+            ventasAntFull: num(a.ventasAntFull), margenAntFull: num(a.margenAntFull),
+            ventasAntYTD: num(a.ventasAntYTD),   margenAntYTD: num(a.margenAntYTD),
+            ventasAct: num(a.ventasAct),         margenAct: num(a.margenAct),
+            ventasMes: num(a.ventasMes),
+            ventasSem: num(a.ventasSem),
+            ventasMesAnt: num(a.ventasMesAnt),
+            margenPctSem:    p(a.margenSem, a.baseSem),
+            margenSem: num(a.margenSem),       baseSem: num(a.baseSem),
+            margenPctMes:    p(a.margenMes, a.baseMes),
+            margenPctMesAnt: p(a.margenMesAnt, a.baseMesAnt),
+            margenMes: num(a.margenMes),       baseMes: num(a.baseMes),
+            margenMesAnt: num(a.margenMesAnt), baseMesAnt: num(a.baseMesAnt),
+            ventasSemAnt: num(a.ventasSemAnt),
+            // El % se calcula sobre la venta con coste fiable, no sobre
+            // la venta total, o saldria diluido.
+            margenPctAntFull: p(a.margenAntFull, a.baseAntFull),
+            margenPctAntYTD: pctAntYTD,
+            margenPctAct: pctAct,
+            variacionPct: a.ventasAntYTD
+              ? num((100 * (a.ventasAct - a.ventasAntYTD)) / a.ventasAntYTD) : null,
+            // Puntos por encima o por debajo del objetivo de margen
+            desviacionObjetivo: (pctAct !== null && a.objetivoMargen)
+              ? num(pctAct - a.objetivoMargen) : null,
+            variacionMargenPts: (pctAct !== null && pctAntYTD !== null)
+              ? num(pctAct - pctAntYTD) : null,
+            coberturaAntFull: cob(a.baseAntFull, a.ventasAntFull),
+            coberturaAntYTD: cob(a.baseAntYTD, a.ventasAntYTD),
+            coberturaAct: cob(a.baseAct, a.ventasAct),
+            baseAntFull: num(a.baseAntFull), baseAntYTD: num(a.baseAntYTD),
+            baseAct: num(a.baseAct),
+          };
+        };
+
+        const resumen = [...porAgente.values()].map(cerrar);
+
+        const tot = [...porAgente.values()].reduce((t, a) => {
+          for (const k of ["ventasAntFull","margenAntFull","baseAntFull",
+                           "ventasAntYTD","margenAntYTD","baseAntYTD",
+                           "ventasAct","margenAct","baseAct","ventasMes","ventasSem",
+                           "ventasMesAnt","ventasSemAnt",
+                           "margenMes","baseMes","margenMesAnt","baseMesAnt",
+                           "margenSem","baseSem",
+                           "clientes","clientesConVentaMes"]) t[k] += a[k];
+          return t;
+        }, { _id: "_TOTAL", agente: "_TOTAL", anoAnterior: anoAnt, anoActual: anoAct,
+             ventasAntFull:0, margenAntFull:0, baseAntFull:0,
+             ventasAntYTD:0, margenAntYTD:0, baseAntYTD:0,
+             ventasAct:0, margenAct:0, baseAct:0, ventasMes:0, ventasSem:0,
+             ventasMesAnt:0, ventasSemAnt:0,
+             margenMes:0, baseMes:0, margenMesAnt:0, baseMesAnt:0,
+             margenSem:0, baseSem:0,
+             clientes:0, clientesConVentaMes:0 });
+        resumen.push(cerrar(tot));
+
+        log.agentes = resumen.length - 1;
+        log.clientesSinAgente = sinAsignar;
+        log.ventaSinAsignar = num(ventaSinAsignar);
+        log.ventaSinAsignarAnt = num(ventaSinAsignarAnt);
+        // Comparacion honesta: si el ano anterior casi todo estaba asignado
+        // y este ano falta mucho, la caida del -35% es un espejismo
+        log.ventaTotalReal = {
+          ant: num(ventaSinAsignarAnt + [...porAgente.values()]
+                 .reduce((t, a) => t + a.ventasAntYTD, 0)),
+          act: num(ventaSinAsignar + [...porAgente.values()]
+                 .reduce((t, a) => t + a.ventasAct, 0)),
+        };
+        log.ventaTotalReal.variacionPct = log.ventaTotalReal.ant
+          ? num(100 * (log.ventaTotalReal.act - log.ventaTotalReal.ant) / log.ventaTotalReal.ant)
+          : null;
+        log.topSinAsignar = huerfanos
+          .sort((a, b) => b.ventas2026 - a.ventas2026)
+          .slice(0, 25)
+          .map((h) => ({ ...h, ventas2026: num(h.ventas2026), ventas2025: num(h.ventas2025) }));
+        // Por diseño el resumen y la suma de clientes deben coincidir: los dos
+        // excluyen intercompany y fusionados y agrupan por el mismo agente. Si
+        // no cuadran, el hueco esta entre "universo" y los clientes escritos.
+        try{
+          const escritos = new Set(docs.map((d) => String(d._id)));
+          const fuera = [];
+          for (const d of universo) {
+            if (d.intercompany || d.fusionadoEn) continue;
+            if (num(d.ventasAct) <= 0) continue;
+            if (escritos.has(String(d.cliente))) continue;
+            fuera.push({ codigo: d.cliente, nombre: d.nombre || null,
+              agente: d.agente || null, ventas: Math.round(num(d.ventasAct)) });
+          }
+          // No falta ninguno, asi que el hueco esta en el IMPORTE: se compara
+          // cliente a cliente lo que suma el resumen con lo que se escribe.
+          const porCod = {};
+          for (const d of docs) porCod[String(d._id)] = d;
+          const dif = [];
+          for (const d of universo) {
+            if (d.intercompany || d.fusionadoEn) continue;
+            const w = porCod[String(d.cliente)];
+            const a = num(d.ventasAct), b = w ? num(w.ventasAct) : 0;
+            if (Math.abs(a - b) < 1) continue;
+            dif.push({ codigo: d.cliente, nombre: d.nombre || null,
+              agente: d.agente || null, enResumen: Math.round(a),
+              enCliente: Math.round(b), dif: Math.round(a - b),
+              cuenta: w ? w.cuenta : null, escrito: !!w });
+          }
+          log.clientesConImporteDistinto = dif.length;
+          log.difImporteTotal = Math.round(dif.reduce((t,x)=>t+x.dif,0));
+          log.ejemplosImporte = dif
+            .sort((a,b)=>Math.abs(b.dif)-Math.abs(a.dif)).slice(0,15);
+          const porAg2 = {};
+          for (const x of dif) {
+            const k = x.agente || "SIN AGENTE";
+            porAg2[k] = (porAg2[k] || 0) + x.dif;
+          }
+          log.difImportePorAgente = Object.entries(porAg2)
+            .sort((a,b)=>Math.abs(b[1])-Math.abs(a[1])).slice(0,10)
+            .map(([agente,dif])=>({agente,dif}));
+
+          log.enResumenPeroNoEnClientes = fuera.length;
+          log.ventaEnEsosClientes = Math.round(
+            fuera.reduce((t, x) => t + x.ventas, 0));
+          log.ejemplosDescuadre = fuera
+            .sort((a, b) => b.ventas - a.ventas).slice(0, 15);
+          // Y el descuadre por comercial, que es como se ve en las pantallas
+          const porAg = {};
+          for (const x of fuera) {
+            const a = x.agente || "SIN AGENTE";
+            porAg[a] = (porAg[a] || 0) + x.ventas;
+          }
+          log.descuadrePorAgente = Object.entries(porAg)
+            .sort((a, b) => b[1] - a[1]).slice(0, 10)
+            .map(([agente, ventas]) => ({ agente, ventas }));
+        }catch(e){ log.errores.push(`descuadre: ${e.message}`); }
+
+        // ── Fusiones confirmadas por los comerciales ────────────────────
+        // El cierre semanal solo ANOTA la equivalencia; aqui se aplica. Las
+        // visitas se mueven al codigo real guardando de donde venian, para
+        // poder deshacerlo si alguien se equivoca.
+        if (req.query.fusiones === "1" || req.query.fusiones === "dry") {
+          try {
+            const soloVer = req.query.fusiones === "dry";
+            const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+            const key = ENV.FB_API_KEY ? `&key=${ENV.FB_API_KEY}` : "";
+            const leerCol = async (col) => {
+              const out = []; let tok = null, v = 0;
+              do {
+                const r = await fetch(`https://firestore.googleapis.com/v1/${base}/${col}`
+                  + `?pageSize=300${tok ? `&pageToken=${tok}` : ""}${key}`);
+                if (!r.ok) break;
+                const j = await r.json();
+                for (const d of j.documents || []) {
+                  const o = { _id: d.name.split("/").pop() };
+                  for (const [k, f] of Object.entries(d.fields || {})) {
+                    o[k] = f.stringValue ?? (f.doubleValue !== undefined ? Number(f.doubleValue)
+                         : f.integerValue !== undefined ? Number(f.integerValue) : null);
+                  }
+                  out.push(o);
+                }
+                tok = j.nextPageToken || null; v++;
+              } while (tok && v < 200);
+              return out;
+            };
+            const props = (await leerCol("fusiones_propuestas"))
+              .filter((f) => f.estado === "confirmada" && !f.aplicada);
+            log.fusionesConfirmadas = props.length;
+
+            if (props.length && !soloVer && !dry) {
+              const visitas = await leerCol("visitas");
+              let movidas = 0, fichas = 0;
+              for (const f of props) {
+                const suyas = visitas.filter((v) => String(v.clienteId) === String(f.crmId));
+                for (const v of suyas) {
+                  const r = await fetch(`https://firestore.googleapis.com/v1/${base}`
+                    + `/visitas/${encodeURIComponent(v._id)}`
+                    + `?updateMask.fieldPaths=clienteId&updateMask.fieldPaths=clienteIdOriginal`
+                    + `${key ? "&" + key.slice(1) : ""}`, {
+                    method: "PATCH", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ fields: {
+                      clienteId: { stringValue: String(f.pbiCodigo) },
+                      clienteIdOriginal: { stringValue: String(f.crmId) },
+                    }}),
+                  });
+                  if (r.ok) movidas++;
+                }
+                // La ficha vieja queda marcada, no se borra
+                await fetch(`https://firestore.googleapis.com/v1/${base}`
+                  + `/clientes/${encodeURIComponent(f.crmId)}`
+                  + `?updateMask.fieldPaths=fusionadoEn&updateMask.fieldPaths=fusionadoEl`
+                  + `${key ? "&" + key.slice(1) : ""}`, {
+                  method: "PATCH", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ fields: {
+                    fusionadoEn: { stringValue: String(f.pbiCodigo) },
+                    fusionadoEl: { stringValue: new Date().toISOString() },
+                  }}),
+                });
+                fichas++;
+                await fetch(`https://firestore.googleapis.com/v1/${base}`
+                  + `/fusiones_propuestas/${encodeURIComponent(f._id)}`
+                  + `?updateMask.fieldPaths=aplicada&updateMask.fieldPaths=visitasMovidas`
+                  + `${key ? "&" + key.slice(1) : ""}`, {
+                  method: "PATCH", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ fields: {
+                    aplicada: { stringValue: new Date().toISOString() },
+                    visitasMovidas: { doubleValue: suyas.length },
+                  }}),
+                });
+              }
+              log.fusionesAplicadas = fichas;
+              log.visitasMovidas = movidas;
+            } else {
+              log.fusionesAplicadas = "solo lectura · lanza con &fusiones=1";
+            }
+          } catch (e) { log.errores.push(`fusiones: ${e.message}`); }
+        }
+
+        // ── Maestro de clientes: Power BI manda ──────────────────────────
+        // El CRM arrastra fichas cargadas hace años; Power BI viene del ERP.
+        // Se actualizan los datos que son del ERP y NO se toca lo que solo
+        // sabe el comercial: SEMANAVISITA, contactos, telefonos y notas.
+        if (req.query.maestro === "1" || req.query.maestro === "dry") {
+          // Con el tiempo justo se prefiere no empezar a escribir: mejor no
+          // hacerlo que dejarlo a medias.
+          if (margen() < 12 && req.query.maestro === "1") {
+            log.maestroCambios = `omitido, quedaban ${margen()} s`;
+          } else
+          try {
+            const soloVer = req.query.maestro === "dry";
+            const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
+            const key = ENV.FB_API_KEY ? `&key=${ENV.FB_API_KEY}` : "";
+            // Ficha actual del CRM, para comparar y no escribir de mas
+            const actual = new Map();
+            let tok = null, v = 0;
+            do {
+              const r = await fetch(`https://firestore.googleapis.com/v1/${base}/clientes`
+                + `?pageSize=300${tok ? `&pageToken=${tok}` : ""}${key}`);
+              if (!r.ok) break;
+              const j = await r.json();
+              for (const d of j.documents || []) {
+                const f = d.fields || {};
+                const g = (k) => f[k]?.stringValue ?? null;
+                const id = d.name.split("/").pop();
+                actual.set(String(id), {
+                  nombre: g("NOMBRE") || g("nombre"),
+                  poblacion: g("POBLACION") || g("poblacion"),
+                  provincia: g("PROVINCIA") || g("provincia"),
+                  codconta: g("CODCONTA") || g("codconta"),
+                });
+              }
+              tok = j.nextPageToken || null; v++;
+            } while (tok && v < 200);
+
+            const cambios = [];
+            for (const d of docs) {
+              if (!d.nombre || d.huerfano) continue;
+              const a = actual.get(String(d._id));
+              if (!a) continue;                     // alta nueva: no toca aqui
+              // Se compara sin espacios sobrantes: " ALICANTE" y "ALICANTE " no
+              // son un cambio real y reescribian 14 fichas cada dia.
+              const lim = (x) => String(x || "").replace(/\s+/g, " ").trim();
+              const dif = {};
+              const poner = (campo, clave, valor) => {
+                const v = lim(valor);
+                if (!v || lim(a[clave]) === v) return;
+                dif[campo] = v;
+              };
+              poner("NOMBRE", "nombre", d.nombre);
+              poner("POBLACION", "poblacion", d.poblacion);
+              poner("PROVINCIA", "provincia", d.provincia);
+              poner("CODCONTA", "codconta", d.codconta);
+              if (Object.keys(dif).length) cambios.push({ id: d._id, dif, antes: a });
+            }
+            log.maestroCambios = cambios.length;
+            log.maestroEjemplos = cambios.slice(0, 12).map((c) => ({
+              codigo: c.id,
+              nombre: c.dif.NOMBRE ? `${c.antes.nombre || "(vacio)"} → ${c.dif.NOMBRE}` : undefined,
+              poblacion: c.dif.POBLACION ? `${c.antes.poblacion || "(vacio)"} → ${c.dif.POBLACION}` : undefined,
+            }));
+
+            // Altas: clientes con venta en Power BI que no existen en el CRM.
+            // Se cruzan por codigo nuevo, antiguo y contable para no duplicar
+            // lo que ya esta: DOHR figura como U431468 y no como U4301468.
+            const viejoDe = (cod) => {
+              const m = String(cod).match(/^([A-Z])(\d{2})0(\d{4})$/i);
+              return m ? (m[1] + m[2] + m[3]).toUpperCase() : null;
+            };
+            const conta = new Set();
+            for (const [, a] of actual) if (a.codconta) conta.add(String(a.codconta).toUpperCase());
+            const altas = [];
+            for (const d of docs) {
+              if (d.intercompany || d.fusionadoEn) continue;
+              // Los huerfanos SI entran si tienen comercial y venta: son los 266
+              // codigos franceses con 119.087 € que hoy no llegan a ninguna
+              // cartera. Les falta ficha en el maestro, no dueno. El nombre se
+              // corregira solo cuando sistemas los de de alta en el ERP.
+              if (!d.agente || d.agente === "SIN AGENTE") continue;
+              if (num(d.ventasAct) <= 0) continue;
+              const cod = String(d._id).toUpperCase();
+              if (actual.has(cod)) continue;
+              const v = viejoDe(cod);
+              if (v && actual.has(v)) continue;
+              if (d.codconta && conta.has(String(d.codconta).toUpperCase())) continue;
+              altas.push(d);
+            }
+            log.maestroAltas = altas.length;
+            log.maestroAltasSinFicha = altas.filter((d) => d.huerfano).length;
+            log.maestroAltasEjemplos = altas.slice(0, 8)
+              .map((d) => ({ codigo: d._id, nombre: d.nombre, agente: d.agente,
+                             ventas: Math.round(num(d.ventasAct)) }));
+
+            if (!soloVer && !dry) {
+              let creados = 0;
+              for (const d of altas) {
+                const r = await fetch(`https://firestore.googleapis.com/v1/${base}`
+                  + `/clientes/${encodeURIComponent(d._id)}${key ? "?" + key.slice(1) : ""}`, {
+                  method: "PATCH", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ fields: {
+                    CODIGO: { stringValue: String(d._id) },
+                    NOMBRE: { stringValue: String(d.nombre || d._id) },
+                    POBLACION: { stringValue: String(d.poblacion || "") },
+                    PROVINCIA: { stringValue: String(d.provincia || "") },
+                    CODCONTA: { stringValue: String(d.codconta || "") },
+                    GRUPOAGENTE: { stringValue: String(d.agente || "") },
+                    origen: { stringValue: d.huerfano ? "powerbi_sin_ficha" : "powerbi" },
+                    creadoEl: { stringValue: new Date().toISOString() },
+                  }}),
+                });
+                if (r.ok) creados++;
+              }
+              log.maestroCreados = creados;
+            }
+
+            if (!soloVer && !dry) {
+              let ok = 0;
+              for (const c of cambios) {
+                const campos = Object.entries(c.dif)
+                  .map(([k]) => `updateMask.fieldPaths=${k}`).join("&");
+                const fields = {};
+                for (const [k, val] of Object.entries(c.dif)) fields[k] = { stringValue: String(val) };
+                const r = await fetch(`https://firestore.googleapis.com/v1/${base}`
+                  + `/clientes/${encodeURIComponent(c.id)}?${campos}${key ? "&" + key.slice(1) : ""}`, {
+                  method: "PATCH", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ fields }),
+                });
+                if (r.ok) ok++;
+              }
+              log.maestroActualizados = ok;
+            } else {
+              log.maestroActualizados = "solo lectura · lanza con &maestro=1";
+            }
+          } catch (e) { log.errores.push(`maestro: ${e.message}`); }
+        }
+
+        log.resumenAgentes = dry
+          ? resumen
+          : await fbCommit("pbi_resumen_agente", resumen);
+      } catch (e) {
+        log.errores.push(`resumen: ${e.message}`);
+      }
+
+      // ── Índice de búsqueda ──
+      // Firestore solo busca por prefijo. Para poder buscar por cualquier
+      // parte del nombre se guarda una lista compacta de toda la cartera en
+      // un único documento: una lectura y se busca en el navegador.
+      // El índice solo se regenera si queda margen: es un extra útil, no
+      // puede ser la causa de que la sincronización entera se pase de los
+      // 60 segundos de Vercel y no escriba nada.
+      const quedan = () => 52 - Math.round((Date.now() - t0) / 1000);
+      if (!dry && quedan() < 6) {
+        log.indiceBusqueda = `omitido, quedaban ${quedan()} s`;
+      } else if (!dry) try {
+        const compacta = docs
+          .filter((d) => !d.fusionadoEn && !d.intercompany)
+          .map((d) => [
+            d.cliente,
+            String(d.nombre || "").slice(0, 60),
+            d.agente || "",
+            Math.round(d.ventasAct || 0),
+            Math.round(d.ventasAntYTD || 0),
+            String(d.poblacion || "").slice(0, 28),
+          ]);
+
+        // Un documento de Firestore admite 1 MB. Se trocea con margen.
+        const trozos = [];
+        let actual = [], bytes = 0;
+        for (const c of compacta) {
+          const t = JSON.stringify(c).length + 1;
+          if (bytes + t > 700000) { trozos.push(actual); actual = []; bytes = 0; }
+          actual.push(c); bytes += t;
+        }
+        if (actual.length) trozos.push(actual);
+
+        await fbCommit("pbi_indice_clientes", trozos.map((t, i) => ({
+          _id: `parte${i}`,
+          parte: i,
+          partes: trozos.length,
+          clientes: t.length,
+          // [codigo, nombre, agente, ventasAct, ventasAntYTD]
+          datos: JSON.stringify(t),
+          actualizado: new Date().toISOString(),
+        })));
+        log.indiceBusqueda = { clientes: compacta.length, partes: trozos.length };
+      } catch (e) {
+        log.errores.push(`indice busqueda: ${e.message}`);
+      }
+
+      // Escribir los 6.167 clientes cada vez se lleva casi todo el tiempo del
+      // cron (24 s en seco frente a 70 escribiendo). La mayoria no ha cambiado
+      // de una pasada a otra, asi que se comparan con lo guardado y solo se
+      // escriben los que de verdad son distintos.
+      let aEscribir = docs;
+      if (!dry) {
+        try {
+          const previos = new Map();
+          for (const d of await fbLeerColeccion("pbi_ventas_cliente")) {
+            previos.set(String(d._id), d);
+          }
+          // Campos que deciden si algo cambio. "actualizado" no cuenta: cambia
+          // siempre y haria que se reescribiera todo.
+          const CLAVE = ["ventasAct", "ventasAntYTD", "ventasAntFull", "margenAct",
+                         "margenAntYTD", "ventasMes", "ventasSem", "ventasMesAnt",
+                         "agente", "agenteFinal", "cuenta", "nombre", "poblacion",
+                         "intercompany", "fusionadoEn", "ultimaVenta"];
+          aEscribir = docs.filter((d) => {
+            const a = previos.get(String(d._id));
+            if (!a) return true;                       // nuevo
+            for (const k of CLAVE) {
+              const x = d[k], y = a[k];
+              if (typeof x === "number" || typeof y === "number") {
+                if (Math.abs(num(x) - num(y)) > 0.005) return true;
+              } else if (String(x ?? "") !== String(y ?? "")) return true;
+            }
+            return false;
+          });
+          log.clientesSinCambios = docs.length - aEscribir.length;
+        } catch (e) {
+          aEscribir = docs;                            // ante la duda, todos
+          log.errores.push(`comparar clientes: ${e.message}`);
+        }
+      }
+      log.ventas = dry ? docs.length : await fbCommit("pbi_ventas_cliente", aEscribir);
+      if (dry) log.muestraVentas = docs.slice(0, 3);
+    } catch (e) {
+      log.errores.push(`ventas: ${e.message}`);
+    }
+
+    // ── 1 bis. Pedidos planificados ──
+    // Con margen de tiempo: si la consulta de ventas ya se ha comido casi
+    // todo el limite de Vercel, se salta y entra en la siguiente pasada.
+    // Mas vale una sincronizacion parcial que un timeout que no escribe nada.
+    const quedanSegundos = () => 55 - Math.round((Date.now() - t0) / 1000);
+    // Con sinpedidos=1 se refrescan solo las ventas. Sirve para lanzar una
+    // pasada extra cuando Power BI vuelve a refrescar por la tarde: reescribir
+    // pbi_pedidos fuera de la sincronizacion de la mañana desplazaria la foto
+    // contra la que se compara el diario, y ese dia se perderia entero.
+    if (req.query.sinpedidos === "1") {
+      log.pedidos = "omitido a proposito (sinpedidos=1)";
+    } else if (activo("pedidos") && quedanSegundos() < 12) {
+      log.pedidos = `omitido, quedaban ${quedanSegundos()} s`;
+    } else if (activo("pedidos")) try {
+      // Maestro de articulos, para poner descripcion en cada linea
+      const arts = new Map();
+      try {
+        for (const a of await pbiQuery(token, Q.articulos, true)) {
+          const cod = String(pick(a, "CODIGO") || "").trim();
+          if (!cod || arts.has(cod)) continue;
+          arts.set(cod, {
+            descripcion: pick(a, "DESCRIPCION"),
+            metros: pick(a, "METROS"),
+            calibre: pick(a, "CALIBRE"),
+            calidad: pick(a, "CALIDAD"),
+          });
+        }
+      } catch (e) { /* sin maestro se muestra solo el codigo */ }
+
+      const filas = await pbiQuery(token, Q.pedidos);
+      const crudos = filas.map((r, i) => {
+        const cli = String(pick(r, "Cliente") || "").trim();
+        const ven = String(pick(r, "Vendedor") || "").trim();
+        const fec = String(pick(r, "Fecha") || "").slice(0, 10);
+        const art = String(pick(r, "Articulo") || "").trim();
+        const ficha = fichas.get(cli) || fichas.get(canonico(cli)) || {};
+        return {
+          // El identificador no puede depender de la posición de la fila: si
+          // Power BI devuelve el resultado en otro orden, la misma línea
+          // recibe otro id y se duplica en vez de sobrescribirse.
+          _id: docId(`${String(pick(r, "Pedido") || "SP").trim()}_${cli}_${art}_${fec}`),
+          // Clave que no depende de la fecha de entrega: permite reconocer la
+          // misma línea de un día para otro y detectar si se ha movido.
+          linea: docId(`${String(pick(r, "Pedido") || "").trim()}_${cli}_${art}`),
+          cliente: cli,
+          nombre: ficha.nombre || cli,
+          poblacion: ficha.poblacion || null,
+          agente: agentes.get(ven)?.grupo || null,
+          vendedor: ven,
+          fecha: fec,
+          articulo: art,
+          familia: String(pick(r, "Familia") || "").trim() || null,
+          unidades: num(pick(r, "Uni")),
+          precio: num(pick(r, "Precio")),
+          descripcion: (arts.get(art) || {}).descripcion || null,
+          metros: (arts.get(art) || {}).metros || null,
+          calibre: (arts.get(art) || {}).calibre || null,
+          calidad: (arts.get(art) || {}).calidad || null,
+          subfamilia: String(pick(r, "Subfamilia") || "").trim() || null,
+          importe: num(pick(r, "Importe")),
+          pedido: String(pick(r, "Pedido") || "").trim(),
+          // Traspasos entre empresas del grupo: mismo criterio que en ventas
+          intercompany: esIntercompany(ficha.nombre || cli),
+          actualizado: new Date().toISOString(),
+        };
+      }).filter((d) => d.cliente && d.fecha);
+
+      // Power BI no publica el numero de linea del pedido. Un pedido con dos
+      // lineas del mismo articulo y la misma fecha llega como dos filas
+      // identicas, y se pisaban al escribir porque comparten _id: la coleccion
+      // guardaba menos lineas de las que decia contar. Ademas, al comparar el
+      // importe contra la unica guardada, el diario cantaria un cambio falso
+      // todos los dias. Se suman en una sola linea.
+      const agrupados = new Map();
+      for (const d of crudos) {
+        const previo = agrupados.get(d._id);
+        if (!previo) { agrupados.set(d._id, d); continue; }
+        previo.importe = num(previo.importe + d.importe);
+        previo.unidades = num(previo.unidades + d.unidades);
+      }
+      const docs = [...agrupados.values()];
+      log.filasAgrupadas = crudos.length - docs.length;
+
+      // Aviso: si una misma linea se entrega en dos fechas, sobreviven dos
+      // documentos con la misma clave "linea" y el diario no sabria cual de
+      // los dos se ha movido. Se cuenta para saber si el caso existe de verdad
+      // antes de complicar el codigo por el.
+      const vecesPorLinea = new Map();
+      for (const d of docs) vecesPorLinea.set(d.linea, (vecesPorLinea.get(d.linea) || 0) + 1);
+      log.lineasRepetidas = [...vecesPorLinea.values()].filter((n) => n > 1).length;
+
+      log.pedidos = dry ? docs.length : await fbCommit("pbi_pedidos", docs);
+
+      // Los pedidos ya servidos deben desaparecer: si no, el comercial
+      // acabaria viendo entregas de la semana pasada mezcladas con las suyas.
+      if (!dry) {
+        try {
+          // Igual que en el modo solopedidos: la colección se deja idéntica a
+          // lo que devuelve Power BI, no solo sin lo caducado.
+          const vivos = new Set(docs.map((d) => d._id));
+          const guardados = await fbLeerColeccion("pbi_pedidos");
+          const sobran = guardados.filter((g) => !vivos.has(g._id)).map((g) => g._id);
+          log.pedidosSobrantes = sobran.length;
+          for (let i = 0; i < sobran.length; i += 400) {
+            await fbBorrar("pbi_pedidos", sobran.slice(i, i + 400));
+          }
+        } catch (e) {
+          log.errores.push(`purga pedidos: ${e.message}`);
+        }
+      }
+      log.pedidosImporte = num(docs.reduce((t, d) => t + d.importe, 0));
+      if (dry) log.muestraPedidos = docs.slice(0, 3);
+    } catch (e) {
+      log.errores.push(`pedidos: ${e.message}`);
+    }
+    else log.pedidos = "desactivado";
+
+    // ── 2. Pendiente de servir (desactivado, ver ACTIVOS) ──
+    if (activo("pendiente")) try {
+      const filas = await pbiQuery(token, Q.pendiente);
+      const docs = filas.map((r) => ({
+        _id: docId(pick(r, "CODIGO")) + "_" + docId(pick(r, "ESTADO")),
+        articulo: pick(r, "CODIGO"),
+        estado: pick(r, "ESTADO"),
+        unidades: num(pick(r, "Unidades")),
+        lineas: num(pick(r, "Lineas")),
+        actualizado: new Date().toISOString(),
+      }));
+      log.pendiente = dry ? docs.length : await fbCommit("pbi_pendiente_servir", docs);
+      if (dry) log.muestraPendiente = docs.slice(0, 3);
+    } catch (e) {
+      log.errores.push(`pendiente: ${e.message}`);
+    }
+    else log.pendiente = "desactivado";
+
+    // ── 3. Stock por referencia (desactivado, ver ACTIVOS) ──
+    if (activo("stock")) try {
+      const filas = await pbiQuery(token, Q.stock);
+      const docs = filas.map((r) => ({
+        _id: docId(pick(r, "CODIGO")) + "_" + docId(pick(r, "ALMACEN")),
+        articulo: pick(r, "CODIGO"),
+        almacen: pick(r, "ALMACEN"),
+        registros: num(pick(r, "Registros")),
+        actualizado: new Date().toISOString(),
+      }));
+      log.stock = dry ? docs.length : await fbCommit("pbi_stock", docs);
+      if (dry) log.muestraStock = docs.slice(0, 3);
+    } catch (e) {
+      log.errores.push(`stock: ${e.message}`);
+    }
+    else log.stock = "desactivado";
+
+    // ── 4. Sello de sincronización (lo lee el CRM para avisar si va viejo) ──
+    log.segundos = Math.round((Date.now() - t0) / 1000);
+    if (!dry) {
+      await fbCommit("pbi_meta", [{
+        _id: "estado",
+        ultimaSync: new Date().toISOString(),
+        ventas: log.ventas,
+        pendienteServir: log.pendiente,
+        stock: log.stock,
+        errores: log.errores.join(" | "),
+        segundos: log.segundos,
+      }]);
+    }
+
+    // Latido: queda constancia de cada ejecucion. Si un cron deja de correr
+    // nadie se entera hasta que alguien nota que los datos estan viejos, y
+    // para entonces lleva dias mal.
+    try {
+      if (!dry) {
+        const modo = req.query.full ? "full"
+          : req.query.resumen ? "resumen"
+          : req.query.solopedidos ? "pedidos"
+          : req.query.mesescliente ? "mesescliente"
+          : req.query.estacionalidad ? "estacionalidad"
+          : req.query.cierre ? "cierre"
+          : req.query.maestro ? "maestro" : "otro";
+        await fbCommit("pbi_latidos", [{
+          _id: modo,
+          modo,
+          cuando: new Date().toISOString(),
+          segundos: log.segundos,
+          errores: log.errores.length,
+          detalleErrores: log.errores.slice(0, 3).join(" | ") || null,
+          ventas: typeof log.ventas === "number" ? log.ventas : null,
+          clientes: log.clientesQueCuentan || null,
+        }]);
+      }
+    } catch (e) { /* el latido nunca debe romper la sincronizacion */ }
+
+    return res.status(log.errores.length ? 207 : 200).json({ ok: true, ...log });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message, ...log });
+  }
+}
