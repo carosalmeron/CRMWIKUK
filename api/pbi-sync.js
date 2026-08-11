@@ -1564,10 +1564,16 @@ EVALUATE
         med.push(`    "a${m}", CALCULATE(SUM(${M.vBase}),\n`
           + `      FILTER(${M.ventas}, YEAR(${M.vFecha}) = ${anoAct} && MONTH(${M.vFecha}) = ${m}))`);
       }
+      // (fix ago 2026) Agrupar SOLO por cliente dejaba fuera a los que facturan
+      // en varias empresas del grupo (exportacion, sobre todo): 124 clientes y
+      // 208.874 EUR que si estan en ?ventas=1, que agrupa por cliente, vendedor
+      // y empresa. Se replica ese agrupamiento y se suma despues por cliente,
+      // asi las dos consultas ven exactamente el mismo universo.
       const filas = await pbiQuery(token, `
 EVALUATE
   SUMMARIZECOLUMNS(
     ${M.vCliente},
+    ${M.vEmpresa},
 ${med.join(",\n")}
   )`);
       out.filasDevueltas = filas.length;
