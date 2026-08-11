@@ -38,6 +38,32 @@ const NOMBRE={ full:"Ventas y clientes", resumen:"Resumen por comercial",
   pedidos:"Pedidos planificados", mesescliente:"Desglose mensual",
   estacionalidad:"Estacionalidad", maestro:"Maestro de clientes",
   cierre:"Cierre semanal" };
+// Colección que alimenta cada proceso. Varios corren de sobra pero no escriben
+// latido, y el panel los daba por caídos. Mirando la fecha del dato más
+// reciente se sabe si el proceso corrió, colabore o no.
+const FUENTE={ full:"pbi_ventas_cliente", resumen:"pbi_resumen_agente",
+  pedidos:"pbi_pedidos", mesescliente:"pbi_meses_cliente",
+  estacionalidad:"pbi_estacionalidad", maestro:"clientes", cierre:"informes" };
+const CAMPO_FECHA=["actualizado","fechaCreacion","fechaEnvio","fecha"];
+
+// Fecha del documento más reciente de una colección
+async function ultimoDato(col){
+  for(const campo of CAMPO_FECHA){
+    try{
+      const body={structuredQuery:{from:[{collectionId:col}],
+        orderBy:[{field:{fieldPath:campo},direction:"DESCENDING"}],limit:1}};
+      const r=await fetch(FB+":runQuery",{method:"POST",
+        headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      if(!r.ok) continue;
+      const j=await r.json();
+      const d=(Array.isArray(j)?j:[]).find(x=>x.document);
+      if(!d) continue;
+      const v=val((d.document.fields||{})[campo]);
+      if(v) return {cuando:v,campo};
+    }catch(e){}
+  }
+  return null;
+}
 
 function val(f){
   if(!f) return null;
@@ -57,11 +83,21 @@ function val(f){
       lat[o._id]=o;
     }
     const ahora=Date.now();
+    // Si no hay latido, se mira el dato: es lo que de verdad importa
+    const respaldo={};
+    await Promise.all(Object.keys(ESPERADO).filter(k=>!lat[k]).map(async k=>{
+      respaldo[k]=await ultimoDato(FUENTE[k]);
+    }));
+
     const filas=Object.keys(ESPERADO).map(k=>{
       const l=lat[k];
-      const horas = l&&l.cuando ? (ahora-new Date(l.cuando))/3600000 : null;
+      const rp=respaldo[k];
+      const cuando = (l&&l.cuando) || (rp&&rp.cuando) || null;
+      const horas = cuando ? (ahora-new Date(cuando))/3600000 : null;
       const tarde = horas===null || horas > ESPERADO[k]*2;
-      return {k, l, horas, tarde, conError:!!(l&&l.errores)};
+      return {k, l, horas, tarde, conError:!!(l&&l.errores),
+        // Sin latido pero con dato fresco: el proceso corre, solo no avisa
+        soloDato: !l&&!!rp};
     });
     const malos=filas.filter(f=>f.tarde||f.conError);
     document.getElementById("app").innerHTML=`
@@ -79,7 +115,8 @@ function val(f){
         return `<div class="f">
           <div><b>${NOMBRE[f.k]}</b>
             <small>${cuando}${l&&l.segundos?" · "+l.segundos+" s":""}${
-              l&&l.errores?" · <b>"+l.errores+" errores</b>":""}</small>
+              l&&l.errores?" · <b>"+l.errores+" errores</b>":""}${
+              f.soloDato?' · <span style="color:var(--med)">sin latido, medido por el dato</span>':""}</small>
             ${l&&l.detalleErrores?`<small style="color:var(--mal)">${l.detalleErrores}</small>`:""}
           </div>
           <span class="e ${cl}">${f.horas===null?"SIN DATOS":f.tarde?"TARDE":f.conError?"CON ERRORES":"AL DÍA"}</span>
@@ -87,7 +124,8 @@ function val(f){
       }).join("")}
       <p class="sub" style="margin-top:16px">Se marca <b>TARDE</b> cuando pasa más
         del doble de lo previsto sin correr. Los latidos se escriben solos en cada
-        ejecución.</p>`;
+        ejecución; el proceso que no escribe latido se mide por la fecha del
+        último dato que ha dejado.</p>`;
   }catch(e){
     document.getElementById("app").innerHTML=`<p class="estado">Error: ${e.message}</p>`;
   }
