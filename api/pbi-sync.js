@@ -3438,6 +3438,10 @@ EVALUATE
         entradaSem: 0, entradaMes: 0, entradaAno: 0,
         entradaSemAnt: 0, entradaAnoAnt: 0,
         previstoEstaSem: 0, previstoProxSem: 0, previstoTotal: 0,
+        // Lo que queda por servir dentro del mes y del año en curso: sin
+        // esto, el CRM solo podia enseñar la cartera entera y no encajaba
+        // con el filtro de periodo.
+        previstoMes: 0, previstoAno: 0,
       });
 
       try {
@@ -3461,6 +3465,11 @@ EVALUATE
       lunes.setDate(lunes.getDate() - ((lunes.getDay() + 6) % 7));
       const finSem = new Date(lunes); finSem.setDate(finSem.getDate() + 6);
       const finProx = new Date(lunes); finProx.setDate(finProx.getDate() + 13);
+      // Ultimo dia del mes y del año en curso, para cortar la cartera igual
+      // que el filtro de periodo del CRM.
+      const _hoyPrev = new Date();
+      const finMesPrev = new Date(_hoyPrev.getFullYear(), _hoyPrev.getMonth() + 1, 0);
+      const finAnoPrev = new Date(_hoyPrev.getFullYear(), 11, 31);
       const iso = (d) => d.toISOString().slice(0, 10);
 
       for (const d of docs) {
@@ -3469,6 +3478,9 @@ EVALUATE
         a.previstoTotal += d.importe;
         if (d.fecha <= iso(finSem)) a.previstoEstaSem += d.importe;
         else if (d.fecha <= iso(finProx)) a.previstoProxSem += d.importe;
+        // Tramos por periodo, para que la cartera siga al filtro del CRM
+        if (d.fecha <= iso(finMesPrev)) a.previstoMes += d.importe;
+        if (d.fecha <= iso(finAnoPrev)) a.previstoAno += d.importe;
       }
 
       const resumen = Object.values(porAg).map((a) => ({
@@ -3477,6 +3489,8 @@ EVALUATE
         entradaAno: num(a.entradaAno), entradaSemAnt: num(a.entradaSemAnt),
         entradaAnoAnt: num(a.entradaAnoAnt),
         previstoEstaSem: num(a.previstoEstaSem),
+        previstoMes: num(a.previstoMes),
+        previstoAno: num(a.previstoAno),
         previstoProxSem: num(a.previstoProxSem),
         previstoTotal: num(a.previstoTotal),
         actualizado: new Date().toISOString(),
