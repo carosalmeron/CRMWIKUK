@@ -145,6 +145,7 @@
   </div>
 </div>
 
+<script src="agentes.js"></script>
 <script>
 const FB_BASE="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
 // ═══ EQUIPOS (editable): añade equipos o vendedores aquí ═══
@@ -769,8 +770,22 @@ async function cruzarVisitas(){
 
   // 2. Visitas del CRM en la ventana (colección grande: se pagina)
   const ini=new Date(new Date().getFullYear(),m1-1,1), fin=new Date(new Date().getFullYear(),m2,1);
-  // el campo agente de la visita puede venir como grupo (VERONICA) o como id de usuario (wk2…)
-  const ALIAS={"WK2":"VERONICA","IK1":"CARLOSG","WK1":"DAVIDMAG","WK3":"SILVIA"};
+  // IDENTIDAD DE AGENTES: única fuente de verdad = agentes.js (tabla agentes_alias).
+  // Prohibido comparar con === o improvisar alias aquí (instrucciones del proyecto).
+  if(typeof Agentes==="undefined") throw new Error("Falta agentes.js junto a esta página: despliégalo y recarga");
+  await Agentes.cargar();
+  const FUSION_EQ=EQUIPO.FUSION||{};
+  // ¿a qué miembro del equipo pertenece este identificador de agente?
+  // — miembros reales: Agentes.mismo() · — KA UNIFICADO: cualquiera de sus agentes de origen
+  const miembroDe=(raw)=>{
+    if(!raw||raw==="?") return null;
+    for(const m of equipo){
+      if(m==="KA UNIFICADO"){
+        for(const o of Object.keys(FUSION_EQ)) if(FUSION_EQ[o]==="KA UNIFICADO"&&Agentes.mismo(raw,o)) return m;
+      } else if(Agentes.mismo(raw,m)) return m;
+    }
+    return null;
+  };
   const agenteDeCliente={}; for(const c of CARTERA) for(const k of (c.codigos||[c.codigo])) agenteDeCliente[String(k).toUpperCase()]=c.agente;
   const equipo=[...EQUIPO.KA,...EQUIPO.INSIDE];
   const visPorAgente={}, llamPorAgente={}, mixVis={}, mixLlam={};
@@ -816,11 +831,12 @@ async function cruzarVisitas(){
       const llamada=esLlamada(f.resultado);
       totalVis++;
       let cod=String(f.clienteId||f.codigoERP||f.codigo||"").toUpperCase().trim();
-      // El CRM guarda códigos sin el 0 (U432109) que Power BI trae con 0 (U4302109): normalizar
-      if(cod&&!segPorCod[cod]){
-        const mc=cod.match(/^([A-Z])43(\d{4})$/);
-        if(mc&&segPorCod[mc[1]+"430"+mc[2]]) cod=mc[1]+"430"+mc[2];
-        else{const ml=cod.match(/^([A-Z])430(\d{4})$/); if(ml&&segPorCod[ml[1]+"43"+ml[2]]) cod=ml[1]+"43"+ml[2];}
+      // SAP y CRM difieren en un 0: las variantes oficiales las da Agentes.variantes()
+      if(cod&&!segPorCod[cod]&&Agentes.variantes){
+        for(const vv of Agentes.variantes(cod)){
+          const V=String(vv).toUpperCase();
+          if(segPorCod[V]){ cod=V; break; }
+        }
       }
       // Si el código sigue sin casar (p.ej. código hermano de la otra empresa que Power BI
       // no exporta), rescatar por el nombre del cliente apuntado en la propia visita
@@ -833,9 +849,9 @@ async function cruzarVisitas(){
         else (llamPorCli[cod]=llamPorCli[cod]||[]).push(1);
       }
       else sinCasar++;
-      // atribución al vendedor: agente directo → alias → agente del cliente
+      // atribución al vendedor: Agentes.mismo() contra los miembros del equipo → si no, agente del cliente
       const rawAg=String(f.agente||f.usuario||"").toUpperCase().trim();
-      const quien=equipo.includes(rawAg)?rawAg:(ALIAS[rawAg]&&equipo.includes(ALIAS[rawAg])?ALIAS[rawAg]:agenteDeCliente[cod]);
+      const quien=miembroDe(rawAg)||agenteDeCliente[cod];
       if(quien&&visPorAgente[quien]!=null){
         if(llamada) llamPorAgente[quien]++; else visPorAgente[quien]++;
         const seg=segPorCod[cod]||(cod.startsWith("CLI_")?"NUEVO":"FUERA");
@@ -856,8 +872,8 @@ async function cruzarVisitas(){
     const esKA=EQUIPO.KA.includes(a);
     el.style.display="block";
     el.innerHTML=`Actividad CRM en ${etiqueta}: <b>🚗 ${nv}</b> visitas (${(nv/2).toFixed(0)}/mes) · <b>📞 ${nl}</b> llamadas (${(nl/2).toFixed(0)}/mes)`+
-      (esKA?` <span style="color:var(--gris);font-style:italic;font-size:11px">(la rueda pedirá ~75 visitas/mes)</span>`
-           :` <span style="color:var(--gris);font-style:italic;font-size:11px">(la rueda pedirá ~185 llamadas/mes)</span>`);
+      (esKA?` <span style="color:var(--gris);font-style:italic;font-size:11px">(su rueda exacta, en el plan de abajo)</span>`
+           :` <span style="color:var(--gris);font-style:italic;font-size:11px">(su rueda exacta, en el plan de abajo)</span>`);
   }
 
   // 3. El cruce sobre la cartera viva

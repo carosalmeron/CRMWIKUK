@@ -40,6 +40,7 @@ small{color:var(--gris)}
   </div>
   <div id="out"><div class="cargando">Leyendo la colección de visitas completa…</div></div>
 </div>
+<script src="agentes.js"></script>
 <script>
 const FB_BASE="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
 const val=f=>f?.stringValue??f?.timestampValue??(f?.integerValue!=null?+f.integerValue:(f?.doubleValue!=null?+f.doubleValue:(f?.booleanValue??null)));
@@ -58,6 +59,7 @@ const esLlamadaCruce=r=>{r=String(r||"");return r.startsWith("llamada")||r==="no
 const esTelefono=r=>{r=String(r||"").toLowerCase();return r.startsWith("llamada")||r==="no_contesta"||r.includes("tfno")||r.includes("telef")||r.includes("phone");};
 
 const MESES=["E","F","M","A","M","J","J","A","S","O","N","D"];
+const NOPERSONA=new Set(["WIKUK","INTERKEY","FRANCIA","DISTRIBUIDOR","INTERC.NACIONAL","INTERC.INTERN.","TIENDA","TELEFONO","SIN AGENTE","_TOTAL","CAMPOFRIO"]);
 let DOCS=[]; let AGDE={}, NOMDE={};   // código→agente PBI · nombre-normalizado→agente
 const normN=s=>String(s||"").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"")
   .replace(/[.,;:()\-\/]/g," ").replace(/\s+/g," ").trim();
@@ -79,11 +81,12 @@ async function cargarCartera(){
 }
 function agenteDe(d){
   if(d.cod&&AGDE[d.cod]) return AGDE[d.cod];
-  // códigos sin el 0 (U432109 ↔ U4302109)
-  const m=d.cod.match(/^([A-Z])43(\d{4})$/); if(m&&AGDE[m[1]+"430"+m[2]]) return AGDE[m[1]+"430"+m[2]];
+  if(Agentes.variantes) for(const vv of Agentes.variantes(d.cod)){const V=String(vv).toUpperCase(); if(AGDE[V]) return AGDE[V];}
   const kn=normN(d.nom); return kn&&NOMDE[kn]?NOMDE[kn]:null;
 }
 async function cargar(){
+  if(typeof Agentes==="undefined"){document.getElementById("out").innerHTML='<div class="aviso">Falta <b>agentes.js</b> junto a esta página. Despliégalo y recarga: esta herramienta usa la tabla oficial de identidades.</div>';return;}
+  await Agentes.cargar();
   await cargarCartera();
   const est=document.getElementById("estado");
   let nextPage=null,pags=0;
@@ -95,7 +98,10 @@ async function cargar(){
       const f={};for(const[k,v]of Object.entries(d.fields||{}))f[k]=val(v);
       let fecha=parseFecha(f.fecha)||parseFecha(f.fechaVisita)||parseFecha(f.fechaCreacion);
       if(!fecha&&f.semana!=null&&Number(f.semana)>0)fecha=lunesISO(Number(f.anio)||new Date().getFullYear(),Number(f.semana));
-      DOCS.push({fecha,ag:String(f.agente||f.usuario||"?").toUpperCase().trim(),
+      const rawAgD=String(f.agente||f.usuario||"?").toUpperCase().trim();
+      let canD=rawAgD;
+      try{ if(!NOPERSONA.has(rawAgD)&&Agentes.id){ const c2=Agentes.id(rawAgD); if(c2) canD=String(c2).toUpperCase(); } }catch(e){}
+      DOCS.push({fecha,ag:rawAgD,can:canD,
         res:String(f.resultado||"(sin resultado)"),
         cod:String(f.clienteId||f.codigoERP||f.codigo||"").toUpperCase().trim(),
         nom:String(f.clienteNombre||f.cliente||f.nombreCliente||f.nombre||""),
@@ -105,8 +111,9 @@ async function cargar(){
     est.textContent=`leídas ${DOCS.length} filas (${pags} páginas)…`;
   }while(nextPage&&pags<200);
   est.textContent=`${DOCS.length} registros en total`;
-  const ags=[...new Set(DOCS.map(d=>d.ag))].sort();
-  document.getElementById("selAg").innerHTML=`<option value="">— TODOS —</option>`+ags.map(a=>`<option>${a}</option>`).join("");
+  const ags=[...new Set(DOCS.map(d=>d.can))].sort();
+  const eti=a=>{try{const n2=Agentes.nombre&&Agentes.nombre(a);return n2&&n2!==a?`${n2} (${a})`:a;}catch(e){return a;}};
+  document.getElementById("selAg").innerHTML=`<option value="">— TODOS —</option>`+ags.map(a=>`<option value="${a}">${NOPERSONA.has(a)?a+" · ⚠ no es persona":eti(a)}</option>`).join("");
   const anios=[...new Set(DOCS.filter(d=>d.fecha).map(d=>d.fecha.getFullYear()))].sort();
   document.getElementById("selAnio").innerHTML=anios.map(a=>`<option ${a===new Date().getFullYear()?"selected":""}>${a}</option>`).join("");
   const p=new URLSearchParams(location.search).get("agente");
@@ -116,7 +123,10 @@ async function cargar(){
 function auditar(){
   const ag=document.getElementById("selAg").value;
   const anio=+document.getElementById("selAnio").value||new Date().getFullYear();
-  const docs=DOCS.filter(d=>(!ag||d.ag===ag));
+  const docs=DOCS.filter(d=>{
+    if(!ag) return true;
+    try{ return d.can===ag||Agentes.mismo(d.ag,ag); }catch(e){ return d.can===ag; }
+  });
   const conFecha=docs.filter(d=>d.fecha), sinFecha=docs.length-conFecha.length;
   const delAnio=conFecha.filter(d=>d.fecha.getFullYear()===anio);
   // ── 1 · registros por MES × RESULTADO (crudo) ──
@@ -138,7 +148,8 @@ function auditar(){
   // ¿Quién es cada usuario? — por el agente PBI de los clientes que registra
   const porUser={};
   for(const d of DOCS.filter(x=>x.fecha&&x.fecha.getFullYear()===anio)){
-    const u=porUser[d.ag]=porUser[d.ag]||{n:0,ag:{},ej:new Set()};
+    const u=porUser[d.can]=porUser[d.can]||{n:0,ag:{},ej:new Set(),logins:new Set()};
+    u.logins.add(d.ag);
     u.n++;
     const a=agenteDe(d);
     if(a){u.ag[a]=(u.ag[a]||0)+1; if(u.ej.size<3&&d.nom)u.ej.add(d.nom.slice(0,24));}
@@ -149,14 +160,17 @@ function auditar(){
     const pct=top&&tot?Math.round(100*top[1]/tot):0;
     const veredicto=top&&pct>=60?`<b style="color:var(--verde)">${top[0]}</b> <small>(${pct}% de sus clientes)</small>`
       :(top?`<span style="color:var(--ambar)">quizá ${top[0]} (${pct}%)</span>`:'<span style="color:var(--rojo)">sin pista (clientes sin casar)</span>');
-    const alias=top&&pct>=60?`<code>"${u}":"${top[0]}",</code>`:"";
-    return `<tr><td><b>${u}</b></td><td class="num">${x.n}</td><td>${veredicto}</td><td><small>${[...x.ej].join(" · ")}</small></td><td>${alias}</td></tr>`;
+    const conocido=(()=>{try{const n2=Agentes.nombre&&Agentes.nombre(u);return n2&&n2!==u;}catch(e){return false;}})();
+    const accion=NOPERSONA.has(u)?'<span class="chip">equipo/no-persona: no mapear</span>'
+      :(conocido?'<span class="chip" style="background:#E8F0E4">en la tabla oficial ✓</span>'
+      :'<b style="color:var(--rojo)">sin dueño</b> → añadir en <code>tabla_alias.html</code> (bloque «Códigos de facturación»)');
+    return `<tr><td><b>${u}</b> <small>${[...x.logins].filter(l=>l!==u).join(" · ")}</small></td><td class="num">${x.n}</td><td>${veredicto}</td><td><small>${[...x.ej].join(" · ")}</small></td><td>${accion}</td></tr>`;
   }).join("");
   document.getElementById("out").innerHTML=`
   <div class="card">
     <h2>0 · ¿Quién es cada usuario? · identificación por sus huellas</h2>
-    <div class="h2sub">Para cada login del CRM: a qué agente de Power BI pertenecen los clientes que registra · si ≥60% son de uno, ese es · la última columna es la línea lista para pegar en el mapa ALIAS de la web</div>
-    <table><thead><tr><th>Usuario CRM</th><th class="num">Registros ${anio}</th><th>Vendedor inferido</th><th>Ejemplos de sus clientes</th><th>Línea ALIAS</th></tr></thead>
+    <div class="h2sub">Para cada login del CRM: a qué agente de Power BI pertenecen los clientes que registra · si ≥60% son de uno, ese es · los códigos sin dueño se dan de alta en tabla_alias.html — la tabla agentes_alias es la ÚNICA fuente de verdad</div>
+    <table><thead><tr><th>Usuario CRM</th><th class="num">Registros ${anio}</th><th>Vendedor inferido</th><th>Ejemplos de sus clientes</th><th>Estado en la tabla oficial</th></tr></thead>
     <tbody>${filasId}</tbody></table>
   </div>
   <div class="card">
