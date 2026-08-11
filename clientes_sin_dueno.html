@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Clientes sin dueño</title>
+<style>
+ :root{--papel:#F2F4F7;--tinta:#14181F;--tenue:#6B7684;--linea:#DCE1E7;
+       --ok:#0E7C5A;--mal:#C2263D;--med:#B07908;--okL:#EDF7F3;--malL:#FEF2F4;--medL:#FFFBEB}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--papel);color:var(--tinta);max-width:880px;
+   margin-inline:auto;padding:20px 14px 50px;
+   font:400 15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+ h1{margin:0 0 3px;font-size:21px;font-weight:800}
+ .sub{margin:0 0 16px;font-size:13px;color:var(--tenue)}
+ h2{font-size:15px;margin:24px 0 8px;padding-bottom:5px;border-bottom:2px solid var(--linea)}
+ .card{background:#fff;border:1px solid var(--linea);border-radius:6px;
+   padding:14px;margin-bottom:9px;font-size:13.5px}
+ .card.ok{border-color:var(--ok);background:var(--okL)}
+ .card.mal{border-color:var(--mal);background:var(--malL)}
+ .card.med{border-color:var(--med);background:var(--medL)}
+ .grande{font-size:26px;font-weight:800;line-height:1.2}
+ code{background:#F1F5F9;padding:1px 6px;border-radius:4px;font-size:12px;
+   font-family:ui-monospace,monospace}
+ table{width:100%;border-collapse:collapse;font-size:12.5px;background:#fff;
+   border:1px solid var(--linea);border-radius:6px;overflow:hidden}
+ th{background:#F1F5F9;text-align:left;padding:8px;font-size:10.5px;
+   text-transform:uppercase;color:var(--tenue)}
+ td{padding:7px 8px;border-top:1px solid var(--linea)}
+ .n{text-align:right;font-variant-numeric:tabular-nums;font-weight:700}
+ .estado{padding:34px 4px;color:var(--tenue);text-align:center}
+ label{display:block;font-size:12px;color:var(--tenue);margin:10px 0 4px}
+ select{padding:8px 10px;border-radius:6px;border:1px solid var(--linea);font-size:13px}
+</style></head><body>
+<h1>🔍 Clientes sin dueño</h1>
+<p class="sub">Ventas que existen pero que el CRM no suma porque su cliente no
+  tiene agente contable. Es la hipótesis del descuadre con Power BI.</p>
+<label>Mes</label>
+<select id="mes" onchange="analizar()">
+  <option value="7" selected>Julio</option>
+  <option value="1">Enero</option><option value="2">Febrero</option>
+  <option value="3">Marzo</option><option value="4">Abril</option>
+  <option value="5">Mayo</option><option value="6">Junio</option>
+  <option value="8">Agosto</option>
+</select>
+<div id="app"><p class="estado">Leyendo…</p></div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const U=(s)=>String(s||"").toUpperCase().trim();
+const eur=(n)=>Math.round(n).toLocaleString("es-ES")+" €";
+// Lo que el parte dice para cada mes, para comparar
+const CRM={1:1275484.14,2:1176209.31,3:1306844.85,4:1269450.82,
+           5:1405740.63,6:1624177.38,7:1477983.19,8:222302.73};
+const PBI_JULIO=1575701;
+
+function val(f){
+  if(!f) return null;
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  return null;
+}
+async function leer(col,max=40){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<max);
+  return t;
+}
+
+let PARTES=null, CLIENTES=null;
+
+window.analizar=async()=>{
+  const app=document.getElementById("app");
+  const nMes=Number(document.getElementById("mes").value);
+  app.innerHTML='<p class="estado">Leyendo…</p>';
+  try{
+    if(!PARTES){
+      PARTES=await leer("pbi_meses_cliente",5);
+      CLIENTES=await leer("pbi_ventas_cliente",30);
+    }
+
+    // Ventas mes a mes por cliente: [codigo, a1..a12, m1..m12]
+    const mesesDe={};
+    PARTES.forEach(d=>{
+      let f=[]; try{ f=JSON.parse(d.datos||"[]"); }catch(e){}
+      f.forEach(fila=>{ mesesDe[U(fila[0])]=fila; });
+    });
+
+    // Mismo criterio que el sync: quién cuenta y de quién es
+    const duenoDe={}, ficha={};
+    CLIENTES.forEach(c=>{
+      const id=U(c._id);
+      ficha[id]=c;
+      const cuenta = c.cuenta!==undefined ? c.cuenta
+        : (!c.intercompany && !c.fusionadoEn);
+      if(!cuenta) return;
+      duenoDe[id]=U(c.agenteFinal||c.agente||"SIN AGENTE");
+    });
+
+    // Los que se pierden
+    let sumaSinDueno=0, sumaConDueno=0;
+    const perdidos=[];
+    for(const [cli,fila] of Object.entries(mesesDe)){
+      const v=Number(fila[nMes])||0;
+      if(duenoDe[cli]){ sumaConDueno+=v; continue; }
+      sumaSinDueno+=v;
+      if(v){
+        const f=ficha[cli]||{};
+        perdidos.push({cli, v,
+          nombre:f.nombre||f.NOMBRE||"(no está en pbi_ventas_cliente)",
+          motivo: !f._id ? "no existe la ficha"
+            : f.intercompany ? "intercompany"
+            : f.fusionadoEn ? "fusionado en "+f.fusionadoEn
+            : f.cuenta===false ? "marcado cuenta=false"
+            : "sin motivo claro",
+          destino:f.fusionadoEn||""});
+      }
+    }
+    perdidos.sort((a,b)=>b.v-a.v);
+
+    // Cuánto aporta cada motivo
+    const porMotivo={};
+    perdidos.forEach(p=>{
+      const k=p.motivo.startsWith("fusionado")?"fusionado en otro cliente":p.motivo;
+      porMotivo[k]=(porMotivo[k]||0)+p.v;
+    });
+
+    const totalCRM=CRM[nMes]||0;
+    const conLosPerdidos=totalCRM+sumaSinDueno;
+    const objetivo=nMes===7?PBI_JULIO:null;
+
+    let h='<div class="card '+(objetivo&&Math.abs(conLosPerdidos-objetivo)<2000?"ok":"med")+'">'
+      +'<div class="grande">'+eur(sumaSinDueno)+'</div>'
+      +'de ventas que el CRM no suma en '
+      +["","enero","febrero","marzo","abril","mayo","junio","julio","agosto"][nMes]
+      +' · '+perdidos.length+' clientes</div>';
+
+    h+='<h2>¿Cuadra la hipótesis?</h2><table><tbody>'
+      +'<tr><td>CRM ahora</td><td class="n">'+eur(totalCRM)+'</td></tr>'
+      +'<tr><td>+ clientes sin dueño</td><td class="n">'+eur(sumaSinDueno)+'</td></tr>'
+      +'<tr style="background:#F1F5F9"><td><b>Total</b></td>'
+      +'<td class="n"><b>'+eur(conLosPerdidos)+'</b></td></tr>'
+      +(objetivo?'<tr><td>Power BI</td><td class="n">'+eur(objetivo)+'</td></tr>'
+        +'<tr><td><b>Diferencia restante</b></td><td class="n" style="color:'
+        +(Math.abs(conLosPerdidos-objetivo)<2000?"var(--ok)":"var(--mal)")+'">'
+        +eur(conLosPerdidos-objetivo)+'</td></tr>':"")
+      +'</tbody></table>';
+
+    if(objetivo){
+      const dif=Math.abs(conLosPerdidos-objetivo);
+      h+='<div class="card '+(dif<2000?"ok":"mal")+'">'
+        +(dif<2000
+          ? "<b>Confirmado.</b> Los clientes sin dueño explican el descuadre. "
+            +"El arreglo es no descartarlos en el sync."
+          : "<b>No cuadra del todo.</b> Falta explicar "+eur(objetivo-conLosPerdidos)
+            +", así que hay otra causa además de esta.")
+        +'</div>';
+    }
+
+    h+='<h2>Por qué se pierde cada uno</h2>'
+      +'<table><thead><tr><th>Motivo</th><th>Importe</th></tr></thead><tbody>'
+      +Object.entries(porMotivo).sort((a,b)=>b[1]-a[1])
+        .map(([k,v])=>'<tr><td>'+k+'</td><td class="n">'+eur(v)+'</td></tr>').join("")
+      +'</tbody></table>';
+
+    h+='<h2>Los 30 mayores</h2>'
+      +'<table><thead><tr><th>Código</th><th>Cliente</th><th>Motivo</th>'
+      +'<th>Venta</th></tr></thead><tbody>'
+      +perdidos.slice(0,30).map(p=>'<tr><td><code>'+p.cli+'</code></td>'
+        +'<td>'+p.nombre+'</td><td style="font-size:11.5px;color:var(--tenue)">'
+        +p.motivo+'</td><td class="n">'+eur(p.v)+'</td></tr>').join("")
+      +'</tbody></table>';
+
+    app.innerHTML=h;
+  }catch(e){
+    app.innerHTML='<div class="card mal">Error: '+e.message+'</div>';
+    console.error(e);
+  }
+};
+analizar();
+</script></body></html>
