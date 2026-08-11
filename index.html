@@ -1258,6 +1258,21 @@ function renderUsuarios(){
           +'</select>'
           +'<div style="font-size:.7rem;color:#8A8078;margin-top:3px">Determina en qué equipo aparece este vendedor</div>'
           +'</div>';
+
+        // ── Códigos de facturación ────────────────────────────────────
+        // El ERP etiqueta cada venta con SU codigo, que no es el del CRM.
+        // Sin registrarlo aqui, las ventas y pedidos de esta persona quedan
+        // huerfanos: es lo que dejo 438 documentos colgando con "WK8".
+        html+='<div id="codfac-'+u.id+'" style="background:#F7F5F2;border:1px solid #E8E3DC;'
+          +'border-radius:10px;padding:12px 14px">'
+          +'<div class="field-label">Códigos de facturación</div>'
+          +'<div style="font-size:.7rem;color:#8A8078;margin:-2px 0 8px">'
+          +'Con qué códigos aparece en ventas, pedidos y visitas. '
+          +'Sin esto, sus datos no se le atribuyen.</div>'
+          +'<div id="codfac-lista-'+u.id+'" style="font-size:.8rem;color:#8A8078">'
+          +'Comprobando…</div>'
+          +'</div>';
+        setTimeout(function(){ buscarCodigos(u); }, 60);
       }
 
       // Sin rol, esta ficha no cuenta en el CRM ni recibe informe. Se ofrece
@@ -1657,12 +1672,185 @@ function toggleAgente(uid,aid){
 }
 function updateCatVendedor(uid,val){
   updateUser(uid,function(u){u.catalogoVendedor=val||null;});
+  // Al cambiar de vendedor cambian sus codigos: se vuelve a comprobar
+  var u=(adminUsers||[]).find(function(x){return x.id===uid;});
+  if(u){ CODFAC_CACHE=null; setTimeout(function(){ buscarCodigos(u); },50); }
 }
 // (v3.23.83) Cambiar el equipo de un usuario
 function updateRolUsuario(uid,val){
   updateUser(uid,function(u){u.rol=val||null;});
   renderAdminBody();
 }
+// ── Códigos de facturación ────────────────────────────────────────────
+// Un comercial aparece en los datos con varios codigos segun de donde
+// vengan (CRM, ERP, portal). Aqui se registran todos para que sus ventas,
+// pedidos y visitas se le atribuyan de verdad.
+var CODFAC_CACHE=null;
+
+async function _codfacDatos(){
+  if(CODFAC_CACHE) return CODFAC_CACHE;
+  var leer=async function(col,campos,max){
+    var uso={}, tok=null, v=0;
+    try{
+      do{
+        var r=await fetch(PORTAL_FB+"/"+col+"?pageSize=300"+(tok?"&pageToken="+encodeURIComponent(tok):""));
+        if(!r.ok) break;
+        var j=await r.json();
+        (j.documents||[]).forEach(function(d){
+          var f=d.fields||{};
+          campos.forEach(function(c){
+            var val=f[c]&&(f[c].stringValue||f[c].doubleValue||f[c].integerValue);
+            if(!val) return;
+            var k=String(val).toUpperCase().trim();
+            if(!k) return;
+            uso[k]=(uso[k]||0)+1;
+          });
+        });
+        tok=j.nextPageToken||null; v++;
+      }while(tok&&v<(max||12));
+    }catch(e){}
+    return uso;
+  };
+  var res=await Promise.all([
+    leer("visitas",["agente"],12),
+    leer("muestras",["agente"],8),
+    leer("pbi_pedidos",["agente","vendedor"],8),
+    leer("ofertas",["agente"],5),
+  ]);
+  var total={};
+  ["visitas","muestras","pedidos","ofertas"].forEach(function(n,i){
+    Object.keys(res[i]).forEach(function(k){
+      total[k]=total[k]||{cod:k,n:0,donde:[]};
+      total[k].n+=res[i][k];
+      total[k].donde.push(n);
+    });
+  });
+  // Quien ya tiene dueño en la tabla de alias
+  var conDueno={};
+  try{
+    var r2=await fetch(PORTAL_FB+"/agentes_alias?pageSize=300");
+    if(r2.ok){
+      var j2=await r2.json();
+      (j2.documents||[]).forEach(function(d){
+        var f=d.fields||{};
+        var al=(f.alias&&f.alias.stringValue)||decodeURIComponent(d.name.split("/").pop());
+        var cn=(f.canonico&&f.canonico.stringValue)||"";
+        if(al) conDueno[String(al).toUpperCase()]=cn;
+      });
+    }
+  }catch(e){}
+  CODFAC_CACHE={uso:total, conDueno:conDueno};
+  return CODFAC_CACHE;
+}
+
+function _norm(x){
+  return String(x==null?"":x).toUpperCase().trim()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^A-Z0-9]/g,"");
+}
+
+async function buscarCodigos(u){
+  var cont=document.getElementById("codfac-lista-"+u.id);
+  if(!cont) return;
+  var d=await _codfacDatos();
+  var mios=[], libres=[];
+  var claves=[u.id,u.crmId,u.username,u.catalogoVendedor,u.grupoAgente,u.nombre]
+    .filter(Boolean).map(_norm);
+
+  Object.keys(d.uso).forEach(function(k){
+    var reg=d.uso[k];
+    var due=d.conDueno[_norm(k)];
+    if(due&&claves.indexOf(_norm(due))>=0){ mios.push(reg); return; }
+    if(claves.indexOf(_norm(k))>=0){ mios.push(reg); return; }
+    // Sin dueño y con datos: candidato a ser suyo
+    if(!due&&reg.n>=3) libres.push(reg);
+  });
+  mios.sort(function(a,b){return b.n-a.n;});
+  libres.sort(function(a,b){return b.n-a.n;});
+
+  var h="";
+  if(mios.length){
+    h+='<div style="margin-bottom:8px">'
+      +mios.map(function(m){
+        return '<span style="display:inline-block;background:#DCFCE7;color:#0E7C5A;'
+          +'border-radius:99px;padding:2px 10px;font-size:.72rem;font-weight:700;'
+          +'margin:0 4px 4px 0;font-family:monospace">'+m.cod+' · '+m.n+'</span>';
+      }).join("")+'</div>';
+  } else {
+    // Obligatorio si ya hay datos suyos en el sistema: dejarlo sin asignar
+    // significa que sus ventas y visitas no cuentan para nadie.
+    var sospecha=libres.filter(function(l){
+      return _norm(l.cod).indexOf(_norm(u.nombre||"").slice(0,4))>=0
+        || _norm(u.nombre||"").indexOf(_norm(l.cod).slice(0,4))>=0
+        || _norm(l.cod)===_norm(u.catalogoVendedor)
+        || _norm(l.cod)===_norm(u.username);
+    });
+    h+='<div style="background:#FEF2F4;border:1px solid #C2263D;border-radius:8px;'
+      +'padding:10px 12px;margin-bottom:8px;font-size:.76rem;color:#C2263D">'
+      +'<b>⚠️ Falta asignar sus códigos.</b><br>'
+      +'Sus ventas, pedidos y visitas no se le atribuyen a nadie.'
+      +(sospecha.length
+        ? '<br><br>Parece que estos son suyos: '
+          +sospecha.map(function(x){return '<b>'+x.cod+'</b> ('+x.n+' docs)';}).join(", ")
+        : '')
+      +'</div>';
+  }
+
+  if(libres.length){
+    h+='<div style="font-size:.72rem;color:#8A8078;margin:6px 0 5px">'
+      +'Códigos con datos y sin dueño. Marca los que sean suyos:</div>'
+      +libres.slice(0,10).map(function(l){
+        return '<label style="display:flex;align-items:center;gap:7px;padding:4px 0;'
+          +'font-size:.78rem;cursor:pointer">'
+          +'<input type="checkbox" value="'+l.cod+'" '
+          +'onchange="marcarCodigo(\''+u.id+'\',this)">'
+          +'<code style="font-family:monospace;font-weight:700">'+l.cod+'</code>'
+          +'<span style="color:#8A8078">'+l.n+' docs · '+l.donde.join(", ")+'</span>'
+          +'</label>';
+      }).join("")
+      +'<button onclick="guardarCodigos(\''+u.id+'\')" '
+      +'style="margin-top:8px;padding:8px 14px;border-radius:8px;border:none;'
+      +'background:#1A1816;color:#fff;font-size:.78rem;font-weight:700;'
+      +'cursor:pointer">Asignar los marcados</button>';
+  } else if(mios.length){
+    h+='<div style="font-size:.72rem;color:#0E7C5A">Todo asignado.</div>';
+  }
+  cont.innerHTML=h;
+}
+
+var CODFAC_SEL={};
+function marcarCodigo(uid,el){
+  CODFAC_SEL[uid]=CODFAC_SEL[uid]||{};
+  if(el.checked) CODFAC_SEL[uid][el.value]=1;
+  else delete CODFAC_SEL[uid][el.value];
+}
+
+async function guardarCodigos(uid){
+  var sel=Object.keys(CODFAC_SEL[uid]||{});
+  if(!sel.length){ alert("No has marcado ningún código."); return; }
+  var u=(adminUsers||[]).find(function(x){return x.id===uid;})||{};
+  var canon=u.crmId||u.id;
+  if(!confirm("Se van a asignar "+sel.length+" código(s) a "+(u.nombre||canon)
+    +".\n\nSus documentos pasarán a contar como suyos. ¿Seguimos?")) return;
+  for(var i=0;i<sel.length;i++){
+    var al=_norm(sel[i]);
+    try{
+      await fetch(PORTAL_FB+"/agentes_alias/"+encodeURIComponent(al),{
+        method:"PATCH",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({fields:{
+          alias:{stringValue:al}, original:{stringValue:sel[i]},
+          canonico:{stringValue:canon},
+          nombre:{stringValue:u.nombre||canon},
+          equipo:{stringValue:u.equipo||""},
+          origen:{stringValue:"panel_admin"},
+          actualizado:{stringValue:new Date().toISOString()}
+        }})});
+    }catch(e){}
+  }
+  CODFAC_CACHE=null; CODFAC_SEL[uid]={};
+  alert("Códigos asignados.");
+  buscarCodigos(u);
+}
+
 function updateEquipoUsuario(uid,val){
   updateUser(uid,function(u){u.equipo=val||null;});
   // El equipo se guarda en portal_users, pero la sincronizacion de Power BI
