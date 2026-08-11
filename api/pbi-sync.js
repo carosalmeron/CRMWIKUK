@@ -1553,7 +1553,7 @@ EVALUATE
   // consulta mensual. Prueba varias formas de pedir su venta para ver cual
   // devuelve dato y cual no, sin tener que desplegar en cada intento.
   if (req.query.dax === "1") {
-    const out = { ok: true, version: "dax-1" };
+    const out = { ok: true, version: "dax-3-motivos" };
     try {
       const { token } = await getToken(req);
       const cli = String(req.query.cliente || "").toUpperCase().trim();
@@ -1592,10 +1592,35 @@ EVALUATE
           let f = []; try { f = JSON.parse(d.datos || "[]"); } catch (e) {}
           for (const fila of f) enDetalle.add(String(fila[0]).toUpperCase());
         }
-        const fuera = porCli.filter((x) => !enDetalle.has(x.cliente));
+        // Por que cada uno se queda fuera: sin el motivo, la lista no dice
+        // si es un descarte correcto (intercompany) o una perdida real.
+        const fichaDe = {};
+        for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
+          fichaDe[String(c._id).toUpperCase()] = c;
+        }
+        const fuera = porCli.filter((x) => !enDetalle.has(x.cliente))
+          .map((x) => {
+            const f = fichaDe[x.cliente];
+            return Object.assign({}, x, {
+              nombre: f ? (f.nombre || "") : "",
+              empresa: f ? (f.empresa || "") : "",
+              agente: f ? (f.agenteFinal || f.agente || "") : "",
+              motivo: !f ? "no esta en pbi_ventas_cliente"
+                : f.intercompany ? "intercompany"
+                : f.fusionadoEn ? "fusionado en " + f.fusionadoEn
+                : f.cuenta === false ? "cuenta=false"
+                : "cuenta, deberia estar",
+            });
+          });
+        const porMotivo = {};
+        for (const x of fuera) {
+          porMotivo[x.motivo] = (porMotivo[x.motivo] || 0) + x.venta;
+        }
         out.fueraDelDetalle = {
           cuantos: fuera.length,
           importe: Math.round(fuera.reduce((t, x) => t + x.venta, 0)),
+          porMotivo: Object.fromEntries(
+            Object.entries(porMotivo).map(([k, v]) => [k, Math.round(v)])),
           lista: fuera.slice(0, 40),
         };
         return res.status(200).json(out);
