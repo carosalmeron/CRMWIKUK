@@ -141,6 +141,7 @@
 </header>
 <main><div class="estado" id="app">Cargando…</div></main>
 
+<script src="agentes.js"></script>
 <script>
 const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
 const P=new URLSearchParams(location.search);
@@ -324,14 +325,9 @@ async function cargarSeguimiento(){
 const CERRADO_RE=/pedido|perdida|aceptada|rechazada|completada|ko|cerrada|positivo/;
 
 // Variantes del código: el CRM y SAP no siempre coinciden (un 0 de más)
-function variantesCod(c){
-  c=U(c); if(!c) return [];
-  const out=[c];
-  for(let i=0;i<c.length;i++){ if(c.charAt(i)==="0") out.push(c.slice(0,i)+c.slice(i+1)); }
-  const m=c.match(/^([A-Z]*)(\d+)$/);
-  if(m){ out.push(m[1]+"0"+m[2]); out.push(m[2]); out.push("U"+m[2]); }
-  return out.filter((v,i,a)=>v&&a.indexOf(v)===i);
-}
+// Los codigos de CLIENTE siguen necesitando variantes (el 0 de mas de SAP);
+// los de agente los resuelve Agentes con la tabla.
+function variantesCod(c){ return Agentes.variantes(c); }
 
 function estadoObjetivo(o){
   // Si apunta a un documento concreto, ese manda: es lo mas fiable
@@ -437,69 +433,40 @@ window.quitar=(campo)=>{
 };
 
 async function cargarUsuarios(){
+  // La identidad la resuelve agentes_alias, no un algoritmo de fusion aqui:
+  // antes se agrupaba por nombre o por id y la misma persona salia dos veces
+  // ("acruz" y "Alex Cruz", "Esther" y su id de portal).
+  await Agentes.cargar();
   const [us,pu]=await Promise.all([leer("usuarios"),leer("portal_users")]);
-  // La misma persona aparece en las dos colecciones con datos distintos:
-  // "Alex Cruz" con id wk?? en usuarios y "acruz" con username alex en
-  // portal_users. Agrupar solo por nombre no los unia. Se fusiona cualquier
-  // par de fichas que comparta ALGUN identificador (id, username, codigo de
-  // vendedor o nombre), que es lo unico fiable con estos datos.
-  const clave=(n)=>U(n).normalize("NFD").replace(/[\u0300-\u036f]/g,"")
-    .replace(/[^A-Z0-9]/g,"");
-  const fichas=[];
-  const meter=(u,deUsuarios)=>{
+  const map={};
+  [...us,...pu].forEach(u=>{
     const rol=String(u.rol||"").toLowerCase();
     if(rol!=="agente"&&rol!=="crm_agente"&&rol!=="comercial") return;
-    const id=u.id||u._id||u.username; if(!id) return;
-    const nom=u.nombre||u.username||id;
-    const ids=new Set([u.id,u._id,u.username,u.grupoAgente,u.catalogoVendedor,
-      u.crmId,nom].filter(Boolean).map(clave).filter(Boolean));
-    fichas.push({ids,deUsuarios,
-      id:id,nombre:nom,equipo:U(u.equipo||""),
-      cod:U(u.grupoAgente||u.catalogoVendedor||id)});
-  };
-  us.forEach(u=>meter(u,true));
-  pu.forEach(u=>meter(u,false));
-
-  // Fusion: dos fichas son la misma persona si comparten un identificador
-  const grupos=[];
-  fichas.forEach(f=>{
-    const enc=grupos.find(g=>[...f.ids].some(x=>g.ids.has(x)));
-    if(enc){
-      f.ids.forEach(x=>enc.ids.add(x));
-      enc.items.push(f);
-    } else {
-      grupos.push({ids:new Set(f.ids),items:[f]});
-    }
-  });
-
-  const l=grupos.map(g=>{
-    // Gana la ficha de "usuarios": lleva el id canonico con el que se
-    // guardan los informes y los objetivos.
-    const base=g.items.find(x=>x.deUsuarios)||g.items[0];
-    const nombre=g.items.map(x=>x.nombre)
-      .sort((a,b)=>b.length-a.length)[0]||base.nombre;   // el mas descriptivo
-    return {
-      id:base.id,
-      nombre:/^[a-z]+$/.test(base.nombre)?nombre:base.nombre,
-      equipo:base.equipo||(g.items.find(x=>x.equipo)||{}).equipo||"",
-      cod:base.cod,
-      // Todos sus identificadores, para cruzar informes y documentos
-      alias:[...g.ids]
+    const bruto=u.id||u._id||u.username; if(!bruto) return;
+    const canon=Agentes.id(bruto);
+    if(!map[canon]) map[canon]={
+      id:canon,
+      nombre:Agentes.nombre(bruto)||u.nombre||u.username||bruto,
+      equipo:U(Agentes.equipo(bruto)||u.equipo||""),
+      cod:U(u.grupoAgente||u.catalogoVendedor||bruto),
+      alias:Agentes.alias(bruto)
     };
-  }).filter(u=>!esJefe||!EQUIPO||u.equipo===EQUIPO);
-
+  });
+  let l=Object.values(map);
+  if(esJefe&&EQUIPO) l=l.filter(u=>u.equipo===EQUIPO);
   l.sort((a,b)=>a.nombre.localeCompare(b.nombre));
   return l;
 }
+
 
 // Informe de cierre de cada comercial para la semana elegida
 async function cargarCierres(){
   const res={};
   await Promise.all(USUARIOS.map(async a=>{
     try{
-      // El informe puede estar bajo cualquiera de sus codigos
+      // El informe puede estar bajo cualquiera de sus alias conocidos
       let r=null;
-      for(const c of [a.cod,...(a.alias||[])]){
+      for(const c of Agentes.alias(a.id)){
         if(!c) continue;
         const t=await fetch(`${FB}/informes/informe_${encodeURIComponent(c)}_s${SEMANA}`);
         if(t.ok){ r=t; break; }
@@ -736,17 +703,10 @@ window.elegirVend=(id)=>{ SEL_VEND=id; SEL_DOC=null; VER_TODAS_DOC=false; pintar
 
 // Buscador de ofertas/muestras/estrategias abiertas del vendedor elegido
 // Todas las formas en que puede venir identificado el vendedor en un documento
-function clavesVendedor(agId){
-  const ag=USUARIOS.find(u=>U(u.id)===U(agId));
-  if(!ag) return [];
-  const c=[ag.id,ag.cod,ag.nombre,...(ag.alias||[])].filter(Boolean).map(U);
-  return c.filter((v,i,a)=>a.indexOf(v)===i);
-}
+function clavesVendedor(agId){ return agId?[agId]:[]; }
 function esDelVendedor(d,claves){
   if(!claves.length) return true;
-  const campos=[d.agente,d.agenteId,d.agenteNombre,d.responsableComercial,
-    d.creadoPor,d.vendedor].filter(Boolean).map(U);
-  return campos.some(x=>claves.indexOf(x)>=0);
+  return Agentes.esDe(d,claves[0]);
 }
 
 window.buscarDoc=(txt)=>{
