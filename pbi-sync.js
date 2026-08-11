@@ -1564,10 +1564,16 @@ EVALUATE
         med.push(`    "a${m}", CALCULATE(SUM(${M.vBase}),\n`
           + `      FILTER(${M.ventas}, YEAR(${M.vFecha}) = ${anoAct} && MONTH(${M.vFecha}) = ${m}))`);
       }
+      // (fix ago 2026) Agrupar SOLO por cliente dejaba fuera a los que facturan
+      // en varias empresas del grupo (exportacion, sobre todo): 124 clientes y
+      // 208.874 EUR que si estan en ?ventas=1, que agrupa por cliente, vendedor
+      // y empresa. Se replica ese agrupamiento y se suma despues por cliente,
+      // asi las dos consultas ven exactamente el mismo universo.
       const filas = await pbiQuery(token, `
 EVALUATE
   SUMMARIZECOLUMNS(
     ${M.vCliente},
+    ${M.vEmpresa},
 ${med.join(",\n")}
   )`);
       out.filasDevueltas = filas.length;
@@ -1602,7 +1608,14 @@ ${med.join(",\n")}
       for (const r of filas) {
         let cli = String(pick(r, "CLIENTE") || "").trim().toUpperCase();
         if (!cli) continue;
-        const destino = canon[cli] || canonico(cli);
+        // (fix ago 2026) canonico() recodifica el codigo insertando un digito
+        // (U434434 -> U4344340). Si el resultado no esta en "cuentan", el
+        // cliente se descartaba aunque SU codigo original si contara: 124
+        // clientes y 208.874 EUR fuera del detalle, casi todos de exportacion.
+        // Ahora el codigo que cuenta manda sobre la recodificacion.
+        const recod = canon[cli] || canonico(cli);
+        const destino = cuentan.has(recod) ? recod
+                      : (cuentan.has(cli) ? cli : recod);
         // Solo cuenta lo que la sincronización marcó como contable
         if (!cuentan.has(destino) && !cuentan.has(cli)) continue;
         if (destino !== cli) agrupados++;
@@ -1673,6 +1686,8 @@ ${med.join(",\n")}
       const duenoDe = {};
       const bloqueadoDe = {};
       const empresaDe = {};
+      const huerfanoDe = {};
+      const vendedorDe = {};
       let leidos = 0, contables = 0;
       for (const c of await fbLeerColeccion("pbi_ventas_cliente")) {
         leidos++;
@@ -1684,6 +1699,8 @@ ${med.join(",\n")}
         duenoDe[String(c._id).toUpperCase()] = ag;
         bloqueadoDe[String(c._id).toUpperCase()] = c.bloqueado === true;
         empresaDe[String(c._id).toUpperCase()] = String(c.empresa || "").trim() || "(vacia)";
+        huerfanoDe[String(c._id).toUpperCase()] = c.huerfano === true;
+        vendedorDe[String(c._id).toUpperCase()] = String(c.vendedor || "").trim() || null;
       }
 
       // (v4.65) Por que el CRM no cuadra con el Panel Principal.
@@ -1693,7 +1710,7 @@ ${med.join(",\n")}
       //   GRUPOAGENTE no es (En blanco), - o CAMPOFRIO  → cajon sin comercial
       //   BLQ es NO                                     → clientes bloqueados
       const FUERA_PBI = new Set(["SIN AGENTE", "-", "", "CAMPOFRIO", "WIKUK"]);
-      const critPBI = { total:[], sinCajon:[], sinBloqueados:[], comoPBI:[] };
+      const critPBI = { total:[], sinCajon:[], sinBloqueados:[], sinHuerfanos:[], comoPBI:[] };
       for (let m = 0; m < 12; m++)
         for (const k in critPBI) critPBI[k][m] = 0;
       for (const [cli, fila] of Object.entries(mesesDe)) {
@@ -1701,13 +1718,18 @@ ${med.join(",\n")}
         if (!ag) continue;
         const enCajon = FUERA_PBI.has(ag);
         const blq = bloqueadoDe[cli] === true;
+        // Huerfano = codigo que no esta en el maestro de clientes. El Panel
+        // Principal cruza ventas con esa dimension, asi que esas filas no le
+        // llegan; el CRM en cambio las suma porque si traen agente.
+        const huer = huerfanoDe[cli] === true;
         for (let m = 0; m < 12; m++) {
           const v = Number(fila[1 + m]) || 0;
           if (!v) continue;
           critPBI.total[m] += v;
           if (!enCajon) critPBI.sinCajon[m] += v;
           if (!blq)     critPBI.sinBloqueados[m] += v;
-          if (!enCajon && !blq) critPBI.comoPBI[m] += v;
+          if (!huer)    critPBI.sinHuerfanos[m] += v;
+          if (!enCajon && !blq && !huer) critPBI.comoPBI[m] += v;
         }
       }
       // (v4.66) Reparto por EMPRESA. Power BI excluye Alm.Marruecos y las filas
@@ -1728,6 +1750,35 @@ ${med.join(",\n")}
         }
         if (tuvo) g.clientes++;
       }
+      // Quienes son y cuanto valen ESTE ano (el log de la sincronizacion los
+      // media sobre ventasAntFull, la venta del ano pasado).
+      const listaHuer = [];
+      for (const [cli, fila] of Object.entries(mesesDe)) {
+        if (!duenoDe[cli] || !huerfanoDe[cli]) continue;
+        let ano = 0, jul = 0;
+        for (let m = 0; m < 12; m++) {
+          const v = Number(fila[1 + m]) || 0;
+          ano += v; if (m === 6) jul += v;
+        }
+        if (ano) listaHuer.push({
+          codigo: cli,
+          agente: duenoDe[cli],
+          vendedor: vendedorDe[cli] || null,
+          empresa: empresaDe[cli] || null,
+          ano: num(ano),
+          julio: num(jul),
+        });
+      }
+      listaHuer.sort((a, b) => b.ano - a.ano);
+      out.huerfanos = {
+        cuantos: listaHuer.length,
+        ano: num(listaHuer.reduce((t, x) => t + x.ano, 0)),
+        julio: num(listaHuer.reduce((t, x) => t + x.julio, 0)),
+        // La lista entera: son 60, caben de sobra, y hacen falta completos
+        // para poder darlos de alta en el maestro de clientes.
+        lista: listaHuer,
+      };
+
       out.porEmpresa = Object.entries(porEmpresa)
         .map(([emp, g]) => ({ empresa: emp, ano: num(g.ano), julio: num(g.jul), clientes: g.clientes }))
         .sort((a, b) => b.ano - a.ano);
@@ -1737,6 +1788,8 @@ ${med.join(",\n")}
         crm: num(v),
         quitandoSinComercial: num(critPBI.sinCajon[i]),
         quitandoBloqueados: num(critPBI.sinBloqueados[i]),
+        quitandoHuerfanos: num(critPBI.sinHuerfanos[i]),
+        soloHuerfanos: num(v - critPBI.sinHuerfanos[i]),
         comoPowerBI: num(critPBI.comoPBI[i]),
         diferencia: num(v - critPBI.comoPBI[i]),
       })).filter((x) => x.crm);
@@ -2836,6 +2889,268 @@ EVALUATE
     ),
     [Importe], DESC)`);
 
+    return res.status(200).json(out);
+  }
+
+  // ?familias=1 → venta por CLIENTE × FAMILIA, año actual frente a año
+  // anterior A MISMA FECHA (mismo criterio vAct/vAnt del resto del sistema),
+  // cruzando la tabla de ventas con el maestro '00 Plu Global' (la tabla de
+  // ventas no tiene columna FAMILIA: solo el codigo de articulo).
+  // Escribe en Firestore:
+  //   pbi_familias_cliente/parte1..N  → JSON [cliente, familia, act, ant, costeAct, costeAnt]
+  //   pbi_familias_resumen/estado     → resumen por familia, para decidir el
+  //                                     mapeo familia → linea comercial
+  // El mapeo familia → linea (TRIPA FRESCA / DESHIDRATADA / INGREDIENTES /
+  // ENVASES) se guarda A MANO en pbi_config/familias_lineas y este bloque
+  // no lo toca: los codigos de familia son estables, se decide una vez.
+  // Se lanza a mano tras la sync nocturna, o se anade al cron como paso 2.
+  // Si Vercel corta por tiempo (60 s), lanzar por empresas sueltas con
+  // &empresa=4 (una llamada por empresa NO sobreescribe a las demas: en ese
+  // modo acumula sobre lo ya guardado solo si se pasa &acumular=1).
+  if (req.query.familias === "1") {
+    const t1 = Date.now();
+    const out = { ok: true };
+    try {
+      const { token, modo } = await getToken(req);
+      out.modoAuth = modo;
+      const T = M.ventas;
+
+      // 1) Maestro de articulos → familia por codigo, con descripciones de
+      //    ejemplo para poder reconocer cada familia al mapearla.
+      const fam = new Map(), famDesc = new Map();
+      const filasPlu = await pbiQuery(token, `
+EVALUATE
+  SUMMARIZECOLUMNS(
+    '00 Plu Global'[CODIGO],
+    '00 Plu Global'[FAMILIA],
+    '00 Plu Global'[SUBFAMILIA],
+    '00 Plu Global'[DESCRIPCION]
+  )`, true);
+      const descArt = new Map();
+      // Tripa artificial repartida por varias familias (la 2012 mezcla equino
+      // natural con FIBROUS): se reclasifica POR DESCRIPCION, mande quien mande.
+      const RE_ARTIFICIAL = /FIBROUS|NOJAX|FIBRAN|COLAGENO|COL.GENO|COLEX|EDICAS|FIBROSA|POLIAM|ARTIFICIAL|MULTIBAR/i;
+      for (const r of filasPlu) {
+        const cod = String(pick(r, "CODIGO") || "").trim();
+        if (!cod) continue;
+        const d = String(pick(r, "DESCRIPCION") || "").trim();
+        let f = String(pick(r, "FAMILIA") || "").trim() || "SIN_FAMILIA";
+        if (d && RE_ARTIFICIAL.test(d)) f = "ARTIF";
+        if (!fam.has(cod)) fam.set(cod, f);
+        if (d && !descArt.has(cod)) descArt.set(cod, d);
+        if (d) {
+          const lista = famDesc.get(f) || [];
+          if (lista.length < 5 && !lista.includes(d)) { lista.push(d); famDesc.set(f, lista); }
+        }
+      }
+      out.articulosEnMaestro = fam.size;
+
+      // 1b) Catalogo comercial (coleccion productos del CRM): segunda
+      //     oportunidad para los articulos que no estan en el maestro Plu.
+      //     Se clasifican como CAT:<categoriaKey> y el mapeo los recoge.
+      const catalogo = new Map();
+      try {
+        for (const p of await fbLeerColeccion("productos")) {
+          const c = String(p.codigo || "").toUpperCase().trim();
+          const k = String(p.categoriaKey || "").trim();
+          if (!c || !k) continue;
+          if (!catalogo.has(c)) catalogo.set(c, k);
+          const base = c.replace(/\.[A-Z0-9]+$/i, ""); // sin sufijo de envase
+          if (base !== c && !catalogo.has(base)) catalogo.set(base, k);
+        }
+        out.productosEnCatalogo = catalogo.size;
+      } catch (e) { out.avisoCatalogo = String(e.message || e).slice(0, 160); }
+      const famDeArt = (art) => {
+        if (fam.has(art)) return fam.get(art);
+        if (catalogo.has(art)) return "CAT:" + catalogo.get(art);
+        const base = art.replace(/\.[A-Z0-9]+$/i, "");
+        if (base !== art) {
+          if (fam.has(base)) return fam.get(base);
+          if (catalogo.has(base)) return "CAT:" + catalogo.get(base);
+        }
+        return "SIN_FAMILIA";
+      };
+
+      // 2) Empresas presentes en ventas: se consulta por empresa para no
+      //    acercarse al limite de 100.000 filas por consulta de la API.
+      let emps = (await pbiQuery(token, `EVALUATE VALUES(${M.vEmpresa})`, true))
+        .map((r) => String(pick(r, "EMPRESA") || "").trim()).filter(Boolean);
+      if (req.query.empresa) emps = [String(req.query.empresa).trim()];
+      out.empresas = emps;
+
+      // 3) Venta por cliente × articulo. El coste se depura igual que en la
+      //    sync principal: sin blancos y descartando costes >3x la base
+      //    (errores de maestro que reventarian el margen).
+      const acum = new Map(); // cliente|familia → {act, ant, cAct, cAnt}
+      const sinFam = new Map(); // articulo sin clasificar → {act, clientes}
+      let filasLeidas = 0;
+      for (const emp of (emps.length ? emps : [null])) {
+        const base = emp === null ? T : `FILTER(${T}, ${M.vEmpresa} = "${emp}")`;
+        const fEmp = emp === null ? "" : `${M.vEmpresa} = "${emp}",`;
+        const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+  VAR _iniAct = DATE(_anoAct, 1, 1)
+  VAR _iniAnt = DATE(_anoAnt, 1, 1)
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
+EVALUATE
+  FILTER(
+    ADDCOLUMNS(
+      SUMMARIZE(${base}, ${M.vCliente}, ${T}[CODIGO]),
+      "Act", CALCULATE(SUM(${M.vBase}), ${fEmp}
+        ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy),
+      "Ant", CALCULATE(SUM(${M.vBase}), ${fEmp}
+        ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt),
+      "CAct", CALCULATE(SUM(${M.vCoste}), ${fEmp}
+        ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy,
+        NOT ISBLANK(${M.vCoste}), ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3),
+      "CAnt", CALCULATE(SUM(${M.vCoste}), ${fEmp}
+        ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt,
+        NOT ISBLANK(${M.vCoste}), ABS(${M.vCoste}) <= ABS(${M.vBase}) * 3)
+    ),
+    [Act] <> 0 || [Ant] <> 0
+  )`, false);
+        filasLeidas += filas.length;
+        for (const r of filas) {
+          const cli = String(pick(r, "CLIENTE") || "").trim();
+          const art = String(pick(r, "CODIGO") || "").trim();
+          if (!cli) continue;
+          const f = famDeArt(art);
+          if (f === "SIN_FAMILIA" && art) {
+            const s = sinFam.get(art) || { act: 0, clientes: new Set() };
+            s.act += Number(pick(r, "Act")) || 0; s.clientes.add(cli);
+            sinFam.set(art, s);
+          }
+          const k = cli + "|" + f;
+          const a = acum.get(k) || { act: 0, ant: 0, cAct: 0, cAnt: 0 };
+          a.act += Number(pick(r, "Act")) || 0;
+          a.ant += Number(pick(r, "Ant")) || 0;
+          a.cAct += Number(pick(r, "CAct")) || 0;
+          a.cAnt += Number(pick(r, "CAnt")) || 0;
+          acum.set(k, a);
+        }
+      }
+      out.filasClienteArticulo = filasLeidas;
+      out.filasClienteFamilia = acum.size;
+
+      // Modo por empresa suelta con &acumular=1: se cargan las partes ya
+      // guardadas y se suman, para poder trocear si Vercel corta por tiempo.
+      if (req.query.empresa && req.query.acumular === "1") {
+        try {
+          const previas = await fbLeerColeccion("pbi_familias_cliente");
+          for (const p of previas) {
+            if (!p.datos) continue;
+            for (const [cli, f, act, ant, cAct, cAnt] of JSON.parse(p.datos)) {
+              const k = cli + "|" + f;
+              const a = acum.get(k) || { act: 0, ant: 0, cAct: 0, cAnt: 0 };
+              a.act += act; a.ant += ant; a.cAct += cAct || 0; a.cAnt += cAnt || 0;
+              acum.set(k, a);
+            }
+          }
+        } catch (e) { out.avisoAcumular = e.message.slice(0, 160); }
+      }
+
+      // 4) Partes JSON (mismo patron de lectura que pbi_indice_clientes)
+      const filasOut = [];
+      for (const [k, a] of acum) {
+        const i = k.indexOf("|");
+        filasOut.push([k.slice(0, i), k.slice(i + 1),
+          num(a.act), num(a.ant), num(a.cAct), num(a.cAnt)]);
+      }
+      filasOut.sort((x, y) => y[2] - x[2]);
+      const partes = [];
+      const TAM = 900;
+      for (let i = 0; i < filasOut.length; i += TAM) {
+        partes.push({
+          _id: "parte" + (partes.length + 1),
+          datos: JSON.stringify(filasOut.slice(i, i + TAM)),
+          filas: Math.min(TAM, filasOut.length - i),
+          actualizado: new Date().toISOString(),
+        });
+      }
+      out.partes = partes.length;
+      await fbCommit("pbi_familias_cliente", partes);
+
+      // 5) Resumen por familia: la chuleta para decidir el mapeo a lineas
+      const porFam = new Map();
+      for (const [k, a] of acum) {
+        const f = k.slice(k.indexOf("|") + 1);
+        const g = porFam.get(f) || { act: 0, ant: 0, cAct: 0, clientes: 0 };
+        g.act += a.act; g.ant += a.ant; g.cAct += a.cAct; g.clientes++;
+        porFam.set(f, g);
+      }
+      const resumen = [...porFam.entries()].map(([f, g]) => ({
+        familia: f,
+        act: num(g.act),
+        ant: num(g.ant),
+        margenPct: g.act ? num((100 * (g.act - g.cAct)) / g.act) : null,
+        clientes: g.clientes,
+        ejemplos: (famDesc.get(f) || []).join(" · ").slice(0, 300),
+      })).sort((x, y) => y.act - x.act);
+      await fbCommit("pbi_familias_resumen", [{
+        _id: "estado",
+        datos: JSON.stringify(resumen),
+        actualizado: new Date().toISOString(),
+      }]);
+      out.familias = resumen;
+
+      // 6) Lineas comerciales: mapeo por defecto (decidido 10-ago-2026).
+      //    Editable en pbi_config/familias_lineas sin tocar codigo; este
+      //    bloque solo lo crea si no existe (o con &remapear=1 lo repone).
+      const MAPEO_DEFECTO = {
+        "TRIPA FRESCA":       ["2001","2002","2003","2004","2012","1037","1077 - SECA UNITED CARO","1097 - SECA UNITED CARO VACUNO","1108 - MAT.PRIMA SHORTS SECA","1109 - MAT.PRIMA SECA","1124 - CERDO RASPADO SHORT","1009","CAT:tripas_naturales","CAT:promo_tripas"],
+        "ENVOLT. DESHIDRATADAS": ["2006","2005","2007","1089 - ENVOL. COMESTIBLE VEGETAL"],
+        "INGREDIENTES":       ["4016","4017","4018","4019","3013","3014","3015","1008","9033","1007","CAT:wikuk_esp","CAT:wikuk_prep","CAT:ceylan_gen","CAT:ceylan_prep","CAT:taberner_esp","CAT:taberner_prep","CAT:campana_gen","CAT:aditivos","CAT:spot_wikuk","CAT:spot_ceylan","CAT:spot_taberner","CAT:spot_campana","CAT:spot_frumen","CAT:promo_especias"],
+        "ENVASES":            ["9027","5019","5020","5021","5022","5023","5024","5025","5026","6024","1020","1043","8011","1007 - BOLSAS DE VACIO","CAT:envases","CAT:promo_envases","CAT:spot_merkapack","CAT:spot_cui","CAT:spot_el_carmen","CAT:spot_sierra"],
+        "TRIPAS ARTIFICIALES": ["ARTIF","1033","1024","1021","1035","1034","1036","ARTIFPP","GAINEA"],
+        "AUXILIARES":         ["7024","7025","6025","6022","1002","1003","1006","HABIT","PROD","1088 - MUESTRAS TRIPAS","CAT:accesorios"],
+        "NO PRODUCTO":        ["1017","1013","1012","9028","9999 - VARIOS"],
+      };
+      let mapeo = null;
+      try {
+        if (req.query.remapear !== "1") {
+          const g = await fbLeerDocumento("pbi_config", "familias_lineas");
+          if (g && g.datos) mapeo = JSON.parse(g.datos);
+        }
+      } catch (e) { /* no existe: se crea */ }
+      if (!mapeo) {
+        mapeo = MAPEO_DEFECTO;
+        await fbCommit("pbi_config", [{
+          _id: "familias_lineas",
+          datos: JSON.stringify(mapeo),
+          actualizado: new Date().toISOString(),
+        }]);
+        out.mapeoCreado = true;
+      }
+      const lineaDe = (f) => {
+        for (const [linea, lista] of Object.entries(mapeo)) if (lista.includes(f)) return linea;
+        return "SIN CLASIFICAR";
+      };
+      const porLinea = new Map();
+      for (const r of resumen) {
+        const L = lineaDe(r.familia);
+        const g = porLinea.get(L) || { act: 0, ant: 0 };
+        g.act += r.act; g.ant += r.ant;
+        porLinea.set(L, g);
+      }
+      out.lineas = [...porLinea.entries()]
+        .map(([linea, g]) => ({ linea, act: num(g.act), ant: num(g.ant),
+          evolPct: g.ant ? num((100 * (g.act - g.ant)) / g.ant) : null }))
+        .sort((x, y) => y.act - x.act);
+
+      // 7) Los articulos que siguen sin clasificar, por venta: la lista
+      //    corta para sistemas (dar de alta la familia en el maestro).
+      out.sinClasificarTop = [...sinFam.entries()]
+        .map(([art, s]) => ({ articulo: art, act: num(s.act), clientes: s.clientes.size }))
+        .sort((x, y) => y.act - x.act).slice(0, 40);
+
+      out.segundos = Math.round((Date.now() - t1) / 1000);
+    } catch (e) {
+      out.ok = false;
+      out.error = String(e.message || e).slice(0, 600);
+    }
     return res.status(200).json(out);
   }
 
