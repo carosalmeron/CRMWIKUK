@@ -111,9 +111,10 @@ tr:nth-child(even) td{background:var(--zebra)}
     <label>Población</label><select id="colPob"></select>
     <label>Provincia</label><select id="colProv"></select>
     <label>Importe</label><select id="colImp"></select>
+    <label>¿Es cliente?</label><select id="colCli"></select>
     <select id="tipoImp"><option value="compra">esa cifra = COMPRA anual a nosotros</option><option value="fact">esa cifra = FACTURACIÓN de la empresa</option></select>
   </div>
-  <div class="nota">Clasificación automática: compra &gt;10.000 €/año o facturación &gt;1 M€ → <b>GRANDES CUENTAS</b> (entra al DUPLO del territorio — KA + Inside — que lo organiza en visitas o llamadas con su rueda) · el resto → <b>grupo WIKUK</b> (cliente pequeño, canal propio con criterios pendientes de diseñar).</div>
+  <div class="nota">La columna «¿Es cliente?» manda: si el Excel lo marca CLIENTE y el cruce no lo encuentra, va a REVISAR (nunca a prospección); si lo marca NO-cliente pero coincide con uno tuyo, se avisa. Clasificación automática: compra &gt;10.000 €/año o facturación &gt;1 M€ → <b>GRANDES CUENTAS</b> (entra al DUPLO del territorio — KA + Inside — que lo organiza en visitas o llamadas con su rueda) · el resto → <b>grupo WIKUK</b> (cliente pequeño, canal propio con criterios pendientes de diseñar).</div>
   <div class="fila">
     <label class="chk"><input type="checkbox" id="vsRutas" checked> contra RUTAS organizadas</label>
     <label class="chk"><input type="checkbox" id="vsBD" checked> contra BD sin organizar</label>
@@ -328,9 +329,11 @@ function cargaHojaS(){
   let h=0;for(let i=0;i<6;i++)if((rows[i]||[]).some(c=>/CLIENTE|NOMBRE|RAZ.N|EMPRESA/i.test(String(c||"")))){h=i;break;}
   fS_head=(rows[h]||[]).map((x,i)=>String(x||("Col "+XLSX.utils.encode_col(i))));
   fS_rows=rows.slice(h+1).filter(r=>r&&r.some(c=>String(c||"").trim()));
-  ["colNom","colPob","colProv","colImp"].forEach(id=>{const s=document.getElementById(id);s.innerHTML="";
+  ["colNom","colPob","colProv","colImp","colCli"].forEach(id=>{const s=document.getElementById(id);s.innerHTML="";
     if(id!=="colNom"){const o=document.createElement("option");o.value="-1";o.textContent="(ninguna)";s.appendChild(o);}
     fS_head.forEach((x,i)=>{const o=document.createElement("option");o.value=i;o.textContent=x.slice(0,24);s.appendChild(o);});});
+  const f5=fS_head.findIndex(x=>/ES\s*CLIENTE|CLIENTE\s*S\/?N|¿?CLIENTE\??$|TIPO\s*CLIENTE/i.test(x));
+  if(f5>=0)document.getElementById("colCli").value=f5;
   const f4=fS_head.findIndex(x=>/FACTURA|VENTAS?|IMPORTE|VOLUMEN|EUROS?|CIFRA/i.test(x));
   if(f4>=0){document.getElementById("colImp").value=f4;
     if(/FACTURA|VOLUMEN|CIFRA/i.test(fS_head[f4]))document.getElementById("tipoImp").value="fact";}
@@ -365,6 +368,10 @@ document.getElementById("btnCruce").onclick=async()=>{
     const refB=usaB?BD.filter(c=>!claveRutas.has(norm(c.n)+"|"+norm(c.p))).map(c=>({k:norm(c.n),c})):[];
     const iN=+document.getElementById("colNom").value,iP=+document.getElementById("colPob").value,iV=+document.getElementById("colProv").value;
     const iM=+document.getElementById("colImp").value,tM=document.getElementById("tipoImp").value;
+    const iC=+document.getElementById("colCli").value;
+    const leeCli=v=>{const s=norm(v);if(!s)return null;
+      if(/^(SI|S|X|TRUE|1|CLIENTE|YES|VERDADERO)$/.test(s))return true;
+      if(/^(NO|N|FALSE|0|NO CLIENTE|POTENCIAL|PROSPECTO|FALSO)$/.test(s))return false;return null;};
     const parseImp=v=>{let s=String(v==null?"":v).replace(/[€\s]/g,"").replace(/\.(?=\d{3}\b)/g,"").replace(",",".");const x=parseFloat(s);return isNaN(x)?null:x;};
     res={rutas:[],bd:[],dudoso:[],nuevo:[]};const vistos=new Set();
     m.textContent="Cruzando "+fS_rows.length+" filas…";
@@ -384,9 +391,13 @@ document.getElementById("btnCruce").onclick=async()=>{
         tipo=esGC?"GRAN CUENTA":"WIKUK";
         canal=esGC?"GRANDES CUENTAS · duplo (organiza V/L)":"grupo WIKUK · cliente pequeño";
       }
-      const it={nombre,pob,prov,fila:r,kap,rutap,imp,tipo,tipoCifra:iM>=0?tM:"",canal};
-      if(bR>=0.9)res.rutas.push({...it,ka:mR.ka,ruta:mR.ruta,match:mR.n,sc:Math.round(bR*100)});
-      else if(bB>=0.9)res.bd.push({...it,ag:mB.ag,vAct:Math.round(mB.vAct),match:mB.n,sc:Math.round(bB*100)});
+      const esCli=iC>=0?leeCli(r[iC]):null;
+      const it={nombre,pob,prov,fila:r,kap,rutap,imp,tipo,tipoCifra:iM>=0?tM:"",canal,esCli};
+      if(bR>=0.9)res.rutas.push({...it,ka:mR.ka,ruta:mR.ruta,match:mR.n+(esCli===false?" · ⚠ el Excel decía NO-cliente":""),sc:Math.round(bR*100)});
+      else if(bB>=0.9)res.bd.push({...it,ag:mB.ag,vAct:Math.round(mB.vAct),match:mB.n+(esCli===false?" · ⚠ el Excel decía NO-cliente":""),sc:Math.round(bB*100)});
+      else if(esCli===true){ // lo marcan CLIENTE pero no lo encuentro → jamás a prospección sin revisar
+        const cerca=Math.max(bR,bB)>=0.55?((bR>=bB?mR.n:mB.n)+" ("+Math.round(Math.max(bR,bB)*100)+"%)"):"sin parecido";
+        res.dudoso.push({...it,match:"⚠ marcado CLIENTE en el Excel · no lo encuentro · más cercano: "+cerca,sc:Math.round(Math.max(bR,bB)*100)});}
       else if(Math.max(bR,bB)>=0.55){const esR=bR>=bB;
         res.dudoso.push({...it,match:(esR?mR.n:mB.n)+(esR?" (rutas)":" (BD)"),sc:Math.round(Math.max(bR,bB)*100)});}
       else res.nuevo.push(it);
