@@ -2007,7 +2007,13 @@ ${med.join(",\n")}
           doc["act_" + m] = num(tot.act[m - 1]);
           doc["peso_" + m] = totalAnt
             ? Math.round(tot.ant[m - 1] / totalAnt * 10000) / 10000 : 0;
+          // (ago 2026) Mismo criterio que el Panel Principal: fuera el cajon
+          // sin comercial, los clientes bloqueados y los huerfanos. Se guarda
+          // aparte para que el parte pueda enseñar la cifra que cuadra con
+          // Power BI sin recalcular nada.
+          doc["pbi_" + m] = num(critPBI.comoPBI[m - 1]);
         }
+        doc.totalActPBI = num(critPBI.comoPBI.reduce((x, y) => x + y, 0));
         docs.push(doc);
 
         // Cuanto se perdia al reconstruir por agentes, mes a mes. Si esto no
