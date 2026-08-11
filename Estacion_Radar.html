@@ -89,7 +89,13 @@ tr:nth-child(even) td{background:var(--zebra)}
     <button class="mini" id="btnBD">⟳ Cargar clientes de la BD</button>
     <span class="msg" id="msgBD">Aún no cargada.</span>
   </div>
-  <div class="nota">Lee <b>pbi_indice_clientes</b> (lo mismo que la web del plan) y aplica el criterio estándar de unificación nombre+población. Los que además estén en radar_rutas se consideran ya organizados.</div>
+  <div class="fila" id="bdTools" style="display:none">
+    <input id="busBD" type="text" placeholder="Filtrar sin-organizar por nombre, población, agente…" style="flex:1;min-width:220px">
+    <select id="filAgBD"><option value="">Todos los agentes</option></select>
+    <button class="mini" id="btnExpBD">⬇ Exportar sin-organizar</button>
+  </div>
+  <div id="bdWrap" style="margin-top:10px;max-height:460px;overflow:auto;border-radius:8px"></div>
+  <div class="nota">Lee <b>pbi_indice_clientes</b> (lo mismo que la web del plan), unifica por nombre+población y DESCUENTA automáticamente los que ya están en radar_rutas: lo que ves abajo es la masa pendiente de organizar.</div>
 </div>
 
 <div class="paso">
@@ -272,9 +278,39 @@ document.getElementById("btnBD").onclick=async()=>{
       g[k].vAct+=(+vA||0);
     });
     BD=Object.entries(g).map(([k,v])=>({clave:k,...v}));
-    m.textContent="✓ "+BD.length+" clientes únicos en la BD.";
-    check3();
+    m.textContent="Descontando los ya organizados…";
+    if(RUTAS===null){try{RUTAS=await cargaRutasNube();}catch(e){RUTAS=[];}}
+    const enRutas=new Set((RUTAS||[]).map(c=>norm(c.n)+"|"+norm(c.p)));
+    BD.forEach(c=>{c.org=enRutas.has(c.clave);});
+    BD_SIN=BD.filter(c=>!c.org).sort((a,b)=>b.vAct-a.vAct);
+    m.textContent="✓ "+BD.length+" únicos en la BD · "+(BD.length-BD_SIN.length)+" ya organizados en rutas · "+BD_SIN.length+" SIN organizar (abajo).";
+    const sel=document.getElementById("filAgBD");sel.innerHTML='<option value="">Todos los agentes</option>';
+    [...new Set(BD_SIN.map(c=>c.ag).filter(Boolean))].sort().forEach(a=>{const o=document.createElement("option");o.value=a;o.textContent=a;sel.appendChild(o);});
+    document.getElementById("bdTools").style.display="flex";
+    pintaBD();check3();
   }catch(e){m.textContent="Error: "+e.message;}
+};
+let BD_SIN=[];
+function pintaBD(){
+  const q=norm(document.getElementById("busBD").value);
+  const fa=document.getElementById("filAgBD").value;
+  const lst=BD_SIN.filter(c=>(!q||norm(c.n+" "+c.p+" "+c.ag).includes(q))&&(!fa||c.ag===fa)).slice(0,500);
+  const w=document.getElementById("bdWrap");
+  if(!lst.length){w.innerHTML='<div class="vacio">Nada sin organizar'+((q||fa)?' con ese filtro':'')+'.</div>';return;}
+  let t='<table><tr><th>#</th><th>Cliente (sin organizar)</th><th>Población</th><th>Agente</th><th>Venta año (€)</th></tr>';
+  lst.forEach((c,i)=>{t+='<tr><td>'+(i+1)+'</td><td><b>'+c.n+'</b></td><td>'+c.p+'</td><td><span class="tag t-otro">'+(c.ag||'?')+'</span></td><td>'+Math.round(c.vAct).toLocaleString("es-ES")+'</td></tr>';});
+  if(BD_SIN.length>500&&lst.length===500)t+='<tr><td colspan="5" class="match">… mostrando 500 · usa el filtro o exporta el total</td></tr>';
+  w.innerHTML=t+'</table>';
+}
+document.getElementById("busBD").oninput=()=>pintaBD();
+document.getElementById("filAgBD").onchange=()=>pintaBD();
+document.getElementById("btnExpBD").onclick=()=>{
+  if(!BD_SIN.length)return;
+  const cab=["Cliente","Población","Agente actual","Venta año (€)"];
+  const filas=BD_SIN.map(c=>[c.n,c.p,c.ag,Math.round(c.vAct)]);
+  const ws=XLSX.utils.aoa_to_sheet([cab,...filas]);
+  const wb2=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb2,ws,"sin_organizar");
+  XLSX.writeFile(wb2,"BD_sin_organizar.xlsx");
 };
 // ═══ ALIMENTADOR 3 ═══
 let wbS=null,fS_rows=[],fS_head=[],FICH_S="";
