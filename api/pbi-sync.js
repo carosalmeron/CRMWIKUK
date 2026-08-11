@@ -1113,18 +1113,6 @@ EVALUATE
       // recorte se hace aquí, ya con los códigos unificados.
 
       out.filasDevueltas = filas.length;
-      // Si al agrupar por empresa las filas no aumentan, es que cada cliente
-      // factura en una sola: entonces la causa del descuadre es otra.
-      {
-        const porCli = {};
-        for (const r of filas) {
-          const c = String(pick(r, "CLIENTE") || "").toUpperCase();
-          porCli[c] = (porCli[c] || 0) + 1;
-        }
-        out.clientesDistintos = Object.keys(porCli).length;
-        out.clientesEnVariasEmpresas =
-          Object.values(porCli).filter((n) => n > 1).length;
-      }
 
       const arts = new Map();
       try {
@@ -1590,6 +1578,19 @@ EVALUATE
 ${med.join(",\n")}
   )`);
       out.filasDevueltas = filas.length;
+      // Si al agrupar por empresa las filas no aumentan, es que cada cliente
+      // factura en una sola: entonces la causa del descuadre es otra.
+      {
+        const porCli = {};
+        for (const r of filas) {
+          const c = String(pick(r, "CLIENTE") || "").toUpperCase();
+          porCli[c] = (porCli[c] || 0) + 1;
+        }
+        out.clientesDistintos = Object.keys(porCli).length;
+        out.clientesEnVariasEmpresas =
+          Object.values(porCli).filter((n) => n > 1).length;
+      }
+
 
       // Solo intercompany. Los codigos fusionados NO se excluyen: el codigo
       // viejo es el que guarda la venta de 2025, y quitarlo hacia que el nuevo
