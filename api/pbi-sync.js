@@ -1557,7 +1557,51 @@ EVALUATE
     try {
       const { token } = await getToken(req);
       const cli = String(req.query.cliente || "").toUpperCase().trim();
-      if (!cli) { out.ok = false; out.error = "falta &cliente=CODIGO"; }
+
+      // ?dax=1&mes=7 → total del mes tal y como lo ve Power BI, y de que
+      // clientes sale. Es lo unico que permite comparar de verdad contra el
+      // titular del panel: por cliente y por año no era comparable.
+      if (req.query.mes) {
+        const m = parseInt(req.query.mes, 10);
+        const a = parseInt(req.query.anio, 10) || new Date().getFullYear();
+        const filas = await pbiQuery(token, `
+EVALUATE
+  FILTER(
+    SUMMARIZECOLUMNS(
+      ${M.vCliente},
+      "v", CALCULATE(SUM(${M.vBase}),
+        FILTER(${M.ventas}, YEAR(${M.vFecha}) = ${a} && MONTH(${M.vFecha}) = ${m}))
+    ),
+    NOT ISBLANK([v])
+  )`, true);
+        let total = 0;
+        const porCli = filas.map((r) => {
+          const c = String(pick(r, "CLIENTE") || "").toUpperCase();
+          const v = num(pick(r, "v"));
+          total += v;
+          return { cliente: c, venta: Math.round(v) };
+        }).sort((x, y) => y.venta - x.venta);
+        out.mes = m; out.anio = a;
+        out.totalPowerBI = Math.round(total);
+        out.clientesConVenta = porCli.length;
+        out.top = porCli.slice(0, 30);
+        // Cuales de esos NO estan en el detalle guardado
+        const partes = await fbLeerColeccion("pbi_meses_cliente");
+        const enDetalle = new Set();
+        for (const d of partes) {
+          let f = []; try { f = JSON.parse(d.datos || "[]"); } catch (e) {}
+          for (const fila of f) enDetalle.add(String(fila[0]).toUpperCase());
+        }
+        const fuera = porCli.filter((x) => !enDetalle.has(x.cliente));
+        out.fueraDelDetalle = {
+          cuantos: fuera.length,
+          importe: Math.round(fuera.reduce((t, x) => t + x.venta, 0)),
+          lista: fuera.slice(0, 40),
+        };
+        return res.status(200).json(out);
+      }
+
+      if (!cli) { out.ok = false; out.error = "falta &cliente=CODIGO o &mes=N"; }
       else {
         const anoAct = new Date().getFullYear();
         const anoAnt = anoAct - 1;
