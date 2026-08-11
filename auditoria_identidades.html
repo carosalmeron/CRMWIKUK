@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Auditoría de identidades</title>
+<style>
+ :root{--papel:#F2F4F7;--tinta:#14181F;--tenue:#6B7684;--linea:#DCE1E7;
+       --ok:#0E7C5A;--mal:#C2263D;--med:#B07908;--okL:#EDF7F3;--malL:#FEF2F4;--medL:#FFFBEB}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--papel);color:var(--tinta);max-width:900px;
+   margin-inline:auto;padding:20px 14px 60px;
+   font:400 15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+ h1{margin:0 0 3px;font-size:21px;font-weight:800}
+ .sub{margin:0 0 16px;font-size:13px;color:var(--tenue)}
+ h2{font-size:15px;margin:26px 0 8px;padding-bottom:5px;border-bottom:2px solid var(--linea)}
+ .card{background:#fff;border:1px solid var(--linea);border-radius:6px;
+   padding:13px 14px;margin-bottom:9px}
+ .card.mal{border-color:var(--mal);background:var(--malL)}
+ .card.med{border-color:var(--med);background:var(--medL)}
+ .card.ok{border-color:var(--ok);background:var(--okL)}
+ code{background:#F1F5F9;padding:1px 6px;border-radius:4px;font-size:12px;
+   font-family:ui-monospace,monospace}
+ .meta{color:var(--tenue);font-size:12px;margin-top:4px}
+ table{width:100%;border-collapse:collapse;font-size:12.5px;background:#fff;
+   border:1px solid var(--linea);border-radius:6px;overflow:hidden}
+ th{background:#F1F5F9;text-align:left;padding:8px;font-size:10.5px;
+   text-transform:uppercase;color:var(--tenue);letter-spacing:.3px}
+ td{padding:8px;border-top:1px solid var(--linea);vertical-align:top}
+ .estado{padding:34px 4px;color:var(--tenue);text-align:center}
+ .chip{display:inline-block;background:#F1F5F9;border-radius:99px;padding:1px 8px;
+   font-size:11px;margin:2px 3px 0 0;font-family:ui-monospace,monospace}
+ .chip.canon{background:#DCFCE7;color:var(--ok);font-weight:700}
+ .chip.huerf{background:var(--malL);color:var(--mal)}
+ .n{font-variant-numeric:tabular-nums;text-align:right;font-weight:700}
+ .resumen{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));
+   gap:9px;margin-bottom:18px}
+ .rk{background:#fff;border:1px solid var(--linea);border-radius:6px;
+   padding:12px;text-align:center}
+ .rk b{display:block;font-size:24px;font-weight:800;line-height:1}
+ .rk span{display:block;font-size:11px;color:var(--tenue);margin-top:4px}
+</style></head><body>
+<h1>🔍 Auditoría de identidades</h1>
+<p class="sub">Cómo se identifica a cada comercial en cada colección, y dónde no cuadra.</p>
+<div id="app"><p class="estado">Escaneando todas las colecciones…</p></div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const U=(s)=>String(s||"").toUpperCase().trim();
+const NORM=(s)=>U(s).normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^A-Z0-9]/g,"");
+
+// Dónde vive el identificador del comercial en cada colección
+const COLS=[
+  {c:"visitas",        campos:["agente","agenteNombre"]},
+  {c:"muestras",       campos:["agente","agenteNombre"]},
+  {c:"ofertas",        campos:["agente","agenteNombre","responsableComercial"]},
+  {c:"estrategias",    campos:["agente","agenteNombre","creadoPor"]},
+  {c:"oportunidades",  campos:["agente","agenteNombre"]},
+  {c:"incidencias",    campos:["agente","agenteNombre"]},
+  {c:"proyectos",      campos:["responsableComercial","agente","creadoPor"]},
+  {c:"planes_semanales",campos:["agente"]},
+  {c:"informes",       campos:["agente","agenteId"]},
+  {c:"objetivos_semana",campos:["agente","creadoPor"]},
+  {c:"pbi_pedidos",    campos:["agente","vendedor"]},
+  {c:"pbi_resumen_agente",campos:["_id"]},
+];
+
+function val(f){
+  if(!f) return null;
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  return null;
+}
+async function leer(col,max=40){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<max);
+  return t;
+}
+
+(async()=>{
+  const app=document.getElementById("app");
+  try{
+    // ── 1 · Las personas, según usuarios y portal_users ──────────────
+    const [us,pu]=await Promise.all([leer("usuarios",5),leer("portal_users",5)]);
+    const fichas=[];
+    const meter=(u,fuente)=>{
+      const rol=String(u.rol||"").toLowerCase();
+      const id=u.id||u._id||u.username; if(!id) return;
+      const nom=u.nombre||u.username||id;
+      const alias=new Set([u.id,u._id,u.username,u.grupoAgente,u.catalogoVendedor,
+        u.crmId,nom].filter(Boolean).map(NORM).filter(Boolean));
+      fichas.push({fuente,rol,id,nom,alias,
+        equipo:U(u.equipo||""),cod:U(u.grupoAgente||u.catalogoVendedor||"")});
+    };
+    us.forEach(u=>meter(u,"usuarios"));
+    pu.forEach(u=>meter(u,"portal_users"));
+
+    // Fusión: misma persona si comparten cualquier alias
+    const personas=[];
+    fichas.forEach(f=>{
+      const g=personas.find(p=>[...f.alias].some(a=>p.alias.has(a)));
+      if(g){ f.alias.forEach(a=>g.alias.add(a)); g.items.push(f); }
+      else personas.push({alias:new Set(f.alias),items:[f]});
+    });
+    personas.forEach(p=>{
+      const enUs=p.items.find(x=>x.fuente==="usuarios");
+      p.canon = enUs ? enUs.id : p.items[0].id;
+      p.nombre = p.items.map(x=>x.nom).sort((a,b)=>b.length-a.length)[0];
+      p.equipo = (p.items.find(x=>x.equipo)||{}).equipo||"";
+      p.roles = [...new Set(p.items.map(x=>x.rol).filter(Boolean))];
+      p.ids = [...new Set(p.items.map(x=>x.id))];
+    });
+
+    // ── 2 · Qué identificadores aparecen de verdad en los datos ──────
+    const uso={};   // alias normalizado -> {col: n}
+    const bruto={}; // alias normalizado -> valor original visto
+    for(const {c,campos} of COLS){
+      const docs=await leer(c,20);
+      docs.forEach(d=>{
+        campos.forEach(campo=>{
+          const v=d[campo]; if(!v) return;
+          const k=NORM(v); if(!k) return;
+          if(!uso[k]) uso[k]={};
+          uso[k][c]=(uso[k][c]||0)+1;
+          if(!bruto[k]) bruto[k]=String(v);
+        });
+      });
+    }
+
+    // ── 3 · Cruce ───────────────────────────────────────────────────
+    const deQuien={};   // alias -> persona
+    personas.forEach(p=>p.alias.forEach(a=>{ deQuien[a]=p; }));
+    const huerfanos=Object.keys(uso).filter(a=>!deQuien[a]);
+
+    // Alias por persona que SÍ se usan en los datos
+    personas.forEach(p=>{
+      p.usados=[...p.alias].filter(a=>uso[a]);
+      p.total=p.usados.reduce((s,a)=>
+        s+Object.values(uso[a]).reduce((x,y)=>x+y,0),0);
+    });
+
+    const conVarios=personas.filter(p=>p.usados.length>1);
+
+    let h='<div class="resumen">'
+      +'<div class="rk"><b>'+personas.length+'</b><span>personas</span></div>'
+      +'<div class="rk"><b>'+Object.keys(uso).length+'</b><span>identificadores en uso</span></div>'
+      +'<div class="rk"><b style="color:var(--med)">'+conVarios.length
+      +'</b><span>con más de un código</span></div>'
+      +'<div class="rk"><b style="color:var(--mal)">'+huerfanos.length
+      +'</b><span>sin dueño</span></div>'
+      +'</div>';
+
+    // ── Personas con varios códigos ────────────────────────────────
+    h+='<h2>⚠️ Personas con más de un identificador ('+conVarios.length+')</h2>'
+      +'<p class="sub">Cada código distinto es un sitio donde los datos se '
+      +'parten. El verde es el canónico (el de <code>usuarios</code>).</p>';
+    h+= conVarios.length
+      ? '<table><thead><tr><th>Persona</th><th>Equipo</th>'
+        +'<th>Identificadores en uso</th><th>Docs</th></tr></thead><tbody>'
+        +conVarios.sort((a,b)=>b.usados.length-a.usados.length).map(p=>
+          '<tr><td><b>'+p.nombre+'</b>'
+          +(p.roles.length?'<div class="meta">'+p.roles.join(", ")+'</div>':"")
+          +'</td><td>'+(p.equipo||"—")+'</td><td>'
+          +p.usados.map(a=>'<span class="chip'+(NORM(p.canon)===a?" canon":"")+'">'
+            +bruto[a]+'</span>').join("")
+          +'<div class="meta">'+p.usados.map(a=>
+              bruto[a]+": "+Object.keys(uso[a]).join(", ")).join(" · ")+'</div>'
+          +'</td><td class="n">'+p.total+'</td></tr>').join("")
+        +'</tbody></table>'
+      : '<div class="card ok">Nadie tiene más de un identificador.</div>';
+
+    // ── Identificadores sin dueño ──────────────────────────────────
+    h+='<h2>❌ Identificadores sin persona conocida ('+huerfanos.length+')</h2>'
+      +'<p class="sub">Aparecen en los datos pero no corresponden a ningún '
+      +'usuario dado de alta. Sus documentos son invisibles en la app.</p>';
+    h+= huerfanos.length
+      ? '<table><thead><tr><th>Identificador</th><th>Dónde aparece</th>'
+        +'<th>Docs</th></tr></thead><tbody>'
+        +huerfanos.map(a=>({a,n:Object.values(uso[a]).reduce((x,y)=>x+y,0)}))
+          .sort((x,y)=>y.n-x.n).map(({a,n})=>
+          '<tr><td><code>'+bruto[a]+'</code></td><td class="meta">'
+          +Object.entries(uso[a]).map(([c,k])=>c+" ("+k+")").join(" · ")
+          +'</td><td class="n">'+n+'</td></tr>').join("")
+        +'</tbody></table>'
+      : '<div class="card ok">Todos los identificadores tienen dueño.</div>';
+
+    // ── Mapa completo ──────────────────────────────────────────────
+    h+='<h2>📋 Mapa completo de personas</h2>'
+      +'<table><thead><tr><th>Canónico</th><th>Nombre</th><th>Equipo</th>'
+      +'<th>Todos sus alias</th></tr></thead><tbody>'
+      +personas.sort((a,b)=>a.nombre.localeCompare(b.nombre)).map(p=>
+        '<tr><td><code>'+p.canon+'</code></td><td>'+p.nombre+'</td>'
+        +'<td>'+(p.equipo||"—")+'</td><td>'
+        +[...p.alias].map(a=>'<span class="chip'+(uso[a]?"":" huerf")+'">'
+          +(bruto[a]||a)+'</span>').join("")+'</td></tr>').join("")
+      +'</tbody></table>'
+      +'<p class="sub">Los alias en rojo no aparecen en ningún dato: '
+      +'sobran o son de otra época.</p>';
+
+    app.innerHTML=h;
+  }catch(e){
+    app.innerHTML='<div class="card mal">Error: '+e.message+'</div>';
+    console.error(e);
+  }
+})();
+</script></body></html>
