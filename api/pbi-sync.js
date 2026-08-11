@@ -1113,6 +1113,18 @@ EVALUATE
       // recorte se hace aquí, ya con los códigos unificados.
 
       out.filasDevueltas = filas.length;
+      // Si al agrupar por empresa las filas no aumentan, es que cada cliente
+      // factura en una sola: entonces la causa del descuadre es otra.
+      {
+        const porCli = {};
+        for (const r of filas) {
+          const c = String(pick(r, "CLIENTE") || "").toUpperCase();
+          porCli[c] = (porCli[c] || 0) + 1;
+        }
+        out.clientesDistintos = Object.keys(porCli).length;
+        out.clientesEnVariasEmpresas =
+          Object.values(porCli).filter((n) => n > 1).length;
+      }
 
       const arts = new Map();
       try {
@@ -1551,7 +1563,8 @@ EVALUATE
   // pocos documentos: 6.500 clientes por 24 cifras serian 6.500 escrituras.
   if (req.query.mesescliente === "1") {
     const t1 = Date.now();
-    const out = { ok: true };
+    // Sello para saber que version esta corriendo de verdad tras desplegar
+    const out = { ok: true, version: "2026-08-11-empresa" };
     try {
       const { token } = await getToken(req);
       const anoAnt = new Date().getFullYear() - 1;
