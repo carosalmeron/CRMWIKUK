@@ -1011,7 +1011,39 @@ function descargarExcel(){
   XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(filas),"Rueda 3 meses");
   XLSX.writeFile(wb,"Plan_Rueda_"+new Date().toISOString().slice(0,10)+".xlsx");
 }
-function descargarJSON(){
+async function cargarPotenciales(){
+  // (v-wikuk) añade a cada cliente del plan sus líneas de POTENCIAL declarado del CRM
+  try{
+    let docs=[],pt="";
+    do{
+      const r=await fetch(`${FB_BASE}/potenciales?pageSize=300${pt?"&pageToken="+pt:""}`);
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      const j=await r.json();
+      (j.documents||[]).forEach(d=>{
+        const F=d.fields||{};
+        const lin=(F.lineas?.arrayValue?.values||[]).map(x=>{
+          const g=x.mapValue?.fields||{};
+          return {producto:g.producto?.stringValue||"",calibre:g.calibre?.stringValue||"",
+                  kgAnual:+(g.kgAnual?.doubleValue??g.kgAnual?.integerValue??parseFloat(g.kgAnual?.stringValue)||0),
+                  fuente:g.fuente?.stringValue||"",notas:g.notas?.stringValue||""};
+        });
+        docs.push({clienteId:F.clienteId?.stringValue||"",nombre:(F.clienteNombre?.stringValue||"").toUpperCase(),lineas:lin});
+      });
+      pt=j.nextPageToken||"";
+    }while(pt);
+    const porId={},porNom={};
+    docs.forEach(d=>{if(d.clienteId)porId[d.clienteId]=d.lineas;if(d.nombre)porNom[d.nombre]=d.lineas;});
+    let con=0;
+    (PLAN||[]).forEach(c=>{
+      const lin=porId[c.codigo]||porNom[(c.nombre||"").toUpperCase()]||null;
+      if(lin&&lin.length){c._potCRM=lin;con++;}
+    });
+    return con;
+  }catch(e){console.warn("potenciales:",e.message);return 0;}
+}
+async function descargarJSON(){
+  const nPot=await cargarPotenciales();
+  if(nPot) console.log("potenciales CRM incorporados a",nPot,"clientes");
   const blob=new Blob([JSON.stringify({generado:new Date().toISOString(),
     mesDatos:mesActual,plan:PLAN,estacionalidad:ESTAC,
     actividadPorPersona:window._actPorPersona||null},null,1)],{type:"application/json"});
