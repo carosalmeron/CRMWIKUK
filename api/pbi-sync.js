@@ -2190,7 +2190,21 @@ ${med.join(",\n")}
       const docs = todos.filter((d) => !viejo(d));
       out.obsoletos = obsoletos.length;
 
-      if (obsoletos.length && req.query.purgar !== "no") {
+      // (ago 2026) Tope de seguridad. Si antes ha corrido una sincronizacion
+      // incremental, aqui llegan solo los clientes con movimiento reciente y
+      // TODO lo demas parece obsoleto: una ejecucion borro 5.969 de 6.589.
+      // Por encima del 20% no se purga: es señal de que el dato de entrada
+      // esta incompleto, no de que sobren clientes.
+      const pctObs = todos.length ? obsoletos.length / todos.length : 0;
+      if (obsoletos.length && pctObs > 0.20 && req.query.purgar !== "si") {
+        out.purgaOmitida = {
+          motivo: "demasiados obsoletos: " + Math.round(pctObs * 100) + "%",
+          obsoletos: obsoletos.length,
+          total: todos.length,
+          aviso: "Parece que los datos de entrada llegaron incompletos. "
+            + "Lanza ?full=1 y repite. Para forzar la purga: &purgar=si",
+        };
+      } else if (obsoletos.length && req.query.purgar !== "no") {
         try {
           await fbBorrar("pbi_ventas_cliente", obsoletos.map((d) => d._id));
           out.obsoletosBorrados = obsoletos.length;
@@ -2316,7 +2330,17 @@ ${med.join(",\n")}
           .filter((d) => d._id !== "_TOTAL" && !vivosSet.has(String(d._id)))
           .map((d) => d._id);
         out.agentesObsoletos = sobran.length;
-        if (sobran.length && req.query.purgar !== "no") {
+        // Mismo tope que con los clientes: una purga se llevo por delante 38
+        // comerciales reales (CARO, WALENN, SILVIA...) porque venia de una
+        // sincronizacion incompleta.
+        const pctAg = previos.length ? sobran.length / previos.length : 0;
+        if (sobran.length && pctAg > 0.20 && req.query.purgar !== "si") {
+          out.purgaAgentesOmitida = {
+            motivo: "demasiados obsoletos: " + Math.round(pctAg * 100) + "%",
+            serianBorrados: sobran.slice(0, 12),
+            aviso: "Lanza ?full=1 y repite. Para forzar: &purgar=si",
+          };
+        } else if (sobran.length && req.query.purgar !== "no") {
           await fbBorrar("pbi_resumen_agente", sobran);
           out.agentesBorrados = sobran;
         }
