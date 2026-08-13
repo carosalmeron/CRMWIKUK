@@ -2160,13 +2160,36 @@ ${med.join(",\n")}
       // y JLGARCIA en Francia.
       let deFicha = 0;
       try {
+        // (ago 2026) Solo se miraba grupoAgente: quien no lo tuviera relleno
+        // se quedaba sin ajuste y con la rama de Power BI. Ahora se aplica el
+        // equipo a TODOS sus codigos conocidos, usando agentes_alias.
+        const aliasDe = {};
+        try {
+          for (const a of await fbLeerColeccion("agentes_alias")) {
+            const canon = String(a.canonico || "").toUpperCase();
+            const al = String(a.alias || a._id || "").toUpperCase();
+            if (!canon || !al) continue;
+            (aliasDe[canon] = aliasDe[canon] || []).push(al);
+            if (a.original) aliasDe[canon].push(String(a.original).toUpperCase());
+          }
+        } catch (e) { /* sin tabla se sigue como antes */ }
+
         for (const col of ["portal_users", "usuarios"]) {
           for (const u of await fbLeerColeccion(col)) {
             if (!u.equipo) continue;
-            const clave = String(u.grupoAgente || u.catalogoVendedor || "").toUpperCase().trim();
-            if (!clave) continue;
-            if (AJUSTES_RAMA[clave] !== u.equipo) deFicha++;
-            AJUSTES_RAMA[clave] = u.equipo;
+            // Todas las formas en que puede aparecer este comercial
+            const claves = new Set();
+            [u.grupoAgente, u.catalogoVendedor, u.id, u._id, u.username, u.nombre]
+              .filter(Boolean)
+              .forEach((k) => {
+                const K = String(k).toUpperCase().trim();
+                if (K) claves.add(K);
+                (aliasDe[K] || []).forEach((x) => claves.add(x));
+              });
+            for (const clave of claves) {
+              if (AJUSTES_RAMA[clave] !== u.equipo) deFicha++;
+              AJUSTES_RAMA[clave] = u.equipo;
+            }
           }
         }
       } catch (e) { out.avisoFichas = e.message.slice(0, 120); }
@@ -4781,6 +4804,18 @@ EVALUATE
       // (fix ago 2026) Este bloque usaba "fichas", declarada en otro ambito:
       // el endpoint de pedidos caia entero con "fichas is not defined".
       // Se carga aqui su propio maestro de clientes.
+      // (ago 2026) Mismo caso que "fichas": el bloque usaba "agentes", que se
+      // declara en otro ambito, y el endpoint caia con "agentes is not
+      // defined". Se carga aqui su propio maestro de comerciales.
+      const agentesPed = new Map();
+      try {
+        for (const a of await pbiQuery(token, Q.agentes, true)) {
+          const cod = String(pick(a, "CODIGO") || "").trim();
+          if (cod) agentesPed.set(cod,
+            String(pick(a, "GRUPOAGENTE") || "").trim() || null);
+        }
+      } catch (e) { /* sin maestro, la linea queda sin agente */ }
+
       const fichasPed = new Map();
       try {
         for (const c of await pbiQuery(token, Q.clientes, true)) {
@@ -4812,7 +4847,7 @@ EVALUATE
           cliente: cli,
           nombre: ficha.nombre || cli,
           poblacion: ficha.poblacion || null,
-          agente: agentes.get(ven)?.grupo || null,
+          agente: agentesPed.get(ven) || null,
           vendedor: ven,
           fecha: fec,
           articulo: art,
