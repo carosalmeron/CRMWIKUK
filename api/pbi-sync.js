@@ -495,6 +495,18 @@ function toFields(obj) {
   return f;
 }
 
+// Deja constancia de que un proceso ha corrido. Cada endpoint sale con su
+// propio return y nunca llegaba al latido del final: por eso el panel de
+// salud decia "nunca ha corrido" de procesos que funcionaban a diario.
+async function latido(modo, extra) {
+  try {
+    await fbCommit("pbi_latidos", [Object.assign({
+      _id: modo, modo,
+      cuando: new Date().toISOString(),
+    }, extra || {})]);
+  } catch (e) { /* el latido nunca debe romper nada */ }
+}
+
 async function fbCommit(coleccion, docs) {
   const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
   // El CRM accede a Firestore sin clave (reglas abiertas). Si algún día se
@@ -1806,6 +1818,8 @@ ${med.join(",\n")}
       out.dry = !!req.query.dry;
     } catch (e) { out.ok = false; out.error = e.message; }
     out.segundos = Math.round((Date.now() - t1) / 1000);
+    await latido("mesescliente", { segundos: out.segundos || null,
+      errores: out.ok ? 0 : 1 });
     return res.status(out.ok ? 200 : 500).json(out);
   }
 
@@ -2050,6 +2064,8 @@ ${med.join(",\n")}
       out.muestra = docs.slice(0, 2);
     } catch (e) { out.ok = false; out.error = e.message; }
     out.segundos = Math.round((Date.now() - t1) / 1000);
+    await latido("estacionalidad", { segundos: out.segundos || null,
+      errores: out.ok ? 0 : 1 });
     return res.status(out.ok ? 200 : 500).json(out);
   }
 
@@ -2115,6 +2131,8 @@ ${med.join(",\n")}
       out.pedidos = totales;
     } catch (e) { out.ok = false; out.error = e.message; }
     out.segundos = Math.round((Date.now() - t1) / 1000);
+    await latido("cierre", { segundos: out.segundos || null,
+      errores: out.ok ? 0 : 1 });
     return res.status(out.ok ? 200 : 500).json(out);
   }
 
@@ -2332,6 +2350,8 @@ ${med.join(",\n")}
       out.ok = false;
       out.error = e.message;
     }
+    await latido("resumen", { segundos: out.segundos || null,
+      errores: out.ok ? 0 : 1 });
     return res.status(out.ok ? 200 : 500).json(out);
   }
 
@@ -4892,13 +4912,16 @@ EVALUATE
     // para entonces lleva dias mal.
     try {
       if (!dry) {
+        // La sincronizacion sin parametros ES la de ventas y clientes: se
+        // guardaba como "otro" y el panel, que busca "full", la daba por no
+        // ejecutada desde hacia dias aunque estuviera corriendo bien.
         const modo = req.query.full ? "full"
           : req.query.resumen ? "resumen"
           : req.query.solopedidos ? "pedidos"
           : req.query.mesescliente ? "mesescliente"
           : req.query.estacionalidad ? "estacionalidad"
           : req.query.cierre ? "cierre"
-          : req.query.maestro ? "maestro" : "otro";
+          : req.query.maestro ? "maestro" : "full";
         await fbCommit("pbi_latidos", [{
           _id: modo,
           modo,
