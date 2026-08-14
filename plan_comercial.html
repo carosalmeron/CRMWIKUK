@@ -1049,8 +1049,54 @@ async function cargarPotenciales(){
     return con;
   }catch(e){console.warn("potenciales:",e.message);return 0;}
 }
+async function cargarPendientes(){
+  // (v-cruce) proyectos con hitos + muestras/ofertas/estrategias ABIERTAS, por cliente
+  const CERR=["cerrado","cerrada","resuelto","resuelta","ganada","perdida","servida","completado","completada","finalizado","finalizada","anulada"];
+  async function baja(col){
+    let docs=[],pt="";
+    do{
+      const r=await fetch(`${FB_BASE}/${col}?pageSize=300${pt?"&pageToken="+pt:""}`);
+      if(!r.ok) return docs;
+      const j=await r.json();
+      (j.documents||[]).forEach(d=>{
+        const F=d.fields||{},o={};
+        for(const k in F){
+          const x=F[k];
+          o[k]=x.stringValue??x.doubleValue??x.integerValue??x.booleanValue??
+               (x.arrayValue?(x.arrayValue.values||[]).map(y=>{
+                 const g=y.mapValue?.fields||{},z={};
+                 for(const kk in g) z[kk]=g[kk].stringValue??g[kk].doubleValue??g[kk].integerValue??"";
+                 return z;}):null);
+        }
+        docs.push(o);
+      });
+      pt=j.nextPageToken||"";
+    }while(pt);
+    return docs;
+  }
+  const [proy,mue,ofe,est]=await Promise.all([baja("proyectos"),baja("muestras"),baja("ofertas"),baja("estrategias")]);
+  const idx={};
+  (PLAN||[]).forEach(c=>{idx[c.codigo]=c;idx[(c.nombre||"").toUpperCase()]=c;});
+  const cli=o=>idx[o.clienteId]||idx[String(o.cliente||o.clienteNombre||"").toUpperCase()];
+  proy.forEach(p=>{
+    const c=cli(p); if(!c) return;
+    (p.hitos||[]).forEach(hi=>{
+      if(String(hi.estado||"").toLowerCase().match(/hecho|complet|cerrad/)) return;
+      (c._proy=c._proy||[]).push({proyecto:p.nombre||"",hito:hi.nombre||"",fecha:hi.fecha||"",responsable:hi.responsable||p.responsable||""});
+    });
+  });
+  const mete=(lista,tipo)=>lista.forEach(o=>{
+    const el=String(o.estado||"").toLowerCase();
+    if(CERR.some(x=>el.includes(x))) return;
+    const c=cli(o); if(!c) return;
+    (c._pend=c._pend||[]).push({tipo,que:o.producto||o.titulo||o.descripcion||o.nombre||"",estado:o.estado||"abierta",fecha:o.fecha||o.fechaCreacion||""});
+  });
+  mete(mue,"MUESTRA");mete(ofe,"OFERTA");mete(est,"ESTRATEGIA");
+  return {p:proy.length,m:mue.length,o:ofe.length,e:est.length};
+}
 async function descargarJSON(){
   const nPot=await cargarPotenciales();
+  try{const nn=await cargarPendientes();console.log("cruce CRM:",nn);}catch(e){console.warn("pendientes:",e.message);}
   if(nPot) console.log("potenciales CRM incorporados a",nPot,"clientes");
   const blob=new Blob([JSON.stringify({generado:new Date().toISOString(),
     mesDatos:mesActual,plan:PLAN,estacionalidad:ESTAC,
