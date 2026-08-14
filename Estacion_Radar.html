@@ -80,6 +80,10 @@ tr:nth-child(even) td{background:var(--zebra)}
     <div class="fich" id="fichR"></div>
   </div>
   <div class="fila"><button class="cta" id="btnSubir" disabled>SUBIR RUTAS A FIREBASE</button><span class="msg" id="msgR"></span></div>
+  <div class="fila">
+    <button class="mini" id="btnInt">🌍 Organizar INTERNACIONALES desde la BD (Miguel · Azarco · Ricardo)</button>
+    <span class="msg" id="msgInt"></span>
+  </div>
   <div class="board" id="board"><div class="msg">Cargando estado de la nube…</div></div>
 </div>
 
@@ -133,7 +137,7 @@ tr:nth-child(even) td{background:var(--zebra)}
     <span class="msg" id="msgBolsa"></span>
   </div>
   <div id="bolsaWrap" style="margin-top:12px;max-height:480px;overflow:auto;border-radius:8px"></div>
-  <div class="nota">Cada cruce guarda aquí AUTOMÁTICAMENTE lo que queda fuera de todo (sin duplicar: si ya está en la bolsa, no se repite). Colección <b>radar_prospectos</b>: accesible desde cualquier navegador con esta página. La ✕ descarta un prospecto para siempre; cuando la Inside lo cualifique o se dé de alta, se descarta de aquí.</div>
+  <div class="nota">MOTOR ÚNICO DE FUTUROS CLIENTES: cada Excel que cruces se normaliza y se FUSIONA aquí (clave nombre|provincia: re-subir un fichero con más columnas —dirección, teléfono, población— ENRIQUECE lo que ya está, nunca duplica). Colección <b>radar_prospectos</b>: accesible desde cualquier navegador con esta página. La ✕ descarta un prospecto para siempre; cuando la Inside lo cualifique o se dé de alta, se descarta de aquí.</div>
 </div>
 
 <div class="paso">
@@ -261,6 +265,8 @@ async function cargaBoard(){
   try{
     const meta=await fbGet("radar_meta/estado");
     const porKA=JSON.parse(meta.fields?.porKA?.stringValue||"{}");
+    try{const mi=await fbGet("radar_meta/estado_int");
+      Object.assign(porKA,JSON.parse(mi.fields?.porKA?.stringValue||"{}"));}catch(e){}
     const fecha=meta.fields?.fecha?.stringValue;
     b.innerHTML=KAS.map(ka=>{
       const n=porKA[ka]||0;
@@ -270,6 +276,40 @@ async function cargaBoard(){
   }catch(e){b.innerHTML='<div class="msg">Nube sin datos de rutas todavía (o reglas pendientes). Sube la primera para estrenarla.</div>';}
 }
 cargaBoard();
+// ═══ INTERNACIONALES desde la BD ═══
+const ZONA_INT={MIGUEL:"Portugal",AZARCO:"Italia + Francia",RICARDO:"Internacional"};
+document.getElementById("btnInt").onclick=async()=>{
+  const m=document.getElementById("msgInt");m.className="msg";m.textContent="Leyendo la BD…";
+  try{
+    let todos=[],pt="";
+    do{
+      const j=await fbGet("pbi_indice_clientes?pageSize=10"+(pt?"&pageToken="+pt:""));
+      (j.documents||[]).forEach(d=>{const s=d.fields?.datos?.stringValue;if(s)todos.push(...JSON.parse(s));});
+      pt=j.nextPageToken||"";
+    }while(pt);
+    const g={};
+    todos.forEach(([cod,nom,ag,vA,vB,pob])=>{
+      const A=String(ag||"").toUpperCase();
+      if(!(A in ZONA_INT))return;
+      const k=norm(nom)+"|"+norm(pob||"");
+      if(!g[k])g[k]={n:nom,p:pob||"",pr:ZONA_INT[A],ka:A,ruta:"BLOQUE "+ZONA_INT[A].toUpperCase()};
+    });
+    const lista=Object.values(g);
+    if(!lista.length){m.className="msg err";m.textContent="No hay clientes de Miguel/Azarco/Ricardo en la BD.";return;}
+    const TAM=350,nCh=Math.ceil(lista.length/TAM);
+    for(let i=0;i<nCh;i++){
+      await fbSet("radar_rutas_int/chunk_"+i,{datos:{stringValue:JSON.stringify(lista.slice(i*TAM,(i+1)*TAM))}});
+      m.textContent="Subiendo internacionales… "+Math.min((i+1)*TAM,lista.length)+"/"+lista.length;
+    }
+    for(let i=nCh;i<nCh+4;i++){try{await fbSet("radar_rutas_int/chunk_"+i,{datos:{stringValue:"[]"}});}catch(e){}}
+    const porKA={};lista.forEach(c=>{porKA[c.ka]=(porKA[c.ka]||0)+1;});
+    await fbSet("radar_meta/estado_int",{fecha:{stringValue:new Date().toISOString()},porKA:{stringValue:JSON.stringify(porKA)}});
+    RUTAS=null;
+    m.className="msg okm";m.textContent="✓ "+lista.length+" clientes internacionales organizados por bloque-país.";
+    cargaBoard();
+  }catch(e){m.className="msg err";
+    m.textContent=String(e.message).includes("403")?"Reglas: añade allow read, write en radar_rutas_int.":e.message;}
+};
 // ═══ ALIMENTADOR 2 ═══
 let BD=null;
 document.getElementById("btnBD").onclick=async()=>{
@@ -356,11 +396,14 @@ function cargaHojaS(){
 function check3(){document.getElementById("btnCruce").disabled=!wbS;}
 let RUTAS=null,res={rutas:[],bd:[],dudoso:[],nuevo:[]},bucket="nuevo";
 async function cargaRutasNube(){
-  let todos=[],i=0;
-  while(true){
-    try{const d=await fbGet("radar_rutas/chunk_"+i);
-      const s=d.fields?.datos?.stringValue;if(!s||s==="[]")break;todos.push(...JSON.parse(s));i++;
-    }catch(e){break;}
+  let todos=[];
+  for(const col of ["radar_rutas","radar_rutas_int"]){
+    let i=0;
+    while(true){
+      try{const d=await fbGet(col+"/chunk_"+i);
+        const s=d.fields?.datos?.stringValue;if(!s||s==="[]")break;todos.push(...JSON.parse(s));i++;
+      }catch(e){break;}
+    }
   }
   return todos;
 }
@@ -378,6 +421,8 @@ document.getElementById("btnCruce").onclick=async()=>{
     const iN=+document.getElementById("colNom").value,iP=+document.getElementById("colPob").value,iV=+document.getElementById("colProv").value;
     const iM=+document.getElementById("colImp").value,tM=document.getElementById("tipoImp").value;
     const iC=+document.getElementById("colCli").value;
+      const iD=cab.findIndex(c=>/DIRECC|DOMICILIO|CALLE|ADDRESS/i.test(String(c||"")));
+      const iT=cab.findIndex(c=>/TEL|PHONE|MOVIL|MÓVIL/i.test(String(c||"")));
     const leeCli=v=>{const s=norm(v);if(!s)return null;
       if(/^(SI|S|X|TRUE|1|CLIENTE|YES|VERDADERO)$/.test(s))return true;
       if(/^(NO|N|FALSE|0|NO CLIENTE|POTENCIAL|PROSPECTO|FALSO)$/.test(s))return false;return null;};
@@ -403,7 +448,7 @@ document.getElementById("btnCruce").onclick=async()=>{
         canal=esGC?"GRANDES CUENTAS · duplo (organiza V/L)":"grupo WIKUK · cliente pequeño";
       }
       const esCli=iC>=0?leeCli(r[iC]):null;
-      const it={nombre,pob,prov,fila:r,kap,rutap,imp,tipo,tipoCifra:iM>=0?tM:"",canal,esCli};
+      const it={nombre,pob,prov,dir:iD>=0?String(r[iD]||"").trim():"",tel:iT>=0?String(r[iT]||"").trim():"",fila:r,kap,rutap,imp,tipo,tipoCifra:iM>=0?tM:"",canal,esCli};
       if(bR>=0.9)res.rutas.push({...it,ka:mR.ka,ruta:mR.ruta,match:mR.n+(esCli===false?" · ⚠ el Excel decía NO-cliente":""),sc:Math.round(bR*100)});
       else if(bB>=0.9)res.bd.push({...it,ag:mB.ag,vAct:Math.round(mB.vAct),match:mB.n+(esCli===false?" · ⚠ el Excel decía NO-cliente":""),sc:Math.round(bB*100)});
       else if(esCli===true){ // lo marcan CLIENTE pero no lo encuentro → jamás a prospección sin revisar
@@ -601,17 +646,41 @@ async function guardaEnBolsa(nuevos){
     const aGuardar=nuevos.filter(x=>!claves.has(norm(x.nombre)+"|"+norm(x.pob)));
     let ok=0;
     for(const x of aGuardar){
-      const body={fields:{
-        n:{stringValue:x.nombre},p:{stringValue:x.pob||""},pr:{stringValue:x.prov||""},
-        ka:{stringValue:x.kap||""},ruta:{stringValue:x.rutap||""},
-        clave:{stringValue:norm(x.nombre)+"|"+norm(x.pob)},
-        tipo:{stringValue:x.tipo||""},imp:{doubleValue:x.imp!=null?x.imp:0},tipoCifra:{stringValue:x.tipoCifra||""},
-        origen:{stringValue:FICH_S||"excel"},fecha:{stringValue:new Date().toISOString()}}};
-      const r=await fetch(FB+"/radar_prospectos",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      const clave=norm(x.nombre)+"|"+norm(x.prov||x.pob);
+      const docId=clave.replace(/[^A-Z0-9|]/g,"_").slice(0,140);
+      const F={n:{stringValue:x.nombre},clave:{stringValue:clave},
+        origen:{stringValue:FICH_S||"excel"},fecha:{stringValue:new Date().toISOString()}};
+      if(x.pob)F.p={stringValue:x.pob};
+      if(x.prov)F.pr={stringValue:x.prov};
+      if(x.dir)F.dir={stringValue:x.dir};
+      if(x.tel)F.tel={stringValue:x.tel};
+      if(x.kap)F.ka={stringValue:x.kap};
+      if(x.rutap)F.ruta={stringValue:x.rutap};
+      if(x.tipo)F.tipo={stringValue:x.tipo};
+      if(x.imp!=null)F.imp={doubleValue:x.imp};
+      if(x.tipoCifra)F.tipoCifra={stringValue:x.tipoCifra};
+      const mask=Object.keys(F).map(k=>"updateMask.fieldPaths="+k).join("&");
+      const r=await fetch(FB+"/radar_prospectos/"+docId+"?"+mask,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:F})});
       if(r.ok)ok++;
       if(ok%25===0)m.textContent="Guardando en la bolsa… "+ok+"/"+aGuardar.length;
     }
     BOLSA=null;
+    // (motor) informe de COJOS: lo que falta por localizar → se lo mandas a Claude y te devuelve el Excel enriquecido
+    try{
+      const cojos=aGuardar.filter(x=>!x.pob||!x.dir||!x.tel);
+      if(cojos.length){
+        const filas=[["NOMBRE","PROVINCIA","POBLACION","DIRECCION","TELEFONO","LE FALTA"]].concat(
+          cojos.map(x=>[x.nombre,x.prov||"",x.pob||"",x.dir||"",x.tel||"",
+            [!x.pob&&"población",!x.dir&&"dirección",!x.tel&&"teléfono"].filter(Boolean).join("+")]));
+        const csv=filas.map(r=>r.map(c=>'"'+String(c).replace(/"/g,'""')+'"').join(";")).join("\n");
+        const a=document.createElement("a");
+        a.href=URL.createObjectURL(new Blob(["\ufeff"+csv],{type:"text/csv;charset=utf-8"}));
+        a.download="RADAR_cojos_para_enriquecer.csv"; a.click();
+        m2=document.createElement("div"); m2.className="nota";
+        m2.innerHTML="⚠ <b>"+cojos.length+" registros incompletos</b> (guardados igualmente). Se ha descargado <b>RADAR_cojos_para_enriquecer.csv</b>: mándaselo a Claude → te devuelve el Excel con población/dirección/teléfono localizados → lo vuelves a subir aquí y la fusión los completa sin duplicar.";
+        m.parentNode.insertBefore(m2,m.nextSibling);
+      }
+    }catch(e){}
     m.className="msg okm";
     m.textContent="✓ Bolsa: +"+ok+" prospectos nuevos guardados"+(nuevos.length-aGuardar.length?(" · "+(nuevos.length-aGuardar.length)+" ya estaban"):"")+
       ". Total en la nube: "+(exist.length+ok)+".";
