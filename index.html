@@ -197,7 +197,7 @@ input,button,select{font-family:inherit;}
 <!-- HUB -->
 <div id="hub" class="screen">
   <div class="hub-header">
-    <div class="hub-logo">GRUPO <span>CONSOLIDADO</span> <span style="font-size:0.4em;color:#8A8078;font-weight:400;margin-left:8px" id="ver-hub">v3.59.0</span></div>
+    <div class="hub-logo">GRUPO <span>CONSOLIDADO</span> <span style="font-size:0.4em;color:#8A8078;font-weight:400;margin-left:8px" id="ver-hub">v3.60.0</span></div>
     <div style="display:flex;align-items:center;gap:10px">
       <span class="hub-user" id="hub-user-name"></span>
       <button class="hub-logout" onclick="doLogout()">Salir</button>
@@ -304,7 +304,7 @@ const USERS_DEFAULT=[
 
 // ── Persistencia ─────────────────────────────────────────────────
 // ── Versión del Portal (mantener sincronizada en cada cambio) ──
-const PORTAL_VERSION="3.59.0";
+const PORTAL_VERSION="3.60.0";
 const PORTAL_BUILD="31/07/2026-version-unificada";
 try{var _pv=document.getElementById('portal-ver');if(_pv)_pv.textContent='Portal v'+PORTAL_VERSION;}catch(e){}
 // Habia tres numeros de version distintos escritos a mano en este archivo y
@@ -451,7 +451,10 @@ var filtroUser="";
 var DEPTOS_SEED=[
   {id:"direccion",     nombre:"Dirección",        icon:"👑", color:"#7C3AED", padre:null,          responsableIds:["ceo"],       tipologias:[],                orden:0,  activo:true},
   {id:"ventas",        nombre:"Ventas",           icon:"📊", color:"#2563EB", padre:"direccion",   responsableIds:["dir"],       tipologias:[],                orden:1,  activo:true},
-  {id:"comercial",     nombre:"Comercial",        icon:"💼", color:"#1F5FA8", padre:"ventas",      responsableIds:["rw1","ri1"], tipologias:[],                orden:2,  activo:true},
+  {id:"eq_wikuk",      nombre:"WIKUK",            icon:"💼", color:"#2E6B42", padre:"ventas",      responsableIds:["rw1"],       tipologias:[],  equipo:"WIKUK",       orden:2,  activo:true},
+  {id:"eq_interkey",   nombre:"INTERKEY",         icon:"🗂️", color:"#D97706", padre:"ventas",      responsableIds:["ri1"],       tipologias:[],  equipo:"INTERKEY",    orden:2.1,activo:true},
+  {id:"eq_francia",    nombre:"FRANCIA",          icon:"🇫🇷", color:"#1E5A8A", padre:"ventas",      responsableIds:[],            tipologias:[],  equipo:"FRANCIA",     orden:2.2,activo:true},
+  {id:"eq_distribuidor",nombre:"DISTRIBUIDOR",    icon:"🤝", color:"#6D28D9", padre:"ventas",      responsableIds:[],            tipologias:[],  equipo:"DISTRIBUIDOR",orden:2.3,activo:true},
   {id:"customer",      nombre:"Customer Service", icon:"🎧", color:"#0EA5E9", padre:"ventas",      responsableIds:[],            tipologias:[],                orden:3,  activo:true},
   {id:"compras",       nombre:"Compras",          icon:"🛒", color:"#0891B2", padre:"direccion",   responsableIds:["compras"],   tipologias:["stock"],         orden:4,  activo:true},
   {id:"logistica",     nombre:"Logística",        icon:"🚚", color:"#0EA5E9", padre:"compras",     responsableIds:["resp_log"],  tipologias:["logistica"],     orden:5,  activo:true},
@@ -514,8 +517,9 @@ function rolCRMde(p){
   return r||"agente";
 }
 // (v5.3) Departamento inferido cuando no hay asignación manual:
-// comerciales y jefes de equipo → Comercial (por su equipo WIKUK/INTERKEY...),
-// responsables con tipología → el departamento que gestiona esa tipología.
+// comerciales y jefes de equipo → la rama de SU equipo (WIKUK, INTERKEY,
+// FRANCIA, DISTRIBUIDOR...) bajo Ventas; responsables con tipología → el
+// departamento que gestiona esa tipología.
 function orgDeptoInferido(u,f){
   if(f.departamentoId)return f.departamentoId;
   var rol=String(f.rol||u.rol||"").toLowerCase();
@@ -526,7 +530,13 @@ function orgDeptoInferido(u,f){
   }
   var esComercial=rol.indexOf("agente")>=0||rol==="comercial"||rol==="vendedor";
   var esJefeEq=(rol==="crm_jefe"||rol==="jefe")&&!tip;
-  if((esComercial||esJefeEq)&&(u.equipo||u.catalogoVendedor)){
+  if(esComercial||esJefeEq){
+    var eq=String(u.equipo||f.equipo||"").toUpperCase().trim();
+    if(eq){
+      var dE=orgActivos().find(function(d){return String(d.equipo||"").toUpperCase()===eq;});
+      if(dE)return dE.id;
+    }
+    // Sin rama de equipo: caer en un depto "comercial" genérico si existiera
     return orgDeptoDe("comercial")?"comercial":"";
   }
   return "";
@@ -566,12 +576,25 @@ function orgSuperioresDe(p){
   if(p.reportaA){var e=orgPersona(p.reportaA);if(e)return[e];}
   var misDeps=orgActivos().filter(function(d){return(d.responsableIds||[]).indexOf(p.orgId)>=0;});
   var sup=[];
+  // Escala por la cadena de padres hasta encontrar responsables
+  function subiendo(depId){
+    var d=orgDeptoDe(depId),n=0;
+    while(d&&n<30){
+      var r=orgRespsDe(d.id).filter(function(u){return u.orgId!==p.orgId;});
+      if(r.length>0)return r;
+      d=d.padre?orgDeptoDe(d.padre):null;n++;
+    }
+    return[];
+  }
   if(misDeps.length>0){
-    misDeps.forEach(function(d){if(d.padre)orgRespsDe(d.padre).forEach(function(u){
-      if(u.orgId!==p.orgId&&sup.indexOf(u)<0)sup.push(u);});});
+    // Es responsable → escala desde el PADRE de sus departamentos
+    misDeps.forEach(function(d){
+      if(d.padre)subiendo(d.padre).forEach(function(u){if(sup.indexOf(u)<0)sup.push(u);});
+    });
     if(sup.length>0)return sup;
   }else if(p.departamentoId){
-    sup=orgRespsDe(p.departamentoId).filter(function(u){return u.orgId!==p.orgId;});
+    // Es miembro → responsables de su depto, o del primer ancestro que los tenga
+    sup=subiendo(p.departamentoId);
     if(sup.length>0)return sup;
   }
   var ceo=orgPersona("ceo");return ceo&&ceo.orgId!==p.orgId?[ceo]:[];
@@ -1262,6 +1285,8 @@ function orgModalDep(dep,esNuevo){
     html+='<option value="'+orgEsc(d.id)+'"'+((dep.padre||'')===d.id?' selected':'')+'>'+d.icon+' '+orgEsc(d.nombre)+'</option>';
   });
   html+='</select></div></div>'
+    +'<div style="font-size:.68rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:4px">Equipo comercial vinculado <span style="text-transform:none;font-weight:400">(opcional — los vendedores de ese equipo caen aquí solos)</span></div>'
+    +'<input class="form-inp" id="org-dep-equipo" value="'+orgEsc(dep.equipo||'')+'" placeholder="Ej: WIKUK, FRANCIA…"/>'
     +'<div style="font-size:.68rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:6px">Color</div>'
     +'<div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:12px">';
   ["#7C3AED","#2563EB","#0EA5E9","#0891B2","#059669","#0F766E","#F59E0B","#B45309","#DC2626","#8B5CF6","#6366F1","#334155"].forEach(function(c){
@@ -1366,8 +1391,10 @@ function orgAbreUser(orgId){var p=orgPersona(orgId);if(!p)return;
   orgState.editUser=Object.assign({},p,{pestanasOcultas:(p.pestanasOcultas||[]).slice(),pestanasExtra:(p.pestanasExtra||[]).slice()});renderAdminBody();}
 function orgCierra(){orgState={editDep:null,nuevoDep:null,editUser:null};renderAdminBody();}
 function orgCapturaDep(){var d=orgState.editDep||orgState.nuevoDep;if(!d)return;
-  var n=document.getElementById('org-dep-nombre'),i=document.getElementById('org-dep-icon'),pa=document.getElementById('org-dep-padre');
-  if(n)d.nombre=n.value;if(i)d.icon=i.value;if(pa)d.padre=pa.value||null;}
+  var n=document.getElementById('org-dep-nombre'),i=document.getElementById('org-dep-icon'),
+      pa=document.getElementById('org-dep-padre'),eq=document.getElementById('org-dep-equipo');
+  if(n)d.nombre=n.value;if(i)d.icon=i.value;if(pa)d.padre=pa.value||null;
+  if(eq)d.equipo=eq.value.toUpperCase().trim()||null;}
 function orgCapturaUser(){var p=orgState.editUser;if(!p)return;
   var r=document.getElementById('org-user-rol'),t=document.getElementById('org-user-tip'),
       d=document.getElementById('org-user-dep'),re=document.getElementById('org-user-rep');
