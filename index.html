@@ -197,7 +197,7 @@ input,button,select{font-family:inherit;}
 <!-- HUB -->
 <div id="hub" class="screen">
   <div class="hub-header">
-    <div class="hub-logo">GRUPO <span>CONSOLIDADO</span> <span style="font-size:0.4em;color:#8A8078;font-weight:400;margin-left:8px" id="ver-hub">v3.56.1</span></div>
+    <div class="hub-logo">GRUPO <span>CONSOLIDADO</span> <span style="font-size:0.4em;color:#8A8078;font-weight:400;margin-left:8px" id="ver-hub">v3.57.0</span></div>
     <div style="display:flex;align-items:center;gap:10px">
       <span class="hub-user" id="hub-user-name"></span>
       <button class="hub-logout" onclick="doLogout()">Salir</button>
@@ -234,6 +234,7 @@ input,button,select{font-family:inherit;}
   </div>
   <div class="admin-tabs">
     <button class="admin-tab active" onclick="setAdminTab('usuarios',this)">Usuarios</button>
+    <button class="admin-tab" onclick="setAdminTab('organigrama',this)">🏗 Organigrama</button>
     <button class="admin-tab" onclick="setAdminTab('accesos',this)">Accesos</button>
     <button class="admin-tab" onclick="setAdminTab('descuentos',this)">Descuentos</button>
     <button class="admin-tab" onclick="setAdminTab('datos',this)">Datos</button>
@@ -439,6 +440,145 @@ var adminUsers=loadUsers();
 var adminTab="usuarios";
 var filtroUser="";
 
+// ═══════════════════════════════════════════════════════════════════
+// (v5.2) ORGANIGRAMA — misma colección "departamentos" que usa el CRM.
+// Todo se configura desde aquí (Zona Administrador → Organigrama):
+// estructura de departamentos, responsables múltiples, rol CRM de cada
+// persona, a quién reporta y qué pestañas ve. Las fichas de organización
+// se escriben en la colección "usuarios", que es la que el CRM fusiona
+// con prioridad sobre su semilla.
+// ═══════════════════════════════════════════════════════════════════
+var DEPTOS_SEED=[
+  {id:"direccion",     nombre:"Dirección",        icon:"👑", color:"#7C3AED", padre:null,          responsableIds:["ceo"],       tipologias:[],                orden:0,  activo:true},
+  {id:"ventas",        nombre:"Ventas",           icon:"📊", color:"#2563EB", padre:"direccion",   responsableIds:["dir"],       tipologias:[],                orden:1,  activo:true},
+  {id:"comercial",     nombre:"Comercial",        icon:"💼", color:"#1F5FA8", padre:"ventas",      responsableIds:["rw1","ri1"], tipologias:[],                orden:2,  activo:true},
+  {id:"customer",      nombre:"Customer Service", icon:"🎧", color:"#0EA5E9", padre:"ventas",      responsableIds:[],            tipologias:[],                orden:3,  activo:true},
+  {id:"compras",       nombre:"Compras",          icon:"🛒", color:"#0891B2", padre:"direccion",   responsableIds:["compras"],   tipologias:["stock"],         orden:4,  activo:true},
+  {id:"logistica",     nombre:"Logística",        icon:"🚚", color:"#0EA5E9", padre:"compras",     responsableIds:["resp_log"],  tipologias:["logistica"],     orden:5,  activo:true},
+  {id:"operaciones",   nombre:"Operaciones",      icon:"⚙️", color:"#334155", padre:"direccion",   responsableIds:[],            tipologias:[],                orden:6,  activo:true},
+  {id:"produccion",    nombre:"Producción",       icon:"🏭", color:"#059669", padre:"operaciones", responsableIds:["resp_prd"],  tipologias:["produccion"],    orden:7,  activo:true},
+  {id:"coordinacion",  nombre:"Coordinación",     icon:"🧭", color:"#0F766E", padre:"operaciones", responsableIds:["resp_coord"],tipologias:["coordinacion"],  orden:8,  activo:true},
+  {id:"id",            nombre:"I+D",              icon:"🔬", color:"#7C3AED", padre:"direccion",   responsableIds:["resp_id"],   tipologias:["id"],            orden:9,  activo:true},
+  {id:"ingredientes",  nombre:"Ingredientes",     icon:"🧂", color:"#B45309", padre:"id",          responsableIds:[],            tipologias:[],                orden:10, activo:true},
+  {id:"envolturas",    nombre:"Envolturas",       icon:"🌯", color:"#92400E", padre:"id",          responsableIds:[],            tipologias:[],                orden:11, activo:true},
+  {id:"calidad",       nombre:"Calidad",          icon:"⚠️", color:"#F59E0B", padre:"direccion",   responsableIds:["resp_cal"],  tipologias:["calidad"],       orden:12, activo:true},
+  {id:"administracion",nombre:"Administración",   icon:"📄", color:"#8B5CF6", padre:"direccion",   responsableIds:["resp_adm"],  tipologias:["administracion"],orden:13, activo:true},
+  {id:"it",            nombre:"IT",               icon:"💻", color:"#6366F1", padre:"direccion",   responsableIds:["resp_it"],   tipologias:["it"],            orden:14, activo:true},
+];
+var DEPTOS=DEPTOS_SEED.map(function(d){return Object.assign({},d);});
+var ORG_FICHAS={}; // colección "usuarios" completa (fichas CRM), id → doc
+var orgCargado=false;
+
+function loadOrgData(){
+  return Promise.all([
+    fetch(PORTAL_FB+"/departamentos?pageSize=300").then(function(r){return r.ok?r.json():{};}).catch(function(){return{};}),
+    fetch(PORTAL_FB+"/usuarios?pageSize=300").then(function(r){return r.ok?r.json():{};}).catch(function(){return{};}),
+  ]).then(function(res){
+    var porId={}; DEPTOS_SEED.forEach(function(d){porId[d.id]=Object.assign({},d);});
+    ((res[0].documents)||[]).map(_fromFB).filter(Boolean).forEach(function(doc){
+      porId[doc.id]=Object.assign({},porId[doc.id]||{},doc);
+    });
+    DEPTOS=Object.keys(porId).map(function(k){return porId[k];});
+    ORG_FICHAS={};
+    ((res[1].documents)||[]).map(_fromFB).filter(Boolean).forEach(function(f){ORG_FICHAS[f.id]=f;});
+    orgCargado=true;
+  });
+}
+function saveDeptoFB(dep){
+  var idx=DEPTOS.findIndex(function(d){return d.id===dep.id;});
+  if(idx>=0)DEPTOS[idx]=dep;else DEPTOS.push(dep);
+  return fetch(PORTAL_FB+"/departamentos/"+encodeURIComponent(dep.id),{method:"PATCH",
+    headers:{"Content-Type":"application/json"},body:JSON.stringify(_toFB(dep))}).catch(function(){});
+}
+// Ficha de organización que lee el CRM (colección "usuarios"; exige id+rol)
+function saveFichaCRM(id,campos){
+  var ficha=Object.assign({},ORG_FICHAS[id]||{},campos,{id:id});
+  delete ficha._col; delete ficha.pass; delete ficha.passHash;
+  ORG_FICHAS[id]=ficha;
+  return fetch(PORTAL_FB+"/usuarios/"+encodeURIComponent(id),{method:"PATCH",
+    headers:{"Content-Type":"application/json"},body:JSON.stringify(_toFB(ficha))}).catch(function(){});
+}
+// ── Helpers de árbol ──
+function orgDeptoDe(id){for(var i=0;i<DEPTOS.length;i++){if(DEPTOS[i].id===id&&DEPTOS[i].activo!==false)return DEPTOS[i];}return null;}
+function orgActivos(){return DEPTOS.filter(function(d){return d.activo!==false;}).sort(function(a,b){return(a.orden||0)-(b.orden||0);});}
+function orgHijos(pid){return orgActivos().filter(function(d){return (d.padre||null)===(pid||null);});}
+function orgEsDesc(id,anc){var d=orgDeptoDe(id),n=0;while(d&&d.padre&&n<30){if(d.padre===anc)return true;d=orgDeptoDe(d.padre);n++;}return false;}
+// ── Personas: portal_users (identidad) + fichas CRM (organización) ──
+function rolCRMde(p){
+  var f=ORG_FICHAS[p.orgId]||{};
+  if(f.rol)return String(f.rol).toLowerCase();
+  var r=String(p.rol||"").toLowerCase();
+  if(r==="crm_agente"||r==="comercial")return"agente";
+  if(r==="crm_jefe")return p.tipologia?"tipologia":"jefe";
+  if(r==="crm_director")return"director";
+  return r||"agente";
+}
+function orgPersonas(){
+  var out=[],vistos={};
+  (adminUsers||[]).forEach(function(u){
+    if(!u||u.id==="admin"||String(u.rol||"")==="admin")return;
+    var orgId=u.crmId||u.id;
+    if(vistos[orgId])return; vistos[orgId]=true;
+    var f=ORG_FICHAS[orgId]||{};
+    out.push({orgId:orgId,nombre:f.nombre||u.nombre||orgId,icon:f.icon||u.icon||"👤",
+      rol:u.rol,tipologia:f.tipologia||u.tipologia||"",equipo:f.equipo||u.equipo||"",
+      departamentoId:f.departamentoId||"",reportaA:f.reportaA||"",
+      pestanasOcultas:f.pestanasOcultas||[],pestanasExtra:f.pestanasExtra||[]});
+  });
+  Object.keys(ORG_FICHAS).forEach(function(id){
+    if(vistos[id])return;
+    var f=ORG_FICHAS[id];
+    if(!f.nombre&&!f.rol)return;
+    vistos[id]=true;
+    out.push({orgId:id,nombre:f.nombre||id,icon:f.icon||"👤",rol:f.rol||"",
+      tipologia:f.tipologia||"",equipo:f.equipo||"",departamentoId:f.departamentoId||"",
+      reportaA:f.reportaA||"",pestanasOcultas:f.pestanasOcultas||[],pestanasExtra:f.pestanasExtra||[]});
+  });
+  return out;
+}
+function orgPersona(orgId){return orgPersonas().find(function(p){return p.orgId===orgId;})||null;}
+function orgRespsDe(depId){var d=orgDeptoDe(depId);if(!d)return[];
+  return (d.responsableIds||[]).map(orgPersona).filter(Boolean);}
+function orgMiembrosDe(depId){var d=orgDeptoDe(depId);if(!d)return[];
+  var r={};(d.responsableIds||[]).forEach(function(x){r[x]=1;});
+  return orgPersonas().filter(function(p){return p.departamentoId===depId&&!r[p.orgId];});}
+function orgSuperioresDe(p){
+  if(p.reportaA){var e=orgPersona(p.reportaA);if(e)return[e];}
+  var misDeps=orgActivos().filter(function(d){return(d.responsableIds||[]).indexOf(p.orgId)>=0;});
+  var sup=[];
+  if(misDeps.length>0){
+    misDeps.forEach(function(d){if(d.padre)orgRespsDe(d.padre).forEach(function(u){
+      if(u.orgId!==p.orgId&&sup.indexOf(u)<0)sup.push(u);});});
+    if(sup.length>0)return sup;
+  }else if(p.departamentoId){
+    sup=orgRespsDe(p.departamentoId).filter(function(u){return u.orgId!==p.orgId;});
+    if(sup.length>0)return sup;
+  }
+  var ceo=orgPersona("ceo");return ceo&&ceo.orgId!==p.orgId?[ceo]:[];
+}
+// ── Pestañas del CRM (mismo catálogo que crm.html) ──
+var CAT_PEST={
+  dashboard:{icon:"🏠",label:"Inicio",fija:true},plan_semanal:{icon:"📅",label:"Mi semana"},
+  analisis:{icon:"📈",label:"Análisis"},clientes:{icon:"📋",label:"Clientes",soloRol:["agente"]},
+  clientes_eq:{icon:"📋",label:"Clientes",noRol:["agente"]},sala_mandos:{icon:"🎯",label:"Mandos"},
+  oportunidades:{icon:"💼",label:"Ops"},ofertas:{icon:"💰",label:"Ofertas"},
+  muestras:{icon:"📦",label:"Muestras"},estrategias:{icon:"🎯",label:"Estrategias"},
+  incidencias:{icon:"🚨",label:"Incidencias"},calendario:{icon:"🗓️",label:"Agenda"},
+  tareas:{icon:"📌",label:"Tareas"},reporting:{icon:"🧾",label:"Reporting"},
+  proyectos:{icon:"📁",label:"Proyectos"},vamos_caros:{icon:"📊",label:"Mercado"},
+  planif_compras:{icon:"📋",label:"Planificación"},
+  inc_stock:{icon:"📦",label:"Stock",soloRol:["compras"]},inc_calidad:{icon:"⚠️",label:"Calidad",soloRol:["compras"]},
+  ia:{icon:"🤖",label:"IA"},
+};
+var MENU_ROL_P={
+  agente:["dashboard","plan_semanal","analisis","clientes","oportunidades","ofertas","muestras","estrategias","incidencias","calendario","tareas","reporting","proyectos","ia"],
+  jefe:["dashboard","sala_mandos","plan_semanal","analisis","calendario","tareas","clientes_eq","muestras","estrategias","oportunidades","ofertas","planif_compras","incidencias","reporting","proyectos","ia"],
+  director:["dashboard","sala_mandos","plan_semanal","analisis","calendario","tareas","clientes_eq","muestras","estrategias","oportunidades","ofertas","vamos_caros","planif_compras","incidencias","reporting","proyectos","ia"],
+  ceo:["dashboard","sala_mandos","plan_semanal","analisis","calendario","tareas","clientes_eq","muestras","estrategias","oportunidades","ofertas","vamos_caros","planif_compras","incidencias","reporting","proyectos","ia"],
+  tipologia:["dashboard","incidencias","proyectos","calendario","tareas"],
+  compras:["vamos_caros","planif_compras","inc_stock","inc_calidad","proyectos"],
+};
+
 // ══════════════════════════════════════════════════════════════════
 // NAVEGACIÓN
 // ══════════════════════════════════════════════════════════════════
@@ -457,6 +597,8 @@ function showAdmin(){
   adminTab="usuarios";
   renderAdmin();
   showScreen('admin-screen');
+  // (v5.2) Cargar organigrama (departamentos + fichas CRM) en paralelo
+  loadOrgData().then(function(){if(adminTab==='organigrama')renderAdminBody();}).catch(function(){});
   // Load from Firebase
   document.getElementById('admin-fb-status').textContent='⏳';
   loadUsersFB().then(function(u){
@@ -692,6 +834,15 @@ function selectDepartamento(dept,crmId){
   newForm.tipologia=dept;
   newForm.crmIdResp=crmId;
   newForm.perfilCRM=crmId;
+  renderAdminBody();
+}
+// (v5.2) Selección por departamento del organigrama: identidad propia,
+// la tipología de incidencias sale del propio departamento.
+function selectDepartamentoOrg(deptoId){
+  newForm.deptoId=deptoId;
+  var d=(typeof orgDeptoDe==='function')?orgDeptoDe(deptoId):null;
+  newForm.tipologia=(d&&d.tipologias&&d.tipologias[0])||"";
+  newForm.crmIdResp="";
   renderAdminBody();
 }
 
@@ -931,6 +1082,237 @@ function renderDatos(){
     + '</div>';
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// (v5.2) RENDER ORGANIGRAMA — Zona Administrador → Organigrama
+// ═══════════════════════════════════════════════════════════════════
+var orgState={editDep:null,nuevoDep:null,editUser:null};
+
+function orgEsc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
+
+function renderOrganigrama(){
+  if(!orgCargado){
+    loadOrgData().then(function(){if(adminTab==='organigrama')renderAdminBody();});
+    return '<div style="padding:40px;text-align:center;color:#8A8078">⏳ Cargando organigrama…</div>';
+  }
+  var html='<div style="max-width:640px;margin:0 auto">'
+    +'<div style="font-size:.72rem;color:#8A8078;line-height:1.5;margin-bottom:14px">'
+    +'Toca ✏️ para cambiar el nombre, los responsables o <b>de quién cuelga</b> un departamento '
+    +'(más vertical o más plano). Toca una persona para moverla, cambiarle el rol del CRM, '
+    +'a quién reporta o sus pestañas. Los cambios aplican en toda la app.</div>';
+  orgHijos(null).forEach(function(d){html+=orgRenderDep(d,0);});
+  html+='<div onclick="orgAbreNuevo()" style="padding:12px;border:2px dashed #E8E3DC;border-radius:11px;'
+    +'text-align:center;color:#8A8078;font-weight:700;font-size:.85rem;cursor:pointer;margin-top:4px">＋ Nuevo departamento</div>';
+  // Personas sin departamento
+  var sinD=orgPersonas().filter(function(p){
+    if(p.departamentoId)return false;
+    return orgActivos().every(function(d){return(d.responsableIds||[]).indexOf(p.orgId)<0;});
+  });
+  if(sinD.length>0){
+    html+='<div style="margin-top:16px;background:#FFFBEB;border:1.5px solid #FCD34D;border-radius:11px;padding:12px">'
+      +'<div style="font-size:.75rem;font-weight:700;color:#92400E;margin-bottom:8px">⚠️ Sin departamento asignado ('+sinD.length+')</div>'
+      +'<div style="display:flex;gap:6px;flex-wrap:wrap">';
+    sinD.forEach(function(p){
+      html+='<span onclick="orgAbreUser(\''+orgEsc(p.orgId)+'\')" style="display:inline-flex;gap:5px;align-items:center;'
+        +'padding:4px 10px;border-radius:99px;background:white;border:1px solid #FCD34D;cursor:pointer;font-size:.72rem;font-weight:600">'
+        +p.icon+' '+orgEsc(p.nombre)+'</span>';
+    });
+    html+='</div></div>';
+  }
+  html+='</div>';
+  if(orgState.editDep)html+=orgModalDep(orgState.editDep,false);
+  if(orgState.nuevoDep)html+=orgModalDep(orgState.nuevoDep,true);
+  if(orgState.editUser)html+=orgModalUser(orgState.editUser);
+  return html;
+}
+function orgRenderDep(dep,nivel){
+  var resp=orgRespsDe(dep.id),miem=orgMiembrosDe(dep.id),hijos=orgHijos(dep.id);
+  var html='<div style="margin-left:'+(nivel>0?14:0)+'px;margin-bottom:8px;'
+    +(nivel>0?'border-left:2px solid '+dep.color+'33;padding-left:10px;':'')+'">'
+    +'<div style="background:white;border:1.5px solid #E8E3DC;border-radius:11px;padding:10px 12px">'
+    +'<div style="display:flex;align-items:center;gap:10px">'
+    +'<div style="width:38px;height:38px;border-radius:9px;background:'+dep.color+'18;display:flex;'
+    +'align-items:center;justify-content:center;font-size:1.15rem;flex-shrink:0">'+dep.icon+'</div>'
+    +'<div style="flex:1;min-width:0">'
+    +'<div style="font-size:.9rem;font-weight:800;color:#1A1816">'+orgEsc(dep.nombre)+'</div>'
+    +'<div style="font-size:.68rem;color:#8A8078">'
+    +(resp.length>0?resp.map(function(r){return orgEsc(r.nombre);}).join(" · "):"⚠️ Sin responsable")
+    +(miem.length>0?" · "+miem.length+" persona"+(miem.length===1?"":"s"):"")
+    +(hijos.length>0?" · "+hijos.length+" sub-dep.":"")+'</div></div>'
+    +'<button onclick="orgAbreDep(\''+orgEsc(dep.id)+'\')" style="padding:7px 10px;border-radius:8px;'
+    +'border:1px solid #E8E3DC;background:white;font-size:.85rem;cursor:pointer;flex-shrink:0">✏️</button>'
+    +'</div>';
+  if(resp.length>0||miem.length>0){
+    html+='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">';
+    resp.forEach(function(p){
+      html+='<span onclick="orgAbreUser(\''+orgEsc(p.orgId)+'\')" style="display:inline-flex;gap:5px;align-items:center;'
+        +'padding:4px 10px;border-radius:99px;background:'+dep.color+'15;border:1px solid '+dep.color+'44;'
+        +'cursor:pointer;font-size:.72rem;font-weight:700">👑 '+orgEsc(p.nombre)+'</span>';
+    });
+    miem.forEach(function(p){
+      html+='<span onclick="orgAbreUser(\''+orgEsc(p.orgId)+'\')" style="display:inline-flex;gap:5px;align-items:center;'
+        +'padding:4px 10px;border-radius:99px;background:#F7F4EF;border:1px solid #E8E3DC;'
+        +'cursor:pointer;font-size:.72rem;font-weight:600">'+p.icon+' '+orgEsc(p.nombre)
+        +(p.reportaA?' <span style="font-size:.6rem;color:#8A8078">↗</span>':'')+'</span>';
+    });
+    html+='</div>';
+  }
+  html+='</div>';
+  hijos.forEach(function(h){html+=orgRenderDep(h,nivel+1);});
+  html+='</div>';
+  return html;
+}
+// ── Modal de departamento (editar o crear) ──
+function orgModalDep(dep,esNuevo){
+  var html='<div onclick="orgCierra()" style="position:fixed;inset:0;background:rgba(26,24,22,.55);z-index:400;display:flex;align-items:flex-end;justify-content:center">'
+    +'<div onclick="event.stopPropagation()" style="background:white;border-radius:18px 18px 0 0;padding:18px 16px 28px;width:100%;max-width:560px;max-height:85vh;overflow-y:auto">'
+    +'<div style="font-size:1rem;font-weight:900;color:#1A1816;margin-bottom:14px">'+(esNuevo?'＋ Nuevo departamento':dep.icon+' Editar departamento')+'</div>'
+    +'<div style="font-size:.68rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:4px">Nombre</div>'
+    +'<input class="form-inp" id="org-dep-nombre" value="'+orgEsc(dep.nombre||'')+'" placeholder="Ej: Mantenimiento"/>'
+    +'<div style="display:flex;gap:8px;margin-bottom:10px">'
+    +'<div style="width:90px"><div style="font-size:.68rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:4px">Icono</div>'
+    +'<input class="form-inp" id="org-dep-icon" style="text-align:center" value="'+orgEsc(dep.icon||'🏢')+'"/></div>'
+    +'<div style="flex:1"><div style="font-size:.68rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:4px">Cuelga de</div>'
+    +'<select class="form-inp" id="org-dep-padre">'
+    +'<option value="">— Raíz (reporta al CEO) —</option>';
+  orgActivos().forEach(function(d){
+    if(!esNuevo&&(d.id===dep.id||orgEsDesc(d.id,dep.id)))return;
+    html+='<option value="'+orgEsc(d.id)+'"'+((dep.padre||'')===d.id?' selected':'')+'>'+d.icon+' '+orgEsc(d.nombre)+'</option>';
+  });
+  html+='</select></div></div>';
+  if(!esNuevo){
+    html+='<div style="font-size:.68rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:6px">'
+      +'Responsables (pueden ser varios — cada uno con su parte individual)</div>'
+      +'<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">';
+    orgPersonas().forEach(function(p){
+      var on=(dep.responsableIds||[]).indexOf(p.orgId)>=0;
+      html+='<button onclick="orgToggleResp(\''+orgEsc(p.orgId)+'\')" style="padding:6px 11px;border-radius:99px;'
+        +'font-size:.72rem;cursor:pointer;border:1.5px solid '+(on?dep.color:'#E8E3DC')+';'
+        +'background:'+(on?dep.color+'18':'white')+';color:'+(on?dep.color:'#8A8078')+';'
+        +'font-weight:'+(on?800:500)+'">'+(on?'✓ ':'')+orgEsc(p.nombre)+'</button>';
+    });
+    html+='</div>';
+  }
+  html+='<div style="display:flex;gap:8px">';
+  if(!esNuevo)html+='<button onclick="orgDesactivaDep()" style="padding:11px 14px;border-radius:10px;border:1px solid #FECACA;background:#FEF2F2;color:#DC2626;font-size:.8rem;font-weight:700;cursor:pointer">🗑</button>';
+  html+='<button onclick="orgCierra()" style="flex:1;padding:11px;border-radius:10px;border:1px solid #E8E3DC;background:white;color:#8A8078;font-size:.85rem;font-weight:600;cursor:pointer">Cancelar</button>'
+    +'<button onclick="'+(esNuevo?'orgCreaDep()':'orgGuardaDep()')+'" style="flex:2;padding:11px;border-radius:10px;border:none;background:#1A1816;color:white;font-size:.85rem;font-weight:800;cursor:pointer">✓ '+(esNuevo?'Crear':'Guardar')+'</button>'
+    +'</div></div></div>';
+  return html;
+}
+// ── Modal de persona ──
+function orgModalUser(p){
+  var rolCRM=p._rolEdit||rolCRMde(p);
+  var menuBase=MENU_ROL_P[rolCRM]||MENU_ROL_P.agente;
+  var ocultas=p.pestanasOcultas||[],extra=p.pestanasExtra||[];
+  var sups=orgSuperioresDe(p);
+  var html='<div onclick="orgCierra()" style="position:fixed;inset:0;background:rgba(26,24,22,.55);z-index:400;display:flex;align-items:flex-end;justify-content:center">'
+    +'<div onclick="event.stopPropagation()" style="background:white;border-radius:18px 18px 0 0;padding:18px 16px 28px;width:100%;max-width:560px;max-height:88vh;overflow-y:auto">'
+    +'<div style="font-size:1rem;font-weight:900;color:#1A1816">'+p.icon+' '+orgEsc(p.nombre)+'</div>'
+    +'<div style="font-size:.7rem;color:#8A8078;margin-bottom:14px">'+orgEsc(p.orgId)+(p.equipo?' · '+orgEsc(p.equipo):'')+'</div>'
+    +'<div style="font-size:.68rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:4px">Rol en el CRM <span style="text-transform:none;font-weight:400">(define su menú y permisos)</span></div>'
+    +'<select class="form-inp" id="org-user-rol" onchange="orgCambiaRol(this.value)">';
+  [["ceo","👑 CEO"],["director","📊 Jefe de Ventas / Director"],["jefe","🏆 Responsable de equipo comercial"],
+   ["agente","🧑‍💼 Comercial"],["tipologia","🏢 Responsable de departamento"],["compras","🛒 Compras"],["rrhh","📋 RRHH"]]
+  .forEach(function(r){html+='<option value="'+r[0]+'"'+(rolCRM===r[0]?' selected':'')+'>'+r[1]+'</option>';});
+  html+='</select>';
+  if(rolCRM==='tipologia'){
+    html+='<div style="font-size:.68rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:4px">Tipología de incidencias que gestiona</div>'
+      +'<select class="form-inp" id="org-user-tip"><option value="">— Ninguna —</option>';
+    [["logistica","🚚 Logística"],["calidad","⚠️ Calidad"],["administracion","📄 Administración"],["stock","📦 Stock"],
+     ["produccion","🏭 Producción"],["id","🔬 I+D"],["coordinacion","🧭 Coordinación"],["it","💻 IT"]]
+    .forEach(function(t){html+='<option value="'+t[0]+'"'+((p.tipologia||'')===t[0]?' selected':'')+'>'+t[1]+'</option>';});
+    html+='</select>';
+  }
+  html+='<div style="font-size:.68rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:4px">Departamento</div>'
+    +'<select class="form-inp" id="org-user-dep"><option value="">— Sin departamento —</option>';
+  orgActivos().forEach(function(d){
+    html+='<option value="'+orgEsc(d.id)+'"'+((p.departamentoId||'')===d.id?' selected':'')+'>'+d.icon+' '+orgEsc(d.nombre)+'</option>';
+  });
+  html+='</select>'
+    +'<div style="font-size:.68rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:4px">Reporta a <span style="text-transform:none;font-weight:400">(vacío = responsables de su departamento)</span></div>'
+    +'<select class="form-inp" id="org-user-rep"><option value="">— Automático (según organigrama) —</option>';
+  orgPersonas().forEach(function(u){
+    if(u.orgId===p.orgId)return;
+    html+='<option value="'+orgEsc(u.orgId)+'"'+((p.reportaA||'')===u.orgId?' selected':'')+'>'+orgEsc(u.nombre)+'</option>';
+  });
+  html+='</select>'
+    +'<div style="font-size:.68rem;color:#8A8078;margin-bottom:10px">→ Su parte semanal lo verá'+(sups.length===1?'':'n')+': <b>'
+    +(sups.map(function(s){return orgEsc(s.nombre);}).join(", ")||"CEO")+'</b></div>'
+    +'<div style="font-size:.68rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:6px">Pestañas visibles del CRM <span style="text-transform:none;font-weight:400">(las de su rol vienen activadas)</span></div>'
+    +'<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">';
+  var ids=menuBase.slice();
+  Object.keys(CAT_PEST).forEach(function(id){
+    if(ids.indexOf(id)>=0)return;
+    var c=CAT_PEST[id];
+    if(c.soloRol&&c.soloRol.indexOf(rolCRM)<0)return;
+    if(c.noRol&&c.noRol.indexOf(rolCRM)>=0)return;
+    if(id==="dashboard")return;
+    ids.push(id);
+  });
+  ids.forEach(function(id){
+    var c=CAT_PEST[id]||{icon:"❔",label:id};
+    var esBase=menuBase.indexOf(id)>=0;
+    var on=esBase?ocultas.indexOf(id)<0:extra.indexOf(id)>=0;
+    var fija=!!c.fija;
+    html+='<button '+(fija?'disabled':'onclick="orgTogglePest(\''+id+'\')"')+' style="padding:6px 11px;border-radius:99px;'
+      +'font-size:.72rem;cursor:'+(fija?'default':'pointer')+';opacity:'+(fija?'.6':'1')+';'
+      +'border:1.5px solid '+(on?(esBase?'#1A1816':'#7C3AED'):'#E8E3DC')+';'
+      +'background:'+(on?(esBase?'#1A181610':'#7C3AED15'):'white')+';'
+      +'color:'+(on?(esBase?'#1A1816':'#7C3AED'):'#8A8078')+';font-weight:'+(on?800:500)+'">'
+      +(on?'✓ ':'')+c.icon+' '+c.label+(!esBase&&on?' ＋':'')+'</button>';
+  });
+  html+='</div><div style="display:flex;gap:8px">'
+    +'<button onclick="orgCierra()" style="flex:1;padding:11px;border-radius:10px;border:1px solid #E8E3DC;background:white;color:#8A8078;font-size:.85rem;font-weight:600;cursor:pointer">Cancelar</button>'
+    +'<button onclick="orgGuardaUser()" style="flex:2;padding:11px;border-radius:10px;border:none;background:#1A1816;color:white;font-size:.85rem;font-weight:800;cursor:pointer">✓ Guardar</button>'
+    +'</div></div></div>';
+  return html;
+}
+// ── Handlers ──
+function orgAbreDep(id){var d=orgDeptoDe(id);if(!d)return;
+  orgState.editDep=Object.assign({},d,{responsableIds:(d.responsableIds||[]).slice()});renderAdminBody();}
+function orgAbreNuevo(){orgState.nuevoDep={nombre:"",icon:"🏢",padre:null,color:"#6366F1"};renderAdminBody();}
+function orgAbreUser(orgId){var p=orgPersona(orgId);if(!p)return;
+  orgState.editUser=Object.assign({},p,{pestanasOcultas:(p.pestanasOcultas||[]).slice(),pestanasExtra:(p.pestanasExtra||[]).slice()});renderAdminBody();}
+function orgCierra(){orgState={editDep:null,nuevoDep:null,editUser:null};renderAdminBody();}
+function orgCapturaDep(){var d=orgState.editDep||orgState.nuevoDep;if(!d)return;
+  var n=document.getElementById('org-dep-nombre'),i=document.getElementById('org-dep-icon'),pa=document.getElementById('org-dep-padre');
+  if(n)d.nombre=n.value;if(i)d.icon=i.value;if(pa)d.padre=pa.value||null;}
+function orgCapturaUser(){var p=orgState.editUser;if(!p)return;
+  var r=document.getElementById('org-user-rol'),t=document.getElementById('org-user-tip'),
+      d=document.getElementById('org-user-dep'),re=document.getElementById('org-user-rep');
+  if(r)p._rolEdit=r.value;if(t)p.tipologia=t.value;if(d)p.departamentoId=d.value;if(re)p.reportaA=re.value;}
+function orgToggleResp(uid){orgCapturaDep();var d=orgState.editDep;if(!d)return;
+  var i=(d.responsableIds||[]).indexOf(uid);
+  if(i>=0)d.responsableIds.splice(i,1);else d.responsableIds.push(uid);renderAdminBody();}
+function orgCambiaRol(v){orgCapturaUser();if(orgState.editUser)orgState.editUser._rolEdit=v;renderAdminBody();}
+function orgTogglePest(id){orgCapturaUser();var p=orgState.editUser;if(!p)return;
+  var rolCRM=p._rolEdit||rolCRMde(p);var base=(MENU_ROL_P[rolCRM]||MENU_ROL_P.agente).indexOf(id)>=0;
+  var arr=base?p.pestanasOcultas:p.pestanasExtra;
+  var i=arr.indexOf(id);if(i>=0)arr.splice(i,1);else arr.push(id);renderAdminBody();}
+function orgGuardaDep(){orgCapturaDep();var d=orgState.editDep;if(!d)return;
+  if(!d.nombre||!d.nombre.trim()){alert("El nombre es obligatorio");return;}
+  if(d.padre&&(d.padre===d.id||orgEsDesc(d.padre,d.id))){alert("No puedes colgar un departamento de sí mismo ni de uno de sus sub-departamentos");return;}
+  saveDeptoFB(d);orgCierra();}
+function orgCreaDep(){orgCapturaDep();var f=orgState.nuevoDep;if(!f)return;
+  if(!f.nombre||!f.nombre.trim()){alert("Escribe el nombre del departamento");return;}
+  var id=f.nombre.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+    .replace(/[^a-z0-9]+/g,"_").replace(/^_+|_+$/g,"")||("dep_"+Date.now());
+  if(orgDeptoDe(id))id=id+"_"+String(Date.now()).slice(-4);
+  saveDeptoFB({id:id,nombre:f.nombre.trim(),icon:f.icon||"🏢",color:f.color||"#6366F1",
+    padre:f.padre||null,responsableIds:[],tipologias:[],orden:DEPTOS.length,activo:true});
+  orgCierra();}
+function orgDesactivaDep(){orgCapturaDep();var d=orgState.editDep;if(!d)return;
+  if(orgHijos(d.id).length>0){alert("Este departamento tiene sub-departamentos. Muévelos o desactívalos primero.");return;}
+  var gente=orgPersonas().filter(function(p){return p.departamentoId===d.id;});
+  if(!confirm('¿Desactivar "'+d.nombre+'"?'+(gente.length>0?'\n\n'+gente.length+' persona(s) quedarán sin departamento.':'')))return;
+  d.activo=false;saveDeptoFB(d);orgCierra();}
+function orgGuardaUser(){orgCapturaUser();var p=orgState.editUser;if(!p)return;
+  var rolCRM=p._rolEdit||rolCRMde(p);
+  saveFichaCRM(p.orgId,{nombre:p.nombre,icon:p.icon,rol:rolCRM,tipologia:p.tipologia||"",
+    equipo:p.equipo||null,departamentoId:p.departamentoId||"",reportaA:p.reportaA||"",
+    pestanasOcultas:p.pestanasOcultas||[],pestanasExtra:p.pestanasExtra||[]});
+  orgCierra();}
+
 function setAdminTab(tab,btn){
   adminTab=tab;
   document.querySelectorAll('.admin-tab').forEach(function(b){b.classList.remove('active');});
@@ -939,13 +1321,14 @@ function setAdminTab(tab,btn){
 }
 function renderAdmin(){
   document.querySelectorAll('.admin-tab').forEach(function(b,i){
-    b.classList.toggle('active',['usuarios','accesos','descuentos','datos','config'][i]===adminTab);
+    b.classList.toggle('active',['usuarios','organigrama','accesos','descuentos','datos','config','tarifas','backup'][i]===adminTab);
   });
   renderAdminBody();
 }
 function renderAdminBody(){
   var body=document.getElementById('admin-body');
   if(adminTab==='usuarios') body.innerHTML=renderUsuarios();
+  else if(adminTab==='organigrama') { body.innerHTML=renderOrganigrama(); return; }
   else if(adminTab==='accesos') body.innerHTML=renderAccesos();
   else if(adminTab==='descuentos') { body.innerHTML=renderDescuentos(); cargarDescuentosPortal(); }
   else if(adminTab==='datos') body.innerHTML=renderDatos();
@@ -1042,30 +1425,33 @@ function renderUsuarios(){
     }
 
     // PASO 2b: Solo para responsables de departamento
+    // (v5.2) Lista dinámica desde la colección "departamentos" (misma que el
+    // organigrama y el CRM). Crear un depto nuevo lo hace aparecer aquí solo.
     if(newForm.tipoUsuario==='responsable'){
       html+='<div style="background:#FEF2F2;border-radius:9px;padding:12px;margin-bottom:10px">'
         +'<div style="font-size:.72rem;font-weight:700;color:#991B1B;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">2 · Departamento</div>'
         +'<div style="display:flex;flex-direction:column;gap:6px">';
-      [{id:'logistica',icon:'🚚',label:'Logística',crmId:'resp_log'},
-       {id:'calidad',icon:'⚠️',label:'Calidad',crmId:'resp_cal'},
-       {id:'stock',icon:'📦',label:'Stock',crmId:'resp_stk'},
-       {id:'administracion',icon:'📄',label:'Administración',crmId:'resp_adm'},
-       {id:'produccion',icon:'🏭',label:'Producción',crmId:'resp_prd'},
-       {id:'id',icon:'🔬',label:'I+D',crmId:'resp_id'},
-       {id:'coordinacion',icon:'🧭',label:'Coordinación',crmId:'resp_coord'},
-       {id:'it',icon:'💻',label:'IT',crmId:'resp_it'}
-      ].forEach(function(d){
-        var sel=newForm.tipologia===d.id;
-        html+='<div onclick="selectDepartamento(\''+d.id+'\',\''+d.crmId+'\')" '
+      var listaDeps=(typeof orgActivos==='function'&&orgCargado)?orgActivos().filter(function(d){return d.id!=='direccion';}):
+       [{id:'logistica',icon:'🚚',nombre:'Logística'},{id:'calidad',icon:'⚠️',nombre:'Calidad'},
+        {id:'compras',icon:'🛒',nombre:'Compras'},{id:'administracion',icon:'📄',nombre:'Administración'},
+        {id:'produccion',icon:'🏭',nombre:'Producción'},{id:'id',icon:'🔬',nombre:'I+D'},
+        {id:'coordinacion',icon:'🧭',nombre:'Coordinación'},{id:'it',icon:'💻',nombre:'IT'}];
+      listaDeps.forEach(function(d){
+        var sel=newForm.deptoId===d.id;
+        var padre=(typeof orgDeptoDe==='function'&&d.padre)?orgDeptoDe(d.padre):null;
+        html+='<div onclick="selectDepartamentoOrg(\''+d.id+'\')" '
           +'style="display:flex;align-items:center;gap:12px;padding:10px 14px;'
           +'border:2px solid '+(sel?'#DC2626':'#E8E3DC')+';border-radius:9px;'
           +'background:'+(sel?'#FEF2F2':'white')+';cursor:pointer">'
           +'<span style="font-size:1.2rem">'+d.icon+'</span>'
-          +'<span style="font-size:.85rem;font-weight:'+(sel?700:500)+';color:'+(sel?'#991B1B':'#1A1816')+'">'+d.label+'</span>'
-          +(sel?'<span style="margin-left:auto;font-size:.7rem;font-weight:700;color:#991B1B;background:#FECACA;padding:2px 8px;border-radius:99px">'+d.crmId+'</span>':'')
+          +'<span style="font-size:.85rem;font-weight:'+(sel?700:500)+';color:'+(sel?'#991B1B':'#1A1816')+'">'+d.nombre
+          +(padre?' <span style="font-size:.65rem;color:#8A8078">· '+padre.nombre+'</span>':'')+'</span>'
+          +(sel?'<span style="margin-left:auto;font-size:.7rem;font-weight:700;color:#991B1B;background:#FECACA;padding:2px 8px;border-radius:99px">✓</span>':'')
           +'</div>';
       });
-      html+='</div></div>';
+      html+='</div>'
+        +'<div style="font-size:.65rem;color:#991B1B;margin-top:8px">Se creará con identidad propia y quedará como responsable del departamento en el organigrama.</div>'
+        +'</div>';
     }
 
     // PASO 2c: Director/CEO — rol
@@ -2022,12 +2408,15 @@ function createUser(){
     rol='crm_jefe';
     color=equipo==='WIKUK'?'#1E5A8A':'#2E6B42';
   } else if(tipo==='responsable'){
-    if(!newForm.tipologia){if(err)err.textContent='Selecciona el departamento';return;}
+    // (v5.2) Responsable con identidad PROPIA: su crmId es su propio usuario,
+    // no un perfil resp_* compartido. Al guardar se crea también su ficha en
+    // la colección "usuarios" y se le añade como responsable del departamento.
+    if(!newForm.deptoId&&!newForm.tipologia){if(err)err.textContent='Selecciona el departamento';return;}
     rol='crm_jefe';
-    tipologia=newForm.tipologia;
-    crmId=newForm.crmIdResp;
-    var deptIcons={logistica:'🚚',calidad:'⚠️',stock:'📦',administracion:'📄',produccion:'🏭',id:'🔬',coordinacion:'🧭',it:'💻'};
-    icon=deptIcons[tipologia]||'🏢';
+    tipologia=newForm.tipologia||'';
+    crmId=null; // se fija más abajo con el username
+    var depAlta=(typeof orgDeptoDe==='function')?orgDeptoDe(newForm.deptoId):null;
+    icon=depAlta?depAlta.icon:'🏢';
     color='#991B1B';
   } else if(tipo==='director'){
     var rolDir=(document.getElementById('nf-rol-dir')||{}).value||'crm_director';
@@ -2038,16 +2427,29 @@ function createUser(){
 
   var un=username.trim().toLowerCase().split(' ').join('');
   if(adminUsers.some(function(u){return u.id===un||u.username===un;})){if(err)err.textContent='Usuario ya existe';return;}
+  // (v5.2) Responsable de departamento: su identidad CRM es su propio usuario
+  if(tipo==='responsable'){crmId=un;}
 
   var nuevo={id:crmId||('u_'+Date.now()),nombre:nombre.trim(),username:un,rol:rol,
     icon:icon,color:color,email:email,
     equipo:equipo,accesos:newForm.accesos||['crm'],
     crmId:crmId,perfilCRM:crmId,tipologia:tipologia,
     catalogoVendedor:vendor||null,equipoCrm:[],catalogoSecciones:null};
+  if(tipo==='responsable'&&newForm.deptoId)nuevo.departamentoId=newForm.deptoId;
   // 🔐 Guardar la clave hasheada, nunca en claro
   sha256Hex(pass).then(function(h){
     if(h){nuevo.passHash=h;} else {nuevo.pass=pass;} // fallback sin crypto
     adminUsers.push(nuevo);saveUsersLocal(adminUsers);saveUserFB(nuevo);
+    // (v5.2) Ficha de organización para el CRM + responsable del departamento
+    if(tipo==='responsable'&&typeof saveFichaCRM==='function'){
+      saveFichaCRM(un,{nombre:nombre.trim(),icon:icon,color:color,rol:'tipologia',
+        tipologia:tipologia,departamentoId:newForm.deptoId||'',email:email});
+      var depR=(typeof orgDeptoDe==='function')?orgDeptoDe(newForm.deptoId):null;
+      if(depR&&(depR.responsableIds||[]).indexOf(un)<0){
+        depR.responsableIds=(depR.responsableIds||[]).concat([un]);
+        saveDeptoFB(depR);
+      }
+    }
     showNewForm=false;newForm={accesos:['crm'],tipoUsuario:'comercial',tipologia:'',crmIdResp:''};renderAdminBody();
   });
 }
