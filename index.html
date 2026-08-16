@@ -197,7 +197,7 @@ input,button,select{font-family:inherit;}
 <!-- HUB -->
 <div id="hub" class="screen">
   <div class="hub-header">
-    <div class="hub-logo">GRUPO <span>CONSOLIDADO</span> <span style="font-size:0.4em;color:#8A8078;font-weight:400;margin-left:8px" id="ver-hub">v3.60.0</span></div>
+    <div class="hub-logo">GRUPO <span>CONSOLIDADO</span> <span style="font-size:0.4em;color:#8A8078;font-weight:400;margin-left:8px" id="ver-hub">v3.60.2</span></div>
     <div style="display:flex;align-items:center;gap:10px">
       <span class="hub-user" id="hub-user-name"></span>
       <button class="hub-logout" onclick="doLogout()">Salir</button>
@@ -304,7 +304,7 @@ const USERS_DEFAULT=[
 
 // ── Persistencia ─────────────────────────────────────────────────
 // ── Versión del Portal (mantener sincronizada en cada cambio) ──
-const PORTAL_VERSION="3.60.0";
+const PORTAL_VERSION="3.60.2";
 const PORTAL_BUILD="31/07/2026-version-unificada";
 try{var _pv=document.getElementById('portal-ver');if(_pv)_pv.textContent='Portal v'+PORTAL_VERSION;}catch(e){}
 // Habia tres numeros de version distintos escritos a mano en este archivo y
@@ -541,13 +541,41 @@ function orgDeptoInferido(u,f){
   }
   return "";
 }
+// (v5.3.1) La misma persona puede vivir en portal_users y en "usuarios" con
+// ids distintos (jperez / JPEREZ / J.Pérez). Se deduplica por TODAS sus
+// claves de identidad, normalizadas sin tildes ni mayúsculas.
+function orgNorm(s){return String(s||"").toUpperCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g,"");}
+function orgClavesDe(o){
+  if(!o)return[];
+  var out=[];
+  ["id","crmId","perfilCRM","username","user","catalogoVendedor","grupoAgente","nombre"].forEach(function(k){
+    var v=orgNorm(o[k]);
+    if(v&&v.length>=2&&out.indexOf(v)<0)out.push(v);
+  });
+  return out;
+}
 function orgPersonas(){
   var out=[],vistos={};
+  // Índice de fichas CRM por cualquiera de sus claves
+  var fichaIdx={};
+  Object.keys(ORG_FICHAS).forEach(function(id){
+    orgClavesDe(ORG_FICHAS[id]).forEach(function(c){if(!fichaIdx[c])fichaIdx[c]=ORG_FICHAS[id];});
+  });
+  function yaVisto(claves){return claves.some(function(c){return vistos[c];});}
+  function marcar(claves){claves.forEach(function(c){vistos[c]=true;});}
   (adminUsers||[]).forEach(function(u){
     if(!u||u.id==="admin"||String(u.rol||"")==="admin")return;
+    // (v5.3.2) Respetar la limpieza hecha con unificar_cuentas.html: las
+    // cuentas marcadas con duplicadaDe (o desactivadas) no cuentan como persona.
+    if(u.duplicadaDe||u.activo===false||u._legacy)return;
     var orgId=u.crmId||u.id;
-    if(vistos[orgId])return; vistos[orgId]=true;
-    var f=ORG_FICHAS[orgId]||{};
+    var f=ORG_FICHAS[orgId]||null;
+    if(!f){var cl0=orgClavesDe(u);for(var i=0;i<cl0.length&&!f;i++)f=fichaIdx[cl0[i]]||null;}
+    f=f||{};
+    if(f.duplicadaDe)return;
+    var claves=orgClavesDe(u).concat(orgClavesDe(f)).filter(function(c,i,a){return a.indexOf(c)===i;});
+    if(yaVisto(claves))return;
+    marcar(claves);
     out.push({orgId:orgId,nombre:f.nombre||u.nombre||orgId,icon:f.icon||u.icon||"👤",
       rol:u.rol,tipologia:f.tipologia||u.tipologia||"",equipo:f.equipo||u.equipo||"",
       departamentoId:orgDeptoInferido(u,f),depManual:!!f.departamentoId,
@@ -555,10 +583,12 @@ function orgPersonas(){
       pestanasOcultas:f.pestanasOcultas||[],pestanasExtra:f.pestanasExtra||[]});
   });
   Object.keys(ORG_FICHAS).forEach(function(id){
-    if(vistos[id])return;
     var f=ORG_FICHAS[id];
     if(!f.nombre&&!f.rol)return;
-    vistos[id]=true;
+    if(f.duplicadaDe||f.activo===false||f._legacy)return;
+    var claves=orgClavesDe(f);
+    if(yaVisto(claves))return;
+    marcar(claves);
     out.push({orgId:id,nombre:f.nombre||id,icon:f.icon||"👤",rol:f.rol||"",
       tipologia:f.tipologia||"",equipo:f.equipo||"",
       departamentoId:orgDeptoInferido({},f),depManual:!!f.departamentoId,
