@@ -345,7 +345,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "5.5.0";
+const CRM_VERSION = "5.6.2";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -587,6 +587,87 @@ function inyectarTiposIncidencia(){
     });
     console.log("[DEPTOS] Tipos de incidencia activos:",Object.keys(INC_TIPOS).join(", "));
   }catch(e){ console.warn("[DEPTOS] inyectarTiposIncidencia:",e.message); }
+}
+// (v5.6) JERARQUÍA DE TIPOS DE INCIDENCIA — sigue el árbol del organigrama.
+// tipoIncPadreDe("produccion") → "operaciones"; tipoIncPadreDe("customer") → null.
+function tipoIncPadreDe(k){
+  var d=deptoDeTipologia(k); if(!d) return null;
+  var p=d.padre?deptoDe(d.padre):null,n=0;
+  while(p&&n<20){
+    if(p.id==="direccion") return null;
+    var key=null;
+    if((p.tipologias||[]).length>0&&INC_TIPOS[p.tipologias[0]]) key=p.tipologias[0];
+    else if(INC_TIPOS[p.id]) key=p.id;
+    if(key&&key!==k) return key;
+    p=p.padre?deptoDe(p.padre):null;n++;
+  }
+  return null;
+}
+function tiposIncHijosDe(k){
+  return Object.keys(INC_TIPOS).filter(function(x){return tipoIncPadreDe(x)===k;});
+}
+function tiposIncRaiz(){
+  return Object.keys(INC_TIPOS).filter(function(x){return !tipoIncPadreDe(x);});
+}
+// Un tipo + todos sus descendientes (filtrar "Operaciones" incluye Producción...)
+function tiposIncBajoDe(k,n){
+  n=n||0; if(n>10) return [k];
+  var out=[k];
+  tiposIncHijosDe(k).forEach(function(h){out=out.concat(tiposIncBajoDe(h,n+1));});
+  return out;
+}
+// Selector jerárquico: eliges el área y, si tiene ramas, se despliegan debajo
+// para afinar (o quedarte con el área general). Usado al crear incidencias.
+function SelectorTipoIncidencia({value,onChange}){
+  // Camino desde la raíz hasta el tipo elegido
+  var path=[],v=value,g=0;
+  while(v&&g<10){path.unshift(v);v=tipoIncPadreDe(v);g++;}
+  // Filas: raíces + una fila por cada nivel del camino que tenga hijos
+  var filas=[{padre:null,opciones:tiposIncRaiz(),sel:path[0]||""}];
+  for(var i=0;i<path.length;i++){
+    var hijos=tiposIncHijosDe(path[i]);
+    if(hijos.length>0) filas.push({padre:path[i],opciones:hijos,sel:path[i+1]||""});
+  }
+  return (
+    <div>
+      {filas.map(function(fila,fi){
+        var cPadre=fila.padre?((INC_TIPOS[fila.padre]||{}).color||"#94A3B8"):null;
+        return (
+          <div key={fi} style={{display:"flex",flexWrap:"wrap",gap:6,
+            marginTop:fi>0?8:0,paddingLeft:fi>0?10:0,
+            borderLeft:fi>0?("3px solid "+cPadre+"55"):"none"}}>
+            {fila.padre&&(function(){
+              var tp=INC_TIPOS[fila.padre]||{};
+              var on=value===fila.padre;
+              return (
+                <button key="_gen" onClick={function(){onChange(fila.padre);}}
+                  style={{padding:"8px 11px",borderRadius:9,cursor:"pointer",fontSize:11,
+                    border:"2px "+(on?"solid":"dashed")+" "+(on?tp.color:T.border),
+                    background:on?tp.color+"15":"#fff",
+                    color:on?tp.color:T.muted,fontWeight:on?800:400}}>
+                  {on?"✓ ":""}{(tp.label||fila.padre)} · general
+                </button>
+              );
+            })()}
+            {fila.opciones.map(function(k){
+              var t=INC_TIPOS[k]||{label:k,color:"#94A3B8"};
+              var on=fila.sel===k;
+              var conHijos=tiposIncHijosDe(k).length>0;
+              return (
+                <button key={k} onClick={function(){onChange(k);}}
+                  style={{padding:"9px 12px",borderRadius:9,cursor:"pointer",fontSize:12,
+                    border:"2px solid "+(on?t.color:T.border),
+                    background:on?t.color+"15":"#fff",
+                    color:on?t.color:T.muted,fontWeight:on?700:400}}>
+                  {t.label}{conHijos?" ▾":""}
+                </button>
+              );
+            })}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -14118,17 +14199,10 @@ function IncidenciasCompras({usuario, incidenciasDB, setIncidenciasDB, clientesF
                 Esta incidencia pasará a otro responsable
               </p>
               <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:T.muted}}>Nuevo departamento: *</p>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:14}}>
-                {Object.entries(INC_TIPOS).filter(function(e){return e[0]!==(modalReasignar.tipo||"")}).map(function(e){
-                  var key=e[0],info=e[1];
-                  var act=deptReasignar===key;
-                  return <button key={key} onClick={function(){setDeptReasignar(key);}}
-                    style={{padding:"10px 8px",borderRadius:10,border:"2px solid "+(act?info.color:T.border),
-                      background:act?info.color+"15":"#fff",color:act?info.color:T.text,
-                      fontWeight:act?800:600,fontSize:12,cursor:"pointer",textAlign:"center"}}>
-                    {info.label}
-                  </button>;
-                })}
+              {/* (v5.6.2) Selector arborizado: área general o rama concreta */}
+              <div style={{marginBottom:14}}>
+                <SelectorTipoIncidencia value={deptReasignar} onChange={function(k){setDeptReasignar(k);}}/>
+                {deptReasignar===(modalReasignar.tipo||"")&&deptReasignar!==""&&<p style={{margin:"8px 0 0",fontSize:11,color:T.amber,textAlign:"center"}}>Es el departamento actual — elige otro o una de sus ramas</p>}
               </div>
               <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:T.muted}}>Motivo (opcional):</p>
               <textarea value={notaReasignar} onChange={function(e){setNotaReasignar(e.target.value);}}
@@ -14140,9 +14214,9 @@ function IncidenciasCompras({usuario, incidenciasDB, setIncidenciasDB, clientesF
                   style={{flex:1,padding:"12px",borderRadius:10,border:"1.5px solid "+T.border,background:"#fff",color:T.text,fontWeight:700,fontSize:13,cursor:"pointer"}}>
                   Cancelar
                 </button>
-                <button onClick={function(){if(!deptReasignar){alert("Selecciona un departamento");return;}reasignarDepartamento(modalReasignar,deptReasignar,notaReasignar);}}
-                  disabled={!deptReasignar}
-                  style={{flex:2,padding:"12px",borderRadius:10,border:"none",background:deptReasignar?T.blue:"#E2E8F0",color:deptReasignar?"#fff":"#94A3B8",fontWeight:800,fontSize:14,cursor:deptReasignar?"pointer":"not-allowed"}}>
+                <button onClick={function(){var okDest=deptReasignar&&deptReasignar!==(modalReasignar.tipo||"");if(!okDest){alert("Selecciona un departamento distinto al actual");return;}reasignarDepartamento(modalReasignar,deptReasignar,notaReasignar);}}
+                  disabled={!deptReasignar||deptReasignar===(modalReasignar.tipo||"")}
+                  style={(function(){var ok=deptReasignar&&deptReasignar!==(modalReasignar.tipo||"");return {flex:2,padding:"12px",borderRadius:10,border:"none",background:ok?T.blue:"#E2E8F0",color:ok?"#fff":"#94A3B8",fontWeight:800,fontSize:14,cursor:ok?"pointer":"not-allowed"};})()}>
                   🔄 Reasignar
                 </button>
               </div>
@@ -18230,6 +18304,30 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB,
   const [agenteSelInc,setAgenteSelInc]=useState(null);
   const [showForm,setShowForm]=useState(false);
 
+  // (v5.6.1) SINCRONIZAR con la prop. El estado se inicializa una sola vez al
+  // montar, pero incidenciasDB llega de Firebase DESPUÉS (y cambia cuando el
+  // perfil del usuario se re-resuelve y aplica el filtro por rama). Sin esto,
+  // un responsable veía la lista vacía o completa según el instante de montaje.
+  const creadasLocalRef=React.useRef(new Set());
+  const incFP=(incDB||[]).map(function(i){return i.id;}).sort().join("|");
+  useEffect(function(){
+    if(!incDB) return;
+    setIncidencias(function(prev){
+      var prevPorId={}; prev.forEach(function(p){prevPorId[p.id]=p;});
+      // Base: la prop (ya filtrada por rama), conservando ediciones locales
+      var base=incDB.map(function(i){
+        return prevPorId[i.id]||{...i,historialEscalado:i.historialEscalado||[],
+          escaladoA:i.escaladoA||null,informadoA:i.informadoA||[],
+          prioridad:i.prioridad||"media",tipo:i.tipo||"otros",estado:i.estado||"abierta"};
+      });
+      // Conservar las creadas en esta sesión que aún no volvieron de Firebase
+      prev.forEach(function(p){
+        if(creadasLocalRef.current.has(p.id)&&!incDB.some(function(i){return i.id===p.id;})) base.unshift(p);
+      });
+      return base;
+    });
+  },[incFP]);
+
   // Marcar como leído al abrir detalle
   useEffect(()=>{
     if(sel && usuario && usuario.id) marcarComoVisto("incidencias", sel.id, usuario.id);
@@ -18272,6 +18370,7 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB,
       historialEscalado:[],escaladoA:null,informadoA:[],
     };
     console.log("[INC] Creando incidencia:",nueva.id,nueva.tipo,nueva.clienteNombre);
+    creadasLocalRef.current.add(nueva.id); // (v5.6.1) no perderla al re-sincronizar
     setIncidencias(p=>{console.log("[INC] Lista antes:",p.length,"→ después:",p.length+1);return [nueva,...p];});
     fbEscribir("incidencias",nueva.id,nueva).then(ok=>{
       console.log("[INC] Firebase:",ok?"✅ Guardada":"❌ Error al guardar");
@@ -18562,7 +18661,7 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB,
     if(esAgente) return i.autor===usuario.id||i.agente===usuario.id||appMisIds.has((i.agente||"").toUpperCase());
     if(esRolJefe) return i.equipo===miEquipo;
     return true;
-  }).filter(i=>filtroTipo==="todas"||i.tipo===filtroTipo)
+  }).filter(i=>filtroTipo==="todas"||tiposIncBajoDe(filtroTipo).indexOf((i.tipo||"").toLowerCase())>=0)
     .filter(function(i){return pasaFiltroGeneral(i,periodoIF,equipoIF,agenteIF);});
 
   // (v3.32.8) Helper: fecha real de la incidencia como objeto Date
@@ -18871,16 +18970,12 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
                 <p style={{margin:"0 0 16px",fontSize:12,color:T.muted,textAlign:"center"}}>
                   Esta incidencia pasará a otro responsable
                 </p>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:14}}>
-                  {Object.entries(INC_TIPOS).filter(e=>e[0]!==(sel.tipo||"")).map(([key,info])=>{
-                    var act=reasigDept===key;
-                    return <button key={key} onClick={()=>setReasigDept(key)}
-                      style={{padding:"10px 8px",borderRadius:10,border:"2px solid "+(act?info.color:T.border),
-                        background:act?info.color+"15":"#fff",color:act?info.color:T.text,
-                        fontWeight:act?800:600,fontSize:12,cursor:"pointer",textAlign:"center"}}>
-                      {info.label}
-                    </button>;
-                  })}
+                {/* (v5.6.2) Selector arborizado: área general o rama concreta.
+                    El tipo actual se puede tocar para desplegar sus ramas,
+                    pero el botón Reasignar exige un destino distinto. */}
+                <div style={{marginBottom:14}}>
+                  <SelectorTipoIncidencia value={reasigDept} onChange={k=>setReasigDept(k)}/>
+                  {reasigDept===(sel.tipo||"")&&reasigDept!==""&&<p style={{margin:"8px 0 0",fontSize:11,color:T.amber,textAlign:"center"}}>Es el departamento actual — elige otro o una de sus ramas</p>}
                 </div>
                 <textarea value={reasigNota} onChange={e=>setReasigNota(e.target.value)}
                   placeholder="Motivo (opcional)" rows={2}
@@ -18888,8 +18983,8 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
                 <div style={{display:"flex",gap:8}}>
                   <button onClick={()=>{setShowReasignar(false);setReasigDept("");setReasigNota("");}}
                     style={{flex:1,padding:"12px",borderRadius:10,border:"1.5px solid "+T.border,background:"#fff",color:T.text,fontWeight:700,fontSize:13,cursor:"pointer"}}>Cancelar</button>
-                  <button onClick={()=>{if(!reasigDept){alert("Selecciona departamento");return;}onReasignar(sel,reasigDept,reasigNota);setShowReasignar(false);setReasigDept("");setReasigNota("");}}
-                    disabled={!reasigDept}
+                  <button onClick={()=>{var okDest=reasigDept&&reasigDept!==(sel.tipo||"");if(!okDest){alert("Selecciona un departamento distinto al actual");return;}onReasignar(sel,reasigDept,reasigNota);setShowReasignar(false);setReasigDept("");setReasigNota("");}}
+                    disabled={!reasigDept||reasigDept===(sel.tipo||"")}
                     style={{flex:2,padding:"12px",borderRadius:10,border:"none",background:reasigDept?T.blue:"#E2E8F0",color:reasigDept?"#fff":"#94A3B8",fontWeight:800,fontSize:14,cursor:reasigDept?"pointer":"not-allowed"}}>
                     🔄 Reasignar
                   </button>
@@ -19004,21 +19099,10 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
             {form.productoCodigo&&<p style={{margin:"4px 0 0",fontSize:10,color:T.blue,fontWeight:700,fontFamily:"monospace"}}>{form.productoCodigo}</p>}
           </div>
 
-          {/* Tipo */}
+          {/* Tipo — (v5.6) selector jerárquico: área general o rama concreta */}
           <div style={{marginBottom:12}}>
             <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Tipo *</p>
-            <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-              {Object.entries(INC_TIPOS).map(([k,t])=>(
-                <button key={k} onClick={()=>setForm(f=>({...f,tipo:k,subtipo:""}))}
-                  style={{padding:"9px 12px",borderRadius:9,cursor:"pointer",fontSize:12,
-                    border:`2px solid ${form.tipo===k?t.color:T.border}`,
-                    background:form.tipo===k?t.color+"15":"#fff",
-                    color:form.tipo===k?t.color:T.muted,
-                    fontWeight:form.tipo===k?700:400}}>
-                  {t.label}
-                </button>
-              ))}
-            </div>
+            <SelectorTipoIncidencia value={form.tipo} onChange={k=>setForm(f=>({...f,tipo:k,subtipo:""}))}/>
           </div>
 
           {/* Subtipo (según tipo seleccionado) */}
@@ -19117,22 +19201,74 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
       {esJefe&&<FiltroBar periodoF={periodoIF} setPeriodoF={setPeriodoIF} equipoF={equipoIF} setEquipoF={setEquipoIF} agenteF={agenteIF} setAgenteF={setAgenteIF} agentes={USUARIOS.filter(function(u){return u.rol==="agente"||u.rol==="crm_agente"||u.rol==="comercial";})}/>}
 
       {/* Filtro por tipo */}
-      <div style={{display:"flex",gap:6,marginBottom:16,overflowX:"auto",paddingBottom:4}}>
-        <button onClick={()=>setFiltroTipo("todas")}
-          style={{padding:"7px 14px",borderRadius:99,flexShrink:0,fontSize:11,fontWeight:filtroTipo==="todas"?700:400,
-            border:`1.5px solid ${filtroTipo==="todas"?T.navy:T.border}`,
-            background:filtroTipo==="todas"?T.navy:"#fff",color:filtroTipo==="todas"?"#fff":T.muted,cursor:"pointer"}}>
-          Todas
-        </button>
-        {Object.entries(INC_TIPOS).map(([k,t])=>(
-          <button key={k} onClick={()=>setFiltroTipo(k)}
-            style={{padding:"7px 14px",borderRadius:99,flexShrink:0,fontSize:11,fontWeight:filtroTipo===k?700:400,
-              border:`1.5px solid ${filtroTipo===k?t.color:T.border}`,
-              background:filtroTipo===k?t.color+"15":"#fff",color:filtroTipo===k?t.color:T.muted,cursor:"pointer"}}>
-            {t.label}
-          </button>
-        ))}
-      </div>
+      {/* (v5.6.1) Filtro ARBOLIZADO por departamento: solo aparecen las ramas
+          con incidencias; tocar un área con ▾ despliega sus sub-ramas debajo.
+          El conteo de cada chip incluye sus ramas descendientes. */}
+      {(function(){
+        var visibles=incidencias.filter(function(i){return !i.eliminada;});
+        var presentes={};
+        visibles.forEach(function(i){var t=(i.tipo||"").toLowerCase();if(t)presentes[t]=1;});
+        var cuenta=function(k){var bajo=tiposIncBajoDe(k);return visibles.filter(function(i){return bajo.indexOf((i.tipo||"").toLowerCase())>=0;}).length;};
+        // Raíces visibles: el ancestro raíz de cada tipo presente
+        var raicesSet={};
+        Object.keys(presentes).forEach(function(t){
+          var r=t,g=0;
+          while(g<10){var p=tipoIncPadreDe(r);if(!p)break;r=p;g++;}
+          raicesSet[INC_TIPOS[r]?r:t]=1;
+        });
+        var raices=Object.keys(raicesSet);
+        // Camino del filtro actual para saber qué filas desplegar
+        var path=[],v=filtroTipo!=="todas"?filtroTipo:null,g2=0;
+        while(v&&g2<10){path.unshift(v);v=tipoIncPadreDe(v);g2++;}
+        var filas=[{padre:null,opciones:raices,sel:path[0]||""}];
+        for(var fi=0;fi<path.length;fi++){
+          var hijos=tiposIncHijosDe(path[fi]).filter(function(h){return cuenta(h)>0;});
+          if(hijos.length>0) filas.push({padre:path[fi],opciones:hijos,sel:path[fi+1]||""});
+        }
+        var chip=function(k,on,label,color,extra){
+          return (
+            <button key={k+(extra||"")} onClick={()=>setFiltroTipo(k)}
+              style={{padding:"7px 14px",borderRadius:99,flexShrink:0,fontSize:11,fontWeight:on?700:400,
+                border:`1.5px solid ${on?color:T.border}`,
+                background:on?color+"15":"#fff",color:on?color:T.muted,cursor:"pointer"}}>
+              {label}
+            </button>
+          );
+        };
+        return (
+          <div style={{marginBottom:16}}>
+            <div style={{display:"flex",gap:6,overflowX:"auto",paddingBottom:4}}>
+              <button onClick={()=>setFiltroTipo("todas")}
+                style={{padding:"7px 14px",borderRadius:99,flexShrink:0,fontSize:11,fontWeight:filtroTipo==="todas"?700:400,
+                  border:`1.5px solid ${filtroTipo==="todas"?T.navy:T.border}`,
+                  background:filtroTipo==="todas"?T.navy:"#fff",color:filtroTipo==="todas"?"#fff":T.muted,cursor:"pointer"}}>
+                Todas ({visibles.length})
+              </button>
+              {raices.map(function(k){
+                var t=INC_TIPOS[k]||{label:k,color:"#94A3B8"};
+                var enPath=path[0]===k;
+                var conHijos=tiposIncHijosDe(k).filter(function(h){return cuenta(h)>0;}).length>0;
+                return chip(k,enPath,t.label+(conHijos?" ▾":"")+" ("+cuenta(k)+")",t.color||"#94A3B8");
+              })}
+            </div>
+            {filas.slice(1).map(function(fila,ix){
+              var cp=(INC_TIPOS[fila.padre]||{}).color||"#94A3B8";
+              var tp=INC_TIPOS[fila.padre]||{label:fila.padre};
+              return (
+                <div key={"f"+ix} style={{display:"flex",gap:6,overflowX:"auto",paddingBottom:4,marginTop:6,
+                  paddingLeft:10,borderLeft:"3px solid "+cp+"55"}}>
+                  {chip(fila.padre,filtroTipo===fila.padre,"✓ "+tp.label+" · todo",cp,"_gen")}
+                  {fila.opciones.map(function(k){
+                    var t=INC_TIPOS[k]||{label:k,color:"#94A3B8"};
+                    var conHijos=tiposIncHijosDe(k).filter(function(h){return cuenta(h)>0;}).length>0;
+                    return chip(k,fila.sel===k,t.label+(conHijos?" ▾":"")+" ("+cuenta(k)+")",t.color||"#94A3B8");
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
 
       {/* Abiertas */}
       {abiertas.length>0&&(
@@ -29201,6 +29337,8 @@ function IncidenciaTab({incidencias,clienteNombre,usuario,onAdd,onCerrar,onEdit,
     {k:"id",            label:"🔬 I+D",              color:"#7C3AED"},
     {k:"coordinacion",  label:"🧭 Coordinación",     color:"#0F766E"},
   ];
+  // (v5.6) Resolver etiqueta/color también para tipos dinámicos del organigrama
+  const tipoMetaDe=k=>TIPOS.find(t=>t.k===k)||(INC_TIPOS[k]?{k:k,label:INC_TIPOS[k].label,color:INC_TIPOS[k].color}:null);
   const PRIORIDADES=[
     {k:"baja",   label:"Baja",   color:T.green},
     {k:"media",  label:"Media",  color:T.amber},
@@ -29223,7 +29361,7 @@ function IncidenciaTab({incidencias,clienteNombre,usuario,onAdd,onCerrar,onEdit,
             🚨 Abiertas ({abiertas.length})
           </p>
           {abiertas.map(i=>{
-            const tipo=TIPOS.find(t=>t.k===i.tipo);
+            const tipo=tipoMetaDe(i.tipo);
             const prio=PRIORIDADES.find(p=>p.k===i.prioridad);
             return(
               <div key={i.id} style={{background:"#fff",borderRadius:13,padding:"14px 16px",
@@ -29279,7 +29417,7 @@ function IncidenciaTab({incidencias,clienteNombre,usuario,onAdd,onCerrar,onEdit,
             ✅ Resueltas ({cerradas.length})
           </p>
           {cerradas.map(i=>{
-            const tipo=TIPOS.find(t=>t.k===i.tipo);
+            const tipo=tipoMetaDe(i.tipo);
             return(
               <div key={i.id} style={{background:"#f9fafb",borderRadius:12,padding:"11px 14px",
                 marginBottom:6,border:`1px solid ${T.border}`,opacity:.7}}>
@@ -29310,17 +29448,9 @@ function IncidenciaTab({incidencias,clienteNombre,usuario,onAdd,onCerrar,onEdit,
           </p>
 
           <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Tipo</p>
-          <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:14}}>
-            {TIPOS.map(t=>(
-              <button key={t.k} onClick={()=>setForm(f=>({...f,tipo:t.k}))}
-                style={{padding:"8px 12px",borderRadius:9,cursor:"pointer",fontSize:12,
-                  border:`2px solid ${form.tipo===t.k?t.color:T.border}`,
-                  background:form.tipo===t.k?t.color+"15":"#fff",
-                  color:form.tipo===t.k?t.color:T.muted,
-                  fontWeight:form.tipo===t.k?700:400}}>
-                {t.label}
-              </button>
-            ))}
+          {/* (v5.6) Selector jerárquico: área general o rama concreta */}
+          <div style={{marginBottom:14}}>
+            <SelectorTipoIncidencia value={form.tipo} onChange={k=>setForm(f=>({...f,tipo:k}))}/>
           </div>
 
           <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Prioridad</p>
