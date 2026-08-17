@@ -345,7 +345,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "5.8.0";
+const CRM_VERSION = "5.8.1";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -19504,6 +19504,9 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
   const [abierto,setAbierto]=useState(null); // parte del equipo desplegado
   const [nuevoObj,setNuevoObj]=useState("");
   const [comentTxt,setComentTxt]=useState("");
+  const [selObj,setSelObj]=useState(null);     // (v5.8.1) objetivo desplegado para cambiar estado
+  const [motivoTxt,setMotivoTxt]=useState("");  // motivo de bloqueo inline
+  const [objParaTxt,setObjParaTxt]=useState(""); // objetivo que el superior escribe para un subordinado
 
   const misSupers=superioresDe(usuario);
   const misReportes=personasQueMeReportan(usuario);
@@ -19589,21 +19592,16 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
       {id:"o"+Date.now(),texto:t,estado:"pendiente",motivo:"",origen:"propio"}]});
     setNuevoObj("");
   }
-  function cicloEstado(obj){
-    var orden=["pendiente","en_curso","hecho"];
-    var sig=orden[(orden.indexOf(obj.estado==="bloqueado"?"pendiente":obj.estado)+1)%3];
+  // (v5.8.1) Cambio de estado EXPLÍCITO: tocas el objetivo → botones con nombre
+  function setEstadoObj(obj,estado,motivo){
     guardarParte({...miParte,objetivos:miParte.objetivos.map(function(o){
-      return o.id===obj.id?{...o,estado:sig,motivo:""}:o;})});
-  }
-  function bloquearObj(obj){
-    var m=prompt("¿Qué lo bloquea? (visible para tu superior)",obj.motivo||"");
-    if(m===null)return;
-    guardarParte({...miParte,objetivos:miParte.objetivos.map(function(o){
-      return o.id===obj.id?{...o,estado:"bloqueado",motivo:m}:o;})});
+      return o.id===obj.id?{...o,estado:estado,motivo:estado==="bloqueado"?(motivo||""):""}:o;})});
+    if(estado!=="bloqueado"){setSelObj(null);setMotivoTxt("");}
   }
   function borrarObj(obj){
-    if(obj.origen==="superior"){alert("Este objetivo lo añadió "+(obj.porNombre||"tu superior")+" — no puedes borrarlo, pero puedes marcarlo bloqueado con motivo.");return;}
+    if(obj.origen==="superior"){alert("Este objetivo lo añadió "+(obj.porNombre||"tu superior")+" — no puedes borrarlo, pero puedes marcarlo Bloqueado explicando el motivo.");return;}
     guardarParte({...miParte,objetivos:miParte.objetivos.filter(function(o){return o.id!==obj.id;})});
+    setSelObj(null);
   }
   function entregarParte(){
     var doc={...miParte,estado:"entregado",entregadoTs:Date.now(),
@@ -19636,16 +19634,18 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
     });
     setComentTxt("");
   }
-  function objetivoASubordinado(u){
-    var t=prompt("Objetivo para "+u.nombre+" (semana "+sem+"):");
-    if(!t||!t.trim())return;
-    var p=parteDe(u);
+  // (v5.8.1) El superior asigna un objetivo escribiéndolo inline en la ficha
+  // de la persona — queda marcado "🎯 de [nombre]" y le llega notificación.
+  function asignarObjetivo(u){
+    var t=objParaTxt.trim();if(!t)return;
+    var p=partes[idParteSemanal(u.id,ano,sem)]||parteDe(u);
     guardarParte({...p,objetivos:[...(p.objetivos||[]),
-      {id:"o"+Date.now(),texto:t.trim(),estado:"pendiente",motivo:"",origen:"superior",porNombre:usuario.nombre}]},function(){
+      {id:"o"+Date.now(),texto:t,estado:"pendiente",motivo:"",origen:"superior",porNombre:usuario.nombre}]},function(){
       try{despacharNotificacion({tipo:"parte",titulo:"🎯 Nuevo objetivo de "+usuario.nombre,
-        mensaje:t.trim().slice(0,120)+" (semana "+sem+")",
+        mensaje:t.slice(0,120)+" (semana "+sem+")",
         destinatarioId:u.id,prioridad:"normal",creadoPor:usuario.id});}catch(e){}
     });
+    setObjParaTxt("");
   }
 
   // ── UI helpers ──
@@ -19685,28 +19685,57 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
     if(objs.length===0)return <p style={{margin:"0 0 10px",fontSize:12,color:T.muted}}>Sin objetivos esta semana{editable?" — añade el primero abajo.":"."}</p>;
     return objs.map(function(o){
       var e=EST_OBJ[o.estado]||EST_OBJ.pendiente;
+      var abiertoObj=editable&&selObj===o.id;
       return (
-        <div key={o.id} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"9px 10px",
-          borderRadius:10,background:"#fff",border:"1px solid "+(o.estado==="bloqueado"?"#FECACA":T.border),marginBottom:6}}>
-          <button onClick={editable?function(){cicloEstado(o);}:undefined}
-            style={{border:"none",background:"transparent",fontSize:17,cursor:editable?"pointer":"default",padding:0,lineHeight:1,flexShrink:0}}>
-            {e.icon}
-          </button>
-          <div style={{flex:1,minWidth:0}}>
-            <p style={{margin:0,fontSize:13,color:T.text,fontWeight:o.estado==="hecho"?400:600,
-              textDecoration:o.estado==="hecho"?"line-through":"none",opacity:o.estado==="hecho"?0.65:1}}>{o.texto}</p>
-            <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:3,alignItems:"center"}}>
-              <span style={{fontSize:9,fontWeight:700,color:e.color}}>{e.label}</span>
-              {o.origen==="superior"&&<span style={{fontSize:9,color:T.purple,fontWeight:700}}>🎯 de {o.porNombre||"superior"}</span>}
-              {o.motivo&&<span style={{fontSize:10,color:T.red}}>· {o.motivo}</span>}
+        <div key={o.id} style={{borderRadius:10,background:"#fff",
+          border:"1.5px solid "+(abiertoObj?T.navy:o.estado==="bloqueado"?"#FECACA":T.border),marginBottom:6,overflow:"hidden"}}>
+          <div onClick={editable?function(){setSelObj(abiertoObj?null:o.id);setMotivoTxt(o.motivo||"");}:undefined}
+            style={{display:"flex",gap:9,alignItems:"flex-start",padding:"10px 11px",cursor:editable?"pointer":"default"}}>
+            <span style={{fontSize:17,lineHeight:1,flexShrink:0}}>{e.icon}</span>
+            <div style={{flex:1,minWidth:0}}>
+              <p style={{margin:0,fontSize:13,color:T.text,fontWeight:o.estado==="hecho"?400:600,
+                textDecoration:o.estado==="hecho"?"line-through":"none",opacity:o.estado==="hecho"?0.65:1}}>{o.texto}</p>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:3,alignItems:"center"}}>
+                <span style={{fontSize:9,fontWeight:700,color:e.color}}>{e.label}</span>
+                {o.origen==="superior"&&<span style={{fontSize:9,color:T.purple,fontWeight:700}}>🎯 de {o.porNombre||"superior"}</span>}
+                {o.motivo&&<span style={{fontSize:10,color:T.red}}>· {o.motivo}</span>}
+              </div>
             </div>
+            {editable&&<span style={{fontSize:10,color:T.muted,flexShrink:0}}>{abiertoObj?"▴":"▾"}</span>}
           </div>
-          {editable&&(
-            <div style={{display:"flex",gap:4,flexShrink:0}}>
-              <button onClick={function(){bloquearObj(o);}} title="Marcar bloqueado"
-                style={{border:"1px solid "+T.border,background:"#fff",borderRadius:7,fontSize:11,padding:"4px 7px",cursor:"pointer"}}>⛔</button>
-              <button onClick={function(){borrarObj(o);}} title="Eliminar"
-                style={{border:"1px solid "+T.border,background:"#fff",borderRadius:7,fontSize:11,padding:"4px 7px",cursor:"pointer",color:T.muted}}>✕</button>
+          {/* (v5.8.1) Barra de acciones explícita: se abre al tocar el objetivo */}
+          {abiertoObj&&(
+            <div style={{padding:"0 11px 11px",borderTop:"1px dashed "+T.border,paddingTop:9}}>
+              <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:6}}>
+                {[["pendiente","⬜ Pendiente"],["en_curso","🔄 En curso"],["hecho","✅ Hecho"],["bloqueado","⛔ Bloqueado"]].map(function(par){
+                  var k=par[0],l=par[1],act=o.estado===k,c=EST_OBJ[k].color;
+                  return (
+                    <button key={k}
+                      onClick={function(){
+                        if(k==="bloqueado"){setEstadoObj(o,"bloqueado",motivoTxt||o.motivo||"");}
+                        else setEstadoObj(o,k);
+                      }}
+                      style={{flex:"1 1 auto",padding:"8px 9px",borderRadius:8,fontSize:11,cursor:"pointer",
+                        border:"2px solid "+(act?c:T.border),background:act?c+"18":"#fff",
+                        color:act?c:T.muted,fontWeight:act?800:500}}>{l}</button>
+                  );
+                })}
+              </div>
+              {o.estado==="bloqueado"&&(
+                <div style={{display:"flex",gap:5,marginBottom:6}}>
+                  <input value={motivoTxt} onChange={function(ev){setMotivoTxt(ev.target.value);}}
+                    placeholder="¿Qué lo bloquea? (lo verá tu superior)"
+                    style={{flex:1,padding:"8px 10px",borderRadius:8,border:"1.5px solid #FECACA",fontSize:12,outline:"none"}}/>
+                  <button onClick={function(){setEstadoObj(o,"bloqueado",motivoTxt);setSelObj(null);}}
+                    style={{padding:"8px 12px",borderRadius:8,border:"none",background:T.red,color:"#fff",
+                      fontWeight:800,fontSize:12,cursor:"pointer"}}>OK</button>
+                </div>
+              )}
+              {o.origen!=="superior"&&(
+                <button onClick={function(){borrarObj(o);}}
+                  style={{border:"none",background:"transparent",fontSize:11,color:T.muted,cursor:"pointer",padding:0,textDecoration:"underline"}}>
+                  Eliminar objetivo</button>
+              )}
             </div>
           )}
         </div>
@@ -19756,10 +19785,11 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
       {/* ═══ MI PARTE ═══ */}
       {tab==="mio"&&(
         <div>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
             <p style={{margin:0,fontSize:12,fontWeight:800,color:T.muted,textTransform:"uppercase"}}>Objetivos de la semana</p>
             {chipEstadoParte(miParte._nuevo?null:miParte)}
           </div>
+          <p style={{margin:"0 0 10px",fontSize:10.5,color:T.muted}}>Toca un objetivo para cambiar su estado. Los 🎯 los ha puesto tu superior.</p>
           {listaObjetivos(miParte,true)}
           <div style={{display:"flex",gap:6,marginBottom:16}}>
             <input value={nuevoObj} onChange={function(e){setNuevoObj(e.target.value);}}
@@ -19815,7 +19845,7 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
             return (
               <Card key={u.id} style={{marginBottom:10,padding:"12px 14px",
                 borderLeft:"4px solid "+(p?(p.estado==="validado"?T.green:p.estado==="entregado"?T.blue:T.amber):"#CBD5E1")}}>
-                <div onClick={function(){setAbierto(abiertoYo?null:u.id);setComentTxt("");}}
+                <div onClick={function(){setAbierto(abiertoYo?null:u.id);setComentTxt("");setObjParaTxt("");}}
                   style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer"}}>
                   <div style={{width:38,height:38,borderRadius:"50%",flexShrink:0,
                     background:(dep.color||T.muted)+"22",display:"flex",alignItems:"center",justifyContent:"center",
@@ -19863,6 +19893,21 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
                         {snapCards(s)}
                       </div>
                     )}
+                    {/* (v5.8.1) Asignar objetivo: inline, siempre visible */}
+                    <div style={{background:T.purpleL,border:"1.5px solid "+T.purple+"55",borderRadius:10,padding:"9px 10px",marginBottom:8}}>
+                      <p style={{margin:"0 0 6px",fontSize:10,fontWeight:800,color:T.purple,textTransform:"uppercase"}}>🎯 Asignar objetivo · semana {sem}</p>
+                      <div style={{display:"flex",gap:6}}>
+                        <input value={objParaTxt} onChange={function(e){setObjParaTxt(e.target.value);}}
+                          onKeyDown={function(e){if(e.key==="Enter")asignarObjetivo(u);}}
+                          placeholder={"Objetivo para "+(u.nombre||"").split(" ")[0]+"…"}
+                          style={{flex:1,padding:"9px 11px",borderRadius:9,border:"1.5px solid "+T.purple+"66",fontSize:12,outline:"none",background:"#fff"}}/>
+                        <button onClick={function(){asignarObjetivo(u);}} disabled={!objParaTxt.trim()}
+                          style={{padding:"9px 14px",borderRadius:9,border:"none",
+                            background:objParaTxt.trim()?T.purple:"#E2E8F0",color:objParaTxt.trim()?"#fff":"#94A3B8",
+                            fontWeight:800,fontSize:12,cursor:objParaTxt.trim()?"pointer":"default"}}>Asignar</button>
+                      </div>
+                      <p style={{margin:"5px 0 0",fontSize:9.5,color:T.purple}}>Le llegará notificación y aparecerá en su parte marcado "🎯 de {usuario.nombre.split(" ")[0]}". No podrá borrarlo, solo bloquearlo con motivo.</p>
+                    </div>
                     <div style={{display:"flex",gap:6,marginBottom:8}}>
                       <input value={comentTxt} onChange={function(e){setComentTxt(e.target.value);}}
                         placeholder="Comentario para su parte…"
@@ -19872,13 +19917,10 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
                           fontSize:12,fontWeight:700,cursor:comentTxt.trim()?"pointer":"default",color:comentTxt.trim()?T.blue:T.muted}}>💬</button>
                     </div>
                     <div style={{display:"flex",gap:6}}>
-                      <button onClick={function(){objetivoASubordinado(u);}}
-                        style={{flex:1,padding:"11px",borderRadius:10,border:"1.5px solid "+T.purple,
-                          background:T.purpleL,color:T.purple,fontWeight:800,fontSize:12,cursor:"pointer"}}>🎯 Añadir objetivo</button>
                       {p&&p.estado==="entregado"&&(
                         <button onClick={function(){validarParte(p);}}
                           style={{flex:1,padding:"11px",borderRadius:10,border:"none",
-                            background:T.green,color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer"}}>✅ Validar</button>
+                            background:T.green,color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer"}}>✅ Validar parte</button>
                       )}
                       {p&&p.estado==="validado"&&(
                         <div style={{flex:1,padding:"11px",borderRadius:10,background:"#F0FDF4",
