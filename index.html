@@ -197,7 +197,7 @@ input,button,select{font-family:inherit;}
 <!-- HUB -->
 <div id="hub" class="screen">
   <div class="hub-header">
-    <div class="hub-logo">GRUPO <span>CONSOLIDADO</span> <span style="font-size:0.4em;color:#8A8078;font-weight:400;margin-left:8px" id="ver-hub">v3.65.2</span></div>
+    <div class="hub-logo">GRUPO <span>CONSOLIDADO</span> <span style="font-size:0.4em;color:#8A8078;font-weight:400;margin-left:8px" id="ver-hub">v3.66.0</span></div>
     <div style="display:flex;align-items:center;gap:10px">
       <span class="hub-user" id="hub-user-name"></span>
       <button class="hub-logout" onclick="doLogout()">Salir</button>
@@ -304,7 +304,7 @@ const USERS_DEFAULT=[
 
 // ── Persistencia ─────────────────────────────────────────────────
 // ── Versión del Portal (mantener sincronizada en cada cambio) ──
-const PORTAL_VERSION="3.65.2";
+const PORTAL_VERSION="3.66.0";
 const PORTAL_BUILD="31/07/2026-version-unificada";
 try{var _pv=document.getElementById('portal-ver');if(_pv)_pv.textContent='Portal v'+PORTAL_VERSION;}catch(e){}
 // Habia tres numeros de version distintos escritos a mano en este archivo y
@@ -845,8 +845,14 @@ function renderHub(){
     currentModule='manuales';
     document.getElementById('frame-title').textContent='📖 Manuales';
     document.getElementById('frame-sub').textContent=currentUser?currentUser.nombre:'';
-    // (v3.65.2) Los manuales viven en su propio proyecto Vercel
-    document.getElementById('module-iframe').src='https://manuales-wikuk.vercel.app/';
+    // (v3.66.0) Los manuales viven en su propio proyecto Vercel.
+    // Se pasa el rol CRM del usuario para que el hub ordene: "para ti" primero.
+    var _rolMan='';
+    try{
+      var _f=ORG_FICHAS&&currentUser?(ORG_FICHAS[currentUser.crmId||currentUser.id]||{}):{};
+      _rolMan=_f.rol||currentUser.rolCRM||(currentUser.rol==='admin'?'ceo':'')||'';
+    }catch(e){}
+    document.getElementById('module-iframe').src='https://manuales-wikuk.vercel.app/'+(_rolMan?'?rol='+encodeURIComponent(_rolMan):'');
     showScreen('module-frame');
   };
   list.appendChild(man);
@@ -1671,7 +1677,7 @@ function renderUsuarios(){
       +_lista.length+' de '+adminUsers.length+' usuarios</div>';
     if(!_lista.length) html+='<div style="padding:20px;text-align:center;color:#8A8078;font-size:.85rem">Nadie coincide con esa busqueda.</div>';
   }
-  _lista.forEach(function(u){
+  var _cardU=function(u){
    var _htmlAntes=html;
    try{
     var open=openCards[u.id];
@@ -1948,7 +1954,55 @@ function renderUsuarios(){
        +'<div style="font-size:.75rem;color:#DC2626;margin-top:4px">No se puede mostrar: '
        +err.message+'</div></div>';
    }
+  };
+
+  // (v3.66) LISTA ARBORIZADA: los usuarios ordenados según el organigrama.
+  // Con búsqueda activa se mantiene la lista plana de resultados.
+  if(!orgCargado){loadOrgData().then(function(){if(adminTab==='usuarios')renderAdminBody();});}
+  if(filtroUser){
+    _lista.forEach(_cardU);
+    return html;
+  }
+  var _porDep={},_admins=[];
+  _lista.forEach(function(u){
+    if(u.rol==='admin'){_admins.push(u);return;}
+    var f=ORG_FICHAS[u.crmId||u.id]||{};
+    var dep=orgDeptoInferido(u,f)||"";
+    (_porDep[dep]=_porDep[dep]||[]).push(u);
   });
+  function _hdr(icon,nombre,n,depth,color){
+    html+='<div style="display:flex;align-items:center;gap:7px;margin:16px 0 6px;padding-left:'+(depth*14)+'px">'
+      +'<span style="font-size:1rem">'+icon+'</span>'
+      +'<span style="font-size:.72rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:'+(color||'#3A342E')+'">'+nombre+'</span>'
+      +'<span style="font-size:.65rem;color:#8A8078">· '+n+'</span>'
+      +'<span style="flex:1;border-top:1px dashed #E8E3DC"></span></div>';
+  }
+  function _pintaDep(dep,depth){
+    var us=_porDep[dep.id]||[];
+    if(us.length>0){
+      us.sort(function(a,b){
+        var ra=(dep.responsableIds||[]).indexOf(a.crmId||a.id)>=0?0:1;
+        var rb=(dep.responsableIds||[]).indexOf(b.crmId||b.id)>=0?0:1;
+        if(ra!==rb)return ra-rb;
+        return String(a.nombre||'').localeCompare(String(b.nombre||''));
+      });
+      _hdr(dep.icon||'🏢',dep.nombre,us.length,depth,null);
+      us.forEach(_cardU);
+      delete _porDep[dep.id];
+    }
+    orgHijos(dep.id).forEach(function(h){_pintaDep(h,depth+1);});
+  }
+  if(_admins.length){
+    _hdr('⚙️','Administración del portal',_admins.length,0,'#5C3E8A');
+    _admins.forEach(_cardU);
+  }
+  orgHijos(null).forEach(function(d){_pintaDep(d,0);});
+  var _sueltos=[];
+  Object.keys(_porDep).forEach(function(k){_sueltos=_sueltos.concat(_porDep[k]);});
+  if(_sueltos.length){
+    _hdr('⚠️','Sin ubicar en el organigrama',_sueltos.length,0,'#C2660C');
+    _sueltos.sort(function(a,b){return String(a.nombre||'').localeCompare(String(b.nombre||''));}).forEach(_cardU);
+  }
 
   return html;
 }
@@ -2096,7 +2150,7 @@ function renderManualesAdmin(){
   el.innerHTML=h;
 }
 // (v3.64) Publicar manual desde archivo: contenido a Firebase + versión + avisos
-// (v3.65.2) Detección AUTOMÁTICA de cambios: primero la etiqueta
+// (v3.66.0) Detección AUTOMÁTICA de cambios: primero la etiqueta
 // <meta name="cambios"> que traen los manuales generados; si no existe,
 // se comparan las secciones del contenido nuevo contra el anterior.
 function _bloquesManual(html){
