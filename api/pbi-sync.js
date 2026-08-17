@@ -1565,7 +1565,7 @@ EVALUATE
   // consulta mensual. Prueba varias formas de pedir su venta para ver cual
   // devuelve dato y cual no, sin tener que desplegar en cada intento.
   if (req.query.dax === "1") {
-    const out = { ok: true, version: "dax-4" };
+    const out = { ok: true, version: "v5-solomaestro" };
     try {
       const { token } = await getToken(req);
       const cli = String(req.query.cliente || "").toUpperCase().trim();
@@ -3724,7 +3724,8 @@ EVALUATE
 
   const dry = req.query.dry === "1"; // ?dry=1 → consulta pero NO escribe
   const t0 = Date.now();
-  const log = { dry, ventas: 0, pendiente: 0, stock: 0, errores: [] };
+  const log = { dry, build: "v5-solomaestro",
+    ventas: 0, pendiente: 0, stock: 0, errores: [] };
   // (ago 2026) El maestro se omitia casi siempre: va detras de la consulta de
   // ventas, que gasta 44-54 s de los 60 disponibles, y el bloque se salta si
   // quedan menos de 12. Con &solomaestro=1 se salta el trabajo de ventas y
