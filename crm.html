@@ -345,7 +345,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "5.6.2";
+const CRM_VERSION = "5.6.3";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -619,6 +619,8 @@ function tiposIncBajoDe(k,n){
 // Selector jerárquico: eliges el área y, si tiene ramas, se despliegan debajo
 // para afinar (o quedarte con el área general). Usado al crear incidencias.
 function SelectorTipoIncidencia({value,onChange}){
+  // (v5.6.3) Tocar un chip ya seleccionado lo PLIEGA: sube al padre (o deselecciona)
+  var alternar=function(k){onChange(value===k?(tipoIncPadreDe(k)||""):k);};
   // Camino desde la raíz hasta el tipo elegido
   var path=[],v=value,g=0;
   while(v&&g<10){path.unshift(v);v=tipoIncPadreDe(v);g++;}
@@ -640,7 +642,7 @@ function SelectorTipoIncidencia({value,onChange}){
               var tp=INC_TIPOS[fila.padre]||{};
               var on=value===fila.padre;
               return (
-                <button key="_gen" onClick={function(){onChange(fila.padre);}}
+                <button key="_gen" onClick={function(){alternar(fila.padre);}}
                   style={{padding:"8px 11px",borderRadius:9,cursor:"pointer",fontSize:11,
                     border:"2px "+(on?"solid":"dashed")+" "+(on?tp.color:T.border),
                     background:on?tp.color+"15":"#fff",
@@ -654,12 +656,12 @@ function SelectorTipoIncidencia({value,onChange}){
               var on=fila.sel===k;
               var conHijos=tiposIncHijosDe(k).length>0;
               return (
-                <button key={k} onClick={function(){onChange(k);}}
+                <button key={k} onClick={function(){alternar(k);}}
                   style={{padding:"9px 12px",borderRadius:9,cursor:"pointer",fontSize:12,
                     border:"2px solid "+(on?t.color:T.border),
                     background:on?t.color+"15":"#fff",
                     color:on?t.color:T.muted,fontWeight:on?700:400}}>
-                  {t.label}{conHijos?" ▾":""}
+                  {t.label}{conHijos?(on?" ▴":" ▾"):""}
                 </button>
               );
             })}
@@ -18358,9 +18360,15 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB,
 
   const crearIncidencia=()=>{
     if(!form.tipo||!form.descripcion.trim()){alert("Tipo y descripción son obligatorios");return;}
+    // (v5.6.3) Incidencia interna: sin cliente, etiquetada como tal
+    const esInterna=(form.origen||"cliente")==="interna";
+    if(!esInterna&&!form.clienteNombre.trim()){alert("Selecciona el cliente, o marca la incidencia como Interna");return;}
     const nueva={
       id:`inc${Date.now()}`,
       ...form,
+      interna:esInterna,
+      clienteNombre:esInterna?"🏢 Interna":form.clienteNombre,
+      clienteId:esInterna?"":form.clienteId,
       autor:idCanonico(usuario),
       equipo:usuario.equipo||"",
       agente:idCanonico(usuario),
@@ -19070,8 +19078,23 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
           border:`2px solid ${T.red}`}}>
           <p style={{margin:"0 0 14px",fontSize:15,fontWeight:800,color:T.text}}>🚨 Nueva incidencia</p>
 
+          {/* (v5.6.3) Origen: de cliente o interna (sin cliente) */}
+          <div style={{display:"flex",gap:6,marginBottom:12,background:T.bg,borderRadius:10,padding:4}}>
+            {[["cliente","🤝 De cliente"],["interna","🏢 Interna"]].map(([k,l])=>(
+              <button key={k} onClick={()=>setForm(f=>({...f,origen:k,...(k==="interna"?{clienteNombre:"",clienteId:""}:{})}))}
+                style={{flex:1,padding:"9px",borderRadius:8,border:"none",
+                  background:(form.origen||"cliente")===k?"#fff":"transparent",
+                  color:(form.origen||"cliente")===k?T.navy:T.muted,
+                  fontWeight:(form.origen||"cliente")===k?800:500,
+                  fontSize:12,cursor:"pointer",
+                  boxShadow:(form.origen||"cliente")===k?"0 1px 4px #0002":"none"}}>
+                {l}
+              </button>
+            ))}
+          </div>
+
           {/* Cliente */}
-          <div style={{marginBottom:12}}>
+          {(form.origen||"cliente")==="cliente"&&<div style={{marginBottom:12}}>
             <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Cliente *</p>
 <SearchInput
               value={form.clienteNombre}
@@ -19082,7 +19105,7 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
                 .slice(0,8).map(c=>({label:c.nombre||c.NOMBRE,sub:c.id,tipo:"cliente"}))}
               onSelect={s=>setForm(f=>({...f,clienteNombre:s.label,clienteId:s.sub||""}))}
             />
-          </div>
+          </div>}
 
           {/* Producto afectado */}
           <div style={{marginBottom:12}}>
@@ -19205,10 +19228,13 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
           con incidencias; tocar un área con ▾ despliega sus sub-ramas debajo.
           El conteo de cada chip incluye sus ramas descendientes. */}
       {(function(){
-        var visibles=incidencias.filter(function(i){return !i.eliminada;});
+        // (v5.6.3) Conteos SOLO de pendientes (abiertas + en proceso)
+        var visibles=incidencias.filter(function(i){return !i.eliminada&&i.estado!=="cerrada"&&i.estado!=="resuelta";});
         var presentes={};
         visibles.forEach(function(i){var t=(i.tipo||"").toLowerCase();if(t)presentes[t]=1;});
         var cuenta=function(k){var bajo=tiposIncBajoDe(k);return visibles.filter(function(i){return bajo.indexOf((i.tipo||"").toLowerCase())>=0;}).length;};
+        // (v5.6.3) Tocar un chip ya seleccionado lo PLIEGA (sube al padre o a Todas)
+        var alternar=function(k){setFiltroTipo(filtroTipo===k?(tipoIncPadreDe(k)||"todas"):k);};
         // Raíces visibles: el ancestro raíz de cada tipo presente
         var raicesSet={};
         Object.keys(presentes).forEach(function(t){
@@ -19225,9 +19251,9 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
           var hijos=tiposIncHijosDe(path[fi]).filter(function(h){return cuenta(h)>0;});
           if(hijos.length>0) filas.push({padre:path[fi],opciones:hijos,sel:path[fi+1]||""});
         }
-        var chip=function(k,on,label,color,extra){
+        var chip=function(k,on,label,color,extra,onTap){
           return (
-            <button key={k+(extra||"")} onClick={()=>setFiltroTipo(k)}
+            <button key={k+(extra||"")} onClick={onTap||function(){alternar(k);}}
               style={{padding:"7px 14px",borderRadius:99,flexShrink:0,fontSize:11,fontWeight:on?700:400,
                 border:`1.5px solid ${on?color:T.border}`,
                 background:on?color+"15":"#fff",color:on?color:T.muted,cursor:"pointer"}}>
@@ -19248,7 +19274,7 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
                 var t=INC_TIPOS[k]||{label:k,color:"#94A3B8"};
                 var enPath=path[0]===k;
                 var conHijos=tiposIncHijosDe(k).filter(function(h){return cuenta(h)>0;}).length>0;
-                return chip(k,enPath,t.label+(conHijos?" ▾":"")+" ("+cuenta(k)+")",t.color||"#94A3B8");
+                return chip(k,enPath,t.label+(conHijos?(enPath?" ▴":" ▾"):"")+" ("+cuenta(k)+")",t.color||"#94A3B8");
               })}
             </div>
             {filas.slice(1).map(function(fila,ix){
@@ -19261,7 +19287,8 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
                   {fila.opciones.map(function(k){
                     var t=INC_TIPOS[k]||{label:k,color:"#94A3B8"};
                     var conHijos=tiposIncHijosDe(k).filter(function(h){return cuenta(h)>0;}).length>0;
-                    return chip(k,fila.sel===k,t.label+(conHijos?" ▾":"")+" ("+cuenta(k)+")",t.color||"#94A3B8");
+                    var on=fila.sel===k;
+                    return chip(k,on,t.label+(conHijos?(on?" ▴":" ▾"):"")+" ("+cuenta(k)+")",t.color||"#94A3B8");
                   })}
                 </div>
               );
