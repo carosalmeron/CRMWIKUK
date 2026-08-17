@@ -345,7 +345,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "6.0.1";
+const CRM_VERSION = "6.1.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -19538,6 +19538,7 @@ function Embudo({usuario, clientesFB}){
   const esJefeEq=usuario.rol==="jefe";
   const esDireccion=usuario.rol==="director"||usuario.rol==="ceo";
   const esIdyd=usuario.rol==="tipologia"&&(tipologiasDeMiRama(usuario)||[]).indexOf("id")>=0;
+  const esCalidad=usuario.rol==="tipologia"&&(tipologiasDeMiRama(usuario)||[]).indexOf("calidad")>=0;
 
   const [devs,setDevs]=useState([]);
   const [cargando,setCargando]=useState(true);
@@ -19571,6 +19572,14 @@ function Embudo({usuario, clientesFB}){
     return u?u.email:null;
   }
   function directoresComerciales(){return USUARIOS.filter(function(u){return !u.duplicadaDe&&u.activo!==false&&u.rol==="director";});}
+  function personasCalidad(){
+    var out=responsablesDeDepto("calidad").slice();
+    USUARIOS.forEach(function(u){
+      if(u.duplicadaDe||u.activo===false)return;
+      if(String(u.tipologia||"").toLowerCase()==="calidad"&&!out.some(function(x){return x.id===u.id;}))out.push(u);
+    });
+    return out;
+  }
   function personasIdyd(){
     var out=responsablesDeDepto("id").slice();
     USUARIOS.forEach(function(u){
@@ -19680,6 +19689,9 @@ function Embudo({usuario, clientesFB}){
       n.etapa=conCond?"aprobado_cond":"aprobado";
       n.condiciones=[n.firmaIdyd.condiciones,n.firmaDireccion.condiciones].filter(Boolean).join(" · ");
       n.decisionTs=Date.now();
+      // (v6.1) GATE ⑤: el proceso de muestra queda bloqueado hasta que
+      // Calidad cree el código de artículo. Se le notifica con la ficha.
+      n.pendienteCodigo=true;n.codigoArticulo="";
       // Proyecto interno de I+D, activo, con hitos de desarrollo
       var respId=(responsablesDeDepto("id")[0]||{}).id||usuario.id;
       var pid="pr"+Date.now();
@@ -19695,6 +19707,7 @@ function Embudo({usuario, clientesFB}){
         propuestoPor:n.comercialId,propuestoPorNombre:n.comercialNombre,aprobadoBacklog:true,
         origenDesarrollo:n.id,
         hitos:[
+          {nombre:"🔐 Código de artículo creado por Calidad",hecho:false,fecha:"",responsable:(responsablesDeDepto("calidad")[0]||{}).id||"calidad",nota:"Bloquea el proceso de muestra hasta completarse"},
           {nombre:"Prototipo / primera muestra interna",hecho:false,fecha:""},
           {nombre:"Muestra enviada al cliente",hecho:false,fecha:""},
           {nombre:"Feedback del cliente recibido",hecho:false,fecha:""},
@@ -19712,7 +19725,14 @@ function Embudo({usuario, clientesFB}){
           "<p><b>"+n.nombre+"</b> ("+n.clienteNombre+") ha sido aprobado con doble firma.</p>"
           +"<p>Margen estimado: <b>"+(n.precioMercado-n.escandallo).toFixed(2)+" €/ud</b> · Escandallo "+n.escandallo+" € · PVP mercado "+n.precioMercado+" €</p>"
           +(conCond?"<p><b>Condiciones:</b> "+n.condiciones+"</p>":"")
-          +"<p>Se ha creado el proyecto de I+D con sus hitos — visible en la pestaña Proyectos.</p>");
+          +"<p>Se ha creado el proyecto de I+D con sus hitos — visible en la pestaña Proyectos.</p>"
+          +"<p>⛔ <b>El proceso de muestra queda bloqueado</b> hasta que Calidad cree el código de artículo.</p>");
+        enviarMails(personasCalidad(),"🔐 Crear artículo — "+n.nombre,
+          "<p>Desarrollo aprobado que necesita <b>código de artículo</b> para poder continuar con las muestras:</p>"
+          +"<p><b>Producto:</b> "+String(n.producto||"").slice(0,400)+"</p>"
+          +(n.sustituye?"<p><b>Sustituye a:</b> "+String(n.sustituye).slice(0,200)+"</p>":"")
+          +"<p><b>Cliente:</b> "+n.clienteNombre+" · <b>Comercial:</b> "+n.comercialNombre+"</p>"
+          +"<p>Crea el artículo y registra su código en la pestaña Desarrollo del CRM — hasta entonces el proceso está parado.</p>");
       });
     } else {
       guardar(n,function(){
@@ -19722,6 +19742,35 @@ function Embudo({usuario, clientesFB}){
       });
     }
     setCondTxt("");
+  }
+
+  // (v6.1) Calidad registra el código de artículo → desbloquea las muestras
+  // y marca automáticamente el primer hito del proyecto de I+D.
+  function registrarCodigo(d){
+    var c=motivoTxt.trim();
+    if(!c){alert("Escribe el código de artículo creado");return;}
+    var n=conHito({...d,codigoArticulo:c,pendienteCodigo:false,codigoPor:usuario.nombre,codigoTs:Date.now()},
+      "🔐 Código de artículo creado por Calidad: "+c+" — proceso de muestra desbloqueado");
+    guardar(n,function(){
+      enviarMails(personasIdyd().concat(directoresComerciales()).concat([comercialDe(d)]),
+        "🔓 Código creado — "+d.nombre+" desbloqueado",
+        "<p>Calidad ha creado el artículo <b>"+c+"</b> para <b>"+d.nombre+"</b> ("+d.clienteNombre+").</p>"
+        +"<p>El proceso de muestra queda desbloqueado — ya se puede avanzar con el prototipo.</p>");
+    });
+    // Marcar el hito de calidad del proyecto vinculado
+    if(d.proyectoId){
+      fbLeer("proyectos").then(function(pp){
+        var p=(pp||[]).find(function(x){return x.id===d.proyectoId;});
+        if(!p)return;
+        var hoyStr=new Date().toLocaleDateString("es-ES");
+        var hitos=(p.hitos||[]).map(function(h){
+          return String(h.nombre||"").indexOf("Código de artículo")>=0?{...h,hecho:true,fecha:new Date().toISOString().slice(0,10),nota:"Código: "+c}:h;
+        });
+        var hist=[...(p.historial||[]),{accion:"🔐 Código de artículo creado por Calidad: "+c,por:usuario.nombre,fecha:hoyStr,nota:""}];
+        fbEscribir("proyectos",p.id,{...p,hitos:hitos,historial:hist});
+      }).catch(function(){});
+    }
+    setMotivoTxt("");
   }
 
   // ── Ficha imprimible (formato del PDF original) ──
@@ -19759,6 +19808,9 @@ function Embudo({usuario, clientesFB}){
       +(margen!=null?'<div style="display:flex;gap:8px;margin:8px 0"><div style="flex:1;text-align:center;border:2px solid '+(margen>0?"#16A34A":"#DC2626")+';border-radius:10px;padding:8px"><p style="margin:0;font-size:19px;font-weight:900;color:'+(margen>0?"#16A34A":"#DC2626")+'">'+margen.toFixed(2)+' €/ud</p><p style="margin:0;font-size:9px;color:#64748B;font-weight:800">MARGEN ESTIMADO</p></div>'
         +'<div style="flex:1;text-align:center;border:2px solid #E2E8F0;border-radius:10px;padding:8px"><p style="margin:0;font-size:19px;font-weight:900">'+Math.round(margen/d.precioMercado*100)+'%</p><p style="margin:0;font-size:9px;color:#64748B;font-weight:800">SOBRE PVP MERCADO</p></div></div>':'')
       +(d.obsIdyd?campo("Observaciones de I+D",d.obsIdyd):"")+(d.idydPor?campo("Dictamen emitido por",d.idydPor+" · "+fmtD(d.idydTs)):"")
+      +((d.etapa==="aprobado"||d.etapa==="aprobado_cond")?(sec("CÓDIGO DE ARTÍCULO (CALIDAD)")
+        +(d.codigoArticulo?campo("Código",d.codigoArticulo)+campo("Creado por",(d.codigoPor||"")+" · "+fmtD(d.codigoTs))
+          :'<p style="margin:5px 0;font-size:12px;color:#DC2626;font-weight:700">⛔ Pendiente — proceso de muestra bloqueado</p>')):"")
       +sec("3 · VALIDACIÓN DEL PROYECTO")
       +'<div style="display:flex;gap:10px;margin-top:8px">'+firmaBox("DIRECTOR/A DE I+D",d.firmaIdyd)+firmaBox("DIRECCIÓN COMERCIAL / MERCADO",d.firmaDireccion)+'</div>'
       +(d.condiciones?campo("Condiciones de la aprobación",d.condiciones):"")
@@ -19774,7 +19826,7 @@ function Embudo({usuario, clientesFB}){
   // ── Visibilidad y filtrado ──
   var misClaves=clavesU(usuario);
   var visibles=devs.filter(function(d){
-    if(esDireccion||esIdyd)return true;
+    if(esDireccion||esIdyd||esCalidad)return true;
     if(esJefeEq)return d.equipo===usuario.equipo||clavesU({id:d.comercialId}).some(function(k){return misClaves.indexOf(k)>=0;});
     return misClaves.indexOf(String(d.comercialId||"").toUpperCase())>=0;
   }).sort(function(a,b){return (b.fechaCreacion||"").localeCompare(a.fechaCreacion||"");});
@@ -19905,6 +19957,11 @@ function Embudo({usuario, clientesFB}){
               )}
               {d.etapa==="rechazado"&&d.rechazoMotivo&&<p style={{margin:"5px 0 0",fontSize:11,color:T.red}}>❌ {d.rechazoMotivo}</p>}
               {d.etapa==="aprobado_cond"&&d.condiciones&&<p style={{margin:"5px 0 0",fontSize:11,color:"#CA8A04"}}>🟡 {d.condiciones}</p>}
+              {(d.etapa==="aprobado"||d.etapa==="aprobado_cond")&&(
+                d.codigoArticulo
+                  ?<p style={{margin:"5px 0 0",fontSize:11,color:T.green,fontWeight:700}}>🔐 Artículo: {d.codigoArticulo}</p>
+                  :<p style={{margin:"5px 0 0",fontSize:11,color:T.red,fontWeight:700}}>⛔ Muestra bloqueada — pendiente de código de Calidad</p>
+              )}
             </div>
 
             {abiertoYo&&(
@@ -19999,6 +20056,25 @@ function Embudo({usuario, clientesFB}){
                   </div>
                 )}
 
+                {/* GATE ⑤: código de artículo por Calidad */}
+                {(d.etapa==="aprobado"||d.etapa==="aprobado_cond")&&!d.codigoArticulo&&(
+                  <div style={{background:"#FEF2F2",border:"1.5px solid #FECACA",borderRadius:11,padding:"11px 12px",marginBottom:10}}>
+                    <p style={{margin:"0 0 4px",fontSize:11,fontWeight:800,color:T.red}}>⛔ Proceso de muestra BLOQUEADO</p>
+                    <p style={{margin:"0 0 8px",fontSize:11,color:"#7F1D1D"}}>Calidad debe crear el artículo y registrar aquí su código antes de avanzar con las muestras.</p>
+                    {esCalidad?(
+                      <div style={{display:"flex",gap:6}}>
+                        <input value={motivoTxt} onChange={function(e){setMotivoTxt(e.target.value);}}
+                          placeholder="Código de artículo creado…"
+                          style={{flex:1,padding:"10px 11px",borderRadius:9,border:"1.5px solid "+T.border,fontSize:13,outline:"none",background:"#fff"}}/>
+                        <button onClick={function(){registrarCodigo(d);}}
+                          style={{padding:"10px 14px",borderRadius:9,border:"none",background:T.green,color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer"}}>🔓 Registrar</button>
+                      </div>
+                    ):(
+                      <p style={{margin:0,fontSize:10.5,color:T.muted}}>Calidad ha recibido email con las características del producto.</p>
+                    )}
+                  </div>
+                )}
+                {d.codigoArticulo&&<p style={{margin:"0 0 8px",fontSize:11,color:T.green,fontWeight:700}}>🔐 Artículo {d.codigoArticulo} · creado por {d.codigoPor||"Calidad"} — muestras desbloqueadas</p>}
                 {d.proyectoId&&<p style={{margin:"0 0 8px",fontSize:11,color:T.green,fontWeight:700}}>📁 Proyecto de I+D creado: visible en la pestaña Proyectos</p>}
 
                 {/* Historial + ficha imprimible */}
@@ -32974,7 +33050,7 @@ function App(props){
     ...(miTipologia==="stock" ? [{id:"planif_compras",icon:"📋",label:"Planificación",color:"#3B82F6"},{id:"vamos_caros",icon:"📊",label:"Mercado",color:"#7C3AED"}] : []), // (v4.20/4.21) Resp. Stock ve Planificacion y Mercado
     {id:"incidencias",  icon:"🚨",label:"Incidencias",  color:T.red, badge:incMiDeptAb},
     {id:"parte_depto",  icon:"🧾",label:"Parte",         color:"#0F766E"}, // (v5.7) parte semanal vertical
-    ...(tipologiasDeMiRama(usuario).indexOf("id")>=0?[{id:"embudo",icon:"🧪",label:"Desarrollo",color:"#7C3AED"}]:[]), // (v6.0) solo I+D
+    ...((tipologiasDeMiRama(usuario).indexOf("id")>=0||tipologiasDeMiRama(usuario).indexOf("calidad")>=0)?[{id:"embudo",icon:"🧪",label:"Desarrollo",color:"#7C3AED"}]:[]), // (v6.0/6.1) I+D y Calidad
     {id:"proyectos",    icon:"📁",label:"Proyectos",    color:T.purple}, // (v5.0) proyectos internos + backlog de su depto
     {id:"calendario",   icon:"🗓️",label:"Agenda",        color:T.blue},
     {id:"tareas",       icon:"📌",label:"Tareas",        color:T.red},
