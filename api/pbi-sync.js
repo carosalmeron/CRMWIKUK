@@ -3725,6 +3725,12 @@ EVALUATE
   const dry = req.query.dry === "1"; // ?dry=1 → consulta pero NO escribe
   const t0 = Date.now();
   const log = { dry, ventas: 0, pendiente: 0, stock: 0, errores: [] };
+  // (ago 2026) El maestro se omitia casi siempre: va detras de la consulta de
+  // ventas, que gasta 44-54 s de los 60 disponibles, y el bloque se salta si
+  // quedan menos de 12. Con &solomaestro=1 se salta el trabajo de ventas y
+  // dispone del tiempo completo.
+  const soloMaestro = req.query.solomaestro === "1";
+  if (soloMaestro) log.modo = "solo maestro";
 
   try {
     const { token, modo } = await getToken(req);
@@ -4546,14 +4552,14 @@ EVALUATE
         // El CRM arrastra fichas cargadas hace años; Power BI viene del ERP.
         // Se actualizan los datos que son del ERP y NO se toca lo que solo
         // sabe el comercial: SEMANAVISITA, contactos, telefonos y notas.
-        if (req.query.maestro === "1" || req.query.maestro === "dry") {
+        if (req.query.maestro === "1" || req.query.maestro === "dry" || soloMaestro) {
           // Con el tiempo justo se prefiere no empezar a escribir: mejor no
           // hacerlo que dejarlo a medias.
-          if (margen() < 12 && req.query.maestro === "1") {
+          if (margen() < 12 && !soloMaestro && req.query.maestro === "1") {
             log.maestroCambios = `omitido, quedaban ${margen()} s`;
           } else
           try {
-            const soloVer = req.query.maestro === "dry";
+            const soloVer = req.query.maestro === "dry" && !soloMaestro;
             const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
             const key = ENV.FB_API_KEY ? `&key=${ENV.FB_API_KEY}` : "";
             // Ficha actual del CRM, para comparar y no escribir de mas
@@ -4766,8 +4772,14 @@ EVALUATE
           log.errores.push(`comparar clientes: ${e.message}`);
         }
       }
-      log.ventas = dry ? docs.length : await fbCommit("pbi_ventas_cliente", aEscribir);
-      if (dry) log.muestraVentas = docs.slice(0, 3);
+      // En modo solo maestro no se escriben ventas: el objetivo es que el
+      // maestro tenga tiempo, no repetir un trabajo que ya hace el cron.
+      if (soloMaestro) {
+        log.ventas = "omitido (solo maestro)";
+      } else {
+        log.ventas = dry ? docs.length : await fbCommit("pbi_ventas_cliente", aEscribir);
+        if (dry) log.muestraVentas = docs.slice(0, 3);
+      }
     } catch (e) {
       log.errores.push(`ventas: ${e.message}`);
     }
