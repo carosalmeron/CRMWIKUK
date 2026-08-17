@@ -345,7 +345,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "5.6.3";
+const CRM_VERSION = "5.8.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -518,6 +518,98 @@ function superioresDe(usuario){
   var ceoU=USUARIOS.find(function(u){return u.rol==="ceo";});
   return ceoU&&ceoU.id!==usuario.id?[ceoU]:[];
 }
+// (v5.7) Personas que reportan a este usuario según el organigrama actual
+// (solo perfiles de departamento: responsables y operarios — la rama
+// comercial mantiene su propio parte semanal de ventas).
+function personasQueMeReportan(usuario){
+  if(!usuario) return [];
+  return USUARIOS.filter(function(u){
+    if(!u||u.id===usuario.id||u.activo===false||u._legacy||u.duplicadaDe) return false;
+    var esPerfilDepto=(u.rol==="tipologia")||!!u.departamentoId||deptosDondeEsResponsable(u).length>0;
+    if(!esPerfilDepto) return false;
+    return superioresDe(u).some(function(s){return s.id===usuario.id;});
+  });
+}
+function idParteSemanal(uid,ano,sem){return uid+"_"+ano+"w"+sem;}
+
+// ═══════════════════════════════════════════════════════════════════
+// (v5.8) SEMÁFORO DE DESEMPEÑO — protocolo de incidencias
+// Verde: todo su ámbito dentro de plazo. Rojo: al menos UNA incidencia
+// incumple el protocolo (responder <4h · resolver <24h). Sin grises.
+// ═══════════════════════════════════════════════════════════════════
+function semaforoProtocolo(usuario, incidenciasDB){
+  var rama=tipologiasDeMiRama(usuario);
+  var propia=(usuario&&usuario.tipologia||"").toLowerCase();
+  var pendientes=(incidenciasDB||[]).filter(function(i){
+    if(i.eliminada)return false;
+    var e=i.estado||"abierta";
+    if(e==="cerrada"||e==="resuelta")return false;
+    var t=(i.tipo||i.tipologia||"").toLowerCase();
+    return rama.indexOf(t)>=0||(propia&&t===propia);
+  });
+  // Timestamp de creación: fechaCreacion ISO → id inc{ms} → fecha dd/mm/aaaa
+  function tsDe(i){
+    if(i.fechaCreacion){var f=new Date(i.fechaCreacion);if(!isNaN(f))return{ts:f.getTime(),soloFecha:false};}
+    var m=/^inc(\d{13})$/.exec(i.id||"");
+    if(m)return{ts:parseInt(m[1]),soloFecha:false};
+    var p=String(i.fecha||"").split("/");
+    if(p.length===3){var y=parseInt(p[2]);if(y<100)y+=2000;
+      var f2=new Date(y,parseInt(p[1])-1,parseInt(p[0]));
+      if(!isNaN(f2))return{ts:f2.getTime(),soloFecha:true};}
+    return null;
+  }
+  var ahora=Date.now(),fuera=[];
+  pendientes.forEach(function(i){
+    var t=tsDe(i);if(!t)return;
+    var horas=(ahora-t.ts)/36e5;
+    var e=i.estado||"abierta";
+    // Sin primera respuesta (sigue "abierta"): límite 4h. Si solo conocemos
+    // el día (sin hora), no marcamos rojo hasta que pase al día siguiente.
+    if(e==="abierta"&&(t.soloFecha?horas>=24:horas>4)){
+      fuera.push({inc:i,horas:horas,motivo:"sin responder"});
+    } else if(horas>24&&(t.soloFecha?horas>=48:true)){
+      // Sin resolver: límite 24h (48 si solo conocemos el día, para no penalizar de más)
+      fuera.push({inc:i,horas:horas,motivo:"sin resolver"});
+    }
+  });
+  fuera.sort(function(a,b){return b.horas-a.horas;});
+  return {ok:fuera.length===0, fuera:fuera, pendientes:pendientes.length};
+}
+
+// Tarjeta grande verde/rojo para el arranque de los perfiles de departamento
+function SemaforoDesempeno({usuario, incidenciasDB, onNav}){
+  var s=semaforoProtocolo(usuario, incidenciasDB);
+  var peor=s.fuera[0];
+  function fmtHoras(h){
+    if(h>=48)return Math.floor(h/24)+" días";
+    if(h>=24)return "1 día";
+    return Math.floor(h)+" h";
+  }
+  return (
+    <div onClick={function(){if(onNav)onNav("incidencias");}}
+      style={{borderRadius:18,padding:"22px 18px",marginBottom:18,cursor:"pointer",
+        background:s.ok?"linear-gradient(135deg,#16A34A,#15803D)":"linear-gradient(135deg,#DC2626,#B91C1C)",
+        boxShadow:"0 6px 20px "+(s.ok?"#16A34A44":"#DC262655"),
+        display:"flex",alignItems:"center",gap:16}}>
+      <div style={{width:64,height:64,borderRadius:"50%",flexShrink:0,
+        background:"rgba(255,255,255,.18)",border:"3px solid rgba(255,255,255,.85)",
+        display:"flex",alignItems:"center",justifyContent:"center",fontSize:30}}>
+        {s.ok?"✓":"✕"}
+      </div>
+      <div style={{flex:1,minWidth:0}}>
+        <p style={{margin:0,fontSize:20,fontWeight:900,color:"#fff",letterSpacing:"-0.02em"}}>
+          {s.ok?"AL DÍA":"FUERA DE PROTOCOLO"}
+        </p>
+        <p style={{margin:"3px 0 0",fontSize:12,color:"rgba(255,255,255,.9)",lineHeight:1.4}}>
+          {s.ok
+            ?(s.pendientes===0?"Sin incidencias pendientes en tu ámbito.":s.pendientes+" pendiente"+(s.pendientes===1?"":"s")+" — todas dentro de plazo (4 h / 24 h).")
+            :s.fuera.length+" incidencia"+(s.fuera.length===1?"":"s")+" fuera de plazo · la más antigua "+fmtHoras(peor.horas)+" "+peor.motivo+" →"}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // Departamento que corresponde a una tipología de incidencia
 // (v5.5) También reconoce los tipos generados por departamento (tipo === id del depto)
 function deptoDeTipologia(tip){
@@ -694,6 +786,7 @@ const CATALOGO_PESTANAS={
   tareas:       {icon:"📌",label:"Tareas",         color:"#EF4444"},
   reporting:    {icon:"🧾",label:"Reporting",      color:"#0F2B46"},
   proyectos:    {icon:"📁",label:"Proyectos",     color:"#7C3AED"},
+  parte_depto:  {icon:"🧾",label:"Parte",         color:"#0F766E"},
   vamos_caros:  {icon:"📊",label:"Mercado",        color:"#7C3AED"},
   planif_compras:{icon:"📋",label:"Planificación",color:"#3B82F6"},
   inc_stock:    {icon:"📦",label:"Stock",          color:"#EF4444", soloRol:["compras"]},
@@ -702,10 +795,10 @@ const CATALOGO_PESTANAS={
 };
 const MENU_ROL={
   agente:   ["dashboard","plan_semanal","analisis","clientes","oportunidades","ofertas","muestras","estrategias","incidencias","calendario","tareas","reporting","proyectos","ia"],
-  jefe:     ["dashboard","sala_mandos","plan_semanal","analisis","calendario","tareas","clientes_eq","muestras","estrategias","oportunidades","ofertas","planif_compras","incidencias","reporting","proyectos","ia"],
-  director: ["dashboard","sala_mandos","plan_semanal","analisis","calendario","tareas","clientes_eq","muestras","estrategias","oportunidades","ofertas","vamos_caros","planif_compras","incidencias","reporting","proyectos","ia"],
-  ceo:      ["dashboard","sala_mandos","plan_semanal","analisis","calendario","tareas","clientes_eq","muestras","estrategias","oportunidades","ofertas","vamos_caros","planif_compras","incidencias","reporting","proyectos","ia"],
-  tipologia:["dashboard","incidencias","proyectos","calendario","tareas"],
+  jefe:     ["dashboard","sala_mandos","plan_semanal","analisis","calendario","tareas","clientes_eq","muestras","estrategias","oportunidades","ofertas","planif_compras","incidencias","reporting","parte_depto","proyectos","ia"],
+  director: ["dashboard","sala_mandos","plan_semanal","analisis","calendario","tareas","clientes_eq","muestras","estrategias","oportunidades","ofertas","vamos_caros","planif_compras","incidencias","reporting","parte_depto","proyectos","ia"],
+  ceo:      ["dashboard","sala_mandos","plan_semanal","analisis","calendario","tareas","clientes_eq","muestras","estrategias","oportunidades","ofertas","vamos_caros","planif_compras","incidencias","reporting","parte_depto","proyectos","ia"],
+  tipologia:["dashboard","incidencias","parte_depto","proyectos","calendario","tareas"],
   compras:  ["vamos_caros","planif_compras","inc_stock","inc_calidad","proyectos"],
 };
 // Menú por defecto del rol de un usuario (ids)
@@ -5252,6 +5345,9 @@ function DashTipologia({usuario, onNav, incidenciasDB}){
           </div>
         </div>
       </div>
+
+      {/* (v5.8) SEMÁFORO DE DESEMPEÑO — protocolo 4h/24h, lo primero que ve */}
+      <SemaforoDesempeno usuario={usuario} incidenciasDB={incidenciasDB} onNav={onNav}/>
 
       {/* Resumen numérico */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:16}}>
@@ -19387,6 +19483,423 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
 
 // ─── PANEL ADMIN ──────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════
+// (v5.7) PARTE SEMANAL DE DEPARTAMENTO — sistema vertical en cascada
+// Cada persona (operario, responsable) entrega SU parte individual:
+// objetivos de la semana (propios o añadidos por su superior) + bloques
+// automáticos (incidencias de su ámbito, proyectos/hitos, tareas) + resumen.
+// El superior ve los partes de su gente con semáforo, los valida o comenta,
+// puede añadirles objetivos, y entrega el suyo hacia arriba. La cadena se
+// calcula EN VIVO del organigrama; los partes entregados quedan como foto.
+// Colección Firebase: partes_departamento · id: {usuarioId}_{año}w{semana}
+// ═══════════════════════════════════════════════════════════════════
+function ParteSemanalDepto({usuario, incidenciasDB}){
+  const hoy=new Date();
+  const [ano,setAno]=useState(hoy.getFullYear());
+  const [sem,setSem]=useState(getSemanaISO());
+  const [partes,setPartes]=useState({});     // id → doc
+  const [proyectosFB,setProyectosFB]=useState([]);
+  const [tareasFB,setTareasFB]=useState([]);
+  const [cargando,setCargando]=useState(true);
+  const [tab,setTab]=useState("mio");        // mio | equipo
+  const [abierto,setAbierto]=useState(null); // parte del equipo desplegado
+  const [nuevoObj,setNuevoObj]=useState("");
+  const [comentTxt,setComentTxt]=useState("");
+
+  const misSupers=superioresDe(usuario);
+  const misReportes=personasQueMeReportan(usuario);
+  const soySoloLector=misSupers.length===0; // CEO: no entrega hacia arriba
+
+  useEffect(()=>{
+    Promise.all([
+      fbLeerTodos?fbLeerTodos("partes_departamento").catch(()=>[]):fbLeer("partes_departamento").catch(()=>[]),
+      fbLeer("proyectos").catch(()=>[]),
+      fbLeer("tareas").catch(()=>[]),
+    ]).then(([pp,pr,ta])=>{
+      var m={};(pp||[]).forEach(function(p){if(p&&p.id)m[p.id]=p;});
+      setPartes(m);setProyectosFB(pr||[]);setTareasFB(ta||[]);setCargando(false);
+      if(misSupers.length===0&&misReportes.length>0)setTab("equipo");
+    });
+  },[]);
+
+  // ── Snapshot automático de UNA persona (en vivo, sobre el árbol actual) ──
+  function snapshotDe(u){
+    var rama=tipologiasDeMiRama(u);
+    var incMias=(incidenciasDB||[]).filter(function(i){
+      if(i.eliminada)return false;
+      var t=(i.tipo||i.tipologia||"").toLowerCase();
+      return rama.indexOf(t)>=0||t===(u.tipologia||"").toLowerCase()&&t!=="";
+    });
+    var incAb=incMias.filter(function(i){return i.estado==="abierta"||!i.estado;}).length;
+    var incProc=incMias.filter(function(i){return i.estado==="en_proceso";}).length;
+    var incResSem=incMias.filter(function(i){return (i.estado==="cerrada"||i.estado==="resuelta")&&i.semana===sem;}).length;
+    // Proyectos: internos de su rama de deptos + donde tenga hitos o responsabilidad
+    var ramaDeps={};(deptosDondeEsResponsable(u)).forEach(function(d){
+      (function bajar(id,n){if(n>15)return;ramaDeps[id]=1;deptosHijosDe(id).forEach(function(h){bajar(h.id,n+1);});})(d.id,0);
+    });
+    if(u.departamentoId)ramaDeps[u.departamentoId]=1;
+    var prMios=(proyectosFB||[]).filter(function(p){
+      if(p.estado==="descartado")return false;
+      if(p.ambito==="interno"&&ramaDeps[p.departamentoId])return true;
+      if(p.responsable===u.id||p.propuestoPor===u.id)return true;
+      return (p.hitos||[]).some(function(h){return h.responsable===u.id;});
+    });
+    var prActivos=prMios.filter(function(p){return p.estado==="activo";}).length;
+    var prBacklog=prMios.filter(function(p){return p.estado==="backlog";}).length;
+    var hitosPend=0,hitosVenc=0,hitosHechosSem=0;
+    var hoyD=new Date();hoyD.setHours(0,0,0,0);
+    prMios.forEach(function(p){(p.hitos||[]).forEach(function(h){
+      var esMio=h.responsable===u.id||(!h.responsable&&ramaDeps[p.departamentoId]);
+      if(!esMio)return;
+      if(h.completado){if(h.semanaCompletado===sem)hitosHechosSem++;return;}
+      hitosPend++;
+      if(h.fecha&&new Date(h.fecha)<hoyD)hitosVenc++;
+    });});
+    // Tareas asignadas a la persona
+    var claves=[u.id,u.crmId,u.user,u.username,u.grupoAgente].filter(Boolean).map(function(x){return String(x).toUpperCase();});
+    var tMias=(tareasFB||[]).filter(function(t){
+      return !t.eliminada&&t.agente&&claves.indexOf(String(t.agente).toUpperCase())>=0;
+    });
+    var tPend=tMias.filter(function(t){return t.estado==="pendiente";}).length;
+    var tHechas=tMias.length-tPend;
+    return {incAb:incAb,incProc:incProc,incResSem:incResSem,
+      prActivos:prActivos,prBacklog:prBacklog,hitosPend:hitosPend,hitosVenc:hitosVenc,hitosHechosSem:hitosHechosSem,
+      tPend:tPend,tHechas:tHechas};
+  }
+
+  function parteDe(u){
+    var id=idParteSemanal(u.id,ano,sem);
+    return partes[id]||{id:id,usuarioId:u.id,usuarioNombre:u.nombre,
+      departamentoId:u.departamentoId||((deptosDondeEsResponsable(u)[0]||{}).id||""),
+      ano:ano,semana:sem,objetivos:[],resumen:"",estado:"borrador",comentarioSuperior:"",_nuevo:true};
+  }
+  function guardarParte(p,cb){
+    var doc={...p};delete doc._nuevo;
+    setPartes(function(prev){var n={...prev};n[doc.id]=doc;return n;});
+    fbEscribir("partes_departamento",doc.id,doc).then(function(){if(cb)cb();});
+  }
+
+  const miParte=parteDe(usuario);
+  const miSnap=miParte.estado==="borrador"?snapshotDe(usuario):(miParte.snapshot||snapshotDe(usuario));
+  const entregado=miParte.estado==="entregado"||miParte.estado==="validado";
+
+  // ── Acciones sobre mi parte ──
+  function addObjetivo(){
+    var t=nuevoObj.trim();if(!t)return;
+    guardarParte({...miParte,objetivos:[...(miParte.objetivos||[]),
+      {id:"o"+Date.now(),texto:t,estado:"pendiente",motivo:"",origen:"propio"}]});
+    setNuevoObj("");
+  }
+  function cicloEstado(obj){
+    var orden=["pendiente","en_curso","hecho"];
+    var sig=orden[(orden.indexOf(obj.estado==="bloqueado"?"pendiente":obj.estado)+1)%3];
+    guardarParte({...miParte,objetivos:miParte.objetivos.map(function(o){
+      return o.id===obj.id?{...o,estado:sig,motivo:""}:o;})});
+  }
+  function bloquearObj(obj){
+    var m=prompt("¿Qué lo bloquea? (visible para tu superior)",obj.motivo||"");
+    if(m===null)return;
+    guardarParte({...miParte,objetivos:miParte.objetivos.map(function(o){
+      return o.id===obj.id?{...o,estado:"bloqueado",motivo:m}:o;})});
+  }
+  function borrarObj(obj){
+    if(obj.origen==="superior"){alert("Este objetivo lo añadió "+(obj.porNombre||"tu superior")+" — no puedes borrarlo, pero puedes marcarlo bloqueado con motivo.");return;}
+    guardarParte({...miParte,objetivos:miParte.objetivos.filter(function(o){return o.id!==obj.id;})});
+  }
+  function entregarParte(){
+    var doc={...miParte,estado:"entregado",entregadoTs:Date.now(),
+      snapshot:snapshotDe(usuario),
+      paraIds:misSupers.map(function(s){return s.id;})};
+    guardarParte(doc,function(){
+      misSupers.forEach(function(s){
+        try{despacharNotificacion({tipo:"parte",
+          titulo:"🧾 Parte semanal entregado — "+usuario.nombre,
+          mensaje:usuario.nombre+" ha entregado su parte de la semana "+sem+". Revísalo en Parte semanal → Mi equipo.",
+          destinatarioId:s.id,prioridad:"normal",creadoPor:usuario.id});}catch(e){}
+      });
+    });
+  }
+
+  // ── Acciones del superior sobre un parte del equipo ──
+  function validarParte(p){
+    guardarParte({...p,estado:"validado",validadoPor:usuario.id,validadoPorNombre:usuario.nombre,validadoTs:Date.now()},function(){
+      try{despacharNotificacion({tipo:"parte",titulo:"✅ Parte validado",
+        mensaje:usuario.nombre+" ha validado tu parte de la semana "+p.semana+".",
+        destinatarioId:p.usuarioId,prioridad:"normal",creadoPor:usuario.id});}catch(e){}
+    });
+  }
+  function comentarParte(p){
+    var t=comentTxt.trim();if(!t)return;
+    guardarParte({...p,comentarioSuperior:t,comentarioPorNombre:usuario.nombre},function(){
+      try{despacharNotificacion({tipo:"parte",titulo:"💬 Comentario en tu parte",
+        mensaje:usuario.nombre+": "+t.slice(0,120),
+        destinatarioId:p.usuarioId,prioridad:"normal",creadoPor:usuario.id});}catch(e){}
+    });
+    setComentTxt("");
+  }
+  function objetivoASubordinado(u){
+    var t=prompt("Objetivo para "+u.nombre+" (semana "+sem+"):");
+    if(!t||!t.trim())return;
+    var p=parteDe(u);
+    guardarParte({...p,objetivos:[...(p.objetivos||[]),
+      {id:"o"+Date.now(),texto:t.trim(),estado:"pendiente",motivo:"",origen:"superior",porNombre:usuario.nombre}]},function(){
+      try{despacharNotificacion({tipo:"parte",titulo:"🎯 Nuevo objetivo de "+usuario.nombre,
+        mensaje:t.trim().slice(0,120)+" (semana "+sem+")",
+        destinatarioId:u.id,prioridad:"normal",creadoPor:usuario.id});}catch(e){}
+    });
+  }
+
+  // ── UI helpers ──
+  const EST_OBJ={pendiente:{icon:"⬜",color:"#94A3B8",label:"Pendiente"},
+    en_curso:{icon:"🔄",color:T.blue,label:"En curso"},
+    hecho:{icon:"✅",color:T.green,label:"Hecho"},
+    bloqueado:{icon:"⛔",color:T.red,label:"Bloqueado"}};
+  function chipEstadoParte(p){
+    if(!p||p._nuevo)return <Badge label="⚪ Sin parte" color={T.muted}/>;
+    if(p.estado==="validado")return <Badge label="✅ Validado" color={T.green}/>;
+    if(p.estado==="entregado")return <Badge label="📤 Entregado" color={T.blue}/>;
+    return <Badge label="✏️ Borrador" color={T.amber}/>;
+  }
+  function snapCards(s){
+    return (
+      <div style={{display:"flex",gap:8,marginBottom:12}}>
+        <Card style={{flex:1,padding:"10px",textAlign:"center"}}>
+          <p style={{margin:0,fontSize:17,fontWeight:900,color:s.incAb>0?T.red:T.green}}>{s.incAb}</p>
+          <p style={{margin:"1px 0 0",fontSize:9,fontWeight:700,color:T.muted}}>🚨 INC. ABIERTAS</p>
+          <p style={{margin:"2px 0 0",fontSize:9,color:T.muted}}>{s.incProc} en proceso · {s.incResSem} resueltas S{sem}</p>
+        </Card>
+        <Card style={{flex:1,padding:"10px",textAlign:"center"}}>
+          <p style={{margin:0,fontSize:17,fontWeight:900,color:s.hitosVenc>0?T.red:T.text}}>{s.hitosPend}</p>
+          <p style={{margin:"1px 0 0",fontSize:9,fontWeight:700,color:T.muted}}>📁 HITOS PEND.</p>
+          <p style={{margin:"2px 0 0",fontSize:9,color:s.hitosVenc>0?T.red:T.muted}}>{s.hitosVenc>0?s.hitosVenc+" vencidos ⚠️":s.prActivos+" proy. activos"}{s.prBacklog>0?" · "+s.prBacklog+" backlog":""}</p>
+        </Card>
+        <Card style={{flex:1,padding:"10px",textAlign:"center"}}>
+          <p style={{margin:0,fontSize:17,fontWeight:900,color:T.text}}>{s.tPend}</p>
+          <p style={{margin:"1px 0 0",fontSize:9,fontWeight:700,color:T.muted}}>📌 TAREAS PEND.</p>
+          <p style={{margin:"2px 0 0",fontSize:9,color:T.muted}}>{s.tHechas} completadas</p>
+        </Card>
+      </div>
+    );
+  }
+  function listaObjetivos(p,editable){
+    var objs=p.objetivos||[];
+    if(objs.length===0)return <p style={{margin:"0 0 10px",fontSize:12,color:T.muted}}>Sin objetivos esta semana{editable?" — añade el primero abajo.":"."}</p>;
+    return objs.map(function(o){
+      var e=EST_OBJ[o.estado]||EST_OBJ.pendiente;
+      return (
+        <div key={o.id} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"9px 10px",
+          borderRadius:10,background:"#fff",border:"1px solid "+(o.estado==="bloqueado"?"#FECACA":T.border),marginBottom:6}}>
+          <button onClick={editable?function(){cicloEstado(o);}:undefined}
+            style={{border:"none",background:"transparent",fontSize:17,cursor:editable?"pointer":"default",padding:0,lineHeight:1,flexShrink:0}}>
+            {e.icon}
+          </button>
+          <div style={{flex:1,minWidth:0}}>
+            <p style={{margin:0,fontSize:13,color:T.text,fontWeight:o.estado==="hecho"?400:600,
+              textDecoration:o.estado==="hecho"?"line-through":"none",opacity:o.estado==="hecho"?0.65:1}}>{o.texto}</p>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:3,alignItems:"center"}}>
+              <span style={{fontSize:9,fontWeight:700,color:e.color}}>{e.label}</span>
+              {o.origen==="superior"&&<span style={{fontSize:9,color:T.purple,fontWeight:700}}>🎯 de {o.porNombre||"superior"}</span>}
+              {o.motivo&&<span style={{fontSize:10,color:T.red}}>· {o.motivo}</span>}
+            </div>
+          </div>
+          {editable&&(
+            <div style={{display:"flex",gap:4,flexShrink:0}}>
+              <button onClick={function(){bloquearObj(o);}} title="Marcar bloqueado"
+                style={{border:"1px solid "+T.border,background:"#fff",borderRadius:7,fontSize:11,padding:"4px 7px",cursor:"pointer"}}>⛔</button>
+              <button onClick={function(){borrarObj(o);}} title="Eliminar"
+                style={{border:"1px solid "+T.border,background:"#fff",borderRadius:7,fontSize:11,padding:"4px 7px",cursor:"pointer",color:T.muted}}>✕</button>
+            </div>
+          )}
+        </div>
+      );
+    });
+  }
+
+  if(cargando)return <div style={{padding:40,textAlign:"center",color:T.muted}}>⏳ Cargando parte semanal…</div>;
+
+  return (
+    <div style={{padding:"0 2px"}}>
+      {/* Cabecera con selector de semana */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+        <div>
+          <p style={{margin:0,fontSize:19,fontWeight:900,color:T.text}}>🧾 Parte semanal</p>
+          <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
+            {(deptoDe(miParte.departamentoId)||{}).nombre||"—"}
+            {misSupers.length>0?" · reporta a "+misSupers.map(function(s){return s.nombre;}).join(", "):" · nivel superior"}
+          </p>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <button onClick={function(){if(sem>1){setSem(sem-1);}else{setSem(52);setAno(ano-1);}setAbierto(null);}}
+            style={{width:30,height:30,borderRadius:8,border:"1px solid "+T.border,background:"#fff",cursor:"pointer"}}>‹</button>
+          <span style={{fontSize:12,fontWeight:800,color:T.text,minWidth:44,textAlign:"center"}}>S{sem}·{String(ano).slice(2)}</span>
+          <button onClick={function(){var sMax=getSemanaISO();if(ano<hoy.getFullYear()||sem<sMax){if(sem<52){setSem(sem+1);}else{setSem(1);setAno(ano+1);}setAbierto(null);}}}
+            style={{width:30,height:30,borderRadius:8,border:"1px solid "+T.border,background:"#fff",cursor:"pointer"}}>›</button>
+        </div>
+      </div>
+
+      {/* Tabs mi parte / mi equipo */}
+      {misReportes.length>0&&(
+        <div style={{display:"flex",gap:6,marginBottom:14,background:T.bg,borderRadius:10,padding:4}}>
+          {[["mio","📝 Mi parte"],["equipo","📥 Mi equipo ("+misReportes.length+")"]].map(function(par){
+            var k=par[0],l=par[1];
+            if(k==="mio"&&soySoloLector&&misReportes.length>0)l="📝 Mi resumen";
+            return (
+              <button key={k} onClick={function(){setTab(k);}}
+                style={{flex:1,padding:"9px",borderRadius:8,border:"none",
+                  background:tab===k?"#fff":"transparent",color:tab===k?T.navy:T.muted,
+                  fontWeight:tab===k?800:500,fontSize:12,cursor:"pointer",
+                  boxShadow:tab===k?"0 1px 4px #0002":"none"}}>{l}</button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ═══ MI PARTE ═══ */}
+      {tab==="mio"&&(
+        <div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <p style={{margin:0,fontSize:12,fontWeight:800,color:T.muted,textTransform:"uppercase"}}>Objetivos de la semana</p>
+            {chipEstadoParte(miParte._nuevo?null:miParte)}
+          </div>
+          {listaObjetivos(miParte,true)}
+          <div style={{display:"flex",gap:6,marginBottom:16}}>
+            <input value={nuevoObj} onChange={function(e){setNuevoObj(e.target.value);}}
+              onKeyDown={function(e){if(e.key==="Enter")addObjetivo();}}
+              placeholder="Nuevo objetivo…"
+              style={{flex:1,padding:"10px 12px",borderRadius:9,border:"1.5px solid "+T.border,fontSize:13,outline:"none"}}/>
+            <button onClick={addObjetivo} disabled={!nuevoObj.trim()}
+              style={{padding:"10px 16px",borderRadius:9,border:"none",background:nuevoObj.trim()?T.navy:"#E2E8F0",
+                color:nuevoObj.trim()?"#fff":"#94A3B8",fontWeight:800,fontSize:13,cursor:nuevoObj.trim()?"pointer":"default"}}>＋</button>
+          </div>
+
+          <p style={{margin:"0 0 8px",fontSize:12,fontWeight:800,color:T.muted,textTransform:"uppercase"}}>Mi semana en datos {entregado?"(foto al entregar)":"(en vivo)"}</p>
+          {snapCards(miSnap)}
+
+          <p style={{margin:"0 0 6px",fontSize:12,fontWeight:800,color:T.muted,textTransform:"uppercase"}}>Resumen hacia arriba</p>
+          <textarea value={miParte.resumen||""}
+            onChange={function(e){guardarParte({...miParte,resumen:e.target.value});}}
+            placeholder="Lo esencial de tu semana en 3-4 líneas: qué se logró, qué preocupa, qué necesitas."
+            rows={4}
+            style={{width:"100%",padding:"11px 12px",borderRadius:10,border:"1.5px solid "+T.border,
+              fontSize:13,resize:"none",fontFamily:"inherit",boxSizing:"border-box",marginBottom:8}}/>
+
+          {miParte.comentarioSuperior&&(
+            <div style={{background:"#EFF6FF",border:"1.5px solid #BFDBFE",borderRadius:10,padding:"10px 12px",marginBottom:10}}>
+              <p style={{margin:0,fontSize:11,fontWeight:800,color:"#1D4ED8"}}>💬 {miParte.comentarioPorNombre||"Tu superior"}:</p>
+              <p style={{margin:"3px 0 0",fontSize:12,color:"#1E3A5F"}}>{miParte.comentarioSuperior}</p>
+            </div>
+          )}
+
+          {!soySoloLector&&(
+            <button onClick={entregarParte}
+              style={{width:"100%",padding:"14px",borderRadius:12,border:"none",
+                background:miParte.estado==="validado"?T.green:T.navy,color:"#fff",fontWeight:900,fontSize:14,cursor:"pointer"}}>
+              {miParte.estado==="validado"?"✅ Validado por "+(miParte.validadoPorNombre||"tu superior")
+                :entregado?"🔄 Actualizar entrega ("+misSupers.map(function(s){return s.nombre;}).join(", ")+")"
+                :"📤 Entregar parte a "+misSupers.map(function(s){return s.nombre;}).join(", ")}
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* ═══ MI EQUIPO (cascada) ═══ */}
+      {tab==="equipo"&&(
+        <div>
+          {misReportes.map(function(u){
+            var p=partes[idParteSemanal(u.id,ano,sem)]||null;
+            var dep=deptoDe(u.departamentoId||((deptosDondeEsResponsable(u)[0]||{}).id))||{icon:"🏢",nombre:"—",color:T.muted};
+            var abiertoYo=abierto===u.id;
+            var s=p&&p.snapshot?p.snapshot:snapshotDe(u);
+            var objs=(p&&p.objetivos)||[];
+            var hechos=objs.filter(function(o){return o.estado==="hecho";}).length;
+            var bloq=objs.filter(function(o){return o.estado==="bloqueado";}).length;
+            return (
+              <Card key={u.id} style={{marginBottom:10,padding:"12px 14px",
+                borderLeft:"4px solid "+(p?(p.estado==="validado"?T.green:p.estado==="entregado"?T.blue:T.amber):"#CBD5E1")}}>
+                <div onClick={function(){setAbierto(abiertoYo?null:u.id);setComentTxt("");}}
+                  style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer"}}>
+                  <div style={{width:38,height:38,borderRadius:"50%",flexShrink:0,
+                    background:(dep.color||T.muted)+"22",display:"flex",alignItems:"center",justifyContent:"center",
+                    fontSize:13,fontWeight:900,color:dep.color||T.muted}}>
+                    {(u.nombre||"?").trim().split(/\s+/).map(function(x){return x[0];}).slice(0,2).join("").toUpperCase()}
+                  </div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{margin:0,fontSize:14,fontWeight:800,color:T.text}}>{u.nombre}</p>
+                    <p style={{margin:"1px 0 0",fontSize:10,color:T.muted}}>{dep.icon} {dep.nombre}
+                      {objs.length>0?" · "+hechos+"/"+objs.length+" objetivos"+(bloq>0?" · ⛔"+bloq:""):""}</p>
+                  </div>
+                  {(function(){
+                    var sf=semaforoProtocolo(u,incidenciasDB);
+                    return <span title={sf.ok?"Protocolo al día":"Fuera de protocolo: "+sf.fuera.length}
+                      style={{width:11,height:11,borderRadius:"50%",flexShrink:0,
+                        background:sf.ok?"#16A34A":"#DC2626",
+                        boxShadow:"0 0 0 3px "+(sf.ok?"#16A34A22":"#DC262622")}}></span>;
+                  })()}
+                  {chipEstadoParte(p)}
+                  <span style={{fontSize:11,color:T.muted}}>{abiertoYo?"▴":"▾"}</span>
+                </div>
+                {abiertoYo&&(
+                  <div style={{marginTop:12,paddingTop:12,borderTop:"1px dashed "+T.border}}>
+                    {p?(
+                      <div>
+                        <p style={{margin:"0 0 6px",fontSize:10,fontWeight:800,color:T.muted,textTransform:"uppercase"}}>Objetivos</p>
+                        {listaObjetivos(p,false)}
+                        <p style={{margin:"10px 0 6px",fontSize:10,fontWeight:800,color:T.muted,textTransform:"uppercase"}}>Su semana en datos</p>
+                        {snapCards(s)}
+                        {p.resumen&&(
+                          <div style={{background:T.bg,borderRadius:10,padding:"10px 12px",marginBottom:10}}>
+                            <p style={{margin:0,fontSize:10,fontWeight:800,color:T.muted,textTransform:"uppercase"}}>Su resumen</p>
+                            <p style={{margin:"4px 0 0",fontSize:12.5,color:T.text,lineHeight:1.5}}>{p.resumen}</p>
+                          </div>
+                        )}
+                        {p.comentarioSuperior&&(
+                          <p style={{margin:"0 0 10px",fontSize:11,color:"#1D4ED8"}}>💬 Comentario enviado: "{p.comentarioSuperior}"</p>
+                        )}
+                      </div>
+                    ):(
+                      <div>
+                        <p style={{margin:"0 0 10px",fontSize:12,color:T.muted}}>
+                          {u.nombre.split(" ")[0]} aún no ha empezado su parte de la semana {sem}. Puedes asignarle objetivos igualmente.
+                        </p>
+                        {snapCards(s)}
+                      </div>
+                    )}
+                    <div style={{display:"flex",gap:6,marginBottom:8}}>
+                      <input value={comentTxt} onChange={function(e){setComentTxt(e.target.value);}}
+                        placeholder="Comentario para su parte…"
+                        style={{flex:1,padding:"9px 11px",borderRadius:9,border:"1.5px solid "+T.border,fontSize:12,outline:"none"}}/>
+                      <button onClick={function(){comentarParte(p||parteDe(u));}} disabled={!comentTxt.trim()}
+                        style={{padding:"9px 12px",borderRadius:9,border:"1px solid "+T.border,background:"#fff",
+                          fontSize:12,fontWeight:700,cursor:comentTxt.trim()?"pointer":"default",color:comentTxt.trim()?T.blue:T.muted}}>💬</button>
+                    </div>
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={function(){objetivoASubordinado(u);}}
+                        style={{flex:1,padding:"11px",borderRadius:10,border:"1.5px solid "+T.purple,
+                          background:T.purpleL,color:T.purple,fontWeight:800,fontSize:12,cursor:"pointer"}}>🎯 Añadir objetivo</button>
+                      {p&&p.estado==="entregado"&&(
+                        <button onClick={function(){validarParte(p);}}
+                          style={{flex:1,padding:"11px",borderRadius:10,border:"none",
+                            background:T.green,color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer"}}>✅ Validar</button>
+                      )}
+                      {p&&p.estado==="validado"&&(
+                        <div style={{flex:1,padding:"11px",borderRadius:10,background:"#F0FDF4",
+                          color:T.green,fontWeight:800,fontSize:12,textAlign:"center"}}>✅ Validado</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </Card>
+            );
+          })}
+          <p style={{margin:"4px 0 0",fontSize:10,color:T.muted,textAlign:"center"}}>
+            La cadena sale del organigrama en vivo — reorganizar departamentos reordena los partes automáticamente.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // (v5.0) EDITOR DE ORGANIGRAMA — Departamentos configurables
 // Todo el árbol se edita aquí: crear/renombrar deptos, cambiar de quién
 // cuelgan (más vertical o más plano), varios responsables por depto, y
@@ -31631,6 +32144,7 @@ function App(props){
     {id:"planif_compras",icon:"📋",label:"Planif.",     color:"#3B82F6"},
     {id:"incidencias",  icon:"🚨",label:"Incidencias", color:T.red,   badge:incAbiertas},
     {id:"reporting",    icon:"🧾",label:"Reporting",    color:T.navy},
+    {id:"parte_depto",  icon:"🗂️",label:"Partes",       color:"#0F766E"}, // (v5.7) cascada de partes de departamento
     {id:"proyectos",    icon:"📁",label:"Proyectos",   color:T.purple},
     {id:"ia",           icon:"🤖",label:"IA",          color:T.purple},
   ];
@@ -31651,6 +32165,7 @@ function App(props){
     {id:"planif_compras",icon:"📋",label:"Planif.",      color:"#3B82F6"},
     {id:"incidencias",  icon:"🚨",label:"Incidencias",  color:T.red,   badge:incAbiertas},
     {id:"reporting",    icon:"🧾",label:"Reporting",     color:T.navy},
+    {id:"parte_depto",  icon:"🗂️",label:"Partes",        color:"#0F766E"}, // (v5.7) cascada de partes de departamento
     {id:"proyectos",    icon:"📁",label:"Proyectos",    color:T.purple},
     {id:"ia",           icon:"🤖",label:"IA",           color:T.purple},
   ];
@@ -31695,6 +32210,7 @@ function App(props){
     {id:"dashboard",    icon:"🏠",label:"Inicio",       color:usuario.color},
     ...(miTipologia==="stock" ? [{id:"planif_compras",icon:"📋",label:"Planificación",color:"#3B82F6"},{id:"vamos_caros",icon:"📊",label:"Mercado",color:"#7C3AED"}] : []), // (v4.20/4.21) Resp. Stock ve Planificacion y Mercado
     {id:"incidencias",  icon:"🚨",label:"Incidencias",  color:T.red, badge:incMiDeptAb},
+    {id:"parte_depto",  icon:"🧾",label:"Parte",         color:"#0F766E"}, // (v5.7) parte semanal vertical
     {id:"proyectos",    icon:"📁",label:"Proyectos",    color:T.purple}, // (v5.0) proyectos internos + backlog de su depto
     {id:"calendario",   icon:"🗓️",label:"Agenda",        color:T.blue},
     {id:"tareas",       icon:"📌",label:"Tareas",        color:T.red},
@@ -32155,6 +32671,7 @@ function App(props){
         {section==="estrategias"&&          <MisEstrategias usuario={usuario} onNavegar={setSection} onVolverPotencial={function(){return volverAPotencialSiCorresponde(setSection, setClienteDirecto, usuario);}}/>}
         {section==="oportunidades"&&        <GestorOportunidades usuario={usuario} onAbrirCliente={onAbrirCliente} opoDirecta={opoDirecta} onOpoDirectaUsada={function(){setOpoDirecta(null);}} onBack={function(){setHideNav(false);setClienteDirecto(null);setSection(prevSectionRef.current||"dashboard");}} onNewCliente={function(nuevo){setClientesDB(function(prev){if(!prev||!prev._todos)return prev;return Object.assign({},prev,{_todos:[nuevo].concat(prev._todos)});});}}/>}
         {section==="proyectos"&&            <Proyectos usuario={usuario} onAbrirCliente={onAbrirCliente} onIrASeccion={onIrASeccion} proyectoDirecto={proyectoDirecto} onProyectoDirectoUsado={function(){setProyectoDirecto(null);}}/>}
+        {section==="parte_depto"&&          <ParteSemanalDepto usuario={usuario} incidenciasDB={incidenciasDB}/>}
         {section==="incidencias"&&          <Incidencias usuario={usuario} clientesFB={misClientesFB} onAbrirCliente={onAbrirCliente} onNavegar={setSection} incidenciasDB={esTipologia?incidenciasDB.filter(function(i){var t=(i.tipo||i.tipologia||"").toLowerCase();return misTipsRama.indexOf(t)>=0||t===miTipologia;}):incidenciasDB}/>}
 
         {/* Secciones nuevas */}
