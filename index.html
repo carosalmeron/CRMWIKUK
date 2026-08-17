@@ -197,7 +197,7 @@ input,button,select{font-family:inherit;}
 <!-- HUB -->
 <div id="hub" class="screen">
   <div class="hub-header">
-    <div class="hub-logo">GRUPO <span>CONSOLIDADO</span> <span style="font-size:0.4em;color:#8A8078;font-weight:400;margin-left:8px" id="ver-hub">v3.64.0</span></div>
+    <div class="hub-logo">GRUPO <span>CONSOLIDADO</span> <span style="font-size:0.4em;color:#8A8078;font-weight:400;margin-left:8px" id="ver-hub">v3.64.1</span></div>
     <div style="display:flex;align-items:center;gap:10px">
       <span class="hub-user" id="hub-user-name"></span>
       <button class="hub-logout" onclick="doLogout()">Salir</button>
@@ -304,7 +304,7 @@ const USERS_DEFAULT=[
 
 // ── Persistencia ─────────────────────────────────────────────────
 // ── Versión del Portal (mantener sincronizada en cada cambio) ──
-const PORTAL_VERSION="3.64.0";
+const PORTAL_VERSION="3.64.1";
 const PORTAL_BUILD="31/07/2026-version-unificada";
 try{var _pv=document.getElementById('portal-ver');if(_pv)_pv.textContent='Portal v'+PORTAL_VERSION;}catch(e){}
 // Habia tres numeros de version distintos escritos a mano en este archivo y
@@ -845,7 +845,7 @@ function renderHub(){
     currentModule='manuales';
     document.getElementById('frame-title').textContent='📖 Manuales';
     document.getElementById('frame-sub').textContent=currentUser?currentUser.nombre:'';
-    // (v3.64.0) Los manuales viven en su propio proyecto Vercel
+    // (v3.64.1) Los manuales viven en su propio proyecto Vercel
     document.getElementById('module-iframe').src='https://manuales-wikuk.vercel.app/';
     showScreen('module-frame');
   };
@@ -2087,25 +2087,51 @@ function renderManualesAdmin(){
   el.innerHTML=h;
 }
 // (v3.64) Publicar manual desde archivo: contenido a Firebase + versión + avisos
+// (v3.64.1) Detección AUTOMÁTICA de cambios: primero la etiqueta
+// <meta name="cambios"> que traen los manuales generados; si no existe,
+// se comparan las secciones del contenido nuevo contra el anterior.
+function _bloquesManual(html){
+  var out={};
+  String(html||"").split('<div class="paso"').slice(1).forEach(function(seg){
+    var t=/class="t">([^<]{4,90})</.exec(seg);
+    if(!t)return;
+    var texto=seg.replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
+    out[t[1].trim()]=texto;
+  });
+  return out;
+}
+function detectarCambiosManual(viejo,nuevo){
+  var meta=/<meta\s+name=["']cambios["']\s+content=["']([^"']+)["']/i.exec(nuevo||"");
+  if(meta&&meta[1].trim())return meta[1].trim();
+  if(!viejo)return "Primera publicación del manual dentro del CRM.";
+  var a=_bloquesManual(viejo),b=_bloquesManual(nuevo);
+  var nuevos=[],mods=[],quitados=[];
+  Object.keys(b).forEach(function(t){if(!(t in a))nuevos.push(t);else if(a[t]!==b[t])mods.push(t);});
+  Object.keys(a).forEach(function(t){if(!(t in b))quitados.push(t);});
+  var partes=[];
+  if(nuevos.length)partes.push("Nuevo: "+nuevos.slice(0,3).join(" · "));
+  if(mods.length)partes.push("Actualizado: "+mods.slice(0,3).join(" · "));
+  if(quitados.length)partes.push("Eliminado: "+quitados.slice(0,2).join(" · "));
+  return partes.length?partes.join(" — ").slice(0,240):"Contenido revisado y actualizado.";
+}
 function onManualFile(id,inp){
   var f=inp.files&&inp.files[0]; if(!f)return;
   var m=_manuales.find(function(x){return x.id===id;}); if(!m)return;
-  var cambios=prompt("¿Qué ha cambiado en esta versión? (se enviará a la audiencia)","");
-  if(cambios===null){inp.value="";return;}
-  if(!cambios.trim()){alert("Describe los cambios — es lo que la gente verá sin tener que releer todo el manual.");inp.value="";return;}
   var lector=new FileReader();
   lector.onload=function(ev){
     var vieja=m.version||1;
+    var htmlViejo=m.html||"";
     m.html=String(ev.target.result||"");
+    var cambios=detectarCambiosManual(htmlViejo,m.html);
     m.version=vieja+1;
     m.publicadoTs=Date.now();
-    m.cambios=[].concat(m.cambios||[],[{version:m.version,ts:Date.now(),texto:cambios.trim()}]);
+    m.cambios=[].concat(m.cambios||[],[{version:m.version,ts:Date.now(),texto:cambios}]);
     fetch(PORTAL_FB+"/manuales/"+encodeURIComponent(id),{method:"PATCH",
       headers:{"Content-Type":"application/json"},body:JSON.stringify(_toFB(m))})
       .then(function(){
-        notificarAudienciaManual(m,cambios.trim(),function(n,e){
+        notificarAudienciaManual(m,cambios,function(n,e){
           renderManualesAdmin();
-          alert("✅ Publicado "+m.titulo+" v"+m.version+"\n📣 Avisadas "+n+" personas ("+e+" con email)\n⏳ Acuse reiniciado: bloqueo a los 7 días para quien no confirme.");
+          alert("✅ Publicado "+m.titulo+" v"+m.version+"\n📝 Cambios detectados: "+cambios+"\n📣 Avisadas "+n+" personas ("+e+" con email)");
         });
       })
       .catch(function(){alert("Error al publicar");});
