@@ -143,11 +143,12 @@ function destinatariosDe(datos, tipologia){
   const addD=e=>{ if(e) directos.add(String(e).toLowerCase()); };
   const addE=e=>{ if(e) escalado.add(String(e).toLowerCase()); };
 
-  // 1. Departamento del organigrama cuya lista `tipologias` incluye este tipo
+  // 1. Departamento del organigrama cuya lista `tipologias` incluye este tipo,
+  //    o cuyo id ES el tipo (tipos generados por departamento, v5.5)
   const dep=datos.departamentos.find(d=>{
     if(d.activo===false) return false;
     const tips=(d.tipologias||[]).map(t=>String(t).toLowerCase());
-    return tips.indexOf(tipologia)>=0;
+    return tips.indexOf(tipologia)>=0 || String(d._id||d.id||"").toLowerCase()===tipologia;
   });
   if(dep){
     (dep.responsableIds||[]).forEach(rid=>addD(emailDeCuenta(datos,rid)));
@@ -266,8 +267,10 @@ module.exports = async function handler(req, res){
       if(!incidenciaId){ res.status(400).json({error:"Falta incidenciaId"}); return; }
       const inc = await getDoc("incidencias", incidenciaId);
       if(!inc){ res.status(404).json({error:"Incidencia no encontrada"}); return; }
-      const tipologia = TIPO_A_TIPOLOGIA[String(inc.tipo||"").toLowerCase()];
-      if(!tipologia){ res.status(200).json({ok:true, skipped:"tipo no mapeado a tipología"}); return; }
+      // (v5.5) Tipos no clásicos (departamentos nuevos) pasan tal cual
+      const tipoLc = String(inc.tipo||"").toLowerCase();
+      const tipologia = TIPO_A_TIPOLOGIA[tipoLc] || tipoLc;
+      if(!tipologia){ res.status(200).json({ok:true, skipped:"incidencia sin tipo"}); return; }
 
       const datos = await cargarDatos();
       const dest = destinatariosDe(datos, tipologia);
@@ -324,7 +327,8 @@ module.exports = async function handler(req, res){
       const ultimoISO = (inc.ultimoAvisoFecha||"").substring(0,10);
       if(ultimoISO===hoyISO){ saltadas++; continue; }
 
-      const tipologia = TIPO_A_TIPOLOGIA[String(inc.tipo||"").toLowerCase()];
+      const tipoLc = String(inc.tipo||"").toLowerCase();
+      const tipologia = TIPO_A_TIPOLOGIA[tipoLc] || tipoLc; // (v5.5) pass-through
       if(!tipologia){ saltadas++; continue; }
       const dest = destinatariosDe(datos, tipologia);
       if(dest.directos.length===0){ sinEmail++; continue; }
