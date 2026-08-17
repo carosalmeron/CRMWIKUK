@@ -523,6 +523,26 @@ function deptoDeTipologia(tip){
   var t=String(tip||"").toLowerCase();
   return deptosActivos().find(function(d){return (d.tipologias||[]).indexOf(t)>=0;})||null;
 }
+// (v5.4) Tipologías de incidencia bajo la responsabilidad de un usuario:
+// su propia tipología + las de todos los departamentos de su rama del
+// organigrama (donde es responsable, con descendientes; o su departamento
+// si es miembro). Así el responsable de Operaciones ve también las
+// incidencias de Producción y Coordinación.
+function tipologiasDeMiRama(usuario){
+  var set={};
+  var propia=(usuario&&usuario.tipologia||"").toLowerCase();
+  if(propia) set[propia]=1;
+  function bajar(depId,n){
+    if(n>20) return;
+    var d=deptoDe(depId); if(!d) return;
+    (d.tipologias||[]).forEach(function(x){set[String(x).toLowerCase()]=1;});
+    deptosHijosDe(depId).forEach(function(h){bajar(h.id,n+1);});
+  }
+  var misDeps=deptosDondeEsResponsable(usuario);
+  if(misDeps.length>0) misDeps.forEach(function(d){bajar(d.id,0);});
+  else if(usuario&&usuario.departamentoId) bajar(usuario.departamentoId,0);
+  return Object.keys(set);
+}
 // Carga/merge desde Firebase. Los docs de Firebase MANDAN sobre la semilla.
 async function cargarDepartamentosFB(){
   try{
@@ -5045,9 +5065,12 @@ function DashTipologia({usuario, onNav, incidenciasDB}){
   function esDeMiTipo(i){
     if(!i||i.eliminada) return false;
     var t=String(i.tipo||"").toLowerCase();
-    if(tip==="stock") return t==="stock"||t==="rotura"||t.indexOf("stock")>=0;
-    return t===tip;
+    if(tip==="stock"&&(t==="stock"||t==="rotura"||t.indexOf("stock")>=0)) return true;
+    if(t===tip) return true;
+    // (v5.4) También las tipologías de su rama del organigrama (deptos hijos)
+    return misRama.indexOf(t)>=0;
   }
+  const misRama=(typeof tipologiasDeMiRama==="function")?tipologiasDeMiRama(usuario):[];
   const todasMis=(incidenciasDB||[]).filter(esDeMiTipo);
 
   // Agrupaciones — abiertas urgentes / abiertas normales / en proceso / resueltas hoy
@@ -31442,13 +31465,16 @@ function App(props){
   ];
 
   // (v3.28.8) Menú para responsables de departamento — solo incidencias de su tipo
+  // (v5.4) Ampliado a su RAMA del organigrama: un responsable de Operaciones
+  // ve también las de Producción y Coordinación (sus deptos hijos).
   const miTipologia=(usuario.tipologia||"").toLowerCase();
+  const misTipsRama=esTipologia?tipologiasDeMiRama(usuario):[];
   var incMiDeptAb=0;
   if(esTipologia){
     (incidenciasDB||[]).forEach(function(i){
       if(i.eliminada||i.estado==="cerrada"||i.estado==="resuelta") return;
       var t=(i.tipo||i.tipologia||"").toLowerCase();
-      if(t===miTipologia) incMiDeptAb++;
+      if(misTipsRama.indexOf(t)>=0||t===miTipologia) incMiDeptAb++;
     });
   }
   const NAV_TIPOLOGIA=[
@@ -31915,7 +31941,7 @@ function App(props){
         {section==="estrategias"&&          <MisEstrategias usuario={usuario} onNavegar={setSection} onVolverPotencial={function(){return volverAPotencialSiCorresponde(setSection, setClienteDirecto, usuario);}}/>}
         {section==="oportunidades"&&        <GestorOportunidades usuario={usuario} onAbrirCliente={onAbrirCliente} opoDirecta={opoDirecta} onOpoDirectaUsada={function(){setOpoDirecta(null);}} onBack={function(){setHideNav(false);setClienteDirecto(null);setSection(prevSectionRef.current||"dashboard");}} onNewCliente={function(nuevo){setClientesDB(function(prev){if(!prev||!prev._todos)return prev;return Object.assign({},prev,{_todos:[nuevo].concat(prev._todos)});});}}/>}
         {section==="proyectos"&&            <Proyectos usuario={usuario} onAbrirCliente={onAbrirCliente} onIrASeccion={onIrASeccion} proyectoDirecto={proyectoDirecto} onProyectoDirectoUsado={function(){setProyectoDirecto(null);}}/>}
-        {section==="incidencias"&&          <Incidencias usuario={usuario} clientesFB={misClientesFB} onAbrirCliente={onAbrirCliente} onNavegar={setSection} incidenciasDB={esTipologia?incidenciasDB.filter(function(i){var t=(i.tipo||i.tipologia||"").toLowerCase();return t===miTipologia;}):incidenciasDB}/>}
+        {section==="incidencias"&&          <Incidencias usuario={usuario} clientesFB={misClientesFB} onAbrirCliente={onAbrirCliente} onNavegar={setSection} incidenciasDB={esTipologia?incidenciasDB.filter(function(i){var t=(i.tipo||i.tipologia||"").toLowerCase();return misTipsRama.indexOf(t)>=0||t===miTipologia;}):incidenciasDB}/>}
 
         {/* Secciones nuevas */}
         {section==="historial"&& <HistorialSemanal usuario={usuario}/> }
