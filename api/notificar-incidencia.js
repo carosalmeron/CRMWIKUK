@@ -1,9 +1,22 @@
 // api/notificar-incidencia.js
-// Envía email al responsable de tipología cuando se crea una incidencia
+// Envía email a los responsables cuando se crea una incidencia
 // y también sirve como worker para los recordatorios diarios.
 //
-// POST inmediato: { incidenciaId } → notifica al responsable de esa incidencia
+// POST inmediato: { incidenciaId } → notifica a los responsables de esa incidencia
 // GET (cron):    sin params       → procesa todas las abiertas y envía recordatorios
+//
+// (v5.5) ALINEADO CON EL ORGANIGRAMA:
+// - Los destinatarios salen de la colección "departamentos": el depto cuya
+//   lista `tipologias` incluye el tipo de la incidencia → TODOS sus
+//   `responsableIds` reciben el email (antes: un solo email fijo).
+// - Escalado: los responsables del departamento PADRE van en copia
+//   (ej. incidencia de Producción → responsables de Producción + copia a
+//   los de Operaciones). Dirección no se copia (el CRM ya avisa a CEO/dir).
+// - Compatibilidad: se mantienen los perfiles antiguos resp_* y cualquier
+//   ficha con campo `tipologia` coincidente. Cuentas con `duplicadaDe` o
+//   `activo:false` se ignoran.
+// - Un solo fetch de cada colección por invocación (el cron ya no
+//   redescarga usuarios por cada incidencia).
 
 const FB = "https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
 
@@ -78,7 +91,7 @@ const LABEL_TIPO = {
   stock:"Stock", produccion:"Producción", id:"I+D", coordinacion:"Coordinación"
 };
 
-// Mapeo id de cuenta → tipología (para portal_users que solo tienen rol crm_jefe)
+// Mapeo id de cuenta legacy → tipología (perfiles resp_* antiguos)
 const ID_A_TIPOLOGIA = {
   resp_cal: "calidad",
   resp_log: "logistica",
@@ -89,23 +102,77 @@ const ID_A_TIPOLOGIA = {
   resp_coord: "coordinacion"
 };
 
-// Encuentra el email del responsable para una tipología
-async function emailResponsable(tipologia){
-  if(!tipologia) return null;
-  // 1. Buscar en portal_users por id resp_xxx o por campo tipologia
-  const portal = await listColeccion("portal_users");
-  let resp = portal.find(u=>{
-    const tip = u.tipologia || ID_A_TIPOLOGIA[u.id||u._id];
-    return tip===tipologia && u.email;
+// ─────────────────────────────────────────────────────────────────────
+// (v5.5) Resolución de destinatarios desde el ORGANIGRAMA
+// ─────────────────────────────────────────────────────────────────────
+
+// Carga las 3 colecciones UNA vez por invocación
+async function cargarDatos(){
+  const [departamentos, portal, usuarios] = await Promise.all([
+    listColeccion("departamentos"),
+    listColeccion("portal_users"),
+    listColeccion("usuarios"),
+  ]);
+  return {departamentos, portal, usuarios};
+}
+
+function cuentaValida(u){
+  return u && !u.duplicadaDe && u.activo!==false && !u._legacy;
+}
+
+// Todas las cuentas (portal + usuarios) de una persona por id, deduplicadas
+function emailDeCuenta(datos, cuentaId){
+  if(!cuentaId) return null;
+  const idN=String(cuentaId).toLowerCase();
+  const coincide=u=>{
+    if(!cuentaValida(u)) return false;
+    return [u.id,u._id,u.crmId,u.perfilCRM,u.username]
+      .some(k=>k&&String(k).toLowerCase()===idN);
+  };
+  // usuarios primero (ficha CRM), luego portal (credenciales suelen llevar email)
+  let m=datos.usuarios.find(u=>coincide(u)&&u.email);
+  if(m) return m.email;
+  m=datos.portal.find(u=>coincide(u)&&u.email);
+  return m?m.email:null;
+}
+
+// Destinatarios de una tipología según el organigrama:
+// { directos:[emails], escalado:[emails del depto padre] }
+function destinatariosDe(datos, tipologia){
+  const directos=new Set(), escalado=new Set();
+  const addD=e=>{ if(e) directos.add(String(e).toLowerCase()); };
+  const addE=e=>{ if(e) escalado.add(String(e).toLowerCase()); };
+
+  // 1. Departamento del organigrama cuya lista `tipologias` incluye este tipo
+  const dep=datos.departamentos.find(d=>{
+    if(d.activo===false) return false;
+    const tips=(d.tipologias||[]).map(t=>String(t).toLowerCase());
+    return tips.indexOf(tipologia)>=0;
   });
-  if(resp&&resp.email) return resp.email;
-  // 2. Fallback: colección usuarios
-  const usuarios = await listColeccion("usuarios");
-  resp = usuarios.find(u=>{
-    const tip = u.tipologia || ID_A_TIPOLOGIA[u.id||u._id];
-    return tip===tipologia && u.email;
+  if(dep){
+    (dep.responsableIds||[]).forEach(rid=>addD(emailDeCuenta(datos,rid)));
+    // Escalado: responsables del departamento PADRE (excepto dirección)
+    if(dep.padre && dep.padre!=="direccion"){
+      const padre=datos.departamentos.find(d=>d._id===dep.padre||d.id===dep.padre);
+      if(padre&&padre.activo!==false){
+        (padre.responsableIds||[]).forEach(rid=>addE(emailDeCuenta(datos,rid)));
+      }
+    }
+  }
+
+  // 2. Compatibilidad: cualquier ficha con campo `tipologia` coincidente
+  //    o con id legacy resp_* (comportamiento anterior, ahora aditivo)
+  [datos.portal, datos.usuarios].forEach(col=>{
+    col.forEach(u=>{
+      if(!cuentaValida(u)||!u.email) return;
+      const tip=String(u.tipologia||ID_A_TIPOLOGIA[u.id||u._id]||"").toLowerCase();
+      if(tip===tipologia) addD(u.email);
+    });
   });
-  return resp&&resp.email ? resp.email : null;
+
+  // Quien ya recibe directo no necesita copia de escalado
+  escalado.forEach(e=>{ if(directos.has(e)) escalado.delete(e); });
+  return {directos:[...directos], escalado:[...escalado]};
 }
 
 // Días entre dos fechas (a partir de una fecha dd/mm/aaaa o ISO)
@@ -124,13 +191,12 @@ function diasDesde(fechaRaw){
   return Math.floor((Date.now()-d.getTime())/(1000*60*60*24));
 }
 
-// Construye y envía un email. Acepta destinatario simple o múltiple separado por ; o ,
+// Construye y envía un email a una lista de destinatarios (array o string)
 async function enviarEmail(to, subject, text){
   if(!to) return {ok:false, error:"sin destinatario"};
-  // (v3.23.94) Trocear strings con varios emails ("a@x.com;b@y.com" o "a@x.com,b@y.com")
-  const destinatarios = String(to)
-    .split(/[;,]/)
-    .map(s=>s.trim())
+  const lista=Array.isArray(to)?to:String(to).split(/[;,]/);
+  const destinatarios = lista
+    .map(s=>String(s).trim())
     .filter(s=>s.length>0 && s.indexOf("@")>0);
   if(destinatarios.length===0) return {ok:false, error:"destinatario inválido"};
 
@@ -157,7 +223,7 @@ async function enviarEmail(to, subject, text){
 }
 
 // Construye cuerpo y asunto según es nuevo o recordatorio
-function construirEmail(inc, dias){
+function construirEmail(inc, dias, esEscalado){
   const tipo = LABEL_TIPO[TIPO_A_TIPOLOGIA[String(inc.tipo||"").toLowerCase()]] || inc.tipo || "—";
   const cliente = inc.cliente || inc.clienteNombre || "—";
   const prio = (inc.prioridad||"media").toLowerCase();
@@ -165,7 +231,10 @@ function construirEmail(inc, dias){
   const linkCRM = "https://crmwikuk.vercel.app/";
 
   let subject, intro;
-  if(dias===0){
+  if(esEscalado){
+    subject = "📋 (Info) Incidencia de "+tipo+" en tu área — "+cliente;
+    intro = "Se ha registrado una incidencia en un departamento a tu cargo. Sus responsables ya han sido avisados; esto es una copia informativa:";
+  } else if(dias===0){
     subject = "🆕 Nueva incidencia de "+tipo+" — "+cliente;
     intro = "Se ha registrado una nueva incidencia que requiere tu atención:";
   } else if(dias===1){
@@ -199,26 +268,43 @@ module.exports = async function handler(req, res){
       if(!inc){ res.status(404).json({error:"Incidencia no encontrada"}); return; }
       const tipologia = TIPO_A_TIPOLOGIA[String(inc.tipo||"").toLowerCase()];
       if(!tipologia){ res.status(200).json({ok:true, skipped:"tipo no mapeado a tipología"}); return; }
-      const email = await emailResponsable(tipologia);
-      if(!email){ res.status(200).json({ok:true, skipped:"sin email configurado para "+tipologia}); return; }
-      const {subject, body} = construirEmail(inc, 0);
-      const send = await enviarEmail(email, subject, body);
-      if(send.ok){
-        // Marcar que se envió aviso inicial
+
+      const datos = await cargarDatos();
+      const dest = destinatariosDe(datos, tipologia);
+      if(dest.directos.length===0 && dest.escalado.length===0){
+        res.status(200).json({ok:true, skipped:"sin email configurado para "+tipologia}); return;
+      }
+
+      let sendD={ok:true}, sendE={ok:true};
+      // Email principal a los responsables directos
+      if(dest.directos.length>0){
+        const {subject, body} = construirEmail(inc, 0, false);
+        sendD = await enviarEmail(dest.directos, subject, body);
+      }
+      // Copia informativa a los responsables del departamento padre
+      if(dest.escalado.length>0){
+        const {subject, body} = construirEmail(inc, 0, true);
+        sendE = await enviarEmail(dest.escalado, subject, body);
+      }
+      if(sendD.ok){
         await setCampo("incidencias", incidenciaId, "ultimoAvisoFecha", new Date().toISOString());
         await setCampo("incidencias", incidenciaId, "ultimoAvisoTipo", "creacion");
       }
       res.status(200).json({
-        ok:send.ok,
-        to:send.destinatarios,
-        status:send.status,
-        response: send.response ? String(send.response).substring(0,200) : null
+        ok:sendD.ok,
+        to:sendD.destinatarios||[],
+        escaladoA:sendE.destinatarios||[],
+        status:sendD.status,
+        response: sendD.response ? String(sendD.response).substring(0,200) : null
       });
       return;
     }
 
     // ─────── MODO 2: GET (cron diario) — repasar y enviar recordatorios ───────
-    const incidencias = await listColeccion("incidencias");
+    const [incidencias, datos] = await Promise.all([
+      listColeccion("incidencias"),
+      cargarDatos(),
+    ]);
     const hoy = new Date();
     const hoyISO = hoy.toISOString().substring(0,10); // yyyy-mm-dd
 
@@ -240,11 +326,12 @@ module.exports = async function handler(req, res){
 
       const tipologia = TIPO_A_TIPOLOGIA[String(inc.tipo||"").toLowerCase()];
       if(!tipologia){ saltadas++; continue; }
-      const email = await emailResponsable(tipologia);
-      if(!email){ sinEmail++; continue; }
+      const dest = destinatariosDe(datos, tipologia);
+      if(dest.directos.length===0){ sinEmail++; continue; }
 
-      const {subject, body} = construirEmail(inc, dias);
-      const send = await enviarEmail(email, subject, body);
+      // Recordatorios: solo a los responsables directos (sin escalado diario)
+      const {subject, body} = construirEmail(inc, dias, false);
+      const send = await enviarEmail(dest.directos, subject, body);
       if(send.ok){
         // (v3.23.94) Solo marcar como avisada si el envío fue OK
         await setCampo("incidencias", inc._id, "ultimoAvisoFecha", new Date().toISOString());
