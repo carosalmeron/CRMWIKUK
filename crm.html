@@ -345,7 +345,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "6.1.0";
+const CRM_VERSION = "6.3.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -531,6 +531,147 @@ function personasQueMeReportan(usuario){
   });
 }
 function idParteSemanal(uid,ano,sem){return uid+"_"+ano+"w"+sem;}
+
+// ═══════════════════════════════════════════════════════════════════
+// (v6.2) MANUALES CON ACUSE DE LECTURA
+// Cada manual define versión y audiencia (editable en el portal → Config).
+// Quien tenga manuales pendientes ve un aviso al entrar; pasados 7 días
+// desde su publicación, el CRM se bloquea hasta confirmar la lectura.
+// Colecciones: manuales (catálogo) · lecturas_manuales (id: uid_manualId)
+// ═══════════════════════════════════════════════════════════════════
+let MANUALES=[
+  {id:"comercial",    titulo:"📊 Tus ventas y tus pedidos",  url:"https://manuales-wikuk.vercel.app/comercial/",    aplica:"comerciales",  version:1, publicadoTs:1786924800000, activo:true},
+  {id:"planificacion",titulo:"📋 Planificación de compras",  url:"https://manuales-wikuk.vercel.app/planificacion/",aplica:"comerciales",  version:1, publicadoTs:1786924800000, activo:true},
+  {id:"incidencias",  titulo:"🚨 Incidencias",               url:"https://manuales-wikuk.vercel.app/Incidencias/",  aplica:"todos",        version:1, publicadoTs:1786924800000, activo:true},
+  {id:"desarrollo",   titulo:"🧪 Desarrollo de producto",    url:"https://manuales-wikuk.vercel.app/desarrollo/",   aplica:"todos",        version:1, publicadoTs:1786924800000, activo:true},
+];
+async function cargarManualesFB(){
+  try{
+    var docs=await fbLeer("manuales");
+    if(docs&&docs.length>0){
+      var porId={};MANUALES.forEach(function(m){porId[m.id]=m;});
+      docs.forEach(function(d){porId[d.id]=Object.assign({},porId[d.id]||{},d);});
+      MANUALES=Object.values(porId);
+    }
+  }catch(e){}
+  return MANUALES;
+}
+function manualAplicaA(usuario,m){
+  if(!usuario||m.activo===false)return false;
+  var rol=String(usuario.rol||"").toLowerCase();
+  if(m.aplica==="comerciales")return rol==="agente"||rol==="jefe";
+  if(m.aplica==="departamentos")return rol==="tipologia"||rol==="compras";
+  if(m.aplica==="direccion")return rol==="director"||rol==="ceo";
+  return true; // todos
+}
+function ManualesGate({usuario}){
+  const [lecturas,setLecturas]=useState(null); // null=cargando
+  const [abiertos,setAbiertos]=useState({});   // manuales abiertos en esta sesión
+  const [oculto,setOculto]=useState(false);    // banner plegado (solo si no hay bloqueo)
+  const [visor,setVisor]=useState(null);       // (v6.3) manual abierto en el visor interno
+  useEffect(function(){
+    Promise.all([cargarManualesFB(),fbLeer("lecturas_manuales").catch(function(){return [];})])
+      .then(function(res){setLecturas(res[1]||[]);});
+  },[]);
+  if(lecturas===null||!usuario)return null;
+
+  var pend=MANUALES.filter(function(m){
+    if(!manualAplicaA(usuario,m))return false;
+    return !(lecturas||[]).some(function(l){
+      return l.usuarioId===usuario.id&&l.manualId===m.id&&(l.version||1)>=(m.version||1);
+    });
+  }).map(function(m){
+    return {...m,dias:Math.floor((Date.now()-(m.publicadoTs||Date.now()))/864e5)};
+  });
+  if(pend.length===0)return null;
+
+  var bloqueo=pend.some(function(m){return m.dias>7;});
+
+  function abrir(m){
+    setAbiertos(function(p){var n={...p};n[m.id]=true;return n;});
+    if(m.html){setVisor(m);return;} // contenido publicado desde el portal → visor interno
+    try{window.open(m.url,"_blank");}catch(e){}
+  }
+  function confirmar(m){
+    var doc={id:usuario.id+"_"+m.id,usuarioId:usuario.id,nombre:usuario.nombre,
+      manualId:m.id,version:m.version||1,ts:Date.now()};
+    fbEscribir("lecturas_manuales",doc.id,doc);
+    setLecturas(function(p){return [...(p||[]).filter(function(l){return l.id!==doc.id;}),doc];});
+  }
+
+  var lista=pend.map(function(m){
+    var yaAbierto=!!abiertos[m.id];
+    return (
+      <div key={m.id} style={{background:"#fff",borderRadius:11,padding:"11px 12px",marginBottom:8,
+        border:"1.5px solid "+(m.dias>7?"#FECACA":T.border)}}>
+        <div style={{display:"flex",justifyContent:"space-between",gap:8,alignItems:"center",marginBottom:8}}>
+          <div style={{flex:1,minWidth:0}}>
+            <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>{m.titulo}
+              {(m.version||1)>1&&<span style={{fontSize:9.5,color:T.blue,fontWeight:700}}> · 🔄 v{m.version}</span>}</p>
+            {(function(){
+              var ult=(m.cambios||[]).slice(-1)[0];
+              return ((m.version||1)>1&&ult)?<p style={{margin:"3px 0 0",fontSize:10.5,color:T.blue,lineHeight:1.4}}>Novedades: {ult.texto}</p>:null;
+            })()}
+          </div>
+          <span style={{fontSize:10,fontWeight:800,color:m.dias>7?T.red:m.dias>=5?"#CA8A04":T.muted,flexShrink:0}}>
+            {m.dias>7?"🔒 bloqueando":m.dias>=5?(7-m.dias)+" día"+(7-m.dias===1?"":"s")+" para bloqueo":m.dias+" d pendiente"}</span>
+        </div>
+        <div style={{display:"flex",gap:6}}>
+          <button onClick={function(){abrir(m);}}
+            style={{flex:1,padding:"10px",borderRadius:9,border:"1.5px solid "+T.navy,background:"#fff",
+              color:T.navy,fontWeight:800,fontSize:12,cursor:"pointer"}}>📖 Leer manual</button>
+          <button onClick={function(){confirmar(m);}} disabled={!yaAbierto}
+            title={yaAbierto?"":"Abre el manual primero"}
+            style={{flex:1,padding:"10px",borderRadius:9,border:"none",
+              background:yaAbierto?T.green:"#E2E8F0",color:yaAbierto?"#fff":"#94A3B8",
+              fontWeight:800,fontSize:12,cursor:yaAbierto?"pointer":"default"}}>✅ He leído y entendido</button>
+        </div>
+      </div>
+    );
+  });
+
+  var visorUI=visor?(
+    <div style={{position:"fixed",inset:0,background:"#0F172A",zIndex:1200,display:"flex",flexDirection:"column"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",flexShrink:0}}>
+        <p style={{margin:0,fontSize:13,fontWeight:800,color:"#fff"}}>{visor.titulo} <span style={{fontSize:10,color:"#94A3B8"}}>v{visor.version||1}</span></p>
+        <button onClick={function(){setVisor(null);}}
+          style={{padding:"8px 16px",borderRadius:9,border:"none",background:"#fff",color:T.text,fontWeight:800,fontSize:12,cursor:"pointer"}}>✕ Cerrar</button>
+      </div>
+      <iframe srcDoc={visor.html} title={visor.titulo}
+        style={{flex:1,border:"none",width:"100%",background:"#fff"}} sandbox="allow-same-origin"/>
+    </div>
+  ):null;
+
+  if(bloqueo){
+    return (
+      <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.85)",zIndex:999,
+        display:"flex",alignItems:"center",justifyContent:"center",padding:16,overflowY:"auto"}}>
+        {visorUI}
+        <div style={{background:T.bg,borderRadius:18,padding:"20px 18px",width:"100%",maxWidth:460,maxHeight:"88vh",overflowY:"auto"}}>
+          <p style={{margin:"0 0 4px",fontSize:19,fontWeight:900,color:T.red}}>🔒 CRM bloqueado</p>
+          <p style={{margin:"0 0 14px",fontSize:12.5,color:T.text,lineHeight:1.5}}>
+            Tienes manuales pendientes desde hace <b>más de 7 días</b>. Para seguir usando el CRM,
+            léelos y confirma la lectura — quedará registrado con tu nombre y fecha.</p>
+          {lista}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div style={{background:"#FFFBEB",border:"1.5px solid #FDE68A",borderRadius:13,padding:"11px 13px",marginBottom:14}}>
+      {visorUI}
+      <div onClick={function(){setOculto(!oculto);}} style={{display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}}>
+        <p style={{margin:0,fontSize:12.5,fontWeight:800,color:"#92400E"}}>
+          📖 {pend.length} manual{pend.length===1?"":"es"} pendiente{pend.length===1?"":"s"} de leer</p>
+        <span style={{fontSize:11,color:"#92400E"}}>{oculto?"▾ ver":"▴"}</span>
+      </div>
+      {!oculto&&<div style={{marginTop:10}}>
+        {lista}
+        <p style={{margin:0,fontSize:9.5,color:"#92400E"}}>A los 7 días de su publicación, los pendientes bloquean el CRM hasta confirmarlos.</p>
+      </div>}
+    </div>
+  );
+}
 
 // (v6.0.1) OPCIONES EN ABANICO DEL ORGANIGRAMA para selectores nativos:
 // recorre el árbol de departamentos (sangría por nivel) y dentro de cada uno
@@ -33427,6 +33568,9 @@ function App(props){
             </div>
           );
         })()}
+
+        {/* (v6.2) Guardián de manuales: aviso de pendientes y bloqueo a los 7 días */}
+        <ManualesGate usuario={usuario}/>
 
         {/* AGENTE */}
         {esAgente&&section==="dashboard"&&  <DashAgente usuario={usuario} onNav={setSection} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} incidenciasDB={incidenciasDB} calendarioDB={calendarioDB} actividad={actividadSemana} _ver={objVer}/>}
