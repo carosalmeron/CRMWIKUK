@@ -76,10 +76,12 @@ tr:nth-child(even) td{background:var(--zebra)}
   <h2><span class="n">ALIMENTADOR 1</span>Rutas organizadas → Firebase</h2>
   <div class="drop" id="dropR">
     <div class="tit">📗 Sube la Rueda_Agenda (.xlsx)</div>
-    <div class="sub">Lee la hoja FILTRABLE, se queda con los clientes de cartera (visitas y llamadas, sin prospección) y los sube a la colección <b>radar_rutas</b> con su KA, ruta y provincia. Volver a subir SOBRESCRIBE.</div>
+    <div class="sub">Lee la hoja FILTRABLE, se queda con los clientes de cartera (visitas y llamadas, sin prospección) y los sube a la colección <b>radar_rutas</b> con su KA, ruta y provincia. Si el Excel trae columna <b>Semana</b>, actualiza también la <b>rueda semanal del CRM</b> (rueda_anual): el comercial verá propuesta su ruta al abrir cada semana. Volver a subir SOBRESCRIBE.</div>
     <div class="fich" id="fichR"></div>
   </div>
-  <div class="fila"><button class="cta" id="btnSubir" disabled>SUBIR RUTAS A FIREBASE</button><span class="msg" id="msgR"></span></div>
+  <div class="fila"><button class="cta" id="btnSubir" disabled>SUBIR RUTAS A FIREBASE</button>
+    <button class="mini" id="btnBajar">⬇ Descargar Excel desde la nube</button>
+    <span class="msg" id="msgR"></span></div>
   <div class="fila">
     <button class="mini" id="btnInt">🌍 Organizar INTERNACIONALES desde la BD (Miguel · Azarco · Ricardo)</button>
     <span class="msg" id="msgInt"></span>
@@ -219,10 +221,45 @@ async function fbGet(ruta){const r=await fetch(FB+"/"+ruta);if(!r.ok)throw new E
 async function fbSet(doc,fields){
   const r=await fetch(FB+"/"+doc,{method:"PATCH",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({fields})});
-  if(!r.ok){const t=await r.text();throw new Error("HTTP "+r.status+" — si es 403, añade en las reglas de Firestore: match /radar_rutas/{d} y /radar_meta/{d} → allow read, write: if true;");}
+  if(!r.ok){const t=await r.text();throw new Error("HTTP "+r.status+" — si es 403, añade en las reglas de Firestore: match /radar_rutas/{d}, /radar_meta/{d} y /rueda_anual/{d} → allow read, write: if true;");}
   return r.json();}
 // ═══ ALIMENTADOR 1 ═══
 let rutasExcel=null;
+let ruedaPorKA=null; // (v3.1) {KA:{w:{rutas:[..],dias:{d:[nombres]}}}} para rueda_anual del CRM
+// (v3.1) Serializador Firestore recursivo (para mapas anidados de la rueda)
+function fsVal(v){
+  if(v===null||v===undefined)return{nullValue:null};
+  if(typeof v==="boolean")return{booleanValue:v};
+  if(typeof v==="number")return Number.isInteger(v)?{integerValue:String(v)}:{doubleValue:v};
+  if(typeof v==="string")return{stringValue:v};
+  if(Array.isArray(v))return{arrayValue:{values:v.map(fsVal)}};
+  return{mapValue:{fields:Object.fromEntries(Object.entries(v).map(([k,x])=>[k,fsVal(x)]))}};
+}
+// (v3.1) Día por cliente: nombres es/pt, números 1-5, fechas texto o serial Excel
+function diaDeValor(v){
+  if(v==null||v==="")return null;
+  if(typeof v==="number"){
+    if(v>=1&&v<=5)return{dia:Math.round(v),explicito:true};
+    if(v>40000&&v<60000){const dt=new Date(Date.UTC(1899,11,30)+v*86400000);const g=dt.getUTCDay();return(g>=1&&g<=5)?{dia:g,explicito:false}:null;}
+    return null;
+  }
+  const s=String(v).trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+  if(!s)return null;
+  const NOM={lunes:1,segunda:1,lun:1,seg:1,l:1,martes:2,terca:2,mar:2,ter:2,m:2,miercoles:3,quarta:3,mie:3,qua:3,x:3,jueves:4,quinta:4,jue:4,qui:4,j:4,viernes:5,sexta:5,vie:5,sex:5,v:5};
+  const s0=s.split(/[\s·.\-]/)[0];
+  if(NOM[s0]!==undefined)return{dia:NOM[s0],explicito:true};
+  if(/^[1-5]$/.test(s))return{dia:parseInt(s),explicito:true};
+  const MES={ene:0,jan:0,feb:1,fev:1,mar:2,abr:3,apr:3,may:4,mai:4,jun:5,jul:6,ago:7,aug:7,sep:8,set:8,oct:9,out:9,nov:10,dic:11,dez:11,dec:11};
+  const mF=s.match(/^(\d{1,2})[\/\-]([a-z]{3,4}|\d{1,2})([\/\-](\d{2,4}))?$/);
+  if(mF){
+    const dd=parseInt(mF[1]);const mm=/^\d+$/.test(mF[2])?parseInt(mF[2])-1:MES[mF[2].slice(0,3)];
+    if(mm===undefined||isNaN(mm))return null;
+    let yy=mF[4]?parseInt(mF[4]):new Date().getFullYear();if(yy<100)yy+=2000;
+    const d=new Date(yy,mm,dd);if(isNaN(d.getTime()))return null;
+    const g=d.getDay();return(g>=1&&g<=5)?{dia:g,explicito:false}:null;
+  }
+  return null;
+}
 function setupDrop(id,fn){const el=document.getElementById(id);
   el.addEventListener("click",()=>{const i=document.createElement("input");i.type="file";i.accept=".xlsx,.xls,.csv";i.onchange=()=>fn(i.files[0],el);i.click();});
   ["dragover","dragenter"].forEach(ev=>el.addEventListener(ev,e=>{e.preventDefault();el.classList.add("over");}));
@@ -239,19 +276,63 @@ setupDrop("dropR",(f,el)=>{
     const H=rows[h].map(x=>String(x||""));
     const ix={acc:H.findIndex(x=>/Acci/i.test(x)),cli:H.findIndex(x=>/Cliente/i.test(x)),
       pob:H.findIndex(x=>/Poblaci/i.test(x)),prov:H.findIndex(x=>/Provincia/i.test(x)),
-      ka:H.findIndex(x=>/^KA$|KA del/i.test(x)),ruta:H.findIndex(x=>/Ruta/i.test(x))};
+      ka:H.findIndex(x=>/^KA$|KA del/i.test(x)),ruta:H.findIndex(x=>/Ruta/i.test(x)),
+      sem:H.findIndex(x=>/Semana/i.test(x)),dia:H.findIndex(x=>/^D[ií]a\b|^Fecha\b|^Lunes\b/i.test(x))};
     const mapa={};
+    const rdRaw={}; // (v3.1) KA → semana → {rutas:Set, regs:[{dia,nombre,explicito}]}
     rows.slice(h+1).forEach(r=>{
       const acc=String(r[ix.acc]||"");if(!/^VISITA|^LLAMADA/i.test(acc))return;
       const nom=String(r[ix.cli]||"").trim();if(!nom)return;
       const clave=norm(nom)+"|"+norm(String(r[ix.pob]||""));
       if(!mapa[clave])mapa[clave]={n:nom,p:String(r[ix.pob]||""),pr:String(r[ix.prov]||""),
-        ka:String(r[ix.ka]||""),ruta:""};
-      if(/^VISITA/i.test(acc)&&!mapa[clave].ruta)mapa[clave].ruta=String(r[ix.ruta]||"");
+        ka:String(r[ix.ka]||""),ruta:"",sem:"",dia:""};
+      if(/^VISITA/i.test(acc)&&!mapa[clave].ruta){
+        mapa[clave].ruta=String(r[ix.ruta]||"");
+        // (v3.1) Guardar semana y día tal cual vienen, para poder DESCARGAR el Excel después
+        if(ix.sem>=0)mapa[clave].sem=String(r[ix.sem]||"");
+        if(ix.dia>=0)mapa[clave].dia=String(r[ix.dia]||"");
+      }
+      // (v3.1) Rueda anual: semana ISO (+ día opcional) de cada visita
+      if(ix.sem>=0&&/^VISITA/i.test(acc)){
+        const kaU=String(r[ix.ka]||"").toUpperCase().trim();
+        const mSem=String(r[ix.sem]||"").match(/(\d{1,2})/);
+        const mRut=String(r[ix.ruta]||"").match(/R?\s*(\d{1,2})/i);
+        if(kaU&&mSem){
+          const w=parseInt(mSem[1]);
+          if(w>=1&&w<=53){
+            if(!rdRaw[kaU])rdRaw[kaU]={};
+            if(!rdRaw[kaU][w])rdRaw[kaU][w]={rutas:new Set(),regs:[]};
+            if(mRut)rdRaw[kaU][w].rutas.add(parseInt(mRut[1]));
+            if(ix.dia>=0){const dV=diaDeValor(r[ix.dia]);if(dV)rdRaw[kaU][w].regs.push({dia:dV.dia,nombre:nom,explicito:dV.explicito});}
+          }
+        }
+      }
     });
+    // (v3.1) Consolidar rueda: días solo si son explícitos o hay ≥2 distintos
+    ruedaPorKA=null;
+    if(ix.sem>=0){
+      ruedaPorKA={};
+      Object.keys(rdRaw).forEach(ka=>{
+        const semanas={};
+        Object.keys(rdRaw[ka]).forEach(w=>{
+          const e=rdRaw[ka][w];
+          const ent={rutas:[...e.rutas].sort((a,b)=>a-b)};
+          const dist=new Set(e.regs.map(x=>x.dia));
+          if(e.regs.length>0&&(e.regs.some(x=>x.explicito)||dist.size>=2)){
+            const dm={};e.regs.forEach(x=>{if(!dm[x.dia])dm[x.dia]=[];if(!dm[x.dia].includes(x.nombre))dm[x.dia].push(x.nombre);});
+            ent.dias=dm;
+          }
+          if(ent.rutas.length>0||ent.dias)semanas[w]=ent;
+        });
+        if(Object.keys(semanas).length>0)ruedaPorKA[ka]={semanas};
+      });
+      if(Object.keys(ruedaPorKA).length===0)ruedaPorKA=null;
+    }
     rutasExcel=Object.values(mapa);
     el.classList.add("ok");
-    document.getElementById("fichR").textContent=f.name+" · "+rutasExcel.length+" clientes de cartera con ruta";
+    const nKAsRueda=ruedaPorKA?Object.keys(ruedaPorKA).length:0;
+    document.getElementById("fichR").textContent=f.name+" · "+rutasExcel.length+" clientes de cartera con ruta"+
+      (nKAsRueda>0?" · 📅 rueda semanal detectada ("+nKAsRueda+" KA)":" · ⚠ sin columna Semana: la rueda semanal del CRM no se actualizará");
     document.getElementById("btnSubir").disabled=false;
   };
   rd.readAsArrayBuffer(f);
@@ -269,8 +350,127 @@ document.getElementById("btnSubir").onclick=async()=>{
     const porKA={};rutasExcel.forEach(c=>{porKA[c.ka]=(porKA[c.ka]||0)+1;});
     await fbSet("radar_meta/estado",{fecha:{stringValue:new Date().toISOString()},
       total:{integerValue:String(rutasExcel.length)},porKA:{stringValue:JSON.stringify(porKA)}});
-    m.className="msg okm";m.textContent="✓ "+rutasExcel.length+" clientes con ruta en la nube.";
+    // (v3.1) Rueda anual para el CRM: un doc por KA con qué ruta toca cada semana
+    let nRuedas=0;
+    if(ruedaPorKA){
+      const anio=new Date().getFullYear();
+      for(const ka of Object.keys(ruedaPorKA)){
+        m.textContent="Subiendo rueda semanal de "+ka+"…";
+        const docId="rueda_"+ka.replace(/[\s\/]+/g,"_")+"_"+anio;
+        await fbSet("rueda_anual/"+docId,{
+          id:{stringValue:docId},
+          agente:{stringValue:ka},
+          anio:fsVal(anio),
+          semanas:fsVal(ruedaPorKA[ka].semanas),
+          actualizadoPor:{stringValue:"Estación de Radar"},
+          fechaActualizacion:{stringValue:new Date().toISOString()}
+        });
+        nRuedas++;
+      }
+    }
+    m.className="msg okm";m.textContent="✓ "+rutasExcel.length+" clientes con ruta en la nube"+
+      (nRuedas>0?" · 📅 rueda semanal actualizada para "+nRuedas+" KA (el CRM propondrá la ruta de cada semana)":"")+".";
     cargaBoard();
+  }catch(e){m.className="msg err";m.textContent=e.message;}
+};
+// (v3.1) DESCARGAR: reconstruye el Excel desde la nube con la MISMA estructura que lee la subida.
+// Hoja FILTRABLE = re-subible tal cual. Hoja RUEDA = calendario semana→ruta por KA,
+// leído de rueda_anual, así que incluye las correcciones hechas desde el editor del CRM.
+document.getElementById("btnBajar").onclick=async()=>{
+  const m=document.getElementById("msgR");m.className="msg";m.textContent="Descargando de la nube…";
+  try{
+    // 1) Clientes de radar_rutas (chunks)
+    const lista=[];
+    for(let i=0;i<60;i++){
+      let d;try{d=await fbGet("radar_rutas/chunk_"+i);}catch(e){break;}
+      const arr=JSON.parse(d.fields?.datos?.stringValue||"[]");
+      if(arr.length===0&&i>0)break;
+      arr.forEach(c=>lista.push(c));
+    }
+    if(lista.length===0){m.className="msg err";m.textContent="No hay rutas subidas en la nube.";return;}
+    // 2) Rueda anual (incluye ediciones del CRM)
+    let ruedas=[];
+    try{
+      const r=await fetch(FB+"/rueda_anual?pageSize=300");
+      if(r.ok){const j=await r.json();
+        ruedas=(j.documents||[]).map(doc=>{
+          const f=doc.fields||{};
+          const semanas={};
+          const semF=f.semanas?.mapValue?.fields||{};
+          Object.keys(semF).forEach(w=>{
+            const e=semF[w].mapValue?.fields||{};
+            const rutas=(e.rutas?.arrayValue?.values||[]).map(v=>parseInt(v.integerValue??v.doubleValue??0)).filter(x=>x>0);
+            semanas[w]={rutas,oficina:e.oficina?.booleanValue===true};
+          });
+          return{agente:f.agente?.stringValue||"",anio:parseInt(f.anio?.integerValue??f.anio?.doubleValue??0),
+            fecha:f.fechaActualizacion?.stringValue||"",por:f.actualizadoPor?.stringValue||"",semanas};
+        }).filter(x=>x.anio===new Date().getFullYear());
+      }
+    }catch(e){}
+    // (v3.3) Perfiles y criterios comerciales → hoja CRITERIOS (contexto completo para el chat)
+    let perfiles=[],usuariosCrit=[];
+    try{
+      const rp=await fetch(FB+"/perfiles_comerciales?pageSize=50");
+      if(rp.ok){const jp=await rp.json();
+        perfiles=(jp.documents||[]).map(doc=>{const f=doc.fields||{};const g=k=>f[k]?.stringValue||"";
+          return{id:g("id")||doc.name.split("/").pop(),nombre:g("nombre"),descripcion:g("descripcion"),
+            informe:g("criteriosInforme"),fecha:g("fechaActualizacion")};});}
+    }catch(e){}
+    try{
+      const ru=await fetch(FB+"/usuarios?pageSize=300");
+      if(ru.ok){const ju=await ru.json();
+        usuariosCrit=(ju.documents||[]).map(doc=>{const f=doc.fields||{};const g=k=>f[k]?.stringValue||"";
+          const parejasArr=(f.critDuplosCon?.arrayValue?.values||[]).map(v=>v.stringValue||"").filter(Boolean);
+          return{nombre:g("nombre")||doc.name.split("/").pop(),grupoAgente:g("grupoAgente"),
+            perfil:g("perfilComercial"),base:g("critBase"),parejas:parejasArr.join(" + "),dias:g("critDias"),
+            duplos:g("critDuplos"),personales:g("critPersonales")};})
+          .filter(u=>u.perfil||u.base||u.parejas||u.dias||u.duplos||u.personales);}
+    }catch(e){}
+    // 3) Hoja FILTRABLE (misma cabecera que lee la subida)
+    const filas=[["Acción","Cliente","Población","Provincia","KA","Ruta","Semana","Día"]];
+    lista.forEach(c=>filas.push(["VISITA",c.n||"",c.p||"",c.pr||"",c.ka||"",c.ruta||"",c.sem||"",c.dia||""]));
+    const wsF=XLSX.utils.aoa_to_sheet(filas);
+    wsF["!cols"]=[{wch:9},{wch:36},{wch:22},{wch:16},{wch:12},{wch:26},{wch:9},{wch:10}];
+    // 4) Hoja RUEDA (calendario por KA, refleja lo editado en el CRM)
+    const filasR=[["KA","Semana","Rutas","Oficina","Última actualización","Por"]];
+    ruedas.forEach(rd=>{
+      Object.keys(rd.semanas).map(Number).sort((a,b)=>a-b).forEach(w=>{
+        const e=rd.semanas[w];
+        filasR.push([rd.agente,"S"+w,e.rutas.map(x=>"R"+x).join(" + "),e.oficina?"SÍ":"",
+          rd.fecha?new Date(rd.fecha).toLocaleString("es-ES"):"",rd.por]);
+      });
+    });
+    const wsR=XLSX.utils.aoa_to_sheet(filasR);
+    wsR["!cols"]=[{wch:14},{wch:8},{wch:14},{wch:8},{wch:18},{wch:20}];
+    // (v3.3) Hoja CRITERIOS: informe completo por perfil (una fila por línea, para que se lea entero)
+    // + personales por comercial. El informe es el mismo texto que se sube/edita en Perfiles.
+    const filasC=[["CRITERIOS DE ORGANIZACIÓN DE RUTAS · fuente: perfiles_comerciales + usuarios (Firebase) · da el contexto completo a quien organice rutas (chat o IA)."],[]];
+    if(perfiles.length===0){
+      filasC.push(["(sin perfiles definidos — configúralos en el Administrador → 🧭 Perfiles)"]);
+    }else{
+      perfiles.forEach(p=>{
+        filasC.push(["═══ PERFIL: "+(p.nombre||p.id)+" ("+p.id+") ═══"]);
+        if(p.descripcion)filasC.push([p.descripcion]);
+        filasC.push(["Actualizado: "+(p.fecha?new Date(p.fecha).toLocaleDateString("es-ES"):"—")]);
+        filasC.push([]);
+        (p.informe||"(sin informe subido todavía)").split("\n").forEach(linea=>filasC.push([linea]));
+        filasC.push([],[]);
+      });
+    }
+    filasC.push(["— CRITERIOS PERSONALES POR COMERCIAL —"],
+      ["Comercial","KA","Perfil","Pareja(s) de duplo","Base/domicilio","Días efectivos propios","Reparto del duplo","Otros criterios personales"]);
+    usuariosCrit.forEach(u=>filasC.push([u.nombre,u.grupoAgente,u.perfil,u.parejas,u.base,u.dias,u.duplos,u.personales]));
+    if(usuariosCrit.length===0)filasC.push(["(sin criterios personales — asígnalos en el Administrador → Usuarios)"]);
+    const wsC=XLSX.utils.aoa_to_sheet(filasC);
+    wsC["!cols"]=[{wch:70},{wch:14},{wch:16},{wch:24},{wch:20},{wch:24},{wch:34},{wch:40}];
+    const wb2=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb2,wsF,"FILTRABLE");
+    XLSX.utils.book_append_sheet(wb2,wsR,"RUEDA");
+    XLSX.utils.book_append_sheet(wb2,wsC,"CRITERIOS");
+    const hoy=new Date();
+    XLSX.writeFile(wb2,"Rueda_Agenda_nube_"+hoy.getFullYear()+"-"+String(hoy.getMonth()+1).padStart(2,"0")+"-"+String(hoy.getDate()).padStart(2,"0")+".xlsx");
+    m.className="msg okm";
+    m.textContent="✓ Descargado: "+lista.length+" clientes (FILTRABLE)"+(ruedas.length>0?" + calendario de "+ruedas.length+" KA (RUEDA)":"")+(perfiles.length>0||usuariosCrit.length>0?" + criterios de organización (CRITERIOS)":" · ⚠ sin criterios: configúralos en el Administrador → 🧭 Perfiles")+". Listo para enviar al chat.";
   }catch(e){m.className="msg err";m.textContent=e.message;}
 };
 async function cargaBoard(){
