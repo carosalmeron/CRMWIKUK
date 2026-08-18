@@ -84,7 +84,10 @@ tr:nth-child(even) td{background:var(--zebra)}
   <div style="margin-top:10px;padding:10px 12px;background:#F9F8F6;border:1px solid #E0DCD6;border-radius:10px">
     <div style="font-size:.78rem;font-weight:700;margin-bottom:6px">⬇ Descargar Excel desde la nube</div>
     <div style="font-size:.72rem;color:#8A8078;margin-bottom:8px">Elige qué KA(s) llevar al Excel — normalmente el duplo o equipo con el que vas a trabajar la rueda. Si no marcas ninguno, se descargan todos.</div>
+    <div style="font-size:.66rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:4px">🚗 KA (dueños de ruta)</div>
     <div id="kasBajar" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px"></div>
+    <div style="font-size:.66rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:4px">☎️ Telefónicos (duplo)</div>
+    <div id="telsBajar" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px"><span style="font-size:.72rem;color:#8A8078">Cargando…</span></div>
     <button class="mini" id="btnBajar">⬇ Descargar Excel</button>
     <span class="msg" id="msgBajar"></span>
   </div>
@@ -396,6 +399,38 @@ function pintarChipsKA(){
   });
 }
 pintarChipsKA();
+// (v3.4) Telefónicos: no tienen ruta propia en radar_rutas (cubren la del KA por
+// teléfono), así que no salen en KAS. Se leen aparte del Administrador, por
+// perfil TELEFONICO_DUPLOS, para poder elegir exactamente cuál llevar al Excel.
+const telsSeleccionados=new Set();
+let TELEFONICOS=[];
+async function cargarTelefonicos(){
+  try{
+    const r=await fetch(FB+"/usuarios?pageSize=300");
+    if(!r.ok)throw new Error();
+    const j=await r.json();
+    TELEFONICOS=(j.documents||[]).map(doc=>{
+      const f=doc.fields||{};const g=k=>f[k]?.stringValue||"";
+      return{id:doc.name.split("/").pop(),nombre:g("nombre")||doc.name.split("/").pop(),perfil:g("perfilComercial")};
+    }).filter(p=>p.perfil==="TELEFONICO_DUPLOS");
+  }catch(e){TELEFONICOS=[];}
+  pintarChipsTel();
+}
+function pintarChipsTel(){
+  const cont=document.getElementById("telsBajar");
+  if(TELEFONICOS.length===0){cont.innerHTML='<span style="font-size:.72rem;color:#8A8078">Ninguno creado todavía — asígnalos en el Administrador → Organigrama.</span>';return;}
+  cont.innerHTML="";
+  TELEFONICOS.forEach(t=>{
+    const on=telsSeleccionados.has(t.id);
+    const b=document.createElement("button");
+    b.type="button";b.textContent=(on?"✅ ":"⬜ ")+t.nombre;
+    b.style.cssText="padding:5px 11px;border-radius:99px;font-size:.74rem;font-weight:700;cursor:pointer;"
+      +"border:1.5px solid "+(on?"#0EA5E9":"#D8D2C8")+";background:"+(on?"#0EA5E915":"#fff")+";color:"+(on?"#0369A1":"#5C554D");
+    b.onclick=()=>{ if(on)telsSeleccionados.delete(t.id); else telsSeleccionados.add(t.id); pintarChipsTel(); };
+    cont.appendChild(b);
+  });
+}
+cargarTelefonicos();
 // Hoja FILTRABLE = re-subible tal cual. Hoja RUEDA = calendario semana→ruta por KA,
 // leído de rueda_anual, así que incluye las correcciones hechas desde el editor del CRM.
 document.getElementById("btnBajar").onclick=async()=>{
@@ -446,11 +481,16 @@ document.getElementById("btnBajar").onclick=async()=>{
       if(ru.ok){const ju=await ru.json();
         usuariosCrit=(ju.documents||[]).map(doc=>{const f=doc.fields||{};const g=k=>f[k]?.stringValue||"";
           const parejasArr=(f.critDuplosCon?.arrayValue?.values||[]).map(v=>v.stringValue||"").filter(Boolean);
-          return{nombre:g("nombre")||doc.name.split("/").pop(),grupoAgente:g("grupoAgente"),
+          return{id:doc.name.split("/").pop(),nombre:g("nombre")||doc.name.split("/").pop(),grupoAgente:g("grupoAgente"),
             perfil:g("perfilComercial"),base:g("critBase"),parejas:parejasArr.join(" + "),dias:g("critDias"),
             duplos:g("critDuplos"),personales:g("critPersonales")};})
           .filter(u=>u.perfil||u.base||u.parejas||u.dias||u.duplos||u.personales)
-          .filter(u=>!filtroKA||filtroKA.has(String(u.grupoAgente||"").toUpperCase())||u.perfil==="TELEFONICO_DUPLOS");}
+          .filter(u=>{
+            if(!filtroKA&&telsSeleccionados.size===0)return true; // nada marcado → todos
+            if(filtroKA&&filtroKA.has(String(u.grupoAgente||"").toUpperCase()))return true;
+            if(telsSeleccionados.has(u.id))return true;
+            return false;
+          });}
     }catch(e){}
     // 3) Hoja FILTRABLE (misma cabecera que lee la subida)
     const filas=[["Acción","Cliente","Población","Provincia","KA","Ruta","Semana","Día"]];
@@ -497,7 +537,7 @@ document.getElementById("btnBajar").onclick=async()=>{
     const sufijo=filtroKA?"_"+[...filtroKA].join("+"):"_TODOS";
     XLSX.writeFile(wb2,"Rueda_Agenda_nube"+sufijo+"_"+hoy.getFullYear()+"-"+String(hoy.getMonth()+1).padStart(2,"0")+"-"+String(hoy.getDate()).padStart(2,"0")+".xlsx");
     m.className="msg okm";
-    m.textContent="✓ Descargado ("+(filtroKA?[...filtroKA].join(", "):"TODOS los KA")+"): "+lista.length+" clientes (FILTRABLE)"+(ruedas.length>0?" + calendario de "+ruedas.length+" KA (RUEDA)":"")+(perfiles.length>0||usuariosCrit.length>0?" + criterios de organización (CRITERIOS)":" · ⚠ sin criterios: configúralos en el Administrador → 🧭 Perfiles")+". Listo para enviar al chat.";
+    m.textContent="✓ Descargado ("+(filtroKA?[...filtroKA].join(", "):"TODOS los KA")+(telsSeleccionados.size>0?" · ☎️ "+[...telsSeleccionados].map(id=>TELEFONICOS.find(t=>t.id===id)?.nombre||id).join(", "):"")+"): "+lista.length+" clientes (FILTRABLE)"+(ruedas.length>0?" + calendario de "+ruedas.length+" KA (RUEDA)":"")+(perfiles.length>0||usuariosCrit.length>0?" + criterios de organización (CRITERIOS)":" · ⚠ sin criterios: configúralos en el Administrador → 🧭 Perfiles")+". Listo para enviar al chat.";
   }catch(e){m.className="msg err";m.textContent=e.message;}
 };
 async function cargaBoard(){
