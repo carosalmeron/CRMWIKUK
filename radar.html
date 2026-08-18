@@ -80,8 +80,14 @@ tr:nth-child(even) td{background:var(--zebra)}
     <div class="fich" id="fichR"></div>
   </div>
   <div class="fila"><button class="cta" id="btnSubir" disabled>SUBIR RUTAS A FIREBASE</button>
-    <button class="mini" id="btnBajar">⬇ Descargar Excel desde la nube</button>
     <span class="msg" id="msgR"></span></div>
+  <div style="margin-top:10px;padding:10px 12px;background:#F9F8F6;border:1px solid #E0DCD6;border-radius:10px">
+    <div style="font-size:.78rem;font-weight:700;margin-bottom:6px">⬇ Descargar Excel desde la nube</div>
+    <div style="font-size:.72rem;color:#8A8078;margin-bottom:8px">Elige qué KA(s) llevar al Excel — normalmente el duplo o equipo con el que vas a trabajar la rueda. Si no marcas ninguno, se descargan todos.</div>
+    <div id="kasBajar" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px"></div>
+    <button class="mini" id="btnBajar">⬇ Descargar Excel</button>
+    <span class="msg" id="msgBajar"></span>
+  </div>
   <div class="fila">
     <button class="mini" id="btnInt">🌍 Organizar INTERNACIONALES desde la BD (Miguel · Azarco · Ricardo)</button>
     <span class="msg" id="msgInt"></span>
@@ -374,20 +380,39 @@ document.getElementById("btnSubir").onclick=async()=>{
   }catch(e){m.className="msg err";m.textContent=e.message;}
 };
 // (v3.1) DESCARGAR: reconstruye el Excel desde la nube con la MISMA estructura que lee la subida.
+// (v3.3) Chips de selección de KA(s) para la descarga — normalmente el duplo/equipo con el que se va a trabajar
+const kasSeleccionados=new Set();
+function pintarChipsKA(){
+  const cont=document.getElementById("kasBajar");
+  cont.innerHTML="";
+  KAS.forEach(ka=>{
+    const on=kasSeleccionados.has(ka);
+    const b=document.createElement("button");
+    b.type="button";b.textContent=(on?"✅ ":"⬜ ")+ka;
+    b.style.cssText="padding:5px 11px;border-radius:99px;font-size:.74rem;font-weight:700;cursor:pointer;"
+      +"border:1.5px solid "+(on?"#0E7C5A":"#D8D2C8")+";background:"+(on?"#0E7C5A15":"#fff")+";color:"+(on?"#0E7C5A":"#5C554D");
+    b.onclick=()=>{ if(on)kasSeleccionados.delete(ka); else kasSeleccionados.add(ka); pintarChipsKA(); };
+    cont.appendChild(b);
+  });
+}
+pintarChipsKA();
 // Hoja FILTRABLE = re-subible tal cual. Hoja RUEDA = calendario semana→ruta por KA,
 // leído de rueda_anual, así que incluye las correcciones hechas desde el editor del CRM.
 document.getElementById("btnBajar").onclick=async()=>{
-  const m=document.getElementById("msgR");m.className="msg";m.textContent="Descargando de la nube…";
+  const m=document.getElementById("msgBajar");m.className="msg";m.textContent="Descargando de la nube…";
   try{
+    const filtroKA=kasSeleccionados.size>0?kasSeleccionados:null; // null = todos
     // 1) Clientes de radar_rutas (chunks)
-    const lista=[];
+    const listaTodo=[];
     for(let i=0;i<60;i++){
       let d;try{d=await fbGet("radar_rutas/chunk_"+i);}catch(e){break;}
       const arr=JSON.parse(d.fields?.datos?.stringValue||"[]");
       if(arr.length===0&&i>0)break;
-      arr.forEach(c=>lista.push(c));
+      arr.forEach(c=>listaTodo.push(c));
     }
-    if(lista.length===0){m.className="msg err";m.textContent="No hay rutas subidas en la nube.";return;}
+    if(listaTodo.length===0){m.className="msg err";m.textContent="No hay rutas subidas en la nube.";return;}
+    const lista=filtroKA?listaTodo.filter(c=>filtroKA.has(String(c.ka||"").toUpperCase())):listaTodo;
+    if(lista.length===0){m.className="msg err";m.textContent="Ningún cliente de los KA marcados está subido todavía.";return;}
     // 2) Rueda anual (incluye ediciones del CRM)
     let ruedas=[];
     try{
@@ -404,7 +429,7 @@ document.getElementById("btnBajar").onclick=async()=>{
           });
           return{agente:f.agente?.stringValue||"",anio:parseInt(f.anio?.integerValue??f.anio?.doubleValue??0),
             fecha:f.fechaActualizacion?.stringValue||"",por:f.actualizadoPor?.stringValue||"",semanas};
-        }).filter(x=>x.anio===new Date().getFullYear());
+        }).filter(x=>x.anio===new Date().getFullYear()&&(!filtroKA||filtroKA.has(String(x.agente||"").toUpperCase())));
       }
     }catch(e){}
     // (v3.3) Perfiles y criterios comerciales → hoja CRITERIOS (contexto completo para el chat)
@@ -424,7 +449,8 @@ document.getElementById("btnBajar").onclick=async()=>{
           return{nombre:g("nombre")||doc.name.split("/").pop(),grupoAgente:g("grupoAgente"),
             perfil:g("perfilComercial"),base:g("critBase"),parejas:parejasArr.join(" + "),dias:g("critDias"),
             duplos:g("critDuplos"),personales:g("critPersonales")};})
-          .filter(u=>u.perfil||u.base||u.parejas||u.dias||u.duplos||u.personales);}
+          .filter(u=>u.perfil||u.base||u.parejas||u.dias||u.duplos||u.personales)
+          .filter(u=>!filtroKA||filtroKA.has(String(u.grupoAgente||"").toUpperCase())||u.perfil==="TELEFONICO_DUPLOS");}
     }catch(e){}
     // 3) Hoja FILTRABLE (misma cabecera que lee la subida)
     const filas=[["Acción","Cliente","Población","Provincia","KA","Ruta","Semana","Día"]];
@@ -468,9 +494,10 @@ document.getElementById("btnBajar").onclick=async()=>{
     XLSX.utils.book_append_sheet(wb2,wsR,"RUEDA");
     XLSX.utils.book_append_sheet(wb2,wsC,"CRITERIOS");
     const hoy=new Date();
-    XLSX.writeFile(wb2,"Rueda_Agenda_nube_"+hoy.getFullYear()+"-"+String(hoy.getMonth()+1).padStart(2,"0")+"-"+String(hoy.getDate()).padStart(2,"0")+".xlsx");
+    const sufijo=filtroKA?"_"+[...filtroKA].join("+"):"_TODOS";
+    XLSX.writeFile(wb2,"Rueda_Agenda_nube"+sufijo+"_"+hoy.getFullYear()+"-"+String(hoy.getMonth()+1).padStart(2,"0")+"-"+String(hoy.getDate()).padStart(2,"0")+".xlsx");
     m.className="msg okm";
-    m.textContent="✓ Descargado: "+lista.length+" clientes (FILTRABLE)"+(ruedas.length>0?" + calendario de "+ruedas.length+" KA (RUEDA)":"")+(perfiles.length>0||usuariosCrit.length>0?" + criterios de organización (CRITERIOS)":" · ⚠ sin criterios: configúralos en el Administrador → 🧭 Perfiles")+". Listo para enviar al chat.";
+    m.textContent="✓ Descargado ("+(filtroKA?[...filtroKA].join(", "):"TODOS los KA")+"): "+lista.length+" clientes (FILTRABLE)"+(ruedas.length>0?" + calendario de "+ruedas.length+" KA (RUEDA)":"")+(perfiles.length>0||usuariosCrit.length>0?" + criterios de organización (CRITERIOS)":" · ⚠ sin criterios: configúralos en el Administrador → 🧭 Perfiles")+". Listo para enviar al chat.";
   }catch(e){m.className="msg err";m.textContent=e.message;}
 };
 async function cargaBoard(){
