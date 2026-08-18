@@ -305,7 +305,7 @@ const USERS_DEFAULT=[
 
 // ── Persistencia ─────────────────────────────────────────────────
 // ── Versión del Portal (mantener sincronizada en cada cambio) ──
-const PORTAL_VERSION="3.66.12";
+const PORTAL_VERSION="3.66.15";
 const PORTAL_BUILD="31/07/2026-version-unificada";
 try{var _pv=document.getElementById('portal-ver');if(_pv)_pv.textContent='Portal v'+PORTAL_VERSION;}catch(e){}
 // Habia tres numeros de version distintos escritos a mano en este archivo y
@@ -419,10 +419,19 @@ async function loadUsersFB(){
     var dos=await Promise.all([leer("portal_users"),leer("usuarios")]);
     var fb=dos[0].slice();
     var vistos={};
-    fb.forEach(function(u){ vistos[String(u.id).toLowerCase()]=true; });
+    // (v3.66.13) Antes solo se comparaba por id exacto: si la misma persona
+    // tenía id distinto en cada colección (ej. "agustin" en portal_users vs un
+    // id autogenerado en usuarios), no se detectaba como duplicado y aparecía
+    // dos veces en la lista. Ahora se compara por CUALQUIERA de sus claves de
+    // identidad (id, username, catalogoVendedor, grupoAgente, nombre) — la
+    // misma lógica que ya usa el organigrama para no duplicar personas.
+    fb.forEach(function(u){ orgClavesDe(u).forEach(function(c){ vistos[c]=true; }); });
     // Los de usuarios solo entran si no estan ya en portal_users, que manda.
     dos[1].forEach(function(u){
-      if(!vistos[String(u.id).toLowerCase()]){ fb.push(u); vistos[String(u.id).toLowerCase()]=true; }
+      var claves=orgClavesDe(u);
+      if(!claves.some(function(c){return vistos[c];})){
+        fb.push(u); claves.forEach(function(c){ vistos[c]=true; });
+      }
     });
     if(fb.length){
       var ids=new Set(fb.map(function(u){return u.id;}));
@@ -1719,11 +1728,21 @@ function orgDesactivaDep(){orgCapturaDep();var d=orgState.editDep;if(!d)return;
   d.activo=false;saveDeptoFB(d);orgCierra();}
 function orgGuardaUser(){orgCapturaUser();var p=orgState.editUser;if(!p)return;
   var rolCRM=p._rolEdit||rolCRMde(p);
+  // (v3.66.15) El equipo lo determina el departamento elegido (si lleva uno
+  // asociado, p.ej. eq_wikuk→WIKUK). Antes solo se podía tocar el equipo
+  // desde Usuarios, un segundo sitio que se desincronizaba con este; ahora
+  // Organigrama es el único punto de entrada y el equipo se deriva de aquí.
+  var depElegido=orgDeptoDe(p.departamentoId);
+  var equipoFinal=depElegido&&depElegido.equipo?depElegido.equipo:(p.equipo||null);
   saveFichaCRM(p.orgId,{nombre:p.nombre,icon:p.icon,rol:rolCRM,tipologia:p.tipologia||"",
-    equipo:p.equipo||null,departamentoId:p.departamentoId||"",reportaA:p.reportaA||"",
+    equipo:equipoFinal,departamentoId:p.departamentoId||"",reportaA:p.reportaA||"",
     pestanasOcultas:p.pestanasOcultas||[],pestanasExtra:p.pestanasExtra||[],
     perfilComercial:p.perfilComercial||"",critBase:p.critBase||"",critDuplosCon:p.critDuplosCon||[],
     critDias:p.critDias||"",critDuplos:p.critDuplos||"",critPersonales:p.critPersonales||""});
+  if(equipoFinal!==p.equipo){
+    var uAcc=adminUsers.find(function(x){return (x.crmId||x.id)===p.orgId;});
+    if(uAcc){uAcc.equipo=equipoFinal;saveUserFB(uAcc);syncEquipoPBI(uAcc,equipoFinal);}
+  }
   orgCierra();}
 
 function setAdminTab(tab,btn){
@@ -2083,44 +2102,15 @@ function renderUsuarios(){
           +'<div style="font-size:.7rem;color:#8A8078;margin-top:3px">Solo se muestran los vendedores libres</div>'
           +'</div>';
 
-        // (v3.23.83) Equipo del vendedor
-        html+='<div><div class="field-label">Equipo</div>'
-          +'<select class="form-inp" onchange="updateEquipoUsuario(\''+u.id+'\',this.value)">'
-          +'<option value=""'+(!u.equipo?' selected':'')+'>— Sin equipo —</option>'
-          +['WIKUK','INTERKEY','FRANCIA','DISTRIBUIDOR'].map(function(e){
-              return '<option value="'+e+'"'+(u.equipo===e?' selected':'')+'>'+e+'</option>';
-            }).join('')
-          +'</select>'
-          +'<div style="font-size:.7rem;color:#8A8078;margin-top:3px">Determina en qué equipo aparece este vendedor</div>'
+        // (v3.66.15) Equipo, departamento, perfil comercial y sus criterios se
+        // gestionan SOLO desde 🏗 Organigrama — antes se podían tocar también
+        // aquí, y al no mirar los dos sitios al mismo dato, se desincronizaban
+        // (cambios que no se veían, o que un sitio pisaba al otro).
+        html+='<div style="background:#F5F3FF;border:1px solid #DDD6FE;border-radius:10px;padding:10px 12px;display:flex;align-items:center;gap:10px">'
+          +'<span style="font-size:1.1rem">🏗</span>'
+          +'<div style="flex:1;font-size:.72rem;color:#5B4B8A">Equipo, departamento, perfil comercial y sus criterios se gestionan desde <b>Organigrama</b>.</div>'
+          +'<button onclick="irAOrganigrama(\''+orgEsc(u.crmId||u.id)+'\')" style="padding:6px 12px;border-radius:8px;border:1px solid #C4B5FD;background:white;color:#5B4B8A;font-size:.72rem;font-weight:700;cursor:pointer;white-space:nowrap">Abrir ficha →</button>'
           +'</div>';
-
-        // (v1) Perfil comercial + criterios personales — misma ficha "usuarios" que lee el organigrama y el CRM
-        var _fid=u.crmId||u.id;
-        if(!orgCargado){
-          loadOrgData().then(function(){renderAdminBody();});
-          html+='<div style="font-size:.72rem;color:#8A8078;padding:8px 0">⏳ Cargando perfil comercial…</div>';
-        }else{
-          var _ficha=Object.assign({},ORG_FICHAS[_fid]||{});
-          html+='<div><div class="field-label">Perfil comercial <span style="font-weight:400;text-transform:none">(criterios de organización de rutas)</span></div>'
-            +'<select class="form-inp" id="uc-perfil-'+u.id+'" onchange="uCritToggle(\''+u.id+'\',\''+orgEsc(_fid)+'\')"><option value="">— Sin asignar —</option>';
-          PERFILES_BASE.forEach(function(pb){
-            html+='<option value="'+pb.id+'"'+((_ficha.perfilComercial||'')===pb.id?' selected':'')+'>'+pb.icon+' '+pb.nombre+'</option>';
-          });
-          html+='</select>'
-            +'<div id="uc-crit-'+u.id+'" style="display:'+(_ficha.perfilComercial?'block':'none')+';margin-top:8px">'
-            +'<div style="font-size:.68rem;color:#8A8078;margin-bottom:3px">Base / domicilio</div>'
-            +'<input class="form-inp" id="uc-base-'+u.id+'" value="'+orgEsc(_ficha.critBase||'')+'" placeholder="Ej: Cascais (PT)" style="margin-bottom:8px">'
-            +'<div style="font-size:.68rem;color:#8A8078;margin-bottom:3px">Pareja de duplo <span style="font-weight:400">(puede marcar varias)</span></div>'
-            +orgParejaCheckboxes('uc-'+u.id,_ficha.perfilComercial||'',_ficha.critDuplosCon||(_ficha.critDuploCon?[_ficha.critDuploCon]:[]))
-            +'<div style="font-size:.68rem;color:#8A8078;margin-bottom:3px">Días efectivos propios</div>'
-            +'<textarea class="form-inp" id="uc-dias-'+u.id+'" rows="2" placeholder="Ej: 4,5 días — viernes tarde libre" style="margin-bottom:8px;font-family:inherit">'+orgEsc(_ficha.critDias||'')+'</textarea>'
-            +'<div style="font-size:.68rem;color:#8A8078;margin-bottom:3px">Reparto dentro del duplo</div>'
-            +'<textarea class="form-inp" id="uc-reparto-'+u.id+'" rows="2" placeholder="Ej: el telefónico llama la semana que el KA no visita" style="margin-bottom:8px;font-family:inherit">'+orgEsc(_ficha.critDuplos||'')+'</textarea>'
-            +'<div style="font-size:.68rem;color:#8A8078;margin-bottom:3px">Otros criterios personales</div>'
-            +'<textarea class="form-inp" id="uc-otros-'+u.id+'" rows="3" placeholder="Clientes con día fijo, zonas que evita, guardias..." style="margin-bottom:8px;font-family:inherit">'+orgEsc(_ficha.critPersonales||'')+'</textarea>'
-            +'<button onclick="uCritGuardar(\''+u.id+'\',\''+orgEsc(_fid)+'\')" style="width:100%;padding:9px;border-radius:9px;border:none;background:#1A1816;color:#fff;font-size:.8rem;font-weight:800;cursor:pointer">💾 Guardar criterios</button>'
-            +'</div></div>';
-        }
 
         // ── Códigos de facturación ────────────────────────────────────
         // El ERP etiqueta cada venta con SU codigo, que no es el del CRM.
@@ -2452,6 +2442,7 @@ function ubicarUsuario(uid,depId){
     u.equipo=dep.equipo;
     saveUserFB(u);
     saveFichaCRM(orgId,{equipo:dep.equipo,rol:fAct.rol&&fAct.rol!=="user"?fAct.rol:"agente"});
+    syncEquipoPBI(u,dep.equipo);
   } else {
     saveFichaCRM(orgId,{departamentoId:dep.id,rol:(fAct.rol&&fAct.rol!=="user"&&fAct.rol!=="agente")?fAct.rol:"tipologia"});
   }
@@ -3174,25 +3165,33 @@ async function guardarCodigos(uid){
   buscarCodigos(u);
 }
 
-function updateEquipoUsuario(uid,val){
-  updateUser(uid,function(u){u.equipo=val||null;});
-  // El equipo se guarda en portal_users, pero la sincronizacion de Power BI
-  // lee pbi_ajustes: sin esto, el cambio se ve en el portal y el CRM sigue
-  // clasificando al comercial en la rama que le toque por GRUPONIVEL4.
-  var u=adminUsers.find(function(x){return x.id===uid;});
+// (v3.66.15) Sincroniza pbi_ajustes cuando cambia el equipo de alguien —
+// antes solo se llamaba desde el selector de Equipo en Usuarios (ya
+// retirado); ahora la llama orgGuardaUser cuando el departamento elegido
+// trae un equipo asociado, y ubicarUsuario/autoubicación.
+function syncEquipoPBI(u,equipo){
   var clave=u&&(u.catalogoVendedor||u.grupoAgente);
-  if(clave){
-    fetch(PORTAL_FB+'/pbi_ajustes/'+encodeURIComponent(clave)
-      +'?updateMask.fieldPaths=equipo&updateMask.fieldPaths=vendedor'
-      +'&updateMask.fieldPaths=guardadoEl',{
-      method:'PATCH',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({fields:{
-        equipo:{stringValue:val||''},
-        vendedor:{stringValue:clave},
-        guardadoEl:{stringValue:new Date().toISOString()}}})
-    }).catch(function(){});
-  }
-  renderAdminBody();
+  if(!clave)return;
+  fetch(PORTAL_FB+'/pbi_ajustes/'+encodeURIComponent(clave)
+    +'?updateMask.fieldPaths=equipo&updateMask.fieldPaths=vendedor'
+    +'&updateMask.fieldPaths=guardadoEl',{
+    method:'PATCH',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({fields:{
+      equipo:{stringValue:equipo||''},
+      vendedor:{stringValue:clave},
+      guardadoEl:{stringValue:new Date().toISOString()}}})
+  }).catch(function(){});
+}
+// (v3.66.15) Atajo desde Usuarios → abre directamente la ficha de esa
+// persona en Organigrama, que es ahora el único sitio donde se tocan
+// equipo, departamento, perfil comercial y sus criterios.
+function irAOrganigrama(fid){
+  adminTab='organigrama';
+  document.querySelectorAll('.admin-tab').forEach(function(b,i){
+    b.classList.toggle('active',['usuarios','organigrama','perfiles','accesos','descuentos','datos','config','tarifas','backup'][i]===adminTab);
+  });
+  function abrir(){ if(fid)orgAbreUser(fid); renderAdminBody(); }
+  if(!orgCargado) loadOrgData().then(abrir); else abrir();
 }
 // (v3.23.92) Cambiar el email de un usuario
 function updateEmailUsuario(uid,val){
@@ -3256,30 +3255,6 @@ function updateUser(uid,fn){
   adminUsers=adminUsers.map(function(u){if(u.id===uid){fn(u);}return u;});
   var u=adminUsers.find(function(u){return u.id===uid;});
   saveUsersLocal(adminUsers);if(u) saveUserFB(u);
-}
-function uCritToggle(uid,fid){
-  var pf=document.getElementById('uc-perfil-'+uid),base=document.getElementById('uc-base-'+uid),
-      dias=document.getElementById('uc-dias-'+uid),
-      reparto=document.getElementById('uc-reparto-'+uid),otros=document.getElementById('uc-otros-'+uid);
-  var cbs=document.querySelectorAll('.uc-'+uid+'-pareja-cb:checked');
-  var parejas=Array.prototype.map.call(cbs,function(x){return x.value;});
-  // Guarda en memoria (no en Firebase) lo ya escrito, para no perderlo al recalcular la lista de pareja
-  ORG_FICHAS[fid]=Object.assign({},ORG_FICHAS[fid]||{},{id:fid,
-    perfilComercial:pf?pf.value:'',critBase:base?base.value:(ORG_FICHAS[fid]||{}).critBase,
-    critDuplosCon:parejas,critDias:dias?dias.value:(ORG_FICHAS[fid]||{}).critDias,
-    critDuplos:reparto?reparto.value:(ORG_FICHAS[fid]||{}).critDuplos,
-    critPersonales:otros?otros.value:(ORG_FICHAS[fid]||{}).critPersonales});
-  renderAdminBody();
-}
-function uCritGuardar(uid,fid){
-  var pf=document.getElementById('uc-perfil-'+uid),base=document.getElementById('uc-base-'+uid),
-      dias=document.getElementById('uc-dias-'+uid),
-      reparto=document.getElementById('uc-reparto-'+uid),otros=document.getElementById('uc-otros-'+uid);
-  var cbs=document.querySelectorAll('.uc-'+uid+'-pareja-cb:checked');
-  var parejas=Array.prototype.map.call(cbs,function(x){return x.value;});
-  saveFichaCRM(fid,{perfilComercial:pf?pf.value:'',critBase:base?base.value:'',critDuplosCon:parejas,
-    critDias:dias?dias.value:'',critDuplos:reparto?reparto.value:'',critPersonales:otros?otros.value:''})
-    .then(function(){renderAdminBody();});
 }
 
 function toggleNewForm(){showNewForm=!showNewForm;newForm={accesos:['crm']};renderAdminBody();}
