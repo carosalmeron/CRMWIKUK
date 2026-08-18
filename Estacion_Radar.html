@@ -76,7 +76,7 @@ tr:nth-child(even) td{background:var(--zebra)}
   <h2><span class="n">ALIMENTADOR 1</span>Rutas organizadas → Firebase</h2>
   <div class="drop" id="dropR">
     <div class="tit">📗 Sube la Rueda_Agenda (.xlsx)</div>
-    <div class="sub">Lee la hoja FILTRABLE, se queda con los clientes de cartera (visitas y llamadas, sin prospección) y los sube a la colección <b>radar_rutas</b> con su KA, ruta y provincia. Si el Excel trae columna <b>Semana</b>, actualiza también la <b>rueda semanal del CRM</b> (rueda_anual): el comercial verá propuesta su ruta al abrir cada semana. Volver a subir SOBRESCRIBE.</div>
+    <div class="sub">Lee la hoja FILTRABLE, se queda con los clientes de cartera (visitas y llamadas, sin prospección) y los sube a la colección <b>radar_rutas</b> con su KA, ruta y provincia. Si el Excel trae columna <b>Semana</b>, actualiza también la <b>rueda semanal del CRM</b> (rueda_anual): el comercial verá propuesta su ruta al abrir cada semana. Los clientes que NO existan todavía en la base real del CRM se dan de alta como <b>bolsa pendiente de confirmar</b> — ya se pueden usar en el CRM, y se completan sus datos en la primera visita/llamada. Volver a subir SOBRESCRIBE.</div>
     <div class="fich" id="fichR"></div>
   </div>
   <div class="fila"><button class="cta" id="btnSubir" disabled>SUBIR RUTAS A FIREBASE</button>
@@ -387,6 +387,58 @@ document.getElementById("btnSubir").onclick=async()=>{
     }
     m.className="msg okm";m.textContent="✓ "+rutasExcel.length+" clientes con ruta en la nube"+
       (nRuedas>0?" · 📅 rueda semanal actualizada para "+nRuedas+" KA (el CRM propondrá la ruta de cada semana)":"")+".";
+    // (v3.9) Clientes NUEVOS → bolsa del CRM real. Estación de Radar solo tocaba
+    // su propia colección radar_rutas; los clientes que no existían en la BD real
+    // del CRM (colección "clientes") quedaban invisibles fuera de aquí. Ahora,
+    // los que no se encuentran se dan de alta directamente en "clientes" con
+    // estadoAlta:"bolsa_pendiente_confirmar" — ya son usables en el CRM (rutas,
+    // visitas...), y en la primera acción comercial se le piden sus datos
+    // completos y pasan a "activo".
+    try{
+      m.textContent="Comparando contra la base de clientes real del CRM…";
+      const existentes=new Set();
+      let pt="";
+      do{
+        const r=await fetch(FB+"/clientes?pageSize=300"+(pt?"&pageToken="+pt:""),{});
+        if(!r.ok)break;
+        const j=await r.json();
+        (j.documents||[]).forEach(d=>{
+          const f=d.fields||{};
+          const nom=f.nombre?.stringValue||f.NOMBRE?.stringValue||"";
+          const pob=f.poblacion?.stringValue||f.POBLACION?.stringValue||"";
+          if(nom)existentes.add(norm(nom)+"|"+norm(pob));
+        });
+        pt=j.nextPageToken||"";
+      }while(pt);
+      const nuevos=rutasExcel.filter(c=>!existentes.has(norm(c.n)+"|"+norm(c.p)));
+      if(nuevos.length>0){
+        m.textContent="Dando de alta "+nuevos.length+" clientes nuevos en la bolsa del CRM…";
+        let hechos=0;
+        for(const c of nuevos){
+          const id="BOLSA-"+Date.now()+"-"+hechos;
+          const rutaNum=(String(c.ruta||"").match(/R?\s*(\d{1,2})/i)||[])[1]||"";
+          try{
+            await fbSet("clientes/"+id,{
+              id:{stringValue:id},nombre:{stringValue:c.n||""},poblacion:{stringValue:c.p||""},
+              provincia:{stringValue:c.pr||""},agente:{stringValue:c.ka||""},ruta:{stringValue:c.ruta||""},
+              semana:rutaNum?{integerValue:rutaNum}:{nullValue:null},
+              categoriaCliente:{stringValue:"Sin clasificar"},
+              estadoAlta:{stringValue:"bolsa_pendiente_confirmar"},
+              origenAlta:{stringValue:"Estación de Radar · Alimentador 1"},
+              fechaAlta:{stringValue:new Date().toLocaleDateString("es-ES")},
+              esNuevo:{booleanValue:true}
+            });
+            hechos++;
+          }catch(e){}
+          if(hechos%20===0)m.textContent="Dando de alta clientes nuevos… "+hechos+"/"+nuevos.length;
+        }
+        m.textContent="✓ "+rutasExcel.length+" clientes con ruta en la nube"+
+          (nRuedas>0?" · 📅 rueda actualizada ("+nRuedas+" KA)":"")+
+          " · 🆕 "+hechos+" clientes nuevos dados de alta en la bolsa del CRM (pendientes de confirmar en su primera visita/llamada).";
+      }
+    }catch(e){
+      m.textContent+=" · ⚠ No se pudo comparar contra la base de clientes real: "+e.message;
+    }
     cargaBoard();
   }catch(e){m.className="msg err";m.textContent=e.message;}
 };
