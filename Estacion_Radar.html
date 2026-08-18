@@ -286,7 +286,8 @@ setupDrop("dropR",(f,el)=>{
     const ix={acc:H.findIndex(x=>/Acci/i.test(x)),cli:H.findIndex(x=>/Cliente/i.test(x)),
       pob:H.findIndex(x=>/Poblaci/i.test(x)),prov:H.findIndex(x=>/Provincia/i.test(x)),
       ka:H.findIndex(x=>/^KA$|KA del/i.test(x)),ruta:H.findIndex(x=>/Ruta/i.test(x)),
-      sem:H.findIndex(x=>/Semana/i.test(x)),dia:H.findIndex(x=>/^D[ií]a\b|^Fecha\b|^Lunes\b/i.test(x))};
+      sem:H.findIndex(x=>/Semana/i.test(x)),dia:H.findIndex(x=>/^D[ií]a\b|^Fecha\b|^Lunes\b/i.test(x)),
+      seg:H.findIndex(x=>/^Seg\b/i.test(x)),venta:H.findIndex(x=>/Venta/i.test(x))};
     const mapa={};
     const rdRaw={}; // (v3.1) KA → semana → {rutas:Set, regs:[{dia,nombre,explicito}]}
     rows.slice(h+1).forEach(r=>{
@@ -294,13 +295,18 @@ setupDrop("dropR",(f,el)=>{
       const nom=String(r[ix.cli]||"").trim();if(!nom)return;
       const clave=norm(nom)+"|"+norm(String(r[ix.pob]||""));
       if(!mapa[clave])mapa[clave]={n:nom,p:String(r[ix.pob]||""),pr:String(r[ix.prov]||""),
-        ka:String(r[ix.ka]||""),ruta:"",sem:"",dia:""};
+        ka:String(r[ix.ka]||""),ruta:"",sem:"",dia:"",seg:"",venta:""};
       if(/^VISITA/i.test(acc)&&!mapa[clave].ruta){
         mapa[clave].ruta=String(r[ix.ruta]||"");
         // (v3.1) Guardar semana y día tal cual vienen, para poder DESCARGAR el Excel después
         if(ix.sem>=0)mapa[clave].sem=String(r[ix.sem]||"");
         if(ix.dia>=0)mapa[clave].dia=String(r[ix.dia]||"");
       }
+      // (v3.6) Segmento y venta: dato del CLIENTE, no un criterio — se guarda tal
+      // cual venga en cada subida. Los criterios (cadencia por segmento, etc.) no
+      // se tocan aquí: esos se leen en vivo al descargar, desde perfiles_comerciales.
+      if(ix.seg>=0&&r[ix.seg]!=null&&r[ix.seg]!=="")mapa[clave].seg=String(r[ix.seg]).trim();
+      if(ix.venta>=0&&r[ix.venta]!=null&&r[ix.venta]!=="")mapa[clave].venta=String(r[ix.venta]).trim();
       // (v3.1) Rueda anual: semana ISO (+ día opcional) de cada visita
       if(ix.sem>=0&&/^VISITA/i.test(acc)){
         const kaU=String(r[ix.ka]||"").toUpperCase().trim();
@@ -340,8 +346,10 @@ setupDrop("dropR",(f,el)=>{
     rutasExcel=Object.values(mapa);
     el.classList.add("ok");
     const nKAsRueda=ruedaPorKA?Object.keys(ruedaPorKA).length:0;
+    const conSegVenta=ix.seg>=0||ix.venta>=0;
     document.getElementById("fichR").textContent=f.name+" · "+rutasExcel.length+" clientes de cartera con ruta"+
-      (nKAsRueda>0?" · 📅 rueda semanal detectada ("+nKAsRueda+" KA)":" · ⚠ sin columna Semana: la rueda semanal del CRM no se actualizará");
+      (nKAsRueda>0?" · 📅 rueda semanal detectada ("+nKAsRueda+" KA)":" · ⚠ sin columna Semana: la rueda semanal del CRM no se actualizará")+
+      (conSegVenta?" · 💰 Seg/Venta detectados":" · ⚠ sin Seg/Venta: la próxima descarga no traerá segmento ni venta de estos clientes");
     document.getElementById("btnSubir").disabled=false;
   };
   rd.readAsArrayBuffer(f);
@@ -448,6 +456,43 @@ document.getElementById("btnBajar").onclick=async()=>{
     if(listaTodo.length===0){m.className="msg err";m.textContent="No hay rutas subidas en la nube.";return;}
     const lista=filtroKA?listaTodo.filter(c=>filtroKA.has(String(c.ka||"").toUpperCase())):listaTodo;
     if(lista.length===0){m.className="msg err";m.textContent="Ningún cliente de los KA marcados está subido todavía.";return;}
+    // (v3.7) Venta año EN VIVO: se cruza contra pbi_indice_clientes en cada
+    // descarga (misma fuente que el Alimentador 2), no contra lo que se guardó
+    // al subir el Excel de rutas — así nunca queda desactualizada aunque pase
+    // un año sin volver a subir la Rueda_Agenda.
+    m.textContent="Actualizando ventas en vivo…";
+    let todosPBI=[];
+    try{
+      let pt="";
+      do{
+        const j=await fbGet("pbi_indice_clientes?pageSize=10"+(pt?"&pageToken="+pt:""));
+        (j.documents||[]).forEach(d=>{const s=d.fields?.datos?.stringValue;if(s)todosPBI.push(...JSON.parse(s));});
+        pt=j.nextPageToken||"";
+      }while(pt);
+      const ventaPorClave={},ventaAntPorClave={};
+      todosPBI.forEach(([cod,nom,ag,vA,vB])=>{
+        const k=norm(nom||"");
+        ventaPorClave[k]=(ventaPorClave[k]||0)+(+vA||0);
+        ventaAntPorClave[k]=(ventaAntPorClave[k]||0)+(+vB||0);
+      });
+      lista.forEach(c=>{
+        const v=ventaPorClave[norm(c.n||"")],vAnt=ventaAntPorClave[norm(c.n||"")];
+        if(v!==undefined)c.venta=String(Math.round(v)); // pisa lo subido: manda el dato vivo
+        if(vAnt!==undefined)c.ventaAnt=String(Math.round(vAnt));
+      });
+    }catch(e){/* si falla el cruce, se queda la venta que hubiera de la última subida */}
+    // (v3.7) Segmentación A/B/C EN VIVO — fórmula exacta de plan_comercial.html
+    // (canal Duplo, sin CORTES absolutos): entre los clientes VIVOS (venta este
+    // año o el pasado > 0) del grupo descargado, ordenados de mayor a menor
+    // venta actual, el 30% que más vende = A, el siguiente 30% = B, el resto = C.
+    // Se recalcula en cada descarga: si cambian las ventas, cambia el segmento.
+    {
+      const vivos=lista.filter(c=>(+c.venta||0)>0||(+c.ventaAnt||0)>0)
+        .sort((a,b)=>(+b.venta||0)-(+a.venta||0));
+      const nA=Math.round(vivos.length*0.30),nB=Math.round(vivos.length*0.30);
+      vivos.forEach((c,i)=>{c.seg=i<nA?"A":i<nA+nB?"B":"C";});
+      lista.forEach(c=>{if(!c.seg&&!((+c.venta||0)>0||(+c.ventaAnt||0)>0))c.seg="";}); // sin venta = sin segmentar (sujeto a recuperación/prospección)
+    }
     // 2) Rueda anual (incluye ediciones del CRM)
     let ruedas=[];
     try{
@@ -505,10 +550,10 @@ document.getElementById("btnBajar").onclick=async()=>{
           });}
     }catch(e){}
     // 3) Hoja FILTRABLE (misma cabecera que lee la subida)
-    const filas=[["Acción","Cliente","Población","Provincia","KA","Ruta","Semana","Día"]];
-    lista.forEach(c=>filas.push(["VISITA",c.n||"",c.p||"",c.pr||"",c.ka||"",c.ruta||"",c.sem||"",c.dia||""]));
+    const filas=[["Acción","Cliente","Población","Provincia","KA","Ruta","Seg","Venta año (€)","Semana","Día"]];
+    lista.forEach(c=>filas.push(["VISITA",c.n||"",c.p||"",c.pr||"",c.ka||"",c.ruta||"",c.seg||"",c.venta||"",c.sem||"",c.dia||""]));
     const wsF=XLSX.utils.aoa_to_sheet(filas);
-    wsF["!cols"]=[{wch:9},{wch:36},{wch:22},{wch:16},{wch:12},{wch:26},{wch:9},{wch:10}];
+    wsF["!cols"]=[{wch:9},{wch:36},{wch:22},{wch:16},{wch:12},{wch:26},{wch:6},{wch:14},{wch:9},{wch:10}];
     // 4) Hoja RUEDA (calendario por KA, refleja lo editado en el CRM)
     const filasR=[["KA","Semana","Rutas","Oficina","Última actualización","Por"]];
     ruedas.forEach(rd=>{
@@ -541,15 +586,65 @@ document.getElementById("btnBajar").onclick=async()=>{
     if(usuariosCrit.length===0)filasC.push(["(sin criterios personales — asígnalos en el Administrador → Usuarios)"]);
     const wsC=XLSX.utils.aoa_to_sheet(filasC);
     wsC["!cols"]=[{wch:70},{wch:14},{wch:16},{wch:24},{wch:20},{wch:24},{wch:34},{wch:40}];
+    // (v3.8) Hoja PROSPECCIÓN: clientes de la BD que NO están organizados en
+    // ninguna ruta (igual que calcula el Alimentador 2), filtrados a las
+    // provincias que ya trabaja este grupo — la bolsa de la que elegir
+    // candidatos nuevos sin salirse de su territorio.
+    let prospeccion=[];
+    try{
+      m.textContent="Calculando bolsa de prospección…";
+      const RUTASall=await cargaRutasNube();
+      const enRutas=new Set(RUTASall.map(c=>norm(c.n)+"|"+norm(c.p)));
+      const provsObjetivo=new Set(lista.map(c=>norm(c.pr||"")).filter(Boolean));
+      const g={};
+      todosPBI.forEach(([cod,nom,ag,vA,vB,pob])=>{
+        const k=norm(nom||"")+"|"+norm(pob||"");
+        if(!g[k])g[k]={n:nom,p:pob||"",ag:String(ag||"").toUpperCase(),vAct:0,vAnt:0};
+        g[k].vAct+=(+vA||0);g[k].vAnt+=(+vB||0);
+      });
+      prospeccion=Object.values(g).filter(c=>{
+        if(enRutas.has(norm(c.n)+"|"+norm(c.p)))return false; // ya organizado en alguna ruta
+        const prov=provDe(c.p,"");
+        return prov&&provsObjetivo.has(norm(prov));
+      }).sort((a,b)=>b.vAct-a.vAct).slice(0,300);
+    }catch(e){}
+    const filasP=[["BOLSA DE PROSPECCIÓN · clientes sin organizar en ninguna ruta, en las mismas provincias que este grupo · elegir aquí, no fuera del territorio"],[],
+      ["Cliente","Población","Provincia (estimada)","Agente actual (BD)","Venta año (€)","Venta año anterior (€)"]];
+    prospeccion.forEach(c=>filasP.push([c.n,c.p,provDe(c.p,"")||"",c.ag||"",Math.round(c.vAct),Math.round(c.vAnt)]));
+    if(prospeccion.length===0)filasP.push(["(sin candidatos en estas provincias, o no se pudo calcular)"]);
+    const wsP=XLSX.utils.aoa_to_sheet(filasP);
+    wsP["!cols"]=[{wch:36},{wch:22},{wch:18},{wch:16},{wch:14},{wch:16}];
     const wb2=XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb2,wsF,"FILTRABLE");
     XLSX.utils.book_append_sheet(wb2,wsR,"RUEDA");
     XLSX.utils.book_append_sheet(wb2,wsC,"CRITERIOS");
+    XLSX.utils.book_append_sheet(wb2,wsP,"PROSPECCION");
     const hoy=new Date();
     const sufijo=filtroKA?"_"+[...filtroKA].join("+"):"_TODOS";
-    XLSX.writeFile(wb2,"Rueda_Agenda_nube"+sufijo+"_"+hoy.getFullYear()+"-"+String(hoy.getMonth()+1).padStart(2,"0")+"-"+String(hoy.getDate()).padStart(2,"0")+".xlsx");
+    const nombreBase="Rueda_Agenda_nube"+sufijo+"_"+hoy.getFullYear()+"-"+String(hoy.getMonth()+1).padStart(2,"0")+"-"+String(hoy.getDate()).padStart(2,"0");
+    XLSX.writeFile(wb2,nombreBase+".xlsx");
+    // (v3.8) JSON gemelo del Excel — mismo contenido en formato que un chat
+    // puede leer directamente sin reinterpretar hojas, para montar la rueda.
+    const jsonData={
+      generado:new Date().toISOString(),
+      kasIncluidos:filtroKA?[...filtroKA]:"TODOS",
+      telefonicosIncluidos:[...telsSeleccionados].map(id=>TELEFONICOS.find(t=>t.id===id)?.nombre||id),
+      clientes:lista.map(c=>({cliente:c.n,poblacion:c.p,provincia:c.pr,ka:c.ka,ruta:c.ruta,
+        segmento:c.seg||"",ventaAnio:+c.venta||0,ventaAnioAnterior:+c.ventaAnt||0,semana:c.sem||"",dia:c.dia||""})),
+      ruedaSemanal:ruedas,
+      perfiles:perfiles.map(p=>({id:p.id,nombre:p.nombre,descripcion:p.descripcion,informe:p.informe,archivo:p.archivo,actualizado:p.fecha})),
+      criteriosPersonales:usuariosCrit,
+      bolsaProspeccion:prospeccion.map(c=>({cliente:c.n,poblacion:c.p,provincia:provDe(c.p,"")||"",
+        agenteActual:c.ag||"",ventaAnio:Math.round(c.vAct),ventaAnioAnterior:Math.round(c.vAnt)}))
+    };
+    const blobJ=new Blob([JSON.stringify(jsonData,null,2)],{type:"application/json"});
+    const urlJ=URL.createObjectURL(blobJ);
+    const aJ=document.createElement("a");aJ.href=urlJ;aJ.download=nombreBase+".json";
+    document.body.appendChild(aJ);aJ.click();document.body.removeChild(aJ);
+    setTimeout(()=>URL.revokeObjectURL(urlJ),4000);
     m.className="msg okm";
-    m.textContent="✓ Descargado ("+(filtroKA?[...filtroKA].join(", "):"TODOS los KA")+(telsSeleccionados.size>0?" · ☎️ "+[...telsSeleccionados].map(id=>TELEFONICOS.find(t=>t.id===id)?.nombre||id).join(", "):"")+"): "+lista.length+" clientes (FILTRABLE)"+(ruedas.length>0?" + calendario de "+ruedas.length+" KA (RUEDA)":"")+(perfiles.length>0||usuariosCrit.length>0?" + criterios de organización (CRITERIOS)":" · ⚠ sin criterios: configúralos en el Administrador → 🧭 Perfiles")+". Listo para enviar al chat.";
+    const sinSegVenta=lista.filter(c=>!c.seg&&!c.venta).length;
+    m.textContent="✓ Descargado ("+(filtroKA?[...filtroKA].join(", "):"TODOS los KA")+(telsSeleccionados.size>0?" · ☎️ "+[...telsSeleccionados].map(id=>TELEFONICOS.find(t=>t.id===id)?.nombre||id).join(", "):"")+"): "+lista.length+" clientes (FILTRABLE, seg. A/B/C recalculada en vivo)"+(ruedas.length>0?" + calendario de "+ruedas.length+" KA (RUEDA)":"")+(perfiles.length>0||usuariosCrit.length>0?" + criterios (CRITERIOS)":" · ⚠ sin criterios: configúralos en el Administrador → 🧭 Perfiles")+" + "+prospeccion.length+" candidatos de prospección (PROSPECCION)"+(sinSegVenta>0?" · ⚠ "+sinSegVenta+" sin venta detectada":"")+". Excel + JSON descargados — listos para enviar al chat.";
   }catch(e){m.className="msg err";m.textContent=e.message;}
 };
 async function cargaBoard(){
