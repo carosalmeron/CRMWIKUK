@@ -364,7 +364,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "6.6.2";
+const CRM_VERSION = "6.8.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -26544,9 +26544,82 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
   // (v5.0) ambito: "cliente" | "interno". Los internos llevan departamento,
   // prioridad y nacen en backlog salvo que el creador pueda aprobarlos.
   const [form,setForm]=useState({nombre:"",tipo:"lanzamiento",desc:"",fin:"",ambito:"cliente",departamentoId:"",prioridad:"media"});
-  const [nuevoHito,setNuevoHito]=useState({nombre:"",fecha:"",responsable:"",nota:""});
+  const [nuevoHito,setNuevoHito]=useState({nombre:"",fecha:"",responsable:"",nota:"",horas:""});
+  // (v6.8) 📎 Documentos adjuntos del proyecto (col proyectos_adjuntos)
+  const [adjuntos,setAdjuntos]=useState([]);
+  const [subiendoAdj,setSubiendoAdj]=useState(false);
+  React.useEffect(function(){
+    if(!sel||!sel.id){setAdjuntos([]);return;}
+    fbLeer("proyectos_adjuntos").then(function(docs){
+      setAdjuntos((docs||[]).filter(function(a){return a.proyectoId===sel.id;})
+        .sort(function(a,b){return (b.ts||0)-(a.ts||0);}));
+    }).catch(function(){setAdjuntos([]);});
+  },[sel?.id]);
+  function subirAdjunto(file){
+    if(!file)return;
+    if(file.size>700*1024){
+      alert("⚠️ El archivo pesa "+Math.round(file.size/1024)+" KB y el máximo es 700 KB.\nPara archivos grandes usa 🔗 Añadir enlace (Drive, SharePoint…).");
+      return;
+    }
+    setSubiendoAdj(true);
+    var r=new FileReader();
+    r.onload=function(){
+      var b64=String(r.result).split(",")[1]||"";
+      var doc={id:"adj"+Date.now(),proyectoId:sel.id,nombre:file.name,mime:file.type||"application/octet-stream",
+        tam:file.size,dataB64:b64,subidoPor:usuario.id,subidoPorNombre:usuario.nombre,
+        fecha:new Date().toLocaleDateString("es-ES"),ts:Date.now()};
+      fbEscribir("proyectos_adjuntos",doc.id,doc).then(function(){
+        setAdjuntos(function(a){return [doc].concat(a);});
+        setSubiendoAdj(false);
+      }).catch(function(){setSubiendoAdj(false);alert("Error al subir. Inténtalo de nuevo.");});
+    };
+    r.onerror=function(){setSubiendoAdj(false);};
+    r.readAsDataURL(file);
+  }
+  function abrirAdjunto(a){
+    if(a.url){try{window.open(a.url,"_blank");}catch(e){}return;}
+    try{
+      var bytes=atob(a.dataB64||"");
+      var arr=new Uint8Array(bytes.length);
+      for(var i=0;i<bytes.length;i++)arr[i]=bytes.charCodeAt(i);
+      var blob=new Blob([arr],{type:a.mime||"application/octet-stream"});
+      var u=URL.createObjectURL(blob);
+      var el=document.createElement("a");el.href=u;el.download=a.nombre||"documento";
+      document.body.appendChild(el);el.click();el.remove();
+      setTimeout(function(){URL.revokeObjectURL(u);},4000);
+    }catch(e){alert("No se pudo abrir el documento.");}
+  }
+  function borrarAdjunto(a){
+    if(a.subidoPor!==usuario.id&&!["director","ceo"].includes(usuario.rol)){
+      alert("Solo quien lo subió (o dirección) puede eliminarlo.");return;
+    }
+    if(!confirm('Eliminar "'+a.nombre+'"?'))return;
+    fetch(FB_BASE+"/proyectos_adjuntos/"+a.id,{method:"DELETE"}).catch(function(){});
+    setAdjuntos(function(list){return list.filter(function(x){return x.id!==a.id;});});
+  }
+  function anadirEnlace(){
+    var url=prompt("Pega el enlace (Drive, SharePoint, web…):");
+    if(!url)return;
+    if(!/^https?:\/\//i.test(url))url="https://"+url;
+    var nombre=prompt("Nombre para mostrar:","Documento enlazado")||"Enlace";
+    var doc={id:"adj"+Date.now(),proyectoId:sel.id,nombre:nombre,url:url,
+      subidoPor:usuario.id,subidoPorNombre:usuario.nombre,
+      fecha:new Date().toLocaleDateString("es-ES"),ts:Date.now()};
+    fbEscribir("proyectos_adjuntos",doc.id,doc);
+    setAdjuntos(function(a){return [doc].concat(a);});
+  }
+  function iconoAdj(a){
+    if(a.url)return "🔗";
+    var m=(a.mime||"")+(a.nombre||"");m=m.toLowerCase();
+    if(m.indexOf("pdf")>=0)return "📕";
+    if(m.indexOf("sheet")>=0||m.indexOf("excel")>=0||/\.xlsx?/.test(m)||m.indexOf("csv")>=0)return "📊";
+    if(m.indexOf("word")>=0||/\.docx?/.test(m))return "📄";
+    if(m.indexOf("image")>=0||/\.(png|jpe?g|gif|webp)/.test(m))return "🖼️";
+    if(m.indexOf("presentation")>=0||/\.pptx?/.test(m))return "📽️";
+    return "📎";
+  }
   const [editHitoIdx,setEditHitoIdx]=useState(null); // índice del hito en edición
-  const [editHitoForm,setEditHitoForm]=useState({nombre:"",fecha:"",responsable:"",nota:""});
+  const [editHitoForm,setEditHitoForm]=useState({nombre:"",fecha:"",responsable:"",nota:"",horas:""});
   const [showCierre,setShowCierre]=useState(null); // "exito" | "perdido" | null
   const [notaCierre,setNotaCierre]=useState("");
   const [motivoCierreProy,setMotivoCierreProy]=useState("");
@@ -26757,7 +26830,7 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
   const addHito=(proyId)=>{
     if(!nuevoHito.nombre.trim()) return;
     const hoy=new Date().toLocaleDateString("es-ES");
-    const hito={nombre:nuevoHito.nombre.trim(),fecha:nuevoHito.fecha,responsable:nuevoHito.responsable,nota:nuevoHito.nota||"",hecho:false,fechaHecho:""};
+    const hito={nombre:nuevoHito.nombre.trim(),fecha:nuevoHito.fecha,responsable:nuevoHito.responsable,nota:nuevoHito.nota||"",horas:nuevoHito.horas||"",hecho:false,fechaHecho:""};
     const updProy=p=>({...p,hitos:[...(p.hitos||[]),hito]});
     setProyectos(pp=>pp.map(p=>p.id===proyId?updProy(p):p));
     if(sel?.id===proyId){const up=updProy(sel);setSel(up);fbEscribir("proyectos",proyId,up);}
@@ -26814,14 +26887,14 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
     const h=(sel.hitos||[])[hitoIdx];
     if(!h) return;
     setEditHitoIdx(hitoIdx);
-    setEditHitoForm({nombre:h.nombre||h.titulo||"",fecha:h.fecha||"",responsable:h.responsable||"",nota:h.nota||""});
+    setEditHitoForm({nombre:h.nombre||h.titulo||"",fecha:h.fecha||"",responsable:h.responsable||"",nota:h.nota||"",horas:h.horas||""});
   };
 
   const saveEditHito=(proyId)=>{
     if(!editHitoForm.nombre.trim()) return;
     const updProy=p=>({...p,hitos:(p.hitos||[]).map((h,i)=>
       i===editHitoIdx?{...h,nombre:editHitoForm.nombre.trim(),fecha:editHitoForm.fecha,
-        responsable:editHitoForm.responsable,nota:editHitoForm.nota}:h)});
+        responsable:editHitoForm.responsable,nota:editHitoForm.nota,horas:editHitoForm.horas||""}:h)});
     setProyectos(pp=>pp.map(p=>p.id===proyId?updProy(p):p));
     if(sel?.id===proyId){const up=updProy(sel);setSel(up);fbEscribir("proyectos",proyId,up);}
     setEditHitoIdx(null);
@@ -27226,6 +27299,34 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
                 </p>
               )}
 
+              {/* (v6.7) INVERSIÓN: horas de los hitos × tarifa €/h del proyecto */}
+              {(function(){
+                var hs=(sel.hitos||[]).filter(function(h){return h.nombre||h.titulo||h.descripcion;});
+                var tot=hs.reduce(function(a,h){return a+(Number(h.horas)||0);},0);
+                if(tot===0)return null;
+                var hechas=hs.filter(function(h){return h.hecho;}).reduce(function(a,h){return a+(Number(h.horas)||0);},0);
+                var tarifa=Number(sel.tarifaHora)||0;
+                return (
+                  <div onClick={function(){
+                      var t=prompt("Tarifa €/hora para valorar la inversión de este proyecto:",sel.tarifaHora||"");
+                      if(t===null)return;
+                      var upd=Object.assign({},sel,{tarifaHora:t});
+                      setSel(upd);
+                      setProyectos(function(ps){return ps.map(function(p){return p.id===sel.id?upd:p;});});
+                      fbEscribir("proyectos",sel.id,upd);
+                    }}
+                    style={{display:"inline-flex",gap:6,alignItems:"center",cursor:"pointer",padding:"3px 10px",
+                      borderRadius:99,background:"#EFF6FF",border:"1px solid "+T.border,marginBottom:8,marginRight:6}}>
+                    <span style={{fontSize:12,fontWeight:800,color:T.text}}>
+                      ⏱ Inversión: {tot} h
+                      <span style={{fontWeight:600,color:T.muted}}> ({hechas} h ejecutadas)</span>
+                      {tarifa>0&&<span style={{color:T.blue}}> · {Math.round(tot*tarifa).toLocaleString("es-ES")} € ({Math.round(hechas*tarifa).toLocaleString("es-ES")} € ejecutados)</span>}
+                    </span>
+                    <span style={{fontSize:11,color:T.muted}}>{tarifa>0?"✏️":"€/h ✏️"}</span>
+                  </div>
+                );
+              })()}
+
               {/* (v6.6) Potencial € — a mano o calculado uds × precio (restaurado) */}
               <div style={{marginBottom:8}}>
                 {editPotencialProy?(
@@ -27342,6 +27443,40 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
           </div>
         )}
 
+        {/* (v6.8) 📎 Documentos del proyecto */}
+        <p style={{margin:"0 0 8px",fontSize:13,fontWeight:800,color:T.text}}>📎 Documentos</p>
+        <Card style={{marginBottom:16,padding:"12px 14px"}}>
+          {adjuntos.length===0&&<p style={{margin:"0 0 10px",fontSize:11.5,color:T.muted}}>Sin documentos. Adjunta el escandallo, la ficha técnica, el contrato…</p>}
+          {adjuntos.map(function(a){
+            return (
+              <div key={a.id} style={{display:"flex",gap:9,alignItems:"center",padding:"8px 0",borderBottom:"1px solid "+T.border}}>
+                <span style={{fontSize:18,flexShrink:0}}>{iconoAdj(a)}</span>
+                <div onClick={function(){abrirAdjunto(a);}} style={{flex:1,minWidth:0,cursor:"pointer"}}>
+                  <p style={{margin:0,fontSize:12.5,fontWeight:700,color:T.blue,textDecoration:"underline",
+                    whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{a.nombre}</p>
+                  <p style={{margin:0,fontSize:10,color:T.muted}}>
+                    {a.url?"enlace externo":Math.max(1,Math.round((a.tam||0)/1024))+" KB"} · {a.subidoPorNombre||""} · {a.fecha||""}
+                  </p>
+                </div>
+                <span onClick={function(){borrarAdjunto(a);}}
+                  style={{fontSize:13,color:T.muted,cursor:"pointer",padding:"4px 6px",flexShrink:0}}>🗑️</span>
+              </div>
+            );
+          })}
+          <div style={{display:"flex",gap:8,marginTop:10}}>
+            <label style={{flex:1,textAlign:"center",padding:"10px",borderRadius:9,border:"1.5px dashed "+T.border,
+              background:"#fff",fontSize:11.5,fontWeight:700,color:subiendoAdj?T.muted:T.text,cursor:"pointer"}}>
+              {subiendoAdj?"⏳ Subiendo…":"📎 Adjuntar archivo"}
+              <input type="file" style={{display:"none"}} disabled={subiendoAdj}
+                onChange={function(e){subirAdjunto(e.target.files&&e.target.files[0]);e.target.value="";}}/>
+            </label>
+            <button onClick={anadirEnlace}
+              style={{flex:1,padding:"10px",borderRadius:9,border:"1.5px dashed "+T.border,background:"#fff",
+                fontSize:11.5,fontWeight:700,color:T.text,cursor:"pointer",fontFamily:"inherit"}}>🔗 Añadir enlace</button>
+          </div>
+          <p style={{margin:"7px 0 0",fontSize:9.5,color:T.muted}}>Archivos hasta 700 KB (PDF, Excel, Word, imágenes…). Para más grandes, usa el enlace.</p>
+        </Card>
+
         {/* Hitos */}
         <p style={{margin:"0 0 10px",fontSize:13,fontWeight:800,color:T.text}}>📍 Hitos del proyecto</p>
         {(sel.hitos||[]).length===0?(
@@ -27382,10 +27517,17 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
                   </select>
                 </div>
               </div>
-              <input value={editHitoForm.nota} onChange={e=>setEditHitoForm(f=>({...f,nota:e.target.value}))}
-                placeholder="Nota (opcional)"
-                style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,
-                  fontSize:12,outline:"none",boxSizing:"border-box",fontFamily:"inherit",marginBottom:8}}/>
+              <div style={{display:"flex",gap:7,marginBottom:8}}>
+                <input value={editHitoForm.nota} onChange={e=>setEditHitoForm(f=>({...f,nota:e.target.value}))}
+                  placeholder="Nota (opcional)"
+                  style={{flex:1,padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,
+                    fontSize:12,outline:"none",boxSizing:"border-box",fontFamily:"inherit"}}/>
+                <input type="number" min="0" step="0.5" value={editHitoForm.horas}
+                  onChange={e=>setEditHitoForm(f=>({...f,horas:e.target.value}))}
+                  placeholder="⏱ h"
+                  style={{width:74,padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,
+                    fontSize:12,outline:"none",boxSizing:"border-box",fontFamily:"inherit"}}/>
+              </div>
               <div style={{display:"flex",gap:8}}>
                 <button onClick={()=>saveEditHito(sel.id)}
                   style={{flex:1,padding:"10px",borderRadius:8,border:"none",background:T.green,
@@ -27424,6 +27566,7 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
                   const u=USUARIOS.find(x=>x.id===h.responsable||x.nombre===h.responsable);
                   return <span style={{fontSize:11,color:T.blue,fontWeight:600}}>👤 {u?u.icon+" "+u.nombre:h.responsable}</span>;
                 })()}
+                {h.horas&&<span style={{fontSize:11,fontWeight:700,color:T.blue}}>⏱ {h.horas} h</span>}
                 {h.nota&&<span style={{fontSize:11,color:T.muted,fontStyle:"italic"}}>{h.nota}</span>}
                 {h.hecho&&h.fechaHecho&&<span style={{fontSize:11,color:T.green,fontWeight:600}}>✅ {h.fechaHecho}</span>}
               </div>
@@ -27466,6 +27609,13 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
             <div style={{flex:1}}>
               <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>Fecha objetivo</p>
               <input type="date" value={nuevoHito.fecha} onChange={e=>setNuevoHito(f=>({...f,fecha:e.target.value}))}
+                style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,
+                  fontSize:12,outline:"none",boxSizing:"border-box",fontFamily:"inherit"}}/>
+            </div>
+            <div style={{width:74}}>
+              <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>⏱ Horas</p>
+              <input type="number" min="0" step="0.5" value={nuevoHito.horas}
+                onChange={e=>setNuevoHito(f=>({...f,horas:e.target.value}))} placeholder="0"
                 style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1.5px solid "+T.border,
                   fontSize:12,outline:"none",boxSizing:"border-box",fontFamily:"inherit"}}/>
             </div>
