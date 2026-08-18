@@ -364,7 +364,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "6.6.0";
+const CRM_VERSION = "6.6.2";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -26650,6 +26650,86 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
       return (p.responsableComercial||p.agente||p.creadoPor)===agenteSelProy;
     });
 
+  const nombreResponsableHito=function(resp){
+    if(!resp) return "Sin asignar";
+    var depto=DEPTOS_PROY.find(function(d){return d.k===resp;});
+    if(depto) return depto.icon+" "+depto.label;
+    var u=USUARIOS.find(function(x){return x.id===resp;});
+    if(u) return u.nombre;
+    return resp;
+  };
+
+  // ── Panel de decisión (CEO / jefe de equipo) ──
+  const [ordenProy,setOrdenProy]=useState("potencial"); // potencial | proximo | nombre
+  const [buscaProy,setBuscaProy]=useState("");           // buscador por cliente/proyecto
+  const [vistaPanel,setVistaPanel]=useState(false);
+  const proyActivosVis=visibles.filter(p=>p.estado==="activo");
+  const potencialTotalActivo=proyActivosVis.reduce((acc,p)=>acc+(Number(p.potencial)||0),0);
+  const sinPotencialCount=proyActivosVis.filter(p=>!p.potencial).length;
+  const hoyISO=new Date().toISOString().slice(0,10);
+  const alertasHitos=[];
+  proyActivosVis.forEach(function(p){
+    (p.hitos||[]).filter(function(h){return (h.nombre||h.titulo||h.descripcion)&&!h.hecho&&h.fecha;}).forEach(function(h){
+      if(h.fecha<hoyISO){
+        var dias=Math.round((new Date(hoyISO)-new Date(h.fecha))/86400000);
+        alertasHitos.push({proyecto:p,hito:h,dias:dias});
+      }
+    });
+  });
+  alertasHitos.sort(function(a,b){return b.dias-a.dias;});
+  const sinResponsableCount=proyActivosVis.filter(function(p){
+    var hv=(p.hitos||[]).filter(function(h){return (h.nombre||h.titulo||h.descripcion)&&!h.hecho;});
+    return hv.length>0&&hv.every(function(h){return !h.responsable;});
+  }).length;
+  const topPotencial=proyActivosVis.filter(function(p){return p.potencial;})
+    .sort(function(a,b){return (Number(b.potencial)||0)-(Number(a.potencial)||0);}).slice(0,5);
+
+  // Carga de trabajo por responsable (quién tiene cosas pendientes)
+  const [respExpandido,setRespExpandido]=useState(null);
+  const [soloVencidos,setSoloVencidos]=useState(false);
+  const respSectionRef=useRef(null);
+  const decisionSectionRef=useRef(null);
+  const potencialSectionRef=useRef(null);
+  const irASeccionPanel=function(ref,vencidosOnly){
+    setSoloVencidos(!!vencidosOnly);
+    setTimeout(function(){
+      if(ref&&ref.current) ref.current.scrollIntoView({behavior:"smooth",block:"start"});
+    },50);
+  };
+  const pendientesPorResp={};
+  proyActivosVis.forEach(function(p){
+    (p.hitos||[]).filter(function(h){return (h.nombre||h.titulo||h.descripcion)&&!h.hecho;}).forEach(function(h){
+      var key=nombreResponsableHito(h.responsable);
+      if(!pendientesPorResp[key]) pendientesPorResp[key]={nombre:key,total:0,vencidos:0,items:[]};
+      var venc=!!(h.fecha&&h.fecha<hoyISO);
+      pendientesPorResp[key].total++;
+      if(venc) pendientesPorResp[key].vencidos++;
+      pendientesPorResp[key].items.push({proyecto:p,hito:h,vencido:venc});
+    });
+  });
+  const respList=Object.values(pendientesPorResp).sort(function(a,b){
+    if(b.vencidos!==a.vencidos) return b.vencidos-a.vencidos;
+    return b.total-a.total;
+  });
+  respList.forEach(function(r){
+    r.items.sort(function(a,b){return (a.hito.fecha||"9999").localeCompare(b.hito.fecha||"9999");});
+  });
+
+  // Proyectos parados esperando una decisión (negociación, aprobación, precio, firma...)
+  const _normTxt=function(s){return (s||"").toString().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"");};
+  const DECISION_KEYS=["decision","negociacion","aprobacion","autorizacion","precio","firma","contrato","validacion","confirmacion","visto bueno"];
+  const proyectosEnDecision=proyActivosVis.map(function(p){
+    var hv=(p.hitos||[]).filter(function(h){return (h.nombre||h.titulo||h.descripcion)&&!h.hecho;})
+      .sort(function(a,b){return (a.fecha||"9999").localeCompare(b.fecha||"9999");});
+    var next=hv[0];
+    if(!next) return null;
+    var txt=_normTxt(next.nombre||next.titulo);
+    var esDecision=DECISION_KEYS.some(function(k){return txt.indexOf(k)>=0;});
+    if(!esDecision) return null;
+    var venc=!!(next.fecha&&next.fecha<hoyISO);
+    return {proyecto:p,hito:next,vencido:venc};
+  }).filter(Boolean);
+
   const toggleHito=(proyId,hitoIdx)=>{
     const updProy=p=>({
       ...p,
@@ -27527,6 +27607,139 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
     );
   }
 
+  if(vistaPanel){
+    const rowStyle={display:"flex",alignItems:"center",gap:10,padding:"12px 4px",
+      borderBottom:"1px solid "+T.border,cursor:"pointer"};
+    return(
+      <div style={{padding:"16px 16px 100px"}}>
+        <BackBar label="Volver a proyectos" onBack={()=>setVistaPanel(false)}/>
+
+        <p style={{margin:"0 0 4px",fontSize:19,fontWeight:800,color:T.text}}>Panel de decisión</p>
+        <p style={{margin:"0 0 4px",fontSize:12,color:T.muted}}>Pipeline activo, carga por responsable y puntos de bloqueo</p>
+        <p style={{margin:"0 0 14px",fontSize:11,color:T.muted}}>
+          Solo proyectos (no incluye muestras) · {filtroEquipoProy==="todos"?"Todos los equipos":filtroEquipoProy}
+        </p>
+
+        {/* Filtro de equipo — mismo estado que en la lista, visible aquí también */}
+        <div style={{marginBottom:18}}>
+          <FiltroEquipo value={filtroEquipoProy} onChange={setFiltroEquipoProy} agenteSel={agenteSelProy} onAgenteSel={setAgenteSelProy} items={proyectos} getAgente={p=>p.responsableComercial||p.agente||p.creadoPor}/>
+        </div>
+
+        {/* KPIs — franja de indicadores sobria (informativos, sin filtro) */}
+        <div style={{display:"flex",border:"1px solid "+T.border,borderRadius:12,overflow:"hidden",marginBottom:22,background:T.white}}>
+          {[
+            {val:potencialTotalActivo.toLocaleString("es-ES")+" €",label:"Potencial activo",sub:sinPotencialCount>0?sinPotencialCount+" sin definir":null},
+            {val:alertasHitos.length,label:"Hitos vencidos",sub:sinResponsableCount>0?sinResponsableCount+" sin responsable":null},
+            {val:proyectosEnDecision.length,label:"Esperando decisión",sub:null},
+            {val:respList.reduce((a,r)=>a+r.total,0),label:"Tareas pendientes",sub:respList.length+" responsables"},
+          ].map(function(k,i){
+            return(
+              <div key={i}
+                style={{flex:1,padding:"14px 12px",borderRight:i<3?"1px solid "+T.border:"none"}}>
+                <p style={{margin:0,fontSize:20,fontWeight:900,color:T.text}}>{k.val}</p>
+                <p style={{margin:"3px 0 0",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase",letterSpacing:.3}}>{k.label}</p>
+                {k.sub&&<p style={{margin:"3px 0 0",fontSize:10,color:T.amberD||T.amber}}>{k.sub}</p>}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Carga por responsable — quién tiene cosas pendientes */}
+        <div ref={respSectionRef} style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end"}}>
+          <div>
+            <p style={{margin:"0 0 2px",fontSize:13,fontWeight:800,color:T.text}}>Carga por responsable</p>
+            <p style={{margin:"0 0 8px",fontSize:11,color:T.muted}}>Quién tiene tareas abiertas ahora mismo</p>
+          </div>
+          {soloVencidos&&(
+            <button onClick={function(){setSoloVencidos(false);}}
+              style={{marginBottom:8,padding:"4px 10px",borderRadius:99,border:"1px solid "+(T.amberD||T.amber),
+                background:T.amberL,color:T.amberD||T.amber,fontSize:11,fontWeight:700,cursor:"pointer"}}>
+              Solo vencidos ✕
+            </button>
+          )}
+        </div>
+        <Card style={{marginBottom:22,padding:"6px 16px"}}>
+          {(function(){
+            const lista=soloVencidos?respList.filter(function(r){return r.vencidos>0;}):respList;
+            if(lista.length===0) return <p style={{margin:"10px 0",fontSize:12,color:T.muted,textAlign:"center"}}>{soloVencidos?"Ningún responsable tiene hitos vencidos":"Sin tareas pendientes"}</p>;
+            return lista.map(function(r,i){
+            const abierto=respExpandido===r.nombre;
+            const itemsMostrados=soloVencidos?r.items.filter(function(it){return it.vencido;}):r.items;
+            return(
+              <div key={r.nombre}>
+                <div onClick={function(){setRespExpandido(abierto?null:r.nombre);}}
+                  style={{...rowStyle,borderBottom:(i===lista.length-1&&!abierto)?"none":rowStyle.borderBottom}}>
+                  <span style={{fontSize:11,color:T.muted,width:16,flexShrink:0}}>{abierto?"▾":"▸"}</span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{r.nombre}</p>
+                  </div>
+                  <span style={{fontSize:12,color:T.muted,flexShrink:0}}>{r.total} pendiente{r.total===1?"":"s"}</span>
+                  {r.vencidos>0&&<span style={{fontSize:11,fontWeight:800,color:T.amberD||T.amber,flexShrink:0,minWidth:52,textAlign:"right"}}>{r.vencidos} vencido{r.vencidos===1?"":"s"}</span>}
+                  {r.vencidos===0&&<span style={{fontSize:11,color:T.border,flexShrink:0,minWidth:52,textAlign:"right"}}>—</span>}
+                </div>
+                {abierto&&(
+                  <div style={{padding:"0 0 10px 26px"}}>
+                    {itemsMostrados.map(function(it,ix){
+                      return(
+                        <div key={ix} onClick={function(){setSel(it.proyecto);setVistaPanel(false);}}
+                          style={{display:"flex",justifyContent:"space-between",gap:8,padding:"6px 0",cursor:"pointer"}}>
+                          <p style={{margin:0,fontSize:12,color:T.text}}>{it.proyecto.nombre} <span style={{color:T.muted}}>— {it.hito.nombre||it.hito.titulo}</span></p>
+                          <span style={{fontSize:11,fontWeight:700,color:it.vencido?(T.amberD||T.amber):T.muted,flexShrink:0}}>{it.hito.fecha?_fechaES(it.hito.fecha):"sin fecha"}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+            });
+          })()}
+        </Card>
+
+        {/* Proyectos esperando una decisión */}
+        <p ref={decisionSectionRef} style={{margin:"0 0 2px",fontSize:13,fontWeight:800,color:T.text}}>Esperando decisión</p>
+        <p style={{margin:"0 0 8px",fontSize:11,color:T.muted}}>Proyectos parados por negociación, aprobación, precio o firma</p>
+        <Card style={{marginBottom:22,padding:"6px 16px"}}>
+          {proyectosEnDecision.length===0?(
+            <p style={{margin:"10px 0",fontSize:12,color:T.muted,textAlign:"center"}}>Ningún proyecto está bloqueado a la espera de una decisión</p>
+          ):proyectosEnDecision.map(function(d,i){
+            return(
+              <div key={d.proyecto.id} onClick={function(){setSel(d.proyecto);setVistaPanel(false);}}
+                style={{...rowStyle,borderBottom:i===proyectosEnDecision.length-1?"none":rowStyle.borderBottom}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.proyecto.nombre}</p>
+                  <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{d.hito.nombre||d.hito.titulo} · {nombreResponsableHito(d.hito.responsable)}</p>
+                </div>
+                {d.hito.fecha&&<span style={{fontSize:11,fontWeight:700,color:d.vencido?(T.amberD||T.amber):T.muted,flexShrink:0}}>{d.vencido?"venció ":"objetivo "}{_fechaES(d.hito.fecha)}</span>}
+              </div>
+            );
+          })}
+        </Card>
+
+        {/* Prioridad por potencial */}
+        <p ref={potencialSectionRef} style={{margin:"0 0 2px",fontSize:13,fontWeight:800,color:T.text}}>Prioridad por potencial</p>
+        <p style={{margin:"0 0 8px",fontSize:11,color:T.muted}}>Dónde está el dinero</p>
+        <Card style={{padding:"6px 16px"}}>
+          {topPotencial.length===0?(
+            <p style={{margin:"10px 0",fontSize:12,color:T.muted,textAlign:"center"}}>Todavía no hay proyectos con potencial (€) definido</p>
+          ):topPotencial.map(function(p,i){
+            return(
+              <div key={p.id} onClick={function(){setSel(p);setVistaPanel(false);}}
+                style={{...rowStyle,borderBottom:i===topPotencial.length-1?"none":rowStyle.borderBottom}}>
+                <span style={{fontSize:11,fontWeight:800,color:T.muted,width:16,flexShrink:0}}>{i+1}</span>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.nombre}</p>
+                  {p.cliente&&<p style={{margin:0,fontSize:11,color:T.muted}}>{p.cliente}</p>}
+                </div>
+                <span style={{fontSize:13,fontWeight:800,color:T.text,flexShrink:0}}>{Number(p.potencial).toLocaleString("es-ES")} €</span>
+              </div>
+            );
+          })}
+        </Card>
+      </div>
+    );
+  }
+
   return(
     <div style={{padding:"16px 16px 100px"}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
@@ -27553,38 +27766,24 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
         </Card>
       </div>
 
-      {/* (v6.6) RESTAURADO: potencial activo + prioridad por potencial */}
-      {(function(){
-        var activosP=proyectos.filter(function(p){return (p.estado||"activo")==="activo";});
-        var total=activosP.reduce(function(a,p){return a+(Number(p.potencial)||0);},0);
-        var sinPot=activosP.filter(function(p){return !p.potencial;}).length;
-        var top=activosP.filter(function(p){return p.potencial;})
-          .sort(function(a,b){return (Number(b.potencial)||0)-(Number(a.potencial)||0);}).slice(0,5);
-        if(total===0&&top.length===0)return null;
-        return (
-          <Card style={{marginBottom:16,padding:"13px 15px"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:top.length?8:0}}>
-              <p style={{margin:0,fontSize:12,fontWeight:800,color:T.text}}>💰 Prioridad por potencial</p>
-              <p style={{margin:0,fontSize:12,fontWeight:900,color:T.green}}>
-                {total.toLocaleString("es-ES")} €
-                {sinPot>0&&<span style={{fontSize:10,fontWeight:600,color:T.amber}}> · {sinPot} sin definir</span>}
-              </p>
-            </div>
-            {top.map(function(p,i){
-              return (
-                <div key={p.id} onClick={function(){setSel(p);}}
-                  style={{display:"flex",gap:8,alignItems:"center",padding:"7px 0",cursor:"pointer",
-                    borderBottom:i<top.length-1?"1px solid "+T.border:"none"}}>
-                  <span style={{fontSize:11,fontWeight:900,color:T.muted,width:16,flexShrink:0}}>{i+1}.</span>
-                  <p style={{margin:0,fontSize:12.5,fontWeight:600,color:T.text,flex:1,minWidth:0,
-                    whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{p.nombre}</p>
-                  <span style={{fontSize:12.5,fontWeight:800,color:T.text,flexShrink:0}}>{Number(p.potencial).toLocaleString("es-ES")} €</span>
-                </div>
-              );
-            })}
-          </Card>
-        );
-      })()}
+      {/* ── Acceso al Panel de decisión ── */}
+      {(
+        <Card onClick={function(){setVistaPanel(true);}}
+          style={{marginBottom:16,cursor:"pointer",border:"1.5px solid "+T.blue+"33",
+            background:T.blueL,display:"flex",alignItems:"center",gap:14,padding:"16px 18px"}}>
+          <div style={{width:44,height:44,borderRadius:12,background:"#fff",display:"flex",
+            alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>📊</div>
+          <div style={{flex:1,minWidth:0}}>
+            <p style={{margin:"0 0 2px",fontSize:14,fontWeight:800,color:T.text}}>Panel de decisión</p>
+            <p style={{margin:0,fontSize:11,color:T.muted}}>
+              {potencialTotalActivo.toLocaleString("es-ES")} € en potencial
+              {alertasHitos.length>0?" · "+alertasHitos.length+" hitos vencidos":" · sin alertas"}
+            </p>
+          </div>
+          <span style={{fontSize:20,color:T.blue,flexShrink:0}}>›</span>
+        </Card>
+      )}
+
 
       {/* Formulario */}
       {formOpen&&(
