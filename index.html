@@ -235,6 +235,7 @@ input,button,select{font-family:inherit;}
   <div class="admin-tabs">
     <button class="admin-tab active" onclick="setAdminTab('usuarios',this)">Usuarios</button>
     <button class="admin-tab" onclick="setAdminTab('organigrama',this)">🏗 Organigrama</button>
+    <button class="admin-tab" onclick="setAdminTab('perfiles',this)">🧭 Perfiles</button>
     <button class="admin-tab" onclick="setAdminTab('accesos',this)">Accesos</button>
     <button class="admin-tab" onclick="setAdminTab('descuentos',this)">Descuentos</button>
     <button class="admin-tab" onclick="setAdminTab('datos',this)">Datos</button>
@@ -487,6 +488,108 @@ function loadOrgData(){
     orgCargado=true;
   });
 }
+// ── (v1) PERFILES COMERCIALES: criterios generales por tipo + personales por persona ──
+var PERFILES_BASE=[
+  {id:"KA",icon:"🎯",color:"#7C3AED",nombre:"KA",descDef:"Key Account: rutas propias en ciclo de rueda, incluye labor de promoción sobre el terreno"},
+  {id:"KA_DUPLOS",icon:"👥",color:"#3B82F6",nombre:"KA Duplos",descDef:"KA de calle que trabaja en pareja con un Telefónico sobre la misma cartera"},
+  {id:"TELEFONICO_DUPLOS",icon:"📞",color:"#0EA5E9",nombre:"Telefónico Duplos",descDef:"Comercial telefónico que trabaja en pareja con un KA sobre la misma cartera"},
+  {id:"KA_INTERNACIONAL",icon:"🌍",color:"#059669",nombre:"KA Internacional",descDef:"Cartera internacional con base fija y desplazamientos largos"},
+];
+// Criterios de partida de los duplos, extraídos del Plan Comercial de Duplos y Criterios_DUPLO1.
+// Solo se usan como valor inicial editable mientras el perfil no tenga criterios guardados.
+var CRITERIOS_DEFAULT={
+  KA_DUPLOS:{
+    diasEfectivos:"Visitas solo lunes–jueves, 4-5 visitas/día (≈80 visitas/mes de capacidad). Viernes SIN visitas: reunión de duplo (25') + comité (20') + teléfono + CRM al día + agenda de la semana siguiente.",
+    cicloSemanas:"Ciclo mensual con capas de segmento: A cada 2 meses, B cada 3 meses, C con diagnóstico previo del Telefónico. La rueda gira cada mes y se recalcula con datos, no por costumbre.",
+    duplos:"El KA forma pareja con un Telefónico (Inside) sobre UNA cartera compartida. Nunca visita+llamada al mismo cliente el mismo mes: el mes que el KA no visita, el Telefónico llama. Reunión conjunta obligatoria el viernes.",
+    criterios:"Rutas VALIDADAS por población, optimizadas desde la base de cada comercial — la estructura de rutas jamás se regenera, se restaura y se superponen capas (alertas, potenciales, pendientes, hitos). Segmentación: A·Prioritario (visita cada 2 meses + llamada intermedia) · B·Desarrollo (visita trimestral + llamada mensual) · C·Recuperación (el Telefónico diagnostica, el KA remata con oferta) · Prospecto/Captación (el Telefónico cualifica antes; solo el cualificado con ficha consume visita). Código de colores oficial: verde=va bien · fila roja=cae/parado (con producto, cifras y propuesta) · azul=conquista nominal · naranja=prospección/puerta fría · amarillo 🎉=festivo, se reprograma el viernes previo. Identidad de cliente resuelta por tabla de alias única; ningún cliente se quita de una ruta sin confirmación."
+  },
+  TELEFONICO_DUPLOS:{
+    diasEfectivos:"Llamadas de lunes a viernes (cubre también el viernes que su KA no visita). ~185 llamadas/mes · 20 días laborables · 8-10 llamadas/día.",
+    cicloSemanas:"Cobertura mensual sincronizada con la rueda del KA: llama a los A y B que ese mes NO reciben visita (relevo, nunca duplicado), más recuperación de C y cualificación de nuevos.",
+    duplos:"Día tipo: ~6 llamadas de cobertura de rueda + ~2 de recuperación C (diagnosticar y preparar oferta para el KA) + ~1 de cualificación de prospectos. Agenda y confirma las visitas de la semana siguiente del KA. Reunión de duplo el viernes.",
+    criterios:"Regla de oro: cada cliente vivo recibe UN contacto al mes — visita del KA o llamada del Telefónico, nunca los dos el mismo mes. El Telefónico es la torre de control de toda la cartera compartida: al ceder un cliente a visita del KA, mantiene el teléfono — cede la visita, no la relación. Prospección: cualifica 1 llamada/día empezando por los códigos dormidos 2+ años (cuestan la mitad que un desconocido); solo el cualificado con ficha pasa a consumir visita del KA. La llamada sola no remata: detecta y prepara; el cierre lo pone la visita."
+  }
+};
+var PERFILES_DB={};
+var perfilesState={cargado:false,open:null,form:{}};
+function loadPerfilesData(){
+  return fetch(PORTAL_FB+"/perfiles_comerciales?pageSize=50").then(function(r){return r.ok?r.json():{};}).catch(function(){return{};})
+    .then(function(res){
+      PERFILES_DB={};
+      ((res.documents)||[]).map(_fromFB).filter(Boolean).forEach(function(p){PERFILES_DB[p.id]=p;});
+      perfilesState.cargado=true;
+    });
+}
+function savePerfilFB(p){
+  PERFILES_DB[p.id]=p;
+  return fetch(PORTAL_FB+"/perfiles_comerciales/"+encodeURIComponent(p.id),{method:"PATCH",
+    headers:{"Content-Type":"application/json"},body:JSON.stringify(_toFB(p))}).catch(function(){});
+}
+function renderPerfiles(){
+  if(!perfilesState.cargado){
+    loadPerfilesData().then(function(){if(adminTab==='perfiles')renderAdminBody();});
+    return '<div style="padding:40px;text-align:center;color:#8A8078">⏳ Cargando perfiles…</div>';
+  }
+  var html='<div style="padding:16px">'
+    +'<div style="font-size:.78rem;font-weight:800;color:#1A1816;margin-bottom:4px">Criterios generales por tipo de perfil</div>'
+    +'<div style="font-size:.72rem;color:#8A8078;margin-bottom:14px">Viajan en la hoja CRITERIOS del Excel que descarga la Estación de Radar: son las reglas con las que se organizan las rutas.</div>';
+  PERFILES_BASE.forEach(function(pb){
+    var p=PERFILES_DB[pb.id]||{};
+    var abierto=perfilesState.open===pb.id;
+    html+='<div style="background:white;border:'+(abierto?'2px solid '+pb.color:'1px solid #E8E3DC')+';border-radius:12px;padding:14px 16px;margin-bottom:10px">'
+      +'<div onclick="perfilToggle(\''+pb.id+'\')" style="display:flex;gap:10px;align-items:center;cursor:pointer">'
+      +'<div style="width:38px;height:38px;border-radius:10px;background:'+pb.color+'18;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">'+pb.icon+'</div>'
+      +'<div style="flex:1">'
+      +'<div style="font-size:.85rem;font-weight:800;color:#1A1816">'+pb.nombre+' <span style="font-size:.68rem;font-weight:600;color:#8A8078">('+pb.id+')</span></div>'
+      +'<div style="font-size:.72rem;color:#8A8078;margin-top:2px">'+orgEsc(p.descripcion||pb.descDef)+'</div>'
+      +(p.fechaActualizacion?'<div style="font-size:.62rem;color:'+pb.color+';font-weight:700;margin-top:2px">✓ criterios guardados · '+new Date(p.fechaActualizacion).toLocaleDateString('es-ES')+'</div>'
+        :'<div style="font-size:.62rem;color:#C2263D;font-weight:700;margin-top:2px">⚠ sin criterios definidos</div>')
+      +'</div><div style="font-size:.85rem;color:#8A8078">'+(abierto?'▲':'▼')+'</div></div>';
+    if(abierto){
+      var base=CRITERIOS_DEFAULT[pb.id]||{};
+      var f=perfilesState.form;
+      var esNueva=!p.fechaActualizacion;
+      if(esNueva&&CRITERIOS_DEFAULT[pb.id]){
+        html+='<div style="font-size:.7rem;font-weight:700;color:#92400E;background:#FEF3C7;border-radius:8px;padding:8px 10px;margin:10px 0">'
+          +'📋 Propuesta de partida a partir del Plan Comercial de Duplos — revisa y guarda para que quede oficial.</div>';
+      }
+      html+='<div style="margin-top:10px;border-top:1px solid #E8E3DC;padding-top:10px">'
+        +orgCampo('perfil-descripcion','Descripción del perfil',f.descripcion!==undefined?f.descripcion:(p.descripcion||pb.descDef),2)
+        +orgCampo('perfil-dias','Días efectivos de ruta por semana',f.diasEfectivos!==undefined?f.diasEfectivos:(p.diasEfectivos||base.diasEfectivos||''),1)
+        +orgCampo('perfil-ciclo','Ciclo de la rueda (semanas)',f.cicloSemanas!==undefined?f.cicloSemanas:(p.cicloSemanas||base.cicloSemanas||''),1)
+        +orgCampo('perfil-duplos','Regla de duplos',f.duplos!==undefined?f.duplos:(p.duplos||base.duplos||''),2)
+        +orgCampo('perfil-criterios','Criterios generales de organización',f.criterios!==undefined?f.criterios:(p.criterios||base.criterios||''),5)
+        +'<button onclick="perfilGuardar(\''+pb.id+'\')" style="width:100%;padding:11px;border-radius:10px;border:none;background:'+pb.color+';color:#fff;font-size:.85rem;font-weight:800;cursor:pointer">💾 Guardar criterios de '+pb.nombre+'</button>'
+        +'</div>';
+    }
+    html+='</div>';
+  });
+  html+='</div>';
+  return html;
+}
+function orgCampo(id,label,val,rows){
+  return '<div style="margin-bottom:10px">'
+    +'<div style="font-size:.66rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:3px">'+label+'</div>'
+    +'<textarea id="'+id+'" rows="'+rows+'" oninput="perfilCaptura()" style="width:100%;border:1.5px solid #E8E3DC;border-radius:9px;padding:8px 10px;font-size:.78rem;font-family:inherit;outline:none;box-sizing:border-box;resize:vertical">'+orgEsc(val)+'</textarea></div>';
+}
+function perfilToggle(id){
+  if(perfilesState.open===id){perfilesState.open=null;perfilesState.form={};renderAdminBody();return;}
+  perfilesState.open=id;perfilesState.form={};renderAdminBody();
+}
+function perfilCaptura(){
+  var ids={descripcion:'perfil-descripcion',diasEfectivos:'perfil-dias',cicloSemanas:'perfil-ciclo',duplos:'perfil-duplos',criterios:'perfil-criterios'};
+  Object.keys(ids).forEach(function(k){var el=document.getElementById(ids[k]);if(el)perfilesState.form[k]=el.value;});
+}
+function perfilGuardar(id){
+  perfilCaptura();
+  var f=perfilesState.form,pb=PERFILES_BASE.find(function(x){return x.id===id;});
+  var doc={id:id,nombre:pb.nombre,descripcion:f.descripcion||'',diasEfectivos:f.diasEfectivos||'',
+    cicloSemanas:f.cicloSemanas||'',duplos:f.duplos||'',criterios:f.criterios||'',
+    actualizadoPor:'admin',fechaActualizacion:new Date().toISOString()};
+  savePerfilFB(doc).then(function(){perfilesState.open=null;perfilesState.form={};renderAdminBody();});
+}
+
 function saveDeptoFB(dep){
   var idx=DEPTOS.findIndex(function(d){return d.id===dep.id;});
   if(idx>=0)DEPTOS[idx]=dep;else DEPTOS.push(dep);
@@ -1437,8 +1540,29 @@ function orgModalUser(p){
   });
   html+='</select>'
     +'<div style="font-size:.68rem;color:#8A8078;margin-bottom:10px">→ Su parte semanal lo verá'+(sups.length===1?'':'n')+': <b>'
-    +(sups.map(function(s){return orgEsc(s.nombre);}).join(", ")||"CEO")+'</b></div>'
-    +'<div style="font-size:.68rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:6px">Pestañas visibles del CRM <span style="text-transform:none;font-weight:400">(las de su rol vienen activadas)</span></div>'
+    +(sups.map(function(s){return orgEsc(s.nombre);}).join(", ")||"CEO")+'</b></div>';
+  // (v1) Perfil comercial + criterios personales — solo tiene sentido para comerciales
+  if(rolCRM==='agente'){
+    html+='<div style="font-size:.68rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:4px">Perfil comercial <span style="text-transform:none;font-weight:400">(criterios de organización de rutas)</span></div>'
+      +'<select class="form-inp" id="org-user-perfil" onchange="orgTogglePerfilCriterios()"><option value="">— Sin asignar —</option>';
+    PERFILES_BASE.forEach(function(pb){
+      html+='<option value="'+pb.id+'"'+((p.perfilComercial||'')===pb.id?' selected':'')+'>'+pb.icon+' '+pb.nombre+'</option>';
+    });
+    html+='</select>'
+      +'<div id="org-user-crit-wrap" style="display:'+(p.perfilComercial?'block':'none')+'">'
+      +'<div style="font-size:.68rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:3px">Base / domicilio</div>'
+      +'<input class="form-inp" id="org-user-critbase" value="'+orgEsc(p.critBase||'')+'" placeholder="Ej: Cascais (PT)" style="margin-bottom:8px">'
+      +'<div style="font-size:.68rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:3px">Pareja de duplo <span style="text-transform:none;font-weight:400">(si es KA_DUPLOS o TELEFONICO_DUPLOS)</span></div>'
+      +'<input class="form-inp" id="org-user-critduplocon" value="'+orgEsc(p.critDuploCon||'')+'" placeholder="Ej: forma duplo con VERÓNICA" style="margin-bottom:8px">'
+      +'<div style="font-size:.68rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:3px">Días efectivos propios</div>'
+      +'<textarea class="form-inp" id="org-user-critdias" rows="2" placeholder="Ej: 4,5 días — viernes tarde libre" style="margin-bottom:8px;font-family:inherit">'+orgEsc(p.critDias||'')+'</textarea>'
+      +'<div style="font-size:.68rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:3px">Reparto dentro del duplo</div>'
+      +'<textarea class="form-inp" id="org-user-critduplos" rows="2" placeholder="Ej: el telefónico llama la semana que el KA no visita" style="margin-bottom:8px;font-family:inherit">'+orgEsc(p.critDuplos||'')+'</textarea>'
+      +'<div style="font-size:.68rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:3px">Otros criterios personales</div>'
+      +'<textarea class="form-inp" id="org-user-critpers" rows="3" placeholder="Clientes con día fijo, zonas que evita, guardias..." style="margin-bottom:14px;font-family:inherit">'+orgEsc(p.critPersonales||'')+'</textarea>'
+      +'</div>';
+  }
+  html+='<div style="font-size:.68rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:6px">Pestañas visibles del CRM <span style="text-transform:none;font-weight:400">(las de su rol vienen activadas)</span></div>'
     +'<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">';
   var ids=menuBase.slice();
   Object.keys(CAT_PEST).forEach(function(id){
@@ -1482,7 +1606,22 @@ function orgCapturaDep(){var d=orgState.editDep||orgState.nuevoDep;if(!d)return;
 function orgCapturaUser(){var p=orgState.editUser;if(!p)return;
   var r=document.getElementById('org-user-rol'),t=document.getElementById('org-user-tip'),
       d=document.getElementById('org-user-dep'),re=document.getElementById('org-user-rep');
-  if(r)p._rolEdit=r.value;if(t)p.tipologia=t.value;if(d)p.departamentoId=d.value;if(re)p.reportaA=re.value;}
+  if(r)p._rolEdit=r.value;if(t)p.tipologia=t.value;if(d)p.departamentoId=d.value;if(re)p.reportaA=re.value;
+  var pf=document.getElementById('org-user-perfil');
+  if(pf){
+    p.perfilComercial=pf.value;
+    var cb=document.getElementById('org-user-critbase'),cd=document.getElementById('org-user-critduplocon'),
+        cds=document.getElementById('org-user-critdias'),cdp=document.getElementById('org-user-critduplos'),
+        cp=document.getElementById('org-user-critpers');
+    if(cb)p.critBase=cb.value;if(cd)p.critDuploCon=cd.value;if(cds)p.critDias=cds.value;
+    if(cdp)p.critDuplos=cdp.value;if(cp)p.critPersonales=cp.value;
+  }
+}
+function orgTogglePerfilCriterios(){
+  orgCapturaUser();
+  var w=document.getElementById('org-user-crit-wrap'),pf=document.getElementById('org-user-perfil');
+  if(w&&pf)w.style.display=pf.value?'block':'none';
+}
 function orgToggleResp(uid){orgCapturaDep();var d=orgState.editDep;if(!d)return;
   var i=(d.responsableIds||[]).indexOf(uid);
   if(i>=0)d.responsableIds.splice(i,1);else d.responsableIds.push(uid);renderAdminBody();}
@@ -1513,7 +1652,9 @@ function orgGuardaUser(){orgCapturaUser();var p=orgState.editUser;if(!p)return;
   var rolCRM=p._rolEdit||rolCRMde(p);
   saveFichaCRM(p.orgId,{nombre:p.nombre,icon:p.icon,rol:rolCRM,tipologia:p.tipologia||"",
     equipo:p.equipo||null,departamentoId:p.departamentoId||"",reportaA:p.reportaA||"",
-    pestanasOcultas:p.pestanasOcultas||[],pestanasExtra:p.pestanasExtra||[]});
+    pestanasOcultas:p.pestanasOcultas||[],pestanasExtra:p.pestanasExtra||[],
+    perfilComercial:p.perfilComercial||"",critBase:p.critBase||"",critDuploCon:p.critDuploCon||"",
+    critDias:p.critDias||"",critDuplos:p.critDuplos||"",critPersonales:p.critPersonales||""});
   orgCierra();}
 
 function setAdminTab(tab,btn){
@@ -1524,7 +1665,7 @@ function setAdminTab(tab,btn){
 }
 function renderAdmin(){
   document.querySelectorAll('.admin-tab').forEach(function(b,i){
-    b.classList.toggle('active',['usuarios','organigrama','accesos','descuentos','datos','config','tarifas','backup'][i]===adminTab);
+    b.classList.toggle('active',['usuarios','organigrama','perfiles','accesos','descuentos','datos','config','tarifas','backup'][i]===adminTab);
   });
   renderAdminBody();
 }
@@ -1532,6 +1673,7 @@ function renderAdminBody(){
   var body=document.getElementById('admin-body');
   if(adminTab==='usuarios') body.innerHTML=renderUsuarios();
   else if(adminTab==='organigrama') { body.innerHTML=renderOrganigrama(); return; }
+  else if(adminTab==='perfiles') { body.innerHTML=renderPerfiles(); return; }
   else if(adminTab==='accesos') body.innerHTML=renderAccesos();
   else if(adminTab==='descuentos') { body.innerHTML=renderDescuentos(); cargarDescuentosPortal(); }
   else if(adminTab==='datos') body.innerHTML=renderDatos();
