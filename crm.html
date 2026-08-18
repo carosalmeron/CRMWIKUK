@@ -364,7 +364,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "6.5.5";
+const CRM_VERSION = "6.6.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -1244,6 +1244,25 @@ function resolverMisIds(usuario){
     ids.forEach(function(x){ _mios.push(x); });
     for(var _p in (window.PERFILES_CRM||{})){
       if(_mios.indexOf(String(window.PERFILES_CRM[_p]).toUpperCase())>=0) ids.add(_p);
+    }
+  }catch(e){}
+  // (v6.5.6) ABSORBER las claves de mis cuentas UNIFICADAS: si otra cuenta
+  // está marcada "duplicadaDe → yo", sus identificadores siguen siendo míos.
+  // Ahí viven los códigos de vendedor históricos que atribuyen proyectos,
+  // potenciales y ventas — al unificar SIN esto, esos datos "desaparecían".
+  try{
+    var cambio=true,vueltas=0;
+    while(cambio&&vueltas<4){
+      cambio=false;vueltas++;
+      (USUARIOS||[]).forEach(function(u){
+        if(!u.duplicadaDe)return;
+        if(!ids.has(String(u.duplicadaDe).toUpperCase()))return;
+        [u.id,u._docId,u.user,u.username,u.grupoAgente,u.catalogoVendedor,u.nombre,u.crmId]
+          .filter(Boolean).forEach(function(k){
+            k=String(k).toUpperCase();
+            if(!ids.has(k)){ids.add(k);cambio=true;}
+          });
+      });
     }
   }catch(e){}
   return ids;
@@ -26512,6 +26531,11 @@ function PotencialCliente({clienteSel, usuario, onPedirEstrategia, onEnviarEstra
 function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onProyectoDirectoUsado}){
   const [proyectos,setProyectos]=useState(PROYECTOS_SEED);
   const [sel,setSel]=useState(null);
+  // (v6.6) RESTAURADO de v4.62: potencial € por proyecto (a mano o uds × precio)
+  const [editPotencialProy,setEditPotencialProy]=useState(false);
+  const [potencialProyTemp,setPotencialProyTemp]=useState("");
+  const [potUdsTemp,setPotUdsTemp]=useState("");
+  const [potPrecioTemp,setPotPrecioTemp]=useState("");
   const [filtro,setFiltro]=useState("activo");
   const [filtroDep,setFiltroDep]=useState("todos");
   const [filtroEquipoProy,setFiltroEquipoProy]=useState("todos");
@@ -27121,6 +27145,80 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
                   {sel.muestraId&&onIrASeccion&&<>{" · "}<span onClick={()=>onIrASeccion("muestras")} style={{color:T.purple,cursor:"pointer",fontWeight:600}}>📦 Ver muestra →</span></>}
                 </p>
               )}
+
+              {/* (v6.6) Potencial € — a mano o calculado uds × precio (restaurado) */}
+              <div style={{marginBottom:8}}>
+                {editPotencialProy?(
+                  <div style={{padding:"11px 13px",borderRadius:11,background:"#F8FAFC",border:"1.5px solid "+T.border}}>
+                    <div style={{display:"flex",gap:8,alignItems:"flex-end",flexWrap:"wrap"}}>
+                      <div>
+                        <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>UNIDADES/AÑO</p>
+                        <input autoFocus type="number" value={potUdsTemp}
+                          onChange={function(e){setPotUdsTemp(e.target.value);}} placeholder="0"
+                          style={{width:88,padding:"6px 9px",borderRadius:8,border:"1.5px solid "+T.border,
+                            fontSize:12,fontWeight:700,outline:"none",fontFamily:"inherit",boxSizing:"border-box"}}/>
+                      </div>
+                      <span style={{fontSize:13,color:T.muted,paddingBottom:7}}>×</span>
+                      <div>
+                        <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>PRECIO/UD</p>
+                        <input type="number" step="0.01" value={potPrecioTemp}
+                          onChange={function(e){setPotPrecioTemp(e.target.value);}} placeholder="0,00"
+                          style={{width:88,padding:"6px 9px",borderRadius:8,border:"1.5px solid "+T.border,
+                            fontSize:12,fontWeight:700,outline:"none",fontFamily:"inherit",boxSizing:"border-box"}}/>
+                      </div>
+                    </div>
+                    {(function(){
+                      var calc=(Number(potUdsTemp)||0)*(Number(potPrecioTemp)||0);
+                      var hayCalc=calc>0;
+                      return (
+                        <div style={{marginTop:9,display:"flex",gap:8,alignItems:"flex-end",flexWrap:"wrap"}}>
+                          <div>
+                            <p style={{margin:"0 0 3px",fontSize:10,fontWeight:700,color:T.muted}}>
+                              POTENCIAL TOTAL {hayCalc?"(calculado)":"(a mano)"}</p>
+                            <input type="number" value={hayCalc?Math.round(calc):potencialProyTemp}
+                              disabled={hayCalc}
+                              onChange={function(e){setPotencialProyTemp(e.target.value);}} placeholder="0"
+                              style={{width:130,padding:"6px 9px",borderRadius:8,border:"1.5px solid "+T.border,
+                                background:"#fff",fontSize:13,fontWeight:800,color:T.text,outline:"none",
+                                fontFamily:"inherit",boxSizing:"border-box"}}/>
+                          </div>
+                          <span style={{fontSize:12,color:T.muted,fontWeight:700,paddingBottom:7}}>€</span>
+                          <button onClick={function(){
+                              var total=hayCalc?String(Math.round(calc)):potencialProyTemp;
+                              var upd=Object.assign({},sel,{potencial:total,potUds:potUdsTemp,potPrecio:potPrecioTemp});
+                              setSel(upd);
+                              setProyectos(function(ps){return ps.map(function(p){return p.id===sel.id?upd:p;});});
+                              fbEscribir("proyectos",sel.id,upd);
+                              setEditPotencialProy(false);
+                            }}
+                            style={{background:T.green,border:"none",borderRadius:8,padding:"7px 14px",
+                              color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer"}}>Guardar</button>
+                          <button onClick={function(){setEditPotencialProy(false);}}
+                            style={{background:"#fff",border:"1.5px solid "+T.border,borderRadius:8,
+                              padding:"7px 12px",color:T.muted,fontSize:12,cursor:"pointer"}}>Cancelar</button>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                ):(
+                  <div onClick={function(){
+                      setPotencialProyTemp(sel.potencial||"");
+                      setPotUdsTemp(sel.potUds||"");
+                      setPotPrecioTemp(sel.potPrecio||"");
+                      setEditPotencialProy(true);
+                    }}
+                    style={{display:"inline-flex",gap:5,alignItems:"center",cursor:"pointer",padding:"3px 10px",
+                      borderRadius:99,background:"#F1F5F9",border:"1px solid "+T.border}}>
+                    <span style={{fontSize:12,fontWeight:800,color:T.text}}>💰 Potencial: {sel.potencial?Number(sel.potencial).toLocaleString("es-ES")+" €":"— añadir"}</span>
+                    {sel.potUds&&sel.potPrecio&&(
+                      <span style={{fontSize:11,color:T.muted}}>
+                        ({Number(sel.potUds).toLocaleString("es-ES")} × {Number(sel.potPrecio).toLocaleString("es-ES",{minimumFractionDigits:2,maximumFractionDigits:2})} €)
+                      </span>
+                    )}
+                    <span style={{fontSize:11,color:T.muted}}>✏️</span>
+                  </div>
+                )}
+              </div>
               <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
                 <Badge label={tipo.label} color={tipo.color}/>
                 <Badge label={sel.estado==="activo"?"● Activo":"● Cerrado"} color={sel.estado==="activo"?T.green:T.muted}/>
@@ -27454,6 +27552,39 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
           <p style={{margin:"2px 0 0",fontSize:10,fontWeight:700,color:T.muted}}>✅ Cerrados</p>
         </Card>
       </div>
+
+      {/* (v6.6) RESTAURADO: potencial activo + prioridad por potencial */}
+      {(function(){
+        var activosP=proyectos.filter(function(p){return (p.estado||"activo")==="activo";});
+        var total=activosP.reduce(function(a,p){return a+(Number(p.potencial)||0);},0);
+        var sinPot=activosP.filter(function(p){return !p.potencial;}).length;
+        var top=activosP.filter(function(p){return p.potencial;})
+          .sort(function(a,b){return (Number(b.potencial)||0)-(Number(a.potencial)||0);}).slice(0,5);
+        if(total===0&&top.length===0)return null;
+        return (
+          <Card style={{marginBottom:16,padding:"13px 15px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:top.length?8:0}}>
+              <p style={{margin:0,fontSize:12,fontWeight:800,color:T.text}}>💰 Prioridad por potencial</p>
+              <p style={{margin:0,fontSize:12,fontWeight:900,color:T.green}}>
+                {total.toLocaleString("es-ES")} €
+                {sinPot>0&&<span style={{fontSize:10,fontWeight:600,color:T.amber}}> · {sinPot} sin definir</span>}
+              </p>
+            </div>
+            {top.map(function(p,i){
+              return (
+                <div key={p.id} onClick={function(){setSel(p);}}
+                  style={{display:"flex",gap:8,alignItems:"center",padding:"7px 0",cursor:"pointer",
+                    borderBottom:i<top.length-1?"1px solid "+T.border:"none"}}>
+                  <span style={{fontSize:11,fontWeight:900,color:T.muted,width:16,flexShrink:0}}>{i+1}.</span>
+                  <p style={{margin:0,fontSize:12.5,fontWeight:600,color:T.text,flex:1,minWidth:0,
+                    whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{p.nombre}</p>
+                  <span style={{fontSize:12.5,fontWeight:800,color:T.text,flexShrink:0}}>{Number(p.potencial).toLocaleString("es-ES")} €</span>
+                </div>
+              );
+            })}
+          </Card>
+        );
+      })()}
 
       {/* Formulario */}
       {formOpen&&(
