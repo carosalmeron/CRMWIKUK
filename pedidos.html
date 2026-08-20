@@ -126,6 +126,27 @@
   .sec.urge{color:var(--hoy);background:#FDF3F3}
   .sec.urge .cuenta{color:#B4232A}
   .pie{margin-top:18px;font-size:11.5px;color:var(--tenue);text-align:center}
+  /* ── (v-notas) Hilo de notas por pedido ── */
+  .notasbox{grid-column:1/-1;margin-top:7px}
+  .nbt{display:inline-flex;align-items:center;gap:5px;border:1.5px solid var(--linea,#d8dee6);
+    background:#fff;border-radius:99px;padding:4px 11px;font-size:11px;font-weight:800;
+    color:#3b4654;cursor:pointer;font-family:inherit}
+  .nbt i{font-style:normal;color:#1f5fa8}
+  .hilo{display:none;margin-top:7px;background:#f4f6f9;border:1px solid var(--linea,#d8dee6);
+    border-radius:10px;padding:9px 10px}
+  .hilo.abierto{display:block}
+  .nota{background:#fff;border:1px solid var(--linea,#d8dee6);border-radius:8px;
+    padding:7px 9px;margin-bottom:6px}
+  .nota .ntx{font-size:12px;line-height:1.45;color:#1c232b}
+  .nota .nmeta{display:flex;gap:7px;align-items:center;margin-top:3px;font-size:9.5px;color:#7a8494}
+  .nota .nmeta b{color:#3b4654}
+  .nota .ndel{margin-left:auto;cursor:pointer;font-size:10.5px}
+  .nform{display:flex;gap:6px}
+  .nform textarea{flex:1;border:1.5px solid var(--linea,#d8dee6);border-radius:8px;padding:7px 9px;
+    font-size:12px;font-family:inherit;resize:none;outline:none;min-width:0;box-sizing:border-box}
+  .nform button{border:none;background:#1f5fa8;color:#fff;border-radius:8px;padding:0 14px;
+    font-size:13px;font-weight:800;cursor:pointer;font-family:inherit}
+  .hilo .vacio{font-size:10.5px;color:#7a8494;margin:0 0 6px}
 </style>
 </head>
 <body>
@@ -634,6 +655,7 @@ async function pintarDiario(){
                 +`<span class="p">${d.pre||eur(x.importe)}</span>`;
               }).join("")}</div>`
           : ""}
+        ${m.pedido?notasBox(m.pedido,m.nombre||m.cliente||""):""}
       </div>`;
       };
 
@@ -685,6 +707,7 @@ async function pintarDiario(){
 
     if(!html) html=`<div class="grupo"><p class="vacio">
       Sin movimientos con los filtros actuales.</p></div>`;
+    window.__notasPinta&&setTimeout(window.__notasPinta,0);
     $("app").innerHTML=html+`<p class="pie">
       Comparación con la sincronización anterior. Un pedido que desaparece con
       fecha ya pasada se da por servido; si su fecha era futura, se marca como
@@ -887,9 +910,133 @@ function pintar(){
   html+=`<p class="pie">Pedidos validados con fecha de entrega desde hoy.
     Se actualizan cada día a las 13:00. · v1.3</p>`;
   $("app").innerHTML=html;
+  window.__notasPinta&&setTimeout(window.__notasPinta,0);
 }
 
 cargar();
+
+// ═══════════════════════════════════════════════════════════════════
+// (v-notas) HILO DE NOTAS POR PEDIDO — colección pedidos_notas.
+// Cada nota lleva autor y fecha; el hilo queda asociado al nº de pedido
+// y se comparte entre todos los que abren esta página.
+// ═══════════════════════════════════════════════════════════════════
+let NOTAS={};          // nº pedido → [notas ordenadas]
+let NOTAS_OK=false;
+let _nbSeq=0;
+
+function notasBox(ped,cliente){
+  const id="nb"+(_nbSeq++);
+  const pe=String(ped).replace(/"/g,"&quot;");
+  const ce=String(cliente).replace(/"/g,"&quot;");
+  return `<div class="notasbox">
+    <button class="nbt" data-ped="${pe}" data-h="${id}" type="button">💬 <i></i> notas</button>
+    <div class="hilo" id="${id}" data-ped="${pe}" data-cli="${ce}"></div>
+  </div>`;
+}
+
+function notasParse(d){
+  const o={id:(d.name||"").split("/").pop()};
+  const f=d.fields||{};
+  for(const k in f) o[k]=val(f[k]);
+  return o;
+}
+async function cargarNotas(){
+  try{
+    const r=await fetch(`${BASE}/pedidos_notas?pageSize=300`);
+    if(!r.ok){NOTAS_OK=true;return;}
+    const docs=((await r.json()).documents||[]).map(notasParse);
+    NOTAS={};
+    docs.sort((a,b)=>(a.ts||0)-(b.ts||0)).forEach(n=>{
+      (NOTAS[n.pedido]=NOTAS[n.pedido]||[]).push(n);
+    });
+  }catch(e){}
+  NOTAS_OK=true;
+  window.__notasPinta();
+}
+function _enc(o){
+  const f={};
+  for(const k in o){
+    const v=o[k];
+    if(typeof v==="number") f[k]=Number.isInteger(v)?{integerValue:String(v)}:{doubleValue:v};
+    else if(typeof v==="boolean") f[k]={booleanValue:v};
+    else f[k]={stringValue:String(v==null?"":v)};
+  }
+  return {fields:f};
+}
+function _yo(){
+  const u=sesion()||{};
+  return {id:u.username||u.crmId||u.id||u.nombre||"anon",
+          nombre:u.nombre||u.username||"Alguien"};
+}
+window.__notasPinta=function(){
+  document.querySelectorAll(".nbt").forEach(b=>{
+    const n=(NOTAS[b.dataset.ped]||[]).length;
+    const i=b.querySelector("i"); if(i) i.textContent=n>0?n:"";
+  });
+  document.querySelectorAll(".hilo.abierto").forEach(h=>pintarHilo(h));
+};
+function pintarHilo(h){
+  const yo=_yo();
+  const lista=NOTAS[h.dataset.ped]||[];
+  let x=lista.length?"":`<p class="vacio">Sin notas aún — cuenta qué ha pasado con este pedido.</p>`;
+  lista.forEach(n=>{
+    const mia=n.por===yo.id||n.porNombre===yo.nombre;
+    x+=`<div class="nota"><div class="ntx">${esc(n.texto)}</div>
+      <div class="nmeta"><b>${esc(n.porNombre||"")}</b><span>${esc(n.fecha||"")}</span>
+      ${mia?`<span class="ndel" data-id="${n.id}" data-ped="${h.dataset.ped}">🗑️</span>`:""}</div></div>`;
+  });
+  x+=`<div class="nform"><textarea rows="2" placeholder="Anotación sobre este pedido…"></textarea>
+    <button type="button" class="nsave">＋</button></div>`;
+  h.innerHTML=x;
+}
+function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+
+document.addEventListener("click",async(ev)=>{
+  const bt=ev.target.closest(".nbt");
+  if(bt){
+    const h=document.getElementById(bt.dataset.h);
+    if(!h)return;
+    const abrir=!h.classList.contains("abierto");
+    h.classList.toggle("abierto",abrir);
+    if(abrir){
+      if(!NOTAS_OK) await cargarNotas();
+      pintarHilo(h);
+      const t=h.querySelector("textarea"); if(t) t.focus();
+    }
+    return;
+  }
+  const del=ev.target.closest(".ndel");
+  if(del){
+    if(!confirm("¿Eliminar esta nota?"))return;
+    const ped=del.dataset.ped, id=del.dataset.id;
+    fetch(`${BASE}/pedidos_notas/${id}`,{method:"DELETE"}).catch(()=>{});
+    NOTAS[ped]=(NOTAS[ped]||[]).filter(n=>n.id!==id);
+    window.__notasPinta();
+    return;
+  }
+  const sv=ev.target.closest(".nsave");
+  if(sv){
+    const h=sv.closest(".hilo");
+    const t=h.querySelector("textarea");
+    const texto=(t.value||"").trim();
+    if(!texto)return;
+    const yo=_yo();
+    const nota={id:"pn"+Date.now(),pedido:h.dataset.ped,cliente:h.dataset.cli,
+      texto:texto,por:yo.id,porNombre:yo.nombre,
+      fecha:new Date().toLocaleDateString("es-ES")+" "+new Date().toTimeString().slice(0,5),
+      ts:Date.now()};
+    sv.disabled=true;
+    try{
+      await fetch(`${BASE}/pedidos_notas/${nota.id}`,{method:"PATCH",
+        headers:{"Content-Type":"application/json"},body:JSON.stringify(_enc(nota))});
+    }catch(e){}
+    sv.disabled=false;
+    (NOTAS[nota.pedido]=NOTAS[nota.pedido]||[]).push(nota);
+    window.__notasPinta();
+  }
+});
+cargarNotas();
+
 </script>
 </body>
 </html>
