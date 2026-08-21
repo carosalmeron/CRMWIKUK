@@ -21,7 +21,7 @@ button.ok{background:var(--verde);color:#fff}
 button:disabled{opacity:.45;cursor:default}
 main{padding:18px 22px;max-width:1240px;margin:0 auto}
 .msg{padding:9px 12px;border-radius:6px;margin:8px 0;font-size:13px;display:none}
-.msg.on{display:block}.msg.err{background:#FBE9E7;color:var(--rojo)}.msg.bien{background:#E8F0E8;color:var(--verde)}.msg.info{background:var(--crema);color:var(--tinta)}
+.msg.on{display:block;position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:300;max-width:min(720px,92vw);box-shadow:0 8px 24px rgba(43,38,34,.25);border:1px solid var(--linea)}.msg.err{background:#FBE9E7;color:var(--rojo)}.msg.bien{background:#E8F0E8;color:var(--verde)}.msg.info{background:var(--crema);color:var(--tinta)}
 .perfil{background:#fff;border:1px solid var(--linea);border-radius:8px;padding:12px 16px;margin:12px 0;font-size:12.5px;color:var(--gris);line-height:1.5}
 .perfil b{color:var(--tinta)}
 .mes{margin:26px 0 10px;font-size:16px;font-weight:bold;color:#fff;background:var(--bur);padding:8px 14px;border-radius:6px}
@@ -511,43 +511,55 @@ function candidatos(per,d){
  return {cs,permitidas:base};}
 async function proponer(d){
  try{
- msg("Buscando en la bolsa…");await cargaBolsa();
- if(/BARRIDO|SIN prospecci|SOLO MANTENER|GUSTO GARANTIZADO/i.test(d.zona+" "+d.ruta)){msg("Esa semana no admite prospección (barrido/mantener/día de distribuidor): es cartera pura por criterio.","err");return;}
- const pf=PERFILES[d.per]||{};
- const {cs,err,permitidas}=candidatos(d.per,d);
- if(err){msg(err,"err");return;}
- if(!cs||!cs.length){
-  msg("La bolsa no tiene candidatos cerca de ese día ("+((permitidas||[]).join(", ")||"su zona")+"): se abre el buscador manual. Para propuestas automáticas, carga potenciales de esa zona al radar.","err");
-  manual(d);return;}
- let anadidos=0;
- abre("<h3>Candidatos de la zona · "+d.dnom+" "+d.fch+"</h3>"+
-  "<p style='font-size:12.5px;color:var(--gris)'>Cerca de ese día: <b>"+((permitidas||[]).join(", ")||"su zona")+"</b> · ordenados por KM REALES al día (misma población → km pueblo a pueblo → provincia) y tamaño · toca los que quieras.</p>"+
+ // el modal abre YA: todo lo demás pasa dentro, a la vista
+ abre("<h3>Candidatos para "+d.dnom+" "+(d.fch||"")+"</h3>"+
+  "<p style='font-size:12.5px;color:var(--gris)' id='mScope'>⏳ cargando la bolsa…</p>"+
   "<label>Afinar por nombre</label><input type='text' id='mBus' placeholder='filtrar…'>"+
   "<label>Tamaño</label><select id='mTam'><option value=''>Todos los tamaños</option><option value='más de 500|entre 100 y 500'>Grandes (+100 M€)</option><option value='entre 30 y 100'>30–100 M€</option><option value='entre 6 y 30'>6–30 M€</option><option value='entre 1,5 y 3|entre 3 y 6'>1,5–6 M€</option><option value='__peq__'>Pequeñas / sin dato</option></select>"+
-  "<div class='lista' id='mLista'></div>"+
-  "<div class='fila'><button class='ok' id='mFin'>Listo</button></div>");
- const anadido=new Set();
- const pinta2=()=>{
-  const q=norm($("mBus").value);
-  const tam=$("mTam")?$("mTam").value:"";
-  const RANGOS=["más de 500","entre 100 y 500","entre 30 y 100","entre 6 y 30","entre 3 y 6","entre 1,5 y 3"];
-  const pasaTam=c=>!tam||(tam==="__peq__"?!RANGOS.some(x=>String(c.rango).includes(x)):tam.split("|").some(x=>String(c.rango).includes(x)));
-  const vis=cs.filter(c=>(!q||norm(c.n).includes(q))&&pasaTam(c)).slice(0,30);
-  $("mLista").innerHTML=vis.length?vis.map((c,i2)=>"<div class='it' data-i='"+i2+"'>"+
-   (anadido.has(c.n)?"✓ <b style='color:var(--verde)'>añadido</b> · ":"")+c.n+"<br><small>"+[c._eti,c.pr,c.p,c.rango,c.tip].filter(Boolean).join(" · ")+"</small></div>").join(""):"<div class='it'>Sin resultados en esta zona con ese filtro.</div>";
-  [...$("mLista").children].forEach((el,i2)=>el.onclick=()=>{
-   const c=vis[i2];if(!c||anadido.has(c.n))return;
-   tocados.add(norm(c.n));PLAN.push(filaNueva(d,{n:c.n,pr:c.pr,p:c.p,v:c.rango||"",nota:"elegido de la bolsa por el comercial · cualificar con la Inside ANTES de la visita"}));
-   addCual(d,c.n);anadido.add(c.n);anadidos++;marca();pinta2();});
- };
- $("mBus").oninput=pinta2;$("mTam").onchange=pinta2;pinta2();
+  "<div class='lista' id='mLista'><div class='it'>⏳ cargando candidatos…</div></div>"+
+  "<div class='fila'><button id='mToda' style='display:none'></button><button class='ok' id='mFin'>Listo</button></div>");
+ let anadidos=0;const anadido=new Set();
  $("mFin").onclick=()=>{cierra();pinta();
   msg(anadidos?anadidos+" candidato(s) añadidos a "+d.dnom+" · 📞 sus cualificaciones ya están en la agenda de la Inside.":"No añadiste ninguno.","bien");};
+ await cargaBolsa();
+ const pf=PERFILES[d.per]||{};
+ if(/BARRIDO|SIN prospecci|SOLO MANTENER|GUSTO GARANTIZADO/i.test(d.zona+" "+d.ruta)){
+  $("mScope").innerHTML="<b style='color:var(--rojo)'>Esta semana/día no admite prospección</b> (barrido · mantener · día de distribuidor): cartera pura por criterio.";
+  $("mLista").innerHTML="";return;}
+ if(!pf.prospecta){
+  $("mScope").innerHTML="<b style='color:var(--rojo)'>"+d.per+" no hace prospección</b> — su perfil es SOLO MANTENER: los huecos son refuerzo de cartera, no puerta nueva.";
+  $("mLista").innerHTML="";return;}
+ let {cs,permitidas}=candidatos(d.per,d);cs=cs||[];
+ let todaBolsa=!cs.length;
+ const libres=()=>(BOLSA||[]).filter(c=>c.n&&!BLOQ.has(c.clave||norm(c.n)+"|"+norm(c.pr||c.p))&&c.estado!=="bloqueado"&&c.estado!=="descartado");
+ const pinta2=()=>{
+  $("mScope").innerHTML=todaBolsa?
+   (cs.length?"Viendo <b>TODA la bolsa</b>.":"La zona de ese día ("+((permitidas||[]).join(", ")||"su zona")+") no tiene candidatos en la bolsa → viendo <b>TODA la bolsa</b>. Para propuestas por cercanía, carga potenciales de esa zona al radar."):
+   "Cerca de ese día: <b>"+((permitidas||[]).join(", ")||"su zona")+"</b> · por KM reales y tamaño · toca los que quieras.";
+  $("mToda").style.display=cs.length?"inline-block":"none";
+  $("mToda").textContent=todaBolsa?"⤺ Volver a la zona del día":"🌍 Ver toda la bolsa";
+  const q=norm($("mBus").value);
+  const tam=$("mTam").value;
+  const RANGOS=["más de 500","entre 100 y 500","entre 30 y 100","entre 6 y 30","entre 3 y 6","entre 1,5 y 3"];
+  const pasaTam=c=>!tam||(tam==="__peq__"?!RANGOS.some(x=>String(c.rango).includes(x)):tam.split("|").some(x=>String(c.rango).includes(x)));
+  const base=todaBolsa?libres():cs;
+  const vis=base.filter(c=>(!q||norm(c.n).includes(q))&&pasaTam(c)).slice(0,30);
+  $("mLista").innerHTML=vis.length?vis.map((c,i2)=>"<div class='it' data-i='"+i2+"'>"+
+   (anadido.has(c.n)?"✓ <b style='color:var(--verde)'>añadido</b> · ":"")+c.n+"<br><small>"+[c._eti,c.pr,c.p,c.rango,c.tip].filter(Boolean).join(" · ")+"</small></div>").join(""):
+   "<div class='it'>"+((BOLSA||[]).length?"Sin resultados con esos filtros.":"La bolsa está vacía o no se pudo leer.")+"</div>";
+  [...$("mLista").querySelectorAll(".it[data-i]")].forEach((el)=>el.onclick=()=>{
+   const c=vis[+el.dataset.i];if(!c||anadido.has(c.n))return;
+   tocados.add(norm(c.n));
+   PLAN.push(filaNueva(d,{n:c.n,pr:c.pr,p:c.p,v:c.rango||"",nota:"elegido de la bolsa por el comercial"+(c._eti?" ("+c._eti+")":"")+" · cualificar con la Inside ANTES de la visita"}));
+   addCual(d,c.n);anadido.add(c.n);anadidos++;marca();pinta2();});
+ };
+ $("mBus").oninput=pinta2;$("mTam").onchange=pinta2;
+ $("mToda").onclick=()=>{todaBolsa=!todaBolsa;pinta2();};
+ pinta2();
  }catch(e){msg("PROPONER tropezó: "+e.message,"err");console.error(e);}}
 
 async function manual(d){
  try{
- await cargaBolsa();
  abre("<h3>Asignar manualmente · "+d.dnom+" "+d.fch+"</h3><label>Buscar en la bolsa</label><input type='text' id='mBus' placeholder='nombre del cliente…'>"+
   "<label>Tamaño</label><select id='mTam'><option value=''>Todos los tamaños</option><option value='más de 500|entre 100 y 500'>Grandes (+100 M€)</option><option value='entre 30 y 100'>30–100 M€</option><option value='entre 6 y 30'>6–30 M€</option><option value='entre 1,5 y 3|entre 3 y 6'>1,5–6 M€</option><option value='__peq__'>Pequeñas / sin dato</option></select>"+
   "<div class='lista' id='mLista'></div>"+
@@ -567,6 +579,7 @@ async function manual(d){
    marca();cierra();pinta();msg("Asignado: "+c.n+" · "+eco,"bien");});
  };
  $("mBus").oninput=pinta2;$("mTam").onchange=pinta2;pinta2();
+ await cargaBolsa();pinta2();
  }catch(e){msg("ASIGNAR MANUAL tropezó: "+e.message,"err");console.error(e);}}
 
 /* ── la sombra de cada cambio en la agenda de la INSIDE ── */
@@ -607,7 +620,6 @@ function mueveCual(nombre,per,fchVisita){const ins=insideCargada(per);if(!ins)re
 
 async function nominar(r){
  try{
- await cargaBolsa();
  const f=F(r);
  // el hueco sabe dónde vive: su día son sus vecinos de columna
  const hermanos=PLAN.filter(x=>x!==r&&norm(F(x).per)===norm(f.per)&&F(x).fecha===f.fecha);
@@ -616,10 +628,7 @@ async function nominar(r){
   pobsD:new Set(hermanos.map(x=>norm(F(x).p)).filter(Boolean)),
   pobPrD:hermanos.map(x=>{const g=F(x);return [g.p,g.pr];}).filter(x=>x[0])};
  let cs=[],err=null,permitidas=[];
- if(INSIDES.has(norm(f.per))){permitidas=[];}
- else ({cs,err,permitidas}=candidatos(f.per,d));
- if(err){msg(err,"err");return;}
- let todaBolsa=INSIDES.has(norm(f.per))||!(cs&&cs.length);
+ let todaBolsa=true; // hasta que cargue la bolsa
  abre("<h3>Nominar el hueco · "+f.dia+"</h3>"+
   "<p style='font-size:12.5px;color:var(--gris)' id='mScope'></p>"+
   "<label>Afinar por nombre</label><input type='text' id='mBus' placeholder='filtrar…'>"+
@@ -646,6 +655,9 @@ async function nominar(r){
  $("mBus").oninput=pinta2;$("mTam").onchange=pinta2;
  $("mToda").onclick=()=>{todaBolsa=!todaBolsa;pinta2();};
  pinta2();
+ await cargaBolsa();
+ ({cs,err,permitidas}=INSIDES.has(norm(f.per))?{cs:[],permitidas:[]}:candidatos(f.per,d));cs=cs||[];
+ todaBolsa=INSIDES.has(norm(f.per))||!(cs&&cs.length);pinta2();
  }catch(e){msg("NOMINAR tropezó: "+e.message,"err");console.error(e);}}
 
 /* 🤖 ASISTENTE: los criterios de los generadores, embebidos */
