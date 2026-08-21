@@ -22,6 +22,18 @@ html,body{margin:0;padding:0;background:#F1F5F9;color:#0F172A;
 .kpi .l{font-size:10px;font-weight:800;color:#94A3B8;text-transform:uppercase;letter-spacing:.08em;margin:0 0 6px}
 .kpi .v{font-size:23px;font-weight:900;letter-spacing:-.03em;margin:0}
 .kpi .s{font-size:11px;color:#94A3B8;margin:3px 0 0}
+.dias{background:#fff;border:1px solid #E2E8F0;border-radius:16px;padding:14px 15px;margin-bottom:12px}
+.dias-top{display:flex;align-items:flex-start;gap:12px}
+.dias-top>div:first-child{flex:1;min-width:0}
+.dl{margin:0 0 4px;font-size:10px;font-weight:800;color:#94A3B8;text-transform:uppercase;letter-spacing:.08em}
+.dv{margin:0;font-size:27px;font-weight:900;letter-spacing:-.03em;line-height:1}
+.ds{margin:4px 0 0;font-size:10.5px;color:#94A3B8;line-height:1.4}
+.dias-lados{display:flex;gap:14px;text-align:center;flex-shrink:0}
+.dias-lados b{display:block;font-size:17px;font-weight:900;letter-spacing:-.02em}
+.dias-lados span{display:block;font-size:9.5px;color:#94A3B8;margin-top:2px;max-width:64px;line-height:1.25}
+.aging{display:flex;height:9px;border-radius:99px;overflow:hidden;margin:13px 0 7px;background:#F1F5F9}
+.aging-l{display:flex;flex-wrap:wrap;gap:4px 11px;font-size:9.5px;color:#64748B}
+.aging-l i{display:inline-block;width:7px;height:7px;border-radius:2px;margin-right:4px}
 .bar{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}
 input.buscar{flex:1;min-width:180px;padding:11px 13px;border:1.5px solid #E2E8F0;border-radius:11px;font-size:14px;outline:none;background:#fff}
 select,button.mini{padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:11px;font-size:12.5px;background:#fff;font-family:inherit;outline:none;cursor:pointer;font-weight:600}
@@ -49,6 +61,7 @@ select,button.mini{padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:11
 .t-ok{background:#F0FDF4;color:#15803D}
 .t-emp{background:#EEF2FF;color:#4F46E5}
 .t-inc{background:#FFF7ED;color:#C2410C}
+.t-ap{background:#F1F5F9;color:#475569}
 .binc{border:1.5px solid #E2E8F0;background:#fff;border-radius:9px;padding:7px 9px;font-size:11px;
   font-weight:800;cursor:pointer;color:#64748B;white-space:nowrap;flex-shrink:0}
 .binc:hover{border-color:#F97316;color:#C2410C;background:#FFF7ED}
@@ -143,6 +156,7 @@ let ST = {
   buscar  : "",
   empresa : "",
   comercial: "",
+  interco : "no",          // no | si | solo
   orden   : (Q.get("vista")==="vencidos") ? "antiguedad" : "importe",
   abiertos: {},
   docs    : [],
@@ -164,6 +178,7 @@ function normCom(s){
   return String(s==null?"":s).toUpperCase().trim().normalize("NFD")
     .replace(/[\u0300-\u036f]/g,"").replace(/[^A-Z0-9]/g,"");
 }
+function esApunte(f){ return String(f.t||"").toUpperCase()==="AS"; }
 function claveFac(cliente, f){ return normCom(cliente)+"|"+String(f.n||"")+"|"+(f.fv||""); }
 function semanaISO(){
   const d=new Date(), s=new Date(d.getFullYear(),0,1);
@@ -257,6 +272,11 @@ function clientes(){
   for(const d of ST.docs){
     if(!d || !d.datos) continue;
     if(ST.comercial && d.comercial!==ST.comercial) continue;
+    // Intercompañía y sociedades del grupo: casi la mitad del saldo y no lo
+    // cobra ningún vendedor, así que por defecto queda fuera.
+    const esG = (d.comercial==="INTERCOMPANY") || !!d.esGrupo;
+    if(ST.interco==="no"   &&  esG) continue;
+    if(ST.interco==="solo" && !esG) continue;
     let arr=[];
     try{ arr=JSON.parse(d.datos); }catch(e){ continue; }
     for(const c of arr) out.push(Object.assign({},c,{_com:d.comercialNombre||d.comercial||""}));
@@ -275,13 +295,78 @@ function preparados(){
     if(q && !String(c.c||"").toUpperCase().includes(q)) continue;
     const p   = facs.reduce((s,f)=>s+(f.im||0),0);
     const v   = facs.filter(f=>f.fv&&f.fv<=HOY).reduce((s,f)=>s+(f.im||0),0);
-    const masAntigua = facs.filter(f=>f.fv&&f.fv<=HOY).map(f=>f.fv).sort()[0] || "9999-12-31";
-    lista.push(Object.assign({},c,{_f:facs,_p:p,_v:v,_ant:masAntigua}));
+    // Un cliente cuyo saldo neto se queda en cero (o a su favor) no es deuda
+    // que reclamar: solo son apuntes que se compensan entre sí.
+    if(Math.abs(p) < 1) continue;
+    if(ST.vista==="vencidos" && p <= 0) continue;
+    // La antigüedad se mide sobre facturas de verdad. Los apuntes contables
+    // (tipo AS) llevan la fecha del asiento de migración y falseaban el
+    // retraso con cifras de 900 y 1.500 días.
+    const venc = facs.filter(f=>f.fv&&f.fv<=HOY);
+    const reales = venc.filter(f=>!esApunte(f));
+    const masAntigua = (reales.length?reales:venc).map(f=>f.fv).sort()[0] || "9999-12-31";
+    lista.push(Object.assign({},c,{_f:facs,_p:p,_v:v,_ant:masAntigua,_apunte:reales.length===0&&venc.length>0}));
   }
   if(ST.orden==="antiguedad")   lista.sort((a,b)=> a._ant.localeCompare(b._ant) || b._v-a._v);
   else if(ST.orden==="nombre")  lista.sort((a,b)=> String(a.c).localeCompare(String(b.c),"es"));
   else                          lista.sort((a,b)=> (ST.vista==="vencidos"? b._v-a._v : b._p-a._p));
   return lista;
+}
+
+// ── Antigüedad de la cartera ────────────────────────────────────
+// Aquí solo van datos medidos sobre las facturas vivas, sin medias que
+// puedan disimular la realidad. El "días medios de cobro" se retiró: el
+// DÍAS PAGO REAL solo existe en WIKUK (en UC viene "Sin Datos"), así que
+// describía media cartera aparentando describirla entera, y el retraso
+// medio lo movía un solo deudor de más de un millón.
+function difDias(a,b){ return Math.round((new Date(b)-new Date(a))/86400000); }
+
+function metricas(base){
+  let sp=0, Wp=0, pend=0;
+  const tramos={"En plazo":0,"0-30":0,"31-60":0,"61-90":0,"91-180":0,"181-365":0,"+365":0};
+  for(const c of base){
+    let facs=(c.f||[]);
+    if(ST.empresa) facs=facs.filter(f=>f.g===ST.empresa);
+    for(const f of facs){
+      if(esApunte(f) || !(f.im>0) || !f.ff || !f.fv) continue;
+      sp += difDias(f.ff,f.fv)*f.im; Wp += f.im; pend += f.im;
+      if(f.fv<=HOY){
+        const d=dias(f.fv);
+        tramos[d<=30?"0-30":d<=60?"31-60":d<=90?"61-90":d<=180?"91-180":d<=365?"181-365":"+365"]+=f.im;
+      } else tramos["En plazo"]+=f.im;
+    }
+  }
+  const plazo = Wp>0 ? sp/Wp : null;
+  const grave = tramos["91-180"]+tramos["181-365"]+tramos["+365"];
+  return {plazo, tramos, pend, grave};
+}
+
+function panelDias(base){
+  const m = metricas(base);
+  if(!m.pend) return "";
+  const T=m.tramos, tot=m.pend;
+  const COLS={"En plazo":"#CBD5E1","0-30":"#22C55E","31-60":"#84CC16","61-90":"#F59E0B",
+              "91-180":"#F97316","181-365":"#EF4444","+365":"#7F1D1D"};
+  const keys=Object.keys(T).filter(k=>T[k]>0);
+  const pctG = Math.round(m.grave/tot*100);
+  return `
+  <div class="dias">
+    <div class="dias-top">
+      <div>
+        <p class="dl">⏱ Plazo medio concedido</p>
+        <p class="dv">${m.plazo==null?"—":Math.round(m.plazo)+" días"}</p>
+        <p class="ds">de emisión a vencimiento, sobre las facturas vivas</p>
+      </div>
+      <div class="dias-lados">
+        <div><b style="color:${pctG>25?"#DC2626":pctG>10?"#F59E0B":"#16A34A"}">${pctG}%</b>
+             <span>vencido a más de 90 días</span></div>
+      </div>
+    </div>
+    <div class="aging">${keys.map(k=>
+      `<div title="${k} · ${eur(T[k])}" style="width:${(T[k]/tot*100).toFixed(2)}%;background:${COLS[k]}"></div>`).join("")}</div>
+    <div class="aging-l">${keys.map(k=>
+      `<span><i style="background:${COLS[k]}"></i>${k==="En plazo"?k:k+"d"} · ${eur(T[k])}</span>`).join("")}</div>
+  </div>`;
 }
 
 // ── Render ──────────────────────────────────────────────────────
@@ -313,6 +398,8 @@ function render(){
       </div>
     </div>
 
+    ${panelDias(todosCli)}
+
     <div class="bar">
       <input class="buscar" id="q" placeholder="Buscar cliente…" value="${esc(ST.buscar)}"
         oninput="ST.buscar=this.value;render();document.getElementById('q').focus()"/>
@@ -326,7 +413,13 @@ function render(){
         <option value="antiguedad" ${ST.orden==="antiguedad"?"selected":""}>Más antiguo</option>
         <option value="nombre"     ${ST.orden==="nombre"?"selected":""}>Nombre A-Z</option>
       </select>
-      ${VE_TODO?`<select onchange="ST.comercial=this.value;render()">
+      ${VE_TODO?`<select onchange="ST.interco=this.value;ST.abiertos={};render()"
+          style="${ST.interco!=="no"?"border-color:#8B5CF6;color:#6D28D9;font-weight:800":""}">
+        <option value="no"   ${ST.interco==="no"?"selected":""}>Sin intercompañía</option>
+        <option value="si"   ${ST.interco==="si"?"selected":""}>Con intercompañía</option>
+        <option value="solo" ${ST.interco==="solo"?"selected":""}>Solo intercompañía</option>
+      </select>
+      <select onchange="ST.comercial=this.value;render()">
         <option value="">Todos los vendedores</option>
         ${comerciales.map(c=>`<option value="${esc(c.id)}" ${ST.comercial===c.id?"selected":""}>${esc(c.n)}</option>`).join("")}
       </select>`:""}
@@ -336,6 +429,8 @@ function render(){
     <p style="margin:0 0 10px;font-size:12px;color:#64748B">
       <b>${lista.length}</b> ${lista.length===1?"cliente":"clientes"} · <b>${eur(sumP)}</b>
       ${ST.vista==="vencidos"?" fuera de plazo":" pendiente"}
+      ${VE_TODO&&ST.interco==="no"?` · <span style="color:#8B5CF6;font-weight:700">intercompañía excluida</span>`:""}
+      ${VE_TODO&&ST.interco==="solo"?` · <span style="color:#8B5CF6;font-weight:700">solo intercompañía</span>`:""}
     </p>
 
     ${lista.length===0 ? `<div class="vacio">${
@@ -363,7 +458,7 @@ function tarjeta(c,ci){
         <b>${esc(c.c)}</b>
         <span>${c._f.length} ${c._f.length===1?"factura":"facturas"}
           ${vencidas.length?` · <b style="color:#DC2626">${vencidas.length} vencida${vencidas.length>1?"s":""}</b>`:""}
-          ${antig>0?` · ${antig} días de retraso`:""}
+          ${antig>0?` · ${c._apunte?"apuntes de "+fecha(c._ant):antig+" días de retraso"}`:""}
           ${VE_TODO&&c._com?` · ${esc(c._com)}`:""}
           ${c.r?` · ${esc(c.r)}`:""}</span>
       </div>
@@ -387,7 +482,9 @@ function fila(c,f,ci,fi){
     <div class="fi">
       <b>${f.t?esc(f.t)+" ":""}${esc(f.n||"—")}</b>
       <span>
-        <span class="tag ${venc?"t-venc":"t-ok"}">${venc?d+" días vencida":"vence "+fecha(f.fv)}</span>
+        <span class="tag ${esApunte(f)?"t-ap":venc?"t-venc":"t-ok"}">${
+          esApunte(f) ? "apunte a cuenta "+fecha(f.fv)
+                      : venc ? d+" días vencida" : "vence "+fecha(f.fv)}</span>
         <span class="tag t-emp">${esc(f.g||"")}${f.em&&f.em!==f.g?" · "+esc(f.em):""}</span>
         ${nInc?`<span class="tag t-inc">⚑ ${nInc} incidencia${nInc>1?"s":""}</span>`:""}
       </span>
