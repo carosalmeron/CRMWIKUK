@@ -1,0 +1,123 @@
+<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Limpiador de duplicados</title><style>
+body{font-family:Arial;background:#FBF8F4;color:#2B2622;margin:0}
+header{background:#7A1F2B;color:#fff;padding:14px 22px;font-size:18px;font-weight:bold}
+main{max-width:960px;margin:0 auto;padding:20px}
+.paso{background:#fff;border:1px solid #E4DCD2;border-radius:10px;padding:16px;margin:14px 0}
+h2{font-size:15px;color:#7A1F2B;margin:0 0 8px}
+button{background:#1A5276;color:#fff;border:0;border-radius:6px;padding:9px 16px;font-size:13.5px;font-weight:bold;cursor:pointer;margin:4px 6px 4px 0}
+button.rojo{background:#B3261E}button:disabled{opacity:.45}
+table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+td,th{border-bottom:1px solid #E4DCD2;padding:5px 7px;text-align:left}
+th{background:#F6EFE7}
+.msg{padding:9px;border-radius:6px;margin:8px 0;font-size:13px;display:none}
+.on{display:block}.ok{background:#E8F0E8;color:#2F6B2F}.err{background:#FBE9E7;color:#B3261E}.info{background:#EAF0F6;color:#1A5276}
+.grupo{background:#FBF6EC}
+small{color:#7A7068}
+</style></head><body>
+<header>🧹 Limpiador de duplicados <span style="font-weight:normal;font-size:12px;opacity:.8">clientes BOLSA-* del CRM · bolsa radar_prospectos</span></header>
+<main>
+<div class="paso">
+ <h2>1 · Altas duplicadas en CLIENTES del CRM (BOLSA-*)</h2>
+ <small>Solo mira documentos cuyo id empieza por "BOLSA-" (altas de radar). JAMÁS toca clientes reales del ERP. Agrupa por nombre+población: conserva el más antiguo de cada grupo y propone borrar el resto.</small><br>
+ <button id="b1">🔍 Buscar duplicados en clientes</button>
+ <button id="b1x" class="rojo" disabled>🗑 Borrar los marcados</button>
+ <div class="msg" id="m1"></div><div id="t1"></div>
+</div>
+<div class="paso">
+ <h2>2 · Parejas sospechosas en la BOLSA (radar_prospectos)</h2>
+ <small>Busca nombres casi iguales aunque cambien el orden de las palabras o la grafía (p. ej. la cantera vieja frente a la lista nueva de Miguel). Tú marcas cuál sobra de cada pareja.</small><br>
+ <button id="b2">🔍 Buscar parejas en la bolsa</button>
+ <button id="b2x" class="rojo" disabled>🗑 Borrar los marcados</button>
+ <div class="msg" id="m2"></div><div id="t2"></div>
+</div>
+</main>
+<script>
+"use strict";
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const $=id=>document.getElementById(id);
+const norm=s=>String(s||"").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^A-Z0-9 ]/g," ").replace(/\s+/g," ").trim();
+const firma=s=>norm(s).split(" ").filter(w=>w.length>1&&!/^(LDA|SA|SL|UNIPESSOAL|DE|DO|DA|DOS|DAS|E|Y|THE)$/.test(w)).sort().join(" ");
+function dice(a,b){const A=new Set(),B=new Set();for(let i=0;i<a.length-1;i++)A.add(a.slice(i,i+2));for(let i=0;i<b.length-1;i++)B.add(b.slice(i,i+2));let n=0;A.forEach(x=>{if(B.has(x))n++;});return A.size&&B.size?2*n/(A.size+B.size):0;}
+async function lista(col,mask){
+ let docs=[],pt="";
+ do{
+  const r=await fetch(FB+"/"+col+"?pageSize=300"+(mask||"")+(pt?"&pageToken="+pt:""));
+  if(!r.ok)throw new Error("Firestore "+r.status+" en "+col);
+  const j=await r.json();
+  (j.documents||[]).forEach(d=>docs.push(d));
+  pt=j.nextPageToken||"";
+ }while(pt);
+ return docs;}
+/* ── 1: clientes BOLSA-* ── */
+let borrar1=[];
+$("b1").onclick=async()=>{
+ const m=$("m1");m.className="msg on info";m.textContent="Leyendo clientes (solo nombre/población/id)…";
+ try{
+  const docs=await lista("clientes","&mask.fieldPaths=nombre&mask.fieldPaths=poblacion&mask.fieldPaths=id&mask.fieldPaths=estadoAlta");
+  const bolsa=docs.map(d=>{const f=d.fields||{};return {path:d.name,id:(f.id||{}).stringValue||d.name.split("/").pop(),
+   n:(f.nombre||{}).stringValue||"",p:(f.poblacion||{}).stringValue||""};})
+   .filter(x=>x.id.startsWith("BOLSA-"));
+  m.textContent=bolsa.length+" altas BOLSA-* leídas. Agrupando…";
+  const g={};bolsa.forEach(x=>{const k=firma(x.n)+"|"+norm(x.p);(g[k]=g[k]||[]).push(x);});
+  const grupos=Object.values(g).filter(a=>a.length>1);
+  borrar1=[];let html="<table><tr><th></th><th>Cliente</th><th>Población</th><th>id</th></tr>";
+  grupos.forEach(a=>{
+   a.sort((x,y)=>x.id<y.id?-1:1); // el más antiguo primero (timestamp en el id)
+   a.forEach((x,i)=>{
+    if(i>0)borrar1.push(x.path);
+    html+="<tr class='"+(i===0?"grupo":"")+"'><td>"+(i===0?"✔ se queda":"🗑 sobra")+"</td><td>"+x.n+"</td><td>"+x.p+"</td><td><small>"+x.id+"</small></td></tr>";});
+  });
+  html+="</table>";
+  $("t1").innerHTML=grupos.length?html:"";
+  m.className="msg on "+(grupos.length?"err":"ok");
+  m.textContent=grupos.length?grupos.length+" grupos duplicados · "+borrar1.length+" documentos sobrantes marcados 🗑":"Sin duplicados BOLSA-* : limpio.";
+  $("b1x").disabled=!borrar1.length;
+ }catch(e){m.className="msg on err";m.textContent=e.message;}};
+$("b1x").onclick=async()=>{
+ if(!confirm("¿Borrar "+borrar1.length+" altas duplicadas? (se conserva la más antigua de cada grupo)"))return;
+ const m=$("m1");let ok=0;
+ for(const p of borrar1){try{const r=await fetch("https://firestore.googleapis.com/v1/"+p.replace(/^projects/,"projects"),{method:"DELETE"});if(r.ok)ok++;}catch(e){}
+  m.className="msg on info";m.textContent="Borrando… "+ok+"/"+borrar1.length;}
+ m.className="msg on ok";m.textContent="✓ "+ok+" duplicados eliminados. Vuelve a buscar para verificar.";$("b1x").disabled=true;};
+/* ── 2: bolsa radar_prospectos ── */
+let borrar2=new Set(),cand2=[];
+$("b2").onclick=async()=>{
+ const m=$("m2");m.className="msg on info";m.textContent="Leyendo la bolsa…";
+ try{
+  const docs=await lista("radar_prospectos","");
+  const B=docs.map(d=>{const f=d.fields||{};const g=k=>(f[k]||{}).stringValue||"";
+   return {path:d.name,id:d.name.split("/").pop(),n:g("n"),p:g("p"),pr:g("pr"),tip:g("tipologia"),origen:g("origen")};})
+   .filter(x=>x.n);
+  m.textContent=B.length+" prospectos. Buscando parejas…";
+  const porFirma={};B.forEach(x=>{const k=firma(x.n);(porFirma[k]=porFirma[k]||[]).push(x);});
+  cand2=[];
+  Object.values(porFirma).forEach(a=>{if(a.length>1)cand2.push(a);});
+  // además: firmas distintas pero muy parecidas (grafías)
+  const firmas=Object.keys(porFirma);
+  for(let i=0;i<firmas.length;i++)for(let j=i+1;j<firmas.length;j++){
+   if(Math.abs(firmas[i].length-firmas[j].length)>10)continue;
+   if(dice(firmas[i],firmas[j])>=0.86)cand2.push([...porFirma[firmas[i]],...porFirma[firmas[j]]]);}
+  borrar2=new Set();
+  let html="<table><tr><th>borrar</th><th>Nombre</th><th>Pob.</th><th>Prov.</th><th>Tipo/Origen</th><th>id</th></tr>";
+  cand2.forEach((a,gi)=>{
+   a.forEach((x,i)=>{
+    html+="<tr class='"+(i===0?"grupo":"")+"'><td><input type='checkbox' data-p='"+x.path+"' "+(i>0?"checked":"")+"></td><td>"+x.n+"</td><td>"+x.p+"</td><td>"+x.pr+"</td><td><small>"+(x.tip||x.origen||"")+"</small></td><td><small>"+x.id.slice(0,28)+"</small></td></tr>";});
+   html+="<tr><td colspan=6 style='border-bottom:2px solid #7A1F2B'></td></tr>";});
+  html+="</table>";
+  $("t2").innerHTML=cand2.length?html:"";
+  [...document.querySelectorAll("#t2 input")].forEach(ch=>{
+   if(ch.checked)borrar2.add(ch.dataset.p);
+   ch.onchange=()=>{ch.checked?borrar2.add(ch.dataset.p):borrar2.delete(ch.dataset.p);
+    $("b2x").disabled=!borrar2.size;};});
+  m.className="msg on "+(cand2.length?"err":"ok");
+  m.textContent=cand2.length?cand2.length+" parejas/grupos sospechosos — revisa y desmarca lo que deba quedarse. Por defecto se conserva el PRIMERO de cada grupo.":"Sin parejas sospechosas: bolsa limpia.";
+  $("b2x").disabled=!borrar2.size;
+ }catch(e){m.className="msg on err";m.textContent=e.message;}};
+$("b2x").onclick=async()=>{
+ if(!confirm("¿Borrar "+borrar2.size+" prospectos marcados de la bolsa?"))return;
+ const m=$("m2");let ok=0;
+ for(const p of borrar2){try{const r=await fetch("https://firestore.googleapis.com/v1/"+p,{method:"DELETE"});if(r.ok)ok++;}catch(e){}
+  m.className="msg on info";m.textContent="Borrando… "+ok+"/"+borrar2.size;}
+ m.className="msg on ok";m.textContent="✓ "+ok+" eliminados. Vuelve a buscar para verificar.";$("b2x").disabled=true;};
+</script></body></html>
