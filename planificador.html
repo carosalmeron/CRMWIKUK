@@ -95,6 +95,9 @@ footer{padding:26px 22px;color:var(--gris);font-size:11.5px;text-align:center}
   <button class="pri" id="btnCargar">Cargar plan</button>
   <button class="ia" id="btnIA" disabled>🤖 Reorganizar (asistente)</button>
   <button class="ok" id="btnGuardar" disabled>💾 Guardar plan</button>
+  <button id="btnExcel" disabled>⬇ Excel</button>
+  <button id="btnJSON" disabled>⬇ JSON vivo</button>
+  <button id="btnDescartar" disabled>↺ Descartar</button>
   <span style="position:relative">
    <input type="text" id="busCli" placeholder="🔎 ¿dónde está…? buscar cliente" style="width:230px">
    <div id="busPanel" style="display:none;position:absolute;top:38px;left:0;width:360px;max-height:340px;overflow:auto;background:#fff;border:1px solid var(--linea);border-radius:8px;box-shadow:0 6px 18px rgba(43,38,34,.18);z-index:60"></div>
@@ -115,6 +118,7 @@ footer{padding:26px 22px;color:var(--gris);font-size:11.5px;text-align:center}
 <footer>Grupo Consolidado · el Excel ya no viaja: la verdad vive en Firebase (radar_rutas · radar_prospectos · bloqueos · solicitudes_traspaso · radar_meta/plan_version)</footer>
 
 <script src="municipios_es_pt.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.min.js"></script>
 <script>
 "use strict";
 const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
@@ -178,7 +182,7 @@ const MOTIVOS=["No consume","Cerrado definitivamente","Moroso / riesgo","Lo llev
 const COMERCIALES=["AGUSTIN","CARLOSG","JLGARCIA","KA CASPE","MIGUEL","AZARCO","RICARDO"];
 
 let PLAN=[],BOLSA=null,BLOQ=new Set(),personas=[],cambios=0;
-let filtroPer=null,filtroRuta=null;const plegadas=new Set();let resalta=null;
+let filtroPer=null,filtroRuta=null;const plegadas=new Set();let resalta=null;const tocados=new Set();
 const MESES=["ENERO","FEBRERO","MARZO","ABRIL","MAYO","JUNIO","JULIO","AGOSTO","SEPTIEMBRE","OCTUBRE","NOVIEMBRE","DICIEMBRE"];
 const F=r=>{
  let dia=String(r.dia??r["día"]??""),fecha=String(r.fecha??"");
@@ -244,10 +248,11 @@ $("btnCargar").onclick=async()=>{
   await cargaBloqueos();cargaVersion();
   PLAN=todos.filter(r=>personas.includes(norm(F(r).per)));
   if(!PLAN.length){msg("No hay rutas de "+personas.join(" + ")+" en la nube. Súbelas primero desde la Estación Radar (Alimentador 1) o revisa el nombre del vendedor en el Excel.","err");$("board").innerHTML="";return;}
-  cambios=0;$("pend").textContent="";$("btnIA").disabled=false;$("btnGuardar").disabled=true;
-  filtroPer=null;filtroRuta=null;plegadas.clear();pintaFiltros();pintaPerfil();pinta();
+  cambios=0;$("pend").textContent="";$("btnIA").disabled=false;$("btnGuardar").disabled=true;$("btnExcel").disabled=false;$("btnJSON").disabled=false;$("btnDescartar").disabled=false;
+  filtroPer=null;filtroRuta=null;plegadas.clear();tocados.clear();pintaFiltros();pintaPerfil();pinta();
   const nIns=PLAN.filter(r=>INSIDES.has(norm(F(r).per))).length;
-  msg("Plan cargado: "+PLAN.length+" acciones de "+personas.join(" + ")+(nIns?" (la Inside viaja con "+nIns+" llamadas: cada cambio de ruta la actualizará y se te mostrará)":"")+".","bien");
+  const fj=await generaJSONvivo(true); // la foto fiel de la nube cae sola al cargar
+  msg("Plan cargado: "+PLAN.length+" acciones de "+personas.join(" + ")+(nIns?" (la Inside viaja con "+nIns+" llamadas: cada cambio de ruta la actualizará y se te mostrará)":"")+(fj?" · ⬇ "+fj+" (foto fiel de la nube, tu punto de partida)":"")+".","bien");
  }catch(e){msg("No se pudo cargar: "+e.message,"err");}
 };
 
@@ -407,6 +412,7 @@ function quitar(r,cardEl){
   "<label>Quién lo bloquea</label><input type='text' id='mQuien' value='"+f.per+"'>"+
   "<div class='fila'><button onclick='cierra()'>Cancelar</button><button class='pri' id='mOk'>⛔ Bloquear y quitar</button></div>");
  $("mSolo").onclick=()=>{
+  tocados.add(norm(f.n));
   PLAN=PLAN.filter(x=>x!==r);
   let eco="";
   if(esProsp){const k=quitaInside(f.n);eco=k?" · 📞 su cualificación de la Inside eliminada":"";}
@@ -422,7 +428,7 @@ function quitar(r,cardEl){
    await fbSet("bloqueos/"+docId,{clave:fsVal(clave),n:fsVal(f.n),p:fsVal(f.p),pr:fsVal(f.pr),
     motivo:fsVal(motivo),quien:fsVal($("mQuien").value),fecha:fsVal(new Date().toISOString()),origen:fsVal("planificador")});
    try{await fbSet("radar_prospectos/"+docId,{estado:fsVal("bloqueado"),motivo:fsVal(motivo)});}catch(e){}
-   BLOQ.add(clave);
+   BLOQ.add(clave);tocados.add(norm(f.n));
    PLAN=PLAN.filter(x=>x!==r);
    const kIns=quitaInside(f.n);
    cardEl.classList.add("fuera");setTimeout(pinta,360);
@@ -439,7 +445,7 @@ function mover(r){
   ops.map((o,i)=>"<option value='"+i+"'>"+o.mes+" · "+o.sem.split("·")[0]+" · "+o.d+" "+o.fc+"</option>").join("")+
   "</select><div class='fila'><button onclick='cierra()'>Cancelar</button><button class='pri' id='mOk'>Mover aquí</button></div>");
  $("mOk").onclick=()=>{const o=ops[+$("mDest").value];
-  const antes={mes:f.mes,dia:f.dia,fecha:f.fecha};
+  const antes={mes:f.mes,dia:f.dia,fecha:f.fecha};tocados.add(norm(f.n));
   setF(r,{mes:o.mes,ruta:o.sem.split("·")[0],dia:o.d,fecha:o.fc});
   r.nota=(F(r).nota?F(r).nota+" · ":"")+"reubicada por el comercial";
   const f2=F(r);let eco=null;
@@ -526,7 +532,7 @@ async function proponer(d){
    (anadido.has(c.n)?"✓ <b style='color:var(--verde)'>añadido</b> · ":"")+c.n+"<br><small>"+[c._eti,c.pr,c.p,c.rango,c.tip].filter(Boolean).join(" · ")+"</small></div>").join(""):"<div class='it'>Sin resultados en esta zona con ese filtro.</div>";
   [...$("mLista").children].forEach((el,i2)=>el.onclick=()=>{
    const c=vis[i2];if(!c||anadido.has(c.n))return;
-   PLAN.push(filaNueva(d,{n:c.n,pr:c.pr,p:c.p,v:c.rango||"",nota:"elegido de la bolsa por el comercial · cualificar con la Inside ANTES de la visita"}));
+   tocados.add(norm(c.n));PLAN.push(filaNueva(d,{n:c.n,pr:c.pr,p:c.p,v:c.rango||"",nota:"elegido de la bolsa por el comercial · cualificar con la Inside ANTES de la visita"}));
    addCual(d,c.n);anadido.add(c.n);anadidos++;marca();pinta2();});
  };
  $("mBus").oninput=pinta2;$("mTam").onchange=pinta2;pinta2();
@@ -549,7 +555,7 @@ async function manual(d){
   [...$("mLista").children].forEach((el,i)=>el.onclick=()=>{
    const c=cs[i];
    if(BLOQ.has(c.clave)||c.estado==="bloqueado"){msg("Ese cliente está BLOQUEADO ("+(c.motivo||"ver bolsa")+"): desbloquéalo primero.","err");return;}
-   PLAN.push(filaNueva(d,{n:c.n,pr:c.pr,p:c.p,v:c.rango||"",nota:"asignado manualmente · cualificar con la Inside ANTES"}));
+   tocados.add(norm(c.n));PLAN.push(filaNueva(d,{n:c.n,pr:c.pr,p:c.p,v:c.rango||"",nota:"asignado manualmente · cualificar con la Inside ANTES"}));
    const eco=addCual(d,c.n);
    marca();cierra();pinta();msg("Asignado: "+c.n+" · "+eco,"bien");});
  };
@@ -623,7 +629,7 @@ async function nominar(r){
   $("mLista").innerHTML=vis.length?vis.map((c,i2)=>"<div class='it' data-i='"+i2+"'>"+c.n+"<br><small>"+[c._eti,c.pr,c.p,c.rango,c.tip].filter(Boolean).join(" · ")+"</small></div>").join(""):"<div class='it'>"+(todaBolsa?"Sin resultados en la bolsa con esos filtros.":"La zona del día no tiene candidatos con esos filtros: prueba 🌍 toda la bolsa o carga potenciales al radar.")+"</div>";
   [...$("mLista").children].forEach((el,i2)=>el.onclick=()=>{
    const c=vis[i2];if(!c)return;
-   setF(r,{n:c.n,pr:c.pr,p:c.p,nota:"nominado sobre hueco de prospección"+(c._eti?" ("+c._eti+")":"")+" · cualificar con la Inside ANTES"});
+   tocados.add(norm(c.n));setF(r,{n:c.n,pr:c.pr,p:c.p,nota:"nominado sobre hueco de prospección"+(c._eti?" ("+c._eti+")":"")+" · cualificar con la Inside ANTES"});
    r.v=c.rango||"";delete r._hueco;
    const eco=addCual({per:f.per,mes:f.mes,fch:f.fecha,dnom:f.dia},c.n);
    marca();cierra();pinta();msg("Hueco nominado: "+c.n+" · "+eco,"bien");});
@@ -637,7 +643,7 @@ $("btnIA").onclick=()=>{
  abre("<h3>🤖 ¿Cómo reorganizo?</h3>"+
   "<div style='display:grid;gap:10px'>"+
   "<div class='it' style='border:1px solid var(--linea);border-left:4px solid var(--verde);border-radius:8px;padding:12px;cursor:pointer' onclick='cierra();ejecutaReorg(\"ajuste\")'>"+
-  "<b>1 · AJUSTE FINO (solo tus cambios)</b><br><small style='color:var(--gris)'>Cierra las consecuencias de lo que has tocado: visita quitada → llamada de la Inside · visita incorporada → su llamada de ese mes sale · días cortos se rellenan desde la bolsa por cercanía · días pasados de techo desbordan · mínimo 2 prospecciones/día de la Inside. <b>NO recoloca nada más.</b></small></div>"+
+  "<b>1 · AJUSTE FINO (solo tus cambios)</b><br><small style='color:var(--gris)'>SOLO los clientes que TÚ has tocado (visita quitada → llamada Inside · visita añadida → su llamada del mes sale) + rellena días cortos con prospección por cercanía + techo con desborde + mínimo 2 prospecciones/día de la Inside. <b>No toca ningún cliente que no hayas tocado.</b></small></div>"+
   "<div class='it' style='border:1px solid var(--linea);border-left:4px solid var(--bur);border-radius:8px;padding:12px;cursor:pointer' onclick='cierra();ejecutaReorg(\"replanteo\")'>"+
   "<b>2 · REPLANTEO COMPLETO (propuesta nueva)</b><br><small style='color:var(--gris)'>Además de todo lo anterior, recoloca CADA visita en su día-zona óptimo (lejos→casa del perfil). Propuesta entera de nuevo — solo respeta lo que moviste tú a mano.</small></div>"+
   "</div>"+
@@ -656,6 +662,7 @@ window.ejecutaReorg=async function(modo){
   const ins=insideCargada(per);if(!ins)continue;
   for(const r of [...PLAN]){const f=F(r);
    if(norm(f.per)!==norm(per)||!/^VISITA/i.test(f.acc))continue;
+   if(modo!=="replanteo"&&!tocados.has(norm(f.n)))continue; // AJUSTE: solo lo que TÚ tocaste
    for(const x of [...PLAN]){const g2=F(x);
     if(norm(g2.per)===ins&&/^LLAMADA/i.test(g2.acc)&&!/CUALIFIC|PROSPEC/i.test(g2.acc)&&norm(g2.n)===norm(f.n)&&g2.mes===f.mes){
      PLAN.splice(PLAN.indexOf(x),1);
@@ -694,7 +701,7 @@ window.ejecutaReorg=async function(modo){
    // 2) TECHO con desborde (ambos modos: es consecuencia de tus altas)
    const gs=grupos()[norm(per)][mes][sem];
    const zTest=Object.values(gs).flat().map(x=>F(x).zona).join(" ")+" "+sem;
-   const semSinProsp=/BARRIDO|SIN prospecci|SOLO MANTENER|GUSTO GARANTIZADO/i.test(zTest);
+   const semSinProsp=/BARRIDO|SIN prospecci|SOLO MANTENER/i.test(zTest); // veto de semana completa
    dias=Object.entries(gs).sort((a,b)=>fechaDe(a[0])-fechaDe(b[0]));
    for(let i2=0;i2<dias.length;i2++){
     const cards=dias[i2][1];
@@ -707,6 +714,7 @@ window.ejecutaReorg=async function(modo){
     }}
    // 3) RELLENO de días cortos (ambos modos: "si faltan visitas, las agrego sin tocar lo demás")
    if(pf.prospecta&&!semSinProsp)for(const [kd,cards] of dias){
+    if(/GUSTO GARANTIZADO/i.test(cards.map(x=>F(x).zona+" "+F(x).nota).join(" ")))continue; // GG veta solo su día
     const dctx2={per,ruta,provsD:[...new Set(cards.map(x=>norm(F(x).pr)).filter(Boolean))],pobsD:new Set(cards.map(x=>norm(F(x).p)).filter(Boolean)),pobPrD:cards.map(x=>{const f=F(x);return [f.p,f.pr];}).filter(x=>x[0])};
     while(cards.length<pf.techoDia){
      const {cs}=candidatos(per,dctx2);if(!cs||!cs.length)break;
@@ -742,11 +750,108 @@ window.ejecutaReorg=async function(modo){
    if(cnt>120)break;}
   if(cnt>120)break;}
  abre("<h3>🤖 "+titulo+" · ámbito: "+ambito+" · "+A.length+" cambios</h3>"+
-  "<p style='font-size:12.5px;color:var(--gris)'>"+(modo==="replanteo"?"Propuesta entera con los criterios del perfil; solo respeta lo que moviste tú a mano.":"Solo las consecuencias de tus cambios y el relleno de días cortos: nada más se ha movido.")+" Las líneas verdes 📞 son el impacto en la Inside. Nada se guarda hasta 💾.</p>"+
+  "<p style='font-size:12.5px;color:var(--gris)'>"+(modo==="replanteo"?"Propuesta entera con los criterios del perfil; solo respeta lo que moviste tú a mano.":"Solo tus clientes tocados, el relleno de días cortos y los mínimos de la Inside: nada más se ha movido.")+" Las líneas verdes 📞 son el impacto en la Inside. Nada se guarda hasta 💾.</p>"+
   "<div style='max-height:50vh;overflow:auto'>"+html+"</div>"+
   "<div class='fila'><button onclick='cierra()'>Ver el tablero</button><button class='ok' onclick='cierra()'>OK, me cuadra</button></div>");
  marca();pinta();
  }catch(e){msg("El asistente tropezó: "+e.message+" — dímelo y lo arreglo.","err");console.error(e);}};
+
+/* ⬇ EXCEL: el plan de vuelta con el diseño de la casa (RESUMEN + AGENDA + FILTRABLE re-subible) */
+$("btnExcel").onclick=()=>{
+ try{
+ if(typeof XLSX==="undefined"){msg("No cargó la librería de Excel (¿sin internet?). Recarga la página.","err");return;}
+ const BUR="7A1F2B",CREMA="F6EFE7",GRISF="EFEAE6",BLANCO="FFFFFF",GRIST="7A7068",TINTA="3A3A3A";
+ const F10=(b,c)=>({font:{name:"Arial",sz:10,bold:!!b,color:{rgb:c||TINTA}}});
+ const cab=(t,fill,color)=>({v:t,t:"s",s:{font:{name:"Arial",sz:12,bold:true,color:{rgb:color||BLANCO}},fill:{fgColor:{rgb:fill}},alignment:{vertical:"center"}}});
+ const celda=(t,st)=>({v:t==null?"":t,t:typeof t==="number"?"n":"s",s:st||F10()});
+ const wb=XLSX.utils.book_new();
+ // ── RESUMEN: criterios vivos de los perfiles cargados
+ const R=[[cab("PLAN COMERCIAL · "+personas.join(" + ")+" · "+new Date().toLocaleDateString("es-ES"),BUR)],[],
+  [celda("Generado por el planificador · los criterios viven en el PERFIL (Firebase) y en CRITERIOS_SISTEMA_COMERCIAL.md · este Excel es un VEHÍCULO: la verdad está en la nube",F10(false,GRIST))],[]];
+ for(const p of personas){const pf=PERFILES[p]||{};
+  R.push([celda(p,F10(true,BUR)),celda("domicilio: "+(pf.domicilio||"?")+" · techo "+(pf.techoDia||5)+"/día"+(pf.prospTel?" · mín. "+pf.prospTel+" prospecciones/día":""),F10(true))]);
+  R.push([celda(""),celda(pf.prospecta?("prospecta en: "+(pf.zonasProspeccion||[]).join(", ")):"sin prospección de visita",F10(false,GRIST))]);
+  R.push([celda(""),celda(pf.nota||"",F10(false,GRIST))]);R.push([]);}
+ const wsR=XLSX.utils.aoa_to_sheet(R);
+ wsR["!cols"]=[{wch:14},{wch:120}];wsR["!merges"]=[{s:{r:0,c:0},e:{r:0,c:1}}];
+ XLSX.utils.book_append_sheet(wb,wsR,"RESUMEN");
+ // ── AGENDA: persona → mes → semana → día, con bandas
+ const AO=[];const g=grupos();
+ const colSeg={A:"2F6B2F",B:"9A7000",C:BUR};
+ for(const per of personas){const gp=g[norm(per)];if(!gp)continue;
+  AO.push([cab("━━ "+per+" ━━",BUR)]);
+  for(const [mes,gm] of Object.entries(gp)){
+   AO.push([celda("— "+mes+" —",F10(true,BUR))]);
+   for(const [sem,gs] of Object.entries(gm)){
+    const n=Object.values(gs).flat().length;
+    AO.push([cab(sem+" · "+n+" acciones",BUR)]);
+    const dias=Object.entries(gs).sort((a,b)=>fechaDe(a[0])-fechaDe(b[0]));
+    for(const [kd,cards] of dias){
+     const [dn,fc]=kd.split("|");
+     const zd=cards.map(x=>F(x).zona).find(z=>z)||"";
+     AO.push([{v:dn+" "+(fc||"")+(zd?" · "+zd:"")+" · "+cards.length+" acciones",t:"s",s:{font:{name:"Arial",sz:9.5,bold:true,color:{rgb:TINTA}},fill:{fgColor:{rgb:GRISF}}}}]);
+     for(const r of cards){const f=F(r);
+      AO.push([celda(f.acc,F10(true,/PROSP/i.test(f.acc)?"1A5276":(colSeg[f.seg]||GRIST))),
+       celda(f.n,F10(false,TINTA)),celda(f.p,F10(false,GRIST)),celda(f.pr,F10(false,GRIST)),
+       celda(f.seg,F10(false,GRIST)),celda(f.v,F10(false,GRIST)),celda(f.nota,{font:{name:"Arial",sz:8.5,italic:true,color:{rgb:GRIST}}})]);}}
+   }}}
+ const wsA=XLSX.utils.aoa_to_sheet(AO);
+ wsA["!cols"]=[{wch:22},{wch:42},{wch:20},{wch:12},{wch:5},{wch:12},{wch:60}];
+ XLSX.utils.book_append_sheet(wb,wsA,"AGENDA");
+ // ── FILTRABLE: dialecto Radar, re-subible al Alimentador tal cual
+ const FH=["Acción","Cliente","Población","Provincia","KA","Ruta","Semana","Día","Seg","Venta año","Zona del día","Nota"];
+ const FO=[FH.map(t=>cab(t,BUR))];
+ for(const r of PLAN){const f=F(r);
+  FO.push([f.acc,f.n,f.p,f.pr,f.per,f.ruta,f.sem,(f.dia+" "+(f.fecha&&!String(f.dia).includes(f.fecha)?f.fecha:"")).trim(),f.seg,f.v,f.zona,f.nota].map(x=>celda(x)));}
+ const wsF=XLSX.utils.aoa_to_sheet(FO);
+ wsF["!cols"]=[{wch:18},{wch:42},{wch:22},{wch:13},{wch:10},{wch:8},{wch:8},{wch:22},{wch:5},{wch:12},{wch:26},{wch:50}];
+ wsF["!autofilter"]={ref:"A1:L"+FO.length};
+ XLSX.utils.book_append_sheet(wb,wsF,"FILTRABLE");
+ const nombre="Plan_"+($("selP").value||"PLAN")+"_"+new Date().toISOString().slice(0,10)+".xlsx";
+ XLSX.writeFile(wb,nombre);
+ msg("⬇ "+nombre+" descargado: RESUMEN (criterios) + AGENDA (semana a semana) + FILTRABLE (re-subible al Radar tal cual). "+(cambios?"OJO: tienes "+cambios+" cambios sin 💾 guardar en la nube — el Excel los incluye, la nube aún no.":""),"bien");
+ }catch(e){msg("No se pudo generar el Excel: "+e.message,"err");}
+};
+
+/* ⬇ JSON VIVO: el estado completo del planificador, embebido aquí — sin ir a ningún otro HTML */
+async function generaJSONvivo(auto){
+ try{
+  let solicitudes=[];
+  try{const d=await fbGet("solicitudes_traspaso?pageSize=200");
+   solicitudes=(d.documents||[]).map(doc=>{const f=doc.fields||{};const g=k=>f[k]?.stringValue||"";
+    return {cliente:g("cliente"),de:g("de"),a:g("a"),motivo:g("motivo"),estado:g("estado"),fecha:g("fecha")};})
+    .filter(x=>x.estado==="pendiente");}catch(e){}
+  let bloqDet=[];
+  try{const d=await fbGet("bloqueos?pageSize=300");
+   bloqDet=(d.documents||[]).map(doc=>{const f=doc.fields||{};const g=k=>f[k]?.stringValue||"";
+    return {n:g("n"),pr:g("pr"),motivo:g("motivo"),quien:g("quien"),fecha:g("fecha")};});}catch(e){}
+  const perf={};
+  for(const p of personas){const pf=PERFILES[p]||{};
+   perf[p]={domicilio:pf.domicilio,techoDia:pf.techoDia,prospTel:pf.prospTel||0,prospecta:!!pf.prospecta,
+    zonasProspeccion:pf.zonasProspeccion||[],rutas:pf.rutas||{},nota:pf.nota||"",origen:pf._deNube?"firebase":"defecto 19-ago"};}
+  const esSimulacion=cambios>0;
+  const data={tipo:"planificador_vivo",version:"v1",generado:new Date().toISOString(),
+   estado:esSimulacion?("SIMULACIÓN · NO guardada · difiere de la nube en "+cambios+" cambio(s)"):"FIEL A LA NUBE (igual que lo publicado)",
+   esSimulacion,
+   seleccion:$("selP").value,personas,planVersion:$("verBox").textContent,
+   cambiosSinGuardar:cambios,tocadosEstaSesion:[...tocados],
+   perfiles:perf,
+   acciones:PLAN.map(r=>{const f=F(r);return {per:f.per,mes:f.mes,ruta:f.ruta,sem:f.sem,zona:f.zona,dia:f.dia,fecha:f.fecha,
+    acc:f.acc,seg:f.seg,n:f.n,pr:f.pr,p:f.p,venta:f.v,nota:f.nota,hueco:!!r._hueco,traspaso:r._traspaso||null};}),
+   bloqueos:bloqDet,solicitudesTraspaso:solicitudes};
+  const nombre=(esSimulacion?"SIMULACION_":"PlanVivo_")+($("selP").value||"PLAN")+"_"+new Date().toISOString().slice(0,10)+".json";
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([JSON.stringify(data,null,1)],{type:"application/json"}));
+  a.download=nombre;a.click();URL.revokeObjectURL(a.href);
+  if(!auto)msg("⬇ "+nombre+(esSimulacion?" — es una SIMULACIÓN (nada de esto está en la nube): dásela a la IA para estudiarla, y aquí decide 💾 guardar o ↺ descartar.":" — fiel a lo publicado en la nube."),"bien");
+  return nombre;
+ }catch(e){msg("No se pudo generar el JSON vivo: "+e.message,"err");}}
+$("btnJSON").onclick=()=>generaJSONvivo(false);
+$("btnDescartar").onclick=()=>{
+ if(!cambios){msg("No hay cambios que descartar: estás viendo lo publicado.","info");return;}
+ abre("<h3>↺ Descartar la simulación</h3><p style='font-size:12.5px;color:var(--gris)'>Tienes <b>"+cambios+" cambio(s) sin guardar</b>. Descartar recarga el plan tal como está publicado en la nube y esta simulación se pierde (los BLOQUEOS ya escritos en la bolsa se conservan: esos son inmediatos por diseño).</p>"+
+  "<div class='fila'><button onclick='cierra()'>Seguir simulando</button><button class='pri' id='mOk'>Sí, descartar y recargar</button></div>");
+ $("mOk").onclick=()=>{cierra();cambios=0;$("pend").textContent="";tocados.clear();$("btnCargar").onclick();};};
 
 /* 💾 GUARDAR */
 $("btnGuardar").onclick=async()=>{
@@ -764,7 +869,8 @@ $("btnGuardar").onclick=async()=>{
   const v=new Date().toISOString().slice(2,16).replace(/[-T:]/g,"");
   await fbSet("radar_meta/plan_version",{v:fsVal(v),fecha:fsVal(new Date().toISOString()),autor:fsVal(personas.join("+")+" (planificador)")});
   cambios=0;$("pend").textContent="";$("btnGuardar").disabled=true;cargaVersion();
-  msg("Plan v"+v+" publicado ("+lista.length+" acciones totales). El CRM ya lo ve.","bien");
+  const fj=await generaJSONvivo(true);
+  msg("Plan v"+v+" publicado ("+lista.length+" acciones). El CRM ya lo ve · ⬇ "+(fj||"JSON vivo")+" descargado automáticamente: ese fichero ES tu foto para la IA.","bien");
  }catch(e){msg("No se pudo guardar: "+e.message,"err");}
 };
 cargaVersion();
