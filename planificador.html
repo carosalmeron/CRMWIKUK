@@ -45,6 +45,7 @@ main{padding:18px 22px;max-width:1240px;margin:0 auto}
 .card.hueco{border-style:dashed;border-left-style:solid;background:#FBFAF7}
 .card.hueco .nom{color:var(--gris);font-style:italic}
 .card.tras{outline:2px dashed var(--ambar)}
+.card.resalta{outline:3px solid var(--azul);box-shadow:0 0 0 4px rgba(26,82,118,.15)}
 .acc{display:flex;gap:5px;margin-top:6px}
 .acc button{padding:3px 7px;font-size:11.5px;font-weight:normal;background:var(--fondo);border:1px solid var(--linea)}
 .acc button:hover{background:var(--crema)}
@@ -94,6 +95,10 @@ footer{padding:26px 22px;color:var(--gris);font-size:11.5px;text-align:center}
   <button class="pri" id="btnCargar">Cargar plan</button>
   <button class="ia" id="btnIA" disabled>🤖 Reorganizar (asistente)</button>
   <button class="ok" id="btnGuardar" disabled>💾 Guardar plan</button>
+  <span style="position:relative">
+   <input type="text" id="busCli" placeholder="🔎 ¿dónde está…? buscar cliente" style="width:230px">
+   <div id="busPanel" style="display:none;position:absolute;top:38px;left:0;width:360px;max-height:340px;overflow:auto;background:#fff;border:1px solid var(--linea);border-radius:8px;box-shadow:0 6px 18px rgba(43,38,34,.18);z-index:60"></div>
+  </span>
   <span id="pend" style="font-size:12px;color:var(--ambar)"></span>
 </div>
 
@@ -142,11 +147,11 @@ const PERFILES={
  zonasProspeccion:["BARCELONA","GIRONA","LLEIDA","TARRAGONA","CASTELLON","ZARAGOZA","TERUEL","HUESCA","NAVARRA","LA RIOJA","ALAVA","BIZKAIA","GIPUZKOA","SORIA"],
  rutas:{R1:["CASTELLON","TERUEL","ZARAGOZA","HUESCA","TARRAGONA"],R2:["LLEIDA"],R3:["GIRONA","BARCELONA"],R4:["BIZKAIA","GIPUZKOA","ALAVA","LA RIOJA","SORIA","NAVARRA"]}},
 "VERONICA":{domicilio:"Inside · duplo 1",techoDia:12,prospecta:false,
- nota:"TELÉFONO: llama de L a J · TECHO 12 llamadas/día · prioridad: CUALIFICACIÓN → A → C con dinero → B · el exceso queda en SIN HUECO (decisión del viernes) · cada prospección nueva del duplo le genera su cualificación ~7 días antes.",
- zonasProspeccion:[],rutas:{}},
+ nota:"TELÉFONO L–J · TECHO 12/día · PROSPECCIÓN TELEFÓNICA: la puerta fría es SUYA — MÍNIMO 2 llamadas de prospección/día (cantera y bolsa) · prioridad: cualificación → prospección mínima (2) → A → C con dinero → B · exceso a SIN HUECO · cada prospección del KA le genera su cualificación ~7 días antes.",
+ zonasProspeccion:[],rutas:{},prospTel:2},
 "ESTHER":{domicilio:"Inside · duplo 2",techoDia:12,prospecta:false,
- nota:"TELÉFONO: llama de L a J · TECHO 12 llamadas/día · prioridad: CUALIFICACIÓN → A → C con dinero → B · cubre a los DOS KA del duplo · el exceso queda en SIN HUECO.",
- zonasProspeccion:[],rutas:{}},
+ nota:"TELÉFONO L–J · TECHO 12/día · PROSPECCIÓN TELEFÓNICA: puerta fría SUYA — MÍNIMO 2 llamadas de prospección/día · prioridad: cualificación → prospección mínima (2) → A → C con dinero → B · cubre a los DOS KA · exceso a SIN HUECO.",
+ zonasProspeccion:[],rutas:{},prospTel:2},
 "MIGUEL":{domicilio:"Cascais",techoDia:6,prospecta:true,
  nota:"Semana de oficina = plan de llamadas 6/día L–J (GUARDIA → cadencia A → conquista → diagnóstico C → B).",
  zonasProspeccion:["PORTUGAL"],rutas:{}},
@@ -173,7 +178,7 @@ const MOTIVOS=["No consume","Cerrado definitivamente","Moroso / riesgo","Lo llev
 const COMERCIALES=["AGUSTIN","CARLOSG","JLGARCIA","KA CASPE","MIGUEL","AZARCO","RICARDO"];
 
 let PLAN=[],BOLSA=null,BLOQ=new Set(),personas=[],cambios=0;
-let filtroPer=null,filtroRuta=null;const plegadas=new Set();
+let filtroPer=null,filtroRuta=null;const plegadas=new Set();let resalta=null;
 const MESES=["ENERO","FEBRERO","MARZO","ABRIL","MAYO","JUNIO","JULIO","AGOSTO","SEPTIEMBRE","OCTUBRE","NOVIEMBRE","DICIEMBRE"];
 const F=r=>{
  let dia=String(r.dia??r["día"]??""),fecha=String(r.fecha??"");
@@ -210,11 +215,31 @@ async function cargaBloqueos(){try{const d=await fbGet("bloqueos?pageSize=300");
 async function cargaVersion(){try{const d=await fbGet("radar_meta/plan_version");
  const f=d.fields||{};$("verBox").textContent="plan v"+(f.v?.stringValue||"?")+" · "+(f.fecha?.stringValue||"").slice(0,10)+" · "+(f.autor?.stringValue||"");}catch(e){$("verBox").textContent="plan: sin versión publicada";}}
 
+async function cargaPerfilesNube(){
+ for(const per of personas){
+  try{
+   const d=await fbGet("perfiles_comerciales/"+encodeURIComponent(per));
+   const f=d.fields||{};const g=k=>f[k];
+   const pf=PERFILES[per]=PERFILES[per]||{};
+   if(g("techoDia"))pf.techoDia=+(g("techoDia").integerValue||g("techoDia").doubleValue||pf.techoDia);
+   if(g("prospTel"))pf.prospTel=+(g("prospTel").integerValue||pf.prospTel||0);
+   if(g("prospecta"))pf.prospecta=g("prospecta").booleanValue??pf.prospecta;
+   if(g("domicilio"))pf.domicilio=g("domicilio").stringValue||pf.domicilio;
+   if(g("nota"))pf.nota=g("nota").stringValue||pf.nota;
+   if(g("zonasProspeccion")&&g("zonasProspeccion").arrayValue)
+    pf.zonasProspeccion=(g("zonasProspeccion").arrayValue.values||[]).map(v=>v.stringValue).filter(Boolean);
+   if(g("rutas")&&g("rutas").mapValue){pf.rutas={};
+    for(const [rk,rv] of Object.entries(g("rutas").mapValue.fields||{}))
+     pf.rutas[rk]=((rv.arrayValue||{}).values||[]).map(v=>v.stringValue).filter(Boolean);}
+   pf._deNube=true;
+  }catch(e){/* sin perfil en la nube: valen los criterios por defecto (19-ago) */}
+ }}
 $("btnCargar").onclick=async()=>{
  const sel=$("selP").value;if(!sel){msg("Elige un vendedor o duplo.","err");return;}
  personas=DUPLOS[sel]||[sel];
- msg("Cargando plan desde la nube…");
+ msg("Cargando plan y perfiles desde la nube…");
  try{
+  await cargaPerfilesNube();
   const todos=await cargaChunks("radar_rutas");todos.push(...await cargaChunks("radar_rutas_int"));
   await cargaBloqueos();cargaVersion();
   PLAN=todos.filter(r=>personas.includes(norm(F(r).per)));
@@ -245,7 +270,7 @@ function pintaFiltros(){
 function pintaPerfil(){
  const box=$("perfilBox");box.style.display="block";
  box.innerHTML=personas.map(p=>{const pf=PERFILES[p]||{};
-  return "<b>"+p+"</b> · domicilio "+(pf.domicilio||"?")+" · techo "+(pf.techoDia||5)+" visitas/día · "+
+  return "<b>"+p+"</b>"+(pf._deNube?" <span style='color:var(--verde)'>☁ perfil de Firebase</span>":" <span style='color:var(--gris)'>criterios 19-ago (por defecto)</span>")+" · domicilio "+(pf.domicilio||"?")+" · techo "+(pf.techoDia||5)+" visitas/día · "+
   (pf.prospecta?("prospecta en: "+(pf.zonasProspeccion||[]).join(", ")):"<b>sin prospección</b>")+"<br>"+(pf.nota||"");
  }).join("<hr style='border:0;border-top:1px solid var(--linea);margin:8px 0'>")+
  "<div style='margin-top:6px'>Los criterios viven en el PERFIL, no en el Excel: cámbialos aquí/Firebase y reorganiza.</div>";}
@@ -298,7 +323,11 @@ function pinta(){
      const pobsD=new Set(cards.map(x=>norm(F(x).p)).filter(Boolean));
      const pobPrD=cards.map(x=>{const f=F(x);return [f.p,f.pr];}).filter(x=>x[0]);
      const dctx={per,mes,ruta:ctx.ruta,sem:ctx.sem,zona:zdia||ctx.zonaSem,dnom,fch,provsD,pobsD,pobPrD};
-     if(INSIDES.has(norm(per))){D.appendChild(col);continue;}
+     if(INSIDES.has(norm(per))){
+      const bIns=document.createElement("button");bIns.className="masdia";bIns.textContent="▢ hueco de llamada de PROSPECCIÓN (mín. 2/día)";
+      bIns.onclick=()=>{PLAN.push({per,ka:per,mes,ruta:"TEL",sem:ctx.sem,zona:"Inside",dia:dnom+(fch?" "+fch:""),fecha:fch,acc:"LLAMADA PROSPECCIÓN",seg:"",n:"(hueco de cantera)",pr:"",p:"",v:"",venta:"",nota:"mínimo 2 prospecciones/día: nominar un dormido de la cantera o un candidato de la bolsa",_hueco:true});
+       marca();pinta();msg("Hueco de llamada de prospección reservado en "+dnom+".","bien");};
+      col.appendChild(bIns);D.appendChild(col);continue;}
      const btn=document.createElement("button");btn.className="masdia";btn.textContent="➕ proponer cliente para este día";
      btn.onclick=()=>proponer(dctx);
      col.appendChild(btn);
@@ -318,9 +347,10 @@ function filaNueva(d,extra){
   dia:d.dnom+(d.fch?" "+d.fch:""),fecha:d.fch,acc:"PROSPECCIÓN",seg:"",n:"",pr:"",p:"",v:"",venta:"",nota:""},extra);}
 function cardDe(r){
  const f=F(r);const c=document.createElement("div");
- const esHueco=r._hueco||/hueco de prospecci/i.test(f.n);
+ const esHueco=r._hueco||/hueco de (prospecci|cantera|llamada)/i.test(f.n);
  c.className="card "+(esHueco?"pros hueco":(String(f.acc).includes("PROSP")?"pros":("seg"+(f.seg||""))));
  if(r._traspaso)c.classList.add("tras");
+ if(resalta&&norm(f.n)===resalta.n&&(!resalta.fecha||f.fecha===resalta.fecha)){c.classList.add("resalta");c.id="cardResalta";}
  c.innerHTML="<div class='nom'>"+f.n+"</div><div class='sub'>"+[f.acc+(f.seg?" "+f.seg:""),f.p||f.pr,f.v].filter(Boolean).join(" · ")+"</div>"+
   (f.nota?"<div class='nota'>"+f.nota+"</div>":"")+
   (r._traspaso?"<div class='nota' style='color:var(--ambar)'>SOLICITADO traspaso a "+r._traspaso+"</div>":"");
@@ -331,6 +361,36 @@ function cardDe(r){
  for(const [t,fn] of acciones){
   const btn=document.createElement("button");btn.textContent=t;btn.onclick=fn;a.appendChild(btn);}
  c.appendChild(a);return c;}
+
+/* ── buscador: ¿dónde vive el cliente ahora? ── */
+$("busCli").oninput=()=>{
+ const q=norm($("busCli").value);const P2=$("busPanel");
+ if(q.length<2){P2.style.display="none";return;}
+ const hits=[];
+ for(const r of PLAN){const f=F(r);
+  if(norm(f.n).includes(q))hits.push({r,f});}
+ const bloq=[...BLOQ].filter(k=>k.split("|")[0].includes(q)).slice(0,3);
+ P2.style.display="block";
+ P2.innerHTML=(hits.length?hits.slice(0,15).map((h,i)=>
+  "<div class='it' data-i='"+i+"' style='padding:8px 10px;border-bottom:1px solid var(--linea);cursor:pointer;font-size:12.5px'>"+
+  "<b>"+h.f.n+"</b>"+(h.r._traspaso?" <span style='color:var(--ambar)'>→ traspaso pedido</span>":"")+
+  "<br><small style='color:var(--gris)'>"+[h.f.per,h.f.mes,(h.f.ruta||h.f.sem),h.f.dia+(h.f.fecha&&!String(h.f.dia).includes(h.f.fecha)?" "+h.f.fecha:""),h.f.acc].filter(Boolean).join(" · ")+
+  (/reubicada|cruzada|propuesto|nominado/i.test(h.f.nota)?"<br>↪ "+h.f.nota:"")+"</small></div>").join(""):
+  "<div style='padding:10px;font-size:12.5px;color:var(--gris)'>No está en el plan cargado.</div>")+
+  bloq.map(k=>"<div style='padding:8px 10px;font-size:12.5px;color:var(--rojo)'>⛔ "+k.split("|")[0]+" está BLOQUEADO en la bolsa</div>").join("");
+ [...P2.querySelectorAll(".it")].forEach((el,i)=>el.onclick=()=>{
+  const h=hits[i];if(!h)return;
+  filtroPer=null;filtroRuta=null;
+  const ks=(h.f.ruta||h.f.sem||"?")+(h.f.sem&&h.f.ruta?" · "+h.f.sem:"");
+  plegadas.delete(norm(h.f.per)+"|"+(h.f.mes||(h.f.sem?"SEMANA "+h.f.sem:"—"))+"|"+ks);
+  resalta={n:norm(h.f.n),fecha:h.f.fecha};
+  P2.style.display="none";$("busCli").value="";
+  pintaFiltros();pinta();
+  const el2=document.getElementById("cardResalta");
+  if(el2)el2.scrollIntoView({behavior:"smooth",block:"center"});
+  setTimeout(()=>{resalta=null;},4000);setTimeout(pinta,4200);
+ });};
+document.addEventListener("click",e=>{if(!e.target.closest("#busCli")&&!e.target.closest("#busPanel"))$("busPanel").style.display="none";});
 
 function abre(html){$("modal").innerHTML=html;$("velo").classList.add("on");}
 window.cierra=function(){$("velo").classList.remove("on");};
@@ -540,9 +600,11 @@ async function nominar(r){
   provsD:[...new Set(hermanos.map(x=>norm(F(x).pr)).filter(Boolean))],
   pobsD:new Set(hermanos.map(x=>norm(F(x).p)).filter(Boolean)),
   pobPrD:hermanos.map(x=>{const g=F(x);return [g.p,g.pr];}).filter(x=>x[0])};
- const {cs,err,permitidas}=candidatos(f.per,d);
+ let cs=[],err=null,permitidas=[];
+ if(INSIDES.has(norm(f.per))){permitidas=[];}
+ else ({cs,err,permitidas}=candidatos(f.per,d));
  if(err){msg(err,"err");return;}
- let todaBolsa=!(cs&&cs.length);
+ let todaBolsa=INSIDES.has(norm(f.per))||!(cs&&cs.length);
  abre("<h3>Nominar el hueco · "+f.dia+"</h3>"+
   "<p style='font-size:12.5px;color:var(--gris)' id='mScope'></p>"+
   "<label>Afinar por nombre</label><input type='text' id='mBus' placeholder='filtrar…'>"+
@@ -572,11 +634,23 @@ async function nominar(r){
 
 /* 🤖 ASISTENTE: los criterios de los generadores, embebidos */
 $("btnIA").onclick=async()=>{
+ try{
  await cargaBolsa();
  const acciones=[];
  for(const per of personas){
   const pf=PERFILES[per]||{techoDia:5};
   let g=grupos()[norm(per)]||{};
+  if(INSIDES.has(norm(per))&&pf.prospTel){ // MÍNIMO de prospección telefónica por día
+   for(const [mes,gm] of Object.entries(g))for(const [sem,gs] of Object.entries(gm))
+    for(const [kd,cards] of Object.entries(gs)){
+     const nPros=cards.filter(x=>/PROSPEC|CANTERA|CUALIFIC/i.test(F(x).acc)).length;
+     let falta=Math.min(pf.prospTel-nPros,(pf.techoDia||12)-cards.length);
+     const [d2,f2]=kd.split("|");
+     while(falta>0){
+      const nue={per,ka:per,mes,ruta:"TEL",sem:"",zona:"Inside",dia:d2,fecha:f2,acc:"LLAMADA PROSPECCIÓN",seg:"",n:"(hueco de cantera)",pr:"",p:"",v:"",venta:"",nota:"mínimo "+pf.prospTel+" prospecciones/día: nominar dormido o candidato",_hueco:true};
+      PLAN.push(nue);cards.push(nue);falta--;
+      acciones.push(["📞 hueco cantera",per,d2+" (mínimo "+pf.prospTel+"/día)"]);}}
+   continue;} // la Inside no entra en la mecánica de rutas
   for(const [mes,gm] of Object.entries(g))for(const [sem,gs0] of Object.entries(gm)){
    const ruta=sem.split("·")[0].trim();const provsRuta=(pf.rutas&&pf.rutas[ruta])||[];
    let dias=Object.entries(gs0).sort((a,b)=>fechaDe(a[0])-fechaDe(b[0]));
@@ -596,8 +670,9 @@ $("btnIA").onclick=async()=>{
     const cards=dias[i][1];
     while(cards.length>pf.techoDia&&i+1<dias.length){
      const r=cards.pop();const [d2,f2]=dias[i+1][0].split("|");
-     setF(r,{dia:d2,fecha:f2});dias[i+1][1].push(r);acciones.push(["⇄ desborde",F(r).n,"techo "+pf.techoDia+"/día → "+d2]);}}
+     setF(r,{dia:d2,fecha:f2});dias[i+1][1].push(r);acciones.push(["⇄ desborde",F(r).n,"techo "+pf.techoDia+"/día → "+d2]);
      if(/PROSP/i.test(F(r).acc)){const e2=mueveCual(F(r).n,per,f2);if(e2)acciones.push(["","",e2]);}
+    }}
    if(pf.prospecta&&!semSinProsp)for(const [kd,cards] of dias){
     const dctx2={per,ruta,provsD:[...new Set(cards.map(x=>norm(F(x).pr)).filter(Boolean))],pobsD:new Set(cards.map(x=>norm(F(x).p)).filter(Boolean)),pobPrD:cards.map(x=>{const f=F(x);return [f.p,f.pr];}).filter(x=>x[0])};
     while(cards.length<pf.techoDia){
@@ -614,7 +689,8 @@ $("btnIA").onclick=async()=>{
   acciones.slice(0,60).map(a=>"<tr><td>"+a[0]+"</td><td>"+a[1]+"</td><td>"+a[2]+"</td></tr>").join("")+
   (acciones.length>60?"<tr><td colspan=3>… y "+(acciones.length-60)+" más</td></tr>":"")+"</table>"+
   "<div class='fila'><button onclick='cierra()'>Ver el tablero</button><button class='ok' onclick='cierra()'>OK, me cuadra</button></div>");
- marca();pinta();};
+ marca();pinta();
+ }catch(e){msg("El asistente tropezó: "+e.message+" — dímelo y lo arreglo.","err");console.error(e);}};
 
 /* 💾 GUARDAR */
 $("btnGuardar").onclick=async()=>{
