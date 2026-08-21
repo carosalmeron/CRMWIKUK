@@ -342,7 +342,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.62.0";
+const CRM_VERSION = "4.63.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -5510,17 +5510,29 @@ function _cobNormCod(s){
   return String(s==null?"":s).toUpperCase().trim().normalize("NFD")
     .replace(/[\u0300-\u036f]/g,"").replace(/[^A-Z0-9]/g,"");
 }
-function _cobCodigoDe(usuario){
-  var cands=[usuario&&usuario.grupoAgente, usuario&&usuario.catalogoVendedor,
-             usuario&&usuario.username, usuario&&usuario.id];
-  for(var i=0;i<cands.length;i++){ var c=_cobNormCod(cands[i]); if(c) return c; }
-  return "";
+function _cobCodigosDe(usuario){
+  // El nombre del comercial en el Excel no siempre es el grupoAgente del CRM
+  // (MIGUEL, ESTHER, AGUSTIN... van por nombre de pila). Probamos por orden
+  // todas las claves que identifican al vendedor y nos quedamos con la primera
+  // que tenga cobros publicados.
+  var u=usuario||{};
+  var brutos=[u.grupoAgente, u.catalogoVendedor, u.username, u.id, u.nombre,
+              String(u.nombre||"").split(/\s+/)[0]];
+  var out=[], vistos={};
+  for(var i=0;i<brutos.length;i++){
+    var c=_cobNormCod(brutos[i]);
+    if(c && !vistos[c]){ vistos[c]=1; out.push(c); }
+  }
+  return out;
 }
+function _cobCodigoDe(usuario){ return _cobCodigosDe(usuario)[0]||""; }
 function CobrosWidget({usuario, onNav}){
   var _s=React.useState(null); var dato=_s[0], setDato=_s[1];
   var _c=React.useState(false); var cargando=_c[0], setCargando=_c[1];
+  var _e=React.useState(null); var noHay=_e[0], setNoHay=_e[1];
   var esMando=["ceo","director","jefe","admin"].indexOf((usuario&&usuario.rol)||"")>=0;
-  var cod=_cobCodigoDe(usuario);
+  var cods=_cobCodigosDe(usuario);
+  var cod=cods[0]||"";
 
   React.useEffect(function(){
     var vivo=true; setCargando(true);
@@ -5562,17 +5574,45 @@ function CobrosWidget({usuario, onNav}){
             nCli:0, nFacV:m.nFacturas||0, fechaDatos:m.fechaDatos||"", global:true}); setCargando(false); }
           return;
         }
-        if(!cod){ if(vivo){setDato(null);setCargando(false);} return; }
-        var r2=await fetch(FBC+"/cobros_comercial/"+cod,{cache:"no-store"});
-        if(!r2.ok){ if(vivo){setDato(null);setCargando(false);} return; }
-        var d=campos(await r2.json());
-        if(vivo){ setDato(recalcular(d)); setCargando(false); }
+        if(!cods.length){ if(vivo){setDato(null);setCargando(false);} return; }
+        var doc=null, usado="";
+        for(var i=0;i<cods.length;i++){
+          var r2=await fetch(FBC+"/cobros_comercial/"+cods[i],{cache:"no-store"});
+          if(r2.ok){ doc=campos(await r2.json()); usado=cods[i]; break; }
+        }
+        if(!doc){
+          // No hay cobros con ninguno de sus códigos. Si Administración SÍ ha
+          // publicado una carga, es que el nombre del Excel no casa con el
+          // usuario del CRM: se avisa en vez de dejar la pantalla muda.
+          var rm=await fetch(FBC+"/cobros_meta/actual",{cache:"no-store"});
+          var hayCarga=rm.ok;
+          console.log("[COBROS] Sin datos para",cods.join(" / "),
+                      hayCarga?"— hay carga publicada, revisar ALIAS_COMERCIAL":"— aún no se ha publicado ninguna carga");
+          if(vivo){ setNoHay(hayCarga?cods:null); setDato(null); setCargando(false); }
+          return;
+        }
+        console.log("[COBROS] Cargados con el código",usado);
+        if(vivo){ setDato(recalcular(doc)); setCargando(false); }
       }catch(e){ if(vivo){setDato(null);setCargando(false);} }
     })();
     return function(){ vivo=false; };
   },[cod,esMando]);
 
-  if(cargando||!dato) return null;
+  if(cargando) return null;
+  if(!dato){
+    if(!noHay) return null;
+    return (
+      <div style={{background:"#FFFBEB",border:"1px solid #FDE68A",borderRadius:14,
+        padding:"12px 14px",marginBottom:14}}>
+        <p style={{margin:"0 0 3px",fontSize:12.5,fontWeight:800,color:"#92400E"}}>
+          💶 Cobros — sin datos para tu usuario</p>
+        <p style={{margin:0,fontSize:11.5,color:"#92400E",lineHeight:1.5}}>
+          Administración ya ha publicado la carga, pero no hay cobros bajo
+          {" "}<b>{noHay.join(" / ")}</b>. Pásale este código a Administración
+          para que lo enlace con tu nombre en el fichero.</p>
+      </div>
+    );
+  }
   if(!dato.pend && !dato.venc) return null;
 
   var qs="agente="+encodeURIComponent(esMando?"__ALL__":cod)
