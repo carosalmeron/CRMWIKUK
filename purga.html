@@ -1,0 +1,93 @@
+<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Purga de datos viejos del radar</title><style>
+body{font-family:Arial;background:#FBF8F4;color:#2B2622;margin:0}
+header{background:#7A1F2B;color:#fff;padding:14px 22px;font-size:18px;font-weight:bold}
+main{max-width:860px;margin:0 auto;padding:20px}
+button{background:#1A5276;color:#fff;border:0;border-radius:6px;padding:10px 18px;font-size:14px;font-weight:bold;cursor:pointer;margin:6px 6px 6px 0}
+button.rojo{background:#B3261E}button:disabled{opacity:.45}
+table{width:100%;border-collapse:collapse;font-size:13px;background:#fff;margin-top:10px}
+td,th{border-bottom:1px solid #E4DCD2;padding:7px 9px;text-align:left}
+th{background:#F6EFE7}
+.msg{padding:10px;border-radius:6px;margin:10px 0;font-size:13.5px;display:none}
+.on{display:block}.ok{background:#E8F0E8;color:#2F6B2F}.err{background:#FBE9E7;color:#B3261E}.info{background:#EAF0F6;color:#1A5276}
+small{color:#7A7068}
+</style></head><body>
+<header>🧯 Purga de agendas VIEJAS <span style="font-weight:normal;font-size:12px;opacity:.8">filas sin semana ni fecha (formato antiguo) en radar_rutas / radar_rutas_int</span></header>
+<main>
+<p><small>Las agendas buenas llevan SEMANA y FECHA en cada fila. Las subidas antiguas (una fila por cliente, "BLOQUE PORTUGAL" y similares) no llevan ninguna de las dos: esta página las detecta por persona y colección, y las borra SOLO si tú lo marcas. Las filas buenas no se tocan ni una.</small></p>
+<button id="b1">🔍 Analizar la nube</button>
+<button id="b2" class="rojo" disabled>🧯 Purgar lo marcado</button>
+<div class="msg" id="m"></div>
+<div id="t"></div>
+</main>
+<script>
+"use strict";
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const $=id=>document.getElementById(id);
+const COLS=["radar_rutas","radar_rutas_int"];
+let DATA={}; // col → {rows:[...], nChunks}
+const esVieja=a=>{
+ const sem=String(a.sem||"").trim(),dia=String(a.dia||a.fecha||"").trim();
+ return !sem&&!/\d{1,2}\/\d{1,2}\/\d{2,4}/.test(dia);};
+$("b1").onclick=async()=>{
+ const m=$("m");m.className="msg on info";m.textContent="Leyendo las dos colecciones…";
+ try{
+  DATA={};
+  for(const col of COLS){
+   let rows=[],n=0;
+   for(let i=0;i<80;i++){
+    const r=await fetch(FB+"/"+col+"/chunk_"+i);
+    if(!r.ok)break;
+    const j=await r.json();
+    const arr=JSON.parse(j.fields?.datos?.stringValue||"[]");
+    n=i+1;
+    if(!arr.length&&i>0&&rows.length)continue;
+    arr.forEach(a=>rows.push(a));
+   }
+   DATA[col]={rows,nChunks:n};
+  }
+  // resumen por colección × persona
+  let html="<table><tr><th>purgar</th><th>Colección</th><th>Persona</th><th>filas TOTALES</th><th>filas VIEJAS (sin sem/fecha)</th></tr>";
+  let hayViejas=false;
+  for(const col of COLS){
+   const por={};
+   DATA[col].rows.forEach(a=>{
+    const p=String(a.per||a.ka||"?").toUpperCase();
+    por[p]=por[p]||{t:0,v:0};por[p].t++;if(esVieja(a))por[p].v++;});
+   Object.entries(por).sort().forEach(([p,x])=>{
+    if(x.v)hayViejas=true;
+    html+="<tr><td>"+(x.v?"<input type='checkbox' data-col='"+col+"' data-per='"+p+"' checked>":"")+"</td><td>"+col+"</td><td><b>"+p+"</b></td><td>"+x.t+"</td><td style='color:"+(x.v?"#B3261E;font-weight:bold":"#2F6B2F")+"'>"+x.v+"</td></tr>";});
+  }
+  html+="</table>";
+  $("t").innerHTML=html;
+  m.className="msg on "+(hayViejas?"err":"ok");
+  m.textContent=hayViejas?"Hay agendas viejas conviviendo con las buenas: revisa las marcas y pulsa PURGAR.":"Nube limpia: todas las filas llevan semana o fecha.";
+  $("b2").disabled=!hayViejas;
+ }catch(e){m.className="msg on err";m.textContent=e.message;}};
+$("b2").onclick=async()=>{
+ const marcas=[...document.querySelectorAll("#t input:checked")].map(ch=>({col:ch.dataset.col,per:ch.dataset.per}));
+ if(!marcas.length)return;
+ if(!confirm("Se borrarán SOLO las filas viejas (sin semana ni fecha) de: "+marcas.map(x=>x.per+" ("+x.col+")").join(", ")+". Las agendas buenas quedan intactas. ¿Adelante?"))return;
+ const m=$("m");m.className="msg on info";
+ try{
+  for(const col of COLS){
+   const afectadas=new Set(marcas.filter(x=>x.col===col).map(x=>x.per));
+   if(!afectadas.size)continue;
+   const antes=DATA[col].rows.length;
+   const limpio=DATA[col].rows.filter(a=>{
+    const p=String(a.per||a.ka||"?").toUpperCase();
+    return !(afectadas.has(p)&&esVieja(a));});
+   m.textContent=col+": reescribiendo "+limpio.length+" filas ("+(antes-limpio.length)+" purgadas)…";
+   const TAM=400;
+   const total=Math.max(Math.ceil(limpio.length/TAM),1);
+   for(let i=0;i<Math.max(total,DATA[col].nChunks);i++){
+    const trozo=limpio.slice(i*TAM,(i+1)*TAM);
+    await fetch(FB+"/"+col+"/chunk_"+i+"?updateMask.fieldPaths=datos",{method:"PATCH",
+     headers:{"Content-Type":"application/json"},
+     body:JSON.stringify({fields:{datos:{stringValue:JSON.stringify(trozo)}}})});
+   }
+  }
+  m.className="msg on ok";m.textContent="✓ Purga hecha. Abre el planificador y recarga: deben quedar solo las agendas con semanas y días.";
+  $("b2").disabled=true;
+ }catch(e){m.className="msg on err";m.textContent="Error: "+e.message;}};
+</script></body></html>
