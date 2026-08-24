@@ -342,7 +342,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.65.0";
+const CRM_VERSION = "4.69.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -651,6 +651,8 @@ async function cargarUsuariosFB(){
       fbLeer("portal_users"),
     ]);
     console.log(`[USUARIOS] CRM: ${(fbUsers||[]).length}, Portal: ${(portalUsers||[]).length}`);
+    // (v4.69) Guardado para poder verlo desde el móvil, sin consola.
+    window._diagUsuarios={ok:true, crm:(fbUsers||[]).length, portal:(portalUsers||[]).length, error:""};
 
     // Mapa de emails del Portal por catalogoVendedor
     const portalEmails={};
@@ -738,6 +740,7 @@ async function cargarUsuariosFB(){
     return true;
   }catch(e){
     console.warn("⚠️ USUARIOS: usando seed local:",e.message);
+    window._diagUsuarios={ok:false, crm:0, portal:0, error:String(e&&e.message||e)};
     return false;
   }
 }
@@ -4852,12 +4855,16 @@ function DashTipologia({usuario, onNav, incidenciasDB}){
     it:            {label:"IT",              icon:"💻",  color:"#7C3AED"}
   };
   const tip=(usuario&&usuario.tipologia)||"";
-  const meta=META[tip]||{label:tip||"Tipología",icon:"⚙️",color:T.muted};
+  const meta=META[tip]||{label:tip||"Todos los departamentos",icon:tip?"⚙️":"🗂️",color:tip?T.muted:"#0F766E"};
 
   // Filtrar incidencias del tipo del responsable
   // (v3.23.91) Para stock también incluimos "rotura" y variantes
+  // (v4.68) Sin tipología en la ficha se enseñan todas: es preferible ver
+  // todas las incidencias abiertas a ver una pantalla vacía sin explicación.
+  const _sinTip = !tip;
   function esDeMiTipo(i){
     if(!i||i.eliminada) return false;
+    if(_sinTip) return true;
     var t=String(i.tipo||"").toLowerCase();
     if(tip==="stock") return t==="stock"||t==="rotura"||t.indexOf("stock")>=0;
     return t===tip;
@@ -5545,7 +5552,63 @@ function _cobCodigosDe(usuario){
   return out;
 }
 function _cobCodigoDe(usuario){ return _cobCodigosDe(usuario)[0]||""; }
-function CobrosWidget({usuario, onNav}){
+// (v4.69) Semáforo de la carga de fichas de usuario. Si esa lectura falla, el
+// CRM se queda con la lista local de reserva: las fichas pierden equipo y
+// tipología y la gente acaba en el panel que no le toca. Como en el móvil no
+// hay consola a mano, se enseña en la propia cabecera.
+function DiagUsuarios(){
+  var _a=React.useState(null); var d=_a[0], setD=_a[1];
+  var _b=React.useState(false); var abierto=_b[0], setAbierto=_b[1];
+  React.useEffect(function(){
+    var n=0;
+    var t=setInterval(function(){
+      n++;
+      if(window._diagUsuarios){ setD(window._diagUsuarios); clearInterval(t); }
+      else if(n>40){ setD({ok:false,crm:0,portal:0,error:"la lectura no llegó a terminar"}); clearInterval(t); }
+    },500);
+    return function(){ clearInterval(t); };
+  },[]);
+  if(!d) return null;
+  var mal = !d.ok || d.crm===0;
+  if(!mal) return <span style={{color:T.muted,fontSize:9}}> · 👥 {d.crm}/{d.portal}</span>;
+  return (
+    <span>
+      <span onClick={function(e){e.stopPropagation();setAbierto(!abierto);}}
+        style={{color:"#B91C1C",fontSize:9,fontWeight:800,cursor:"pointer"}}> · ⚠️ FICHAS SIN CARGAR</span>
+      {abierto&&(
+        <div onClick={function(e){e.stopPropagation();setAbierto(false);}}
+          style={{position:"fixed",left:12,right:12,top:70,zIndex:300,background:"#fff",
+            border:"2px solid #FECACA",borderRadius:14,padding:"14px 16px",
+            boxShadow:"0 10px 30px rgba(0,0,0,.2)"}}>
+          <p style={{margin:"0 0 6px",fontSize:13,fontWeight:800,color:"#991B1B"}}>
+            ⚠️ No se han podido leer las fichas de usuario</p>
+          <p style={{margin:"0 0 8px",fontSize:12,color:"#7F1D1D",lineHeight:1.55}}>
+            El CRM está funcionando con la lista local de reserva, así que a varias
+            personas les faltan el equipo y el departamento y acaban en el panel
+            equivocado. No es cosa de esta pantalla: es la lectura de Firebase.</p>
+          <p style={{margin:"0 0 8px",fontSize:11.5,color:"#7F1D1D",fontFamily:"ui-monospace,Menlo,monospace"}}>
+            usuarios: {d.crm} · portal_users: {d.portal}<br/>
+            {d.error||"la colección respondió vacía"}</p>
+          <p style={{margin:0,fontSize:11,color:"#B45309"}}>Toca para cerrar</p>
+        </div>
+      )}
+    </span>
+  );
+}
+
+// Barrera de seguridad: si el widget de cobros fallara por lo que sea, se
+// queda él solo en blanco. Sin esto, un error suyo se lleva por delante el
+// dashboard entero del usuario, sea comercial, responsable o dirección.
+class CobrosBoundary extends React.Component{
+  constructor(p){ super(p); this.state={roto:false}; }
+  static getDerivedStateFromError(){ return {roto:true}; }
+  componentDidCatch(e){ console.error("[COBROS] widget desactivado por error:", e); }
+  render(){ return this.state.roto ? null : this.props.children; }
+}
+function CobrosWidget(props){
+  return <CobrosBoundary><CobrosWidgetInterno {...props}/></CobrosBoundary>;
+}
+function CobrosWidgetInterno({usuario, onNav}){
   var _s=React.useState(null); var dato=_s[0], setDato=_s[1];
   var _c=React.useState(false); var cargando=_c[0], setCargando=_c[1];
   var _e=React.useState(null); var noHay=_e[0], setNoHay=_e[1];
@@ -30660,9 +30723,16 @@ function App(props){
 
   // (v3.23.45) Rol comercial cuenta como agente
   const esAgente=["agente","comercial","vendedor","crm_agente"].includes((usuario.rol||"").toLowerCase());
-  const esTipologia=((usuario.rol==="tipologia")||(usuario.rol==="crm_jefe"&&!!usuario.tipologia))&&(usuario.tipologia||"").toLowerCase()!=="calidad";
+  // (v4.68) Un responsable sin equipo NO es jefe de ventas. Varias fichas del
+  // portal llegan como jefe/crm_jefe sin equipo y sin tipología, y la regla
+  // anterior las mandaba al panel de ventas: veían la venta del grupo a cero
+  // y el equipo "—". Si no tiene equipo, es un responsable de departamento y
+  // va al panel de incidencias, aunque no sepamos aún de qué departamento.
+  const _respSinEquipo=(usuario.rol==="jefe"||usuario.rol==="crm_jefe")
+                       && !usuario.tipologia && !usuario.equipo;
+  const esTipologia=((usuario.rol==="tipologia")||(usuario.rol==="crm_jefe"&&!!usuario.tipologia)||_respSinEquipo)&&(usuario.tipologia||"").toLowerCase()!=="calidad";
   const esCalidad=(usuario.tipologia||"").toLowerCase()==="calidad";
-  const esJefe=usuario.rol==="jefe"||(usuario.rol==="crm_jefe"&&!usuario.tipologia);
+  const esJefe=(usuario.rol==="jefe"||(usuario.rol==="crm_jefe"&&!usuario.tipologia))&&!_respSinEquipo;
   const esDir=["director","ceo","crm_director"].includes(usuario.rol)||esCalidad;
   const esJefeOmas=esJefe||esDir;
   const miEquipo=usuario.equipo;
@@ -30911,6 +30981,7 @@ function App(props){
             {!fbCargando&&fbStatus==="ok"&&!navigator.onLine&&<span style={{color:T.amber}}>📴 Offline (caché)</span>}
             {!fbCargando&&fbStatus==="ok"&&navigator.onLine&&<span style={{color:T.green}}>🔵 Firebase OK</span>}
             <span style={{color:T.muted,fontSize:9}}> · v{CRM_VERSION}</span>
+            <DiagUsuarios/>
             <span onClick={function(){if(window.recargarProductos)window.recargarProductos();}} style={{color:T.muted,fontSize:9,marginLeft:6,cursor:"pointer",textDecoration:"underline"}}>🔄 Recargar productos</span>
             {!fbCargando&&fbStatus==="error"&&<span style={{color:T.muted}}>⚪ Sin conexión</span>}
             {colaLeer().length>0&&<span style={{color:T.amber,marginLeft:4}}>· 📤 {colaLeer().length} pendiente{colaLeer().length>1?"s":""}</span>}
