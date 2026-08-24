@@ -364,7 +364,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "6.15.0";
+const CRM_VERSION = "6.16.1";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -20826,6 +20826,56 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
     guardarParte({...miParte,objetivos:miParte.objetivos.filter(function(o){return o.id!==obj.id;})});
     setSelObj(null);
   }
+  // (v6.16) CASCADA: primero cierra el equipo, después el responsable. Un
+  // parte de responsable que se entrega antes que los de su gente no puede
+  // resumir nada — se limita a sus propios objetivos y el superior se queda
+  // sin saber qué pasó abajo.
+  const equipoEstado = React.useMemo(function(){
+    return misReportes.map(function(u){
+      var pp=partes[idParteSemanal(u.id,ano,sem)]||null;
+      var objs=(pp&&pp.objetivos)||[];
+      return {u:u, parte:pp,
+        entregado: !!pp && (pp.estado==="entregado"||pp.estado==="validado"),
+        ausente: !!(pp&&pp.ausente),
+        hechos: objs.filter(function(o){return o.estado==="hecho";}).length,
+        total: objs.length};
+    });
+  },[misReportes,partes,ano,sem]);
+  const equipoPendiente = equipoEstado.filter(function(x){ return !x.entregado && !x.ausente; });
+
+  function recordarA(x){
+    try{despacharNotificacion({tipo:"parte",
+      titulo:"🧾 Te falta cerrar la semana "+sem,
+      mensaje:usuario.nombre+" no puede entregar su parte hasta que cierres el tuyo. Entra en Parte semanal y ciérralo.",
+      destinatarioId:x.u.id,prioridad:"alta",creadoPor:usuario.id});}catch(e){}
+    try{
+      var em=(USUARIOS.find(function(z){return z.id===x.u.id;})||{}).email||"";
+      if(em) fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({to:em,subject:"[CRM] 🧾 Te falta cerrar la semana "+sem,
+          html:'<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:20px">'
+            +'<p style="font-size:15px;color:#0F172A"><b>'+usuario.nombre+'</b> no puede entregar su parte '
+            +'de la semana '+sem+' hasta que cierres el tuyo.</p>'
+            +'<p style="font-size:13px;color:#475569">Entra en el CRM → Parte semanal, marca cómo ha ido cada '
+            +'objetivo y pulsa «Entregar parte».</p>'
+            +'<a href="https://crmwikuk.vercel.app" style="display:inline-block;margin-top:12px;padding:12px 22px;'
+            +'background:#0F1E2E;color:#fff;text-decoration:none;border-radius:9px;font-weight:700;font-size:13px">'
+            +'Cerrar mi semana →</a></div>'})}).catch(function(){});
+    }catch(e){}
+    alert("Recordatorio enviado a "+x.u.nombre+".");
+  }
+  function marcarAusente(x){
+    var motivo=prompt("¿Por qué no va a entregar "+x.u.nombre+" esta semana?\n(vacaciones, baja, etc. — constará en el informe)");
+    if(!motivo||!motivo.trim()) return;
+    var id=idParteSemanal(x.u.id,ano,sem);
+    var doc=Object.assign({id:id,usuarioId:x.u.id,usuarioNombre:x.u.nombre,
+      departamentoId:x.u.departamentoId||"",ano:ano,semana:sem,objetivos:[],
+      resumen:"",estado:"borrador",comentarioSuperior:""}, partes[id]||{},
+      {ausente:true, ausenteMotivo:motivo.trim(), ausentePor:usuario.nombre});
+    delete doc._nuevo;
+    fbEscribir("partes_departamento",doc.id,doc);
+    setPartes(function(prev){var n={...prev};n[doc.id]=doc;return n;});
+  }
+
   function avisarBloqueo(){
     alert("Antes tienes que cerrar la semana "+(pendienteDeCerrar?pendienteDeCerrar.semana:"anterior")+
           ". Entrégala y podrás trabajar en esta.");
@@ -20838,6 +20888,13 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
   }
   // Abre el cierre si hay algo que decidir; si no, entrega directamente.
   function pedirCierre(){
+    if(equipoPendiente.length){
+      alert("Antes tiene que cerrar tu equipo.\n\nFaltan: "+
+        equipoPendiente.map(function(x){return x.u.nombre;}).join(", ")+
+        "\n\nEn «Mi equipo» puedes recordárselo o marcar a quien esté de baja o de vacaciones.");
+      setTab("equipo");
+      return;
+    }
     var pasar={};
     // Los que puso el superior se proponen marcados: no le toca al responsable
     // decidir que desaparezcan.
@@ -20846,7 +20903,17 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
     });
     // (v6.13) El cierre se abre siempre, también sin objetivos: nadie entrega
     // sin contar cómo fue la semana y qué hará la siguiente.
-    setCierre({pasar:pasar, hechos:{}, notas:{},
+    // Lo que el responsable eleva de cada persona. Se propone marcado a quien
+    // tiene algo que merezca subir: parciales, bloqueos o cosas sin hacer.
+    var elevar={}, notasEq={};
+    equipoEstado.forEach(function(x){
+      var objs=(x.parte&&x.parte.objetivos)||[];
+      var flojo=objs.some(function(o){return o.estado==="bloqueado"||o.parcial||
+        (o.estado!=="hecho"&&!o.traspasado);});
+      elevar[x.u.id]= x.ausente || flojo || (x.total>0 && x.hechos<x.total);
+      notasEq[x.u.id]="";
+    });
+    setCierre({pasar:pasar, hechos:{}, notas:{}, elevar:elevar, notasEq:notasEq,
       resumen:miParte.resumen||"",
       plan:miParte.planSiguiente||""});
   }
@@ -20914,6 +20981,33 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
     + bloque("✍️ Cómo ha ido la semana", doc.resumen, "#0F172A", "#F8FAFC")
     + bloque("📌 Qué hará la semana "+(doc.semana>=52?1:doc.semana+1), doc.planSiguiente, "#16A34A", "#F0FDF4")
 
+    + (function(){
+        var eq=doc.equipoResumen||[];
+        if(!eq.length) return "";
+        return '<p style="margin:18px 0 5px;font-size:10.5px;font-weight:800;color:#64748B;'
+          +'letter-spacing:.07em;text-transform:uppercase">Su equipo · '+eq.length
+          +' de '+(doc.equipoTotal||eq.length)+'</p>'
+          + eq.map(function(x){
+              var sem2=x.total?(x.hechos+"/"+x.total+" objetivos"):"sin objetivos";
+              var alerta=[];
+              if(x.bloqueados) alerta.push(x.bloqueados+" bloqueados");
+              if(x.parciales)  alerta.push(x.parciales+" a medias");
+              if(x.sinHacer)   alerta.push(x.sinHacer+" sin hacer");
+              return '<div style="border:1px solid #E2E8F0;border-left:3px solid '
+                +(x.ausente?"#94A3B8":(alerta.length?"#F59E0B":"#16A34A"))
+                +';border-radius:0 9px 9px 0;padding:10px 12px;margin-bottom:7px">'
+                +'<div style="font-size:13px;font-weight:800;color:#0F172A">'+esc(x.nombre)+'</div>'
+                +'<div style="font-size:10.5px;color:#64748B;margin-top:2px">'
+                +(x.ausente?('🌴 '+esc(x.ausenteMotivo||"ausente")):esc(sem2)
+                  +(alerta.length?' · <span style="color:#B45309">'+esc(alerta.join(" · "))+'</span>':''))+'</div>'
+                +(x.resumen?'<div style="font-size:11.5px;color:#475569;line-height:1.5;margin-top:6px;'
+                  +'background:#F8FAFC;border-radius:7px;padding:7px 9px">'+esc(x.resumen)+'</div>':'')
+                +(x.plan?'<div style="font-size:11px;color:#166534;margin-top:4px">📌 '+esc(x.plan)+'</div>':'')
+                +(x.nota?'<div style="font-size:11.5px;color:#0F172A;margin-top:6px;border-left:3px solid #0F1E2E;'
+                  +'padding-left:8px"><b>Lectura de '+esc(doc.usuarioNombre||"")+':</b> '+esc(x.nota)+'</div>':'')
+                +'</div>';
+            }).join("");
+      })()
     +'<p style="margin:16px 0 5px;font-size:10.5px;font-weight:800;color:#64748B;letter-spacing:.07em;text-transform:uppercase">Su semana en datos</p>'
     +'<table width="100%" cellpadding="0" cellspacing="0" style="font-size:12px;color:#475569">'
     +'<tr><td style="padding:3px 0">🚨 Incidencias abiertas</td><td align="right"><b>'+(sn.incAb||0)+'</b>'
@@ -20958,6 +21052,21 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
       snapshot:snapshotDe(usuario),
       cierre:{noTerminados:objetivosVivos(miParte).length, traspasados:aPasar.length,
               cerradoTs:Date.now()},
+      // (v6.16) Resumen del equipo que sube al informe del superior
+      equipoResumen: equipoEstado.filter(function(x){ return (traspaso.elevar||{})[x.u.id]; })
+        .map(function(x){
+          var objs=(x.parte&&x.parte.objetivos)||[];
+          return {usuarioId:x.u.id, nombre:x.u.nombre,
+            ausente:!!x.ausente, ausenteMotivo:(x.parte&&x.parte.ausenteMotivo)||"",
+            hechos:x.hechos, total:x.total,
+            bloqueados:objs.filter(function(o){return o.estado==="bloqueado";}).length,
+            parciales:objs.filter(function(o){return o.parcial;}).length,
+            sinHacer:objs.filter(function(o){return o.estado!=="hecho"&&!o.traspasado;}).length,
+            resumen:(x.parte&&x.parte.resumen)||"",
+            plan:(x.parte&&x.parte.planSiguiente)||"",
+            nota:((traspaso.notasEq||{})[x.u.id]||"").trim()};
+        }),
+      equipoTotal: equipoEstado.length,
       paraIds:misSupers.map(function(s){return s.id;})};
 
     // Alta en la semana siguiente: lo traspasado y el plan que acaba de escribir.
@@ -21551,6 +21660,49 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
               </div>
             )}
 
+            {/* (v6.16) Qué se eleva de cada persona del equipo */}
+            {equipoEstado.length>0&&(
+              <div style={{marginTop:16}}>
+                <p style={{margin:"0 0 3px",fontSize:11,fontWeight:800,color:T.muted,
+                  textTransform:"uppercase",letterSpacing:".07em"}}>Tu equipo · qué elevas</p>
+                <p style={{margin:"0 0 9px",fontSize:11,color:T.muted,lineHeight:1.5}}>
+                  Todos han cerrado. Marca a quien tu superior deba conocer y añade,
+                  si hace falta, una línea tuya.</p>
+                {equipoEstado.map(function(x){
+                  var on=!!cierre.elevar[x.u.id];
+                  return (
+                    <div key={x.u.id} style={{border:"1.5px solid "+(on?T.navy:T.border),
+                      borderRadius:11,padding:"10px 12px",marginBottom:7,background:on?"#F8FAFC":"#fff"}}>
+                      <div onClick={function(){var e={...cierre.elevar};e[x.u.id]=!e[x.u.id];setCierre({...cierre,elevar:e});}}
+                        style={{display:"flex",gap:9,alignItems:"center",cursor:"pointer"}}>
+                        <span style={{fontSize:15}}>{on?"⬆️":"⬜"}</span>
+                        <div style={{flex:1,minWidth:0}}>
+                          <p style={{margin:0,fontSize:12.5,fontWeight:800,color:T.text}}>{x.u.nombre}</p>
+                          <p style={{margin:"2px 0 0",fontSize:10.5,color:T.muted}}>
+                            {x.ausente?("🌴 "+((x.parte&&x.parte.ausenteMotivo)||"ausente"))
+                              :(x.total?x.hechos+" de "+x.total+" objetivos":"sin objetivos")}
+                          </p>
+                        </div>
+                        <span style={{fontSize:9.5,fontWeight:800,color:on?T.navy:T.muted}}>
+                          {on?"SUBE":"NO SUBE"}</span>
+                      </div>
+                      {x.parte&&x.parte.resumen&&(
+                        <p style={{margin:"7px 0 0",fontSize:11.5,color:"#475569",lineHeight:1.5,
+                          background:"#F1F5F9",borderRadius:8,padding:"7px 9px"}}>{x.parte.resumen}</p>
+                      )}
+                      {on&&(
+                        <input value={cierre.notasEq[x.u.id]||""}
+                          onChange={function(ev){var n={...cierre.notasEq};n[x.u.id]=ev.target.value;setCierre({...cierre,notasEq:n});}}
+                          placeholder="Tu lectura (opcional): qué hay que saber de esta persona"
+                          style={{width:"100%",marginTop:7,padding:"8px 10px",borderRadius:9,fontSize:12,
+                            border:"1.5px solid "+T.border,fontFamily:"inherit",outline:"none",boxSizing:"border-box"}}/>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
             {/* (v6.13) El relato: obligatorio para todos */}
             <p style={{margin:"14px 0 6px",fontSize:11,fontWeight:800,color:T.muted,
               textTransform:"uppercase",letterSpacing:".07em"}}>¿Cómo ha ido la semana? *</p>
@@ -21652,6 +21804,37 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
       {/* ═══ MI EQUIPO (cascada) ═══ */}
       {tab==="equipo"&&(
         <div>
+          {/* (v6.16) Quién falta por cerrar. Hasta que no cierren todos, el
+              responsable no puede entregar el suyo. */}
+          {equipoPendiente.length>0?(
+            <div style={{background:"#FFFBEB",border:"1.5px solid #FDE68A",borderRadius:14,
+              padding:"14px 16px",marginBottom:14}}>
+              <p style={{margin:"0 0 4px",fontSize:13,fontWeight:900,color:"#92400E"}}>
+                ⏳ Faltan {equipoPendiente.length} por cerrar la semana {sem}</p>
+              <p style={{margin:"0 0 11px",fontSize:11.5,color:"#92400E",lineHeight:1.5}}>
+                No puedes entregar tu parte hasta que cierren. Recuérdaselo, o marca
+                a quien esté de baja o de vacaciones.</p>
+              {equipoPendiente.map(function(x){
+                return (
+                  <div key={x.u.id} style={{display:"flex",gap:6,alignItems:"center",marginBottom:6}}>
+                    <span style={{flex:1,fontSize:12.5,fontWeight:700,color:"#7C2D12"}}>{x.u.nombre}</span>
+                    <button onClick={function(){recordarA(x);}}
+                      style={{padding:"7px 11px",borderRadius:8,border:"1.5px solid #B45309",
+                        background:"#fff",color:"#B45309",fontWeight:800,fontSize:11,cursor:"pointer"}}>🔔 Recordar</button>
+                    <button onClick={function(){marcarAusente(x);}}
+                      style={{padding:"7px 11px",borderRadius:8,border:"1.5px solid #CBD5E1",
+                        background:"#fff",color:"#64748B",fontWeight:800,fontSize:11,cursor:"pointer"}}>🌴 Ausente</button>
+                  </div>
+                );
+              })}
+            </div>
+          ):(
+            <div style={{background:"#F0FDF4",border:"1.5px solid #BBF7D0",borderRadius:14,
+              padding:"12px 16px",marginBottom:14}}>
+              <p style={{margin:0,fontSize:12.5,fontWeight:800,color:"#15803D"}}>
+                ✅ Tu equipo ha cerrado la semana {sem} — ya puedes entregar tu parte</p>
+            </div>
+          )}
           {misReportes.map(function(u){
             var p=partes[idParteSemanal(u.id,ano,sem)]||null;
             var dep=deptoDe(u.departamentoId||((deptosDondeEsResponsable(u)[0]||{}).id))||{icon:"🏢",nombre:"—",color:T.muted};
