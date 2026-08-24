@@ -342,7 +342,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.69.0";
+const CRM_VERSION = "4.71.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -585,6 +585,54 @@ function agenteCanonico(usuario){
   }catch(e){ return ""; }
 }
 
+// (v4.71) Cruza cada ficha con el organigrama: de qué departamentos es
+// responsable, qué tipologías le corresponden (las suyas y las de todo lo que
+// cuelga por debajo) y, si lleva un equipo comercial, cuál.
+function aplicarOrganigrama(usuarios, deptos){
+  try{
+    var act=(deptos||[]).filter(function(d){ return d && d.id && d.activo!==false; });
+    if(!act.length) return;
+    var hijos={};
+    act.forEach(function(d){
+      var p=d.padre||"__raiz";
+      (hijos[p]=hijos[p]||[]).push(d);
+    });
+    function descendientes(id, acc, visto){
+      acc=acc||[]; visto=visto||{};
+      if(visto[id]) return acc;            // por si el organigrama tiene un ciclo
+      visto[id]=1;
+      (hijos[id]||[]).forEach(function(h){ acc.push(h); descendientes(h.id, acc, visto); });
+      return acc;
+    }
+    function esResp(d,u){
+      var ids=(d.responsableIds||[]).map(function(x){ return String(x||"").toUpperCase(); });
+      return [u.id,u.username,u.nombre].filter(Boolean)
+        .some(function(k){ return ids.indexOf(String(k).toUpperCase())>=0; });
+    }
+    usuarios.forEach(function(u){
+      var mios=act.filter(function(d){ return esResp(d,u); });
+      if(!mios.length) return;
+      var ambito=mios.slice();
+      mios.forEach(function(d){ descendientes(d.id, ambito); });
+      var tips=[], equipos=[];
+      ambito.forEach(function(d){
+        (d.tipologias||[]).forEach(function(t){ if(t && tips.indexOf(t)<0) tips.push(t); });
+        if(d.equipo && equipos.indexOf(d.equipo)<0) equipos.push(d.equipo);
+      });
+      u.orgDepto  = mios[0].nombre || "";
+      u.orgIcon   = mios[0].icon   || "";
+      u.orgColor  = mios[0].color  || "";
+      u.orgTipologias = tips;
+      // Solo se rellena lo que falta: si la ficha ya lo trae, manda la ficha.
+      if(!u.equipo && equipos.length===1) u.equipo=equipos[0];
+      if(!u.tipologia && tips.length===1) u.tipologia=tips[0];
+    });
+    console.log("[ORG] Departamentos:",act.length,"· responsables cruzados:",
+      usuarios.filter(function(u){return u.orgDepto;}).map(function(u){
+        return u.nombre+"→"+u.orgDepto+"["+(u.orgTipologias||[]).join(",")+"]";}).join(" | ")||"ninguno");
+  }catch(e){ console.warn("[ORG] no se ha podido aplicar el organigrama:", e); }
+}
+
 function idCanonico(usuario){
   if(!usuario) return "";
   // Si el propio id ya es un código corto del CRM, usarlo
@@ -646,9 +694,10 @@ function haceDiasLaborales(n){
 async function cargarUsuariosFB(){
   try{
     // Leer usuarios CRM + portal_users (mismo proyecto Firebase)
-    const [fbUsers, portalUsers] = await Promise.all([
+    const [fbUsers, portalUsers, deptos] = await Promise.all([
       fbLeer("usuarios"),
       fbLeer("portal_users"),
+      fbLeer("departamentos"),      // (v4.71) organigrama del Hub
     ]);
     console.log(`[USUARIOS] CRM: ${(fbUsers||[]).length}, Portal: ${(portalUsers||[]).length}`);
     // (v4.69) Guardado para poder verlo desde el móvil, sin consola.
@@ -732,6 +781,14 @@ async function cargarUsuariosFB(){
         console.log("[USUARIOS] + Añadido desde portal_users:",pu.nombre,pu.equipo||"");
       }
     });
+
+    // (v4.71) El organigrama del Hub manda. Hasta ahora el CRM solo leía las
+    // fichas de "usuarios" y adivinaba el rol por su contenido; la estructura
+    // real —quién es responsable de qué y qué cuelga de qué— vivía en
+    // "departamentos" y nadie la miraba. Por eso un responsable de área como
+    // Ricardo (Operaciones) acababa clasificado como jefe de ventas sin equipo.
+    aplicarOrganigrama(merged, deptos);
+    window._diagUsuarios.deptos=(deptos||[]).length;
 
     USUARIOS=merged;
     const conEmail=USUARIOS.filter(u=>u.email);
@@ -4842,6 +4899,28 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
 // (v3.23.91) Dashboard para responsables de tipología (calidad, stock, logística, etc.)
 // Solo muestra las incidencias de su tipo, agrupadas por estado/prioridad.
 // La acción (gestionar/cerrar) se hace en el módulo de incidencias normal.
+// (v4.70) Hay responsables que no llevan un departamento sino un ÁREA que
+// agrupa varios. Ricardo Morales lleva Operaciones: Producción, Coordinación,
+// Almacén y Producción Marruecos. Su ficha no tiene tipología (no hay una
+// sola que le sirva), así que caía en el panel de ventas primero y en "todos
+// los departamentos" después. Ninguna de las dos es su sitio.
+// Para añadir otro responsable de área basta con una línea más aquí.
+const AREAS_RESPONSABLE = {
+  "RICARDO MORALES": {label:"Operaciones", icon:"⚙️", color:"#0F766E",
+                      tipos:["produccion","coordinacion","stock"]},
+};
+function _areaDe(usuario){
+  if(!usuario) return null;
+  var claves=[usuario.nombre, usuario.username, usuario.id]
+    .filter(Boolean)
+    .map(function(x){ return String(x).toUpperCase().trim()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g,""); });
+  for(var i=0;i<claves.length;i++){
+    if(AREAS_RESPONSABLE[claves[i]]) return AREAS_RESPONSABLE[claves[i]];
+  }
+  return null;
+}
+
 function DashTipologia({usuario, onNav, incidenciasDB}){
   // Etiquetas y colores por tipología — todo el mapeo en un sitio
   const META={
@@ -4855,19 +4934,34 @@ function DashTipologia({usuario, onNav, incidenciasDB}){
     it:            {label:"IT",              icon:"💻",  color:"#7C3AED"}
   };
   const tip=(usuario&&usuario.tipologia)||"";
-  const meta=META[tip]||{label:tip||"Todos los departamentos",icon:tip?"⚙️":"🗂️",color:tip?T.muted:"#0F766E"};
+  // El área viene del organigrama del Hub. La tabla manual queda solo como
+  // red de seguridad por si la colección "departamentos" no respondiera.
+  const _org=(usuario&&usuario.orgTipologias&&usuario.orgTipologias.length)
+    ? {label:usuario.orgDepto||"Mi área", icon:usuario.orgIcon||"⚙️",
+       color:usuario.orgColor||"#0F766E", tipos:usuario.orgTipologias}
+    : null;
+  const area=_org||_areaDe(usuario);
+  const meta=META[tip] || (area
+    ? {label:area.label, icon:area.icon, color:area.color}
+    : {label:tip||"Todos los departamentos", icon:tip?"⚙️":"🗂️", color:tip?T.muted:"#0F766E"});
 
   // Filtrar incidencias del tipo del responsable
   // (v3.23.91) Para stock también incluimos "rotura" y variantes
   // (v4.68) Sin tipología en la ficha se enseñan todas: es preferible ver
   // todas las incidencias abiertas a ver una pantalla vacía sin explicación.
-  const _sinTip = !tip;
+  // Sin tipología: si es responsable de un área, se filtra por los
+  // departamentos de esa área; si no lo tenemos fichado, se enseñan todas
+  // antes que dejar la pantalla vacía.
+  const _tipos = tip ? [tip] : (area ? area.tipos : null);
+  function _casa(t, k){
+    if(k==="stock") return t==="stock"||t==="rotura"||t.indexOf("stock")>=0||t.indexOf("almacen")>=0;
+    return t===k;
+  }
   function esDeMiTipo(i){
     if(!i||i.eliminada) return false;
-    if(_sinTip) return true;
+    if(!_tipos) return true;
     var t=String(i.tipo||"").toLowerCase();
-    if(tip==="stock") return t==="stock"||t==="rotura"||t.indexOf("stock")>=0;
-    return t===tip;
+    return _tipos.some(function(k){ return _casa(t,k); });
   }
   const todasMis=(incidenciasDB||[]).filter(esDeMiTipo);
 
@@ -5570,7 +5664,7 @@ function DiagUsuarios(){
   },[]);
   if(!d) return null;
   var mal = !d.ok || d.crm===0;
-  if(!mal) return <span style={{color:T.muted,fontSize:9}}> · 👥 {d.crm}/{d.portal}</span>;
+  if(!mal) return <span style={{color:T.muted,fontSize:9}}> · 👥 {d.crm}/{d.portal} · 🗂️ {d.deptos!=null?d.deptos:"?"}</span>;
   return (
     <span>
       <span onClick={function(e){e.stopPropagation();setAbierto(!abierto);}}
@@ -5587,7 +5681,7 @@ function DiagUsuarios(){
             personas les faltan el equipo y el departamento y acaban en el panel
             equivocado. No es cosa de esta pantalla: es la lectura de Firebase.</p>
           <p style={{margin:"0 0 8px",fontSize:11.5,color:"#7F1D1D",fontFamily:"ui-monospace,Menlo,monospace"}}>
-            usuarios: {d.crm} · portal_users: {d.portal}<br/>
+            usuarios: {d.crm} · portal_users: {d.portal} · departamentos: {d.deptos!=null?d.deptos:"?"}<br/>
             {d.error||"la colección respondió vacía"}</p>
           <p style={{margin:0,fontSize:11,color:"#B45309"}}>Toca para cerrar</p>
         </div>
@@ -30728,6 +30822,7 @@ function App(props){
   // anterior las mandaba al panel de ventas: veían la venta del grupo a cero
   // y el equipo "—". Si no tiene equipo, es un responsable de departamento y
   // va al panel de incidencias, aunque no sepamos aún de qué departamento.
+  const _tipsOrg=(usuario.orgTipologias||[]);
   const _respSinEquipo=(usuario.rol==="jefe"||usuario.rol==="crm_jefe")
                        && !usuario.tipologia && !usuario.equipo;
   const esTipologia=((usuario.rol==="tipologia")||(usuario.rol==="crm_jefe"&&!!usuario.tipologia)||_respSinEquipo)&&(usuario.tipologia||"").toLowerCase()!=="calidad";
