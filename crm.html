@@ -364,7 +364,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "6.11.2";
+const CRM_VERSION = "6.13.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -572,6 +572,32 @@ function personasQueMeReportan(usuario){
   });
 }
 function idParteSemanal(uid,ano,sem){return uid+"_"+ano+"w"+sem;}
+// ═══════════════════════════════════════════════════════════════════
+// (v6.13) Cerrar la semana es obligación de todos, con objetivos o sin ellos.
+// Quien no tuvo objetivos igualmente cuenta cómo fue la semana y qué hará la
+// siguiente: el hábito de reportar es el objetivo, no la lista de tareas.
+// Por eso la semana pendiente se busca en el CALENDARIO y no entre los partes
+// guardados — si no, quien nunca abre el parte no se bloquearía nunca, que es
+// justo a quien hay que acostumbrar.
+// PARTE_DESDE marca desde cuándo se exige. No se mira más atrás.
+// ═══════════════════════════════════════════════════════════════════
+var PARTE_DESDE={ano:2026,semana:34};
+function _idxSem(a,s){ return a*52+s; }
+function partePendienteDe(uid,partes){
+  if(!uid) return null;
+  var semHoy=getSemanaISO(), anoHoy=new Date().getFullYear();
+  var mapa={};
+  (partes||[]).forEach(function(p){ if(p&&p.usuarioId===uid) mapa[p.ano+"w"+p.semana]=p; });
+  var a=PARTE_DESDE.ano, s=PARTE_DESDE.semana, n=0;
+  while(n<120){
+    if(_idxSem(a,s)>=_idxSem(anoHoy,semHoy)) break;   // la semana en curso aún no toca
+    var p=mapa[a+"w"+s];
+    if(!p || p.estado==="borrador") return {ano:a,semana:s};
+    s++; if(s>52){ s=1; a++; }
+    n++;
+  }
+  return null;
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // (v6.2) MANUALES CON ACUSE DE LECTURA
@@ -20665,10 +20691,12 @@ function Embudo({usuario, clientesFB}){
 // calcula EN VIVO del organigrama; los partes entregados quedan como foto.
 // Colección Firebase: partes_departamento · id: {usuarioId}_{año}w{semana}
 // ═══════════════════════════════════════════════════════════════════
-function ParteSemanalDepto({usuario, incidenciasDB}){
+function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
   const hoy=new Date();
-  const [ano,setAno]=useState(hoy.getFullYear());
-  const [sem,setSem]=useState(getSemanaISO());
+  // (v6.12) Si viene bloqueado, se abre ya en la semana que hay que cerrar:
+  // no tiene sentido hacerle buscarla.
+  const [ano,setAno]=useState(bloqueo?bloqueo.ano:hoy.getFullYear());
+  const [sem,setSem]=useState(bloqueo?bloqueo.semana:getSemanaISO());
   const [partes,setPartes]=useState({});     // id → doc
   const [proyectosFB,setProyectosFB]=useState([]);
   const [tareasFB,setTareasFB]=useState([]);
@@ -20770,18 +20798,7 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
   // parte no se le bloquea nada.
   const pendienteDeCerrar = React.useMemo(function(){
     if(soySoloLector) return null;
-    var semHoy=getSemanaISO(), anoHoy=hoy.getFullYear();
-    var cands=Object.keys(partes).map(function(k){ return partes[k]; })
-      .filter(function(p){
-        if(!p||p.usuarioId!==usuario.id) return false;
-        if(p.estado!=="borrador") return false;
-        if(!(p.objetivos||[]).length) return false;      // sin objetivos no hay nada que cerrar
-        if(p.ano>anoHoy) return false;
-        if(p.ano===anoHoy && p.semana>=semHoy) return false; // la semana en curso aún no toca
-        return true;
-      })
-      .sort(function(a,b){ return (a.ano-b.ano)||(a.semana-b.semana); });
-    return cands[0]||null;
+    return partePendienteDe(usuario.id, Object.keys(partes).map(function(k){return partes[k];}));
   },[partes,usuario&&usuario.id,soySoloLector]);
 
   // Estás mirando una semana que no puedes tocar todavía
@@ -20820,13 +20837,17 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
   }
   // Abre el cierre si hay algo que decidir; si no, entrega directamente.
   function pedirCierre(){
-    var vivos=objetivosVivos(miParte);
-    if(!vivos.length){ entregarParte({}); return; }
     var pasar={};
-    // Los que puso el superior se proponen marcados: no son del responsable
-    // decidir si desaparecen.
-    vivos.forEach(function(o){ pasar[o.id]= o.origen==="superior" ? true : (o.estado==="en_curso"); });
-    setCierre({pasar:pasar});
+    // Los que puso el superior se proponen marcados: no le toca al responsable
+    // decidir que desaparezcan.
+    objetivosVivos(miParte).forEach(function(o){
+      pasar[o.id]= o.origen==="superior" ? true : (o.estado==="en_curso");
+    });
+    // (v6.13) El cierre se abre siempre, también sin objetivos: nadie entrega
+    // sin contar cómo fue la semana y qué hará la siguiente.
+    setCierre({pasar:pasar,
+      resumen:miParte.resumen||"",
+      plan:miParte.planSiguiente||""});
   }
   function entregarParte(traspaso){
     traspaso=traspaso||{};
@@ -20841,13 +20862,15 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
     });
     var doc={...miParte,objetivos:objsCerrados,
       estado:"entregado",entregadoTs:Date.now(),
+      resumen:(traspaso.resumen!=null?traspaso.resumen:miParte.resumen)||"",
+      planSiguiente:(traspaso.plan!=null?traspaso.plan:miParte.planSiguiente)||"",
       snapshot:snapshotDe(usuario),
       cierre:{noTerminados:objetivosVivos(miParte).length, traspasados:aPasar.length,
               cerradoTs:Date.now()},
       paraIds:misSupers.map(function(s){return s.id;})};
 
-    // Alta en la semana siguiente de lo traspasado, conservando el hilo.
-    if(aPasar.length){
+    // Alta en la semana siguiente: lo traspasado y el plan que acaba de escribir.
+    if(aPasar.length || (traspaso.plan||"").trim()){
       var sSig=sem>=52?1:sem+1, aSig=sem>=52?ano+1:ano;
       var idSig=idParteSemanal(usuario.id,aSig,sSig);
       var pSig=partes[idSig]||{id:idSig,usuarioId:usuario.id,usuarioNombre:usuario.nombre,
@@ -20860,12 +20883,15 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
           traspasado:false, traspasadoA:null,
           vieneDeSemana:sem, vieneDeAno:ano, semanasArrastrado:(o.semanasArrastrado||0)+1};
       });
-      var docSig={...pSig,objetivos:(pSig.objetivos||[]).concat(nuevos)};
+      var docSig={...pSig,objetivos:(pSig.objetivos||[]).concat(nuevos),
+        planPrevio:(traspaso.plan||"").trim()||pSig.planPrevio||"",
+        planPrevioDe:sem};
       delete docSig._nuevo;
       fbEscribir("partes_departamento",docSig.id,docSig);
       setPartes(function(prev){var n={...prev};n[docSig.id]=docSig;return n;});
     }
     setCierre(null);
+    if(typeof onDesbloquear==="function") onDesbloquear();
     guardarParte(doc,function(){
       misSupers.forEach(function(s){
         try{despacharNotificacion({tipo:"parte",
@@ -20984,8 +21010,10 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
         +bloqueDatos(s)
         +'<p style="margin:0 0 5px;font-size:9px;font-weight:800;color:#64748B;letter-spacing:.06em">OBJETIVOS</p>'
         +bloqueObjetivos(p)
-        +((p&&p.resumen)?'<p style="margin:6px 0 0;font-size:9px;font-weight:800;color:#64748B;letter-spacing:.06em">SU RESUMEN</p>'
+        +((p&&p.resumen)?'<p style="margin:6px 0 0;font-size:9px;font-weight:800;color:#64748B;letter-spacing:.06em">CÓMO LE HA IDO</p>'
           +'<p style="margin:4px 0 0;font-size:12px;color:#334155;line-height:1.5;background:#F8FAFC;border-radius:9px;padding:9px 12px">'+esc(p.resumen)+'</p>':'')
+        +((p&&p.planSiguiente)?'<p style="margin:6px 0 0;font-size:9px;font-weight:800;color:#15803D;letter-spacing:.06em">QUÉ HARÁ LA SEMANA QUE VIENE</p>'
+          +'<p style="margin:4px 0 0;font-size:12px;color:#166534;line-height:1.5;background:#F0FDF4;border-radius:9px;padding:9px 12px">'+esc(p.planSiguiente)+'</p>':'')
         +'</div>';
     }
 
@@ -21018,8 +21046,10 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
       +bloqueObjetivos(miParte._nuevo?null:miParte)
       +'<p style="margin:12px 0 8px;font-size:11px;font-weight:800;color:#0F172A;letter-spacing:.08em">📊 MI SEMANA — EN DATOS</p>'
       +bloqueDatos(miSnap)
-      +((miParte.resumen)?'<p style="margin:12px 0 6px;font-size:11px;font-weight:800;color:#0F172A;letter-spacing:.08em">✍️ MI RESUMEN</p>'
-        +'<p style="margin:0;font-size:13px;color:#334155;line-height:1.55;background:#F8FAFC;border-left:4px solid #0F172A;border-radius:0 9px 9px 0;padding:11px 14px">'+esc(miParte.resumen)+'</p>':'');
+      +((miParte.resumen)?'<p style="margin:12px 0 6px;font-size:11px;font-weight:800;color:#0F172A;letter-spacing:.08em">✍️ CÓMO HA IDO LA SEMANA</p>'
+        +'<p style="margin:0;font-size:13px;color:#334155;line-height:1.55;background:#F8FAFC;border-left:4px solid #0F172A;border-radius:0 9px 9px 0;padding:11px 14px">'+esc(miParte.resumen)+'</p>':'')
+      +((miParte.planSiguiente)?'<p style="margin:12px 0 6px;font-size:11px;font-weight:800;color:#0F172A;letter-spacing:.08em">📌 QUÉ HARÉ LA SEMANA QUE VIENE</p>'
+        +'<p style="margin:0;font-size:13px;color:#166534;line-height:1.55;background:#F0FDF4;border-left:4px solid #16A34A;border-radius:0 9px 9px 0;padding:11px 14px">'+esc(miParte.planSiguiente)+'</p>':'');
     if(equipoOrdenado.length>0){
       h+='<div style="margin-top:22px;border-top:2px dashed #CBD5E1;padding-top:16px">'
         +'<p style="margin:0 0 10px;font-size:11px;font-weight:800;color:#0F172A;letter-spacing:.08em">👥 MI EQUIPO — PERSONA A PERSONA <span style="font-weight:400;color:#94A3B8">(fuera de protocolo primero)</span></p>';
@@ -21259,6 +21289,17 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
         </div>
       </div>
 
+      {/* (v6.12) El CRM está bloqueado hasta entregar esta semana */}
+      {bloqueo&&(
+        <div style={{background:"#7F1D1D",borderRadius:14,padding:"14px 16px",marginBottom:14,color:"#fff"}}>
+          <p style={{margin:"0 0 4px",fontSize:14,fontWeight:900}}>
+            🔒 Cierra la semana {bloqueo.semana} para continuar</p>
+          <p style={{margin:0,fontSize:12,opacity:.9,lineHeight:1.5}}>
+            El resto del CRM está bloqueado. Marca el estado de cada objetivo y pulsa
+            «Entregar parte»: ahí decides qué sigue vivo y pasa a la semana siguiente.</p>
+        </div>
+      )}
+
       {/* Tabs mi parte / mi equipo */}
       {misReportes.length>0&&(
         <div style={{display:"flex",gap:6,marginBottom:14,background:T.bg,borderRadius:10,padding:4}}>
@@ -21313,6 +21354,15 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
               a la semana {sem>=52?1:sem+1}. Los que dejes sin marcar quedan cerrados sin
               hacer, y así constará en el informe.</p>
 
+            {objetivosVivos(miParte).length===0&&(miParte.objetivos||[]).length===0&&(
+              <div style={{background:"#EFF6FF",border:"1px solid #BFDBFE",borderRadius:11,
+                padding:"11px 13px",marginBottom:12}}>
+                <p style={{margin:0,fontSize:12,color:"#1E3A5F",lineHeight:1.5}}>
+                  Esta semana no registraste objetivos. No pasa nada: cuenta igualmente
+                  cómo ha ido y qué vas a hacer la semana que viene.</p>
+              </div>
+            )}
+
             {objetivosVivos(miParte).map(function(o){
               var marcado=!!cierre.pasar[o.id];
               var EST={pendiente:["⬜","Pendiente"],en_curso:["🔄","En curso"],bloqueado:["⛔","Bloqueado"]};
@@ -21340,17 +21390,48 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
               );
             })}
 
-            <div style={{background:T.bg,borderRadius:10,padding:"10px 12px",margin:"12px 0"}}>
-              <p style={{margin:0,fontSize:11.5,color:T.muted}}>
-                Se traspasan <b style={{color:T.text}}>
-                {objetivosVivos(miParte).filter(function(o){return cierre.pasar[o.id];}).length}</b> de{" "}
-                <b style={{color:T.text}}>{objetivosVivos(miParte).length}</b> sin terminar.
-              </p>
-            </div>
+            {objetivosVivos(miParte).length>0&&(
+              <div style={{background:T.bg,borderRadius:10,padding:"10px 12px",margin:"12px 0"}}>
+                <p style={{margin:0,fontSize:11.5,color:T.muted}}>
+                  Se traspasan <b style={{color:T.text}}>
+                  {objetivosVivos(miParte).filter(function(o){return cierre.pasar[o.id];}).length}</b> de{" "}
+                  <b style={{color:T.text}}>{objetivosVivos(miParte).length}</b> sin terminar.
+                </p>
+              </div>
+            )}
 
-            <button onClick={function(){entregarParte(cierre);}}
-              style={{width:"100%",padding:"14px",borderRadius:12,border:"none",background:T.navy,
-                color:"#fff",fontWeight:900,fontSize:14,cursor:"pointer"}}>
+            {/* (v6.13) El relato: obligatorio para todos */}
+            <p style={{margin:"14px 0 6px",fontSize:11,fontWeight:800,color:T.muted,
+              textTransform:"uppercase",letterSpacing:".07em"}}>¿Cómo ha ido la semana? *</p>
+            <textarea value={cierre.resumen||""}
+              onChange={function(e){setCierre({...cierre,resumen:e.target.value});}}
+              placeholder="Qué has sacado adelante, qué se ha atascado y por qué."
+              style={{width:"100%",minHeight:78,padding:"11px 12px",borderRadius:11,fontSize:14,
+                border:"1.5px solid "+((cierre.resumen||"").trim().length<15?"#FCA5A5":T.border),
+                fontFamily:"inherit",outline:"none",resize:"vertical",boxSizing:"border-box"}}/>
+
+            <p style={{margin:"12px 0 6px",fontSize:11,fontWeight:800,color:T.muted,
+              textTransform:"uppercase",letterSpacing:".07em"}}>¿Qué vas a hacer la semana {sem>=52?1:sem+1}? *</p>
+            <textarea value={cierre.plan||""}
+              onChange={function(e){setCierre({...cierre,plan:e.target.value});}}
+              placeholder="En qué te vas a centrar. Aparecerá en tu parte de la semana que viene."
+              style={{width:"100%",minHeight:78,padding:"11px 12px",borderRadius:11,fontSize:14,
+                border:"1.5px solid "+((cierre.plan||"").trim().length<15?"#FCA5A5":T.border),
+                fontFamily:"inherit",outline:"none",resize:"vertical",boxSizing:"border-box",marginBottom:12}}/>
+
+            {((cierre.resumen||"").trim().length<15||(cierre.plan||"").trim().length<15)&&(
+              <p style={{margin:"0 0 10px",fontSize:11.5,color:"#B91C1C",fontWeight:700}}>
+                Explica las dos cosas antes de entregar. Con una frase en cada una basta,
+                pero tiene que decir algo.</p>
+            )}
+
+            <button
+              disabled={(cierre.resumen||"").trim().length<15||(cierre.plan||"").trim().length<15}
+              onClick={function(){entregarParte(cierre);}}
+              style={{width:"100%",padding:"14px",borderRadius:12,border:"none",
+                background:((cierre.resumen||"").trim().length<15||(cierre.plan||"").trim().length<15)?"#CBD5E1":T.navy,
+                color:"#fff",fontWeight:900,fontSize:14,
+                cursor:((cierre.resumen||"").trim().length<15||(cierre.plan||"").trim().length<15)?"default":"pointer"}}>
               🔒 Cerrar semana y entregar a {misSupers.map(function(x){return x.nombre;}).join(", ")}
             </button>
             <button onClick={function(){setCierre(null);}}
@@ -21382,6 +21463,15 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
           {snapCards(miSnap)}
 
           <p style={{margin:"0 0 6px",fontSize:12,fontWeight:800,color:T.muted,textTransform:"uppercase"}}>Resumen hacia arriba</p>
+          {miParte.planPrevio&&(
+            <div style={{background:"#F0FDF4",border:"1.5px solid #BBF7D0",borderRadius:12,
+              padding:"12px 14px",marginBottom:12}}>
+              <p style={{margin:"0 0 4px",fontSize:10.5,fontWeight:800,color:"#15803D",
+                textTransform:"uppercase",letterSpacing:".07em"}}>
+                📌 Lo que dijiste que harías esta semana (al cerrar la S{miParte.planPrevioDe})</p>
+              <p style={{margin:0,fontSize:12.5,color:"#166534",lineHeight:1.55}}>{miParte.planPrevio}</p>
+            </div>
+          )}
           <textarea value={miParte.resumen||""}
             onChange={function(e){guardarParte({...miParte,resumen:e.target.value});}}
             placeholder="Lo esencial de tu semana en 3-4 líneas: qué se logró, qué preocupa, qué necesitas."
@@ -33720,7 +33810,39 @@ function App(props){
     });
   };
 
-  const setSection=function(s){prevSectionRef.current=section;setSection_(s);if(s==="dashboard")setHideNav(false);if(s==="plan_semanal")refreshDBs();if(s==="informe"){var ss=sessionStorage.getItem("semanaInforme");if(ss)setSemanaParaInforme(parseInt(ss));}};
+  // ═══════════════════════════════════════════════════════════════
+  // (v6.12) BLOQUEO POR PARTE SEMANAL SIN CERRAR
+  // Si el responsable dejó una semana sin entregar, el CRM no le deja hacer
+  // otra cosa: se le lleva al parte de esa semana y ahí se queda hasta que la
+  // cierre. Es prioridad absoluta — de nada sirve empezar objetivos nuevos
+  // arrastrando semanas sin cerrar, y el superior se queda sin saber qué pasó.
+  // ═══════════════════════════════════════════════════════════════
+  const _bp=React.useState(null); const bloqueoParte=_bp[0], setBloqueoParte=_bp[1];
+  React.useEffect(function(){
+    var vivo=true;
+    if(!usuario||!usuario.id){ setBloqueoParte(null); return; }
+    // Solo a quien entrega parte a alguien. El CEO no reporta hacia arriba.
+    var entrega=false;
+    try{ entrega=(superioresDe(usuario)||[]).length>0; }catch(e){ entrega=false; }
+    var esDepto=(usuario.rol==="tipologia")||(usuario.rol==="crm_jefe");
+    if(!entrega||!esDepto){ setBloqueoParte(null); return; }
+    (fbLeer("partes_departamento")||Promise.resolve([])).then?
+      fbLeer("partes_departamento").then(revisar).catch(function(){}) : null;
+    function revisar(pp){
+      if(!vivo) return;
+      setBloqueoParte(partePendienteDe(usuario.id,pp||[]));
+    }
+    return function(){ vivo=false; };
+  },[usuario&&usuario.id]);
+
+  // Mientras esté bloqueado, la única pantalla posible es el parte
+  React.useEffect(function(){
+    if(bloqueoParte && section!=="parte_depto") setSection_("parte_depto");
+  },[bloqueoParte,section]);
+
+  const setSection=function(s){
+    if(bloqueoParte && s!=="parte_depto"){ return; }   // no se sale de aquí
+    prevSectionRef.current=section;setSection_(s);if(s==="dashboard")setHideNav(false);if(s==="plan_semanal")refreshDBs();if(s==="informe"){var ss=sessionStorage.getItem("semanaInforme");if(ss)setSemanaParaInforme(parseInt(ss));}};
   // Al llegar desde la apertura de semana, el prefill ya está en sessionStorage
   // pero lo leen MisEstrategias y OfertasModule, que solo se montan si estás en
   // esa pantalla. Sin esto el CRM abre en el inicio y el formulario no aparece.
@@ -34998,7 +35120,7 @@ function App(props){
         {section==="estrategias"&&          <MisEstrategias usuario={usuario} onNavegar={setSection} onVolverPotencial={function(){return volverAPotencialSiCorresponde(setSection, setClienteDirecto, usuario);}}/>}
         {section==="oportunidades"&&        <GestorOportunidades usuario={usuario} onAbrirCliente={onAbrirCliente} opoDirecta={opoDirecta} onOpoDirectaUsada={function(){setOpoDirecta(null);}} onBack={function(){setHideNav(false);setClienteDirecto(null);setSection(prevSectionRef.current||"dashboard");}} onNewCliente={function(nuevo){setClientesDB(function(prev){if(!prev||!prev._todos)return prev;return Object.assign({},prev,{_todos:[nuevo].concat(prev._todos)});});}}/>}
         {section==="proyectos"&&            <Proyectos usuario={usuario} onAbrirCliente={onAbrirCliente} onIrASeccion={onIrASeccion} proyectoDirecto={proyectoDirecto} onProyectoDirectoUsado={function(){setProyectoDirecto(null);}}/>}
-        {section==="parte_depto"&&          <ParteSemanalDepto usuario={usuario} incidenciasDB={incidenciasDB}/>}
+        {section==="parte_depto"&&          <ParteSemanalDepto usuario={usuario} incidenciasDB={incidenciasDB} bloqueo={bloqueoParte} onDesbloquear={function(){setBloqueoParte(null);}}/>}
         {section==="embudo"&&               <Embudo usuario={usuario} clientesFB={misClientesFB}/>}
         {section==="incidencias"&&          <Incidencias usuario={usuario} clientesFB={misClientesFB} onAbrirCliente={onAbrirCliente} onNavegar={setSection} incidenciasDB={esTipologia?incidenciasDB.filter(function(i){var t=(i.tipo||i.tipologia||"").toLowerCase();return misTipsRama.indexOf(t)>=0||t===miTipologia;}):incidenciasDB}/>}
 
@@ -35067,7 +35189,14 @@ function App(props){
       </div>
 
       {/* Bottom Nav — (v3.23.46) Visible también en plan_semanal (antes se ocultaba) */}
-      {!(section==="clientes"&&hideNav)&&<BottomNav items={nav} current={section} onChange={setSection}/>}
+      {/* (v6.12) Con el parte sin cerrar, la barra deja una sola opción: no es
+          que la app se haya roto, es que no hay nada más que hacer antes. */}
+      {!(section==="clientes"&&hideNav)&&(
+        bloqueoParte
+          ? <BottomNav items={[{id:"parte_depto",icon:"🔒",label:"Cerrar S"+bloqueoParte.semana,color:"#B91C1C"}]}
+              current="parte_depto" onChange={function(){}}/>
+          : <BottomNav items={nav} current={section} onChange={setSection}/>
+      )}
     </div>
   );
 }
