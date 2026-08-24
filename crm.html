@@ -890,6 +890,10 @@ function ObjetivosSemanaWidget({usuario, onNav}){
                 {o.texto}
                 {o.origen==="superior"&&<span style={{fontSize:9,color:T.purple,fontWeight:700}}> 🎯 {(o.porNombre||"").split(" ")[0]}</span>}
                 {o.estado==="bloqueado"&&o.motivo&&<span style={{fontSize:10,color:T.red}}> · {o.motivo}</span>}
+                {/* (v6.11) Rastro del cierre semanal */}
+                {o.traspasado&&<span style={{fontSize:9.5,color:T.blue,fontWeight:700}}> · ➡️ a S{o.traspasadoA}</span>}
+                {o.estado!=="hecho"&&o.traspasado===false&&<span style={{fontSize:9.5,color:"#B45309",fontWeight:700}}> · ⛔ cerrado sin hacer</span>}
+                {!!o.semanasArrastrado&&<span style={{fontSize:9.5,color:T.red,fontWeight:700}}> · ⚠️ {o.semanasArrastrado}ª semana</span>}
               </p>
             </div>
           );
@@ -20659,6 +20663,11 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
   const [motivoTxt,setMotivoTxt]=useState("");  // motivo de bloqueo inline
   const [objParaTxt,setObjParaTxt]=useState(""); // objetivo que el superior escribe para un subordinado
   const [notaTxt,setNotaTxt]=useState("");       // (v5.8.2) anotación del hilo de un objetivo
+  // (v6.11) Cierre de semana: al entregar se decide qué objetivos sin terminar
+  // se traspasan a la semana siguiente. Antes no se traspasaba ninguno: el
+  // lunes la hoja salía en blanco y lo que quedó a medias desaparecía de la
+  // vista sin que nadie lo hubiera cerrado.
+  const [cierre,setCierre]=useState(null);      // {pasar:{idObjetivo:true}}
 
   const misSupers=superioresDe(usuario);
   const misReportes=personasQueMeReportan(usuario);
@@ -20737,6 +20746,16 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
   const miSnap=miParte.estado==="borrador"?snapshotDe(usuario):(miParte.snapshot||snapshotDe(usuario));
   const entregado=miParte.estado==="entregado"||miParte.estado==="validado";
 
+  // (v6.11) La semana no se abre si la anterior quedó sin entregar. Se mira
+  // solo hacia atrás desde la semana en curso, y solo mientras exista parte
+  // previo: a quien empieza de cero no se le bloquea nada.
+  const semAnterior = sem>1 ? sem-1 : 52;
+  const anoAnterior = sem>1 ? ano   : ano-1;
+  const parteAnterior = partes[idParteSemanal(usuario.id,anoAnterior,semAnterior)]||null;
+  const bloqueadaPorAnterior = !soySoloLector && sem===getSemanaISO() && ano===hoy.getFullYear()
+    && !!parteAnterior && parteAnterior.estado==="borrador"
+    && (parteAnterior.objetivos||[]).length>0;
+
   // ── Acciones sobre mi parte ──
   function addObjetivo(){
     var t=nuevoObj.trim();if(!t)return;
@@ -20755,10 +20774,60 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
     guardarParte({...miParte,objetivos:miParte.objetivos.filter(function(o){return o.id!==obj.id;})});
     setSelObj(null);
   }
-  function entregarParte(){
-    var doc={...miParte,estado:"entregado",entregadoTs:Date.now(),
+  // Objetivos que quedan sin terminar al cerrar
+  function objetivosVivos(p){
+    return (p.objetivos||[]).filter(function(o){
+      return o.estado!=="hecho";
+    });
+  }
+  // Abre el cierre si hay algo que decidir; si no, entrega directamente.
+  function pedirCierre(){
+    var vivos=objetivosVivos(miParte);
+    if(!vivos.length){ entregarParte({}); return; }
+    var pasar={};
+    // Los que puso el superior se proponen marcados: no son del responsable
+    // decidir si desaparecen.
+    vivos.forEach(function(o){ pasar[o.id]= o.origen==="superior" ? true : (o.estado==="en_curso"); });
+    setCierre({pasar:pasar});
+  }
+  function entregarParte(traspaso){
+    traspaso=traspaso||{};
+    var pasar=traspaso.pasar||{};
+    var aPasar=objetivosVivos(miParte).filter(function(o){ return !!pasar[o.id]; });
+
+    // El parte de esta semana deja constancia de lo que no se terminó y de
+    // qué se llevó a la siguiente. Sin esto el informe no cuadraría.
+    var objsCerrados=(miParte.objetivos||[]).map(function(o){
+      if(o.estado==="hecho") return o;
+      return {...o, traspasado:!!pasar[o.id], traspasadoA: pasar[o.id]?(sem>=52?1:sem+1):null};
+    });
+    var doc={...miParte,objetivos:objsCerrados,
+      estado:"entregado",entregadoTs:Date.now(),
       snapshot:snapshotDe(usuario),
+      cierre:{noTerminados:objetivosVivos(miParte).length, traspasados:aPasar.length,
+              cerradoTs:Date.now()},
       paraIds:misSupers.map(function(s){return s.id;})};
+
+    // Alta en la semana siguiente de lo traspasado, conservando el hilo.
+    if(aPasar.length){
+      var sSig=sem>=52?1:sem+1, aSig=sem>=52?ano+1:ano;
+      var idSig=idParteSemanal(usuario.id,aSig,sSig);
+      var pSig=partes[idSig]||{id:idSig,usuarioId:usuario.id,usuarioNombre:usuario.nombre,
+        departamentoId:miParte.departamentoId,ano:aSig,semana:sSig,
+        objetivos:[],resumen:"",estado:"borrador",comentarioSuperior:""};
+      var yaHay={}; (pSig.objetivos||[]).forEach(function(o){ yaHay[o.texto]=1; });
+      var nuevos=aPasar.filter(function(o){ return !yaHay[o.texto]; }).map(function(o){
+        return {...o, id:"o"+Date.now()+Math.floor(Math.random()*1000),
+          estado:o.estado==="bloqueado"?"bloqueado":"pendiente",
+          traspasado:false, traspasadoA:null,
+          vieneDeSemana:sem, vieneDeAno:ano, semanasArrastrado:(o.semanasArrastrado||0)+1};
+      });
+      var docSig={...pSig,objetivos:(pSig.objetivos||[]).concat(nuevos)};
+      delete docSig._nuevo;
+      fbEscribir("partes_departamento",docSig.id,docSig);
+      setPartes(function(prev){var n={...prev};n[docSig.id]=docSig;return n;});
+    }
+    setCierre(null);
     guardarParte(doc,function(){
       misSupers.forEach(function(s){
         try{despacharNotificacion({tipo:"parte",
@@ -20817,6 +20886,15 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
       var objs=(p&&p.objetivos)||[];
       if(objs.length===0)return '<p style="margin:0 0 10px;font-size:12px;color:#94A3B8">Sin objetivos registrados esta semana.</p>';
       var h='';
+      // Cómo terminó la semana, antes del detalle
+      var nH=objs.filter(function(o){return o.estado==="hecho";}).length;
+      var nT=objs.filter(function(o){return o.traspasado;}).length;
+      var nSin=objs.filter(function(o){return o.estado!=="hecho"&&!o.traspasado;}).length;
+      h+='<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:9px 12px;margin-bottom:9px;font-size:11px;color:#475569">'
+        +'<b style="color:#16A34A">'+nH+' hechos</b> · '
+        +'<b style="color:#2563EB">'+nT+' traspasados</b> · '
+        +'<b style="color:'+(nSin?'#B45309':'#94A3B8')+'">'+nSin+' cerrados sin hacer</b>'
+        +' <span style="color:#94A3B8">de '+objs.length+'</span></div>';
       objs.forEach(function(o){
         var e=EST[o.estado]||EST.pendiente;
         h+='<div style="border:1.5px solid '+(o.estado==="bloqueado"?"#FECACA":"#E2E8F0")+';border-radius:10px;padding:9px 12px;margin-bottom:6px;page-break-inside:avoid">'
@@ -20824,7 +20902,13 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
           +'<div style="flex:1"><p style="margin:0;font-size:12.5px;font-weight:'+(o.estado==="hecho"?"400":"700")+';color:#0F172A;'+(o.estado==="hecho"?"text-decoration:line-through;opacity:.65":"")+'">'+esc(o.texto)+'</p>'
           +'<p style="margin:2px 0 0;font-size:9.5px"><b style="color:'+e[2]+'">'+e[1]+'</b>'
           +(o.origen==="superior"?' <span style="color:#7C3AED;font-weight:700">· 🎯 de '+esc(o.porNombre||"superior")+'</span>':'')
-          +(o.motivo?' <span style="color:#DC2626">· '+esc(o.motivo)+'</span>':'')+'</p>';
+          +(o.motivo?' <span style="color:#DC2626">· '+esc(o.motivo)+'</span>':'')
+          // (v6.11) Trazabilidad del cierre: qué se llevó a la semana siguiente,
+          // qué se cerró sin hacer y cuánto lleva un objetivo rodando.
+          +(o.traspasado?' <span style="color:#2563EB;font-weight:700">· ➡️ traspasado a S'+o.traspasadoA+'</span>':'')
+          +(o.estado!=="hecho"&&o.traspasado===false?' <span style="color:#B45309;font-weight:700">· ⛔ cerrado sin hacer</span>':'')
+          +(o.semanasArrastrado?' <span style="color:#DC2626;font-weight:700">· ⚠️ '+o.semanasArrastrado+(o.semanasArrastrado===1?' semana':' semanas')+' arrastrado</span>':'')
+          +(o.vieneDeSemana?' <span style="color:#94A3B8">· viene de S'+o.vieneDeSemana+'</span>':'')+'</p>';
         (o.notas||[]).forEach(function(n){
           h+='<p style="margin:4px 0 0;font-size:10.5px;color:#475569;border-left:2.5px solid '+(n.por&&n.por!==p.usuarioId?"#7C3AED":"#CBD5E1")+';padding-left:7px">'
             +'<b style="color:#94A3B8">'+fmtF(n.ts)+'</b> '
@@ -21151,6 +21235,85 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
       )}
 
       {/* ═══ MI PARTE ═══ */}
+      {/* (v6.11) La semana anterior quedó sin entregar */}
+      {tab==="mio"&&bloqueadaPorAnterior&&(
+        <div style={{background:"#FFFBEB",border:"1.5px solid #FDE68A",borderRadius:14,
+          padding:"14px 16px",marginBottom:14}}>
+          <p style={{margin:"0 0 5px",fontSize:13,fontWeight:900,color:"#92400E"}}>
+            ⏳ Te falta cerrar la semana {semAnterior}</p>
+          <p style={{margin:"0 0 10px",fontSize:12,color:"#92400E",lineHeight:1.55}}>
+            No puedes empezar la semana {sem} sin entregar la anterior. Al cerrarla
+            decides qué objetivos sin terminar se traspasan, y así no se pierde nada
+            por el camino.</p>
+          <button onClick={function(){ if(semAnterior>sem){setAno(ano-1);} setSem(semAnterior); }}
+            style={{width:"100%",padding:"12px",borderRadius:10,border:"none",
+              background:"#B45309",color:"#fff",fontWeight:900,fontSize:13,cursor:"pointer"}}>
+            Ir a cerrar la semana {semAnterior} →</button>
+        </div>
+      )}
+
+      {/* (v6.11) Cierre de semana: qué se traspasa */}
+      {cierre&&(
+        <div onClick={function(){setCierre(null);}}
+          style={{position:"fixed",inset:0,background:"rgba(15,23,42,.55)",zIndex:400,
+            display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+          <div onClick={function(e){e.stopPropagation();}}
+            style={{background:"#fff",width:"100%",maxWidth:520,borderRadius:"20px 20px 0 0",
+              padding:20,maxHeight:"90vh",overflowY:"auto"}}>
+            <p style={{margin:"0 0 3px",fontSize:17,fontWeight:900,color:T.text}}>
+              🔒 Cerrar la semana {sem}</p>
+            <p style={{margin:"0 0 14px",fontSize:12,color:T.muted,lineHeight:1.5}}>
+              Estos objetivos no están terminados. Marca los que siguen vivos y pasarán
+              a la semana {sem>=52?1:sem+1}. Los que dejes sin marcar quedan cerrados sin
+              hacer, y así constará en el informe.</p>
+
+            {objetivosVivos(miParte).map(function(o){
+              var marcado=!!cierre.pasar[o.id];
+              var EST={pendiente:["⬜","Pendiente"],en_curso:["🔄","En curso"],bloqueado:["⛔","Bloqueado"]};
+              var e=EST[o.estado]||EST.pendiente;
+              return (
+                <div key={o.id} onClick={function(){
+                    var np={...cierre.pasar}; np[o.id]=!np[o.id]; setCierre({pasar:np});
+                  }}
+                  style={{display:"flex",gap:10,alignItems:"flex-start",padding:"11px 12px",
+                    borderRadius:11,marginBottom:7,cursor:"pointer",
+                    border:"2px solid "+(marcado?T.navy:T.border),
+                    background:marcado?"#F8FAFC":"#fff"}}>
+                  <span style={{fontSize:17,flexShrink:0}}>{marcado?"➡️":"⬛"}</span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{margin:0,fontSize:12.5,fontWeight:700,color:T.text,lineHeight:1.4}}>{o.texto}</p>
+                    <p style={{margin:"3px 0 0",fontSize:10.5,color:T.muted}}>
+                      {e[0]} {e[1]}
+                      {o.origen==="superior"?" · 🎯 de "+(o.porNombre||"tu superior"):""}
+                      {o.semanasArrastrado?" · arrastrado "+o.semanasArrastrado+(o.semanasArrastrado===1?" semana":" semanas"):""}
+                    </p>
+                  </div>
+                  <span style={{fontSize:10,fontWeight:800,flexShrink:0,
+                    color:marcado?T.navy:T.muted}}>{marcado?"PASA":"NO PASA"}</span>
+                </div>
+              );
+            })}
+
+            <div style={{background:T.bg,borderRadius:10,padding:"10px 12px",margin:"12px 0"}}>
+              <p style={{margin:0,fontSize:11.5,color:T.muted}}>
+                Se traspasan <b style={{color:T.text}}>
+                {objetivosVivos(miParte).filter(function(o){return cierre.pasar[o.id];}).length}</b> de{" "}
+                <b style={{color:T.text}}>{objetivosVivos(miParte).length}</b> sin terminar.
+              </p>
+            </div>
+
+            <button onClick={function(){entregarParte(cierre);}}
+              style={{width:"100%",padding:"14px",borderRadius:12,border:"none",background:T.navy,
+                color:"#fff",fontWeight:900,fontSize:14,cursor:"pointer"}}>
+              🔒 Cerrar semana y entregar a {misSupers.map(function(x){return x.nombre;}).join(", ")}
+            </button>
+            <button onClick={function(){setCierre(null);}}
+              style={{width:"100%",padding:12,border:"none",background:"none",color:T.muted,
+                fontWeight:700,fontSize:13,cursor:"pointer",marginTop:4}}>Cancelar</button>
+          </div>
+        </div>
+      )}
+
       {tab==="mio"&&(
         <div>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
@@ -21188,7 +21351,7 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
           )}
 
           {!soySoloLector&&(
-            <button onClick={entregarParte}
+            <button onClick={pedirCierre}
               style={{width:"100%",padding:"14px",borderRadius:12,border:"none",
                 background:miParte.estado==="validado"?T.green:T.navy,color:"#fff",fontWeight:900,fontSize:14,cursor:"pointer"}}>
               {miParte.estado==="validado"?"✅ Validado por "+(miParte.validadoPorNombre||"tu superior")
