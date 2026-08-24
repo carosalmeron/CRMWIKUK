@@ -364,7 +364,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "6.20.0";
+const CRM_VERSION = "6.21.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -25551,9 +25551,12 @@ function FocoDireccion({usuario, onNav}){
       fbLeer("partes_departamento").catch(function(){return [];}),
       fbLeer("proyectos").catch(function(){return [];}),
       fbLeer("tareas").catch(function(){return [];}),
+      fbLeer("estrategias").catch(function(){return [];}),
+      fbLeer("incidencias").catch(function(){return [];}),
     ]).then(function(r){
       if(!vivo) return;
-      var partes=r[0]||[], proys=r[1]||[], tareas=r[2]||[];
+      var partes=r[0]||[], proys=r[1]||[], tareas=r[2]||[],
+          estrategias=r[3]||[], incidencias=r[4]||[];
       var semHoy=getSemanaISO(), anoHoy=new Date().getFullYear();
       var hoyD=new Date(); hoyD.setHours(0,0,0,0);
 
@@ -25626,8 +25629,41 @@ function FocoDireccion({usuario, onNav}){
         return t && !t.eliminada && t.estado==="pendiente" && !t.agente;
       });
 
+      // ── 5 · Lo que está parado esperando una decisión TUYA ──
+      // Es la categoría más incómoda de un panel de dirección y la que más
+      // suele faltar: el cuello de botella propio. Va la primera a propósito.
+      var mias=[];
+      (estrategias||[]).forEach(function(e){
+        if(e&&!e.eliminada&&(e.estado==="pendiente"||e.estado==="por_aprobar"||e.pendienteAprobacion))
+          mias.push({q:"🎯 Estrategia", t:e.titulo||e.nombre||e.clienteNombre||"(sin título)",
+            de:e.autorNombre||e.autor||"", ir:"estrategias"});
+      });
+      var claves=[usuario.id,usuario.username,usuario.grupoAgente].filter(Boolean)
+        .map(function(x){return String(x).toUpperCase();});
+      (tareas||[]).forEach(function(t){
+        if(!t||t.eliminada||t.estado!=="pendiente") return;
+        if(t.agente && claves.indexOf(String(t.agente).toUpperCase())>=0)
+          mias.push({q:"📌 Tarea", t:t.titulo||t.texto||"(sin título)",
+            de:t.clienteNombre||"", ir:"tareas"});
+      });
+
+      // ── 6 · Incidencias fuera de protocolo ──
+      var incAb=(incidencias||[]).filter(function(i){
+        return i && !i.eliminada && i.estado!=="resuelta" && i.estado!=="cerrada";
+      });
+      function diasDe(i){
+        var f=i.fechaISO||i.creadoTs||i.fecha;
+        var d=f?new Date(typeof f==="number"?f:String(f)):null;
+        return (d&&!isNaN(d))?Math.round((hoyD-d)/86400000):0;
+      }
+      var incViejas=incAb.map(function(i){
+        return {t:i.clienteNombre||i.descripcion||"(sin cliente)", dias:diasDe(i),
+                tipo:i.tipo||"", quien:i.agente||i.autor||""};
+      }).filter(function(x){return x.dias>15;}).sort(function(a,b){return b.dias-a.dias;});
+
       setD({sinCerrar:sinCerrar, hVenc:hVenc, hReplan:hReplan, arrastre:arr,
-            sinAsignar:sinAsignar.length, totalReportan:quienReporta.length});
+            sinAsignar:sinAsignar.length, totalReportan:quienReporta.length,
+            mias:mias, incViejas:incViejas});
     });
     return function(){ vivo=false; };
   },[]);
@@ -25638,6 +25674,9 @@ function FocoDireccion({usuario, onNav}){
   var depto=d.sinCerrar.filter(function(x){return !x.comercial;});
 
   var BLOQUES=[
+    {k:"mias", on:(d.mias||[]).length>0, color:"#0F172A", icon:"⏸️",
+     n:(d.mias||[]).length, tit:"esperan una decisión tuya",
+     sub:"nadie más puede desatascarlo"},
     {k:"partes", on:d.sinCerrar.length>0, color:"#DC2626", icon:"🧾",
      n:d.sinCerrar.length, de:d.totalReportan, tit:"partes sin cerrar",
      sub:depto.length+" de departamento · "+comercial.length+" comerciales"},
@@ -25652,6 +25691,9 @@ function FocoDireccion({usuario, onNav}){
      sub:d.arrastre.length?("el peor lleva "+d.arrastre[0].semanas):""},
     {k:"tareas", on:d.sinAsignar>0, color:"#0891B2", icon:"📌",
      n:d.sinAsignar, tit:"tareas sin dueño", sub:"nadie las va a hacer"},
+    {k:"inc", on:(d.incViejas||[]).length>0, color:"#BE123C", icon:"🚨",
+     n:(d.incViejas||[]).length, tit:"incidencias de más de 15 días",
+     sub:(d.incViejas||[]).length?("la más antigua, "+d.incViejas[0].dias+" días"):""},
   ].filter(function(b){return b.on;});
 
   if(!BLOQUES.length){
@@ -25680,6 +25722,12 @@ function FocoDireccion({usuario, onNav}){
     if(abierto==="arrastre"){ tit="Objetivos que no avanzan";
       L=d.arrastre.slice(0,25).map(function(x){return {a:x.texto,
         b:x.quien+" · "+x.semanas+" semanas · última vez S"+x.ultima,c:"#B45309"};}); }
+    if(abierto==="mias"){ tit="Parado en tu mesa";
+      L=(d.mias||[]).slice(0,25).map(function(x){return {a:x.q+" · "+x.t,
+        b:x.de?("de "+x.de):"",c:"#0F172A"};}); }
+    if(abierto==="inc"){ tit="Incidencias sin resolver";
+      L=(d.incViejas||[]).slice(0,25).map(function(x){return {a:x.t,
+        b:(x.tipo?x.tipo+" · ":"")+x.dias+" días abierta",c:"#BE123C"};}); }
     if(abierto==="tareas"){ tit="Tareas sin dueño";
       return (
         <div style={{padding:"14px 16px"}}>
@@ -26183,6 +26231,10 @@ function DashMando({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasDB, 
             agente / responsable / dirección y aplica los mismos umbrales que ve
             el comercial. Antes cada dashboard contaba a su manera y los números
             no coincidían entre pantallas. */}
+        {/* (v6.21) En dirección esto se repliega: el foco de arriba ya
+            destila los hitos vencidos y las tareas sin dueño. La lista
+            entera es consulta, no decisión. */}
+        {(!verTodo||verDetalle)&&(<React.Fragment>
         <PanelSeguimiento usuario={usuario} oportunidadesDB={oportunidadesDB}
           muestrasDB={muestrasDB} estrategiasDB={estrategiasDB}
           incidenciasDB={incidenciasDB} onNav={onNav}/>
@@ -26192,6 +26244,7 @@ function DashMando({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasDB, 
           <HitosProyectoWidget usuario={usuario} onNav={onNav}/>
           <TareasWidget onNav={onNav} usuario={usuario}/>
         </div>
+        </React.Fragment>)}
 
         {/* ══ PIPELINE / PROYECTOS / ESTRATEGIAS ══ */}
         <div style={{display:"flex",gap:10,marginBottom:14}}>
@@ -26214,6 +26267,10 @@ function DashMando({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasDB, 
           </Card>
         </div>
 
+        {/* (v6.21) Vendedores, oportunidades, proyectos y estrategias:
+            60 filas de inventario. Para dirección es material de consulta,
+            no de arranque. Se guarda detrás del botón de detalle. */}
+        {(!verTodo||verDetalle)&&(<React.Fragment>
         {/* ══ VENDEDORES — cifras reales ══ */}
         <p style={{margin:"0 0 10px",fontSize:10,fontWeight:700,color:"#64748B",
           textTransform:"uppercase",letterSpacing:".12em"}}>
@@ -26336,6 +26393,17 @@ function DashMando({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasDB, 
             <p style={{fontSize:12,color:T.muted,textAlign:"center",padding:16}}>Sin estrategias activas</p>
           )}
         </div>
+        </React.Fragment>)}
+
+        {/* Botón para desplegar todo lo anterior */}
+        {verTodo&&(
+          <button onClick={function(){setVerDetalle(!verDetalle);}}
+            style={{width:"100%",padding:"13px",borderRadius:12,marginTop:4,marginBottom:8,
+              border:"1.5px solid "+T.border,background:"#fff",color:T.muted,
+              fontWeight:800,fontSize:12.5,cursor:"pointer",fontFamily:"inherit"}}>
+            {verDetalle?"▲ Ocultar el detalle comercial":"▼ Ver el detalle comercial (vendedores, seguimiento, hitos, pipeline)"}
+          </button>
+        )}
 
       </div>
     </div>
