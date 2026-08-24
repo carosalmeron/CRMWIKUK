@@ -364,7 +364,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "6.17.1";
+const CRM_VERSION = "6.19.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -20702,7 +20702,9 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
   const [proyectosFB,setProyectosFB]=useState([]);
   const [tareasFB,setTareasFB]=useState([]);
   const [cargando,setCargando]=useState(true);
-  const [tab,setTab]=useState("mio");        // mio | equipo
+  // (v6.19) El CEO no entrega parte a nadie: no tiene cierre semanal propio,
+  // solo la revisión de lo que le sube su equipo.
+  const [tab,setTab]=useState(superioresDe(usuario).length===0&&personasQueMeReportan(usuario).length>0?"equipo":"mio");        // mio | equipo
   const [abierto,setAbierto]=useState(null); // parte del equipo desplegado
   const [nuevoObj,setNuevoObj]=useState("");
   const [comentTxt,setComentTxt]=useState("");
@@ -20860,31 +20862,52 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
   // parte de responsable que se entrega antes que los de su gente no puede
   // resumir nada — se limita a sus propios objetivos y el superior se queda
   // sin saber qué pasó abajo.
+  // (v6.19) En la semana en curso no se mira la semana en curso: se mira quién
+  // no ha cerrado la ANTERIOR. La actual no se juzga hasta que termina, así que
+  // enseñar a todo el mundo como "pendiente" un miércoles era solo ruido.
+  React.useEffect(function(){
+    if(soySoloLector && misReportes.length>0 && tab==="mio") setTab("equipo");
+  },[soySoloLector,misReportes.length,tab]);
+
+  const enCurso = (sem===getSemanaISO() && ano===hoy.getFullYear());
+  const semEq = enCurso ? (sem>1?sem-1:52) : sem;
+  const anoEq = enCurso ? (sem>1?ano:ano-1) : ano;
+
   const equipoEstado = React.useMemo(function(){
     return misReportes.map(function(u){
-      var pp=partes[idParteSemanal(u.id,ano,sem)]||null;
+      var pp=partes[idParteSemanal(u.id,anoEq,semEq)]||null;
       var objs=(pp&&pp.objetivos)||[];
-      return {u:u, parte:pp,
+      // (v6.18) Última semana que sí entregó. Sin esto, ver a alguien en la
+      // lista de pendientes de la S35 hace pensar que el sistema no ha
+      // registrado su parte, cuando lo que pasa es que entregó la S34.
+      var ult=null;
+      Object.keys(partes).forEach(function(k){
+        var x=partes[k];
+        if(!x||x.usuarioId!==u.id) return;
+        if(x.estado!=="entregado"&&x.estado!=="validado") return;
+        if(!ult||(x.ano*52+x.semana)>(ult.ano*52+ult.semana)) ult={ano:x.ano,semana:x.semana};
+      });
+      return {u:u, parte:pp, ultimaEntregada:ult,
         entregado: !!pp && (pp.estado==="entregado"||pp.estado==="validado"),
         ausente: !!(pp&&pp.ausente),
         hechos: objs.filter(function(o){return o.estado==="hecho";}).length,
         total: objs.length};
     });
-  },[misReportes,partes,ano,sem]);
+  },[misReportes,partes,anoEq,semEq]);
   const equipoPendiente = equipoEstado.filter(function(x){ return !x.entregado && !x.ausente; });
 
   function recordarA(x){
     try{despacharNotificacion({tipo:"parte",
-      titulo:"🧾 Te falta cerrar la semana "+sem,
-      mensaje:usuario.nombre+" no puede entregar su parte hasta que cierres el tuyo. Entra en Parte semanal y ciérralo.",
+      titulo:"🧾 Te falta cerrar la semana "+semEq,
+      mensaje:usuario.nombre+" no puede entregar su parte hasta que cierres la semana "+semEq+". Entra en Parte semanal y ciérrala.",
       destinatarioId:x.u.id,prioridad:"alta",creadoPor:usuario.id});}catch(e){}
     try{
       var em=(USUARIOS.find(function(z){return z.id===x.u.id;})||{}).email||"";
       if(em) fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({to:em,subject:"[CRM] 🧾 Te falta cerrar la semana "+sem,
+        body:JSON.stringify({to:em,subject:"[CRM] 🧾 Te falta cerrar la semana "+semEq,
           html:'<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:20px">'
             +'<p style="font-size:15px;color:#0F172A"><b>'+usuario.nombre+'</b> no puede entregar su parte '
-            +'de la semana '+sem+' hasta que cierres el tuyo.</p>'
+            +'de la semana '+semEq+' hasta que cierres la tuya.</p>'
             +'<p style="font-size:13px;color:#475569">Entra en el CRM → Parte semanal, marca cómo ha ido cada '
             +'objetivo y pulsa «Entregar parte».</p>'
             +'<a href="https://crmwikuk.vercel.app" style="display:inline-block;margin-top:12px;padding:12px 22px;'
@@ -20896,9 +20919,9 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
   function marcarAusente(x){
     var motivo=prompt("¿Por qué no va a entregar "+x.u.nombre+" esta semana?\n(vacaciones, baja, etc. — constará en el informe)");
     if(!motivo||!motivo.trim()) return;
-    var id=idParteSemanal(x.u.id,ano,sem);
+    var id=idParteSemanal(x.u.id,anoEq,semEq);
     var doc=Object.assign({id:id,usuarioId:x.u.id,usuarioNombre:x.u.nombre,
-      departamentoId:x.u.departamentoId||"",ano:ano,semana:sem,objetivos:[],
+      departamentoId:x.u.departamentoId||"",ano:anoEq,semana:semEq,objetivos:[],
       resumen:"",estado:"borrador",comentarioSuperior:""}, partes[id]||{},
       {ausente:true, ausenteMotivo:motivo.trim(), ausentePor:usuario.nombre});
     delete doc._nuevo;
@@ -20919,7 +20942,7 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
   // Abre el cierre si hay algo que decidir; si no, entrega directamente.
   function pedirCierre(){
     if(equipoPendiente.length){
-      alert("Antes tiene que cerrar tu equipo.\n\nFaltan: "+
+      alert("Antes tiene que cerrar tu equipo la semana "+semEq+".\n\nFaltan: "+
         equipoPendiente.map(function(x){return x.u.nombre;}).join(", ")+
         "\n\nEn «Mi equipo» puedes recordárselo o marcar a quien esté de baja o de vacaciones.");
       setTab("equipo");
@@ -21618,11 +21641,10 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
       )}
 
       {/* Tabs mi parte / mi equipo */}
-      {misReportes.length>0&&(
+      {misReportes.length>0&&!soySoloLector&&(
         <div style={{display:"flex",gap:6,marginBottom:14,background:T.bg,borderRadius:10,padding:4}}>
           {[["mio","📝 Mi parte"],["equipo","📥 Mi equipo ("+misReportes.length+")"]].map(function(par){
             var k=par[0],l=par[1];
-            if(k==="mio"&&soySoloLector&&misReportes.length>0)l="📝 Mi resumen";
             return (
               <button key={k} onClick={function(){setTab(k);}}
                 style={{flex:1,padding:"9px",borderRadius:8,border:"none",
@@ -21995,14 +22017,22 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
             <div style={{background:"#FFFBEB",border:"1.5px solid #FDE68A",borderRadius:14,
               padding:"14px 16px",marginBottom:14}}>
               <p style={{margin:"0 0 4px",fontSize:13,fontWeight:900,color:"#92400E"}}>
-                ⏳ Faltan {equipoPendiente.length} por cerrar la semana {sem}</p>
+                ⏳ {equipoPendiente.length} de {equipoEstado.length} sin cerrar la semana {semEq}</p>
               <p style={{margin:"0 0 11px",fontSize:11.5,color:"#92400E",lineHeight:1.5}}>
-                No puedes entregar tu parte hasta que cierren. Recuérdaselo, o marca
-                a quien esté de baja o de vacaciones.</p>
+                {soySoloLector
+                  ? "La semana "+semEq+" ya terminó y siguen sin cerrarla. Recuérdaselo, o marca a quien estuviera de baja o de vacaciones."
+                  : "No puedes entregar tu parte hasta que cierren la "+semEq+". Recuérdaselo, o marca a quien esté de baja o de vacaciones."}</p>
               {equipoPendiente.map(function(x){
                 return (
                   <div key={x.u.id} style={{display:"flex",gap:6,alignItems:"center",marginBottom:6}}>
-                    <span style={{flex:1,fontSize:12.5,fontWeight:700,color:"#7C2D12"}}>{x.u.nombre}</span>
+                    <span style={{flex:1,minWidth:0,fontSize:12.5,fontWeight:700,color:"#7C2D12"}}>
+                      {x.u.nombre}
+                      <span style={{display:"block",fontSize:10,fontWeight:600,color:"#B45309"}}>
+                        {x.ultimaEntregada
+                          ? "última entregada: S"+x.ultimaEntregada.semana
+                          : "nunca ha entregado un parte"}
+                      </span>
+                    </span>
                     <button onClick={function(){recordarA(x);}}
                       style={{padding:"7px 11px",borderRadius:8,border:"1.5px solid #B45309",
                         background:"#fff",color:"#B45309",fontWeight:800,fontSize:11,cursor:"pointer"}}>🔔 Recordar</button>
@@ -22017,7 +22047,7 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
             <div style={{background:"#F0FDF4",border:"1.5px solid #BBF7D0",borderRadius:14,
               padding:"12px 16px",marginBottom:14}}>
               <p style={{margin:0,fontSize:12.5,fontWeight:800,color:"#15803D"}}>
-                ✅ Tu equipo ha cerrado la semana {sem} — ya puedes entregar tu parte</p>
+                ✅ Tu equipo ha cerrado la semana {semEq}{soySoloLector?"":" — ya puedes entregar tu parte"}</p>
             </div>
           )}
           {misReportes.map(function(u){
