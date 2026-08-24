@@ -342,7 +342,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "4.71.0";
+const CRM_VERSION = "4.73.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -5626,6 +5626,30 @@ function PanelSeguimiento({usuario, oportunidadesDB, muestrasDB, estrategiasDB, 
 // cobros_comercial) y muestra dos accesos: cobros totales y cobros
 // vencidos. Ambos abren /cobros.html con el detalle por cliente.
 // ═══════════════════════════════════════════════════════════════════
+// (v4.72) Los cobros solo tienen sentido para quien puede hacer algo con
+// ellos: dirección, la red comercial y Administración. A Producción, Calidad,
+// IT o I+D no les corresponde ver la deuda de los clientes.
+function puedeVerCobros(u){
+  if(!u) return false;
+  var rol=String(u.rol||"").toLowerCase();
+  if(["ceo","director","crm_director"].indexOf(rol)>=0) return true;      // CEO y Jefe de Ventas
+  if(["agente","comercial","vendedor","crm_agente"].indexOf(rol)>=0) return true; // red comercial
+  if((rol==="jefe"||rol==="crm_jefe") && u.equipo) return true;            // jefe de equipo
+  var tips=[u.tipologia].concat(u.orgTipologias||[])
+    .map(function(x){ return String(x||"").toLowerCase(); });
+  return tips.indexOf("administracion")>=0;                               // Administración
+}
+// Códigos de los comerciales de un equipo, para acotar la vista del jefe
+function _cobCodigosEquipo(equipo){
+  if(!equipo) return [];
+  var out=[];
+  (USUARIOS||[]).forEach(function(u){
+    if(String(u.equipo||"")!==String(equipo)) return;
+    var c=_cobNormCod(u.grupoAgente||u.catalogoVendedor||u.id);
+    if(c && out.indexOf(c)<0) out.push(c);
+  });
+  return out;
+}
 function _cobNormCod(s){
   return String(s==null?"":s).toUpperCase().trim().normalize("NFD")
     .replace(/[\u0300-\u036f]/g,"").replace(/[^A-Z0-9]/g,"");
@@ -5700,13 +5724,17 @@ class CobrosBoundary extends React.Component{
   render(){ return this.state.roto ? null : this.props.children; }
 }
 function CobrosWidget(props){
+  if(!puedeVerCobros(props&&props.usuario)) return null;
   return <CobrosBoundary><CobrosWidgetInterno {...props}/></CobrosBoundary>;
 }
 function CobrosWidgetInterno({usuario, onNav}){
   var _s=React.useState(null); var dato=_s[0], setDato=_s[1];
   var _c=React.useState(false); var cargando=_c[0], setCargando=_c[1];
   var _e=React.useState(null); var noHay=_e[0], setNoHay=_e[1];
-  var esMando=["ceo","director","jefe","admin","tipologia"].indexOf((usuario&&usuario.rol)||"")>=0;
+  var _rol=String((usuario&&usuario.rol)||"").toLowerCase();
+  var _jefeEq=(_rol==="jefe"||_rol==="crm_jefe") && !!(usuario&&usuario.equipo);
+  var equipoCods=_jefeEq ? _cobCodigosEquipo(usuario.equipo) : [];
+  var esMando=!_jefeEq && ["ceo","director","crm_director","admin","tipologia","crm_jefe"].indexOf(_rol)>=0;
   var cods=_cobCodigosDe(usuario);
   var cod=cods[0]||"";
 
@@ -5753,6 +5781,23 @@ function CobrosWidgetInterno({usuario, onNav}){
             nCli:0, nFacV:m.nFacturas||0, fechaDatos:m.fechaDatos||"", global:true}); setCargando(false); }
           return;
         }
+        if(_jefeEq){
+          // Suma de los cobros de los comerciales de su equipo.
+          var rl=await fetch(FBC+"/cobros_comercial?pageSize=300",{cache:"no-store"});
+          if(!rl.ok){ if(vivo){setDato(null);setCargando(false);} return; }
+          var lista=((await rl.json()).documents)||[];
+          var acc={pend:0,venc:0,nCli:0,nFacV:0,fechaDatos:""};
+          lista.forEach(function(doc){
+            var f=campos(doc);
+            var id=(doc.name||"").split("/").pop();
+            if(equipoCods.indexOf(id)<0) return;
+            var r=recalcular(f);
+            acc.pend+=r.pend; acc.venc+=r.venc; acc.nCli+=r.nCli; acc.nFacV+=r.nFacV;
+            if(!acc.fechaDatos) acc.fechaDatos=r.fechaDatos;
+          });
+          if(vivo){ setDato(acc); setCargando(false); }
+          return;
+        }
         if(!cods.length){ if(vivo){setDato(null);setCargando(false);} return; }
         var doc=null, usado="";
         for(var i=0;i<cods.length;i++){
@@ -5794,7 +5839,8 @@ function CobrosWidgetInterno({usuario, onNav}){
   }
   if(!dato.pend && !dato.venc) return null;
 
-  var qs="agente="+encodeURIComponent(esMando?"__ALL__":cod)
+  var qs="agente="+encodeURIComponent((esMando||_jefeEq)?"__ALL__":cod)
+        +(_jefeEq?"&codigos="+encodeURIComponent(equipoCods.join(",")):"")
         +"&nombre="+encodeURIComponent((usuario&&usuario.nombre)||"")
         +"&rol="+encodeURIComponent((usuario&&usuario.rol)||"agente")
         +"&uid="+encodeURIComponent(idCanonico(usuario)||"")
@@ -5806,7 +5852,7 @@ function CobrosWidgetInterno({usuario, onNav}){
     <div style={{marginBottom:14}}>
       <p style={{margin:"0 0 8px",fontSize:10,fontWeight:700,color:"#64748B",
         textTransform:"uppercase",letterSpacing:".12em"}}>
-        Cobros {dato.global?"· grupo":""}
+        Cobros {_jefeEq?("· "+usuario.equipo):dato.global?"· grupo":""}
       </p>
       <div style={{display:"flex",gap:10}}>
         <div onClick={function(){ir("totales");}}
@@ -31040,6 +31086,13 @@ function App(props){
     {id:"incidencias",  icon:"🚨",label:"Incidencias",  color:T.red, badge:incMiDeptAb},
     {id:"calendario",   icon:"🗓️",label:"Agenda",        color:T.blue},
     {id:"tareas",       icon:"📌",label:"Tareas",        color:T.red},
+    // (v4.73) Proyectos y parte semanal. No estaban en este menú: los
+    // responsables de departamento los tenían solo porque el CRM los
+    // clasificaba como jefes de ventas. Al colocarlos en su sitio (v4.68)
+    // perdieron las dos pestañas, y las dos les corresponden: los hitos de
+    // proyecto se asignan a departamentos y el parte semanal lo rellenan ellos.
+    {id:"proyectos",    icon:"📁",label:"Proyectos",     color:T.purple},
+    {id:"reporting",    icon:"🧾",label:"Parte semanal", color:T.navy},
   ];
 
   const nav=esCompras?NAV_COMPRAS:esTipologia?NAV_TIPOLOGIA:esAgente?NAV_AGENTE:esJefe?NAV_JEFE:NAV_DIR;
