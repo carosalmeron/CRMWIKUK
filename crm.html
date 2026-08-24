@@ -364,7 +364,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "6.19.0";
+const CRM_VERSION = "6.20.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -25533,6 +25533,214 @@ function CentroPendientes({usuario, onBack, onNav, muestrasDB, ofertasDB, incide
 // oportunidadesDB, muestrasDB, incidenciasDB, estrategiasDB y la colección
 // "proyectos" de Firebase. No queda ningún literal de maqueta.
 // ═══════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════
+// (v6.20) FOCO DE DIRECCIÓN
+// La pantalla del CEO era un inventario: 60 vendedores, 21 hitos, listas
+// completas de todo. Un inventario no es un panel de mando. Aquí solo entra
+// lo que se ha salido de su cauce y que solo dirección puede desatascar,
+// ordenado por lo que más tiempo lleva parado. Si algo va bien, no aparece.
+// ═══════════════════════════════════════════════════════════════════
+function FocoDireccion({usuario, onNav}){
+  var _p=React.useState(null); var d=_p[0], setD=_p[1];
+  var _o=React.useState(null); var abierto=_o[0], setAbierto=_o[1];
+
+  React.useEffect(function(){
+    var vivo=true;
+    Promise.all([
+      fbLeer("partes_departamento").catch(function(){return [];}),
+      fbLeer("proyectos").catch(function(){return [];}),
+      fbLeer("tareas").catch(function(){return [];}),
+    ]).then(function(r){
+      if(!vivo) return;
+      var partes=r[0]||[], proys=r[1]||[], tareas=r[2]||[];
+      var semHoy=getSemanaISO(), anoHoy=new Date().getFullYear();
+      var hoyD=new Date(); hoyD.setHours(0,0,0,0);
+
+      // ── 1 · Partes sin cerrar, por persona y semanas de retraso ──
+      var quienReporta=(USUARIOS||[]).filter(function(u){
+        if(!u||u.activo===false||u._legacy||u.duplicadaDe) return false;
+        try{ return (superioresDe(u)||[]).length>0; }catch(e){ return false; }
+      });
+      var entregadas={};
+      partes.forEach(function(x){
+        if(x&&(x.estado==="entregado"||x.estado==="validado"||x.ausente))
+          entregadas[x.usuarioId+"w"+x.ano+"-"+x.semana]=1;
+      });
+      var sinCerrar=[];
+      quienReporta.forEach(function(u){
+        var faltan=[], a=PARTE_DESDE.ano, sm=PARTE_DESDE.semana, n=0;
+        while(n<60){
+          if(a*52+sm>=anoHoy*52+semHoy) break;
+          if(!entregadas[u.id+"w"+a+"-"+sm]) faltan.push(sm);
+          sm++; if(sm>52){sm=1;a++;} n++;
+        }
+        if(faltan.length){
+          var dep="";
+          try{ dep=(deptosDondeEsResponsable(u)[0]||{}).nombre || (deptoDe(u.departamentoId)||{}).nombre || ""; }catch(e){}
+          sinCerrar.push({nombre:u.nombre, id:u.id, equipo:u.equipo||"", depto:dep,
+            semanas:faltan.length, desde:faltan[0],
+            comercial:["agente","comercial","vendedor","crm_agente"].indexOf(String(u.rol||"").toLowerCase())>=0
+                      || !!u.equipo});
+        }
+      });
+      sinCerrar.sort(function(x,y){ return y.semanas-x.semanas; });
+
+      // ── 2 · Hitos vencidos y los que se replanifican una y otra vez ──
+      var hVenc=[], hReplan=[];
+      proys.forEach(function(pr){
+        if(!pr||pr.estado==="descartado") return;
+        (pr.hitos||[]).forEach(function(h){
+          if(h.hecho||h.completado) return;
+          var resp=(USUARIOS||[]).find(function(u){return u.id===h.responsable;});
+          var base={proy:pr.nombre||"(sin nombre)", hito:h.nombre||h.titulo||"(sin nombre)",
+            quien:(resp&&resp.nombre)||"sin responsable", fecha:h.fecha||""};
+          if(h.fecha&&new Date(h.fecha)<hoyD)
+            hVenc.push(Object.assign({dias:Math.round((hoyD-new Date(h.fecha))/86400000)},base));
+          if((h.replanificado||0)>=2)
+            hReplan.push(Object.assign({veces:h.replanificado, motivo:h.motivoReplan||""},base));
+        });
+      });
+      hVenc.sort(function(x,y){return y.dias-x.dias;});
+      hReplan.sort(function(x,y){return y.veces-x.veces;});
+
+      // ── 3 · Objetivos que llevan semanas arrastrándose ──
+      // Solo se puede saber desde que existe el cierre semanal: es la señal
+      // más honesta de lo que se promete y nunca se hace.
+      var arrastre={};
+      partes.forEach(function(x){
+        if(!x||(x.estado!=="entregado"&&x.estado!=="validado")) return;
+        (x.objetivos||[]).forEach(function(o){
+          if((o.semanasArrastrado||0)<2) return;
+          var k=x.usuarioId+"|"+o.texto;
+          if(!arrastre[k]||arrastre[k].semanas<o.semanasArrastrado)
+            arrastre[k]={quien:x.usuarioNombre||"", texto:o.texto,
+              semanas:o.semanasArrastrado, ultima:x.semana};
+        });
+      });
+      var arr=Object.keys(arrastre).map(function(k){return arrastre[k];})
+        .sort(function(x,y){return y.semanas-x.semanas;});
+
+      // ── 4 · Tareas sin dueño ──
+      var sinAsignar=(tareas||[]).filter(function(t){
+        return t && !t.eliminada && t.estado==="pendiente" && !t.agente;
+      });
+
+      setD({sinCerrar:sinCerrar, hVenc:hVenc, hReplan:hReplan, arrastre:arr,
+            sinAsignar:sinAsignar.length, totalReportan:quienReporta.length});
+    });
+    return function(){ vivo=false; };
+  },[]);
+
+  if(!d) return null;
+
+  var comercial=d.sinCerrar.filter(function(x){return x.comercial;});
+  var depto=d.sinCerrar.filter(function(x){return !x.comercial;});
+
+  var BLOQUES=[
+    {k:"partes", on:d.sinCerrar.length>0, color:"#DC2626", icon:"🧾",
+     n:d.sinCerrar.length, de:d.totalReportan, tit:"partes sin cerrar",
+     sub:depto.length+" de departamento · "+comercial.length+" comerciales"},
+    {k:"hitos", on:d.hVenc.length>0, color:"#EA580C", icon:"📁",
+     n:d.hVenc.length, tit:"hitos vencidos",
+     sub:d.hVenc.length?("el más antiguo, "+d.hVenc[0].dias+" días"):""},
+    {k:"replan", on:d.hReplan.length>0, color:"#7C3AED", icon:"🔁",
+     n:d.hReplan.length, tit:"hitos replanificados 2+ veces",
+     sub:"fechas que no se sostienen"},
+    {k:"arrastre", on:d.arrastre.length>0, color:"#B45309", icon:"⚠️",
+     n:d.arrastre.length, tit:"objetivos arrastrados 2+ semanas",
+     sub:d.arrastre.length?("el peor lleva "+d.arrastre[0].semanas):""},
+    {k:"tareas", on:d.sinAsignar>0, color:"#0891B2", icon:"📌",
+     n:d.sinAsignar, tit:"tareas sin dueño", sub:"nadie las va a hacer"},
+  ].filter(function(b){return b.on;});
+
+  if(!BLOQUES.length){
+    return (
+      <div style={{background:"#F0FDF4",border:"1.5px solid #BBF7D0",borderRadius:16,
+        padding:"18px 20px",marginBottom:16}}>
+        <p style={{margin:0,fontSize:15,fontWeight:900,color:"#15803D"}}>✅ Nada atascado</p>
+        <p style={{margin:"4px 0 0",fontSize:12.5,color:"#166534"}}>
+          Partes al día, hitos en fecha y ninguna tarea sin dueño.</p>
+      </div>
+    );
+  }
+
+  function detalle(){
+    var L=[], tit="";
+    if(abierto==="partes"){ tit="Partes sin cerrar";
+      L=d.sinCerrar.map(function(x){return {a:x.nombre,
+        b:(x.depto||x.equipo||"—")+" · "+x.semanas+(x.semanas===1?" semana":" semanas")+" · desde la S"+x.desde,
+        c:x.semanas>=3?"#DC2626":"#B45309"};}); }
+    if(abierto==="hitos"){ tit="Hitos vencidos";
+      L=d.hVenc.slice(0,25).map(function(x){return {a:x.hito,
+        b:x.proy+" · "+x.quien+" · "+x.dias+" días",c:"#EA580C"};}); }
+    if(abierto==="replan"){ tit="Hitos replanificados";
+      L=d.hReplan.slice(0,25).map(function(x){return {a:x.hito,
+        b:x.proy+" · "+x.quien+" · movido "+x.veces+" veces"+(x.motivo?" · "+x.motivo:""),c:"#7C3AED"};}); }
+    if(abierto==="arrastre"){ tit="Objetivos que no avanzan";
+      L=d.arrastre.slice(0,25).map(function(x){return {a:x.texto,
+        b:x.quien+" · "+x.semanas+" semanas · última vez S"+x.ultima,c:"#B45309"};}); }
+    if(abierto==="tareas"){ tit="Tareas sin dueño";
+      return (
+        <div style={{padding:"14px 16px"}}>
+          <p style={{margin:0,fontSize:12.5,color:T.muted,lineHeight:1.5}}>
+            Hay {d.sinAsignar} tareas pendientes sin nadie asignado.</p>
+          <button onClick={function(){onNav&&onNav("tareas");}}
+            style={{marginTop:10,padding:"10px 16px",borderRadius:9,border:"none",
+              background:T.navy,color:"#fff",fontWeight:800,fontSize:12.5,cursor:"pointer"}}>
+            Ir a Tareas →</button>
+        </div>
+      );
+    }
+    return (
+      <div style={{padding:"6px 0 10px"}}>
+        <p style={{margin:"0 14px 8px",fontSize:10.5,fontWeight:800,color:T.muted,
+          textTransform:"uppercase",letterSpacing:".07em"}}>{tit}</p>
+        {L.map(function(x,i){
+          return (
+            <div key={i} style={{padding:"9px 14px",borderTop:i?"1px solid #F1F5F9":"none"}}>
+              <p style={{margin:0,fontSize:12.5,fontWeight:700,color:T.text,lineHeight:1.4}}>{x.a}</p>
+              <p style={{margin:"2px 0 0",fontSize:10.5,color:x.c,fontWeight:600}}>{x.b}</p>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{marginBottom:16}}>
+      <p style={{margin:"0 0 8px",fontSize:10,fontWeight:700,color:"#64748B",
+        textTransform:"uppercase",letterSpacing:".12em"}}>Lo que requiere tu atención</p>
+      <div style={{background:"#fff",border:"1px solid "+T.border,borderRadius:16,overflow:"hidden",
+        boxShadow:"0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06)"}}>
+        {BLOQUES.map(function(b,i){
+          var on=abierto===b.k;
+          return (
+            <div key={b.k}>
+              <div onClick={function(){setAbierto(on?null:b.k);}}
+                style={{display:"flex",gap:12,alignItems:"center",padding:"13px 15px",
+                  cursor:"pointer",borderTop:i?"1px solid #F1F5F9":"none",
+                  background:on?"#F8FAFC":"#fff"}}>
+                <span style={{fontSize:19}}>{b.icon}</span>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{margin:0,fontSize:13.5,fontWeight:800,color:T.text}}>
+                    <span style={{color:b.color,fontSize:17,fontWeight:900}}>{b.n}</span>
+                    {b.de?<span style={{color:T.muted,fontWeight:600}}> de {b.de}</span>:null} {b.tit}
+                  </p>
+                  {b.sub&&<p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{b.sub}</p>}
+                </div>
+                <span style={{color:"#CBD5E1",fontSize:13}}>{on?"▲":"▼"}</span>
+              </div>
+              {on&&<div style={{background:"#F8FAFC",borderTop:"1px solid #F1F5F9"}}>{detalle()}</div>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function DashMando({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasDB, incidenciasDB, forzarGlobal}){
   const rol=String(usuario.rol||"").toLowerCase();
   // El enrutador decide quién ve toda la empresa (incluye perfiles como Calidad,
@@ -25749,6 +25957,12 @@ function DashMando({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasDB, 
           superior de la aplicación. */}
 
       <div style={{padding:"18px 16px 0"}}>
+
+        {/* ══ FOCO DE DIRECCIÓN (v6.20) ══
+            Lo primero que ve dirección: solo lo atascado. El resto —ventas por
+            vendedor, seguimiento, pipeline— queda debajo, que es donde debe
+            estar: se consulta cuando se busca, no se impone al entrar. */}
+        {verTodo&&<FocoDireccion usuario={usuario} onNav={onNav}/>}
 
         {/* Sin datos de ventas: se dice, no se pinta un cero silencioso */}
         {sinVentas&&(
