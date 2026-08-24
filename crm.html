@@ -364,7 +364,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "6.16.1";
+const CRM_VERSION = "6.17.1";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -20777,6 +20777,36 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
       tPend:tPend,tHechas:tHechas};
   }
 
+  // (v6.17) Los hitos de proyecto vivían aparte del parte: se contaban en el
+  // snapshot pero no se tocaban, así que uno podía cerrar la semana dejando
+  // hitos vencidos sin decir una palabra. Ahora entran en el cierre igual que
+  // los objetivos: o los terminas, o pones fecha nueva, o explicas el bloqueo.
+  function misHitosAbiertos(u){
+    var out=[];
+    var ramaDeps={};
+    (deptosDondeEsResponsable(u)).forEach(function(d){
+      (function bajar(id,n){if(n>15)return;ramaDeps[id]=1;deptosHijosDe(id).forEach(function(h){bajar(h.id,n+1);});})(d.id,0);
+    });
+    if(u.departamentoId)ramaDeps[u.departamentoId]=1;
+    var hoyD=new Date();hoyD.setHours(0,0,0,0);
+    (proyectosFB||[]).forEach(function(p){
+      if(p.estado==="descartado") return;
+      (p.hitos||[]).forEach(function(h,idx){
+        var esMio=h.responsable===u.id||(!h.responsable&&ramaDeps[p.departamentoId]);
+        if(!esMio) return;
+        if(h.hecho||h.completado) return;
+        var venc=!!(h.fecha&&new Date(h.fecha)<hoyD);
+        out.push({key:p.id+"#"+idx, proyId:p.id, idx:idx,
+          proyNombre:p.nombre||"(proyecto sin nombre)",
+          ambito:p.ambito||"", nombre:h.nombre||h.titulo||"(hito sin nombre)",
+          fecha:h.fecha||"", vencido:venc,
+          dias: h.fecha?Math.round((hoyD-new Date(h.fecha))/86400000):0});
+      });
+    });
+    out.sort(function(a,b){ return (b.vencido-a.vencido)||String(a.fecha).localeCompare(String(b.fecha)); });
+    return out;
+  }
+
   function parteDe(u){
     var id=idParteSemanal(u.id,ano,sem);
     return partes[id]||{id:id,usuarioId:u.id,usuarioNombre:u.nombre,
@@ -20913,7 +20943,11 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
       elevar[x.u.id]= x.ausente || flojo || (x.total>0 && x.hechos<x.total);
       notasEq[x.u.id]="";
     });
+    var hitos=misHitosAbiertos(usuario);
+    var hAcc={};   // key → {accion:"hecho"|"fecha"|"bloqueado", fecha, motivo}
+    hitos.forEach(function(h){ hAcc[h.key]={accion:"",fecha:h.fecha||"",motivo:""}; });
     setCierre({pasar:pasar, hechos:{}, notas:{}, elevar:elevar, notasEq:notasEq,
+      hitos:hitos, hAcc:hAcc,
       resumen:miParte.resumen||"",
       plan:miParte.planSiguiente||""});
   }
@@ -20981,6 +21015,29 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
     + bloque("✍️ Cómo ha ido la semana", doc.resumen, "#0F172A", "#F8FAFC")
     + bloque("📌 Qué hará la semana "+(doc.semana>=52?1:doc.semana+1), doc.planSiguiente, "#16A34A", "#F0FDF4")
 
+    + (function(){
+        var hc=doc.hitosCierre||[];
+        if(!hc.length) return "";
+        return '<p style="margin:18px 0 5px;font-size:10.5px;font-weight:800;color:#64748B;'
+          +'letter-spacing:.07em;text-transform:uppercase">📁 Hitos de proyecto</p>'
+          + hc.map(function(h){
+              var ic = h.accion==="hecho"?"✅" : h.accion==="fecha"?"📅" : "⛔";
+              var col= h.accion==="hecho"?"#16A34A": h.accion==="fecha"?"#2563EB":"#B91C1C";
+              var txt= h.accion==="hecho" ? "Terminado"
+                     : h.accion==="fecha" ? ("Replanificado al "+String(h.fechaNueva||"").split("-").reverse().join("/")
+                         +(h.fechaAnterior?" (era "+String(h.fechaAnterior).split("-").reverse().join("/")+")":""))
+                     : "Bloqueado";
+              return '<div style="border:1px solid #E2E8F0;border-left:3px solid '+col
+                +';border-radius:0 9px 9px 0;padding:9px 12px;margin-bottom:6px">'
+                +'<div style="font-size:12.5px;color:#0F172A;font-weight:700">'+ic+' '+esc(h.hito)+'</div>'
+                +'<div style="font-size:10.5px;color:#64748B;margin-top:2px">📁 '+esc(h.proyecto)
+                +' · <span style="color:'+col+';font-weight:700">'+esc(txt)+'</span>'
+                +(h.vencido?' · <span style="color:#DC2626">venció hace '+h.dias+' días</span>':'')+'</div>'
+                +(h.motivo?'<div style="font-size:11.5px;color:#475569;margin-top:5px;background:#F8FAFC;'
+                  +'border-radius:7px;padding:6px 9px">'+esc(h.motivo)+'</div>':'')
+                +'</div>';
+            }).join("");
+      })()
     + (function(){
         var eq=doc.equipoResumen||[];
         if(!eq.length) return "";
@@ -21067,6 +21124,7 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
             nota:((traspaso.notasEq||{})[x.u.id]||"").trim()};
         }),
       equipoTotal: equipoEstado.length,
+      hitosCierre: hitosCierre,
       paraIds:misSupers.map(function(s){return s.id;})};
 
     // Alta en la semana siguiente: lo traspasado y el plan que acaba de escribir.
@@ -21094,6 +21152,39 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
       fbEscribir("partes_departamento",docSig.id,docSig);
       setPartes(function(prev){var n={...prev};n[docSig.id]=docSig;return n;});
     }
+    // Escribir en los proyectos lo decidido sobre cada hito
+    var hAcc=traspaso.hAcc||{}, hitosCierre=[];
+    var porProy={};
+    (traspaso.hitos||[]).forEach(function(h){
+      var a=hAcc[h.key]||{};
+      if(!a.accion) return;
+      (porProy[h.proyId]=porProy[h.proyId]||[]).push({h:h,a:a});
+      hitosCierre.push({proyecto:h.proyNombre, hito:h.nombre, accion:a.accion,
+        fechaAnterior:h.fecha, fechaNueva:a.fecha||"", motivo:a.motivo||"",
+        vencido:h.vencido, dias:h.dias});
+    });
+    Object.keys(porProy).forEach(function(pid){
+      var pr=(proyectosFB||[]).find(function(x){return x.id===pid;});
+      if(!pr) return;
+      var hs=(pr.hitos||[]).slice();
+      porProy[pid].forEach(function(par){
+        var h=hs[par.h.idx]; if(!h) return;
+        if(par.a.accion==="hecho"){
+          hs[par.h.idx]={...h,hecho:true,completado:true,
+            semanaCompletado:sem,completadoTs:Date.now(),completadoPor:usuario.id};
+        } else if(par.a.accion==="fecha"){
+          hs[par.h.idx]={...h,fecha:par.a.fecha||h.fecha,
+            replanificado:(h.replanificado||0)+1, replanificadoDesde:h.fecha,
+            replanificadoEnS:sem, motivoReplan:par.a.motivo||""};
+        } else if(par.a.accion==="bloqueado"){
+          hs[par.h.idx]={...h,bloqueado:true,motivoBloqueo:par.a.motivo||"",bloqueadoEnS:sem};
+        }
+      });
+      var docPr={...pr,hitos:hs};
+      fbEscribir("proyectos",pr.id,docPr);
+      setProyectosFB(function(prev){ return (prev||[]).map(function(x){return x.id===pr.id?docPr:x;}); });
+    });
+
     setCierre(null);
     if(typeof onDesbloquear==="function") onDesbloquear();
     guardarParte(doc,function(){
@@ -21660,6 +21751,64 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
               </div>
             )}
 
+            {/* (v6.17) Hitos de proyecto: se cierran con la semana */}
+            {(cierre.hitos||[]).length>0&&(
+              <div style={{marginTop:16}}>
+                <p style={{margin:"0 0 3px",fontSize:11,fontWeight:800,color:T.muted,
+                  textTransform:"uppercase",letterSpacing:".07em"}}>
+                  📁 Tus hitos de proyecto · {(cierre.hitos||[]).length}</p>
+                <p style={{margin:"0 0 9px",fontSize:11,color:T.muted,lineHeight:1.5}}>
+                  Los vencidos hay que resolverlos para poder entregar: termínalos,
+                  ponles fecha nueva o explica qué los bloquea.</p>
+                {(cierre.hitos||[]).map(function(h){
+                  var a=cierre.hAcc[h.key]||{};
+                  var set=function(campos){
+                    var n={...cierre.hAcc}; n[h.key]={...a,...campos}; setCierre({...cierre,hAcc:n});
+                  };
+                  var OPC=[["hecho","✅ Hecho","#16A34A"],["fecha","📅 Nueva fecha",T.navy],["bloqueado","⛔ Bloqueado","#B91C1C"]];
+                  return (
+                    <div key={h.key} style={{border:"1.5px solid "+(h.vencido&&!a.accion?"#FCA5A5":T.border),
+                      borderRadius:12,padding:"11px 12px",marginBottom:8,
+                      background:h.vencido&&!a.accion?"#FEF2F2":"#fff"}}>
+                      <p style={{margin:0,fontSize:12.5,fontWeight:700,color:T.text,lineHeight:1.4}}>{h.nombre}</p>
+                      <p style={{margin:"2px 0 9px",fontSize:10.5,color:T.muted}}>
+                        📁 {h.proyNombre}
+                        {h.fecha?" · "+String(h.fecha).split("-").reverse().join("/"):" · sin fecha"}
+                        {h.vencido?<span style={{color:"#DC2626",fontWeight:800}}> · vencido {h.dias} días</span>:null}
+                      </p>
+                      <div style={{display:"flex",gap:5}}>
+                        {OPC.map(function(par){
+                          var k=par[0],l=par[1],col=par[2],on=a.accion===k;
+                          return (
+                            <button key={k} onClick={function(){set({accion:on?"":k});}}
+                              style={{flex:1,padding:"8px 4px",borderRadius:9,fontSize:11,
+                                fontWeight:on?900:600,cursor:"pointer",fontFamily:"inherit",
+                                border:"2px solid "+(on?col:T.border),
+                                background:on?col:"#fff",color:on?"#fff":T.muted}}>{l}</button>
+                          );
+                        })}
+                      </div>
+                      {a.accion==="fecha"&&(
+                        <input type="date" value={a.fecha||""}
+                          onChange={function(ev){set({fecha:ev.target.value});}}
+                          style={{width:"100%",marginTop:7,padding:"9px 11px",borderRadius:9,fontSize:13,
+                            border:"1.5px solid "+((a.fecha||"")?T.border:"#FCA5A5"),
+                            fontFamily:"inherit",outline:"none",boxSizing:"border-box"}}/>
+                      )}
+                      {(a.accion==="bloqueado"||a.accion==="fecha")&&(
+                        <input value={a.motivo||""}
+                          onChange={function(ev){set({motivo:ev.target.value});}}
+                          placeholder={a.accion==="bloqueado"?"¿Qué lo bloquea? (obligatorio)":"¿Por qué se retrasa? (opcional)"}
+                          style={{width:"100%",marginTop:6,padding:"9px 11px",borderRadius:9,fontSize:12.5,
+                            border:"1.5px solid "+((a.accion==="bloqueado"&&!(a.motivo||"").trim())?"#FCA5A5":T.border),
+                            fontFamily:"inherit",outline:"none",boxSizing:"border-box"}}/>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
             {/* (v6.16) Qué se eleva de cada persona del equipo */}
             {equipoEstado.length>0&&(
               <div style={{marginTop:16}}>
@@ -21722,19 +21871,55 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
                 border:"1.5px solid "+((cierre.plan||"").trim().length<15?"#FCA5A5":T.border),
                 fontFamily:"inherit",outline:"none",resize:"vertical",boxSizing:"border-box",marginBottom:12}}/>
 
-            {((cierre.resumen||"").trim().length<15||(cierre.plan||"").trim().length<15)&&(
-              <p style={{margin:"0 0 10px",fontSize:11.5,color:"#B91C1C",fontWeight:700}}>
-                Explica las dos cosas antes de entregar. Con una frase en cada una basta,
-                pero tiene que decir algo.</p>
-            )}
+            {(function(){
+              var faltaTexto=(cierre.resumen||"").trim().length<15||(cierre.plan||"").trim().length<15;
+              var pend=(cierre.hitos||[]).filter(function(h){
+                var a=cierre.hAcc[h.key]||{};
+                if(!h.vencido) return false;
+                if(!a.accion) return true;
+                if(a.accion==="fecha"&&!(a.fecha||"")) return true;
+                if(a.accion==="bloqueado"&&!(a.motivo||"").trim()) return true;
+                return false;
+              });
+              if(!faltaTexto&&!pend.length) return null;
+              return (
+                <div style={{background:"#FEF2F2",border:"1px solid #FECACA",borderRadius:10,
+                  padding:"10px 12px",marginBottom:10}}>
+                  {faltaTexto&&(
+                    <p style={{margin:0,fontSize:11.5,color:"#B91C1C",fontWeight:700}}>
+                      Explica cómo ha ido la semana y qué harás la siguiente. Con una frase
+                      en cada una basta, pero tiene que decir algo.</p>
+                  )}
+                  {pend.length>0&&(
+                    <p style={{margin:faltaTexto?"6px 0 0":0,fontSize:11.5,color:"#B91C1C",fontWeight:700}}>
+                      Te quedan {pend.length} hito{pend.length>1?"s":""} de proyecto vencido{pend.length>1?"s":""} sin
+                      resolver{pend.some(function(h){var a=cierre.hAcc[h.key]||{};return a.accion==="bloqueado";})?" (falta explicar el bloqueo)":""}.</p>
+                  )}
+                </div>
+              );
+            })()}
 
             <button
-              disabled={(cierre.resumen||"").trim().length<15||(cierre.plan||"").trim().length<15}
+              disabled={(function(){
+                if((cierre.resumen||"").trim().length<15||(cierre.plan||"").trim().length<15) return true;
+                return (cierre.hitos||[]).some(function(h){
+                  var a=cierre.hAcc[h.key]||{};
+                  if(!h.vencido) return false;
+                  if(!a.accion) return true;
+                  if(a.accion==="fecha"&&!(a.fecha||"")) return true;
+                  if(a.accion==="bloqueado"&&!(a.motivo||"").trim()) return true;
+                  return false;
+                });
+              })()}
               onClick={function(){entregarParte(cierre);}}
               style={{width:"100%",padding:"14px",borderRadius:12,border:"none",
-                background:((cierre.resumen||"").trim().length<15||(cierre.plan||"").trim().length<15)?"#CBD5E1":T.navy,
-                color:"#fff",fontWeight:900,fontSize:14,
-                cursor:((cierre.resumen||"").trim().length<15||(cierre.plan||"").trim().length<15)?"default":"pointer"}}>
+                background:(function(){
+                  if((cierre.resumen||"").trim().length<15||(cierre.plan||"").trim().length<15) return "#CBD5E1";
+                  var mal=(cierre.hitos||[]).some(function(h){var a=cierre.hAcc[h.key]||{};
+                    return h.vencido&&(!a.accion||(a.accion==="fecha"&&!(a.fecha||""))||(a.accion==="bloqueado"&&!(a.motivo||"").trim()));});
+                  return mal?"#CBD5E1":T.navy;
+                })(),
+                color:"#fff",fontWeight:900,fontSize:14,cursor:"pointer"}}>
               🔒 Cerrar semana y entregar a {misSupers.map(function(x){return x.nombre;}).join(", ")}
             </button>
             <button onClick={function(){setCierre(null);}}
