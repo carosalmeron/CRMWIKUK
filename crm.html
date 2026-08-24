@@ -364,7 +364,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "6.11.0";
+const CRM_VERSION = "6.11.1";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -20746,18 +20746,33 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
   const miSnap=miParte.estado==="borrador"?snapshotDe(usuario):(miParte.snapshot||snapshotDe(usuario));
   const entregado=miParte.estado==="entregado"||miParte.estado==="validado";
 
-  // (v6.11) La semana no se abre si la anterior quedó sin entregar. Se mira
-  // solo hacia atrás desde la semana en curso, y solo mientras exista parte
-  // previo: a quien empieza de cero no se le bloquea nada.
-  const semAnterior = sem>1 ? sem-1 : 52;
-  const anoAnterior = sem>1 ? ano   : ano-1;
-  const parteAnterior = partes[idParteSemanal(usuario.id,anoAnterior,semAnterior)]||null;
-  const bloqueadaPorAnterior = !soySoloLector && sem===getSemanaISO() && ano===hoy.getFullYear()
-    && !!parteAnterior && parteAnterior.estado==="borrador"
-    && (parteAnterior.objetivos||[]).length>0;
+  // (v6.11) La semana nueva NO se empieza sin cerrar la anterior. Se busca la
+  // semana pendiente más antigua sin entregar: si alguien deja dos o tres sin
+  // cerrar, se le lleva a la primera, no a la última. A quien nunca ha tenido
+  // parte no se le bloquea nada.
+  const pendienteDeCerrar = React.useMemo(function(){
+    if(soySoloLector) return null;
+    var semHoy=getSemanaISO(), anoHoy=hoy.getFullYear();
+    var cands=Object.keys(partes).map(function(k){ return partes[k]; })
+      .filter(function(p){
+        if(!p||p.usuarioId!==usuario.id) return false;
+        if(p.estado!=="borrador") return false;
+        if(!(p.objetivos||[]).length) return false;      // sin objetivos no hay nada que cerrar
+        if(p.ano>anoHoy) return false;
+        if(p.ano===anoHoy && p.semana>=semHoy) return false; // la semana en curso aún no toca
+        return true;
+      })
+      .sort(function(a,b){ return (a.ano-b.ano)||(a.semana-b.semana); });
+    return cands[0]||null;
+  },[partes,usuario&&usuario.id,soySoloLector]);
+
+  // Estás mirando una semana que no puedes tocar todavía
+  const semanaBloqueada = !!pendienteDeCerrar &&
+    ((ano>pendienteDeCerrar.ano) || (ano===pendienteDeCerrar.ano && sem>pendienteDeCerrar.semana));
 
   // ── Acciones sobre mi parte ──
   function addObjetivo(){
+    if(semanaBloqueada){ avisarBloqueo(); return; }
     var t=nuevoObj.trim();if(!t)return;
     guardarParte({...miParte,objetivos:[...(miParte.objetivos||[]),
       {id:"o"+Date.now(),texto:t,estado:"pendiente",motivo:"",origen:"propio"}]});
@@ -20765,6 +20780,7 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
   }
   // (v5.8.1) Cambio de estado EXPLÍCITO: tocas el objetivo → botones con nombre
   function setEstadoObj(obj,estado,motivo){
+    if(semanaBloqueada){ avisarBloqueo(); return; }
     guardarParte({...miParte,objetivos:miParte.objetivos.map(function(o){
       return o.id===obj.id?{...o,estado:estado,motivo:estado==="bloqueado"?(motivo||""):""}:o;})});
     if(estado!=="bloqueado"){setSelObj(null);setMotivoTxt("");}
@@ -20773,6 +20789,10 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
     if(obj.origen==="superior"){alert("Este objetivo lo añadió "+(obj.porNombre||"tu superior")+" — no puedes borrarlo, pero puedes marcarlo Bloqueado explicando el motivo.");return;}
     guardarParte({...miParte,objetivos:miParte.objetivos.filter(function(o){return o.id!==obj.id;})});
     setSelObj(null);
+  }
+  function avisarBloqueo(){
+    alert("Antes tienes que cerrar la semana "+(pendienteDeCerrar?pendienteDeCerrar.semana:"anterior")+
+          ". Entrégala y podrás trabajar en esta.");
   }
   // Objetivos que quedan sin terminar al cerrar
   function objetivosVivos(p){
@@ -21212,7 +21232,11 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
           <button onClick={function(){if(sem>1){setSem(sem-1);}else{setSem(52);setAno(ano-1);}setAbierto(null);}}
             style={{width:30,height:30,borderRadius:8,border:"1px solid "+T.border,background:"#fff",cursor:"pointer"}}>‹</button>
           <span style={{fontSize:12,fontWeight:800,color:T.text,minWidth:44,textAlign:"center"}}>S{sem}·{String(ano).slice(2)}</span>
-          <button onClick={function(){var sMax=getSemanaISO();if(ano<hoy.getFullYear()||sem<sMax){if(sem<52){setSem(sem+1);}else{setSem(1);setAno(ano+1);}setAbierto(null);}}}
+          <button onClick={function(){
+              var sMax=getSemanaISO();
+              // (v6.11) No se avanza por encima de una semana sin cerrar
+              if(pendienteDeCerrar && ano===pendienteDeCerrar.ano && sem>=pendienteDeCerrar.semana && tab==="mio"){ avisarBloqueo(); return; }
+              if(ano<hoy.getFullYear()||sem<sMax){if(sem<52){setSem(sem+1);}else{setSem(1);setAno(ano+1);}setAbierto(null);}}}
             style={{width:30,height:30,borderRadius:8,border:"1px solid "+T.border,background:"#fff",cursor:"pointer"}}>›</button>
         </div>
       </div>
@@ -21235,20 +21259,24 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
       )}
 
       {/* ═══ MI PARTE ═══ */}
-      {/* (v6.11) La semana anterior quedó sin entregar */}
-      {tab==="mio"&&bloqueadaPorAnterior&&(
-        <div style={{background:"#FFFBEB",border:"1.5px solid #FDE68A",borderRadius:14,
-          padding:"14px 16px",marginBottom:14}}>
-          <p style={{margin:"0 0 5px",fontSize:13,fontWeight:900,color:"#92400E"}}>
-            ⏳ Te falta cerrar la semana {semAnterior}</p>
-          <p style={{margin:"0 0 10px",fontSize:12,color:"#92400E",lineHeight:1.55}}>
-            No puedes empezar la semana {sem} sin entregar la anterior. Al cerrarla
-            decides qué objetivos sin terminar se traspasan, y así no se pierde nada
-            por el camino.</p>
-          <button onClick={function(){ if(semAnterior>sem){setAno(ano-1);} setSem(semAnterior); }}
-            style={{width:"100%",padding:"12px",borderRadius:10,border:"none",
-              background:"#B45309",color:"#fff",fontWeight:900,fontSize:13,cursor:"pointer"}}>
-            Ir a cerrar la semana {semAnterior} →</button>
+      {/* (v6.11) Bloqueo: la semana nueva no se empieza sin cerrar la anterior.
+          No se oculta la pantalla entera —el histórico y el equipo siguen
+          accesibles— pero el parte de la semana nueva no se puede tocar. */}
+      {tab==="mio"&&semanaBloqueada&&(
+        <div style={{background:"#fff",border:"2px solid #FCA5A5",borderRadius:16,
+          padding:"22px 18px",marginBottom:14,textAlign:"center"}}>
+          <p style={{margin:"0 0 8px",fontSize:34}}>🔒</p>
+          <p style={{margin:"0 0 6px",fontSize:16,fontWeight:900,color:"#991B1B"}}>
+            Tienes la semana {pendienteDeCerrar.semana} sin cerrar</p>
+          <p style={{margin:"0 0 16px",fontSize:12.5,color:"#7F1D1D",lineHeight:1.6}}>
+            No puedes empezar la semana {sem} hasta entregar la {pendienteDeCerrar.semana}.
+            Al cerrarla decides qué objetivos siguen vivos y pasan aquí; lo que no,
+            queda cerrado sin hacer y así consta en el informe.
+          </p>
+          <button onClick={function(){ setAno(pendienteDeCerrar.ano); setSem(pendienteDeCerrar.semana); setAbierto(null); }}
+            style={{width:"100%",padding:"15px",borderRadius:12,border:"none",
+              background:"#B91C1C",color:"#fff",fontWeight:900,fontSize:14,cursor:"pointer"}}>
+            🔒 Ir a cerrar la semana {pendienteDeCerrar.semana} →</button>
         </div>
       )}
 
@@ -21314,7 +21342,7 @@ function ParteSemanalDepto({usuario, incidenciasDB}){
         </div>
       )}
 
-      {tab==="mio"&&(
+      {tab==="mio"&&!semanaBloqueada&&(
         <div>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
             <p style={{margin:0,fontSize:12,fontWeight:800,color:T.muted,textTransform:"uppercase"}}>Objetivos de la semana</p>
