@@ -507,6 +507,36 @@ async function latido(modo, extra) {
   } catch (e) { /* el latido nunca debe romper nada */ }
 }
 
+// (ago 2026) Foto diaria de los pedidos planificados. Es la referencia contra
+// la que compara el día siguiente. Se guarda como una sola cadena JSON con los
+// campos mínimos: la colección viva "pbi_pedidos" no sirve porque se
+// sobrescribe en cada ejecución, y eso hacía que el diario dependiera de
+// cuántas veces hubiera corrido el cron.
+async function guardarFoto(fecha, docs) {
+  const minimo = (docs || []).map((d) => ({
+    linea: d.linea, pedido: d.pedido, fecha: d.fecha,
+    cliente: d.cliente, nombre: d.nombre, agente: d.agente,
+    articulo: d.articulo, descripcion: d.descripcion,
+    importe: d.importe, unidades: d.unidades,
+  }));
+  await fbCommit("pbi_pedidos_foto", [{
+    _id: fecha,
+    fecha,
+    guardadoEl: new Date().toISOString(),
+    lineas: JSON.stringify(minimo),
+    nLineas: minimo.length,
+    importe: minimo.reduce((x, d) => x + (d.importe || 0), 0),
+  }]);
+
+  // Basta con guardar diez días: el diario solo enseña los siete últimos.
+  try {
+    const viejas = (await fbLeerColeccion("pbi_pedidos_foto"))
+      .map((f) => f._id)
+      .filter((id) => id < new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10));
+    if (viejas.length) await fbBorrar("pbi_pedidos_foto", viejas);
+  } catch (e) { /* la limpieza nunca debe romper la sincronización */ }
+}
+
 async function fbCommit(coleccion, docs) {
   const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
   // El CRM accede a Firestore sin clave (reglas abiertas). Si algún día se
@@ -3579,19 +3609,62 @@ EVALUATE
         // con la que tenía en la sincronización anterior. Un pedido que se
         // mueve no deja rastro en Power BI: si no se guarda aquí, se pierde.
         try {
+          // ── Contra qué se compara ──────────────────────────────────────
+          // (ago 2026) Antes se comparaba contra la colección viva
+          // "pbi_pedidos", que se sobrescribe en cada ejecución. Eso hacía que
+          // el diario del día dependiera de CUÁNTAS veces hubiera corrido el
+          // cron: la segunda pasada comparaba contra la primera —minutos, no
+          // un día— y al escribir el documento con el nombre de la fecha
+          // borraba lo que había registrado la anterior. Por eso el 25/08
+          // acabó enseñando solo "Servidos": la última pasada del día pilló
+          // únicamente salidas y machacó el resto.
+          //
+          // Ahora se guarda una FOTO por día en pbi_pedidos_foto/<fecha> y
+          // siempre se compara contra la de AYER. El resultado deja de
+          // depender del número de ejecuciones: lanzarlo cinco veces da cinco
+          // veces el mismo diario, y el día queda completo.
+          const hoy = new Date().toISOString().slice(0, 10);
+          const ayerISO = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+
           const antes = new Map();
-          let fotoDe = null;   // cuándo se escribió la foto contra la que comparamos
-          for (const g of await fbLeerColeccion("pbi_pedidos")) {
-            if (g.linea) antes.set(g.linea, g);
-            // (ago 2026) Si el cron se salta un día, el siguiente compara
-            // contra la foto anterior que encuentre y el diario sale con un
-            // "AYER" que no es de ayer. Hasta ahora eso no constaba en ningún
-            // sitio y había que deducirlo cuadrando cifras a mano.
-            const sello = g.sincronizadoEl || g.detectadoEl || null;
-            if (sello && (!fotoDe || sello > fotoDe)) fotoDe = sello;
+          let fotoDe = null;
+
+          const fotoAyer = await fbLeerDoc("pbi_pedidos_foto", ayerISO).catch(() => null);
+          if (fotoAyer && fotoAyer.lineas) {
+            try {
+              for (const g of JSON.parse(fotoAyer.lineas)) {
+                if (g.linea) antes.set(g.linea, g);
+              }
+              fotoDe = fotoAyer.fecha || ayerISO;
+            } catch (e) { out.avisoFoto = "foto de ayer ilegible: " + e.message.slice(0, 80); }
           }
 
-          const hoy = new Date().toISOString().slice(0, 10);
+          // Sin foto de ayer se busca hacia atrás: si el cron no corrió un día,
+          // mejor comparar contra hace dos que no comparar contra nada. Queda
+          // registrado en comparadoCon para que el diario pueda decirlo.
+          if (!antes.size) {
+            for (let k = 2; k <= 7 && !antes.size; k++) {
+              const f = new Date(Date.now() - k * 86400000).toISOString().slice(0, 10);
+              const fx = await fbLeerDoc("pbi_pedidos_foto", f).catch(() => null);
+              if (fx && fx.lineas) {
+                try {
+                  for (const g of JSON.parse(fx.lineas)) if (g.linea) antes.set(g.linea, g);
+                  fotoDe = fx.fecha || f;
+                } catch (e) { /* seguimos hacia atrás */ }
+              }
+            }
+          }
+
+          // Primera vez con el sistema nuevo: todavía no hay fotos. Se usa la
+          // colección viva para no perder este día, y a partir de mañana ya
+          // habrá foto. Se marca para que no parezca una comparación limpia.
+          if (!antes.size) {
+            for (const g of await fbLeerColeccion("pbi_pedidos")) {
+              if (g.linea) antes.set(g.linea, g);
+            }
+            out.avisoFoto = "primera pasada con foto diaria: comparado contra la colección viva";
+          }
+
           out.comparadoCon = fotoDe ? String(fotoDe).slice(0, 10) : null;
           if (out.comparadoCon && out.comparadoCon !== hoy) {
             const dSalto = Math.round(
@@ -3711,12 +3784,22 @@ EVALUATE
               entradas:    JSON.stringify(porTipo(movs, ["nuevo"], 80)),
               cambios:     JSON.stringify(porMagnitud(movs, 80)),
             }]);
+            // ── Foto de hoy, para que mañana haya contra qué comparar ────
+            // Solo los campos que necesita la comparación. 550 líneas ocupan
+            // unos 90 KB en un documento, muy por debajo del millón de bytes
+            // que admite Firestore. Se escribe SIEMPRE, haya habido cambios
+            // o no: si un día falta la foto, se rompe la cadena.
+            await guardarFoto(hoy, docs);
+            out.fotoGuardada = docs.length;
+
             out.cambiosFecha = { retrasos: cuenta("retraso"),
               adelantos: cuenta("adelanto"), nuevos: cuenta("nuevo"),
               servidos: cuenta("servido"), anulados: cuenta("anulado"),
               importeServidos: suma("servido"), importeRetrasos: suma("retraso"),
               variaciones: cuenta("cambio"), importeVariacion: num(variacion) };
           } else {
+            await guardarFoto(hoy, docs);
+            out.fotoGuardada = docs.length;
             out.cambiosFecha = "primera pasada, no hay con qué comparar";
           }
         } catch (e) {
