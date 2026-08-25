@@ -3751,7 +3751,27 @@ EVALUATE
           const suma = (t) => num(movs.filter((m) => m.tipo === t)
             .reduce((x, m) => x + (m.importe || 0), 0));
 
-          if (antes.size) {
+          // (ago 2026) Ejecutar esto dos veces el mismo dia machacaba el
+          // diario: la segunda vez comparaba contra la foto que acababa de
+          // guardar la primera, no encontraba cambios y lo dejaba todo a cero.
+          // Si ya hay diario de hoy CON movimientos y ahora no sale ninguno,
+          // se conserva el que estaba: es mejor dato que un cero vacio.
+          let conservar = false;
+          try {
+            const yaHay = await fbLeerDoc("pbi_pedidos_cambios", hoy).catch(() => null);
+            const teniaMovs = yaHay && (num(yaHay.retrasos) + num(yaHay.adelantos)
+              + num(yaHay.nuevos) + num(yaHay.servidos) + num(yaHay.anulados)
+              + num(yaHay.variaciones)) > 0;
+            const ahoraSinMovs = (cuenta("retraso") + cuenta("adelanto")
+              + cuenta("nuevo") + cuenta("servido") + cuenta("anulado")
+              + cuenta("cambio")) === 0;
+            if (teniaMovs && ahoraSinMovs) {
+              conservar = true;
+              out.diarioConservado = "ya habia diario de hoy con movimientos";
+            }
+          } catch (e) { /* ante la duda, se escribe */ }
+
+          if (antes.size && !conservar) {
             await fbCommit("pbi_pedidos_cambios", [{
               _id: hoy,
               fecha: hoy,
