@@ -62,6 +62,12 @@ select,button.mini{padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:11
 .t-emp{background:#EEF2FF;color:#4F46E5}
 .t-inc{background:#FFF7ED;color:#C2410C}
 .t-ap{background:#F1F5F9;color:#475569}
+.t-comp{background:#ECFEFF;color:#0E7490}
+.fila.par{background:#ECFEFF}
+.cli-imp .c{font-size:11.5px;font-weight:800;color:#0E7490;margin:2px 0 0}
+.compbar{background:#ECFEFF;border:1px solid #A5F3FC;border-radius:12px;padding:11px 13px;
+  margin-bottom:11px;font-size:12.5px;color:#0E7490;line-height:1.5}
+.compbar span{font-size:11px;color:#0891B2}
 .binc{border:1.5px solid #E2E8F0;background:#fff;border-radius:9px;padding:7px 9px;font-size:11px;
   font-weight:800;cursor:pointer;color:#64748B;white-space:nowrap;flex-shrink:0}
 .binc:hover{border-color:#F97316;color:#C2410C;background:#FFF7ED}
@@ -160,6 +166,7 @@ let ST = {
   empresa : "",
   comercial: "",
   interco : "no",          // no | si | solo
+  compensar: false,        // solo clientes con abonos que cuadran con facturas
   orden   : (Q.get("vista")==="vencidos") ? "antiguedad" : "importe",
   abiertos: {},
   docs    : [],
@@ -181,6 +188,34 @@ function normCom(s){
   return String(s==null?"":s).toUpperCase().trim().normalize("NFD")
     .replace(/[\u0300-\u036f]/g,"").replace(/[^A-Z0-9]/g,"");
 }
+// Se reconoce por el nombre del comercial, no solo por el identificador del
+// documento: así el filtro funciona también con cargas antiguas, publicadas
+// antes de que el importador separase el bloque de grupo.
+const CODIGOS_GRUPO = ["INTERCOMPANY","INTERCNACIONAL","INTERCINTERN","INTERCINTERNACIONAL",
+                       "GRUPO","TIENDA","INTERCOMPANIA"];
+function esIntercompania(d){
+  if(!d) return false;
+  if(d.esGrupo===true) return true;
+  const c=normCom(d.comercial||""), n=normCom(d.comercialNombre||"");
+  return CODIGOS_GRUPO.indexOf(c)>=0 || CODIGOS_GRUPO.indexOf(n)>=0;
+}
+// Busca abonos que cuadran, importe a importe, con una factura pendiente del
+// mismo cliente. Son compensaciones que alguien tiene que aplicar a mano: el
+// dinero no se debe, pero sigue contando como vencido y ensuciando la cartera.
+// Emparejamiento uno a uno: cada documento se usa una sola vez.
+function paresCompensables(facs){
+  const pos=facs.filter(f=>f.im>0).slice().sort((a,b)=>b.im-a.im);
+  const neg=facs.filter(f=>f.im<0).slice().sort((a,b)=>a.im-b.im);
+  const usados=new Set(), pares=[];
+  for(const n of neg){
+    const objetivo=Math.abs(n.im);
+    const i=pos.findIndex((f,idx)=>!usados.has(idx) && Math.abs(f.im-objetivo)<0.01);
+    if(i>=0){ usados.add(i); pares.push({abono:n, factura:pos[i], importe:objetivo}); }
+  }
+  return pares;
+}
+function claveDoc(f){ return String(f.g||"")+"|"+String(f.t||"")+"|"+String(f.n||"")+"|"+String(f.fv||""); }
+
 function esApunte(f){ return String(f.t||"").toUpperCase()==="AS"; }
 function claveFac(cliente, f){ return normCom(cliente)+"|"+String(f.n||"")+"|"+(f.fv||""); }
 function semanaISO(){
@@ -278,7 +313,7 @@ function clientes(){
     if(ST.comercial && d.comercial!==ST.comercial) continue;
     // Intercompañía y sociedades del grupo: casi la mitad del saldo y no lo
     // cobra ningún vendedor, así que por defecto queda fuera.
-    const esG = (d.comercial==="INTERCOMPANY") || !!d.esGrupo;
+    const esG = esIntercompania(d);
     if(ST.interco==="no"   &&  esG) continue;
     if(ST.interco==="solo" && !esG) continue;
     let arr=[];
@@ -299,19 +334,33 @@ function preparados(){
     if(q && !String(c.c||"").toUpperCase().includes(q)) continue;
     const p   = facs.reduce((s,f)=>s+(f.im||0),0);
     const v   = facs.filter(f=>f.fv&&f.fv<=HOY).reduce((s,f)=>s+(f.im||0),0);
+    // Modo compensación: solo los clientes donde hay algo que cuadrar.
+    let pares=[];
+    if(ST.compensar){
+      pares=paresCompensables(facs);
+      if(!pares.length) continue;
+    }
     // Un cliente cuyo saldo neto se queda en cero (o a su favor) no es deuda
-    // que reclamar: solo son apuntes que se compensan entre sí.
-    if(Math.abs(p) < 1) continue;
-    if(ST.vista==="vencidos" && p <= 0) continue;
+    // que reclamar: solo son apuntes que se compensan entre sí. En el modo
+    // compensación sí interesan: son justo los que hay que limpiar.
+    if(!ST.compensar){
+      if(Math.abs(p) < 1) continue;
+      if(ST.vista==="vencidos" && p <= 0) continue;
+    }
     // La antigüedad se mide sobre facturas de verdad. Los apuntes contables
     // (tipo AS) llevan la fecha del asiento de migración y falseaban el
     // retraso con cifras de 900 y 1.500 días.
     const venc = facs.filter(f=>f.fv&&f.fv<=HOY);
     const reales = venc.filter(f=>!esApunte(f));
     const masAntigua = (reales.length?reales:venc).map(f=>f.fv).sort()[0] || "9999-12-31";
-    lista.push(Object.assign({},c,{_f:facs,_p:p,_v:v,_ant:masAntigua,_apunte:reales.length===0&&venc.length>0}));
+    const marcados=new Set();
+    pares.forEach(x=>{ marcados.add(claveDoc(x.abono)); marcados.add(claveDoc(x.factura)); });
+    lista.push(Object.assign({},c,{_f:facs,_p:p,_v:v,_ant:masAntigua,
+      _apunte:reales.length===0&&venc.length>0,
+      _pares:pares, _comp:pares.reduce((s,x)=>s+x.importe,0), _marcados:marcados}));
   }
-  if(ST.orden==="antiguedad")   lista.sort((a,b)=> a._ant.localeCompare(b._ant) || b._v-a._v);
+  if(ST.compensar)              lista.sort((a,b)=> b._comp-a._comp);
+  else if(ST.orden==="antiguedad") lista.sort((a,b)=> a._ant.localeCompare(b._ant) || b._v-a._v);
   else if(ST.orden==="nombre")  lista.sort((a,b)=> String(a.c).localeCompare(String(b.c),"es"));
   else                          lista.sort((a,b)=> (ST.vista==="vencidos"? b._v-a._v : b._p-a._p));
   return lista;
@@ -385,7 +434,9 @@ function render(){
   const sumP = lista.reduce((s,c)=>s+c._p,0);
 
   const comerciales = VE_TODO
-    ? ST.docs.map(d=>({id:d.comercial,n:d.comercialNombre||d.comercial}))
+    ? ST.docs.filter(d=>ST.interco==="solo" ? esIntercompania(d)
+                      : ST.interco==="no"   ? !esIntercompania(d) : true)
+        .map(d=>({id:d.comercial,n:d.comercialNombre||d.comercial}))
         .sort((a,b)=>String(a.n).localeCompare(String(b.n),"es")) : [];
 
   document.getElementById("app").innerHTML = `
@@ -427,8 +478,19 @@ function render(){
         <option value="">Todos los vendedores</option>
         ${comerciales.map(c=>`<option value="${esc(c.id)}" ${ST.comercial===c.id?"selected":""}>${esc(c.n)}</option>`).join("")}
       </select>`:""}
+      <button class="mini" onclick="ST.compensar=!ST.compensar;ST.abiertos={};render()"
+        style="${ST.compensar?"border-color:#0891B2;background:#ECFEFF;color:#0E7490;font-weight:800":""}">
+        🔄 Compensables</button>
       <button class="mini" onclick="exportar()">⬇︎ Excel</button>
     </div>
+
+    ${ST.compensar?`<div class="compbar">
+      <b>${lista.length}</b> ${lista.length===1?"cliente":"clientes"} con abonos que cuadran ·
+      <b>${eur(lista.reduce((s,c)=>s+c._comp,0))}</b> compensables en
+      ${lista.reduce((s,c)=>s+c._pares.length,0)} pares<br>
+      <span>Son documentos que se anulan entre sí y siguen contando como pendientes.
+      Aplicar la compensación los saca de la cartera sin cobrar un euro.</span>
+    </div>`:""}
 
     <p style="margin:0 0 10px;font-size:12px;color:#64748B">
       <b>${lista.length}</b> ${lista.length===1?"cliente":"clientes"} · <b>${eur(sumP)}</b>
@@ -453,7 +515,7 @@ function render(){
 
 function tarjeta(c,ci){
   const k = normCom(c.c);
-  const ab = !!ST.abiertos[k];
+  const ab = ST.compensar ? (ST.abiertos[k]!==false) : !!ST.abiertos[k];
   const vencidas = c._f.filter(f=>f.fv&&f.fv<=HOY);
   const antig = vencidas.length ? dias(c._ant) : 0;
   return `
@@ -469,7 +531,9 @@ function tarjeta(c,ci){
       </div>
       <div class="cli-imp">
         <p class="p">${eur(c._p)}</p>
-        ${c._v?`<p class="v">${eur(c._v)} vencido</p>`:""}
+        ${ST.compensar
+          ? `<p class="c">🔄 ${eur(c._comp)} a compensar</p>`
+          : (c._v?`<p class="v">${eur(c._v)} vencido</p>`:"")}
       </div>
       <span class="chev">${ab?"▲":"▼"}</span>
     </div>
@@ -483,7 +547,7 @@ function fila(c,f,ci,fi){
   const key = claveFac(c.c,f);
   const nInc = ST.incid[key]||0;
   return `
-  <div class="fila">
+  <div class="fila${ST.compensar&&c._marcados&&c._marcados.has(claveDoc(f))?" par":""}">
     <div class="fi">
       <b>${f.t?esc(f.t)+" ":""}${esc(f.n||"—")}</b>
       <span>
@@ -492,6 +556,8 @@ function fila(c,f,ci,fi){
                       : venc ? d+" días vencida" : "vence "+fecha(f.fv)}</span>
         <span class="tag t-emp">${esc(f.g||"")}${f.em&&f.em!==f.g?" · "+esc(f.em):""}</span>
         ${nInc?`<span class="tag t-inc">⚑ ${nInc} incidencia${nInc>1?"s":""}</span>`:""}
+        ${ST.compensar&&c._marcados&&c._marcados.has(claveDoc(f))
+          ? `<span class="tag t-comp">🔄 ${f.im<0?"abono":"factura"} compensable</span>`:""}
       </span>
       <span>Emitida ${fecha(f.ff)} · Vence ${fecha(f.fv)}${f.tf&&f.tf!==f.im?" · Factura "+eur(f.tf):""}</span>
     </div>
@@ -500,7 +566,10 @@ function fila(c,f,ci,fi){
   </div>`;
 }
 
-function toggle(k){ ST.abiertos[k]=!ST.abiertos[k]; render(); }
+function toggle(k){
+  const abierto = ST.compensar ? (ST.abiertos[k]!==false) : !!ST.abiertos[k];
+  ST.abiertos[k]=!abierto; render();
+}
 function setVista(v){
   ST.vista=v;
   ST.orden = (v==="vencidos") ? "antiguedad" : "importe";
@@ -626,6 +695,8 @@ function exportar(){
       const venc=f.fv&&f.fv<=HOY;
       filas.push({
         Cliente:c.c, Vendedor:c._com||P.nombre||P.agente, Empresa:f.g, Sociedad:f.em||"",
+        Compensable: (ST.compensar&&c._marcados&&c._marcados.has(claveDoc(f)))
+          ? (f.im<0?"ABONO":"FACTURA") : "",
         Documento:(f.t?f.t+" ":"")+(f.n||""),
         "Fecha emisión":fecha(f.ff), "Fecha vencimiento":fecha(f.fv),
         "Importe pendiente":f.im, Estado:venc?"Vencida":"En plazo",
@@ -635,7 +706,7 @@ function exportar(){
   }
   const ws=XLSX.utils.json_to_sheet(filas), wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb,ws,"Cobros");
-  XLSX.writeFile(wb,`cobros_${ST.vista}_${HOY}.xlsx`);
+  XLSX.writeFile(wb,`cobros_${ST.compensar?"compensables":ST.vista}_${HOY}.xlsx`);
 }
 
 // ── Arranque ────────────────────────────────────────────────────
