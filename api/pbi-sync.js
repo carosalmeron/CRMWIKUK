@@ -5170,7 +5170,7 @@ EVALUATE
           : req.query.mesescliente ? "mesescliente"
           : req.query.estacionalidad ? "estacionalidad"
           : req.query.cierre ? "cierre"
-          : req.query.maestro ? "maestro" : "full";
+          : (req.query.maestro || soloMaestro) ? "maestro" : "full";
         await fbCommit("pbi_latidos", [{
           _id: modo,
           modo,
