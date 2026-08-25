@@ -819,6 +819,29 @@ const docId = (v) => String(v || "").trim().replace(/[/#?\[\]*]/g, "_") || "SIN_
 
 // ─────────────── Handler ───────────────
 export default async function handler(req, res) {
+  // (ago 2026) El plan gratuito de cron-job.org corta a los 30 s y los
+  // procesos largos (sync general, full, maestro) tardan 44-54: el cron los
+  // daba por fallidos aunque Vercel los ejecutara bien. Con &async=1 se
+  // responde al instante y el trabajo sigue por detras, asi el cron ve un
+  // 200 limpio. El resultado se consulta en el panel de salud.
+  if (req.query.async === "1") {
+    const q = { ...req.query };
+    delete q.async;
+    const qs = Object.entries(q)
+      .map(([k, v]) => encodeURIComponent(k) + "=" + encodeURIComponent(v))
+      .join("&");
+    const proto = req.headers["x-forwarded-proto"] || "https";
+    const host = req.headers.host;
+    // Se dispara la misma URL sin esperar respuesta
+    fetch(`${proto}://${host}/api/pbi-sync?${qs}`).catch(() => {});
+    return res.status(202).json({
+      ok: true,
+      lanzado: true,
+      nota: "Proceso lanzado en segundo plano. Mira el panel de salud "
+        + "en unos minutos para ver el resultado.",
+    });
+  }
+
   // Consulta de solo lectura que llama la pantalla de análisis desde el
   // navegador. Va antes del control de acceso porque no se puede poner el
   // secreto en el código del cliente sin exponerlo. No escribe nada.
