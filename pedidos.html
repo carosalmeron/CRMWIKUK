@@ -510,13 +510,47 @@ async function pintarDiario(){
       && (!SIN_INTER || !/INTERCO|WIKUK EASY|DISCOB/i.test(m.nombre||""));
     const tot=(l)=>l.reduce((s,m)=>s+(m.importe||0),0);
 
+    // ── Vigilancia del propio diario ──────────────────────────────
+    // El cron de pedidos no escribe latido: salud.html deduce su estado de
+    // que el dato sea reciente, y un dato reciente no significa un proceso
+    // completo. Si se corta a medias, escribe unas listas y no otras, y el
+    // panel lo sigue dando por bueno. Aquí se comprueba lo único que no
+    // engaña: que la cadena de días no tenga huecos y que las secciones
+    // expliquen la variación de la cabecera.
+    const diaISO=(x)=>String(x&&x.fecha||"").slice(0,10);
+    const huecos=[];
+    for(let i=0;i<dias.length-1;i++){
+      const hoyD2=new Date(diaISO(dias[i])+"T12:00:00");
+      const antD =new Date(diaISO(dias[i+1])+"T12:00:00");
+      const salto=Math.round((hoyD2-antD)/86400000);
+      for(let k=1;k<salto;k++){
+        const f=new Date(antD); f.setDate(f.getDate()+k);
+        huecos.push(iso(f));
+      }
+    }
+
     let html="";
+    if(huecos.length){
+      html+=`<div class="grupo"><div class="cab urge" style="display:block">
+        <div style="font-size:14px;font-weight:800;color:var(--hoy)">
+          ⚠️ ${huecos.length===1?"Falta un día en el diario":"Faltan "+huecos.length+" días en el diario"}</div>
+        <div style="font-size:12px;margin-top:5px;line-height:1.5">
+          ${huecos.map(f=>f.split("-").reverse().join("/")).join(" · ")}.
+          Ese día la sincronización no llegó a escribir, así que el día siguiente
+          compara contra el anterior y todo lo que pasó en medio se pierde o se mezcla.</div>
+      </div></div>`;
+    }
+
     for(const d of dias){
       const salidas=lee(d.salidas).filter(mio);
       const movs=lee(d.movimientos).filter(mio);
       const entradas=lee(d.entradas).filter(mio);
       const cambios=lee(d.cambios).filter(mio);
-      if(!salidas.length&&!movs.length&&!entradas.length&&!cambios.length) continue;
+      // (ago 2026) Un día sin movimientos se saltaba en silencio, y entonces
+      // no se distinguía "ese día no pasó nada" de "ese día la sincronización
+      // se cortó". Ahora se pinta igualmente, con la cabecera y una línea que
+      // lo dice, para que la cadena de días quede completa a la vista.
+      const vacio = !salidas.length&&!movs.length&&!entradas.length&&!cambios.length;
 
       const servidos=salidas.filter(m=>m.tipo==="servido");
       const anulados=salidas.filter(m=>m.tipo==="anulado");
@@ -674,6 +708,14 @@ async function pintarDiario(){
       const tit=(t,l,urge)=>`<div class="sec${urge?" urge":""}">${t} · ${eur(tot(l))}
         <span class="cuenta">${cuenta(l)}</span></div>`;
 
+      if(vacio){
+        const mismo = d.pedidosAntes===d.pedidosAhora && d.importeAntes===d.importeAhora;
+        html+=`<div class="sec" style="font-weight:600;color:var(--tenue)">
+          Sin movimientos${mismo?"":" registrados"}
+          <span class="cuenta">${mismo
+            ? "la foto no había cambiado"
+            : "las cifras cambiaron pero no se registró el detalle"}</span></div>`;
+      }
       if(noSalieron.length){
         html+=tit("No han salido hoy", noSalieron, true)
           +agrupar(noSalieron).map(m=>linea(m,
