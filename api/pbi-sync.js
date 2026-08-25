@@ -3384,6 +3384,7 @@ EVALUATE
   if (req.query.solopedidos === "1") {
     const t1 = Date.now();
     const out = { ok: true };
+    const SELLO_SYNC = new Date().toISOString();
     try {
       const { token, modo } = await getToken(req);
       out.modoAuth = modo;
@@ -3437,6 +3438,11 @@ EVALUATE
           // Clave que no depende de la fecha de entrega: permite reconocer la
           // misma línea de un día para otro y detectar si se ha movido.
           linea: docId(`${String(pick(r, "Pedido") || "").trim()}_${cli}_${art}`),
+          // (ago 2026) Sello de la foto. Mañana, al comparar, se sabe de qué
+          // día era lo que había guardado: si el cron se saltó una jornada, el
+          // diario puede decirlo en vez de presentar como "ayer" algo de hace
+          // tres días.
+          sincronizadoEl: SELLO_SYNC,
           cliente: cli,
           nombre: ficha.nombre || cli,
           poblacion: ficha.poblacion || null,
@@ -3574,11 +3580,26 @@ EVALUATE
         // mueve no deja rastro en Power BI: si no se guarda aquí, se pierde.
         try {
           const antes = new Map();
+          let fotoDe = null;   // cuándo se escribió la foto contra la que comparamos
           for (const g of await fbLeerColeccion("pbi_pedidos")) {
             if (g.linea) antes.set(g.linea, g);
+            // (ago 2026) Si el cron se salta un día, el siguiente compara
+            // contra la foto anterior que encuentre y el diario sale con un
+            // "AYER" que no es de ayer. Hasta ahora eso no constaba en ningún
+            // sitio y había que deducirlo cuadrando cifras a mano.
+            const sello = g.sincronizadoEl || g.detectadoEl || null;
+            if (sello && (!fotoDe || sello > fotoDe)) fotoDe = sello;
           }
 
           const hoy = new Date().toISOString().slice(0, 10);
+          out.comparadoCon = fotoDe ? String(fotoDe).slice(0, 10) : null;
+          if (out.comparadoCon && out.comparadoCon !== hoy) {
+            const dSalto = Math.round(
+              (new Date(hoy) - new Date(out.comparadoCon)) / 86400000);
+            if (dSalto > 1) out.avisoSalto =
+              `comparado contra ${out.comparadoCon}, ${dSalto} días atrás: ` +
+              `falta al menos una sincronización intermedia`;
+          }
           const movs = [];
           const vistas = new Set();
           let variacion = 0;   // suma de cambios de importe en líneas vivas
@@ -3662,6 +3683,8 @@ EVALUATE
               _id: hoy,
               fecha: hoy,
               detectadoEl: new Date().toISOString(),
+              comparadoCon: out.comparadoCon || null,
+              avisoSalto: out.avisoSalto || null,
               lineasAntes: antes.size,
               lineasAhora: docs.length,
               // Importe y número de pedidos de cada foto, para la cabecera
@@ -3719,6 +3742,34 @@ EVALUATE
       out.ok = false;
       out.error = e.message;
     }
+    // (ago 2026) Este endpoint era el único de los seis que salía sin dejar
+    // latido. El panel de salud no podía saber si había terminado, así que
+    // deducía su estado de que el dato fuese reciente: "sin latido, medido
+    // por el dato". Un proceso cortado a medias deja dato fresco y se seguía
+    // dando por AL DÍA — el 25/08 escribió las salidas, no llegó al resto y
+    // nadie se enteró. Va fuera del try para que salga también cuando falla.
+    await latido("pedidos", {
+      segundos: out.segundos || Math.round((Date.now() - t1) / 1000),
+      errores: out.ok ? 0 : 1,
+      detalleErrores: out.error ? String(out.error).slice(0, 160) : null,
+      // Recuentos de lo escrito: sin esto no se distingue "corrió y no hubo
+      // movimiento" de "corrió y se cortó". Los dos dejan el día casi vacío.
+      pedidos: out.guardados || null,
+      salidas: (out.cambiosFecha && typeof out.cambiosFecha === "object")
+        ? (out.cambiosFecha.servidos || 0) + (out.cambiosFecha.anulados || 0) : null,
+      movimientos: (out.cambiosFecha && typeof out.cambiosFecha === "object")
+        ? (out.cambiosFecha.retrasos || 0) + (out.cambiosFecha.adelantos || 0) : null,
+      entradas: (out.cambiosFecha && typeof out.cambiosFecha === "object")
+        ? (out.cambiosFecha.nuevos || 0) : null,
+      cambios: (out.cambiosFecha && typeof out.cambiosFecha === "object")
+        ? (out.cambiosFecha.variaciones || 0) : null,
+      // Contra qué foto se comparó. Si el cron se salta un día, el siguiente
+      // compara contra el anterior que encuentre y hasta ahora eso no constaba
+      // en ningún sitio: el martes ponía "AYER 299" sin decir que ese ayer era
+      // el domingo.
+      comparadoCon: out.comparadoCon || null,
+      sinComparar: (out.cambiosFecha === "primera pasada, no hay con qué comparar") || null,
+    });
     return res.status(out.ok ? 200 : 500).json(out);
   }
 
