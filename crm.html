@@ -25790,6 +25790,27 @@ function FocoDireccion({usuario, onNav}){
 }
 
 function DashMando({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasDB, incidenciasDB, forzarGlobal}){
+  // El _TOTAL de pbi_estacionalidad: es lo que factura la empresa, incluidas
+  // las fichas sin comercial dado de alta en el CRM. Sumando por comercial se
+  // perdian 380.000 EUR en agosto.
+  const [totEstMando,setTotEstMando]=React.useState(null);
+  React.useEffect(()=>{
+    let vivo=true;
+    fetch(`${FB_BASE}/pbi_estacionalidad/_TOTAL`)
+      .then(r=>r.ok?r.json():null)
+      .then(j=>{
+        if(!vivo||!j||!j.fields) return;
+        const o={};
+        for(const [k,v] of Object.entries(j.fields)){
+          o[k]=v.doubleValue!==undefined?Number(v.doubleValue)
+            :v.integerValue!==undefined?Number(v.integerValue)
+            :v.stringValue;
+        }
+        setTotEstMando(o);
+      }).catch(()=>{});
+    return ()=>{ vivo=false; };
+  },[]);
+
   const rol=String(usuario.rol||"").toLowerCase();
   // El enrutador decide quién ve toda la empresa (incluye perfiles como Calidad,
   // que no son dirección pero necesitan la visión global). Se respeta esa
@@ -25908,7 +25929,23 @@ function DashMando({usuario, onNav, estrategiasDB, oportunidadesDB, muestrasDB, 
     ? filtradosEq.reduce((s,v)=>s+(v.oMb||0)*(v.vAnual||0),0)/pesoMb
     : (filtradosEq.length?filtradosEq.reduce((s,v)=>s+(v.oMb||0),0)/filtradosEq.length:0);
 
-  const vR=periodo==="semana"?tot.vSem:periodo==="mes"?tot.vMes:tot.vAnual;
+  // (ago 2026) Sumando comercial por comercial se perdian las ventas de las
+  // fichas sin usuario en el CRM: 501.223 EUR frente a los 883.067 reales de
+  // agosto. En la vista consolidada (sin filtro de equipo ni de agente) se usa
+  // el _TOTAL de estacionalidad, que es lo que factura la empresa y cuadra con
+  // el Panel Principal. Al filtrar por equipo o agente se sigue sumando, que
+  // es lo correcto: ahi si interesa el reparto por comercial.
+  const _consolidado = equipoFiltro==="todos" && !agenteFiltro;
+  const _totEst = totEstMando;
+  const _mesHoy = new Date().getMonth()+1;
+  const _pbiMes = _totEst ? Number(_totEst["pbi_"+_mesHoy]||0) : 0;
+  const _pbiAnual = _totEst ? Number(_totEst.totalActPBI||0) : 0;
+
+  let vR=periodo==="semana"?tot.vSem:periodo==="mes"?tot.vMes:tot.vAnual;
+  if(_consolidado){
+    if(periodo==="mes" && _pbiMes>0) vR=_pbiMes;
+    else if(periodo==="año" && _pbiAnual>0) vR=_pbiAnual;
+  }
   // En "año" se mide contra el objetivo acumulado hasta hoy, no contra el
   // presupuesto anual completo.
   const vO=periodo==="semana"?tot.oSem:periodo==="mes"?tot.oMes:(tot.oAnualHoy||tot.oAnual);
