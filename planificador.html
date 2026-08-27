@@ -686,6 +686,98 @@ async function manual(d){
  }catch(e){msg("ASIGNAR MANUAL tropezó: "+e.message,"err");console.error(e);}}
 
 /* ── ✖ ANULAR SEMANA: enfermedad, feria, vacaciones… la palanca de los cambios grandes ── */
+/* ── 📅 CORRER TODO EL CALENDARIO desde una semana (enfermedad/imprevisto largo) ── */
+function crucePorMes(per,nombre,mesViejo,mesNuevo){
+ if(mesViejo===mesNuevo)return null;
+ const ins=insideCargada(per);if(!ins)return null;
+ const lls=llamadasDe(nombre,ins).filter(x=>F(x).mes===mesNuevo);
+ if(lls.length){for(const l of lls)setF(l,{mes:mesViejo});return "📞 llamada de "+nombre+" cruzada a "+mesViejo+" (el duplo no pierde el impacto)";}
+ return null;}
+function corrCalendario(per,mesRef,semRef){
+ abre("<h3>📅 Correr el calendario de "+per+"</h3>"+
+  "<p style='font-size:12.5px;color:var(--gris)'>Desde <b>"+semRef+" ("+mesRef+")</b> en adelante, todo se desplaza. ¿Cuántas semanas de baja?</p>"+
+  "<label>Semanas a correr</label><select id='mN'><option value='1'>1 semana</option><option value='2'>2 semanas</option><option value='3'>3 semanas</option><option value='4'>4 semanas</option></select>"+
+  "<label>Motivo</label><select id='mMotC'><option>Enfermedad</option><option>Vacaciones</option><option>Imprevisto</option><option>Otro</option></select>"+
+  "<div class='fila'><button onclick='cierra()'>Cancelar</button><button class='pri' id='mOkC'>Correr calendario</button></div>");
+ $("mOkC").onclick=()=>{
+  const N=+$("mN").value;const motivo=$("mMotC").value;
+  const refRow=PLAN.find(r=>{const f=F(r);return norm(f.per)===norm(per)&&f.sem===semRef&&f.mes===mesRef;});
+  const desdeF=refRow?fechaDe("|"+F(refRow).fecha):0;
+  const afectadas=PLAN.filter(r=>{const f=F(r);return norm(f.per)===norm(per)&&fechaDe("|"+(f.fecha||""))>=desdeF;});
+  const efectos=[];
+  for(const r of afectadas){
+   const f=F(r);
+   const [dd,mm,yy]=(f.fecha||"01/01/2026").split("/").map(Number);
+   const nd=new Date(yy,mm-1,dd);nd.setDate(nd.getDate()+7*N);
+   const f2=String(nd.getDate()).padStart(2,"0")+"/"+String(nd.getMonth()+1).padStart(2,"0")+"/"+nd.getFullYear();
+   const sem2="S"+String(getISOWeek(nd)).padStart(2,"0")+(nd.getFullYear()!==yy?"("+nd.getFullYear()+")":"");
+   const MESES=["ENERO","FEBRERO","MARZO","ABRIL","MAYO","JUNIO","JULIO","AGOSTO","SEPTIEMBRE","OCTUBRE","NOVIEMBRE","DICIEMBRE"];
+   const mesViejo=f.mes,mesNuevo=MESES[nd.getMonth()];
+   setF(r,{fecha:f2,sem:sem2,mes:mesNuevo});
+   r.nota=(f.nota?f.nota+" · ":"")+"calendario corrido "+N+" semana(s) ("+motivo+")";
+   if(/^VISITA/i.test(f.acc)&&!/PROSP/i.test(f.acc)){
+    const eco=crucePorMes(per,f.n,mesViejo,mesNuevo);if(eco)efectos.push(eco);
+   }else if(/PROSP/i.test(f.acc)){
+    const eco=mueveCual(f.n,per,f2);if(eco)efectos.push(eco);
+   }
+  }
+  tocados.add("__CALENDARIO__");
+  const insQ=insideCargada(per);const mv=insQ&&!SOLO.has(insQ)?reequilibraInside(per,efectos):0;
+  anota("📅 CALENDARIO CORRIDO "+N+" semana(s) desde "+semRef+" ("+motivo+"): "+per,
+   ["afectadas "+afectadas.length+" acciones · todo lo posterior a "+semRef+" se desplazó "+N+" semana(s)"].concat(efectos));
+  marca();cierra();pinta();
+  msg("Calendario de "+per+" corrido "+N+" semana(s) desde "+semRef+". "+afectadas.length+" acciones reubicadas"+(insQ?" · su Inside ("+insQ+") reconciliada":"")+".","bien");};}
+function getISOWeek(d){const t=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));
+ const day=(t.getUTCDay()+6)%7;t.setUTCDate(t.getUTCDate()-day+3);
+ const first=new Date(Date.UTC(t.getUTCFullYear(),0,4));
+ return 1+Math.round(((t-first)/86400000-3+((first.getUTCDay()+6)%7))/7);}
+
+/* ── ⇆ CAMBIAR esta ruta por otra semana: buscador + swap ── */
+function abreBuscadorSwap(per,mesA,semA){
+ const g=grupos()[norm(per)]||{};
+ const opciones=[];
+ for(const [m2,gm2] of Object.entries(g))for(const [s2] of Object.entries(gm2)){
+  if(m2===mesA&&s2===semA)continue;
+  opciones.push({m2,s2});}
+ opciones.sort((a,b)=>{
+  const fa=Object.keys(g[a.m2][a.s2])[0]||"",fb=Object.keys(g[b.m2][b.s2])[0]||"";
+  return fechaDe(fa)-fechaDe(fb);});
+ abre("<h3>⇆ Cambiar "+semA+" ("+mesA+") por…</h3>"+
+  "<p style='font-size:12.5px;color:var(--gris)'>Elige la semana con la que quieres intercambiarla. Las dos rutas se cruzan enteras: los clientes de cada una pasan a los días de la otra semana.</p>"+
+  "<input type='text' id='mBusS' placeholder='filtrar por ruta o mes…'>"+
+  "<div class='lista' id='mListaS'></div>"+
+  "<div class='fila'><button onclick='cierra()'>Cancelar</button></div>");
+ const pinta2=()=>{
+  const q=norm($("mBusS").value);
+  const vis=opciones.filter(o=>!q||norm(o.s2+" "+o.m2).includes(q));
+  $("mListaS").innerHTML=vis.map((o,i)=>"<div class='it' data-i='"+i+"'>"+o.s2+" · "+o.m2+"</div>").join("")||"<div class='it'>Sin resultados.</div>";
+  [...$("mListaS").querySelectorAll(".it[data-i]")].forEach(el=>el.onclick=()=>{
+   const o=vis[+el.dataset.i];swapSemanas(per,mesA,semA,o.m2,o.s2);});};
+ $("mBusS").oninput=pinta2;pinta2();}
+function swapSemanas(per,mesA,semA,mesB,semB){
+ const g=grupos()[norm(per)]||{};
+ const gA=g[mesA][semA],gB=g[mesB][semB];
+ const fA={},fB={};
+ for(const kd of Object.keys(gA)){const dn=kd.split("|")[0];if(!(dn in fA))fA[dn]=kd.split("|")[1];}
+ for(const kd of Object.keys(gB)){const dn=kd.split("|")[0];if(!(dn in fB))fB[dn]=kd.split("|")[1];}
+ const efectos=[];
+ for(const cards of Object.values(gA))for(const r of cards){
+  const f=F(r);const dn=f.dia.split(" ")[0]||f.dia;const mesViejo=f.mes;
+  setF(r,{mes:mesB,sem:semB,fecha:fB[dn]||f.fecha});
+  efectos.push("⇆ "+f.n+": "+semA+"→"+semB);
+  if(/^VISITA/i.test(f.acc)&&!/PROSP/i.test(f.acc)){const eco=crucePorMes(per,f.n,mesViejo,mesB);if(eco)efectos.push(eco);}
+  else if(/PROSP/i.test(f.acc)){const eco=mueveCual(f.n,per,fB[dn]||f.fecha);if(eco)efectos.push(eco);}}
+ for(const cards of Object.values(gB))for(const r of cards){
+  const f=F(r);const dn=f.dia.split(" ")[0]||f.dia;const mesViejo=f.mes;
+  setF(r,{mes:mesA,sem:semA,fecha:fA[dn]||f.fecha});
+  efectos.push("⇆ "+f.n+": "+semB+"→"+semA);
+  if(/^VISITA/i.test(f.acc)&&!/PROSP/i.test(f.acc)){const eco=crucePorMes(per,f.n,mesViejo,mesA);if(eco)efectos.push(eco);}
+  else if(/PROSP/i.test(f.acc)){const eco=mueveCual(f.n,per,fA[dn]||f.fecha);if(eco)efectos.push(eco);}}
+ tocados.add("__SWAP__");
+ anota("⇆ INTERCAMBIO: "+semA+" ("+mesA+") ↔ "+semB+" ("+mesB+") de "+per,efectos);
+ marca();cierra();pinta();
+ msg("Semanas intercambiadas: "+semA+" ahora es lo que era "+semB+", y viceversa.","bien");}
+
 function anulaSemana(per,mes,sem){
  const gs=(grupos()[norm(per)]||{})[mes]?.[sem];if(!gs)return;
  const filas=Object.values(gs).flat();
@@ -698,7 +790,11 @@ function anulaSemana(per,mes,sem){
   "<div class='it' id='mTel' style='border:1px solid var(--linea);border-left:4px solid var(--azul);border-radius:8px;padding:12px;cursor:pointer'><b>📞 Todo a TELÉFONO este mes</b><br><small style='color:var(--gris)'>Cada visita de cartera pasa como llamada a la Inside (se salva el impacto del mes). Las prospecciones se aplazan (sus cualificaciones se retiran). El resto de la agenda NO se toca.</small></div>"+
   "<div class='it' id='mReu' style='border:1px solid var(--linea);border-left:4px solid var(--bur);border-radius:8px;padding:12px;cursor:pointer'><b>⇄ REUBICAR en las próximas semanas</b><br><small style='color:var(--gris'>Las visitas se recolocan en los huecos de tus siguientes semanas (por orden de fecha, misma provincia si se puede, sin pasar el techo/día). Lo que no quepa, baja a teléfono. Las cualificaciones de prospección siguen a sus visitas.</small></div>"+
   "<div class='it' id='mMovS' style='border:1px solid var(--linea);border-left:4px solid var(--verde);border-radius:8px;padding:12px;cursor:pointer'><b>📦 MOVER la semana ÍNTEGRA a otro sitio</b><br><small style='color:var(--gris)'>Todas sus visitas viajan juntas a la semana que elijas (repartidas por días sin pasar el techo). Si cambia de mes, la llamada de la Inside de cada cliente se cruza al mes que queda huérfano (1 impacto/mes) y la Inside se reequilibra.</small></div>"+
+  "<div class='it' id='mCorre' style='border:1px solid var(--linea);border-left:4px solid var(--azul);border-radius:8px;padding:12px;cursor:pointer'><b>📅 CORRER TODO EL CALENDARIO desde aquí (estoy enfermo N días)</b><br><small style='color:var(--gris)'>Esta semana y TODAS las que vengan después se desplazan en bloque N semanas — mismo orden de rutas, solo más tarde. Nadie pierde su visita, todo llega más tarde.</small></div>"+
+  "<div class='it' id='mSwap' style='border:1px solid var(--linea);border-left:4px solid var(--ambar);border-radius:8px;padding:12px;cursor:pointer'><b>⇆ CAMBIAR esta ruta por OTRA semana</b><br><small style='color:var(--gris)'>Buscador de tu calendario: eliges qué otra semana quieres aquí y las dos se intercambian enteras (mismo criterio que usamos para adelantar Ruta 3).</small></div>"+
   "</div><div class='fila'><button onclick='cierra()'>Cancelar</button></div>");
+ $("mCorre").onclick=()=>corrCalendario(per,mes,sem);
+ $("mSwap").onclick=()=>abreBuscadorSwap(per,mes,sem);
  const motivo=()=>$("mMot").value;
  $("mMovS").onclick=()=>{
   const g=grupos()[norm(per)]||{};const ops=[];
