@@ -281,6 +281,32 @@ function provDe(pob,pc){if(pc){const p=norm(pc);for(const pv of Object.values(D.
 function kaDe(prov){if(!prov)return["",""];const ka=D.SUR.includes(prov)?"AGUSTIN":"CARLOSG";
   const z=D.ZON[ka];for(const s in z)if(z[s].includes(prov))return[ka,"R"+s+" · "+D.NOM[ka][s]];return[ka,""];}
 async function fbGet(ruta){const r=await fetch(FB+"/"+ruta);if(!r.ok)throw new Error("HTTP "+r.status);return r.json();}
+async function fbDel(doc){
+  const r=await fetch(FB+"/"+doc,{method:"DELETE"});
+  if(!r.ok&&r.status!==404)throw new Error("HTTP "+r.status);
+}
+// (v3.11) LIMPIEZA DEL FORMATO VIEJO. Hasta la v3.10 los trozos se llamaban
+// chunk_0, chunk_1... y se numeraban desde cero en CADA subida, asi que la
+// rueda de un comercial machacaba la del anterior. Ahora son chunk_<KA>_<n>.
+// Los documentos con el nombre antiguo tienen que desaparecer o sus clientes
+// se leerian por duplicado. Se hace una sola vez, sola, al abrir la pagina.
+async function limpiarTrozosViejos(silencioso){
+  const viejos=[];
+  try{
+    let pt="";
+    do{
+      const j=await fbGet("radar_rutas?pageSize=300"+(pt?"&pageToken="+pt:""));
+      for(const doc of (j.documents||[])){
+        const id=String(doc.name||"").split("/").pop();
+        if(/^chunk_\d+$/.test(id))viejos.push(id);   // solo chunk_ + numero
+      }
+      pt=j.nextPageToken||"";
+    }while(pt);
+  }catch(e){return {n:0,error:e.message};}
+  for(const id of viejos){try{await fbDel("radar_rutas/"+id);}catch(e){}}
+  if(viejos.length&&!silencioso)console.log("Estación: limpiados",viejos.length,"trozos del formato viejo");
+  return {n:viejos.length};
+}
 async function fbSet(doc,fields){
   const r=await fetch(FB+"/"+doc,{method:"PATCH",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({fields})});
@@ -900,6 +926,26 @@ document.getElementById("btnBajar").onclick=async()=>{
 async function cargaBoard(){
   const b=document.getElementById("board");
   try{
+    const limpieza=await limpiarTrozosViejos(true);
+    if(limpieza.n>0){
+      // el contador viejo mezclaba KAs: se recalcula desde los trozos que quedan
+      const cuenta={};
+      try{
+        let pt="";
+        do{
+          const j=await fbGet("radar_rutas?pageSize=300"+(pt?"&pageToken="+pt:""));
+          for(const doc of (j.documents||[])){
+            const arr=JSON.parse(doc.fields?.datos?.stringValue||"[]");
+            arr.forEach(c=>{const k=String(c.ka||"SIN KA").toUpperCase().trim()||"SIN KA";
+              cuenta[k]=(cuenta[k]||0)+1;});
+          }
+          pt=j.nextPageToken||"";
+        }while(pt);
+        await fbSet("radar_meta/estado",{fecha:{stringValue:new Date().toISOString()},
+          total:{integerValue:String(Object.values(cuenta).reduce((a,b)=>a+b,0))},
+          porKA:{stringValue:JSON.stringify(cuenta)}});
+      }catch(e){}
+    }
     const meta=await fbGet("radar_meta/estado");
     const porKA=JSON.parse(meta.fields?.porKA?.stringValue||"{}");
     try{const mi=await fbGet("radar_meta/estado_int");
@@ -919,7 +965,12 @@ async function cargaBoard(){
       rotulo("Internacional")+porModelo("internacional").map(tarjeta).join("")+
       rotulo("WIKUK cliente pequeño · van solos · 15 visitas/día")+porModelo("wikuk").map(tarjeta).join("")+
       rotulo("")+'<div class="kacard"><b>Última subida</b><div class="est">'+
-      (fecha?new Date(fecha).toLocaleString("es-ES"):"—")+'</div></div>';
+      (fecha?new Date(fecha).toLocaleString("es-ES"):"—")+'</div></div>'+
+      (limpieza.n>0?'<div style="flex-basis:100%;margin-top:8px;padding:8px 10px;'+
+        'background:#FFF6E5;border:1px solid #E8D9B0;border-radius:8px;font-size:.72rem">'+
+        '🧹 Se han limpiado '+limpieza.n+' trozos del formato antiguo (chunk_0, chunk_1…), '+
+        'que hacían que subir una rueda borrase la anterior. Vuelve a subir las ruedas '+
+        'que veas “sin subir”.</div>':'');
   }catch(e){b.innerHTML='<div class="msg">Nube sin datos de rutas todavía (o reglas pendientes). Sube la primera para estrenarla.</div>';}
 }
 cargaBoard();
