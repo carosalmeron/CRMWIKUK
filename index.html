@@ -305,7 +305,7 @@ const USERS_DEFAULT=[
 
 // ── Persistencia ─────────────────────────────────────────────────
 // ── Versión del Portal (mantener sincronizada en cada cambio) ──
-const PORTAL_VERSION="3.66.12";
+const PORTAL_VERSION="3.68.0";
 const PORTAL_BUILD="31/07/2026-version-unificada";
 try{var _pv=document.getElementById('portal-ver');if(_pv)_pv.textContent='Portal v'+PORTAL_VERSION;}catch(e){}
 // Habia tres numeros de version distintos escritos a mano en este archivo y
@@ -2405,6 +2405,14 @@ function renderConfig(){
   html+='<div style="background:#fff;border:1.5px solid #E8E3DC;border-radius:12px;padding:16px;margin-bottom:12px">';
   html+='<p style="margin:0 0 4px;font-size:1rem;font-weight:800">📖 Manuales de uso · acuse de lectura</p>';
   html+='<p style="margin:0 0 12px;font-size:.78rem;color:#8A8078">Al actualizar un manual, sube su versión: quedará pendiente para todos otra vez, con aviso en el CRM y bloqueo a los 7 días.</p>';
+  // (v3.68) Alta de manuales nuevos. Hasta ahora solo se podían editar los del
+  // catálogo de código: para meter uno nuevo había que crear el documento en
+  // Firebase a mano. Con los manuales de trabajo internos —Customer Service el
+  // primero— eso deja de ser una excepción y pasa a ser lo habitual.
+  html+='<button onclick="manNuevoAbrir()" style="width:100%;padding:11px;margin-bottom:12px;'
+    +'background:#FDFCFA;border:1.5px dashed #CDBCE4;border-radius:10px;color:#5C3E8A;'
+    +'font-size:.82rem;font-weight:800;cursor:pointer;font-family:inherit">➕ Dar de alta un manual nuevo</button>';
+  html+='<div id="man-nuevo-caja"></div>';
   html+='<div id="manuales-config-body"><p style="color:#8A8078;font-size:.82rem">Cargando...</p></div>';
   html+='</div>';
 
@@ -2436,7 +2444,15 @@ var MANUALES_SEED=[
   {id:"visitas",      titulo:"👋 Visitas e instrucciones",   url:"https://manuales-wikuk.vercel.app/",              aplica:"comerciales",  version:1, publicadoTs:1786924800000, activo:true},
   {id:"stock",        titulo:"📦 Stock en el catálogo",      url:"https://manuales-wikuk.vercel.app/index_stock.html",aplica:"direccion",  version:1, publicadoTs:1786924800000, activo:true},
 ];
-var MAN_APLICA={todos:"Todos",comerciales:"Comerciales",departamentos:"Departamentos",direccion:"Dirección"};
+var MAN_APLICA={todos:"Todos",comerciales:"Comerciales",departamentos:"Departamentos",
+  direccion:"Dirección",depto:"Un departamento"};
+// (v3.67) Las cuatro audiencias de siempre se resuelven por ROL, y con eso no
+// se puede dirigir un manual a un área concreta: el de Customer Service, si se
+// marca como "comerciales", se lo come toda la red de ventas; si se marca como
+// "departamentos", no les llega, porque Customer Service cuelga de Ventas y su
+// gente no tiene rol de tipología. La quinta audiencia apunta directamente al
+// NODO del organigrama, y alcanza a quien está en él y a todo lo que cuelga
+// por debajo. Así, cuando entra alguien nuevo al área, lo hereda solo.
 var _manuales=[],_lecturas=[];
 function cargarManualesAdmin(){
   Promise.all([
@@ -2450,7 +2466,24 @@ function cargarManualesAdmin(){
     renderManualesAdmin();
   });
 }
+function manDeptoYDescendientes(id){
+  var out={},pend=[id],n=0;
+  while(pend.length&&n<200){
+    var x=pend.shift(); n++;
+    if(!x||out[x])continue;
+    out[x]=1;
+    (deptosActivos?deptosActivos():[]).forEach(function(d){ if(d.padre===x) pend.push(d.id); });
+  }
+  return out;
+}
 function manAplicaA(persona,m){
+  // (v3.67) Manual dirigido a un departamento del organigrama
+  if(m.aplica==="depto"){
+    var objetivo=String(m.departamentoId||"");
+    if(!objetivo) return false;
+    var rama=manDeptoYDescendientes(objetivo);
+    return !!rama[String(persona.departamentoId||"")];
+  }
   var rol=String(persona.rolCRM||"").toLowerCase();
   // (v3.66.12) "Comerciales" incluye a la dirección comercial: dirige ese
   // equipo y debe conocer sus herramientas.
@@ -2470,11 +2503,23 @@ function renderManualesAdmin(){
       +'<div style="display:flex;gap:6px;align-items:center">'
       +'<span style="font-size:.68rem;color:#8A8078">v</span>'
       +'<input id="man-v-'+m.id+'" type="number" min="1" value="'+(m.version||1)+'" style="width:52px;padding:6px 8px;border:1.5px solid #E8E3DC;border-radius:8px;font-size:.82rem;font-family:inherit">'
-      +'<select id="man-a-'+m.id+'" style="padding:6px 8px;border:1.5px solid #E8E3DC;border-radius:8px;font-size:.78rem;font-family:inherit">'
+      +'<select id="man-a-'+m.id+'" onchange="renderManualDepto(\''+m.id+'\')" style="padding:6px 8px;border:1.5px solid #E8E3DC;border-radius:8px;font-size:.78rem;font-family:inherit">'
       +Object.keys(MAN_APLICA).map(function(k){return '<option value="'+k+'"'+(m.aplica===k?' selected':'')+'>'+MAN_APLICA[k]+'</option>';}).join('')
       +'</select>'
       +'<button onclick="guardarManualFB(\''+m.id+'\')" style="padding:7px 12px;background:#1F5FA8;color:#fff;border:none;border-radius:8px;font-size:.75rem;font-weight:700;cursor:pointer;font-family:inherit">💾</button>'
       +'</div></div>'
+      +'<div id="man-d-'+m.id+'" style="margin-top:7px;'+(m.aplica==="depto"?'':'display:none')+'">'
+      +  '<select id="man-dep-'+m.id+'" style="width:100%;padding:8px 10px;border:1.5px solid #CDBCE4;border-radius:8px;font-size:.8rem;font-family:inherit;background:#F5F0FA">'
+      +  '<option value="">— Elige el departamento —</option>'
+      +  (deptosActivos?deptosActivos():[]).map(function(d){
+           var prof=0,x=d,g=0;
+           while(x&&x.padre&&g<20){prof++;x=(deptosActivos?deptosActivos():[]).find(function(y){return y.id===x.padre;});g++;}
+           return '<option value="'+d.id+'"'+(m.departamentoId===d.id?' selected':'')+'>'
+             +new Array(prof+1).join("· ")+(d.icon||"")+" "+d.nombre+'</option>';
+         }).join('')
+      +  '</select>'
+      +  '<p style="margin:4px 0 0;font-size:.66rem;color:#8A8078">Alcanza a quien está en ese departamento y a todo lo que cuelga por debajo.</p>'
+      +'</div>'
       +'<input type="file" accept=".html,text/html" id="man-f-'+m.id+'" style="display:none" onchange="onManualFile(\''+m.id+'\',this)">'
       +'<div style="display:flex;gap:6;align-items:center;margin-top:8px">'
       +'<button onclick="document.getElementById(\'man-f-'+m.id+'\').click()" style="flex:1;padding:9px;background:#5C3E8A;color:#fff;border:none;border-radius:8px;font-size:.75rem;font-weight:700;cursor:pointer;font-family:inherit">📤 Publicar nueva versión (elige el .html)</button>'
@@ -2544,6 +2589,71 @@ function detectarCambiosManual(viejo,nuevo){
   if(quitados.length)partes.push("Eliminado: "+quitados.slice(0,2).join(" · "));
   return partes.length?partes.join(" — ").slice(0,240):"Contenido revisado y actualizado.";
 }
+// ═══ (v3.68) Alta de manuales nuevos ═══
+function manNuevoAbrir(){
+  var caja=document.getElementById("man-nuevo-caja"); if(!caja)return;
+  if(caja.innerHTML.trim()){ caja.innerHTML=""; return; }   // segundo clic: cerrar
+  caja.innerHTML=
+     '<div style="border:1.5px solid #CDBCE4;background:#FAF8FD;border-radius:11px;padding:14px;margin-bottom:12px">'
+    +'<p style="margin:0 0 10px;font-size:.86rem;font-weight:800;color:#4A3070">➕ Manual nuevo</p>'
+    +'<label style="display:block;font-size:.68rem;font-weight:800;color:#8A8078;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Identificador</label>'
+    +'<input id="mn-id" placeholder="customer" style="width:100%;padding:9px 11px;border:1.5px solid #E8E3DC;border-radius:8px;font-size:.86rem;font-family:inherit;margin-bottom:10px">'
+    +'<label style="display:block;font-size:.68rem;font-weight:800;color:#8A8078;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Título, con su emoji</label>'
+    +'<input id="mn-tit" placeholder="🎧 Customer Service" style="width:100%;padding:9px 11px;border:1.5px solid #E8E3DC;border-radius:8px;font-size:.86rem;font-family:inherit;margin-bottom:10px">'
+    +'<label style="display:block;font-size:.68rem;font-weight:800;color:#8A8078;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Quién está obligado a leerlo</label>'
+    +'<select id="mn-ap" onchange="manNuevoDepto()" style="width:100%;padding:9px 11px;border:1.5px solid #E8E3DC;border-radius:8px;font-size:.86rem;font-family:inherit;margin-bottom:10px">'
+    + Object.keys(MAN_APLICA).map(function(k){return '<option value="'+k+'">'+MAN_APLICA[k]+'</option>';}).join('')
+    +'</select>'
+    +'<div id="mn-dep-caja" style="display:none;margin-bottom:10px">'
+    +  '<select id="mn-dep" style="width:100%;padding:9px 11px;border:1.5px solid #CDBCE4;border-radius:8px;font-size:.86rem;font-family:inherit;background:#F5F0FA">'
+    +  '<option value="">— Elige el departamento —</option>'
+    +  (deptosActivos?deptosActivos():[]).map(function(d){
+         var prof=0,x=d,g=0;
+         while(x&&x.padre&&g<20){prof++;x=(deptosActivos?deptosActivos():[]).find(function(y){return y.id===x.padre;});g++;}
+         return '<option value="'+d.id+'">'+new Array(prof+1).join("· ")+(d.icon||"")+" "+d.nombre+'</option>';
+       }).join('')
+    +  '</select></div>'
+    +'<button onclick="manNuevoCrear()" style="width:100%;padding:11px;background:#5C3E8A;color:#fff;border:none;border-radius:9px;font-size:.84rem;font-weight:800;cursor:pointer;font-family:inherit">Crear la ficha</button>'
+    +'<p style="margin:8px 0 0;font-size:.68rem;color:#8A8078">Se crea vacía. El contenido se sube después con «Publicar nueva versión», que es lo que dispara el acuse de lectura.</p>'
+    +'<div id="mn-res"></div>'
+    +'</div>';
+}
+function manNuevoDepto(){
+  var sel=document.getElementById("mn-ap"), caja=document.getElementById("mn-dep-caja");
+  if(sel&&caja) caja.style.display = (sel.value==="depto") ? "" : "none";
+}
+function manNuevoCrear(){
+  var id=(document.getElementById("mn-id").value||"").trim().toLowerCase().replace(/[^a-z0-9_-]/g,"");
+  var tit=(document.getElementById("mn-tit").value||"").trim();
+  var ap=document.getElementById("mn-ap").value;
+  var depEl=document.getElementById("mn-dep");
+  var dep=(ap==="depto"&&depEl)?depEl.value:"";
+  var res=document.getElementById("mn-res");
+  function aviso(t,ok){ res.innerHTML='<p style="margin:8px 0 0;font-size:.75rem;font-weight:700;color:'
+    +(ok?"#2E6B42":"#9B3028")+'">'+t+'</p>'; }
+  if(!id||!tit){ aviso("Falta el identificador o el título.",false); return; }
+  if(ap==="depto"&&!dep){ aviso("Elige a qué departamento va dirigido.",false); return; }
+  if(_manuales.some(function(m){return m.id===id;})){
+    aviso("Ya existe un manual con el identificador «"+id+"».",false); return;
+  }
+  var m={id:id,titulo:tit,aplica:ap,departamentoId:dep,activo:true,version:1,
+    publicadoTs:Date.now(),url:"",
+    cambios:[{version:1,ts:Date.now(),texto:"Alta del manual en el catálogo."}]};
+  fetch(PORTAL_FB+"/manuales/"+encodeURIComponent(id),{method:"PATCH",
+    headers:{"Content-Type":"application/json"},body:JSON.stringify(_toFB(m))})
+    .then(function(r){
+      if(!r.ok) throw new Error("Error "+r.status);
+      document.getElementById("man-nuevo-caja").innerHTML="";
+      cargarManualesAdmin();
+      alert("✅ "+tit+" creado.\n\nAhora súbele el .html con «Publicar nueva versión»: eso es lo que avisa a su audiencia y arranca el plazo de 7 días.");
+    })
+    .catch(function(e){ aviso("No se ha podido crear: "+(e.message||e),false); });
+}
+
+function renderManualDepto(id){
+  var sel=document.getElementById("man-a-"+id), caja=document.getElementById("man-d-"+id);
+  if(sel&&caja) caja.style.display = (sel.value==="depto") ? "" : "none";
+}
 function onManualFile(id,inp){
   var f=inp.files&&inp.files[0]; if(!f)return;
   var m=_manuales.find(function(x){return x.id===id;}); if(!m)return;
@@ -2604,6 +2714,13 @@ function guardarManualFB(id){
   var vNueva=parseInt(vEl.value)||1;
   if(vNueva>(m.version||1)) m.publicadoTs=Date.now(); // versión nueva → reinicia el reloj de 7 días
   m.version=vNueva; m.aplica=aEl.value;
+  // (v3.67) Nodo del organigrama al que va dirigido, si la audiencia lo pide
+  var dEl=document.getElementById('man-dep-'+id);
+  m.departamentoId = (aEl.value==="depto" && dEl) ? dEl.value : "";
+  if(aEl.value==="depto" && !m.departamentoId){
+    alert("Elige a qué departamento va dirigido el manual.");
+    return;
+  }
   fetch(PORTAL_FB+"/manuales/"+encodeURIComponent(id),{method:"PATCH",
     headers:{"Content-Type":"application/json"},body:JSON.stringify(_toFB(m))})
     .then(function(){renderManualesAdmin();alert("✅ Manual guardado. La audiencia lo verá pendiente en el CRM.");})
