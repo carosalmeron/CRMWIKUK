@@ -394,6 +394,8 @@ function pinta(){
     const carr=document.createElement("div");carr.className="carretera";S.appendChild(carr);
     const D=document.createElement("div");D.className="dias";
     const dias=Object.entries(gs).sort((a,b2)=>fechaDe(a[0])-fechaDe(b2[0]));
+    let _prevPt=domCoord(per),_esInicio=true;
+    const esRuta=!INSIDES.has(norm(per));
     for(const [kd,cards] of dias){
      const [dnom,fch]=kd.split("|");
      const zdia=cards.map(x=>F(x).zona).find(z=>z)||"";
@@ -1255,12 +1257,50 @@ window.ejecutaReorg=async function(modo){
 $("btnExcel").onclick=()=>{
  try{
  if(typeof XLSX==="undefined"){msg("No cargó la librería de Excel (¿sin internet?). Recarga la página.","err");return;}
- const BUR="7A1F2B",CREMA="F6EFE7",GRISF="EFEAE6",BLANCO="FFFFFF",GRIST="7A7068",TINTA="3A3A3A";
+ const BUR="7A1F2B",CREMA="F6EFE7",GRISF="EFEAE6",BLANCO="FFFFFF",GRIST="7A7068",TINTA="3A3A3A",AZUL="1A5276";
  const F10=(b,c)=>({font:{name:"Arial",sz:10,bold:!!b,color:{rgb:c||TINTA}}});
  const cab=(t,fill,color)=>({v:t,t:"s",s:{font:{name:"Arial",sz:12,bold:true,color:{rgb:color||BLANCO}},fill:{fgColor:{rgb:fill}},alignment:{vertical:"center"}}});
  const celda=(t,st)=>({v:t==null?"":t,t:typeof t==="number"?"n":"s",s:st||F10()});
  const wb=XLSX.utils.book_new();
- // ── RESUMEN: criterios vivos de los perfiles cargados
+
+ // ── recorrido REAL por km: reordena cada semana de las rutas (KA con duplo o solista) por vecino-más-cercano,
+ //    encadenando de un día a otro, y calcula el Km desde el anterior (solo "desde casa" al empezar la semana)
+ const ordenKm={}; // r → texto km ; ordenFinal[per] → filas VISITA en su orden real de ruta
+ const ordenFinal={};
+ function _rid(r){return PLAN.indexOf(r);}
+ const g=grupos();
+ for(const per of personas){
+  if(INSIDES.has(norm(per)))continue;
+  const gp=g[norm(per)];if(!gp)continue;
+  const dom=domCoord(per);
+  const salida=[];
+  const mesesOrd=Object.entries(gp).sort((a,b)=>Math.min(...Object.values(a[1]).map(fechaSem))-Math.min(...Object.values(b[1]).map(fechaSem)));
+  for(const [mes,gm] of mesesOrd){
+   const semanasMes=Object.entries(gm).sort((a,b)=>fechaSem(a[1])-fechaSem(b[1]));
+   for(const [sem,gs] of semanasMes){
+    let prev=dom,esInicio=true;
+    const dias=Object.entries(gs).sort((a,b)=>fechaDe(a[0])-fechaDe(b[0]));
+    for(const [kd,cards] of dias){
+     const visitas=cards.filter(r=>/^VISITA/i.test(F(r).acc));
+     const otras=cards.filter(r=>!/^VISITA/i.test(F(r).acc));
+     // vecino más cercano dentro del día, empezando desde el punto anterior (día previo o casa)
+     const pend=visitas.slice();const ordenDia=[];
+     const coordDe=r=>{const f=F(r);return geoPueblo(f.p,f.pr)||GEO[norm(f.pr||"")]||null;};
+     while(pend.length){
+      pend.sort((a,b)=>{
+       const ga=coordDe(a),gb=coordDe(b);
+       const da=(ga&&prev)?kmPts(prev,ga):1e9,db=(gb&&prev)?kmPts(prev,gb):1e9;
+       return da-db;});
+      const r=pend.shift();const gc=coordDe(r);
+      if(gc&&prev){const d=kmPts(prev,gc);ordenKm[_rid(r)]=Math.round(d)+(esInicio?" (desde casa)":"");}
+      else ordenKm[_rid(r)]="";
+      if(gc)prev=gc;
+      esInicio=false;ordenDia.push(r);}
+     salida.push(...ordenDia,...otras);
+    }}}
+  ordenFinal[per]=salida;}
+
+ // ── RESUMEN ──
  const R=[[cab("PLAN COMERCIAL · "+personas.join(" + ")+" · "+new Date().toLocaleDateString("es-ES"),BUR)],[],
   [celda("Generado por el planificador · los criterios viven en el PERFIL (Firebase) y en CRITERIOS_SISTEMA_COMERCIAL.md · este Excel es un VEHÍCULO: la verdad está en la nube",F10(false,GRIST))],[]];
  for(const p of personas){const pf=PERFILES[p]||{};
@@ -1270,49 +1310,69 @@ $("btnExcel").onclick=()=>{
  const wsR=XLSX.utils.aoa_to_sheet(R);
  wsR["!cols"]=[{wch:14},{wch:120}];wsR["!merges"]=[{s:{r:0,c:0},e:{r:0,c:1}}];
  XLSX.utils.book_append_sheet(wb,wsR,"RESUMEN");
- // ── AGENDA: persona → mes → semana → día, con bandas
- const AO=[];const g=grupos();
+
+ // ── AGENDA POR PERSONA (una hoja cada uno, con Km) — mismo formato aprobado ──
  const colSeg={A:"2F6B2F",B:"9A7000",C:BUR};
- for(const per of personas){const gp=g[norm(per)];if(!gp)continue;
-  AO.push([cab("━━ "+per+" ━━",BUR)]);
-  for(const [mes,gm] of Object.entries(gp)){
-   AO.push([celda("— "+mes+" —",F10(true,BUR))]);
-   for(const [sem,gs] of Object.entries(gm)){
-    const n=Object.values(gs).flat().length;
-    const _fl=Object.values(gs).flat();
-    const _zs=_fl.map(x=>String(F(x).zona||"").split("·")[0].trim()).filter(z=>z&&!/^Oficina$|^Inside$/i.test(z));
+ for(const per of personas){
+  const filasP=(!INSIDES.has(norm(per)))?ordenFinal[per]:null;
+  const gp=g[norm(per)];if(!gp)continue;
+  const AO=[];
+  const mesesOrd=Object.entries(gp).sort((a,b)=>Math.min(...Object.values(a[1]).map(fechaSem))-Math.min(...Object.values(b[1]).map(fechaSem)));
+  for(const [mes,gm] of mesesOrd){
+   const semanasMes=Object.entries(gm).sort((a,b)=>fechaSem(a[1])-fechaSem(b[1]));
+   for(const [sem,gs] of semanasMes){
+    const todasSem=Object.values(gs).flat();
+    const n=todasSem.length;
+    const _zs=todasSem.map(x=>String(F(x).zona||"").split("·")[0].trim()).filter(z=>z&&!/^Oficina$|^Inside$/i.test(z));
     const _zT=_zs.length?Object.entries(_zs.reduce((a,z)=>(a[z]=(a[z]||0)+1,a),{})).sort((a,b)=>b[1]-a[1])[0][0]:"";
-    const _fd=_fl.map(x=>{const f=(F(x).fecha||"").split("/");return f.length===3?new Date(+f[2],f[1]-1,+f[0]):null;}).filter(Boolean).sort((a,b)=>a-b);
-    const _dd=d=>String(d.getDate()).padStart(2,"0")+"/"+String(d.getMonth()+1).padStart(2,"0");
-    const _rg=_fd.length?_dd(_fd[0])+(_fd.length>1&&+_fd[0]!==+_fd[_fd.length-1]?" – "+_dd(_fd[_fd.length-1]):""):"";
-    AO.push([cab(sem+(_zT?" · "+_zT:"")+(_rg?" · "+_rg:"")+" · "+n+" acciones",BUR)]);
+    AO.push([cab("━━ "+mes+" · RUTA "+(F(todasSem[0]||{}).ruta||sem)+(_zT?" "+_zT:"")+" · "+n+" clientes ━━",BUR)]);
     const dias=Object.entries(gs).sort((a,b)=>fechaDe(a[0])-fechaDe(b[0]));
-    for(const [kd,cards] of dias){
+    for(const [kd,cardsOrig] of dias){
      const [dn,fc]=kd.split("|");
-     const zd=cards.map(x=>F(x).zona).find(z=>z)||"";
+     const zd=cardsOrig.map(x=>F(x).zona).find(z=>z)||"";
+     // usar el orden REAL calculado (filasP) si existe, filtrando a las de este día
+     const cards=filasP?filasP.filter(r=>cardsOrig.includes(r)):cardsOrig;
      AO.push([{v:dn+" "+(fc||"")+(zd?" · "+zd:"")+" · "+cards.length+" acciones",t:"s",s:{font:{name:"Arial",sz:9.5,bold:true,color:{rgb:TINTA}},fill:{fgColor:{rgb:GRISF}}}}]);
      for(const r of cards){const f=F(r);
-      AO.push([celda(f.acc,F10(true,/PROSP/i.test(f.acc)?"1A5276":(colSeg[f.seg]||GRIST))),
-       celda(f.n,F10(false,TINTA)),celda(f.p,F10(false,GRIST)),celda(f.pr,F10(false,GRIST)),
-       celda(f.seg,F10(false,GRIST)),celda(f.v,F10(false,GRIST)),celda(f.nota,{font:{name:"Arial",sz:8.5,italic:true,color:{rgb:GRIST}}})]);}}
-   }}}
- const wsA=XLSX.utils.aoa_to_sheet(AO);
- wsA["!cols"]=[{wch:22},{wch:42},{wch:20},{wch:12},{wch:5},{wch:12},{wch:60}];
- XLSX.utils.book_append_sheet(wb,wsA,"AGENDA");
- // ── FILTRABLE: dialecto Radar, re-subible al Alimentador tal cual
- const FH=["Acción","Cliente","Población","Provincia","KA","Ruta","Semana","Día","Seg","Venta año","Zona del día","Nota"];
+      const kmTxt=ordenKm[_rid(r)]||"";
+      AO.push([celda(f.acc,F10(true,/PROSP/i.test(f.acc)?AZUL:(colSeg[f.seg]||GRIST))),
+       celda(f.n,F10(false,TINTA)),celda(f.p,F10(false,GRIST)),
+       celda(kmTxt,F10(true,AZUL)),
+       celda(f.pr,F10(false,GRIST)),celda(f.seg,F10(false,GRIST)),celda(f.v,F10(false,GRIST)),
+       celda(f.nota,{font:{name:"Arial",sz:8.5,italic:true,color:{rgb:GRIST}}})]);}}
+   }}
+  const hoja="AGENDA "+per.slice(0,25);
+  const wsA=XLSX.utils.aoa_to_sheet(AO);
+  wsA["!cols"]=[{wch:22},{wch:42},{wch:20},{wch:16},{wch:12},{wch:5},{wch:12},{wch:60}];
+  XLSX.utils.book_append_sheet(wb,wsA,hoja);
+ }
+
+ // ── FILTRABLE: dialecto Radar CON Km, filas en el orden real de ruta ──
+ const FH=["Acción","Cliente","Población","Km desde el anterior","Provincia","KA","Ruta","Semana","Día","Seg","Venta año","Zona del día","Nota"];
  const FO=[FH.map(t=>cab(t,BUR))];
- for(const r of PLAN){const f=F(r);
-  FO.push([f.acc,f.n,f.p,f.pr,f.per,f.ruta,f.sem,(f.dia+" "+(f.fecha&&!String(f.dia).includes(f.fecha)?f.fecha:"")).trim(),f.seg,f.v,f.zona,f.nota].map(x=>celda(x)));}
+ const yaPuestas=new Set();
+ for(const per of personas){
+  const lista=ordenFinal[per];
+  if(!lista)continue; // Inside: se añaden después en su orden normal
+  for(const r of lista){const f=F(r);
+   FO.push([f.acc,f.n,f.p,ordenKm[_rid(r)]||"",f.pr,f.per,f.ruta,f.sem,(f.dia+" "+(f.fecha&&!String(f.dia).includes(f.fecha)?f.fecha:"")).trim(),f.seg,f.v,f.zona,f.nota].map(x=>celda(x)));
+   yaPuestas.add(r);}}
+ for(const r of PLAN){
+  if(yaPuestas.has(r))continue;
+  const f=F(r);
+  FO.push([f.acc,f.n,f.p,"",f.pr,f.per,f.ruta,f.sem,(f.dia+" "+(f.fecha&&!String(f.dia).includes(f.fecha)?f.fecha:"")).trim(),f.seg,f.v,f.zona,f.nota].map(x=>celda(x)));}
  const wsF=XLSX.utils.aoa_to_sheet(FO);
- wsF["!cols"]=[{wch:18},{wch:42},{wch:22},{wch:13},{wch:10},{wch:8},{wch:8},{wch:22},{wch:5},{wch:12},{wch:26},{wch:50}];
- wsF["!autofilter"]={ref:"A1:L"+FO.length};
+ wsF["!cols"]=[{wch:18},{wch:42},{wch:22},{wch:16},{wch:13},{wch:10},{wch:8},{wch:8},{wch:22},{wch:5},{wch:12},{wch:26},{wch:50}];
+ wsF["!autofilter"]={ref:"A1:M"+FO.length};
  XLSX.utils.book_append_sheet(wb,wsF,"FILTRABLE");
+
  const nombre="Plan_"+($("selP").value||"PLAN")+"_"+new Date().toISOString().slice(0,10)+".xlsx";
  XLSX.writeFile(wb,nombre);
- msg("⬇ "+nombre+" descargado: RESUMEN (criterios) + AGENDA (semana a semana) + FILTRABLE (re-subible al Radar tal cual). "+(cambios?"OJO: tienes "+cambios+" cambios sin 💾 guardar en la nube — el Excel los incluye, la nube aún no.":""),"bien");
+ msg("⬇ "+nombre+" descargado: RESUMEN + AGENDA por persona (con Km real) + FILTRABLE (re-subible, con Km) — mismo formato aprobado. "+(cambios?"OJO: tienes "+cambios+" cambios sin 💾 guardar en la nube — el Excel los incluye, la nube aún no.":""),"bien");
  }catch(e){msg("No se pudo generar el Excel: "+e.message,"err");}
-};
+}
+
+
 
 /* ⬇ JSON VIVO: el estado completo del planificador, embebido aquí — sin ir a ningún otro HTML */
 async function generaJSONvivo(auto){
