@@ -2763,6 +2763,8 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
                 poblacion:a.p||"", provincia:a.pr||"",
                 segmento:a.seg||"", _deRueda:true,
                 _dia:a.dia||"", _nota:a.nota||"",
+                _km:a.km||"", _venta:a.venta||"", _guion:a.guion||a.nota||"",
+                _diag:a.diag||"",
                 _acc:acc, _pros:/^PROSPEC/i.test(acc), _libre:libre,
                 _orden:lista.length
               });
@@ -2792,6 +2794,31 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
     })();
     return function(){vivo=false;};
   },[usuario&&usuario.id]);
+
+  // (28-ago) Bolsa de potenciales (radar_prospectos): es de donde se nominan
+  // los huecos de puerta nueva. Sin ella el hueco se queda en blanco.
+  var _sb=React.useState([]); var bolsa=_sb[0], setBolsa=_sb[1];
+  React.useEffect(function(){
+    var vivo=true;
+    (async function(){
+      try{
+        var out=[],tk="";
+        do{
+          var r=await fetch(FB_BASE+"/radar_prospectos?pageSize=300"+(tk?"&pageToken="+tk:""));
+          if(!r.ok)break;
+          var j=await r.json();
+          (j.documents||[]).forEach(function(d){
+            var f=d.fields||{},g=function(k){return (f[k]&&f[k].stringValue)||"";};
+            out.push({id:d.name.split("/").pop(),n:g("n"),p:g("p"),pr:g("pr"),
+              estado:g("estado"),tip:g("tipologia")||g("tipo"),rango:g("rango")||g("cifra")});
+          });
+          tk=j.nextPageToken||"";
+        }while(tk);
+        if(vivo)setBolsa(out);
+      }catch(e){}
+    })();
+    return function(){vivo=false;};
+  },[]);
 
   var getR=function(c){return parseInt(c.SEMANAVISITA||c.semanaVisita||c.ruta||c.semana||0)||0;};
   var rutas=[];var rutaMap={};
@@ -5466,23 +5493,30 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
                           var n=c.nombre||c.NOMBRE||"";
                           var pob=c.poblacion||c.POBLACION||"";
                           var seg=(c.segmento||"").toUpperCase();
-                          var cs=seg==="A"?"#0E7C5A":seg==="B"?"#B98A00":seg==="C"?"#7A1F2B":"#94A3B8";
+                          var cs=seg==="A"?"#0E7C5A":seg==="B"?"#B98A00":seg==="C"?"#7A1F2B":"#6D28D9";
+                          // línea de cabecera igual que en el planificador:
+                          // ACCIÓN SEG · Población · venta · 🚗 km
+                          var partes=[];
+                          partes.push((c._pros?"PROSPECCIÓN":"VISITA")+" "+(seg||"P"));
+                          if(pob) partes.push(pob);
+                          if(c._venta&&!c._pros) partes.push(c._venta);
+                          var km=c._km!==""&&c._km!=null?String(c._km):"";
+                          var urg=/^RECUPERAR|^DEFENDER/i.test(c._guion||"");
                           return <div key={i} onClick={function(){if(!c._libre&&onAbrirCliente)onAbrirCliente(c);}}
-                            style={{display:"flex",alignItems:"center",gap:12,padding:"13px 16px",
+                            style={{padding:"12px 16px",
                               borderBottom:i<cl.length-1?"1px solid #F1F5F9":"none",
                               cursor:c._libre?"default":"pointer",
                               background:c._libre?"#FAF7F0":c._pros?"#F8FAFF":"#fff"}}>
-                            <div style={{width:34,height:34,borderRadius:9,display:"flex",alignItems:"center",
-                              justifyContent:"center",fontSize:13,fontWeight:800,flexShrink:0,
-                              background:c._libre?"#F1E9D8":c._pros?"#E7EEFB":"#EFF6FF",color:cs}}>
-                              {c._libre?"▢":c._pros?"◎":(seg||"·")}</div>
-                            <div style={{flex:1,minWidth:0}}>
-                              <p style={{margin:0,fontSize:14,fontWeight:700,
-                                color:c._libre?T.muted:T.text}}>{c._libre?"Puerta nueva por cubrir":n}</p>
-                              {pob&&<p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{pob}</p>}
-                              {c._nota&&<p style={{margin:"3px 0 0",fontSize:10.5,color:"#5C554D",lineHeight:1.35}}>{c._nota}</p>}
+                            <div style={{display:"flex",alignItems:"baseline",gap:8}}>
+                              <p style={{margin:0,flex:1,fontSize:14,fontWeight:700,
+                                color:c._libre?T.muted:T.text}}>{c._libre?"▢ Puerta nueva por cubrir":n}</p>
+                              {km!==""&&<span style={{fontSize:11,fontWeight:700,color:"#5C554D",whiteSpace:"nowrap"}}>
+                                {"\uD83D\uDE97 "+km+" km"}</span>}
                             </div>
-                            {!c._libre&&<span style={{fontSize:14,color:"#94A3B8"}}>{">"}</span>}
+                            <p style={{margin:"3px 0 0",fontSize:11,color:cs,fontWeight:700}}>
+                              {partes.join(" \u00B7 ")}</p>
+                            {c._guion&&<p style={{margin:"4px 0 0",fontSize:11,lineHeight:1.4,
+                              color:urg?"#A32D2D":"#5C554D",fontWeight:urg?700:400}}>{c._guion}</p>}
                           </div>;
                         })}
                       </div>
@@ -5525,11 +5559,44 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
                   <input value={busqLibre} onChange={function(e){setBusqLibre(e.target.value);}}
                     placeholder="Nombre del negocio al que has entrado…"
                     style={{width:"100%",padding:"12px 14px",borderRadius:10,border:"1.5px solid #E8DCC8",fontSize:13,boxSizing:"border-box",outline:"none",background:"#fff"}}/>
+                  {/* Sugerencias de la BOLSA en los pueblos del día: son los
+                      potenciales que ya tenemos localizados en esa zona. */}
+                  {busqLibre.length<2&&bolsa.length>0&&(function(){
+                    var pobsDia={};
+                    cliPendientes.forEach(function(c){var p=(c.poblacion||"").toUpperCase().trim();if(p)pobsDia[p]=1;});
+                    var cerca=bolsa.filter(function(b){return pobsDia[(b.p||"").toUpperCase().trim()];}).slice(0,6);
+                    if(!cerca.length) return null;
+                    return <div style={{marginTop:10}}>
+                      <p style={{margin:"0 0 6px",fontSize:10.5,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>
+                        Potenciales que ya tenemos en tus pueblos de esta ruta
+                      </p>
+                      <div style={{background:"#fff",border:"1.5px solid "+T.border,borderRadius:10,overflow:"hidden"}}>
+                        {cerca.map(function(b,i){
+                          return <div key={i} onClick={function(){setBusqLibre(b.n||"");}}
+                            style={{padding:"10px 14px",borderBottom:i<cerca.length-1?"1px solid #F1F5F9":"none",cursor:"pointer",fontSize:13}}>
+                            <p style={{margin:0,fontWeight:600}}>{b.n}</p>
+                            <p style={{margin:0,fontSize:10,color:T.muted}}>
+                              {b.p}{b.tip?" \u00B7 "+b.tip:""}{b.rango?" \u00B7 "+b.rango:""}</p>
+                          </div>;})}
+                      </div>
+                    </div>;
+                  })()}
                   {busqLibre.length>=2&&(
-                    <div style={{background:"#fff",border:"1.5px solid "+T.border,borderRadius:10,maxHeight:200,overflow:"auto",marginTop:8}}>
+                    <div style={{background:"#fff",border:"1.5px solid "+T.border,borderRadius:10,maxHeight:240,overflow:"auto",marginTop:8}}>
+                      {(function(){
+                        var q=busqLibre.toUpperCase();
+                        var pot=bolsa.filter(function(b){
+                          return (b.n||"").toUpperCase().includes(q)||(b.p||"").toUpperCase().includes(q);}).slice(0,6);
+                        return pot.map(function(b,i){
+                          return <div key={"p"+i} onClick={function(){if(onNewCliente)onNewCliente(b.n);setBusqLibre("");}}
+                            style={{padding:"10px 14px",borderBottom:"1px solid #F1F5F9",cursor:"pointer",fontSize:13,background:"#FAF7F0"}}>
+                            <p style={{margin:0,fontWeight:600}}>{"\u25CE "+b.n}</p>
+                            <p style={{margin:0,fontSize:10,color:T.muted}}>
+                              {"potencial \u00B7 "+(b.p||"")}{b.tip?" \u00B7 "+b.tip:""}</p>
+                          </div>;});})()}
                       {(function(){var a=todosClientesFB,b=clientesFB;var src=(a&&a.length>0)?a:(b&&b.length>0)?b:[];
                         return src.filter(function(c){var q=busqLibre.toUpperCase();
-                          return(c.nombre||c.NOMBRE||"").toUpperCase().includes(q)||(c.poblacion||c.ciudad||"").toUpperCase().includes(q);});})().slice(0,8).map(function(c,i){
+                          return(c.nombre||c.NOMBRE||"").toUpperCase().includes(q)||(c.poblacion||c.ciudad||"").toUpperCase().includes(q);});})().slice(0,6).map(function(c,i){
                         return <div key={i} onClick={function(){if(onAbrirCliente)onAbrirCliente(c);setBusqLibre("");}}
                           style={{padding:"10px 14px",borderBottom:"1px solid #F1F5F9",cursor:"pointer",fontSize:13}}>
                           <p style={{margin:0,fontWeight:600}}>{c.nombre||c.NOMBRE||""}</p>
