@@ -364,7 +364,7 @@ function BadgeLectura({ elemento, usuarioId, style }) {
 // React globals provided by CDN (useState, useEffect, useMemo, useRef, useCallback)
 
 // ─── PALETA ────────────────────────────────────────────────────────
-const CRM_VERSION = "6.25.0";
+const CRM_VERSION = "6.24.0";
 const CRM_BUILD = "29/07/2026-powerbi-objetivos-pedidos";
 const T = {
   navy:"#0F1E2E", navyL:"#1A3044",
@@ -634,31 +634,6 @@ async function cargarManualesFB(){
 }
 function manualAplicaA(usuario,m){
   if(!usuario||m.activo===false)return false;
-  // (v6.25) Manual dirigido a un departamento concreto del organigrama.
-  // Las audiencias por rol no servían para un área como Customer Service:
-  // marcarlo "comerciales" se lo come a toda la red de ventas, y
-  // "departamentos" no les llega porque cuelgan de Ventas. Esta apunta al
-  // nodo y alcanza a quien está en él y a lo que cuelga por debajo, así que
-  // quien entre mañana al área lo hereda sin tocar nada.
-  if(m.aplica==="depto"){
-    var objetivo=String(m.departamentoId||"");
-    if(!objetivo) return false;
-    var mio=String(usuario.departamentoId||"");
-    if(!mio){
-      try{ mio=(deptosDondeEsResponsable(usuario)[0]||{}).id||""; }catch(e){}
-    }
-    if(!mio) return false;
-    if(mio===objetivo) return true;
-    // ¿Cuelga mi departamento del que apunta el manual?
-    try{
-      var x=deptoDe(mio), n=0;
-      while(x && x.padre && n<20){
-        if(x.padre===objetivo) return true;
-        x=deptoDe(x.padre); n++;
-      }
-    }catch(e){}
-    return false;
-  }
   var rol=String(usuario.rol||"").toLowerCase();
   // (v6.5.2) "Comerciales" incluye a la dirección comercial
   if(m.aplica==="comerciales")return rol==="agente"||rol==="jefe"||rol==="director"||rol==="ceo";
@@ -666,7 +641,188 @@ function manualAplicaA(usuario,m){
   if(m.aplica==="direccion")return rol==="director"||rol==="ceo";
   return true; // todos
 }
-function ManualesGate({usuario}){
+
+// ═══════════════════════════════════════════════════════════════════
+// (v6.26) BIBLIOTECA DE MANUALES
+// Hasta ahora los manuales se leían en manuales-wikuk.vercel.app y se firmaban
+// aquí: dos sitios para lo mismo. Además el catálogo estaba escrito a mano en
+// tres ficheros —Hub, CRM y esa página— y un manual nuevo solo aparecía si
+// alguien lo añadía en los tres; de hecho la portada de manuales descartaba en
+// silencio cualquiera que no estuviera en su lista.
+// Aquí se lee, se busca y se firma en el mismo sitio, con el catálogo que
+// publica el portal como única fuente.
+// ═══════════════════════════════════════════════════════════════════
+function BibliotecaManuales({usuario, onNav}){
+  const [lecturas,setLecturas]=useState(null);
+  const [visor,setVisor]=useState(null);
+  const [q,setQ]=useState("");
+  const [abiertos,setAbiertos]=useState({});
+
+  useEffect(function(){
+    Promise.all([cargarManualesFB(),fbLeer("lecturas_manuales").catch(function(){return [];})])
+      .then(function(r){ setLecturas(r[1]||[]); });
+  },[]);
+
+  if(lecturas===null) return <div style={{padding:40,textAlign:"center",color:T.muted,fontSize:13}}>Cargando manuales…</div>;
+
+  function leido(m){
+    return (lecturas||[]).some(function(l){
+      return l.usuarioId===usuario.id && l.manualId===m.id && (l.version||1)>=(m.version||1);
+    });
+  }
+  function confirmar(m){
+    var doc={id:usuario.id+"_"+m.id,usuarioId:usuario.id,nombre:usuario.nombre,
+      manualId:m.id,version:m.version||1,ts:Date.now()};
+    fbEscribir("lecturas_manuales",doc.id,doc);
+    setLecturas(function(p){return [...(p||[]).filter(function(l){return l.id!==doc.id;}),doc];});
+  }
+  function abrir(m){
+    setAbiertos(function(p){var n={...p};n[m.id]=true;return n;});
+    setVisor(m);   // interno por html, o la web en un iframe: se lee siempre aquí
+  }
+
+  // Etiqueta de audiencia, incluida la de departamento del organigrama
+  function audiencia(m){
+    if(m.aplica==="depto"){
+      try{ var d=deptoDe(m.departamentoId); if(d) return (d.icon||"")+" "+d.nombre; }catch(e){}
+      return "Un departamento";
+    }
+    return {todos:"Todos",comerciales:"Comerciales",
+            departamentos:"Departamentos",direccion:"Dirección"}[m.aplica]||m.aplica||"Todos";
+  }
+
+  var mios=MANUALES.filter(function(m){ return manualAplicaA(usuario,m); });
+  var otros=MANUALES.filter(function(m){ return m.activo!==false && mios.indexOf(m)<0; });
+
+  function filtra(l){
+    var t=q.trim().toLowerCase();
+    if(!t) return l;
+    return l.filter(function(m){
+      return (String(m.titulo||"")+" "+String(m.desc||"")+" "+audiencia(m)).toLowerCase().indexOf(t)>=0;
+    });
+  }
+  var pendientes=filtra(mios.filter(function(m){return !leido(m);}));
+  var alDia     =filtra(mios.filter(function(m){return  leido(m);}));
+  var resto     =filtra(otros);
+
+  function ficha(m,obligatorio){
+    var dias=Math.floor((Date.now()-(m.publicadoTs||Date.now()))/864e5);
+    var ok=leido(m);
+    var ult=(m.cambios||[]).slice(-1)[0];
+    return (
+      <div key={m.id} onClick={function(){abrir(m);}}
+        style={{background:"#fff",border:"1.5px solid "+(obligatorio&&dias>7?"#FECACA":T.border),
+          borderRadius:12,padding:"13px 14px",marginBottom:8,cursor:"pointer",
+          borderLeft:"3px solid "+(ok?T.green:obligatorio?T.amber:T.border)}}>
+        <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+          <span style={{fontSize:20,flexShrink:0}}>{String(m.titulo||"📖").split(" ")[0]}</span>
+          <div style={{flex:1,minWidth:0}}>
+            <p style={{margin:0,fontSize:13.5,fontWeight:800,color:T.text,lineHeight:1.3}}>
+              {String(m.titulo||"").replace(/^[^ ]+ /,"")}
+              {(m.version||1)>1&&<span style={{fontSize:9.5,color:T.blue,fontWeight:700}}> · v{m.version}</span>}
+            </p>
+            {m.desc&&<p style={{margin:"3px 0 0",fontSize:11.5,color:T.muted,lineHeight:1.4}}>{m.desc}</p>}
+            <p style={{margin:"4px 0 0",fontSize:10,color:T.muted}}>
+              {audiencia(m)}
+              {m.html?" · se lee aquí":m.url?" · página web":" · sin contenido todavía"}
+            </p>
+            {!ok&&(m.version||1)>1&&ult&&(
+              <p style={{margin:"4px 0 0",fontSize:10.5,color:T.blue,lineHeight:1.4}}>Novedades: {ult.texto}</p>
+            )}
+          </div>
+          <span style={{flexShrink:0,fontSize:9.5,fontWeight:800,
+            color:ok?T.green:(obligatorio&&dias>7?T.red:T.amber)}}>
+            {ok?"✅ leído":obligatorio?(dias>7?"🔒 bloquea":"pendiente"):"opcional"}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{background:T.bg,minHeight:"100vh",paddingBottom:100}}>
+      {visor&&(
+        <div style={{position:"fixed",inset:0,background:"#0F172A",zIndex:1200,display:"flex",flexDirection:"column"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",flexShrink:0}}>
+            <p style={{margin:0,fontSize:13,fontWeight:800,color:"#fff"}}>{visor.titulo}
+              <span style={{fontSize:10,color:"#94A3B8"}}> v{visor.version||1}</span></p>
+            <button onClick={function(){setVisor(null);}}
+              style={{padding:"8px 16px",borderRadius:9,border:"none",background:"#fff",
+                color:T.text,fontWeight:800,fontSize:12,cursor:"pointer"}}>✕ Cerrar</button>
+          </div>
+          {visor.html
+            ? <iframe srcDoc={visor.html} title={visor.titulo}
+                style={{flex:1,border:"none",width:"100%",background:"#fff"}} sandbox="allow-same-origin"/>
+            : visor.url
+              ? <iframe src={visor.url} title={visor.titulo}
+                  style={{flex:1,border:"none",width:"100%",background:"#fff"}}/>
+              : <div style={{flex:1,display:"grid",placeItems:"center",color:"#94A3B8",fontSize:13,padding:24,textAlign:"center"}}>
+                  Este manual todavía no tiene contenido publicado.
+                </div>}
+          {!leido(visor)&&manualAplicaA(usuario,visor)&&(
+            <div style={{padding:"10px 14px",flexShrink:0}}>
+              <button onClick={function(){confirmar(visor);setVisor(null);}}
+                disabled={!abiertos[visor.id]}
+                style={{width:"100%",padding:"13px",borderRadius:10,border:"none",
+                  background:abiertos[visor.id]?T.green:"#475569",color:"#fff",
+                  fontWeight:800,fontSize:13,cursor:"pointer"}}>
+                ✅ He leído y entendido este manual</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{padding:"18px 16px 0"}}>
+        <p style={{margin:"0 0 3px",fontSize:19,fontWeight:900,letterSpacing:"-.02em"}}>📖 Manuales</p>
+        <p style={{margin:"0 0 14px",fontSize:12,color:T.muted}}>
+          Se leen y se firman aquí. {pendientes.length>0
+            ? <b style={{color:T.amber}}>Te faltan {pendientes.length} por leer.</b>
+            : "Los tienes todos al día."}
+        </p>
+
+        <input value={q} onChange={function(e){setQ(e.target.value);}}
+          placeholder="Buscar por título, tema o departamento…"
+          style={{width:"100%",padding:"12px 14px",borderRadius:11,fontSize:14,
+            border:"1.5px solid "+T.border,fontFamily:"inherit",outline:"none",
+            marginBottom:16,boxSizing:"border-box"}}/>
+
+        {pendientes.length>0&&(
+          <div style={{marginBottom:18}}>
+            <p style={{margin:"0 0 8px",fontSize:10.5,fontWeight:800,color:T.amber,
+              textTransform:"uppercase",letterSpacing:".08em"}}>Pendientes de leer · {pendientes.length}</p>
+            {pendientes.map(function(m){return ficha(m,true);})}
+          </div>
+        )}
+
+        {alDia.length>0&&(
+          <div style={{marginBottom:18}}>
+            <p style={{margin:"0 0 8px",fontSize:10.5,fontWeight:800,color:T.green,
+              textTransform:"uppercase",letterSpacing:".08em"}}>Al día · {alDia.length}</p>
+            {alDia.map(function(m){return ficha(m,true);})}
+          </div>
+        )}
+
+        {resto.length>0&&(
+          <div style={{marginBottom:18}}>
+            <p style={{margin:"0 0 8px",fontSize:10.5,fontWeight:800,color:T.muted,
+              textTransform:"uppercase",letterSpacing:".08em"}}>De otras áreas · {resto.length}</p>
+            <p style={{margin:"0 0 8px",fontSize:11,color:T.muted}}>
+              No te los pide nadie, pero puedes leerlos.</p>
+            {resto.map(function(m){return ficha(m,false);})}
+          </div>
+        )}
+
+        {(pendientes.length+alDia.length+resto.length)===0&&(
+          <p style={{textAlign:"center",color:T.muted,fontSize:13,padding:"40px 20px"}}>
+            {q?"Ningún manual coincide con «"+q+"».":"No hay manuales publicados."}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ManualesGate({usuario,onNav}){
   const [lecturas,setLecturas]=useState(null); // null=cargando
   const [abiertos,setAbiertos]=useState({});   // manuales abiertos en esta sesión
   const [oculto,setOculto]=useState(false);    // banner plegado (solo si no hay bloqueo)
@@ -705,7 +861,8 @@ function ManualesGate({usuario}){
         <div onClick={function(){setOculto(!oculto);}}
           style={{display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer",padding:"4px 2px"}}>
           <p style={{margin:0,fontSize:11,fontWeight:700,color:T.muted}}>📖 Manuales de uso <span style={{color:T.green}}>· al día ✓</span></p>
-          <span style={{fontSize:10,color:T.muted}}>{oculto?"▴":"▾ releer"}</span>
+          <span onClick={function(e){e.stopPropagation();if(onNav)onNav("manuales");}}
+            style={{fontSize:10,color:T.blue,fontWeight:800,cursor:"pointer"}}>ver todos →</span>
         </div>
         {oculto&&(
           <div style={{marginTop:6,display:"flex",flexWrap:"wrap",gap:6}}>
@@ -36004,6 +36161,7 @@ function App(props){
                section==="tareas"?"📌 Tareas y acciones":
                section==="calendario"?"🗓️ Agenda":
                section==="sala_mandos"?"🎯 Sala de Mandos":
+               section==="manuales"?"📖 Manuales":
                section==="reporting"?"🧾 Parte semanal":
                section==="ia"?"🤖 Asistente IA":
                section==="plan_semanal"?"📅 Mi semana":
@@ -36041,7 +36199,7 @@ function App(props){
         })()}
 
         {/* (v6.2) Guardián de manuales: aviso de pendientes y bloqueo a los 7 días */}
-        <ManualesGate usuario={usuario}/>
+        <ManualesGate usuario={usuario} onNav={setSection}/>
 
         {/* AGENTE */}
         {esAgente&&section==="dashboard"&&  <DashAgente usuario={usuario} onNav={setSection} oportunidadesDB={oportunidadesDB} clientesFB={misClientesFB} muestrasDB={muestrasDB} estrategiasDB={estrategiasDB} incidenciasDB={incidenciasDB} calendarioDB={calendarioDB} actividad={actividadSemana} _ver={objVer}/>}
@@ -36126,6 +36284,7 @@ function App(props){
         {section==="estrategias"&&          <MisEstrategias usuario={usuario} onNavegar={setSection} onVolverPotencial={function(){return volverAPotencialSiCorresponde(setSection, setClienteDirecto, usuario);}}/>}
         {section==="oportunidades"&&        <GestorOportunidades usuario={usuario} onAbrirCliente={onAbrirCliente} opoDirecta={opoDirecta} onOpoDirectaUsada={function(){setOpoDirecta(null);}} onBack={function(){setHideNav(false);setClienteDirecto(null);setSection(prevSectionRef.current||"dashboard");}} onNewCliente={function(nuevo){setClientesDB(function(prev){if(!prev||!prev._todos)return prev;return Object.assign({},prev,{_todos:[nuevo].concat(prev._todos)});});}}/>}
         {section==="proyectos"&&            <Proyectos usuario={usuario} onAbrirCliente={onAbrirCliente} onIrASeccion={onIrASeccion} proyectoDirecto={proyectoDirecto} onProyectoDirectoUsado={function(){setProyectoDirecto(null);}}/>}
+        {section==="manuales"&&            <BibliotecaManuales usuario={usuario} onNav={setSection}/>}
         {section==="parte_depto"&&          <ParteSemanalDepto usuario={usuario} incidenciasDB={incidenciasDB} bloqueo={bloqueoParte} onDesbloquear={function(){setBloqueoParte(null);}}/>}
         {section==="embudo"&&               <Embudo usuario={usuario} clientesFB={misClientesFB}/>}
         {section==="incidencias"&&          <Incidencias usuario={usuario} clientesFB={misClientesFB} onAbrirCliente={onAbrirCliente} onNavegar={setSection} incidenciasDB={esTipologia?incidenciasDB.filter(function(i){var t=(i.tipo||i.tipologia||"").toLowerCase();return misTipsRama.indexOf(t)>=0||t===miTipologia;}):incidenciasDB}/>}
