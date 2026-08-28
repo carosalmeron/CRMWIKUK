@@ -2718,10 +2718,93 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
 
   var guardar=function(p){setPlan(p);fbEscribir("planes_semanales",p.id,p);};
 
+  // (28-ago) LAS RUTAS VIENEN DEL PLANIFICADOR, no de la ficha del ERP.
+  // Antes se leia SEMANAVISITA de cada cliente: un campo del ERP que nadie
+  // mantiene, por eso salian rutas con 4 clientes y faltaba la 3. Ahora la
+  // fuente es la misma que edita el planificador:
+  //   · rueda_anual  → que RUTA le toca a este agente en esta semana ISO
+  //   · radar_rutas  → que CLIENTES lleva cada ruta
+  // Si no hay nada subido para el agente, se cae al campo antiguo para no
+  // dejar a nadie sin pantalla mientras se suben las ruedas.
+  var _sr=React.useState({rutas:{},dias:{},cargado:false});
+  var ruedaFB=_sr[0], setRuedaFB=_sr[1];
+  React.useEffect(function(){
+    var vivo=true;
+    (async function(){
+      try{
+        var agente=String(idCanonico(usuario)||"").toUpperCase().trim();
+        if(!agente){if(vivo)setRuedaFB({rutas:{},dias:{},cargado:true});return;}
+        // 1) clientes por ruta, de radar_rutas (trozos chunk_<KA>_<n>)
+        var porRuta={};
+        var tk="";
+        do{
+          var url=FB_BASE+"/radar_rutas?pageSize=300"+(tk?"&pageToken="+tk:"");
+          var r=await fetch(url); if(!r.ok) break;
+          var j=await r.json();
+          (j.documents||[]).forEach(function(doc){
+            var s=doc.fields&&doc.fields.datos&&doc.fields.datos.stringValue;
+            if(!s) return;
+            var arr=[]; try{arr=JSON.parse(s);}catch(e){return;}
+            arr.forEach(function(a){
+              if(String(a.ka||"").toUpperCase().trim()!==agente) return;
+              if(!/^VISITA/i.test(String(a.acc||""))) return;   // solo visitas
+              var m=String(a.ruta||"").match(/R?\s*(\d{1,2})/i);
+              if(!m) return;
+              var nr=parseInt(m[1]); if(!(nr>0)) return;
+              (porRuta[nr]=porRuta[nr]||[]).push({
+                id:"rr_"+nr+"_"+(porRuta[nr]||[]).length,
+                nombre:a.n||"", NOMBRE:a.n||"",
+                poblacion:a.p||"", provincia:a.pr||"",
+                segmento:a.seg||"", _deRueda:true, _dia:a.dia||"", _nota:a.nota||""
+              });
+            });
+          });
+          tk=j.nextPageToken||"";
+        }while(tk);
+        // 2) que ruta toca cada semana, de rueda_anual
+        var semRuta={}, semDias={};
+        try{
+          var anio=new Date().getFullYear();
+          var docId="rueda_"+agente.replace(/[\s\/]+/g,"_")+"_"+anio;
+          var rr=await fetch(FB_BASE+"/rueda_anual/"+docId);
+          if(rr.ok){
+            var jr=await rr.json();
+            var sem=jr.fields&&jr.fields.semanas&&jr.fields.semanas.mapValue&&jr.fields.semanas.mapValue.fields;
+            if(sem) Object.keys(sem).forEach(function(w){
+              var e=sem[w].mapValue&&sem[w].mapValue.fields; if(!e) return;
+              var lista=e.rutas&&e.rutas.arrayValue&&e.rutas.arrayValue.values;
+              if(lista) semRuta[+w]=lista.map(function(v){return parseInt(v.integerValue||v.doubleValue||v.stringValue);}).filter(Boolean);
+              if(e.dias&&e.dias.mapValue) semDias[+w]=e.dias.mapValue.fields;
+            });
+          }
+        }catch(e){}
+        if(vivo) setRuedaFB({porRuta:porRuta, semRuta:semRuta, dias:semDias, cargado:true});
+      }catch(e){ if(vivo) setRuedaFB({porRuta:{}, semRuta:{}, dias:{}, cargado:true}); }
+    })();
+    return function(){vivo=false;};
+  },[usuario&&usuario.id]);
+
   var getR=function(c){return parseInt(c.SEMANAVISITA||c.semanaVisita||c.ruta||c.semana||0)||0;};
   var rutas=[];var rutaMap={};
-  (clientesFB||[]).forEach(function(c){var r=getR(c);if(r>0){if(!rutaMap[r])rutaMap[r]=[];rutaMap[r].push(c);if(rutas.indexOf(r)<0)rutas.push(r);}});
-  rutas.sort(function(a,b){return a-b;});
+  var _pr=ruedaFB.porRuta||{};
+  var _hayRueda=Object.keys(_pr).length>0;
+  if(_hayRueda){
+    rutaMap=_pr;
+    rutas=Object.keys(_pr).map(Number).filter(function(n){return n>0;});
+    // Si el planificador dice que ESTA semana toca una ruta concreta, se
+    // ofrece primero: es la propuesta, no una lista para elegir a ciegas.
+    var _tocan=(ruedaFB.semRuta||{})[semana]||[];
+    if(_tocan.length){
+      rutas.sort(function(a,b){
+        var ta=_tocan.indexOf(a)>=0?0:1, tb=_tocan.indexOf(b)>=0?0:1;
+        return ta-tb||a-b;
+      });
+    } else rutas.sort(function(a,b){return a-b;});
+  } else {
+    (clientesFB||[]).forEach(function(c){var r=getR(c);if(r>0){if(!rutaMap[r])rutaMap[r]=[];rutaMap[r].push(c);if(rutas.indexOf(r)<0)rutas.push(r);}});
+    rutas.sort(function(a,b){return a-b;});
+  }
+  var rutaPropuesta=((ruedaFB.semRuta||{})[semana]||[])[0]||null;
 
   // 360 data
   var esAgenteRol=(usuario?.rol||"").toLowerCase().indexOf("agente")>=0;
@@ -4311,12 +4394,14 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
               es un trámite: se escribe y nadie vuelve a mirarlo. */}
           <Compromisos usuario={usuario} semana={semana} T={T}/>
           {rutas.length>0&&esAgenteRol&&<div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:16}}>
-            {rutas.map(function(r){var clis=rutaMap[r]||[];return <button key={r} onClick={function(){
+            {rutas.map(function(r){var clis=rutaMap[r]||[];
+              var toca=(rutaPropuesta===r);
+              return <button key={r} onClick={function(){
               guardar({id:"plan_"+usuario.id+"_"+new Date().getFullYear()+"_s"+semana,agente:idCanonico(usuario),semana:semana,anio:new Date().getFullYear(),modo:"ruta",rutaNum:r,estado:"activo",visitados:[]});
-            }} style={{display:"flex",alignItems:"center",gap:14,padding:18,borderRadius:16,border:"2px solid "+T.blue,background:"#EFF6FF",cursor:"pointer",textAlign:"left"}}>
-              <div style={{width:48,height:48,borderRadius:14,background:T.blue,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:18,fontWeight:800,flexShrink:0}}>{r}</div>
+            }} style={{display:"flex",alignItems:"center",gap:14,padding:18,borderRadius:16,border:"2px solid "+(toca?"#0E7C5A":T.blue),background:toca?"#ECFDF5":"#EFF6FF",cursor:"pointer",textAlign:"left"}}>
+              <div style={{width:48,height:48,borderRadius:14,background:toca?"#0E7C5A":T.blue,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:18,fontWeight:800,flexShrink:0}}>{r}</div>
               <div style={{flex:1}}>
-                <p style={{margin:0,fontSize:15,fontWeight:700,color:T.navy}}>Ruta {r}</p>
+                <p style={{margin:0,fontSize:15,fontWeight:700,color:T.navy}}>Ruta {r}{toca?" \u00B7 te toca esta semana":""}</p>
                 <p style={{margin:"3px 0 0",fontSize:11,color:T.muted}}>{clis.length} clientes{clis.length>0?" \u00B7 "+clis.slice(0,2).map(function(c){return c.nombre||c.NOMBRE||"";}).join(", ")+(clis.length>2?"...":""):""}</p>
               </div>
             </button>;})}
