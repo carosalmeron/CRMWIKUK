@@ -67,7 +67,7 @@ tr:nth-child(even) td{background:var(--zebra)}
 <body>
 <header>
   <div class="sweep"><b></b></div>
-  <h1>Estación de Radar · <span style="color:#B3261E">MOTOR v3.0</span></h1>
+  <h1>Estación de Radar · <span style="color:#B3261E">MOTOR v3.11</span></h1>
   <p>Tres alimentadores sobre el Firebase del sistema: <b>1)</b> sube las rutas organizadas y queda marcado qué vendedor las tiene en la nube · <b>2)</b> la base de datos existente (sin organizar) se lee directamente · <b>3)</b> cruza cualquier Excel de clientes sueltos contra rutas, contra la BD, o contra las dos.</p>
 </header>
 <main>
@@ -81,6 +81,16 @@ tr:nth-child(even) td{background:var(--zebra)}
   </div>
   <div class="fila"><button class="cta" id="btnSubir" disabled>SUBIR RUTAS A FIREBASE</button>
     <span class="msg" id="msgR"></span></div>
+  <div style="margin-top:10px;padding:10px 12px;background:#F9F8F6;border:1px solid #E0DCD6;border-radius:10px">
+    <div style="font-size:.78rem;font-weight:700;margin-bottom:6px">⬇ Descargar Excel desde la nube</div>
+    <div style="font-size:.72rem;color:#8A8078;margin-bottom:8px">Elige qué KA(s) llevar al Excel — normalmente el duplo o equipo con el que vas a trabajar la rueda. Si no marcas ninguno, se descargan todos.</div>
+    <div style="font-size:.66rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:4px">🚗 KA (dueños de ruta)</div>
+    <div id="kasBajar" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px"></div>
+    <div style="font-size:.66rem;font-weight:700;color:#8A8078;text-transform:uppercase;margin-bottom:4px">☎️ Telefónicos (duplo)</div>
+    <div id="telsBajar" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px"><span style="font-size:.72rem;color:#8A8078">Cargando…</span></div>
+    <button class="mini" id="btnBajar">⬇ Descargar Excel</button>
+    <span class="msg" id="msgBajar"></span>
+  </div>
   <div class="fila">
     <button class="mini" id="btnInt">🌍 Organizar INTERNACIONALES desde la BD (Miguel · Azarco · Ricardo)</button>
     <span class="msg" id="msgInt"></span>
@@ -192,12 +202,11 @@ const D={"MP": {"ALCEDA": "Cantabria", "ALISEDA": "Cáceres", "ALMAZAN": "Soria"
 const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
 // KA con ruta propia. Los seis de WIKUK "cliente pequeno" trabajan SOLOS
 // (sin telefonico de duplo): su rueda es de 15 visitas/dia y 240 paradas por
-// ciclo, frente a las 5/dia de los duplos. Si un vendedor no esta en esta
-// lista, sus clientes SI se suben a radar_rutas pero no aparece su tarjeta
-// de estado abajo: la subida se hace a ciegas.
+// ciclo, frente a las 5/dia de los duplos. Si un vendedor NO esta en esta
+// lista, sus clientes si se suben a radar_rutas pero no aparece su tarjeta
+// de estado ni se le puede marcar para la descarga.
 const KAS=["AGUSTIN","CARLOSG","JLGARCIA","KA UNIFICADO","MIGUEL","AZARCO","RICARDO",
            "DAVIDMAG","RPIEDRA","DVEGA","ACRUZ","LLVILA","JPEREZ"];
-// Cada KA, con su nombre legible y su modelo. WIKUK = va solo, sin Inside.
 const KA_INFO={
   "AGUSTIN":{n:"Agustín",m:"duplo"}, "CARLOSG":{n:"CarlosG",m:"duplo"},
   "JLGARCIA":{n:"JLGarcia",m:"duplo"}, "KA UNIFICADO":{n:"KA Unificado",m:"duplo"},
@@ -410,16 +419,45 @@ setupDrop("dropR",(f,el)=>{
 document.getElementById("btnSubir").onclick=async()=>{
   const m=document.getElementById("msgR");m.className="msg";m.textContent="Subiendo…";
   try{
-    const TAM=350;const nCh=Math.ceil(rutasExcel.length/TAM);
-    for(let i=0;i<nCh;i++){
-      const trozo=rutasExcel.slice(i*TAM,(i+1)*TAM);
-      await fbSet("radar_rutas/chunk_"+i,{datos:{stringValue:JSON.stringify(trozo)},n:{integerValue:String(trozo.length)}});
-      m.textContent="Subiendo… "+Math.min((i+1)*TAM,rutasExcel.length)+"/"+rutasExcel.length;
+    // (v3.11) UN ESPACIO POR VENDEDOR. Antes los trozos se numeraban desde cero
+    // en cada subida (chunk_0, chunk_1...), asi que subir la rueda de un
+    // comercial SOBRESCRIBIA la del anterior y ademas vaciaba los seis trozos
+    // siguientes: se perdian las rutas de los demas y sus tarjetas se apagaban.
+    // Ahora cada KA escribe en chunk_<KA>_<n> y solo se limpian los suyos.
+    const TAM=350;
+    const porKAsubida={};
+    rutasExcel.forEach(c=>{const k=String(c.ka||"SIN KA").toUpperCase().trim()||"SIN KA";
+      (porKAsubida[k]=porKAsubida[k]||[]).push(c);});
+    const kaDoc=k=>k.replace(/[^A-Z0-9]+/gi,"_");
+    let hechos=0;
+    for(const ka of Object.keys(porKAsubida)){
+      const suyo=porKAsubida[ka];
+      const nCh=Math.ceil(suyo.length/TAM);
+      for(let i=0;i<nCh;i++){
+        const trozo=suyo.slice(i*TAM,(i+1)*TAM);
+        await fbSet("radar_rutas/chunk_"+kaDoc(ka)+"_"+i,
+          {datos:{stringValue:JSON.stringify(trozo)},ka:{stringValue:ka},
+           n:{integerValue:String(trozo.length)}});
+        hechos+=trozo.length;
+        m.textContent="Subiendo "+ka+"… "+hechos+"/"+rutasExcel.length;
+      }
+      // se vacian SOLO los trozos sobrantes de ESTE KA (por si antes tenia mas)
+      for(let i=nCh;i<nCh+6;i++){
+        try{await fbSet("radar_rutas/chunk_"+kaDoc(ka)+"_"+i,
+          {datos:{stringValue:"[]"},ka:{stringValue:ka},n:{integerValue:"0"}});}catch(e){}
+      }
     }
-    for(let i=nCh;i<nCh+6;i++){try{await fbSet("radar_rutas/chunk_"+i,{datos:{stringValue:"[]"},n:{integerValue:"0"}});}catch(e){}}
-    const porKA={};rutasExcel.forEach(c=>{porKA[c.ka]=(porKA[c.ka]||0)+1;}); // acciones por KA
+    // (v3.11) El contador se FUSIONA con lo ya publicado: subir a uno no puede
+    // dejar a los demas como "sin subir".
+    const porKA={};
+    try{
+      const prev=await fbGet("radar_meta/estado");
+      Object.assign(porKA,JSON.parse(prev.fields?.porKA?.stringValue||"{}"));
+    }catch(e){}
+    Object.keys(porKAsubida).forEach(k=>{porKA[k]=porKAsubida[k].length;});
+    const totalGlobal=Object.values(porKA).reduce((a,b)=>a+(+b||0),0);
     await fbSet("radar_meta/estado",{fecha:{stringValue:new Date().toISOString()},
-      total:{integerValue:String(rutasExcel.length)},porKA:{stringValue:JSON.stringify(porKA)}});
+      total:{integerValue:String(totalGlobal)},porKA:{stringValue:JSON.stringify(porKA)}});
     // (v3.1) Rueda anual para el CRM: un doc por KA con qué ruta toca cada semana
     let nRuedas=0;
     if(ruedaPorKA){
@@ -515,7 +553,6 @@ document.getElementById("btnSubir").onclick=async()=>{
 const kasSeleccionados=new Set();
 function pintarChipsKA(){
   const cont=document.getElementById("kasBajar");
-  if(!cont) return;              // bloque de descarga retirado
   cont.innerHTML="";
   KAS.forEach(ka=>{
     const on=kasSeleccionados.has(ka);
@@ -547,7 +584,6 @@ async function cargarTelefonicos(){
 }
 function pintarChipsTel(){
   const cont=document.getElementById("telsBajar");
-  if(!cont) return;              // bloque de descarga retirado
   if(TELEFONICOS.length===0){cont.innerHTML='<span style="font-size:.72rem;color:#8A8078">Ninguno creado todavía — asígnalos en el Administrador → Organigrama.</span>';return;}
   cont.innerHTML="";
   TELEFONICOS.forEach(t=>{
@@ -563,18 +599,23 @@ function pintarChipsTel(){
 cargarTelefonicos();
 // Hoja FILTRABLE = re-subible tal cual. Hoja RUEDA = calendario semana→ruta por KA,
 // leído de rueda_anual, así que incluye las correcciones hechas desde el editor del CRM.
-const _btnBajar=document.getElementById("btnBajar");
-if(_btnBajar) _btnBajar.onclick=async()=>{
+document.getElementById("btnBajar").onclick=async()=>{
   const m=document.getElementById("msgBajar");m.className="msg";m.textContent="Descargando de la nube…";
   try{
     const filtroKA=kasSeleccionados.size>0?kasSeleccionados:null; // null = todos
     // 1) Clientes de radar_rutas (chunks)
+    // (v3.11) Se LISTA la coleccion entera: los trozos ya no son chunk_0,1,2...
+    // sino chunk_<KA>_<n>, asi que no se pueden adivinar por numero.
     const listaTodo=[];
-    for(let i=0;i<60;i++){
-      let d;try{d=await fbGet("radar_rutas/chunk_"+i);}catch(e){break;}
-      const arr=JSON.parse(d.fields?.datos?.stringValue||"[]");
-      if(arr.length===0&&i>0)break;
-      arr.forEach(c=>listaTodo.push(c));
+    {
+      let pt="";
+      do{
+        const j=await fbGet("radar_rutas?pageSize=300"+(pt?"&pageToken="+pt:""));
+        for(const doc of (j.documents||[])){
+          try{(JSON.parse(doc.fields?.datos?.stringValue||"[]")).forEach(c=>listaTodo.push(c));}catch(e){}
+        }
+        pt=j.nextPageToken||"";
+      }while(pt);
     }
     if(listaTodo.length===0){m.className="msg err";m.textContent="No hay rutas subidas en la nube.";return;}
     const lista=filtroKA?listaTodo.filter(c=>filtroKA.has(String(c.ka||"").toUpperCase())):listaTodo;
@@ -869,7 +910,7 @@ async function cargaBoard(){
       return '<div class="kacard"><b>'+ka+'</b>'+
         (inf.n!==ka?'<div style="font-size:.68rem;color:#8A8078;margin-top:2px">'+inf.n+'</div>':'')+
         '<div class="est '+(n?'ok2':'no2')+'">'+
-        (n?('✓ ruta subida · '+n+' clientes'):'— sin subir')+'</div></div>';};
+        (n?('✓ ruta subida · '+n+' acciones'):'— sin subir')+'</div></div>';};
     const rotulo=t=>'<div style="flex-basis:100%;font-size:.66rem;font-weight:700;'+
       'color:#8A8078;text-transform:uppercase;margin:8px 0 2px">'+t+'</div>';
     const porModelo=m=>KAS.filter(k=>(KA_INFO[k]||{}).m===m);
@@ -1002,14 +1043,17 @@ function cargaHojaS(){
 function check3(){document.getElementById("btnCruce").disabled=!wbS;}
 let RUTAS=null,res={rutas:[],bd:[],dudoso:[],nuevo:[]},bucket="nuevo";
 async function cargaRutasNube(){
+  // (v3.11) misma razon: se lista la coleccion, no se adivinan los ids
   let todos=[];
   for(const col of ["radar_rutas","radar_rutas_int"]){
-    let i=0;
-    while(true){
-      try{const d=await fbGet(col+"/chunk_"+i);
-        const s=d.fields?.datos?.stringValue;if(!s||s==="[]")break;todos.push(...JSON.parse(s));i++;
-      }catch(e){break;}
-    }
+    let pt="";
+    do{
+      let j;try{j=await fbGet(col+"?pageSize=300"+(pt?"&pageToken="+pt:""));}catch(e){break;}
+      for(const doc of (j.documents||[])){
+        try{todos.push(...JSON.parse(doc.fields?.datos?.stringValue||"[]"));}catch(e){}
+      }
+      pt=j.nextPageToken||"";
+    }while(pt);
   }
   return todos;
 }
