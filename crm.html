@@ -2747,15 +2747,24 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
             var arr=[]; try{arr=JSON.parse(s);}catch(e){return;}
             arr.forEach(function(a){
               if(String(a.ka||"").toUpperCase().trim()!==agente) return;
-              if(!/^VISITA/i.test(String(a.acc||""))) return;   // solo visitas
+              var acc=String(a.acc||"");
+              // Entran visitas Y prospecciones: la jornada de WIKUK es de 15
+              // paradas y mas de la mitad pueden ser puerta nueva. Si solo se
+              // muestran las visitas, el comercial ve media agenda.
+              if(!/^VISITA|^PROSPEC/i.test(acc)) return;
               var m=String(a.ruta||"").match(/R?\s*(\d{1,2})/i);
               if(!m) return;
               var nr=parseInt(m[1]); if(!(nr>0)) return;
-              (porRuta[nr]=porRuta[nr]||[]).push({
-                id:"rr_"+nr+"_"+(porRuta[nr]||[]).length,
+              var lista=(porRuta[nr]=porRuta[nr]||[]);
+              var libre=/LIBRE/i.test(acc)||/puerta nueva por cubrir/i.test(String(a.n||""));
+              lista.push({
+                id:"rr_"+nr+"_"+lista.length,
                 nombre:a.n||"", NOMBRE:a.n||"",
                 poblacion:a.p||"", provincia:a.pr||"",
-                segmento:a.seg||"", _deRueda:true, _dia:a.dia||"", _nota:a.nota||""
+                segmento:a.seg||"", _deRueda:true,
+                _dia:a.dia||"", _nota:a.nota||"",
+                _acc:acc, _pros:/^PROSPEC/i.test(acc), _libre:libre,
+                _orden:lista.length
               });
             });
           });
@@ -5426,7 +5435,61 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
 
               {cliPendientes.length>0&&(<div>
                 <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.blue,textTransform:"uppercase"}}>Pendientes ({cliPendientes.length})</p>
-                <div style={{background:"#fff",borderRadius:16,overflow:"hidden",marginBottom:14,boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
+                {/* (28-ago) La ruta se muestra POR DÍAS, en el orden del
+                    planificador. Antes era una lista plana de 27 nombres y el
+                    comercial no sabía qué le tocaba el lunes y qué el jueves. */}
+                {(function(){
+                  var porDia={},orden=[];
+                  cliPendientes.forEach(function(c){
+                    var d=c._dia||"Sin día asignado";
+                    if(!porDia[d]){porDia[d]=[];orden.push(d);}
+                    porDia[d].push(c);
+                  });
+                  var DIAS=["LUNES","MARTES","MIERCOLES","MIÉRCOLES","JUEVES","VIERNES"];
+                  orden.sort(function(a,b){
+                    var ia=DIAS.findIndex(function(x){return a.toUpperCase().indexOf(x)===0;});
+                    var ib=DIAS.findIndex(function(x){return b.toUpperCase().indexOf(x)===0;});
+                    return (ia<0?9:ia)-(ib<0?9:ib);
+                  });
+                  if(orden.length<=1) return null;   // sin días: lista normal
+                  return orden.map(function(d){
+                    var cl=porDia[d];
+                    var nv=cl.filter(function(x){return !x._pros;}).length;
+                    var np=cl.length-nv;
+                    return <div key={d} style={{marginBottom:14}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,margin:"0 0 6px"}}>
+                        <p style={{margin:0,fontSize:13,fontWeight:800,color:T.navy}}>{d}</p>
+                        <span style={{fontSize:10,color:T.muted}}>{nv} visitas{np>0?" \u00B7 "+np+" prospección":""}</span>
+                      </div>
+                      <div style={{background:"#fff",borderRadius:16,overflow:"hidden",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
+                        {cl.map(function(c,i){
+                          var n=c.nombre||c.NOMBRE||"";
+                          var pob=c.poblacion||c.POBLACION||"";
+                          var seg=(c.segmento||"").toUpperCase();
+                          var cs=seg==="A"?"#0E7C5A":seg==="B"?"#B98A00":seg==="C"?"#7A1F2B":"#94A3B8";
+                          return <div key={i} onClick={function(){if(!c._libre&&onAbrirCliente)onAbrirCliente(c);}}
+                            style={{display:"flex",alignItems:"center",gap:12,padding:"13px 16px",
+                              borderBottom:i<cl.length-1?"1px solid #F1F5F9":"none",
+                              cursor:c._libre?"default":"pointer",
+                              background:c._libre?"#FAF7F0":c._pros?"#F8FAFF":"#fff"}}>
+                            <div style={{width:34,height:34,borderRadius:9,display:"flex",alignItems:"center",
+                              justifyContent:"center",fontSize:13,fontWeight:800,flexShrink:0,
+                              background:c._libre?"#F1E9D8":c._pros?"#E7EEFB":"#EFF6FF",color:cs}}>
+                              {c._libre?"▢":c._pros?"◎":(seg||"·")}</div>
+                            <div style={{flex:1,minWidth:0}}>
+                              <p style={{margin:0,fontSize:14,fontWeight:700,
+                                color:c._libre?T.muted:T.text}}>{c._libre?"Puerta nueva por cubrir":n}</p>
+                              {pob&&<p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>{pob}</p>}
+                              {c._nota&&<p style={{margin:"3px 0 0",fontSize:10.5,color:"#5C554D",lineHeight:1.35}}>{c._nota}</p>}
+                            </div>
+                            {!c._libre&&<span style={{fontSize:14,color:"#94A3B8"}}>{">"}</span>}
+                          </div>;
+                        })}
+                      </div>
+                    </div>;
+                  });
+                })()}
+                <div style={{background:"#fff",borderRadius:16,overflow:"hidden",marginBottom:14,boxShadow:"0 1px 4px rgba(0,0,0,.04)",display:cliPendientes.some(function(c){return c._dia;})?"none":"block"}}>
                   {cliPendientes.map(function(c,i){
                     var n=c.nombre||c.NOMBRE||"";
                     var poblacion=c.poblacion||c.POBLACION||c.localidad||"";
@@ -5447,6 +5510,39 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
                   })}
                 </div>
               </div>)}
+
+              {/* (28-ago) Los huecos de puerta nueva se NOMINAN: el comercial
+                  escribe a quién ha entrado. Sin esto, el hueco se queda en
+                  blanco y no hay forma de saber si se trabajó. */}
+              {plan.modo==="ruta"&&cliPendientes.some(function(c){return c._libre;})&&(
+                <div style={{marginBottom:14,background:"#FAF7F0",border:"1.5px solid #E8DCC8",borderRadius:14,padding:14}}>
+                  <p style={{margin:"0 0 4px",fontSize:12,fontWeight:800,color:"#7A1F2B"}}>
+                    ▢ {cliPendientes.filter(function(c){return c._libre;}).length} puertas nuevas por cubrir
+                  </p>
+                  <p style={{margin:"0 0 10px",fontSize:11,color:T.muted}}>
+                    Busca el negocio si ya está en la base; si no, dalo de alta con ➕ y anota quién le sirve hoy.
+                  </p>
+                  <input value={busqLibre} onChange={function(e){setBusqLibre(e.target.value);}}
+                    placeholder="Nombre del negocio al que has entrado…"
+                    style={{width:"100%",padding:"12px 14px",borderRadius:10,border:"1.5px solid #E8DCC8",fontSize:13,boxSizing:"border-box",outline:"none",background:"#fff"}}/>
+                  {busqLibre.length>=2&&(
+                    <div style={{background:"#fff",border:"1.5px solid "+T.border,borderRadius:10,maxHeight:200,overflow:"auto",marginTop:8}}>
+                      {(function(){var a=todosClientesFB,b=clientesFB;var src=(a&&a.length>0)?a:(b&&b.length>0)?b:[];
+                        return src.filter(function(c){var q=busqLibre.toUpperCase();
+                          return(c.nombre||c.NOMBRE||"").toUpperCase().includes(q)||(c.poblacion||c.ciudad||"").toUpperCase().includes(q);});})().slice(0,8).map(function(c,i){
+                        return <div key={i} onClick={function(){if(onAbrirCliente)onAbrirCliente(c);setBusqLibre("");}}
+                          style={{padding:"10px 14px",borderBottom:"1px solid #F1F5F9",cursor:"pointer",fontSize:13}}>
+                          <p style={{margin:0,fontWeight:600}}>{c.nombre||c.NOMBRE||""}</p>
+                          <p style={{margin:0,fontSize:10,color:T.muted}}>{c.poblacion||c.POBLACION||""}</p>
+                        </div>;})}
+                      {onNewCliente&&<div onClick={function(){onNewCliente(busqLibre);setBusqLibre("");}}
+                        style={{padding:"11px 14px",cursor:"pointer",fontSize:13,fontWeight:700,color:"#0E7C5A",background:"#ECFDF5"}}>
+                        ➕ Dar de alta &ldquo;{busqLibre}&rdquo; como cliente nuevo
+                      </div>}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Buscador para añadir cliente fuera de ruta */}
               {plan.modo==="ruta"&&(
