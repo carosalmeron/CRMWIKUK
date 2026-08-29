@@ -2607,6 +2607,7 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
   var _s8d=React.useState(null);var diaAbierto=_s8d[0],setDiaAbierto=_s8d[1];
   var _s8e=React.useState(null);var proponiendo=_s8e[0],setProponiendo=_s8e[1];
   var _s8f=React.useState(8);var topeCand=_s8f[0],setTopeCand=_s8f[1];
+
   var _s9=React.useState(false);var showNuevoMS=_s9[0],setShowNuevoMS=_s9[1];
   // (v3.69) Recuperado: hilo de comentarios/instrucciones de la visita
   var _vhilo=React.useState(null);var visitaHilo=_vhilo[0],setVisitaHilo=_vhilo[1];
@@ -2797,7 +2798,26 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
             });
           }
         }catch(e){}
-        if(vivo) setRuedaFB({porRuta:porRuta, semRuta:semRuta, dias:semDias, cargado:true});
+        // 3) lo que el comercial ha añadido desde prospeccion.html
+        var añadidos={};
+        try{
+          var tk2="";
+          do{
+            var r2=await fetch(FB_BASE+"/prospeccion_propuesta?pageSize=300"+(tk2?"&pageToken="+tk2:""));
+            if(!r2.ok)break;
+            var j2=await r2.json();
+            (j2.documents||[]).forEach(function(d2){
+              var f2=d2.fields||{};
+              if(((f2.ka&&f2.ka.stringValue)||"").toUpperCase().trim()!==agente)return;
+              var dia=(f2.dia&&f2.dia.stringValue)||"";
+              var lst=[]; try{lst=JSON.parse((f2.clientes&&f2.clientes.stringValue)||"[]");}catch(e){}
+              (añadidos[dia]=añadidos[dia]||[]).push.apply(añadidos[dia],lst);
+            });
+            tk2=j2.nextPageToken||"";
+          }while(tk2);
+        }catch(e){}
+        if(vivo) setRuedaFB({porRuta:porRuta, semRuta:semRuta, dias:semDias,
+                             anadidos:añadidos, cargado:true});
       }catch(e){ if(vivo) setRuedaFB({porRuta:{}, semRuta:{}, dias:{}, cargado:true}); }
     })();
     return function(){vivo=false;};
@@ -3740,6 +3760,28 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
     // "Miércoles" con y sin tilde
     return d.replace(/É/g,"E").indexOf(f.replace(/É/g,"E"))===0;
   };
+  // (29-ago) Los candidatos que el comercial ha añadido desde prospeccion.html
+  // OCUPAN los huecos de puerta nueva de su día: el hueco existía justamente
+  // para esto, así que no se suma una parada, se nombra la que ya había.
+  var _añad=(ruedaFB.anadidos)||{};
+  if(Object.keys(_añad).length){
+    var usados={};
+    clientesSemana=clientesSemana.map(function(c){
+      if(!c._libre)return c;
+      var d=c._dia||"";
+      var cola=_añad[d]||[];
+      var i=(usados[d]=(usados[d]||0));
+      if(i>=cola.length)return c;
+      usados[d]=i+1;
+      var p=cola[i];
+      return Object.assign({},c,{
+        nombre:p.n,NOMBRE:p.n,poblacion:p.p||"",provincia:p.pr||"",
+        _libre:false,_pros:true,_km:(p.km!=null?String(p.km):c._km),
+        _guion:"PROSPECCIÓN que tú añadiste · presentarte, anotar qué compra hoy y quién se lo sirve",
+        _añadido:true
+      });
+    });
+  }
   var clientesRuta=clientesSemana.filter(_enDiaFiltro);
   var cliVisitados=clientesRuta.filter(function(c){return esVisitado(c);});
   var cliPendientes=clientesRuta.filter(function(c){return !esVisitado(c);});
@@ -5581,7 +5623,8 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
                               background:c._libre?(abierto?"#F1E9D8":"#FAF7F0"):c._pros?"#F8FAFF":"#fff"}}>
                             <div style={{display:"flex",alignItems:"baseline",gap:8}}>
                               <p style={{margin:0,flex:1,fontSize:14,fontWeight:700,
-                                color:c._libre?"#7A1F2B":T.text}}>{c._libre?"▢ Puerta nueva — pulsa para anotar":n}</p>
+                                color:c._libre?"#7A1F2B":T.text}}>
+                                {c._libre?"▢ Puerta nueva — pulsa para anotar":(c._añadido?"★ "+n:n)}</p>
                               {km!==""&&<span style={{fontSize:11,fontWeight:700,color:"#5C554D",whiteSpace:"nowrap"}}>
                                 {"\uD83D\uDE97 "+km+" km"}</span>}
                             </div>
@@ -5627,68 +5670,29 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
                       {/* (28-ago) Mismo gesto que el planificador: proponer un
                           cliente para ESTE día, con los candidatos ordenados por
                           cercanía a los pueblos de la jornada. */}
-                      <button onClick={function(){setProponiendo(proponiendo===d?null:d);setBusqPros("");setTopeCand(8);}}
+                      <button onClick={function(){
+                          // Se pasan las PARADAS en orden, no los pueblos sueltos:
+                          // el punto de partida es la visita en la que está, y los
+                          // candidatos tienen que salir de ahí hacia adelante.
+                          var paradas=cl.map(function(x){
+                            return ((x._libre?"Puerta nueva":(x.nombre||x.NOMBRE||""))+"~"+(x.poblacion||""));
+                          });
+                          var prov=(cl[0]||{}).provincia||"";
+                          var u="prospeccion.html?ka="+encodeURIComponent(idCanonico(usuario)||"")+
+                                "&dia="+encodeURIComponent(d)+
+                                "&paradas="+encodeURIComponent(paradas.join("|"))+
+                                "&prov="+encodeURIComponent(prov);
+                          window.open(u,"_blank");
+                        }}
                         style={{width:"100%",marginTop:8,padding:"11px 14px",borderRadius:11,
-                          border:"1.5px dashed "+(proponiendo===d?"#0E7C5A":T.border),
-                          background:proponiendo===d?"#ECFDF5":"#fff",color:proponiendo===d?"#0E7C5A":T.blue,
+                          border:"1.5px dashed "+T.border,background:"#fff",color:T.blue,
                           fontSize:12.5,fontWeight:700,cursor:"pointer",textAlign:"left"}}>
-                        ➕ proponer cliente para este día
+                        ➕ proponer cliente para este día ↗
                       </button>
-                      {proponiendo===d&&(function(){
-                        // Los pueblos se numeran EN EL ORDEN de la jornada, para que
-                        // los candidatos salgan en el mismo orden en que va a pasar
-                        // por ellos y no por orden alfabético.
-                        var pobs={},ord=0;
-                        cl.forEach(function(x){var p=(x.poblacion||"").toUpperCase().trim();
-                          if(p&&pobs[p]===undefined)pobs[p]=ord++;});
-                        var q=busqPros.toUpperCase();
-                        var todosCand=bolsa.filter(function(b){
-                          if(q.length>=2) return (b.n||"").toUpperCase().includes(q)||(b.p||"").toUpperCase().includes(q);
-                          return pobs[(b.p||"").toUpperCase().trim()]!==undefined;
-                        }).sort(function(a,b){
-                          var pa=pobs[(a.p||"").toUpperCase().trim()],pb=pobs[(b.p||"").toUpperCase().trim()];
-                          if(pa===undefined)pa=99; if(pb===undefined)pb=99;
-                          return pa-pb||String(a.n||"").localeCompare(String(b.n||""));
-                        });
-                        var cand=todosCand.slice(0,topeCand);
-                        var mios=(q.length>=2?(clientesFB||[]).filter(function(c2){
-                          return (c2.nombre||c2.NOMBRE||"").toUpperCase().includes(q);}).slice(0,5):[]);
-                        return <div style={{marginTop:8,padding:12,background:"#FBFDFC",border:"1.5px solid #D7F0E3",borderRadius:12}}>
-                          <input autoFocus value={busqPros} onChange={function(e){setBusqPros(e.target.value);}}
-                            placeholder="Afinar por nombre o población…"
-                            style={{width:"100%",padding:"10px 12px",borderRadius:9,border:"1.5px solid "+T.border,fontSize:13,boxSizing:"border-box",outline:"none",marginBottom:8}}/>
-                          <p style={{margin:"0 0 6px",fontSize:10,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>
-                            {q.length>=2?"Coincidencias":"Candidatos en los pueblos de este día"}</p>
-                          {cand.length===0&&mios.length===0&&
-                            <p style={{margin:0,fontSize:11.5,color:T.muted}}>Sin candidatos con esos filtros.</p>}
-                          {cand.map(function(b,j){
-                            return <div key={"c"+j} onClick={function(){if(onNewCliente)onNewCliente(b.n);setProponiendo(null);setBusqPros("");}}
-                              style={{padding:"9px 12px",background:"#fff",border:"1px solid "+T.border,borderRadius:9,marginBottom:5,cursor:"pointer"}}>
-                              <p style={{margin:0,fontSize:13,fontWeight:600}}>{"\u25CE "+b.n}</p>
-                              <p style={{margin:0,fontSize:10,color:T.muted}}>
-                                {"PROSPECCIÓN P \u00B7 "+(b.p||"")+(b.tip?" \u00B7 "+b.tip:"")+
-                                 (b.rango&&!/SIN CIFRA/i.test(b.rango)?" \u00B7 "+b.rango:"")}</p>
-                            </div>;})}
-                          {mios.map(function(c2,j){
-                            return <div key={"m"+j} onClick={function(){if(onAbrirCliente)onAbrirCliente(c2);setProponiendo(null);setBusqPros("");}}
-                              style={{padding:"9px 12px",background:"#fff",border:"1px solid "+T.border,borderRadius:9,marginBottom:5,cursor:"pointer"}}>
-                              <p style={{margin:0,fontSize:13,fontWeight:600}}>{c2.nombre||c2.NOMBRE||""}</p>
-                              <p style={{margin:0,fontSize:10,color:T.muted}}>{"cliente mío \u00B7 "+(c2.poblacion||"")}</p>
-                            </div>;})}
-                          {todosCand.length>cand.length&&
-                            <div onClick={function(){setTopeCand(topeCand+10);}}
-                              style={{padding:"10px 12px",borderRadius:9,cursor:"pointer",fontSize:12.5,fontWeight:700,
-                                color:T.blue,background:"#EFF6FF",border:"1px solid #BFDBFE",textAlign:"center",marginBottom:5}}>
-                              ▾ ver {Math.min(10,todosCand.length-cand.length)} más ({todosCand.length-cand.length} restantes)
-                            </div>}
-                          {busqPros.length>=2&&onNewCliente&&
-                            <div onClick={function(){onNewCliente(busqPros);setProponiendo(null);setBusqPros("");}}
-                              style={{padding:"10px 12px",borderRadius:9,cursor:"pointer",fontSize:12.5,fontWeight:700,
-                                color:"#0E7C5A",background:"#ECFDF5",border:"1px solid #A7E5C8"}}>
-                              ➕ Dar de alta &ldquo;{busqPros}&rdquo;
-                            </div>}
-                        </div>;
-                      })()}
+                      {/* (29-ago) El buscador de candidatos vive FUERA del CRM, en
+                          prospeccion.html: necesita el mapa de 9.577 municipios para
+                          ordenar por km y no tiene sentido cargarlo en cada arranque
+                          del CRM, que se abre veinte veces al día en la carretera. */}
                       {hechos.length>0&&<div style={{marginTop:8}}>
                         <p style={{margin:"0 0 5px",fontSize:10,fontWeight:700,color:"#0E7C5A",textTransform:"uppercase"}}>
                           Ya visitados ({hechos.length})</p>
