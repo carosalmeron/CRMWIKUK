@@ -28,6 +28,19 @@
   .cand:last-child{border-bottom:none}
   .cand:active{background:var(--crema)}
   .cand.sel{background:#ECFDF5;border-left:4px solid var(--verde)}
+  .cand{display:flex;align-items:center;gap:10px}
+  .cand .txt{flex:1;min-width:0}
+  .bloq{flex-shrink:0;padding:7px 10px;border:1.5px solid #E8DCC8;border-radius:8px;
+       background:#fff;font-size:15px;line-height:1;cursor:pointer}
+  .bloq:active{background:#FEF2F2;border-color:#FCA5A5}
+  .modal{position:fixed;inset:0;background:rgba(15,23,42,.55);display:flex;
+       align-items:flex-end;z-index:50}
+  .modal .caja{margin:0;width:100%;border-radius:16px 16px 0 0;max-height:82vh;overflow:auto}
+  .modal h3{margin:0 0 4px;font-size:16px;color:var(--burdeos)}
+  .modal .fila{display:flex;gap:9px;margin-top:12px}
+  .modal .fila button{flex:1;padding:13px;border-radius:10px;font-size:14px;
+       font-weight:700;cursor:pointer;font-family:inherit;border:1.5px solid var(--linea);background:#fff}
+  .modal .fila button.rojo{background:#B91C1C;color:#fff;border-color:#B91C1C}
   .cand b{display:block;font-size:14.5px;font-weight:600}
   .cand span{display:block;font-size:11.5px;color:var(--gris);margin-top:3px;line-height:1.4}
   .mas{margin-top:9px;padding:11px;text-align:center;border-radius:9px;background:#EFF6FF;
@@ -86,6 +99,21 @@
   <div class="mas" id="mas" style="display:none"></div>
 </div>
 
+<div class="modal" id="modalBloq" style="display:none">
+  <div class="caja">
+    <h3 id="mbTit">Quitar de la bolsa</h3>
+    <p class="scope" id="mbSub"></p>
+    <label>¿Por qué no interesa?</label>
+    <select id="mbMotivo"></select>
+    <label>Detalle (opcional)</label>
+    <input type="text" id="mbNota" placeholder="quién le sirve, qué elabora…">
+    <div class="fila">
+      <button type="button" id="mbCancel">Cancelar</button>
+      <button type="button" class="rojo" id="mbOk">⛔ Quitar de la bolsa</button>
+    </div>
+  </div>
+</div>
+
 <div class="barra">
   <button id="guardar" disabled>Selecciona candidatos</button>
 </div>
@@ -138,6 +166,10 @@ let soloZona=true;
 // de Alicante. Ahora manda la DISTANCIA, que no depende de que el campo esté
 // relleno: lo que no se puede situar en el mapa, no se propone.
 let topeKm=80;
+// Mismos motivos que usa el planificador para vetar en la bolsa.
+const MOTIVOS=["No consume","No elabora","Cerrado definitivamente","Moroso / riesgo",
+               "Lo lleva la competencia","Duplicado","Otro"];
+let bloqueando=null;
 // (29-ago) Punto de partida. Antes se medía contra TODOS los pueblos del día,
 // así que estando en el primero te ofrecía puertas que caen junto al último.
 // Ahora se mide desde donde estás y la lista va de ahí hacia adelante.
@@ -228,13 +260,21 @@ function pintar(){
     M.style.display="none";actualizarBarra();return;}
   L.innerHTML=v.map(c=>
     '<div class="cand'+(sel.has(c.id)?' sel':'')+'" data-id="'+c.id+'">'+
-    '<b>'+(sel.has(c.id)?'✓ ':'')+esc(c.n)+'</b><span>'+esc(c.eti)+' · '+esc(c.p||"")+
+    '<div class="txt"><b>'+(sel.has(c.id)?'✓ ':'')+esc(c.n)+'</b><span>'+esc(c.eti)+' · '+esc(c.p||"")+
     (c.rango&&!/SIN CIFRA/i.test(c.rango)?' · '+esc(c.rango):'')+
-    (c.tip?' · '+esc(c.tip):'')+'</span></div>').join("");
-  L.querySelectorAll(".cand").forEach(el=>el.onclick=()=>{
-    const id=el.dataset.id;
+    (c.tip?' · '+esc(c.tip):'')+'</span></div>'+
+    '<button class="bloq" data-bloq="'+c.id+'" title="No interesa: quitar de la bolsa">⛔</button>'+
+    '</div>').join("");
+  L.querySelectorAll(".cand .txt").forEach(el=>el.onclick=()=>{
+    const id=el.parentNode.dataset.id;
     if(sel.has(id))sel.delete(id);else sel.add(id);
     pintar();
+  });
+  // ⛔ = no elabora, no consume, cerrado… se veta y no vuelve a proponerse
+  L.querySelectorAll(".bloq").forEach(el=>el.onclick=ev=>{
+    ev.stopPropagation();
+    bloqueando=CANDS.find(c=>c.id===el.dataset.bloq)||null;
+    pintarModal();
   });
   if(CANDS.length>v.length){
     M.style.display="block";
@@ -317,6 +357,54 @@ function cerrar(guardado){
 document.getElementById("salir").onclick=()=>{
   if(!cerrar(false)) document.body.innerHTML='<div class="aviso">Puedes cerrar esta pestaña.</div>';
 };
+function pintarModal(){
+  const m=document.getElementById("modalBloq");
+  if(!bloqueando){m.style.display="none";return;}
+  document.getElementById("mbTit").textContent=bloqueando.n;
+  document.getElementById("mbSub").textContent=
+    "Deja de proponerse a todo el equipo, aquí y en el planificador. Se puede deshacer desde el planificador.";
+  const sel=document.getElementById("mbMotivo");
+  sel.innerHTML=MOTIVOS.map(x=>'<option>'+esc(x)+'</option>').join("");
+  document.getElementById("mbNota").value="";
+  m.style.display="flex";
+}
+document.getElementById("mbCancel").onclick=()=>{bloqueando=null;pintarModal();};
+document.getElementById("mbOk").onclick=async()=>{
+  if(!bloqueando)return;
+  const b=bloqueando, btn=document.getElementById("mbOk");
+  const motivo=document.getElementById("mbMotivo").value;
+  const nota=document.getElementById("mbNota").value.trim();
+  btn.disabled=true;btn.textContent="Quitando…";
+  const clave=(b.clave||(norm(b.n)+"|"+norm(b.pr||b.p)));
+  try{
+    // 1) el prospecto queda vetado
+    await fetch(FB+"/radar_prospectos/"+b.id+"?updateMask.fieldPaths=estado&updateMask.fieldPaths=motivo",
+      {method:"PATCH",headers:{"Content-Type":"application/json"},
+       body:JSON.stringify({fields:{estado:{stringValue:"bloqueado"},
+         motivo:{stringValue:motivo+(nota?" · "+nota:"")}}})});
+    // 2) y se apunta en la lista de bloqueos que lee el planificador
+    await fetch(FB+"/bloqueos/"+encodeURIComponent(clave.replace(/[\/\s]+/g,"_")),
+      {method:"PATCH",headers:{"Content-Type":"application/json"},
+       body:JSON.stringify({fields:{clave:{stringValue:clave},
+         motivo:{stringValue:motivo+(nota?" · "+nota:"")},
+         quien:{stringValue:KA},fecha:{stringValue:new Date().toISOString()}}})});
+    BOLSA=BOLSA.filter(x=>x.id!==b.id);
+    sel_borrar(b.id);
+    bloqueando=null;pintarModal();
+    btn.disabled=false;btn.textContent="⛔ Quitar de la bolsa";
+    calcular();
+    avisar("⛔ "+b.n+" ya no se propondrá ("+motivo+").");
+  }catch(e){
+    btn.disabled=false;btn.textContent="Error · reintentar";
+  }
+};
+function sel_borrar(id){if(sel.has(id))sel.delete(id);}
+function avisar(t){
+  const d=document.createElement("div");
+  d.className="aviso";d.textContent=t;
+  document.body.insertBefore(d,document.body.firstChild);
+  setTimeout(()=>d.remove(),4000);
+}
 document.getElementById("bus").oninput=()=>{tope=10;calcular();};
 document.getElementById("tam").onchange=()=>{tope=10;calcular();};
 document.getElementById("radio").onchange=e=>{topeKm=parseInt(e.target.value);tope=10;calcular();};
