@@ -21415,6 +21415,14 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
   const [ano,setAno]=useState(bloqueo?bloqueo.ano:hoy.getFullYear());
   const [sem,setSem]=useState(bloqueo?bloqueo.semana:getSemanaISO());
   const [partes,setPartes]=useState({});     // id → doc
+  // Desarrollos abiertos, para que los que esperan dictamen entren en el cierre
+  const [desarrollosFB,setDesarrollosFB]=useState([]);
+  useEffect(function(){
+    var vivo=true;
+    fbLeer("desarrollos").then(function(d){ if(vivo) setDesarrollosFB(d||[]); })
+      .catch(function(){});
+    return function(){ vivo=false; };
+  },[]);
   const [proyectosFB,setProyectosFB]=useState([]);
   const [tareasFB,setTareasFB]=useState([]);
   const [cargando,setCargando]=useState(true);
@@ -21563,6 +21571,43 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
       });
     });
     out.sort(function(a,b){ return (b.vencido-a.vencido)||String(a.fecha).localeCompare(String(b.fecha)); });
+    return out;
+  }
+
+  // (ago 2026) Un desarrollo esperando dictamen es un pendiente igual que un
+  // hito, pero vivía fuera del cierre: se podía cerrar la semana con una
+  // solicitud parada desde hacía días sin decir nada. Entra en el cierre con
+  // las mismas opciones: resuelto, nueva fecha o bloqueo.
+  function misDesarrollosAbiertos(u){
+    var out=[];
+    var ACT=["solicitado","filtro","decision"];
+    var esID=false, esCom=false;
+    try{
+      var t=tipologiasDeMiRama(u)||[];
+      esID=t.indexOf("id")>=0||t.indexOf("calidad")>=0;
+    }catch(e){}
+    esCom=["director","ceo"].indexOf(String(u.rol||"").toLowerCase())>=0;
+    var hoyD=new Date(); hoyD.setHours(0,0,0,0);
+    (desarrollosFB||[]).forEach(function(d){
+      if(!d||d.eliminado) return;
+      var et=String(d.etapa||"").toLowerCase();
+      if(ACT.indexOf(et)<0) return;
+      // A quién le toca mover ficha en cada etapa
+      var meToca = (et==="filtro" && esID)
+        || (et==="solicitado" && esCom)
+        || (et==="decision" && (esID||esCom))
+        || _esResponsable(d.responsable,u)
+        || _esResponsable(d.agente,u);
+      if(!meToca) return;
+      var f=d.fechaEtapa||d.fechaCreacion||d.fecha||"";
+      var dias=f?Math.round((hoyD-new Date(String(f).slice(0,10)))/86400000):0;
+      out.push({key:"dev#"+(d.id||d._docId||d.nombre),
+        devId:d.id||d._docId, etapa:et,
+        nombre:d.nombre||"(desarrollo sin nombre)",
+        cliente:d.clienteNombre||d.cliente||"",
+        dias:dias, vencido:dias>7, fecha:String(f).slice(0,10)});
+    });
+    out.sort(function(a,b){ return b.dias-a.dias; });
     return out;
   }
 
@@ -21726,8 +21771,11 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
     var hitos=misHitosAbiertos(usuario);
     var hAcc={};   // key → {accion:"hecho"|"fecha"|"bloqueado", fecha, motivo}
     hitos.forEach(function(h){ hAcc[h.key]={accion:"",fecha:h.fecha||"",motivo:""}; });
+    var devs=misDesarrollosAbiertos(usuario);
+    var dAcc={};
+    devs.forEach(function(d){ dAcc[d.key]={accion:"",motivo:""}; });
     setCierre({pasar:pasar, hechos:{}, notas:{}, elevar:elevar, notasEq:notasEq,
-      hitos:hitos, hAcc:hAcc,
+      hitos:hitos, hAcc:hAcc, devs:devs, dAcc:dAcc,
       resumen:miParte.resumen||"",
       plan:miParte.planSiguiente||""});
   }
@@ -22531,6 +22579,60 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
             )}
 
             {/* (v6.17) Hitos de proyecto: se cierran con la semana */}
+            {/* (ago 2026) Desarrollos parados: un dictamen pendiente es un
+                compromiso igual que un hito, y se cerraba la semana sin
+                mencionarlo. */}
+            {(cierre.devs||[]).length>0&&(
+              <div style={{marginTop:16}}>
+                <p style={{margin:"0 0 3px",fontSize:11,fontWeight:800,color:T.muted,
+                  textTransform:"uppercase",letterSpacing:".07em"}}>
+                  🧪 Desarrollos esperándote · {(cierre.devs||[]).length}</p>
+                <p style={{margin:"0 0 9px",fontSize:11,color:T.muted,lineHeight:1.5}}>
+                  Están parados en tu etapa. Resuélvelos, déjalos para la semana
+                  que viene o explica qué los bloquea.</p>
+                {(cierre.devs||[]).map(function(d){
+                  var a=(cierre.dAcc||{})[d.key]||{};
+                  var set=function(campos){
+                    var n={...(cierre.dAcc||{})}; n[d.key]={...a,...campos};
+                    setCierre({...cierre,dAcc:n});
+                  };
+                  var ETQ={solicitado:"📨 Esperando filtro comercial",
+                    filtro:"🔬 Esperando dictamen I+D",
+                    decision:"✍️ Esperando firma"};
+                  var OPC=[["resuelto","✅ Ya está","#16A34A"],
+                    ["sigue","➡️ Sigue la próxima",T.navy],
+                    ["bloqueado","⛔ Bloqueado","#B91C1C"]];
+                  return (
+                    <div key={d.key} style={{border:"1.5px solid "+(d.vencido&&!a.accion?"#FCA5A5":T.border),
+                      borderRadius:12,padding:"11px 12px",marginBottom:8,
+                      background:d.vencido&&!a.accion?"#FEF2F2":"#fff"}}>
+                      <p style={{margin:0,fontSize:12.5,fontWeight:700,color:T.text,lineHeight:1.4}}>{d.nombre}</p>
+                      <p style={{margin:"2px 0 8px",fontSize:11,color:T.muted}}>
+                        {d.cliente?d.cliente+" · ":""}{ETQ[d.etapa]||d.etapa}
+                        {d.dias>0?" · parado "+d.dias+" día"+(d.dias===1?"":"s"):""}</p>
+                      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                        {OPC.map(function(o){
+                          var act=a.accion===o[0];
+                          return <button key={o[0]} onClick={function(){set({accion:act?"":o[0]});}}
+                            style={{padding:"6px 11px",borderRadius:9,cursor:"pointer",
+                              border:"1.5px solid "+(act?o[2]:T.border),
+                              background:act?o[2]:"#fff",color:act?"#fff":T.muted,
+                              fontSize:11.5,fontWeight:700}}>{o[1]}</button>;
+                        })}
+                      </div>
+                      {(a.accion==="bloqueado"||a.accion==="sigue")&&(
+                        <input value={a.motivo||""} onChange={function(e){set({motivo:e.target.value});}}
+                          placeholder={a.accion==="bloqueado"?"¿Qué lo bloquea?":"¿Qué falta para cerrarlo?"}
+                          style={{marginTop:8,width:"100%",padding:"8px 10px",borderRadius:9,
+                            border:"1.5px solid "+T.border,fontSize:12,fontFamily:"inherit",
+                            outline:"none",boxSizing:"border-box"}}/>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
             {(cierre.hitos||[]).length>0&&(
               <div style={{marginTop:16}}>
                 <p style={{margin:"0 0 3px",fontSize:11,fontWeight:800,color:T.muted,
@@ -22660,7 +22762,15 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
                 if(a.accion==="bloqueado"&&!(a.motivo||"").trim()) return true;
                 return false;
               });
-              if(!faltaTexto&&!pend.length) return null;
+              // Desarrollos parados mas de una semana: mismo criterio
+              var pendDev=(cierre.devs||[]).filter(function(d){
+                var a=(cierre.dAcc||{})[d.key]||{};
+                if(!d.vencido) return false;
+                if(!a.accion) return true;
+                if((a.accion==="bloqueado"||a.accion==="sigue")&&!(a.motivo||"").trim()) return true;
+                return false;
+              });
+              if(!faltaTexto&&!pend.length&&!pendDev.length) return null;
               return (
                 <div style={{background:"#FEF2F2",border:"1px solid #FECACA",borderRadius:10,
                   padding:"10px 12px",marginBottom:10}}>
@@ -22674,6 +22784,11 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
                       Te quedan {pend.length} hito{pend.length>1?"s":""} de proyecto vencido{pend.length>1?"s":""} sin
                       resolver{pend.some(function(h){var a=cierre.hAcc[h.key]||{};return a.accion==="bloqueado";})?" (falta explicar el bloqueo)":""}.</p>
                   )}
+                  {pendDev.length>0&&(
+                    <p style={{margin:(faltaTexto||pend.length)?"6px 0 0":0,fontSize:11.5,color:"#B91C1C",fontWeight:700}}>
+                      Tienes {pendDev.length} desarrollo{pendDev.length>1?"s":""} parado{pendDev.length>1?"s":""} sin
+                      resolver.</p>
+                  )}
                 </div>
               );
             })()}
@@ -22681,6 +22796,14 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
             <button
               disabled={(function(){
                 if((cierre.resumen||"").trim().length<15||(cierre.plan||"").trim().length<15) return true;
+                var devPend=(cierre.devs||[]).some(function(d){
+                  var a=(cierre.dAcc||{})[d.key]||{};
+                  if(!d.vencido) return false;
+                  if(!a.accion) return true;
+                  if((a.accion==="bloqueado"||a.accion==="sigue")&&!(a.motivo||"").trim()) return true;
+                  return false;
+                });
+                if(devPend) return true;
                 return (cierre.hitos||[]).some(function(h){
                   var a=cierre.hAcc[h.key]||{};
                   if(!h.vencido) return false;
