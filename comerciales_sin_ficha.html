@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Comerciales sin ficha</title>
+<style>
+ :root{--papel:#F2F4F7;--tinta:#14181F;--tenue:#6B7684;--linea:#DCE1E7;
+       --ok:#0E7C5A;--mal:#C2263D;--med:#B07908;--okL:#EDF7F3;--malL:#FEF2F4;--medL:#FFFBEB}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--papel);color:var(--tinta);max-width:820px;
+   margin-inline:auto;padding:20px 14px 90px;
+   font:400 15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+ h1{margin:0 0 3px;font-size:21px;font-weight:800}
+ .sub{margin:0 0 16px;font-size:13px;color:var(--tenue)}
+ .card{background:#fff;border:1px solid var(--linea);border-radius:8px;
+   padding:13px 14px;margin-bottom:9px;font-size:13.5px}
+ .card.ok{border-color:var(--ok);background:var(--okL)}
+ .card.med{border-color:var(--med);background:var(--medL)}
+ code{background:#F1F5F9;padding:1px 6px;border-radius:4px;font-size:12px;
+   font-family:ui-monospace,monospace}
+ table{width:100%;border-collapse:collapse;font-size:12.5px;background:#fff;
+   border:1px solid var(--linea);border-radius:8px;overflow:hidden}
+ th{background:#F1F5F9;text-align:left;padding:8px;font-size:10.5px;
+   text-transform:uppercase;color:var(--tenue)}
+ td{padding:8px;border-top:1px solid var(--linea);vertical-align:middle}
+ .estado{padding:34px 4px;color:var(--tenue);text-align:center}
+ .barra{position:fixed;left:0;right:0;bottom:0;background:#fff;
+   border-top:1px solid var(--linea);padding:12px 14px;display:flex;gap:10px;
+   align-items:center;justify-content:space-between;box-shadow:0 -2px 12px #0000000f}
+ button.pri{padding:11px 20px;border-radius:8px;border:none;background:var(--tinta);
+   color:#fff;font-size:13.5px;font-weight:700;cursor:pointer}
+ button.pri:disabled{background:#94A3B8;cursor:default}
+ .chk{width:auto}
+</style></head><body>
+<h1>👤 Comerciales sin ficha de usuario</h1>
+<p class="sub">Están en <code>portal_users</code> (pueden entrar) pero no en
+  <code>usuarios</code>, así que el CRM no los ofrece al traspasar, asignar
+  ni filtrar. Es el caso de David Mag.</p>
+<div id="app"><p class="estado">Comparando…</p></div>
+<div class="barra" id="barra" style="display:none">
+  <span class="sub" id="txt" style="margin:0"></span>
+  <button class="pri" id="btn" onclick="crear()">Dar de alta los marcados</button>
+</div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const U=(s)=>String(s||"").toUpperCase().trim();
+const NORM=(s)=>U(s).normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^A-Z0-9]/g,"");
+const ROLES_COM=["agente","crm_agente","comercial","vendedor"];
+
+function val(f){
+  if(!f) return null;
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  return null;
+}
+async function leer(col){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<20);
+  return t;
+}
+
+let FALTAN=[];
+
+(async()=>{
+  const app=document.getElementById("app");
+  try{
+    const [us,pu]=await Promise.all([leer("usuarios"),leer("portal_users")]);
+
+    // Todo lo que identifica a alguien ya dado de alta
+    const yaEsta=new Set();
+    us.forEach(u=>{
+      [u.id,u._id,u.username,u.crmId,u.grupoAgente,u.catalogoVendedor,u.nombre]
+        .filter(Boolean).forEach(x=>yaEsta.add(NORM(x)));
+    });
+
+    FALTAN=pu.filter(p=>{
+      const rol=String(p.rol||"").toLowerCase();
+      if(!ROLES_COM.includes(rol)) return false;
+      if(p.activo===false) return false;
+      const claves=[p.id,p._id,p.username,p.crmId,p.catalogoVendedor,p.nombre]
+        .filter(Boolean).map(NORM);
+      return !claves.some(k=>yaEsta.has(k));
+    }).map(p=>({
+      ...p,
+      alta:true,
+      idNuevo:p.crmId||p.id||p._id,
+      nombreFinal:p.nombre||p.username||p.id,
+    }));
+
+    pintar();
+  }catch(e){
+    app.innerHTML='<div class="card">Error: '+e.message+'</div>';
+  }
+})();
+
+function pintar(){
+  const marcados=FALTAN.filter(x=>x.alta).length;
+  let h="";
+  if(!FALTAN.length){
+    h='<div class="card ok"><b>Todo al día.</b> Cada comercial del portal '
+      +'tiene su ficha de usuario en el CRM.</div>';
+  }else{
+    h='<div class="card med"><b>'+FALTAN.length+' comercial(es) sin ficha.</b> '
+      +'Pueden entrar al CRM pero no aparecen en los desplegables ni en los '
+      +'filtros por comercial.</div>'
+      +'<table><thead><tr><th></th><th>Nombre</th><th>ID</th><th>Equipo</th>'
+      +'<th>Código</th></tr></thead><tbody>'
+      +FALTAN.map((x,i)=>'<tr><td><input type="checkbox" class="chk" '
+        +(x.alta?"checked":"")+' onchange="marcar('+i+',this.checked)"></td>'
+        +'<td><b>'+x.nombreFinal+'</b></td>'
+        +'<td><code>'+x.idNuevo+'</code></td>'
+        +'<td>'+(x.equipo||"—")+'</td>'
+        +'<td>'+(x.catalogoVendedor||x.grupoAgente||"—")+'</td></tr>').join("")
+      +'</tbody></table>';
+  }
+  document.getElementById("app").innerHTML=h;
+  const b=document.getElementById("barra");
+  b.style.display=FALTAN.length?"flex":"none";
+  document.getElementById("txt").textContent=marcados+" para dar de alta";
+  document.getElementById("btn").disabled=!marcados;
+}
+
+window.marcar=(i,v)=>{ FALTAN[i].alta=v; pintar(); };
+
+window.crear=async()=>{
+  const lista=FALTAN.filter(x=>x.alta);
+  if(!lista.length) return;
+  if(!confirm("Se crearán "+lista.length+" ficha(s) en usuarios y sus alias.\n\n"
+    +"No se borra ni modifica nada existente. ¿Seguimos?")) return;
+  const btn=document.getElementById("btn");
+  btn.disabled=true;
+  let ok=0,err=0;
+  for(const x of lista){
+    btn.textContent="Creando… "+(ok+err+1)+"/"+lista.length;
+    const id=x.idNuevo;
+    const cod=x.catalogoVendedor||x.grupoAgente||id;
+    try{
+      // El rol se normaliza a "agente": es el que entiende todo el CRM
+      await fetch(FB+"/usuarios/"+encodeURIComponent(id),{
+        method:"PATCH",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({fields:{
+          id:{stringValue:id},
+          nombre:{stringValue:x.nombreFinal},
+          rol:{stringValue:"agente"},
+          equipo:{stringValue:x.equipo||""},
+          grupoAgente:{stringValue:cod},
+          catalogoVendedor:{stringValue:cod},
+          username:{stringValue:x.username||""},
+          origen:{stringValue:"alta_desde_portal"},
+          creadoEl:{stringValue:new Date().toISOString()}
+        }})});
+      // Y sus alias, para que sus datos históricos se le atribuyan
+      const alias=[...new Set([id,cod,x.username,x.nombreFinal]
+        .filter(Boolean).map(NORM))];
+      for(const al of alias){
+        await fetch(FB+"/agentes_alias/"+encodeURIComponent(al),{
+          method:"PATCH",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({fields:{
+            alias:{stringValue:al}, original:{stringValue:al},
+            canonico:{stringValue:id}, nombre:{stringValue:x.nombreFinal},
+            equipo:{stringValue:x.equipo||""},
+            origen:{stringValue:"alta_desde_portal"},
+            actualizado:{stringValue:new Date().toISOString()}
+          }})});
+      }
+      ok++;
+    }catch(e){ err++; }
+  }
+  btn.textContent = err ? `Hecho con ${err} errores` : `✓ ${ok} fichas creadas`;
+  if(err) btn.disabled=false;
+};
+</script></body></html>
