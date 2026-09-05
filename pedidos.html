@@ -475,7 +475,8 @@ function abrirCliente(id){
 // Lo que ha salido de verdad, no lo planificado. Sale del diario: cada dia
 // guarda las lineas que desaparecieron del pedido, que son las servidas.
 let SERV_RANGO="semana";   // dia | semana | mes
-let SERV_TIPO="salidas";   // salidas | entradas | movimientos | cambios
+let SERV_TIPO="salidas";   // salidas | entradas | movimientos | cambios | fuera_mes
+let SERV_MINDIAS=3;        // umbral de retraso: no cuentan los de menos días
 let SERV_ABIERTOS=new Set();
 
 // Los cuatro tipos de movimiento que guarda el diario
@@ -484,13 +485,23 @@ const SERV_TIPOS={
   entradas:    {campo:"entradas",    lbl:"Nuevos",    verbo:"introducidos"},
   movimientos: {campo:"movimientos", lbl:"Retrasos",  verbo:"movidos de fecha"},
   cambios:     {campo:"cambios",     lbl:"Cambios",   verbo:"con importe cambiado"},
+  // No es un tipo del diario: se calcula sobre los movimientos, quedandose
+  // con los que cruzan de mes. Responde a "que deberia haber salido en agosto
+  // y ya no saldra".
+  fuera_mes:   {campo:"movimientos", lbl:"Se fue de mes", verbo:"que se van a otro mes"},
 };
 
 window.servRango=function(r){
   SERV_RANGO=r; SERV_ABIERTOS.clear(); pintarServidos();
 };
 window.servTipo=function(t){
-  SERV_TIPO=t; SERV_ABIERTOS.clear(); pintarServidos();
+  SERV_TIPO=t;
+  // "Se fue de mes" con un rango de un día no dice nada: se mira el mes entero
+  if(t==="fuera_mes"&&SERV_RANGO!=="mes") SERV_RANGO="mes";
+  SERV_ABIERTOS.clear(); pintarServidos();
+};
+window.servDias=function(n){
+  SERV_MINDIAS=Number(n)||0; SERV_ABIERTOS.clear(); pintarServidos();
 };
 window.servToggle=function(k){
   if(SERV_ABIERTOS.has(k)) SERV_ABIERTOS.delete(k); else SERV_ABIERTOS.add(k);
@@ -525,20 +536,62 @@ async function pintarServidos(){
       && (!SIN_INTER||!m.intercompany)
       && (!EQUIPO_CLAVES||EQUIPO_CLAVES.has(norm(m.agente)));
 
-    // Todo lo servido del periodo, dia a dia
+    // Movimientos del periodo, dia a dia
     let total=0, lineas=[];
     const faltan=[];
-    for(const f of fechas){
+    const esRetraso = SERV_TIPO==="movimientos"||SERV_TIPO==="fuera_mes";
+    // (ago 2026) Un pedido que se retrasa tres veces salia tres veces y su
+    // importe se contaba tres veces. Se queda una sola linea por pedido y
+    // articulo, con el salto acumulado: de la fecha original a la ultima.
+    const porLinea={};
+    // Las fechas vienen de hoy hacia atras: se recorren al reves para que
+    // "antes" sea la fecha mas antigua y "ahora" la mas reciente.
+    const enOrden=fechas.slice().reverse();
+
+    for(const f of enOrden){
       const d=dias.find(x=>x.fecha===f);
-      if(!d){ faltan.push(f); continue; }
+      if(!d){ if(faltan.indexOf(f)<0) faltan.push(f); continue; }
       lee(d[SERV_TIPOS[SERV_TIPO].campo]).filter(mio).forEach(m=>{
-        // En los cambios de importe, lo que interesa es la variación
         var imp = SERV_TIPO==="cambios"
           ? num(m.importeAhora)-num(m.importeAntes)
           : num(m.importe);
+
+        if(esRetraso){
+          const k=(m.pedido||"")+"|"+(m.articulo||m.descripcion||"")+"|"+(m.cliente||m.nombre||"");
+          if(porLinea[k]){
+            // Ya se habia movido antes: se conserva la fecha original y se
+            // actualiza la nueva, sin volver a sumar el importe.
+            const v=porLinea[k];
+            v.fechaNueva=m.fechaNueva||v.fechaNueva;
+            v.dia=f;
+            v.veces=(v.veces||1)+1;
+            return;
+          }
+          porLinea[k]={...m, dia:f, _imp:imp, veces:1,
+            fechaAntes:m.fechaAntes, fechaNueva:m.fechaNueva};
+          return;
+        }
         total+=imp;
         lineas.push({...m, dia:f, _imp:imp});
       });
+    }
+
+    if(esRetraso){
+      const mes=(f)=>String(f||"").slice(0,7);   // YYYY-MM
+      lineas=Object.values(porLinea).filter(v=>{
+        // Dias de retraso acumulados, de la fecha original a la definitiva
+        const d1=v.fechaAntes?new Date(String(v.fechaAntes).slice(0,10)):null;
+        const d2=v.fechaNueva?new Date(String(v.fechaNueva).slice(0,10)):null;
+        v._dias = (d1&&d2) ? Math.round((d2-d1)/86400000)
+                 : (v.dias!=null?Number(v.dias):0);
+        if(SERV_TIPO==="fuera_mes"){
+          // Solo lo que cambia de mes: lo que ya no saldra este mes
+          if(!v.fechaAntes||!v.fechaNueva) return false;
+          return mes(v.fechaAntes)!==mes(v.fechaNueva) && v._dias>0;
+        }
+        return v._dias>=SERV_MINDIAS;
+      });
+      total=lineas.reduce((t,v)=>t+num(v._imp),0);
     }
 
     if(!lineas.length){
@@ -571,7 +624,10 @@ async function pintarServidos(){
         <div><div class="tit">${eur(total)} ${SERV_TIPOS[SERV_TIPO].verbo}</div>
           <div class="sub">${nPed} pedido${nPed===1?"":"s"} ·
             ${lineas.length} línea${lineas.length===1?"":"s"} ·
-            ${ags.length} comercial${ags.length===1?"":"es"}</div></div>
+            ${ags.length} comercial${ags.length===1?"":"es"}${
+            SERV_TIPO==="movimientos"&&SERV_MINDIAS>0
+              ? " · solo "+SERV_MINDIAS+" día(s) o más":""}${
+            esRetraso?" · una línea por pedido, sin repetir":""}</div></div>
       </div>`;
 
     if(faltan.length){
@@ -605,9 +661,10 @@ async function pintarServidos(){
             const fc=(f)=>String(f||"").slice(0,10).split("-").reverse().join("/");
             // Cada tipo de movimiento se explica distinto
             let extra="";
-            if(SERV_TIPO==="movimientos"&&x.fechaAntes)
+            if((SERV_TIPO==="movimientos"||SERV_TIPO==="fuera_mes")&&x.fechaAntes)
               extra=` · ${fc(x.fechaAntes)} → ${fc(x.fechaNueva)}${
-                x.dias!=null?" ("+(x.dias>0?"+":"")+x.dias+" d)":""}`;
+                x._dias!=null?" ("+(x._dias>0?"+":"")+x._dias+" d)":""}${
+                x.veces>1?" · movido "+x.veces+" veces":""}`;
             else if(SERV_TIPO==="cambios")
               extra=` · ${eur(x.importeAntes)} → ${eur(x.importeAhora)}`;
             else if(SERV_TIPO==="entradas"&&x.fecha)
@@ -644,9 +701,23 @@ function barraServ(){
   let rr="";
   for(let i=0;i<rangos.length;i+=2)
     rr+=bot(SERV_RANGO===rangos[i],"servRango",rangos[i],rangos[i+1]);
+  // El umbral solo tiene sentido en retrasos: en "se fue de mes" manda el
+  // cambio de mes, no los dias.
+  let umbral="";
+  if(SERV_TIPO==="movimientos"){
+    const dd=[0,"Todos",1,"1 día+",3,"3 días+",7,"1 semana+",15,"15 días+"];
+    let bb="";
+    for(let i=0;i<dd.length;i+=2)
+      bb+=bot(SERV_MINDIAS===dd[i],"servDias",dd[i],dd[i+1]);
+    umbral=`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;
+      align-items:center">
+      <span style="font-size:11px;color:var(--tenue);font-weight:700;
+        text-transform:uppercase;letter-spacing:.4px">Retraso mínimo</span>${bb}</div>`;
+  }
   return `<div style="padding:11px 14px;border-bottom:1px solid var(--linea)">
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${tipos}</div>
     <div style="display:flex;gap:6px;flex-wrap:wrap">${rr}</div>
+    ${umbral}
   </div>`;
 }
 
