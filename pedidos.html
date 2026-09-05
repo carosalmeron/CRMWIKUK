@@ -176,6 +176,7 @@
     <button onclick="ver('semana')" aria-pressed="false" id="t-semana">Por semana</button>
     <button onclick="ver('mes')"    aria-pressed="false" id="t-mes">Por mes</button>
     <button onclick="ver('diario')" aria-pressed="false" id="t-diario">Diario</button>
+    <button onclick="ver('servidos')" aria-pressed="false" id="t-servidos">Servidos</button>
   </div>
   <div id="app"><div class="cargando">Leyendo pedidos…</div></div>
 </main>
@@ -434,7 +435,7 @@ async function cargar(){
 
 function ver(modo){
   MODO=modo;
-  for(const m of ["dia","semana","mes","diario"])
+  for(const m of ["dia","semana","mes","diario","servidos"])
     $("t-"+m).setAttribute("aria-pressed", String(m===modo));
   ABIERTOS.clear(); INICIADO=false;
   pintar();
@@ -469,6 +470,152 @@ function abrirCliente(id){
 // Qué pasó desde la sincronización anterior: qué salió, qué se movió de
 // fecha y qué entró. Power BI no guarda ese histórico, así que se calcula
 // comparando cada día con el anterior.
+
+// ── Servidos ────────────────────────────────────────────────────────────
+// Lo que ha salido de verdad, no lo planificado. Sale del diario: cada dia
+// guarda las lineas que desaparecieron del pedido, que son las servidas.
+let SERV_RANGO="semana";   // dia | semana | mes
+let SERV_ABIERTOS=new Set();
+
+window.servRango=function(r){
+  SERV_RANGO=r; SERV_ABIERTOS.clear(); pintarServidos();
+};
+window.servToggle=function(k){
+  if(SERV_ABIERTOS.has(k)) SERV_ABIERTOS.delete(k); else SERV_ABIERTOS.add(k);
+  pintarServidos();
+};
+
+async function pintarServidos(){
+  $("app").innerHTML=`<div class="grupo"><p class="vacio">Leyendo lo servido…</p></div>`;
+  try{
+    const iso=(d)=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${
+      String(d.getDate()).padStart(2,"0")}`;
+    // Cuantos dias hay que leer segun el rango pedido
+    const nDias = SERV_RANGO==="dia" ? 1 : SERV_RANGO==="semana" ? 7 : 31;
+    const fechas=[];
+    for(let i=0;i<nDias;i++){
+      const d=new Date(); d.setDate(d.getDate()-i); fechas.push(iso(d));
+    }
+    const crudos=await Promise.all(fechas.map(f=>
+      fetch(`${BASE}/pbi_pedidos_cambios/${f}`)
+        .then(r=>r.ok?r.json():null).catch(()=>null)));
+    const dias=crudos.filter(Boolean).map(doc=>{
+      const o={_id:doc.name.split("/").pop()};
+      for(const [k,v] of Object.entries(doc.fields||{})) o[k]=val(v);
+      if(!o.fecha) o.fecha=o._id;
+      return o;
+    }).sort((a,b)=>String(b.fecha||"").localeCompare(String(a.fecha||"")));
+
+    const lee=(x)=>{ try{ return JSON.parse(x||"[]"); }catch(e){ return []; } };
+    const mio=(m)=>(!F_AGENTE||norm(m.agente)===norm(F_AGENTE))
+      && (!SIN_INTER||!m.intercompany)
+      && (!EQUIPO_CLAVES||EQUIPO_CLAVES.has(norm(m.agente)));
+
+    // Todo lo servido del periodo, dia a dia
+    let total=0, lineas=[];
+    const faltan=[];
+    for(const f of fechas){
+      const d=dias.find(x=>x.fecha===f);
+      if(!d){ faltan.push(f); continue; }
+      lee(d.salidas).filter(mio).forEach(m=>{
+        total+=num(m.importe);
+        lineas.push({...m, dia:f});
+      });
+    }
+
+    if(!lineas.length){
+      $("app").innerHTML=`<div class="grupo">${barraServ()}
+        <p class="vacio">No consta nada servido en este periodo.${
+          faltan.length?` <br><small>Faltan ${faltan.length} día(s) de diario:
+          la sincronización no corrió y esas salidas no se registraron.</small>`:""}
+        </p></div>`;
+      return;
+    }
+
+    // Agrupado: comercial → cliente → articulos
+    const porAg={};
+    lineas.forEach(l=>{
+      const ag=l.agente||"SIN AGENTE";
+      const cli=l.nombre||l.cliente||"—";
+      porAg[ag]=porAg[ag]||{ag, importe:0, pedidos:new Set(), clientes:{}};
+      const A=porAg[ag];
+      A.importe+=num(l.importe);
+      if(l.pedido) A.pedidos.add(l.pedido);
+      A.clientes[cli]=A.clientes[cli]||{cli, importe:0, arts:[]};
+      A.clientes[cli].importe+=num(l.importe);
+      A.clientes[cli].arts.push(l);
+    });
+    const ags=Object.values(porAg).sort((a,b)=>b.importe-a.importe);
+    const nPed=new Set(lineas.map(l=>l.pedido).filter(Boolean)).size;
+
+    let h=`<div class="grupo">${barraServ()}
+      <div class="cab" style="cursor:default">
+        <div><div class="tit">${eur(total)} servidos</div>
+          <div class="sub">${nPed} pedido${nPed===1?"":"s"} ·
+            ${lineas.length} línea${lineas.length===1?"":"s"} ·
+            ${ags.length} comercial${ags.length===1?"":"es"}</div></div>
+      </div>`;
+
+    if(faltan.length){
+      h+=`<div class="art" style="background:var(--hueco);display:block">
+        <div style="font-size:12px;color:var(--tenue);line-height:1.5">
+          ⚠️ Faltan ${faltan.length} día(s) de diario en este periodo
+          (${faltan.slice(0,5).map(f=>f.split("-").reverse().join("/")).join(" · ")}${
+            faltan.length>5?"…":""}).
+          Lo servido esos días no quedó registrado.</div></div>`;
+    }
+
+    ags.forEach((a,iAg)=>{
+      const k="ag"+iAg;
+      const abierto=SERV_ABIERTOS.has(k);
+      h+=`<div class="art" onclick="servToggle('${k}')" style="cursor:pointer">
+        <div style="flex:1;min-width:0">
+          <b>${abierto?"▾":"▸"} ${a.ag}</b>
+          <small>${a.pedidos.size} pedido${a.pedidos.size===1?"":"s"} ·
+            ${Object.keys(a.clientes).length} cliente${
+            Object.keys(a.clientes).length===1?"":"s"}</small>
+        </div>
+        <div class="d">${eur(a.importe)}</div></div>`;
+
+      if(abierto){
+        Object.values(a.clientes).sort((x,y)=>y.importe-x.importe).forEach(c=>{
+          h+=`<div class="art" style="padding-left:34px;background:#FAFBFC">
+            <div style="flex:1;min-width:0"><b style="font-size:13px">${c.cli}</b></div>
+            <div class="d" style="font-size:13px">${eur(c.importe)}</div></div>`;
+          c.arts.sort((x,y)=>num(y.importe)-num(x.importe)).forEach(x=>{
+            const u=x.unidades!=null?Number(x.unidades).toLocaleString("es-ES")+" uds":"";
+            h+=`<div class="art" style="padding-left:46px;font-size:12.5px">
+              <div style="flex:1;min-width:0">
+                <span style="color:var(--tenue)">${x.descripcion||x.articulo||"—"}</span>
+                <small>${x.dia.split("-").reverse().join("/")}${
+                  x.pedido?" · "+x.pedido:""}${u?" · "+u:""}</small>
+              </div>
+              <div class="d" style="font-size:12.5px">${eur(x.importe)}</div></div>`;
+          });
+        });
+      }
+    });
+
+    h+=`</div>`;
+    $("app").innerHTML=h;
+  }catch(e){
+    $("app").innerHTML=`<div class="grupo"><p class="vacio">
+      No se ha podido leer lo servido: ${e.message}</p></div>`;
+  }
+}
+
+function barraServ(){
+  const b=(r,txt)=>`<button onclick="servRango('${r}')"
+    style="padding:7px 14px;border-radius:9px;cursor:pointer;font-size:12.5px;
+      font-weight:700;border:1.5px solid ${SERV_RANGO===r?"var(--tinta)":"var(--linea)"};
+      background:${SERV_RANGO===r?"var(--tinta)":"#fff"};
+      color:${SERV_RANGO===r?"#fff":"var(--tenue)"}">${txt}</button>`;
+  return `<div style="display:flex;gap:7px;padding:11px 14px;flex-wrap:wrap;
+    border-bottom:1px solid var(--linea)">
+    ${b("dia","Hoy")}${b("semana","Últimos 7 días")}${b("mes","Últimos 31 días")}
+  </div>`;
+}
+
 async function pintarDiario(){
   $("app").innerHTML=`<div class="grupo"><p class="vacio">Leyendo el diario…</p></div>`;
   try{
@@ -774,6 +921,7 @@ const fechaCorta=(f)=>{
 
 function pintar(){
   if(MODO==="diario"){ pintarDiario(); return; }
+  if(MODO==="servidos"){ pintarServidos(); return; }
   if(!PEDIDOS.length){
     $("app").innerHTML=`<div class="grupo"><p class="vacio">
       No tienes pedidos con fecha de entrega pendiente.</p></div>`;
