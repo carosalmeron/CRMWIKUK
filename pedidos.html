@@ -176,7 +176,7 @@
     <button onclick="ver('semana')" aria-pressed="false" id="t-semana">Por semana</button>
     <button onclick="ver('mes')"    aria-pressed="false" id="t-mes">Por mes</button>
     <button onclick="ver('diario')" aria-pressed="false" id="t-diario">Diario</button>
-    <button onclick="ver('servidos')" aria-pressed="false" id="t-servidos">Servidos</button>
+    <button onclick="ver('servidos')" aria-pressed="false" id="t-servidos">Movimientos</button>
   </div>
   <div id="app"><div class="cargando">Leyendo pedidos…</div></div>
 </main>
@@ -475,10 +475,22 @@ function abrirCliente(id){
 // Lo que ha salido de verdad, no lo planificado. Sale del diario: cada dia
 // guarda las lineas que desaparecieron del pedido, que son las servidas.
 let SERV_RANGO="semana";   // dia | semana | mes
+let SERV_TIPO="salidas";   // salidas | entradas | movimientos | cambios
 let SERV_ABIERTOS=new Set();
+
+// Los cuatro tipos de movimiento que guarda el diario
+const SERV_TIPOS={
+  salidas:     {campo:"salidas",     lbl:"Servidos",  verbo:"servidos"},
+  entradas:    {campo:"entradas",    lbl:"Nuevos",    verbo:"introducidos"},
+  movimientos: {campo:"movimientos", lbl:"Retrasos",  verbo:"movidos de fecha"},
+  cambios:     {campo:"cambios",     lbl:"Cambios",   verbo:"con importe cambiado"},
+};
 
 window.servRango=function(r){
   SERV_RANGO=r; SERV_ABIERTOS.clear(); pintarServidos();
+};
+window.servTipo=function(t){
+  SERV_TIPO=t; SERV_ABIERTOS.clear(); pintarServidos();
 };
 window.servToggle=function(k){
   if(SERV_ABIERTOS.has(k)) SERV_ABIERTOS.delete(k); else SERV_ABIERTOS.add(k);
@@ -519,15 +531,19 @@ async function pintarServidos(){
     for(const f of fechas){
       const d=dias.find(x=>x.fecha===f);
       if(!d){ faltan.push(f); continue; }
-      lee(d.salidas).filter(mio).forEach(m=>{
-        total+=num(m.importe);
-        lineas.push({...m, dia:f});
+      lee(d[SERV_TIPOS[SERV_TIPO].campo]).filter(mio).forEach(m=>{
+        // En los cambios de importe, lo que interesa es la variación
+        var imp = SERV_TIPO==="cambios"
+          ? num(m.importeAhora)-num(m.importeAntes)
+          : num(m.importe);
+        total+=imp;
+        lineas.push({...m, dia:f, _imp:imp});
       });
     }
 
     if(!lineas.length){
       $("app").innerHTML=`<div class="grupo">${barraServ()}
-        <p class="vacio">No consta nada servido en este periodo.${
+        <p class="vacio">No consta nada ${SERV_TIPOS[SERV_TIPO].verbo} en este periodo.${
           faltan.length?` <br><small>Faltan ${faltan.length} día(s) de diario:
           la sincronización no corrió y esas salidas no se registraron.</small>`:""}
         </p></div>`;
@@ -541,10 +557,10 @@ async function pintarServidos(){
       const cli=l.nombre||l.cliente||"—";
       porAg[ag]=porAg[ag]||{ag, importe:0, pedidos:new Set(), clientes:{}};
       const A=porAg[ag];
-      A.importe+=num(l.importe);
+      A.importe+=num(l._imp);
       if(l.pedido) A.pedidos.add(l.pedido);
       A.clientes[cli]=A.clientes[cli]||{cli, importe:0, arts:[]};
-      A.clientes[cli].importe+=num(l.importe);
+      A.clientes[cli].importe+=num(l._imp);
       A.clientes[cli].arts.push(l);
     });
     const ags=Object.values(porAg).sort((a,b)=>b.importe-a.importe);
@@ -552,7 +568,7 @@ async function pintarServidos(){
 
     let h=`<div class="grupo">${barraServ()}
       <div class="cab" style="cursor:default">
-        <div><div class="tit">${eur(total)} servidos</div>
+        <div><div class="tit">${eur(total)} ${SERV_TIPOS[SERV_TIPO].verbo}</div>
           <div class="sub">${nPed} pedido${nPed===1?"":"s"} ·
             ${lineas.length} línea${lineas.length===1?"":"s"} ·
             ${ags.length} comercial${ags.length===1?"":"es"}</div></div>
@@ -584,15 +600,25 @@ async function pintarServidos(){
           h+=`<div class="art" style="padding-left:34px;background:#FAFBFC">
             <div style="flex:1;min-width:0"><b style="font-size:13px">${c.cli}</b></div>
             <div class="d" style="font-size:13px">${eur(c.importe)}</div></div>`;
-          c.arts.sort((x,y)=>num(y.importe)-num(x.importe)).forEach(x=>{
+          c.arts.sort((x,y)=>Math.abs(num(y._imp))-Math.abs(num(x._imp))).forEach(x=>{
             const u=x.unidades!=null?Number(x.unidades).toLocaleString("es-ES")+" uds":"";
+            const fc=(f)=>String(f||"").slice(0,10).split("-").reverse().join("/");
+            // Cada tipo de movimiento se explica distinto
+            let extra="";
+            if(SERV_TIPO==="movimientos"&&x.fechaAntes)
+              extra=` · ${fc(x.fechaAntes)} → ${fc(x.fechaNueva)}${
+                x.dias!=null?" ("+(x.dias>0?"+":"")+x.dias+" d)":""}`;
+            else if(SERV_TIPO==="cambios")
+              extra=` · ${eur(x.importeAntes)} → ${eur(x.importeAhora)}`;
+            else if(SERV_TIPO==="entradas"&&x.fecha)
+              extra=` · sale ${fc(x.fecha)}`;
             h+=`<div class="art" style="padding-left:46px;font-size:12.5px">
               <div style="flex:1;min-width:0">
                 <span style="color:var(--tenue)">${x.descripcion||x.articulo||"—"}</span>
                 <small>${x.dia.split("-").reverse().join("/")}${
-                  x.pedido?" · "+x.pedido:""}${u?" · "+u:""}</small>
+                  x.pedido?" · "+x.pedido:""}${u?" · "+u:""}${extra}</small>
               </div>
-              <div class="d" style="font-size:12.5px">${eur(x.importe)}</div></div>`;
+              <div class="d" style="font-size:12.5px">${eur(x._imp)}</div></div>`;
           });
         });
       }
@@ -607,14 +633,20 @@ async function pintarServidos(){
 }
 
 function barraServ(){
-  const b=(r,txt)=>`<button onclick="servRango('${r}')"
-    style="padding:7px 14px;border-radius:9px;cursor:pointer;font-size:12.5px;
-      font-weight:700;border:1.5px solid ${SERV_RANGO===r?"var(--tinta)":"var(--linea)"};
-      background:${SERV_RANGO===r?"var(--tinta)":"#fff"};
-      color:${SERV_RANGO===r?"#fff":"var(--tenue)"}">${txt}</button>`;
-  return `<div style="display:flex;gap:7px;padding:11px 14px;flex-wrap:wrap;
-    border-bottom:1px solid var(--linea)">
-    ${b("dia","Hoy")}${b("semana","Últimos 7 días")}${b("mes","Últimos 31 días")}
+  const bot=(activo,fn,val,txt)=>`<button onclick="${fn}('${val}')"
+    style="padding:7px 13px;border-radius:9px;cursor:pointer;font-size:12.5px;
+      font-weight:700;border:1.5px solid ${activo?"var(--tinta)":"var(--linea)"};
+      background:${activo?"var(--tinta)":"#fff"};
+      color:${activo?"#fff":"var(--tenue)"}">${txt}</button>`;
+  const tipos=Object.entries(SERV_TIPOS)
+    .map(([k,v])=>bot(SERV_TIPO===k,"servTipo",k,v.lbl)).join("");
+  const rangos=["dia","Hoy","semana","Últimos 7 días","mes","Últimos 31 días"];
+  let rr="";
+  for(let i=0;i<rangos.length;i+=2)
+    rr+=bot(SERV_RANGO===rangos[i],"servRango",rangos[i],rangos[i+1]);
+  return `<div style="padding:11px 14px;border-bottom:1px solid var(--linea)">
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${tipos}</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">${rr}</div>
   </div>`;
 }
 
