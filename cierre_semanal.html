@@ -233,6 +233,68 @@ function plantear(k,tipo,nom,desc){
 }
 
 let PENDIENTES=[];
+// (sep 2026) Retrasos sin clasificar. Un retraso sin motivo es un dato muerto:
+// nadie sabe si fue capacidad, produccion o cliente, asi que nadie puede
+// corregirlo. Se clasifica a diario en Pedidos planificados, y aqui se
+// comprueba: no se cierra la semana dejandolos en blanco.
+let RETRASOS_SIN_MOTIVO=0;
+async function comprobarRetrasos(){
+  try{
+    const iso=(d)=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${
+      String(d.getDate()).padStart(2,"0")}`;
+    const fechas=[];
+    for(let i=0;i<7;i++){ const d=new Date(); d.setDate(d.getDate()-i); fechas.push(iso(d)); }
+
+    const crudos=await Promise.all(fechas.map(f=>
+      fetch(`${FB}/pbi_pedidos_cambios/${f}`).then(r=>r.ok?r.json():null).catch(()=>null)));
+
+    // Motivos ya puestos
+    const puestos=new Set();
+    try{
+      const rm=await fetch(`${FB}/pbi_retrasos_motivo?pageSize=300&mask.fieldPaths=motivo`);
+      if(rm.ok){
+        const jm=await rm.json();
+        (jm.documents||[]).forEach(d=>{
+          if(d.fields?.motivo?.stringValue)
+            puestos.add(decodeURIComponent(d.name.split("/").pop()));
+        });
+      }
+    }catch(e){}
+
+    const clave=(m)=>[m.pedido||"",m.articulo||m.descripcion||"",
+      m.cliente||m.nombre||""].join("|").replace(/[\s\/]/g,"_").slice(0,180);
+
+    const vistos=new Set();
+    let sin=0;
+    crudos.filter(Boolean).forEach(doc=>{
+      const f=doc.fields||{};
+      let movs=[]; try{ movs=JSON.parse(f.movimientos?.stringValue||"[]"); }catch(e){}
+      // esMio() se define mas abajo y solo dentro de pintar(): aqui se
+      // compara contra el agente de la URL, que es quien cierra.
+      movs.filter(m=>m.tipo==="retraso"
+        &&ARR(m.agente)===AGENTE
+        &&Math.abs(m.dias||0)>=3).forEach(m=>{
+        const k=clave(m);
+        if(vistos.has(k)) return;
+        vistos.add(k);
+        if(!puestos.has(k)) sin++;
+      });
+    });
+    RETRASOS_SIN_MOTIVO=sin;
+    if(sin){
+      const av=document.getElementById("avisoRetrasos");
+      if(av){
+        av.style.display="block";
+        av.innerHTML=`<b>⚠️ ${sin} retraso${sin===1?"":"s"} sin motivo.</b>
+          Clasifícalo${sin===1?"":"s"} en <a href="/pedidos.html" style="color:#92400E;
+          font-weight:700">Pedidos planificados → Movimientos → Retrasos</a>
+          antes de cerrar la semana.`;
+      }
+    }
+    refrescar();
+  }catch(e){}
+}
+
 function refrescar(){
   const faltan=PENDIENTES.filter(k=>{
     const r=R[k]||{};
@@ -240,10 +302,17 @@ function refrescar(){
   });
   const b=document.getElementById("btn");
   if(!b) return;
-  document.getElementById("cuenta").innerHTML = faltan.length
-    ? `Faltan <b style="color:#fff">${faltan.length}</b> de ${PENDIENTES.length}`
+  const total=faltan.length+RETRASOS_SIN_MOTIVO;
+  document.getElementById("cuenta").innerHTML = total
+    ? (faltan.length
+        ? `Faltan <b style="color:#fff">${faltan.length}</b> de ${PENDIENTES.length}`
+        : "")
+      +(RETRASOS_SIN_MOTIVO
+        ? (faltan.length?" · ":"")+`<b style="color:#fff">${RETRASOS_SIN_MOTIVO}</b> retraso${
+            RETRASOS_SIN_MOTIVO===1?"":"s"} sin motivo`
+        : "")
     : "Todo respondido";
-  b.disabled=faltan.length>0;
+  b.disabled=total>0;
 }
 
 async function enviar(){
@@ -881,7 +950,16 @@ async function enviar(){
         <p class="sub">Una sola cosa. La que de verdad va a mover el mes.</p>
         <textarea placeholder="Mi prioridad de la semana ${SEMANA+1} es…"
           oninput="texto('prioridad',this)"></textarea>
-      </div>`;
+      </div>
+
+      <div id="avisoRetrasos" style="display:none;background:#FEF3C7;
+        border:1.5px solid #FCD34D;border-radius:12px;padding:12px 14px;
+        margin-top:14px;font-size:13px;color:#92400E;line-height:1.5"></div>`;
+
+    // Los retrasos se clasifican en Pedidos planificados, pero es aqui donde
+    // se comprueba: cerrar la semana con retrasos sin motivo dejaria el dato
+    // muerto y nadie volveria a mirarlo.
+    comprobarRetrasos();
 
     document.getElementById("pie").innerHTML=`
       <div class="barra"><p id="cuenta">—</p>

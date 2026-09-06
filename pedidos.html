@@ -87,6 +87,15 @@
   .art{display:flex;gap:12px;padding:13px 15px 13px 24px;font-size:14.5px;
     border-top:1px solid #E9EEF3;align-items:flex-start}
   .art:first-child{border-top:none}
+  /* Clasificacion de retrasos */
+  .mot{padding:4px 9px;border-radius:99px;border:1px solid var(--linea);
+    background:#fff;color:var(--tenue);font-size:10.5px;font-weight:600;
+    cursor:pointer;font-family:inherit}
+  .mot:hover{border-color:var(--tinta)}
+  .mot.on{background:var(--tinta);color:#fff;border-color:var(--tinta);font-weight:700}
+  .motnota{width:100%;max-width:420px;margin-top:7px;padding:7px 10px;
+    border-radius:8px;border:1px solid var(--linea);font-size:12px;
+    font-family:inherit;outline:none}
   /* Articulos de un pedido agrupado dentro del diario */
   /* UNA sola rejilla para todos los articulos, no una por fila: asi las tres
      columnas comparten ancho y los numeros quedan alineados entre si. */
@@ -318,8 +327,11 @@ function etiqueta(fechaISO){
           titulo:t.charAt(0).toUpperCase()+t.slice(1), sub:"", dias};
 }
 
+let USUARIO=null;   // quien clasifica los retrasos queda registrado
+
 async function cargar(){
   const u=sesion();
+  USUARIO=u;
 
   // Sin sesion no se puede saber a quien limitar la vista. Antes se seguia
   // adelante y se acababa enseñando el grupo entero al primero que abriera
@@ -337,6 +349,8 @@ async function cargar(){
   let clave=null, titulo="Todos los comerciales";
 
   try{
+    await cargarMotivos();
+
     // La tabla de identidades primero: de ella depende a quién se le
     // atribuye cada pedido.
     try{ if(window.Agentes) await window.Agentes.cargar(); }catch(e){}
@@ -477,6 +491,79 @@ function abrirCliente(id){
 let SERV_RANGO="semana";   // dia | semana | mes
 let SERV_TIPO="salidas";   // salidas | entradas | movimientos | cambios | fuera_mes
 let SERV_MINDIAS=3;        // umbral de retraso: no cuentan los de menos días
+
+// ── Motivos de retraso ──────────────────────────────────────────────────
+// SAP dice que la fecha cambió, pero no por qué. Sin el motivo, el retraso
+// es un dato muerto: nadie sabe si es capacidad, produccion o cliente, y
+// por tanto nadie puede corregirlo. Lo clasifica el responsable, a diario.
+const MOTIVOS=[
+  "Capacidad de almacén",
+  "Retraso de Marruecos",
+  "Retraso producción Deshidratado España",
+  "Retraso Producción Fresco España",
+  "Retraso Producción Entubado España",
+];
+let MOTIVOS_PUESTOS={};   // clave de linea -> {motivo, quien, cuando}
+
+// Clave estable de una línea: el mismo pedido y artículo, aunque se mueva
+// varias veces, es un solo retraso que clasificar.
+function claveRetraso(m){
+  return [m.pedido||"", m.articulo||m.descripcion||"", m.cliente||m.nombre||""]
+    .join("|").replace(/[\s\/]/g,"_").slice(0,180);
+}
+
+async function cargarMotivos(){
+  try{
+    const r=await fetch(`${BASE}/pbi_retrasos_motivo?pageSize=300`);
+    if(!r.ok) return;
+    const j=await r.json();
+    (j.documents||[]).forEach(d=>{
+      const id=decodeURIComponent(d.name.split("/").pop());
+      const f=d.fields||{};
+      MOTIVOS_PUESTOS[id]={
+        motivo:f.motivo?.stringValue||"",
+        quien:f.quien?.stringValue||"",
+        cuando:f.cuando?.stringValue||"",
+        nota:f.nota?.stringValue||"",
+      };
+    });
+  }catch(e){}
+}
+
+window.ponerMotivo=async function(clave,motivo,el){
+  const antes=MOTIVOS_PUESTOS[clave];
+  MOTIVOS_PUESTOS[clave]={motivo, quien:(USUARIO&&USUARIO.nombre)||"",
+    cuando:new Date().toISOString(), nota:(antes&&antes.nota)||""};
+  // Se marca al momento: esperar a Firestore hace que parezca que no responde
+  if(el&&el.parentNode){
+    [...el.parentNode.children].forEach(x=>{
+      if(x.classList&&x.classList.contains("mot")) x.classList.remove("on");
+    });
+    el.classList.add("on");
+  }
+  try{
+    await fetch(`${BASE}/pbi_retrasos_motivo/${encodeURIComponent(clave)}`,{
+      method:"PATCH",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({fields:{
+        motivo:{stringValue:motivo},
+        quien:{stringValue:(USUARIO&&USUARIO.nombre)||""},
+        cuando:{stringValue:new Date().toISOString()},
+        nota:{stringValue:(antes&&antes.nota)||""},
+      }})});
+  }catch(e){}
+  pintarServidos();
+};
+
+window.notaMotivo=async function(clave,txt){
+  const a=MOTIVOS_PUESTOS[clave]||{};
+  MOTIVOS_PUESTOS[clave]={...a, nota:txt};
+  try{
+    await fetch(`${BASE}/pbi_retrasos_motivo/${encodeURIComponent(clave)}`
+      +"?updateMask.fieldPaths=nota",{
+      method:"PATCH",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({fields:{nota:{stringValue:txt}}})});
+  }catch(e){}
+};
 let SERV_ABIERTOS=new Set();
 
 // Los cuatro tipos de movimiento que guarda el diario
@@ -592,6 +679,12 @@ async function pintarServidos(){
         return v._dias>=SERV_MINDIAS;
       });
       total=lineas.reduce((t,v)=>t+num(v._imp),0);
+      // Los que faltan por clasificar, arriba: es lo accionable
+      lineas.sort((a,b)=>{
+        const ma=MOTIVOS_PUESTOS[claveRetraso(a)]?1:0;
+        const mb=MOTIVOS_PUESTOS[claveRetraso(b)]?1:0;
+        return ma-mb || Math.abs(num(b._imp))-Math.abs(num(a._imp));
+      });
     }
 
     if(!lineas.length){
@@ -619,7 +712,16 @@ async function pintarServidos(){
     const ags=Object.values(porAg).sort((a,b)=>b.importe-a.importe);
     const nPed=new Set(lineas.map(l=>l.pedido).filter(Boolean)).size;
 
+    // Cuántos retrasos siguen sin clasificar: es lo que bloquea el cierre
+    const sinMotivo = esRetraso
+      ? lineas.filter(l=>!MOTIVOS_PUESTOS[claveRetraso(l)]).length : 0;
+
     let h=`<div class="grupo">${barraServ()}
+      ${sinMotivo?`<div style="background:#FEF2F4;border-bottom:1px solid var(--linea);
+        padding:11px 14px;font-size:13px;color:var(--hoy);font-weight:700">
+        ⚠️ ${sinMotivo} retraso${sinMotivo===1?"":"s"} sin motivo.
+        <span style="font-weight:400">Hasta que no los clasifiques no podrás
+        cerrar la semana.</span></div>`:""}
       <div class="cab" style="cursor:default">
         <div><div class="tit">${eur(total)} ${SERV_TIPOS[SERV_TIPO].verbo}</div>
           <div class="sub">${nPed} pedido${nPed===1?"":"s"} ·
@@ -676,6 +778,30 @@ async function pintarServidos(){
                   x.pedido?" · "+x.pedido:""}${u?" · "+u:""}${extra}</small>
               </div>
               <div class="d" style="font-size:12.5px">${eur(x._imp)}</div></div>`;
+            // Los retrasos hay que clasificarlos: sin motivo no se puede
+            // corregir nada, y es lo que se lleva al parte de departamento.
+            if(SERV_TIPO==="movimientos"||SERV_TIPO==="fuera_mes"){
+              const cl=claveRetraso(x);
+              const yaP=MOTIVOS_PUESTOS[cl];
+              h+=`<div style="padding:2px 0 10px 46px">
+                <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">
+                  <span style="font-size:10.5px;font-weight:700;color:${
+                    yaP?"var(--ok)":"var(--hoy)"};text-transform:uppercase;
+                    letter-spacing:.3px;margin-right:3px">${
+                    yaP?"✓ Motivo":"⚠ Sin motivo"}</span>
+                  ${MOTIVOS.map(mo=>`<button class="mot${
+                    yaP&&yaP.motivo===mo?" on":""}"
+                    onclick="ponerMotivo('${cl}','${mo.replace(/'/g,"")}',this)"
+                    >${mo}</button>`).join("")}
+                </div>
+                ${yaP?`<input class="motnota" placeholder="Qué se hace para que no se repita"
+                    value="${(yaP.nota||"").replace(/"/g,"&quot;")}"
+                    onchange="notaMotivo('${cl}',this.value)">
+                  <div style="font-size:10.5px;color:var(--tenue);margin-top:3px">
+                    ${yaP.quien||"—"} · ${yaP.cuando?yaP.cuando.slice(0,10)
+                      .split("-").reverse().join("/"):""}</div>`:""}
+              </div>`;
+            }
           });
         });
       }
