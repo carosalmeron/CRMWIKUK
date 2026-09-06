@@ -254,7 +254,7 @@ window.toggleObj=function(i){
 </script>
 </head>
 <body>
-<div id="app"><p class="estado">Leyendo… v1.76</p></div>
+<div id="app"><p class="estado">Leyendo… v1.77</p></div>
 <script src="agentes.js"></script>
 
 <script>
@@ -530,7 +530,7 @@ function desvHTML(pct, etqMenos, etqMas){
 
     const [agentes,objetivos,usuarios,portal,
            muestras,ofertas,estrategias,incidencias,semanas,estacion,clientesFB,mesesCli,
-           informes,planes,visitas,ajustes,objSemana]=await Promise.all([
+           informes,planes,visitas,ajustes,motivosRetraso,objSemana]=await Promise.all([
       // La tabla de identidades primero: todo el cruce por agente depende de ella
       Agentes.cargar().then(()=>leerCol("pbi_resumen_agente")),
       leerCol("pbi_objetivos"),
@@ -548,6 +548,7 @@ function desvHTML(pct, etqMenos, etqMas){
       leerCol("planes_semanales").catch(()=>[]),
       leerCol("visitas").catch(()=>[]),
       leerCol("pbi_ajustes").catch(()=>[]),
+      leerCol("pbi_retrasos_motivo").catch(()=>[]),
       leerCol("objetivos_semana").catch(()=>[]),
     ]);
     if(!agentes.length) throw new Error(
@@ -685,8 +686,11 @@ function desvHTML(pct, etqMenos, etqMas){
 
     // Se leen aqui, fuera de pintar(): no dependen del filtro y asi pintar()
     // no necesita await. Tenerlo dentro rompia el script entero.
-    const fechas=[]; for(let i=0;i<7;i++){ const d=new Date(); d.setDate(d.getDate()-i); fechas.push(iso(d)); }
+    // 14 dias: la semana en curso y la anterior, para poder comparar si los
+    // retrasos mejoran o empeoran.
+    const fechas=[]; for(let i=0;i<14;i++){ const d=new Date(); d.setDate(d.getDate()-i); fechas.push(iso(d)); }
     const dias=(await Promise.all(fechas.map(f=>leerDoc(`pbi_pedidos_cambios/${f}`)))).filter(Boolean);
+    const diasCambios=dias;   // lo usa el resumen de retrasos
 
     function pintar(){
     const mios=seleccionados();
@@ -1045,6 +1049,75 @@ function desvHTML(pct, etqMenos, etqMas){
     // ── Prometido y cumplido ────────────────────────────────────────────
     // No se declara: se cruza lo que dijo el lunes con las visitas, ofertas y
     // pedidos registrados durante la semana.
+    // ── Retrasos de pedido ──────────────────────────────────────────────
+    // SAP dice que la fecha cambio, pero no por que. El responsable lo
+    // clasifica a diario en Pedidos planificados, y aqui se ve el patron:
+    // si siempre es la misma causa, es un problema estructural, no mala suerte.
+    const RETRASOS=(function(){
+      const iso=(d)=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${
+        String(d.getDate()).padStart(2,"0")}`;
+      const clave=(m)=>[m.pedido||"",m.articulo||m.descripcion||"",
+        m.cliente||m.nombre||""].join("|").replace(/[\s\/]/g,"_").slice(0,180);
+
+      const puestos={};
+      (motivosRetraso||[]).forEach(x=>{
+        if(x.motivo) puestos[x._id]={motivo:x.motivo, nota:x.nota||"", quien:x.quien||""};
+      });
+
+      // Dos ventanas: la semana en curso y la anterior, para ver la tendencia
+      const ventana=(desdeDias,hastaDias)=>{
+        const dias=[];
+        for(let i=desdeDias;i<hastaDias;i++){
+          const d=new Date(); d.setDate(d.getDate()-i); dias.push(iso(d));
+        }
+        return dias;
+      };
+      const juntar=(fechas)=>{
+        const vistos={};
+        (diasCambios||[]).filter(d=>fechas.includes(d.fecha||d._id)).forEach(doc=>{
+          let movs=[]; try{ movs=JSON.parse(doc.movimientos||"[]"); }catch(e){}
+          movs.filter(m=>m.tipo==="retraso"&&Math.abs(m.dias||0)>=3)
+            .filter(m=>!mios.length||mios.some(a=>arriba(a._id)===arriba(m.agente)))
+            .forEach(m=>{
+              const k=clave(m);
+              // Un pedido movido tres veces es un retraso, no tres
+              if(vistos[k]){ vistos[k].veces++; vistos[k].dias=Math.max(vistos[k].dias,Math.abs(m.dias||0)); return; }
+              vistos[k]={...m, _k:k, dias:Math.abs(m.dias||0), veces:1,
+                motivo:(puestos[k]||{}).motivo||null,
+                nota:(puestos[k]||{}).nota||"",
+                quien:(puestos[k]||{}).quien||""};
+            });
+        });
+        return Object.values(vistos);
+      };
+
+      const ahora=juntar(ventana(0,7));
+      const antes=juntar(ventana(7,14));
+      if(!ahora.length&&!antes.length) return null;
+
+      const resume=(l)=>({
+        n:l.length,
+        imp:l.reduce((t,x)=>t+num(x.importe),0),
+        dias:l.length?l.reduce((t,x)=>t+x.dias,0)/l.length:0,
+      });
+
+      const porMotivo={};
+      ahora.forEach(x=>{
+        const m=x.motivo||"— sin clasificar —";
+        porMotivo[m]=porMotivo[m]||{motivo:m,n:0,imp:0,notas:[]};
+        porMotivo[m].n++;
+        porMotivo[m].imp+=num(x.importe);
+        if(x.nota&&porMotivo[m].notas.length<3) porMotivo[m].notas.push(x.nota);
+      });
+
+      return {
+        ahora:resume(ahora), antes:resume(antes),
+        sinMotivo:ahora.filter(x=>!x.motivo).length,
+        porMotivo:Object.values(porMotivo).sort((a,b)=>b.n-a.n),
+        top:ahora.slice().sort((a,b)=>num(b.importe)-num(a.importe)).slice(0,6),
+      };
+    })();
+
     const COMPROMISOS=(function(){
       const out=[];
       const semRef=_nSem;
@@ -1499,6 +1572,57 @@ function desvHTML(pct, etqMenos, etqMas){
   })()}
 </section>
 
+${RETRASOS?`<section>
+  <p class="rot">Retrasos de pedido · última semana</p>
+  <p class="sub" style="margin:-4px 0 10px">Pedidos que han cambiado de fecha
+    3 días o más. El motivo lo pone quien lo gestiona, a diario.</p>
+
+  ${(()=>{
+    const A=RETRASOS.ahora, B=RETRASOS.antes;
+    const flecha=(ahora,antes,menosEsMejor)=>{
+      if(!antes) return "";
+      const d=ahora-antes;
+      if(!d) return `<span class="var">igual</span>`;
+      const bien=menosEsMejor?d<0:d>0;
+      return `<span class="var" style="color:${bien?"var(--ok)":"var(--hoy)"}">${
+        d>0?"▲":"▼"} ${Math.abs(Math.round(d*10)/10)}</span>`;
+    };
+    return `<div class="dato"><div class="dg">
+      <div><b>${A.n}</b><span>pedidos retrasados</span>
+        ${flecha(A.n,B.n,true)}</div>
+      <div><b>${eur(A.imp)}</b><span>en riesgo</span>
+        ${flecha(A.imp,B.imp,true)}</div>
+      <div><b>${Math.round(A.dias*10)/10} d</b><span>retraso medio</span>
+        ${flecha(A.dias,B.dias,true)}</div>
+    </div></div>`;
+  })()}
+
+  ${RETRASOS.sinMotivo?`<div class="card" style="border-color:var(--hoy);
+    background:#FEF2F4;margin-bottom:10px">
+    <b style="color:var(--hoy)">${RETRASOS.sinMotivo} sin clasificar.</b>
+    Sin motivo no se puede corregir nada: se ponen en
+    Pedidos planificados → Diario.</div>`:""}
+
+  <p class="rot" style="font-size:13px;margin-top:14px">Por qué se retrasan</p>
+  <table><thead><tr><th>Motivo</th><th>Pedidos</th><th>Importe</th></tr></thead>
+    <tbody>${RETRASOS.porMotivo.map(m=>`<tr>
+      <td class="cli">${m.motivo}
+        ${m.notas.length?`<small>${m.notas[0]}</small>`:""}</td>
+      <td style="text-align:right;font-weight:700">${m.n}</td>
+      <td style="text-align:right"><span class="imp">${eur(m.imp)}</span></td>
+    </tr>`).join("")}</tbody></table>
+
+  ${RETRASOS.top.length?`
+  <p class="rot" style="font-size:13px;margin-top:14px">Los que más pesan</p>
+  <table>${RETRASOS.top.map(x=>`<tr>
+    <td class="cli">${x.nombre||x.cliente||"—"}
+      <small>${x.agente||""}${x.pedido?" · "+x.pedido:""} ·
+        ${x.dias} d${x.veces>1?" · movido "+x.veces+" veces":""} ·
+        ${x.motivo||"<b style='color:var(--hoy)'>sin motivo</b>"}</small></td>
+    <td style="text-align:right"><span class="imp">${eur(x.importe)}</span></td>
+  </tr>`).join("")}</table>`:""}
+</section>`:""}
+
 <section>
   ${COMPROMISOS.length?`
   <p class="rot">Lo prometido y lo cumplido · semana ${_nSem}</p>
@@ -1763,7 +1887,7 @@ function desvHTML(pct, etqMenos, etqMas){
   ${FALLOS.join(" · ")}.<br>`:""}
   <span style="font-size:11px">Páginas leídas: ${
     Object.entries(PAGINAS).map(([k,v])=>k+" "+v).join(" · ")}</span><br>
-  <b>Parte semanal v1.76.</b> Lee Firestore en directo y no escribe nada.
+  <b>Parte semanal v1.77.</b> Lee Firestore en directo y no escribe nada.
   El «hoy tocaría» sale de <b>pbi_objetivos</b>, que
   suma los meses ya cerrados, no un prorrateo. No se puede retroceder de semana
   porque <b>pbi_resumen_agente</b> solo guarda la semana en curso.
