@@ -186,6 +186,35 @@ window.marcar=(k,v,el)=>{
   [...el.parentNode.children].forEach(x=>x.classList.remove("on"));
   el.classList.add("on"); refrescar();
 };
+// (sep 2026) Responder a todas las lineas de un cliente de una vez: cinco
+// muestras del mismo cliente con 95 dias suelen tener el mismo destino, y
+// obligar a marcarlas una a una es lo que hace el cierre interminable.
+window.marcarVarias=(claves,v,el)=>{
+  (claves||[]).forEach(k=>{
+    R[k]=R[k]||{}; R[k].accion=v; R[k].cierra=CIERRA[v]||null;
+    if(window.NOMBRES_CLAVE&&window.NOMBRES_CLAVE[k]) R[k].nom=window.NOMBRES_CLAVE[k];
+    if(window.CRMID_CLAVE&&window.CRMID_CLAVE[k]) R[k].crmId=window.CRMID_CLAVE[k];
+  });
+  // Se marca el boton del grupo y los de cada linea, para que se vea aplicado
+  [...el.parentNode.children].forEach(x=>{
+    if(x.classList&&x.classList.contains("chip")) x.classList.remove("on");
+  });
+  el.classList.add("on");
+  let n=el.parentNode.nextElementSibling;
+  while(n){
+    if(n.classList&&n.classList.contains("acc")){
+      [...n.children].forEach(b=>{
+        if(!b.classList||!b.classList.contains("chip")) return;
+        b.classList.toggle("on", b.textContent.trim()===v);
+      });
+    }
+    // Parar al llegar a la cabecera del siguiente cliente
+    if(n.classList&&n.classList.contains("item")
+      &&n.getAttribute("style")&&n.getAttribute("style").indexOf("#F1F5F9")>=0) break;
+    n=n.nextElementSibling;
+  }
+  refrescar();
+};
 window.texto=(k,el)=>{ R[k]=R[k]||{}; R[k].texto=el.value.trim();
   if(window.NOMBRES_CLAVE&&window.NOMBRES_CLAVE[k]) R[k].nom=window.NOMBRES_CLAVE[k];
   if(window.CRMID_CLAVE&&window.CRMID_CLAVE[k]) R[k].crmId=window.CRMID_CLAVE[k];
@@ -411,7 +440,13 @@ async function enviar(){
         return d!=null && d>g.dias;
       }).map(o=>({id:o._id, cli:o.clienteNombre||o.cliente||"(sin cliente)",
         d:dias(fecha(o.fecha||o.fechaCreacion)),
-        imp:num(o.importe||o.total), tit:o.titulo||o.producto||""}))
+        // (sep 2026) Las muestras guardan el producto en "prod": buscando solo
+        // "producto" salia vacio y el comercial veia cinco lineas identicas
+        // del mismo cliente sin saber cual era cual.
+        imp:num(o.importe||o.total),
+        tit:o.titulo||o.producto||o.prod||o.prodNombre||"",
+        cal:o.calibre||"", met:o.metros||o.medida||"",
+        fch:String(o.fecha||o.fechaCreacion||"").slice(0,10)}))
         .sort((a,b)=> tipo==="ofertas" ? b.imp-a.imp : b.d-a.d);
     }
     const vOf=abiertas(of,"ofertas",["pedido","perdida","aceptada","rechazada"]);
@@ -422,18 +457,60 @@ async function enviar(){
       const g=REGLAS[tipo], v=l.slice(0,g.tope);
       if(!v.length) return `<p class="rot">${tit}</p>
         <p class="sub" style="margin:0">Nada pendiente de más de ${g.dias} días.</p>`;
+
+      // (sep 2026) Cinco muestras del mismo cliente salian como cinco filas
+      // identicas: el comercial no sabia cual era cual ni por que se repetian.
+      // Se agrupan por cliente, con sus lineas dentro y un boton para
+      // responder a todas de golpe cuando la decision es la misma.
+      const porCli={};
+      v.forEach(o=>{ (porCli[o.cli]=porCli[o.cli]||[]).push(o); });
+
       return `<p class="rot">${tit} · +${g.dias} días ·
         <span style="color:var(--tinta)">${v.length} de ${l.length}</span></p>
-        ${v.map(o=>{
-          const k=tipo+":"+o.id; PENDIENTES.push(k);
-          plantear(k,tipo,o.cli,(o.tit||"")+" · "+o.d+" días");
-          return `<div class="item">
-            <div>${o.cli}<small>${o.tit||""}${o.tit?" · ":""}${o.d} días</small></div>
-            <div class="imp ${o.d>60?"dn":"pd"}">${o.imp?eur(o.imp):o.d+" d"}</div>
-          </div>
-          <div class="acc">${opciones.map(x=>
-            `<button class="chip" onclick="marcar('${k}','${x}',this)">${x}</button>`).join("")}</div>
-          ${pide?`<textarea placeholder="${pide}" oninput="texto('${k}',this)"></textarea>`:""}`;
+        ${Object.entries(porCli).map(([cli,items])=>{
+          const varios=items.length>1;
+          const claves=items.map(o=>tipo+":"+o.id);
+          const maxD=Math.max(...items.map(o=>o.d));
+          const sumaImp=items.reduce((t,o)=>t+(o.imp||0),0);
+
+          let h="";
+          if(varios){
+            // Cabecera del cliente, con la accion para todas a la vez
+            h+=`<div class="item" style="background:#F1F5F9;border-radius:8px;
+              padding:9px 11px;margin-top:10px">
+              <div><b>${cli}</b><small>${items.length} ${
+                tipo==="muestras"?"muestras":tipo==="ofertas"?"ofertas":"pendientes"
+              } · la más antigua ${maxD} días</small></div>
+              <div class="imp ${maxD>60?"dn":"pd"}">${
+                sumaImp?eur(sumaImp):maxD+" d"}</div>
+            </div>
+            <div class="acc" style="margin-bottom:4px">
+              <span style="font-size:11px;color:var(--tenue);align-self:center;
+                margin-right:4px">Todas:</span>
+              ${opciones.map(x=>
+                `<button class="chip" onclick="marcarVarias(${
+                  JSON.stringify(claves).replace(/"/g,"&quot;")},'${x}',this)"
+                  >${x}</button>`).join("")}</div>`;
+          }
+
+          h+=items.map(o=>{
+            const k=tipo+":"+o.id; PENDIENTES.push(k);
+            const detalle=[o.tit,o.cal,o.met,
+              o.fch?o.fch.split("-").reverse().join("/"):""].filter(Boolean).join(" · ");
+            plantear(k,tipo,o.cli,detalle+" · "+o.d+" días");
+            return `<div class="item"${varios?' style="padding-left:14px"':""}>
+              <div>${varios?(o.tit||"(sin producto)"):o.cli}<small>${
+                varios ? [o.cal,o.met,o.fch?o.fch.split("-").reverse().join("/"):""]
+                          .filter(Boolean).join(" · ")+(o.cal||o.met||o.fch?" · ":"")+o.d+" días"
+                       : detalle+(detalle?" · ":"")+o.d+" días"
+              }</small></div>
+              <div class="imp ${o.d>60?"dn":"pd"}">${o.imp?eur(o.imp):o.d+" d"}</div>
+            </div>
+            <div class="acc">${opciones.map(x=>
+              `<button class="chip" onclick="marcar('${k}','${x}',this)">${x}</button>`).join("")}</div>
+            ${pide?`<textarea placeholder="${pide}" oninput="texto('${k}',this)"></textarea>`:""}`;
+          }).join("");
+          return h;
         }).join("")}
         ${l.length>v.length?`<p class="sub" style="margin:6px 0 0">Y ${l.length-v.length} más
           para las próximas semanas.</p>`:""}`;
