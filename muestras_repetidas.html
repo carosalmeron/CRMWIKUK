@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Muestras repetidas · diagnóstico</title>
+<style>
+ :root{--papel:#F2F4F7;--tinta:#14181F;--tenue:#6B7684;--linea:#DCE1E7;
+       --ok:#0E7C5A;--mal:#C2263D;--med:#B07908;--okL:#EDF7F3;--malL:#FEF2F4;--medL:#FFFBEB}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--papel);color:var(--tinta);max-width:860px;
+   margin-inline:auto;padding:20px 14px 50px;
+   font:400 15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+ h1{margin:0 0 3px;font-size:21px;font-weight:800}
+ .sub{margin:0 0 16px;font-size:13px;color:var(--tenue)}
+ h2{font-size:15px;margin:24px 0 8px;padding-bottom:5px;border-bottom:2px solid var(--linea)}
+ .card{background:#fff;border:1px solid var(--linea);border-radius:8px;
+   padding:13px 14px;margin-bottom:9px;font-size:13.5px}
+ .card.ok{border-color:var(--ok);background:var(--okL)}
+ .card.mal{border-color:var(--mal);background:var(--malL)}
+ .card.med{border-color:var(--med);background:var(--medL)}
+ code{background:#F1F5F9;padding:1px 6px;border-radius:4px;font-size:12px;
+   font-family:ui-monospace,monospace}
+ table{width:100%;border-collapse:collapse;font-size:12.5px;background:#fff;
+   border:1px solid var(--linea);border-radius:8px;overflow:hidden}
+ th{background:#F1F5F9;text-align:left;padding:8px;font-size:10.5px;
+   text-transform:uppercase;color:var(--tenue)}
+ td{padding:7px 8px;border-top:1px solid var(--linea);vertical-align:top}
+ .n{text-align:right;font-variant-numeric:tabular-nums;font-weight:700}
+ .estado{padding:34px 4px;color:var(--tenue);text-align:center}
+ .grande{font-size:26px;font-weight:800;line-height:1.2}
+</style></head><body>
+<h1>🔬 Muestras repetidas</h1>
+<p class="sub">¿Son productos distintos del mismo cliente, o el mismo cliente
+  guardado con códigos diferentes?</p>
+<div id="app"><p class="estado">Analizando…</p></div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const U=(s)=>String(s||"").toUpperCase().trim();
+// Nombre de empresa normalizado: sin tildes, sin S.L./S.R.L. y sin puntuación
+const NOM=(s)=>U(s).normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+  .replace(/\b(S\.?L\.?U?|S\.?A\.?U?|S\.?R\.?L|SCL|LDA|SARL|SAS|GMBH|CB|SAT|COOP|SOC|SPA|DOO|OOD|BT|KG|CO)\b/g,"")
+  .replace(/[^A-Z0-9]/g,"");
+
+function val(f){
+  if(!f) return null;
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  return null;
+}
+async function leer(col,max=25){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<max);
+  return t;
+}
+
+(async()=>{
+  const app=document.getElementById("app");
+  try{
+    const [mu,cli]=await Promise.all([leer("muestras"),leer("clientes")]);
+    const vivas=mu.filter(m=>!m.eliminada
+      && !["positivo","pedido","ko","negativo"].includes(String(m.estado||"").toLowerCase()));
+
+    // Agrupadas por nombre de cliente normalizado
+    const porNom={};
+    vivas.forEach(m=>{
+      const n=NOM(m.clienteNombre||m.cliente);
+      if(!n) return;
+      (porNom[n]=porNom[n]||[]).push(m);
+    });
+
+    // De esos grupos, cuáles tienen MÁS DE UN código de cliente
+    const conVariosCodigos=[], soloProductos=[];
+    Object.entries(porNom).forEach(([n,ms])=>{
+      if(ms.length<2) return;
+      const cods=[...new Set(ms.map(m=>U(m.clienteId||m.cliente)).filter(Boolean))];
+      const prods=[...new Set(ms.map(m=>U(m.prod||m.producto)).filter(Boolean))];
+      const reg={nom:ms[0].clienteNombre||ms[0].cliente, n:ms.length, cods, prods, ms};
+      if(cods.length>1) conVariosCodigos.push(reg); else soloProductos.push(reg);
+    });
+    conVariosCodigos.sort((a,b)=>b.cods.length-a.cods.length);
+    soloProductos.sort((a,b)=>b.n-a.n);
+
+    // Fichas de cliente duplicadas por nombre
+    const fichasPorNom={};
+    cli.forEach(c=>{
+      const n=NOM(c.nombre||c.NOMBRE);
+      if(!n) return;
+      (fichasPorNom[n]=fichasPorNom[n]||[]).push(c);
+    });
+    const fichasDup=Object.entries(fichasPorNom).filter(([n,f])=>f.length>1)
+      .map(([n,f])=>({nom:f[0].nombre||f[0].NOMBRE, fichas:f}))
+      .sort((a,b)=>b.fichas.length-a.fichas.length);
+
+    let h='<div class="card '+(conVariosCodigos.length?"mal":"ok")+'">'
+      +'<div class="grande">'+conVariosCodigos.length+'</div>'
+      +'clientes con muestras guardadas bajo <b>códigos distintos</b>'
+      +(conVariosCodigos.length
+        ? " — esto sí es un problema: son fichas duplicadas."
+        : " — ninguno: las repeticiones son productos distintos, que es normal.")
+      +'</div>';
+
+    h+='<div class="card">'
+      +'<b>'+soloProductos.length+'</b> clientes con varias muestras pero '
+      +'<b>un solo código</b>. Eso es normal: son productos distintos.</div>';
+
+    if(conVariosCodigos.length){
+      h+='<h2>Mismo cliente, códigos distintos</h2>'
+        +'<table><thead><tr><th>Cliente</th><th>Muestras</th>'
+        +'<th>Códigos que usa</th></tr></thead><tbody>'
+        +conVariosCodigos.map(x=>'<tr><td><b>'+x.nom+'</b></td>'
+          +'<td class="n">'+x.n+'</td><td>'
+          +x.cods.map(c=>'<code>'+c+'</code>').join(" ")+'</td></tr>').join("")
+        +'</tbody></table>';
+    }
+
+    h+='<h2>Fichas de cliente duplicadas ('+fichasDup.length+')</h2>';
+    h+= fichasDup.length
+      ? '<p class="sub">Mismo nombre, varias fichas en la colección '
+        +'<code>clientes</code>. Es el origen del problema.</p>'
+        +'<table><thead><tr><th>Cliente</th><th>Fichas</th></tr></thead><tbody>'
+        +fichasDup.slice(0,30).map(x=>'<tr><td><b>'+x.nom+'</b></td><td>'
+          +x.fichas.map(f=>'<code>'+f._id+'</code>'
+            +(f.agente?' <span style="color:var(--tenue);font-size:11px">'+f.agente+'</span>':""))
+            .join("<br>")+'</td></tr>').join("")
+        +'</tbody></table>'
+        +(fichasDup.length>30?'<p class="sub">Y '+(fichasDup.length-30)+' más.</p>':"")
+      : '<div class="card ok">No hay fichas duplicadas por nombre.</div>';
+
+    // Detalle de los casos que viste
+    h+='<h2>Los que viste en el cierre</h2>';
+    ["CAVALLO","GEMA EXIMCO","GIANNI GIORDANO"].forEach(b=>{
+      const g=Object.values(porNom).find(ms=>
+        NOM(ms[0].clienteNombre||ms[0].cliente).indexOf(NOM(b))>=0);
+      if(!g) return;
+      const cods=[...new Set(g.map(m=>U(m.clienteId||m.cliente)).filter(Boolean))];
+      h+='<div class="card '+(cods.length>1?"mal":"med")+'">'
+        +'<b>'+(g[0].clienteNombre||g[0].cliente)+'</b> · '+g.length+' muestras · '
+        +(cods.length>1?'<span style="color:var(--mal)">'+cods.length+' códigos distintos</span>'
+                       :'1 solo código')
+        +'<table style="margin-top:8px"><thead><tr><th>Producto</th><th>Código cliente</th>'
+        +'<th>Fecha</th></tr></thead><tbody>'
+        +g.map(m=>'<tr><td>'+(m.prod||m.producto||"(sin producto)")+'</td>'
+          +'<td><code>'+(m.clienteId||m.cliente||"—")+'</code></td>'
+          +'<td>'+String(m.fecha||m.fechaCreacion||"").slice(0,10)+'</td></tr>').join("")
+        +'</tbody></table></div>';
+    });
+
+    app.innerHTML=h;
+  }catch(e){
+    app.innerHTML='<div class="card mal">Error: '+e.message+'</div>';
+    console.error(e);
+  }
+})();
+</script></body></html>
