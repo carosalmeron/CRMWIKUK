@@ -403,6 +403,26 @@ async function enviar(){
     });
 
     // 2 · Los que dan señales de bajada, con la misma regla del parte
+    // (sep 2026) El cierre recalculaba desde cero cada viernes: un cliente
+    // sobre el que ya dijiste "Le visito" volvia a salir la semana siguiente,
+    // y la otra, hasta que hubiera visita registrada. Se recuerda lo
+    // respondido en las 3 ultimas semanas para no repreguntar lo mismo.
+    const YA_DICHO={};
+    try{
+      for(let sp=SEMANA-1; sp>=SEMANA-3 && sp>0; sp--){
+        const rp=await fetch(`${FB}/informes/informe_${encodeURIComponent(AGENTE)}_s${sp}`);
+        if(!rp.ok) continue;
+        const jp=await rp.json();
+        let R2={};
+        try{ R2=JSON.parse(jp.fields?.respuestas?.stringValue||"{}"); }catch(e){}
+        for(const [k,v] of Object.entries(R2)){
+          if(!k.startsWith("cliente:")||!v||!v.accion) continue;
+          // Se guarda la mas reciente: sp va de mayor a menor
+          if(!YA_DICHO[k]) YA_DICHO[k]={accion:v.accion, semana:sp, nom:v.nom||""};
+        }
+      }
+    }catch(e){}
+
     const avisos=[];
     for(const c of mios){
       const f=mes[ARR(c._id)]; if(!f) continue;
@@ -422,12 +442,18 @@ async function enviar(){
         grav=ritmo*seco; }
       else if(caida<=-45){ motivo=`compraba ${eur(ritmo)} al mes y ahora ${eur(ahora)}, `
         +`un ${Math.round(-caida)} % menos`; grav=(ritmo-ahora)*2; }
-      if(motivo) avisos.push({id:c._id,nom:c.nombre||c._id,motivo,grav,
+      if(motivo){
+        const yaD=YA_DICHO["cliente:"+c._id];
+        // Si ya se dijo que se iba a hacer algo y sigue igual, no se
+        // repregunta: se recuerda lo prometido y se pide el resultado.
+        avisos.push({id:c._id,nom:c.nombre||c._id,motivo,grav,
+          yaDicho:yaD?yaD.accion:null, yaSem:yaD?yaD.semana:null,
         // Guardamos el nombre normalizado para poder emparejarlo luego con la
         // ficha del CRM: el id de aquí es el código SAP y no vale para eso.
         _k:String(c.nombre||"").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"")
              .replace(/\b(S\.?L\.?U?|S\.?A\.?U?|SCL|LDA|SARL|SAS|GMBH|SRL|CB|SAT|COOP|SOC|UNIPESSOAL)\b/g,"")
              .replace(/[^A-Z0-9]/g,"")});
+      }
     }
     avisos.sort((a,b)=>b.grav-a.grav);
     // (sep 2026) Un cliente salia en "indicios de bajada" y otra vez en sus
@@ -447,8 +473,7 @@ async function enviar(){
         if(!esMio(o)) return false;
         const e=String(o.estado||"").toLowerCase();
         if(cerrados.includes(e)) return false;
-        // Si ya se ha preguntado por este cliente arriba, no se repite aqui
-        if(YA_EN_AVISOS.has(_nn(o.clienteNombre||o.cliente))) return false;
+
         const d=dias(fecha(o.fecha||o.fechaCreacion));
         return d!=null && d>g.dias;
       }).map(o=>({id:o._id, cli:o.clienteNombre||o.cliente||"(sin cliente)",
@@ -787,12 +812,24 @@ async function enviar(){
           // El id equivalente en el CRM, para que una oferta o visita creada
           // después se reconozca como cumplimiento de este compromiso.
           if(c.crmId) window.CRMID_CLAVE[k]=c.crmId;
+          // Si ya se comprometio a algo y el cliente sigue igual, no se
+          // repregunta en frio: se le recuerda y se le pide el resultado.
+          const rep=c.yaDicho
+            ? `<div style="background:#FEF3C7;border-radius:8px;padding:8px 11px;
+                margin:4px 0 6px;font-size:12.5px;color:#92400E">
+                Ya dijiste <b>"${c.yaDicho}"</b> en la semana ${c.yaSem}
+                y sigue igual. ¿Qué ha pasado?</div>` : "";
           return `<div class="item">
             <div>${c.nom}<small>${c.motivo}</small></div>
             <div class="imp pd">${eur(c.grav)}</div></div>
-          <div class="acc">${["Le visito","Le llamo","Le mando oferta","Ya lo sé, es normal"]
+          ${rep}
+          <div class="acc">${(c.yaDicho
+              ? ["Ya lo hice","Lo hago esta semana","No he podido","Ya lo sé, es normal"]
+              : ["Le visito","Le llamo","Le mando oferta","Ya lo sé, es normal"])
             .map(x=>`<button class="chip" onclick="marcar('${k}','${x}',this)">${x}</button>`).join("")}</div>
-          <textarea placeholder="Qué ha pasado y cuándo lo vas a hacer"
+          <textarea placeholder="${c.yaDicho
+            ? "Qué pasó con lo que dijiste la semana pasada"
+            : "Qué ha pasado y cuándo lo vas a hacer"}"
             oninput="texto('${k}',this)"></textarea>`;
         }).join("") : '<p class="sub" style="margin:0">Ninguno da señales por ahora.</p>'}
       </div>
