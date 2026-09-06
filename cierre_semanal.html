@@ -93,8 +93,11 @@ window.volverCRM=function(ev){
 // Umbrales acordados: lo que lleva demasiado tiempo abierto. Con tope por
 // bloque para que la primera semana no salgan trescientas cosas y se marque
 // cualquiera por salir del paso.
-const REGLAS={ ofertas:{dias:5,tope:10}, estrategias:{dias:15,tope:8},
-               muestras:{dias:30,tope:10} };
+// (sep 2026) Los topes eran 10/8/10: con 20+ decisiones el cierre se hace
+// interminable y se abandona a medias. Se piden las 3 mas urgentes de cada
+// cosa; el resto sigue vivo y sale la semana siguiente.
+const REGLAS={ ofertas:{dias:5,tope:3}, estrategias:{dias:15,tope:3},
+               muestras:{dias:30,tope:3} };
 
 const R={};   // respuestas
 
@@ -427,7 +430,15 @@ async function enviar(){
              .replace(/[^A-Z0-9]/g,"")});
     }
     avisos.sort((a,b)=>b.grav-a.grav);
+    // (sep 2026) Un cliente salia en "indicios de bajada" y otra vez en sus
+    // ofertas o muestras: dos decisiones sobre lo mismo. El aviso de bajada
+    // manda (es lo grave), y sus pendientes se quedan fuera del otro bloque.
     const av=avisos.slice(0,5);
+    const _nn=(x)=>String(x||"").toUpperCase().normalize("NFD")
+      .replace(/[\u0300-\u036f]/g,"")
+      .replace(/\b(S\.?L\.?U?|S\.?A\.?U?|S\.?R\.?L|SCL|LDA|SARL|SAS|GMBH|CB|SAT|COOP|SOC|SPA|DOO|OOD|BT|KG|CO)\b/g,"")
+      .replace(/[^A-Z0-9]/g,"");
+    const YA_EN_AVISOS=new Set(av.map(a=>_nn(a.nom)).filter(Boolean));
 
     // 3 · Lo que se está enfriando
     function abiertas(lista,tipo,cerrados){
@@ -436,6 +447,8 @@ async function enviar(){
         if(!esMio(o)) return false;
         const e=String(o.estado||"").toLowerCase();
         if(cerrados.includes(e)) return false;
+        // Si ya se ha preguntado por este cliente arriba, no se repite aqui
+        if(YA_EN_AVISOS.has(_nn(o.clienteNombre||o.cliente))) return false;
         const d=dias(fecha(o.fecha||o.fechaCreacion));
         return d!=null && d>g.dias;
       }).map(o=>({id:o._id, cli:o.clienteNombre||o.cliente||"(sin cliente)",
@@ -444,8 +457,11 @@ async function enviar(){
         // "producto" salia vacio y el comercial veia cinco lineas identicas
         // del mismo cliente sin saber cual era cual.
         imp:num(o.importe||o.total),
-        tit:o.titulo||o.producto||o.prod||o.prodNombre||"",
-        cal:o.calibre||"", met:o.metros||o.medida||"",
+        // El codigo del articulo (R4P, MXP32.10F4) no dice nada: se prefiere
+        // la descripcion legible cuando existe.
+        tit:o.prodNombre||o.descripcion||o.titulo||o.producto||o.prod||"",
+        cod:o.prod||o.articulo||"",
+        cal:o.calibre||o.cal||"", met:o.metros||o.medida||o.me||"",
         fch:String(o.fecha||o.fechaCreacion||"").slice(0,10)}))
         .sort((a,b)=> tipo==="ofertas" ? b.imp-a.imp : b.d-a.d);
     }
@@ -495,13 +511,17 @@ async function enviar(){
 
           h+=items.map(o=>{
             const k=tipo+":"+o.id; PENDIENTES.push(k);
-            const detalle=[o.tit,o.cal,o.met,
+            // Codigo y descripcion juntos: el codigo identifica, la
+            // descripcion explica. Con calibre y metros si constan.
+            const prodTxt=[o.cod,o.tit&&o.tit!==o.cod?o.tit:""].filter(Boolean).join(" · ");
+            const carac=[o.cal?"⌀"+o.cal:"",o.met?o.met+" m":""].filter(Boolean).join(" · ");
+            const detalle=[prodTxt,carac,
               o.fch?o.fch.split("-").reverse().join("/"):""].filter(Boolean).join(" · ");
             plantear(k,tipo,o.cli,detalle+" · "+o.d+" días");
             return `<div class="item"${varios?' style="padding-left:14px"':""}>
-              <div>${varios?(o.tit||"(sin producto)"):o.cli}<small>${
-                varios ? [o.cal,o.met,o.fch?o.fch.split("-").reverse().join("/"):""]
-                          .filter(Boolean).join(" · ")+(o.cal||o.met||o.fch?" · ":"")+o.d+" días"
+              <div>${varios?(prodTxt||"(sin producto)"):o.cli}<small>${
+                varios ? [carac,o.fch?o.fch.split("-").reverse().join("/"):""]
+                          .filter(Boolean).join(" · ")+(carac||o.fch?" · ":"")+o.d+" días"
                        : detalle+(detalle?" · ":"")+o.d+" días"
               }</small></div>
               <div class="imp ${o.d>60?"dn":"pd"}">${o.imp?eur(o.imp):o.d+" d"}</div>
