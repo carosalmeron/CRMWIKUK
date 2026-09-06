@@ -433,30 +433,58 @@ window.quitar=(campo)=>{
 };
 
 async function cargarUsuarios(){
-  // La identidad la resuelve agentes_alias, no un algoritmo de fusion aqui:
-  // antes se agrupaba por nombre o por id y la misma persona salia dos veces
-  // ("acruz" y "Alex Cruz", "Esther" y su id de portal).
+  // La identidad la resuelve agentes_alias. Antes se buscaba el canonico solo
+  // por u.id: si ese id concreto no estaba en la tabla, la persona salia sin
+  // fusionar y con su id crudo por nombre (u_1776324530809), y la misma
+  // persona aparecia dos veces ("Antonio" y "ANTONIO ZARCO").
   await Agentes.cargar();
   const [us,pu]=await Promise.all([leer("usuarios"),leer("portal_users")]);
+
+  // Ni intercompañia ni canales de venta son comerciales
+  const NO_PERSONA=/^(interc|clientsdirect|cataluna|cataluña|tienda|telefono|sinagente|_?total|campofrio|wikuk|interkey|francia|distribuidor)/i;
+  const esCanal=(x)=>NO_PERSONA.test(String(x||"").replace(/[.\s_-]/g,""));
+
   const map={};
   [...us,...pu].forEach(u=>{
     const rol=String(u.rol||"").toLowerCase();
-    if(rol!=="agente"&&rol!=="crm_agente"&&rol!=="comercial") return;
-    const bruto=u.id||u._id||u.username; if(!bruto) return;
-    const canon=Agentes.id(bruto);
+    if(rol!=="agente"&&rol!=="crm_agente"&&rol!=="comercial"&&rol!=="vendedor") return;
+    if(u.activo===false) return;
+
+    // Se prueba con TODOS sus identificadores hasta dar con uno que la tabla
+    // conozca: basta que uno cruce para reunir a la persona.
+    const posibles=[u.id,u._id,u.crmId,u.grupoAgente,u.catalogoVendedor,
+      u.username,u.nombre].filter(Boolean);
+    let canon=null, ficha=null;
+    for(const k of posibles){
+      if(Agentes.conocido(k)){ canon=Agentes.id(k); ficha=k; break; }
+    }
+    if(!canon){ canon=u.id||u._id||u.username; ficha=canon; }
+    if(!canon) return;
+
+    const nombre=Agentes.nombre(ficha)||u.nombre||u.username||canon;
+    if(esCanal(nombre)||esCanal(canon)||esCanal(u.catalogoVendedor)) return;
+    // Sin nombre real no aporta nada: seria una fila "u_177..." mas
+    if(/^u_\d+$/i.test(String(nombre))) return;
+
     if(!map[canon]) map[canon]={
-      id:canon,
-      nombre:Agentes.nombre(bruto)||u.nombre||u.username||bruto,
-      equipo:U(Agentes.equipo(bruto)||u.equipo||""),
-      cod:U(u.grupoAgente||u.catalogoVendedor||bruto),
-      alias:Agentes.alias(bruto)
+      id:canon, nombre:nombre,
+      equipo:U(Agentes.equipo(ficha)||u.equipo||""),
+      cod:U(u.grupoAgente||u.catalogoVendedor||canon),
+      alias:Agentes.alias(ficha)
     };
+    else{
+      // Si otra ficha de la misma persona trae mejor nombre o equipo, se usa
+      const m=map[canon];
+      if(nombre.length>m.nombre.length&&!/^[a-z]+$/.test(nombre)) m.nombre=nombre;
+      if(!m.equipo&&u.equipo) m.equipo=U(u.equipo);
+    }
   });
   let l=Object.values(map);
   if(esJefe&&EQUIPO) l=l.filter(u=>u.equipo===EQUIPO);
   l.sort((a,b)=>a.nombre.localeCompare(b.nombre));
   return l;
 }
+
 
 
 // Informe de cierre de cada comercial para la semana elegida
