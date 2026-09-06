@@ -88,11 +88,11 @@
     border-top:1px solid #E9EEF3;align-items:flex-start}
   .art:first-child{border-top:none}
   /* Clasificacion de retrasos */
-  .mot{padding:4px 9px;border-radius:99px;border:1px solid var(--linea);
-    background:#fff;color:var(--tenue);font-size:10.5px;font-weight:600;
-    cursor:pointer;font-family:inherit}
-  .mot:hover{border-color:var(--tinta)}
-  .mot.on{background:var(--tinta);color:#fff;border-color:var(--tinta);font-weight:700}
+  .motbox{padding:8px 0 4px;grid-column:1 / -1}
+  .motsel{flex:1;min-width:180px;max-width:340px;padding:7px 10px;
+    border-radius:8px;border:1.5px solid var(--hoy);background:#fff;
+    font-size:12.5px;font-family:inherit;color:var(--texto);cursor:pointer}
+  .motsel.on{border-color:var(--ok);font-weight:600}
   .motnota{width:100%;max-width:420px;margin-top:7px;padding:7px 10px;
     border-radius:8px;border:1px solid var(--linea);font-size:12px;
     font-family:inherit;outline:none}
@@ -530,17 +530,44 @@ async function cargarMotivos(){
   }catch(e){}
 }
 
+// Bloque de motivos de un retraso. Se usa igual en el Diario y en la vista
+// de Movimientos: es la misma decisión, y tenerla en dos formatos distintos
+// solo confundiría a quien la rellena.
+function bloqueMotivo(m){
+  const cl=claveRetraso(m);
+  const ya=MOTIVOS_PUESTOS[cl];
+  // (sep 2026) Cinco botones ocupaban tres lineas y en movil se descolocaban.
+  // Un desplegable dice lo mismo en una linea y se elige de una pulsacion.
+  return `<div class="motbox">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <span style="font-size:10.5px;font-weight:700;color:${
+        ya?"var(--ok)":"var(--hoy)"};text-transform:uppercase;
+        letter-spacing:.3px;white-space:nowrap">${
+        ya?"✓ Motivo":"⚠ Sin motivo"}</span>
+      <select class="motsel${ya?" on":""}"
+        onchange="ponerMotivo('${cl}',this.value,this)">
+        <option value="">— elige el motivo —</option>
+        ${MOTIVOS.map(mo=>`<option value="${mo}"${
+          ya&&ya.motivo===mo?" selected":""}>${mo}</option>`).join("")}
+      </select>
+    </div>
+    ${ya?`<input class="motnota" placeholder="Qué se hace para que no se repita"
+        value="${(ya.nota||"").replace(/"/g,"&quot;")}"
+        onchange="notaMotivo('${cl}',this.value)">
+      <div style="font-size:10.5px;color:var(--tenue);margin-top:3px">
+        ${ya.quien||"—"}${ya.cuando?" · "+ya.cuando.slice(0,10)
+          .split("-").reverse().join("/"):""}</div>`:""}
+  </div>`;
+}
+
+
 window.ponerMotivo=async function(clave,motivo,el){
   const antes=MOTIVOS_PUESTOS[clave];
   MOTIVOS_PUESTOS[clave]={motivo, quien:(USUARIO&&USUARIO.nombre)||"",
     cuando:new Date().toISOString(), nota:(antes&&antes.nota)||""};
+  if(!motivo) return;   // volvio a "elige el motivo"
   // Se marca al momento: esperar a Firestore hace que parezca que no responde
-  if(el&&el.parentNode){
-    [...el.parentNode.children].forEach(x=>{
-      if(x.classList&&x.classList.contains("mot")) x.classList.remove("on");
-    });
-    el.classList.add("on");
-  }
+  if(el) el.classList.add("on");
   try{
     await fetch(`${BASE}/pbi_retrasos_motivo/${encodeURIComponent(clave)}`,{
       method:"PATCH",headers:{"Content-Type":"application/json"},
@@ -551,7 +578,7 @@ window.ponerMotivo=async function(clave,motivo,el){
         nota:{stringValue:(antes&&antes.nota)||""},
       }})});
   }catch(e){}
-  pintarServidos();
+  if(MODO==="diario") pintarDiario(); else pintarServidos();
 };
 
 window.notaMotivo=async function(clave,txt){
@@ -781,26 +808,7 @@ async function pintarServidos(){
             // Los retrasos hay que clasificarlos: sin motivo no se puede
             // corregir nada, y es lo que se lleva al parte de departamento.
             if(SERV_TIPO==="movimientos"||SERV_TIPO==="fuera_mes"){
-              const cl=claveRetraso(x);
-              const yaP=MOTIVOS_PUESTOS[cl];
-              h+=`<div style="padding:2px 0 10px 46px">
-                <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">
-                  <span style="font-size:10.5px;font-weight:700;color:${
-                    yaP?"var(--ok)":"var(--hoy)"};text-transform:uppercase;
-                    letter-spacing:.3px;margin-right:3px">${
-                    yaP?"✓ Motivo":"⚠ Sin motivo"}</span>
-                  ${MOTIVOS.map(mo=>`<button class="mot${
-                    yaP&&yaP.motivo===mo?" on":""}"
-                    onclick="ponerMotivo('${cl}','${mo.replace(/'/g,"")}',this)"
-                    >${mo}</button>`).join("")}
-                </div>
-                ${yaP?`<input class="motnota" placeholder="Qué se hace para que no se repita"
-                    value="${(yaP.nota||"").replace(/"/g,"&quot;")}"
-                    onchange="notaMotivo('${cl}',this.value)">
-                  <div style="font-size:10.5px;color:var(--tenue);margin-top:3px">
-                    ${yaP.quien||"—"} · ${yaP.cuando?yaP.cuando.slice(0,10)
-                      .split("-").reverse().join("/"):""}</div>`:""}
-              </div>`;
+              h+=`<div style="padding-left:46px">${bloqueMotivo(x)}</div>`;
             }
           });
         });
@@ -1044,7 +1052,7 @@ async function pintarDiario(){
           Math.abs(b.importe)-Math.abs(a.importe));
       };
 
-      const linea=(m,extra)=>{
+      const linea=(m,extra,pideMotivo)=>{
         const n=m.lineas?m.lineas.length:1;
         const arts=(m.lineas||[m]);
         return `<div class="linea">
@@ -1065,6 +1073,7 @@ async function pintarDiario(){
             m.dias>0?"var(--hoy)":"var(--ok)"}">${
             m.dias>0?"+":""}${m.dias} d</div>`:""}
         </div>
+        ${pideMotivo?bloqueMotivo(m):""}
         ${n>1
           ? `<div class="arts">${arts.map(x=>{
               const d=detArt(x);
@@ -1097,7 +1106,8 @@ async function pintarDiario(){
       if(noSalieron.length){
         html+=tit("No han salido hoy", noSalieron, true)
           +agrupar(noSalieron).map(m=>linea(m,
-            `debía salir el ${fechaCorta(m.fechaAntes)} → ahora <b>${fechaCorta(m.fechaNueva)}</b>`)).join("");
+            `debía salir el ${fechaCorta(m.fechaAntes)} → ahora <b>${fechaCorta(m.fechaNueva)}</b>`,
+            true)).join("");
       }
       if(servidos.length){
         html+=tit("Servidos", servidos)
@@ -1106,7 +1116,8 @@ async function pintarDiario(){
       if(replan.length){
         html+=tit("Cambian de fecha", replan)
           +agrupar(replan).map(m=>linea(m,
-            `${fechaCorta(m.fechaAntes)} → <b>${fechaCorta(m.fechaNueva)}</b>`)).join("");
+            `${fechaCorta(m.fechaAntes)} → <b>${fechaCorta(m.fechaNueva)}</b>`,
+            true)).join("");
       }
       if(ade.length){
         html+=tit("Se adelantan", ade)
