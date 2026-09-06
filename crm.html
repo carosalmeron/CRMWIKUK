@@ -2535,11 +2535,19 @@ function ModalHiloVisita({visita, usuario, onClose, onGuardado}){
 
 // Lee el cierre de la semana anterior y saca lo que dijo que iba a hacer.
 // Aparece al abrir la semana nueva, que es cuando sirve de algo.
-function Compromisos({usuario,semana,T}){
+function Compromisos({usuario,semana,T,plegable,verCierre}){
+  // verCierre: en vez de lo prometido al cerrar la semana anterior, muestra
+  // el cierre de ESTA semana, para poder repasar lo que se envio.
+  var _semInf = verCierre ? semana : semana-1;
   const [c,setC]=React.useState(null);
+  const [estados,setEstados]=React.useState({});
+  const [abierto,setAbierto]=React.useState(!plegable);
+  const [verTodos,setVerTodos]=React.useState(false);
+
+  // Lo prometido al cerrar
   React.useEffect(function(){
     var ag=(typeof agenteCanonico==="function"?agenteCanonico(usuario):null)||idCanonico(usuario);
-    var id="informe_"+String(ag).toUpperCase()+"_s"+(semana-1);
+    var id="informe_"+String(ag).toUpperCase()+"_s"+_semInf;
     fetch(FB_BASE+"/informes/"+encodeURIComponent(id)).then(function(r){
       return r.ok?r.json():null;
     }).then(function(j){
@@ -2550,34 +2558,154 @@ function Compromisos({usuario,semana,T}){
         var v=R[k]||{};
         if(!v.accion&&!v.texto) continue;
         // Solo lo que implica hacer algo: lo descartado no vuelve
-        if(/Ya lo sé|por perdida|por cerrada/i.test(v.accion||"")) continue;
+        if(/Ya lo sé|por perdida|por cerrada|es el mismo/i.test(v.accion||"")) continue;
         var p=k.split(/:(.+)/);
-        l.push({tipo:p[0],id:p[1]||"",accion:v.accion||"",texto:v.texto||""});
+        l.push({tipo:p[0],id:p[1]||"",accion:v.accion||"",texto:v.texto||"",
+          nom:v.nom||"",crmId:v.crmId||""});
       }
       if(l.length) setC({lista:l,prio:(R.prioridad||{}).texto||""});
     }).catch(function(){});
   },[semana]);
+
+  // Objetivos que le ha puesto su responsable, mezclados y marcados con ⭐
+  React.useEffect(function(){
+    if(verCierre||typeof fbLeer!=="function") return;
+    fbLeer("objetivos_semana").then(function(docs){
+      var claves=[usuario.id,(typeof idCanonico==="function"?idCanonico(usuario):null),
+        usuario.grupoAgente,usuario.username].filter(Boolean)
+        .map(function(x){return String(x).toUpperCase();});
+      var mios=(docs||[]).filter(function(o){
+        if(o.eliminado) return false;
+        if(Number(o.semana)!==Number(semana)) return false;
+        if(o.origen!=="jefe") return false;
+        return claves.indexOf(String(o.agente||"").toUpperCase())>=0;
+      });
+      if(!mios.length) return;
+      setC(function(prev){
+        var base=prev||{lista:[],prio:""};
+        var yaIds={}; base.lista.forEach(function(x){ if(x.id) yaIds[x.id]=1; });
+        var nuevos=mios.filter(function(o){return !yaIds[o.id];}).map(function(o){
+          return {tipo:"jefe",id:o.id,accion:"",texto:o.texto,nom:o.refNombre||"",
+            delJefe:true,porQuien:o.creadoPorNombre||""};
+        });
+        if(!nuevos.length) return base;
+        return {lista:nuevos.concat(base.lista),prio:base.prio};
+      });
+    }).catch(function(){});
+  },[semana]);
+
+  // Semaforo: los codigos de SAP y del CRM no siempre coinciden (un 0 de mas),
+  // asi que se prueban variantes y, si fallan, el nombre del cliente.
+  function _variantesCod(cod,crmId){
+    var out=[];
+    if(crmId) out.push(String(crmId).toUpperCase().trim());
+    var c=String(cod||"").toUpperCase().trim();
+    if(!c) return out;
+    out.push(c);
+    for(var i=0;i<c.length;i++) if(c.charAt(i)==="0") out.push(c.slice(0,i)+c.slice(i+1));
+    var m=c.match(/^([A-Z]*)(\d+)$/);
+    if(m){ out.push(m[1]+"0"+m[2]); out.push(m[2]); out.push("U"+m[2]); }
+    return out.filter(function(v,i,a){return v&&a.indexOf(v)===i;});
+  }
+  function _nn(n){
+    return String(n||"").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+      .replace(/\b(S\.?L\.?U?|S\.?A\.?U?|SCL|LDA|SARL|SAS|GMBH|SRL|CB|SAT|COOP|SOC|CO|KG|DOO|SPA)\b/g,"")
+      .replace(/[^A-Z0-9]/g,"");
+  }
+
+  React.useEffect(function(){
+    if(!c||verCierre||typeof fbLeerVisitasRecientes!=="function") return;
+    fbLeerVisitasRecientes(4).then(function(vis){
+      var porCod={}, porNom={};
+      (vis||[]).forEach(function(v){
+        if(Number(v.semana)!==Number(semana)) return;
+        var cid=String(v.clienteId||"").toUpperCase();
+        if(cid) (porCod[cid]=porCod[cid]||[]).push(v);
+        var nm=_nn(v.clienteNombre||v.cliente);
+        if(nm) (porNom[nm]=porNom[nm]||[]).push(v);
+      });
+      var est={};
+      c.lista.filter(function(x){return x.tipo==="cliente";}).forEach(function(x){
+        var vs=_variantesCod(x.id,x.crmId), v=[];
+        for(var i=0;i<vs.length;i++) if(porCod[vs[i]]){ v=porCod[vs[i]]; break; }
+        if(!v.length){ var nm=_nn(x.nom); if(nm&&porNom[nm]) v=porNom[nm]; }
+        if(v.length){
+          var ped=v.some(function(z){return /pedido/i.test(z.resultado||"");});
+          est[x.tipo+":"+x.id]={hecho:true,
+            detalle:ped?"Visitado y con pedido"
+              :v.length+" contacto"+(v.length>1?"s":"")+" registrado"+(v.length>1?"s":"")};
+        } else est[x.tipo+":"+x.id]={hecho:false,detalle:"Sin rastro de contacto"};
+      });
+      setEstados(est);
+    }).catch(function(){});
+  },[c,semana]);
+
   if(!c) return null;
+  var hechos=c.lista.filter(function(x){var e=estados[x.tipo+":"+x.id];return e&&e.hecho;}).length;
+  // Lo pendiente primero: es sobre lo que hay que actuar
+  var lista=c.lista.slice().sort(function(a,b){
+    var ea=estados[a.tipo+":"+a.id], eb=estados[b.tipo+":"+b.id];
+    return (ea&&ea.hecho?1:0)-(eb&&eb.hecho?1:0);
+  });
+  var mostrar=verTodos?lista:lista.slice(0,8);
+  var TIPO={cliente:"🚗 Visita",ofertas:"💰 Oferta",muestras:"📦 Muestra",
+    estrategias:"🎯 Estrategia",jefe:"⭐ Del jefe",promesa:"🤝 Promesa",
+    semana:"🗓️ La semana en general",prioridad:"📌 Prioridad"};
+
   return <div style={{background:"#FFFBEB",border:"2px solid #F59E0B",borderRadius:16,
     padding:16,marginBottom:18}}>
-    <p style={{margin:"0 0 3px",fontSize:14,fontWeight:800,color:"#92400E"}}>
-      Lo que dijiste al cerrar la semana {semana-1}</p>
-    <p style={{margin:"0 0 11px",fontSize:11.5,color:"#92400E",opacity:.85}}>
-      Tenlo delante al programar esta.</p>
-    {c.prio&&<p style={{margin:"0 0 11px",fontSize:13.5,color:T.navy,
-      background:"#fff",borderRadius:10,padding:"9px 11px"}}>
-      <b>Tu prioridad:</b> {c.prio}</p>}
-    {c.lista.slice(0,8).map(function(x,i){
-      return <div key={i} style={{padding:"8px 0",
-        borderTop:i?"1px solid #FDE68A":"none"}}>
-        <p style={{margin:0,fontSize:13,fontWeight:700,color:T.navy}}>
-          {x.accion||"Pendiente"}
-          <span style={{fontWeight:400,color:T.muted}}> · {x.tipo}</span></p>
-        {x.texto&&<p style={{margin:"2px 0 0",fontSize:12,color:T.muted}}>{x.texto}</p>}
-      </div>;
-    })}
-    {c.lista.length>8&&<p style={{margin:"8px 0 0",fontSize:11.5,color:"#92400E"}}>
-      Y {c.lista.length-8} cosas más.</p>}
+    <div onClick={plegable?function(){setAbierto(!abierto);}:null}
+      style={{cursor:plegable?"pointer":"default",display:"flex",
+        alignItems:"center",gap:8}}>
+      <div style={{flex:1,minWidth:0}}>
+        <p style={{margin:"0 0 3px",fontSize:14,fontWeight:800,color:"#92400E"}}>
+          {verCierre?"📋 Lo que envié al cerrar la semana "+semana
+            :(plegable?"🎯 Mis objetivos de esta semana"
+                      :"Lo que dijiste al cerrar la semana "+(semana-1))}</p>
+        <p style={{margin:0,fontSize:11.5,color:"#92400E",opacity:.85}}>
+          {verCierre?c.lista.length+" respuestas enviadas"
+            :"Llevas "+hechos+" de "+c.lista.length}</p>
+      </div>
+      {plegable&&<span style={{fontSize:16,color:"#92400E"}}>{abierto?"▾":"▸"}</span>}
+    </div>
+
+    {abierto&&<div style={{marginTop:11}}>
+      {c.prio&&<p style={{margin:"0 0 11px",fontSize:13.5,color:T.navy,
+        background:"#fff",borderRadius:10,padding:"9px 11px"}}>
+        <b>Tu prioridad:</b> {c.prio}</p>}
+      {mostrar.map(function(x,i){
+        var e=estados[x.tipo+":"+x.id];
+        var sinFicha=(x.tipo==="semana"||x.tipo==="prioridad"||x.tipo==="jefe"||!x.id);
+        return <div key={i} style={{padding:"9px 0",
+          borderTop:i?"1px solid #FDE68A":"none",display:"flex",gap:9,
+          alignItems:"flex-start"}}>
+          {!sinFicha&&<span style={{width:9,height:9,borderRadius:99,flexShrink:0,
+            marginTop:5,background:!e?"#E2E8F0":(e.hecho?"#22C55E":"#F59E0B")}}/>}
+          <div style={{flex:1,minWidth:0}}>
+            <p style={{margin:0,fontSize:10.5,fontWeight:700,color:"#92400E",
+              textTransform:"uppercase",letterSpacing:".3px"}}>
+              {TIPO[x.tipo]||x.tipo}{x.accion?" · "+x.accion:""}
+              {x.porQuien?" · "+x.porQuien:""}</p>
+            {!sinFicha&&<p style={{margin:"2px 0 0",fontSize:13,fontWeight:700,color:T.navy}}>
+              {x.nom||<span style={{fontWeight:400,color:T.muted}}>
+                Código <code style={{background:"#FDE68A",padding:"1px 5px",
+                  borderRadius:4,fontSize:11.5}}>{x.id}</code></span>}</p>}
+            {e&&<p style={{margin:"2px 0 0",fontSize:11.5,fontWeight:600,
+              color:e.hecho?"#15803D":"#B45309"}}>
+              {e.hecho?"✓ ":"○ "}{e.detalle}</p>}
+            {x.texto&&<p style={{margin:"3px 0 0",fontSize:12,color:T.muted,
+              fontStyle:"italic"}}>“{x.texto}”</p>}
+          </div>
+        </div>;
+      })}
+      {!verTodos&&lista.length>8&&(
+        <button onClick={function(){setVerTodos(true);}}
+          style={{marginTop:9,width:"100%",padding:"8px",borderRadius:9,
+            border:"1.5px solid #F59E0B",background:"#fff",color:"#92400E",
+            fontSize:12,fontWeight:700,cursor:"pointer"}}>
+          Ver las {lista.length-8} restantes</button>
+      )}
+    </div>}
   </div>;
 }
 
@@ -2693,6 +2821,12 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
   var appMisIds=resolverMisIds(usuario);
 
   var esAgenteMS=usuario.rol==="crm_agente"||usuario.rol==="agente";
+  // Los responsables siguen el mismo ciclo que los comerciales: si no han
+  // cerrado la semana anterior, no pueden abrir una nueva. Su cierre es
+  // distinto (eligen las 10 del equipo), pero la obligacion es la misma.
+  var esRespMS=["jefe","crm_jefe","director","crm_director"]
+    .indexOf((usuario.rol||"").toLowerCase())>=0;
+  var _cierraSemanaMS=esAgenteMS||esRespMS;
   var _sinf=React.useState([]);var informesMiSem=_sinf[0],setInformesMiSem=_sinf[1];
   var _splns=React.useState([]);var todosPlanes=_splns[0],setTodosPlanes=_splns[1];
   // (v3.28.1) Modal revisión para crear estrategia desde vamos caros
@@ -3245,7 +3379,7 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
   var _miCandado=(typeof resolverMisIds==="function")?resolverMisIds(usuario):new Set([String(usuario.id||"").toUpperCase()]);
   var _esMioCandado=function(x){return !!x&&_miCandado.has(String(x).toUpperCase());};
   var semanaSinCerrar=null;
-  if(esAgenteMS){
+  if(_cierraSemanaMS){
     var anioCheck=new Date().getFullYear();
     for(var sc=semana-1;sc>=Math.max(semana-4,1);sc--){
       var planAnterior=todosPlanes.find(function(p){return _esMioCandado(p.agente)&&parseInt(p.semana)===sc&&parseInt(p.anio)===anioCheck;});
@@ -4398,6 +4532,12 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
               <p style={{margin:"2px 0 0",fontSize:12,color:"#15803D"}}>Informe enviado correctamente</p>
             </div>
           </div>
+          {/* Antes solo decia que se habia enviado, sin poder ver el contenido:
+              el comercial no tenia forma de repasar lo que contesto. */}
+          <div style={{marginTop:12}}>
+            <Compromisos usuario={usuario} semana={semana} T={T}
+              plegable={true} verCierre={true}/>
+          </div>
           {/* (v3.22.33/v3.23.42) Botón reabrir — sintaxis simple sin async/await */}
           <button onClick={function(){
             if(!confirm("¿Reabrir la semana "+semana+"?\nSe sobreescribirá el plan y se podrá reprogramar.")) return;
@@ -4474,6 +4614,14 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
         return null;
       })()}
 
+      {/* Mis objetivos de la semana: lo que prometio al cerrar la anterior.
+          Antes solo se veia en "Programa tu semana", asi que en cuanto elegia
+          ruta desaparecia y no volvia a mirarlo en toda la semana. Aqui va
+          plegado, disponible en cualquier momento. */}
+      {plan&&(
+        <Compromisos usuario={usuario} semana={semana} T={T} plegable={true}/>
+      )}
+
       {/* Botón ir al informe — solo si plan existe, no está cerrada y la semana ya ha llegado a viernes (o es anterior) */}
       {plan&&!semanaActualCerrada&&semana<=semActual&&(()=>{
         const hoy=new Date();
@@ -4486,7 +4634,16 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
           // Cierre nuevo: el comercial no teclea cifras, solo explica y decide.
           // Vive aparte para poder cambiarlo sin tocar el CRM.
           var ag=encodeURIComponent(agenteCanonico(usuario)||idCanonico(usuario));
-          window.location.href="/cierre_semanal.html?agente="+ag+"&semana="+semana
+          // Un responsable no cierra con clientes propios: cierra eligiendo las
+          // 10 cosas mas importantes de su equipo, que es otra pantalla.
+          var _rol=(usuario.rol||"").toLowerCase();
+          var _esResp=["jefe","crm_jefe","director","crm_director"].indexOf(_rol)>=0;
+          // El uid hace falta para escribir el plan cerrado con la clave buena:
+          // sin el, quien tuviera id distinto del codigo de agente no podia cerrar.
+          window.location.href=(_esResp?"/objetivos_equipo.html?":"/cierre_semanal.html?")
+            +"agente="+ag+"&uid="+encodeURIComponent(usuario.id)+"&semana="+semana
+            +(_esResp?"&rol="+encodeURIComponent(usuario.rol||"")
+                     +"&equipo="+encodeURIComponent(usuario.equipo||""):"")
             +"&vuelve="+encodeURIComponent(window.location.pathname);
         }} style={{width:"100%",padding:"14px",borderRadius:14,border:"2px solid #F59E0B",background:"#FFFBEB",cursor:"pointer",marginBottom:14,display:"flex",alignItems:"center",justifyContent:"center",gap:10}}>
           <span style={{fontSize:20}}>📋</span>
@@ -6082,7 +6239,12 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
           <div style={{marginTop:20}}>
             <button onClick={function(){
               var ag=encodeURIComponent(agenteCanonico(usuario)||idCanonico(usuario));
-              window.location.href="/cierre_semanal.html?agente="+ag+"&semana="+semana
+              var _rol2=(usuario.rol||"").toLowerCase();
+              var _esResp2=["jefe","crm_jefe","director","crm_director"].indexOf(_rol2)>=0;
+              window.location.href=(_esResp2?"/objetivos_equipo.html?":"/cierre_semanal.html?")
+                +"agente="+ag+"&uid="+encodeURIComponent(usuario.id)+"&semana="+semana
+                +(_esResp2?"&rol="+encodeURIComponent(usuario.rol||"")
+                          +"&equipo="+encodeURIComponent(usuario.equipo||""):"")
                 +"&vuelve="+encodeURIComponent(window.location.pathname);
             }} style={{width:"100%",padding:16,borderRadius:14,border:"none",background:T.navy,color:"#fff",fontWeight:700,fontSize:14,cursor:"pointer",textAlign:"center"}}>Cerrar la semana</button>
           </div>
