@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>¿Por qué no le llega?</title>
+<style>
+ :root{--papel:#F2F4F7;--tinta:#14181F;--tenue:#6B7684;--linea:#DCE1E7;
+       --ok:#0E7C5A;--mal:#C2263D;--med:#B07908;--okL:#EDF7F3;--malL:#FEF2F4;--medL:#FFFBEB}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--papel);color:var(--tinta);max-width:820px;
+   margin-inline:auto;padding:20px 14px 50px;
+   font:400 15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+ h1{margin:0 0 3px;font-size:21px;font-weight:800}
+ .sub{margin:0 0 16px;font-size:13px;color:var(--tenue)}
+ h2{font-size:15px;margin:22px 0 8px;padding-bottom:5px;border-bottom:2px solid var(--linea)}
+ .card{background:#fff;border:1px solid var(--linea);border-radius:8px;
+   padding:13px 14px;margin-bottom:9px;font-size:13.5px}
+ .card.ok{border-color:var(--ok);background:var(--okL)}
+ .card.mal{border-color:var(--mal);background:var(--malL)}
+ .card.med{border-color:var(--med);background:var(--medL)}
+ code{background:#F1F5F9;padding:1px 6px;border-radius:4px;font-size:12px;
+   font-family:ui-monospace,monospace}
+ pre{background:#F1F5F9;padding:10px;border-radius:8px;font-size:11px;
+   overflow-x:auto;margin:7px 0 0}
+ input{width:100%;padding:10px 12px;border-radius:8px;border:1.5px solid var(--linea);
+   font-size:14px;font-family:inherit}
+ button{padding:11px 20px;border-radius:9px;border:none;background:var(--tinta);
+   color:#fff;font-weight:700;font-size:13.5px;cursor:pointer;margin-top:10px}
+ .estado{padding:26px 4px;color:var(--tenue);text-align:center}
+ table{width:100%;border-collapse:collapse;font-size:12.5px;background:#fff;
+   border:1px solid var(--linea);border-radius:8px;overflow:hidden}
+ th{background:#F1F5F9;text-align:left;padding:8px;font-size:10.5px;
+   text-transform:uppercase;color:var(--tenue)}
+ td{padding:7px 8px;border-top:1px solid var(--linea);vertical-align:top}
+</style></head><body>
+<h1>🔎 ¿Por qué no le llega?</h1>
+<p class="sub">Busca a una persona y comprueba si el CRM sabe quién es, de qué
+  departamento y quién le reporta.</p>
+<input id="q" value="Administración" placeholder="Nombre, usuario o parte de él">
+<button onclick="buscar()">Buscar</button>
+<div id="app"></div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const U=(s)=>String(s||"").toUpperCase().trim();
+const NORM=(s)=>U(s).normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^A-Z0-9]/g,"");
+
+function val(f){
+  if(!f) return null;
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.arrayValue!==undefined) return (f.arrayValue.values||[]).map(val);
+  return null;
+}
+async function leer(col){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<20);
+  return t;
+}
+
+window.buscar=async()=>{
+  const app=document.getElementById("app");
+  const q=NORM(document.getElementById("q").value);
+  if(!q){ app.innerHTML='<div class="card mal">Escribe algo.</div>'; return; }
+  app.innerHTML='<p class="estado">Buscando…</p>';
+  try{
+    const [us,pu,deps]=await Promise.all([
+      leer("usuarios"),leer("portal_users"),leer("departamentos")]);
+
+    const casa=(o)=>[o._id,o.id,o.nombre,o.username,o.crmId,o.tipologia]
+      .filter(Boolean).some(x=>NORM(x).includes(q));
+    const enUs=us.filter(casa), enPu=pu.filter(casa);
+
+    let h='<h2>1 · Dónde está</h2>';
+    if(!enUs.length&&!enPu.length){
+      h+='<div class="card mal"><b>No aparece en ninguna colección.</b> '
+        +'Ni en <code>usuarios</code> ni en <code>portal_users</code>.</div>';
+    }
+    h+='<table><thead><tr><th>Colección</th><th>ID</th><th>Nombre</th>'
+      +'<th>Rol</th><th>Departamento</th><th>Tipología</th></tr></thead><tbody>'
+      +enUs.map(o=>'<tr><td><b>usuarios</b></td><td><code>'+o._id+'</code></td>'
+        +'<td>'+(o.nombre||"—")+'</td><td>'+(o.rol||"—")+'</td>'
+        +'<td>'+(o.departamentoId||'<span style="color:var(--mal)">vacío</span>')+'</td>'
+        +'<td>'+(o.tipologia||'<span style="color:var(--mal)">vacío</span>')+'</td></tr>').join("")
+      +enPu.map(o=>'<tr><td>portal_users</td><td><code>'+o._id+'</code></td>'
+        +'<td>'+(o.nombre||o.username||"—")+'</td><td>'+(o.rol||"—")+'</td>'
+        +'<td>'+(o.departamentoId||"—")+'</td>'
+        +'<td>'+(o.tipologia||"—")+'</td></tr>').join("")
+      +'</tbody></table>';
+
+    if(!enUs.length&&enPu.length){
+      h+='<div class="card mal" style="margin-top:9px"><b>Está solo en '
+        +'<code>portal_users</code>.</b> Puede entrar al CRM, pero el sistema '
+        +'no lo conoce como usuario: no aparece en desplegables, no se le '
+        +'puede asignar nada y no recibe objetivos ni partes.</div>';
+    }
+
+    // ¿De qué departamento es responsable?
+    h+='<h2>2 · Departamentos que responde</h2>';
+    const ids=[...enUs,...enPu].map(o=>o._id).concat([...enUs,...enPu].map(o=>o.id))
+      .filter(Boolean);
+    const suyos=deps.filter(d=>(d.responsableIds||[]).some(r=>ids.includes(r)));
+    h+= suyos.length
+      ? '<table><thead><tr><th>Departamento</th><th>Responsables</th>'
+        +'<th>Padre</th></tr></thead><tbody>'
+        +suyos.map(d=>'<tr><td><b>'+(d.nombre||d._id)+'</b> <code>'+d._id+'</code></td>'
+          +'<td>'+((d.responsableIds||[]).map(r=>'<code>'+r+'</code>').join(" ")||"—")+'</td>'
+          +'<td>'+(d.padre||"—")+'</td></tr>').join("")
+        +'</tbody></table>'
+      : '<div class="card mal"><b>No es responsable de ningún departamento.</b> '
+        +'Por eso no le llegan los partes ni los objetivos de su gente: el '
+        +'sistema no sabe que manda ahí.</div>';
+
+    // Departamentos con nombre parecido, por si el responsable esta mal puesto
+    const pareceSuyo=deps.filter(d=>NORM(d.nombre||d._id).includes(q)
+      ||q.includes(NORM(d._id)));
+    if(pareceSuyo.length){
+      h+='<h2>3 · Departamentos que coinciden con la búsqueda</h2>'
+        +'<table><thead><tr><th>Departamento</th><th>Responsables</th>'
+        +'<th>Tipologías</th></tr></thead><tbody>'
+        +pareceSuyo.map(d=>{
+          const rr=(d.responsableIds||[]);
+          const existen=rr.map(r=>{
+            const ok=us.some(u=>u._id===r||u.id===r);
+            return '<code style="color:'+(ok?"var(--ok)":"var(--mal)")+'">'+r
+              +(ok?"":" ✗ no existe")+'</code>';
+          }).join(" ");
+          return '<tr><td><b>'+(d.nombre||d._id)+'</b> <code>'+d._id+'</code></td>'
+            +'<td>'+(existen||'<span style="color:var(--mal)">sin responsable</span>')+'</td>'
+            +'<td>'+((d.tipologias||[]).join(", ")||"—")+'</td></tr>';
+        }).join("")
+        +'</tbody></table>'
+        +'<p class="sub" style="margin-top:7px">En rojo, los responsables que '
+        +'figuran en el departamento pero no existen como usuario. Esa es la '
+        +'causa más habitual de que no llegue nada.</p>';
+    }
+
+    // Ficha en crudo
+    if(enUs.length||enPu.length){
+      h+='<h2>4 · Ficha en crudo</h2><pre>'
+        +JSON.stringify(enUs[0]||enPu[0],null,1)+'</pre>';
+    }
+
+    app.innerHTML=h;
+  }catch(e){
+    app.innerHTML='<div class="card mal">Error: '+e.message+'</div>';
+  }
+};
+buscar();
+</script></body></html>
