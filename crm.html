@@ -535,7 +535,8 @@ function superioresDe(usuario){
   function subiendo(depId){
     var d=deptoDe(depId),n=0;
     while(d&&n<30){
-      var r=responsablesDeDepto(d.id).filter(function(u){return u.id!==usuario.id;});
+      var r=responsablesDeDepto(d.id).filter(function(u){
+        return !_esLaMismaPersona(u,usuario); });
       if(r.length>0)return r;
       d=d.padre?deptoDe(d.padre):null;n++;
     }
@@ -581,13 +582,27 @@ function superioresDe(usuario){
 // (v5.7) Personas que reportan a este usuario según el organigrama actual
 // (solo perfiles de departamento: responsables y operarios — la rama
 // comercial mantiene su propio parte semanal de ventas).
+// (sep 2026) Una persona entra con su usuario de acceso (jagarcia) pero su
+// perfil en el CRM es otro (resp_adm). Comparando ids exactos, el responsable
+// de Administracion no veia a nadie de su equipo y no le llegaba ni un parte,
+// aunque los partes SI venian dirigidos a el.
+function _idsDe(u){
+  if(!u) return [];
+  var out=[u.id,u._docId,u.crmId,u.username,u.user,u.portalId]
+    .filter(Boolean).map(function(x){return String(x).toUpperCase();});
+  return out.filter(function(v,i,a){return a.indexOf(v)===i;});
+}
+function _esLaMismaPersona(a,b){
+  var A=_idsDe(a), B=_idsDe(b);
+  return A.some(function(x){return B.indexOf(x)>=0;});
+}
 function personasQueMeReportan(usuario){
   if(!usuario) return [];
   return USUARIOS.filter(function(u){
-    if(!u||u.id===usuario.id||u.activo===false||u._legacy||u.duplicadaDe) return false;
+    if(!u||_esLaMismaPersona(u,usuario)||u.activo===false||u._legacy||u.duplicadaDe) return false;
     var esPerfilDepto=(u.rol==="tipologia")||!!u.departamentoId||deptosDondeEsResponsable(u).length>0;
     if(!esPerfilDepto) return false;
-    return superioresDe(u).some(function(s){return s.id===usuario.id;});
+    return superioresDe(u).some(function(s){return _esLaMismaPersona(s,usuario);});
   });
 }
 function idParteSemanal(uid,ano,sem){return uid+"_"+ano+"w"+sem;}
@@ -36101,13 +36116,41 @@ function App(props){
   // agente con el mismo grupoAgente, actualiza usuario.id al ID del CRM.
   // Esto hace que TODOS los filtros (===usuario.id) funcionen sin cambios.
   useEffect(()=>{
-    if(!usuario||!usuario.grupoAgente) return;
-    const match=USUARIOS.find(u=>u.grupoAgente&&u.grupoAgente.toUpperCase()===(usuario.grupoAgente||"").toUpperCase());
-    if(match&&match.id!==usuario.id){
-      console.log("[AUTH] Normalizando ID:",usuario.id,"→",match.id,"(via grupoAgente:",usuario.grupoAgente+")");
-      setUsuario(prev=>({...prev,...match,catalogoVendedor:prev.catalogoVendedor||prev.grupoAgente}));
+    if(!usuario) return;
+    // (sep 2026) Solo se normalizaba por grupoAgente, que es de comerciales.
+    // Un responsable de departamento entra con su usuario de acceso
+    // (jagarcia) mientras su perfil del CRM es otro (resp_adm): sin
+    // normalizar, no veia a su equipo ni le llegaban objetivos ni partes.
+    let match=null, via="";
+    if(usuario.grupoAgente){
+      match=USUARIOS.find(u=>u.grupoAgente
+        &&u.grupoAgente.toUpperCase()===usuario.grupoAgente.toUpperCase());
+      if(match) via="grupoAgente";
     }
-  },[usuario?.grupoAgente]);
+    if(!match&&usuario.crmId){
+      match=USUARIOS.find(u=>String(u.id).toUpperCase()===String(usuario.crmId).toUpperCase());
+      if(match) via="crmId";
+    }
+    if(!match){
+      // Por usuario de acceso o por nombre visible, que es lo único que
+      // comparten las dos fichas cuando no hay crmId.
+      const claves=[usuario.username,usuario.user,usuario.id,usuario.nombre]
+        .filter(Boolean).map(x=>String(x).toUpperCase());
+      match=USUARIOS.find(u=>{
+        if(String(u.id).toUpperCase()===String(usuario.id||"").toUpperCase()) return false;
+        return [u.username,u.user,u.nombre,u.id].filter(Boolean)
+          .some(x=>claves.includes(String(x).toUpperCase()));
+      });
+      if(match) via="usuario o nombre";
+    }
+    if(match&&match.id!==usuario.id){
+      console.log("[AUTH] Normalizando ID:",usuario.id,"→",match.id,"(via",via+")");
+      setUsuario(prev=>({...prev,...match,
+        catalogoVendedor:prev.catalogoVendedor||prev.grupoAgente,
+        // Se conserva el usuario con el que entró, para no perder el rastro
+        usernamePortal:prev.username||prev.user||prev.id}));
+    }
+  },[usuario?.grupoAgente,usuario?.id,usuario?.crmId]);
 
   // ── Tracking de tiempo de uso (optimizado para móvil) ───────────
   useEffect(()=>{
