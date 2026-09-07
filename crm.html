@@ -551,10 +551,29 @@ function superioresDe(usuario){
       });
     });
     if(sup.length>0) return sup;
-  } else if(usuario.departamentoId){
+  } else {
     // Es miembro → responsables de su depto, o del primer ancestro que los tenga
-    var resp=subiendo(usuario.departamentoId);
-    if(resp.length>0) return resp;
+    // (sep 2026) Solo se miraba departamentoId, que muchos tienen vacio: sus
+    // objetivos y su parte cerrado saltaban directos al CEO y el responsable
+    // de area nunca se enteraba. Ahora se deduce tambien de su tipologia.
+    var candidatos=[];
+    if(usuario.departamentoId) candidatos.push(usuario.departamentoId);
+    var _tip=String(usuario.tipologia||"").toLowerCase();
+    if(_tip){
+      deptosActivos().forEach(function(d){
+        if(String(d.id).toLowerCase()===_tip) candidatos.push(d.id);
+        else if((d.tipologias||[]).some(function(t){
+          return String(t).toLowerCase()===_tip; })) candidatos.push(d.id);
+      });
+    }
+    deptosActivos().forEach(function(d){
+      var m=(d.miembros||d.miembroIds||[]);
+      if(m.indexOf&&m.indexOf(usuario.id)>=0) candidatos.push(d.id);
+    });
+    for(var ci=0;ci<candidatos.length;ci++){
+      var resp=subiendo(candidatos[ci]);
+      if(resp.length>0) return resp;
+    }
   }
   var ceoU=USUARIOS.find(function(u){return u.rol==="ceo";});
   return ceoU&&ceoU.id!==usuario.id?[ceoU]:[];
@@ -1065,10 +1084,21 @@ function semaforoProtocolo(usuario, incidenciasDB){
 function ObjetivosSemanaWidget({usuario, onNav}){
   const [parte,setParte]=React.useState(undefined); // undefined=cargando, null=sin parte
   React.useEffect(function(){
+    var vivo=true;
     var id=idParteSemanal(usuario.id,new Date().getFullYear(),getSemanaISO());
-    fbLeer("partes_departamento").then(function(docs){
-      setParte((docs||[]).find(function(p){return p.id===id;})||null);
-    }).catch(function(){setParte(null);});
+    var mirar=function(){
+      fbLeer("partes_departamento").then(function(docs){
+        if(vivo) setParte((docs||[]).find(function(p){return p.id===id;})||null);
+      }).catch(function(){ if(vivo) setParte(null); });
+    };
+    mirar();
+    // (sep 2026) Solo se leia al montar: un objetivo puesto por el superior no
+    // aparecia hasta recargar la pagina. Se vuelve a mirar al volver a la
+    // pestaña, que es cuando la gente espera ver lo nuevo.
+    var alVolver=function(){ if(!document.hidden) mirar(); };
+    document.addEventListener("visibilitychange",alVolver);
+    return function(){ vivo=false;
+      document.removeEventListener("visibilitychange",alVolver); };
   },[usuario?.id]);
   if(parte===undefined)return null;
   var objs=(parte&&parte.objetivos)||[];
@@ -21956,7 +21986,13 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
   function guardarParte(p,cb){
     var doc={...p};delete doc._nuevo;
     setPartes(function(prev){var n={...prev};n[doc.id]=doc;return n;});
-    fbEscribir("partes_departamento",doc.id,doc).then(function(){if(cb)cb();});
+    fbEscribir("partes_departamento",doc.id,doc).then(function(){
+      // (sep 2026) fbLeer sirve de una cache en memoria y al guardar no se
+      // limpiaba: el CEO ponia un objetivo, se escribia en Firestore, y el
+      // destinatario seguia leyendo la copia vieja. Por eso "no le llegaba".
+      try{ fbInvalidarCache("partes_departamento"); }catch(e){}
+      if(cb)cb();
+    });
   }
 
   const miParte=parteDe(usuario);
