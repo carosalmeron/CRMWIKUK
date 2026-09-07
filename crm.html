@@ -21655,7 +21655,22 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
   // Customer Service y Operaciones comparten este objetivo: que no haya
   // retrasos. Antes cada uno reportaba lo suyo y nadie miraba el dato comun.
   const [retrasosDep,setRetrasosDep]=useState(null);
+  // (sep 2026) Solo lo ven los departamentos que pueden hacer algo con ello:
+  // Customer Service, Operaciones, Logistica y Produccion. A Calidad, I+D o
+  // RRHH no les corresponde, y llenarles el parte de un dato ajeno hace que
+  // dejen de mirar el suyo.
+  const _meTocaRetrasos=(function(){
+    try{
+      var r=String(usuario.rol||"").toLowerCase();
+      if(r==="ceo"||r==="director") return true;
+      var deps=(deptosDondeEsResponsable(usuario)||[]).map(function(d){return d.id;});
+      if(usuario.departamentoId) deps.push(usuario.departamentoId);
+      var DE_PEDIDOS=["customer","operaciones","logistica","produccion"];
+      return deps.some(function(d){ return DE_PEDIDOS.indexOf(String(d).toLowerCase())>=0; });
+    }catch(e){ return false; }
+  })();
   useEffect(function(){
+    if(!_meTocaRetrasos) return;
     var vivo=true;
     (async function(){
       try{
@@ -21688,11 +21703,20 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
           return [m.pedido||"",m.articulo||m.descripcion||"",m.cliente||m.nombre||""]
             .join("|").replace(/[\s\/]/g,"_").slice(0,180);
         };
-        var vistos={};
+        // (sep 2026) Arranque limpio: la obligacion de clasificar cuenta
+        // desde esta fecha. Los 95 retrasos anteriores quedan como historico
+        // sin clasificar; exigir ponerse al dia con todos de golpe habria
+        // hecho que nadie cerrara la semana.
+        var DESDE="2026-09-08";
+        var vistos={}, historico=0;
         docs.filter(Boolean).forEach(function(doc){
           var f=doc.fields||{};
+          var fDoc=(f.fecha&&f.fecha.stringValue)
+            ||decodeURIComponent(doc.name.split("/").pop());
           var movs=[];
           try{ movs=JSON.parse((f.movimientos&&f.movimientos.stringValue)||"[]"); }catch(e){}
+          if(fDoc<DESDE){ historico+=movs.filter(function(m){
+            return m.tipo==="retraso"&&Math.abs(m.dias||0)>=3; }).length; return; }
           movs.filter(function(m){ return m.tipo==="retraso"&&Math.abs(m.dias||0)>=3; })
             .forEach(function(m){
               var k=clave(m);
@@ -21704,14 +21728,18 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
         });
 
         var l=Object.values(vistos);
-        if(!l.length){ if(vivo) setRetrasosDep({n:0}); return; }
+        if(!l.length){ if(vivo) setRetrasosDep({n:0,historico:historico}); return; }
         var porM={};
         l.forEach(function(x){
           var mo=x.motivo||"— sin clasificar —";
-          porM[mo]=porM[mo]||{motivo:mo,n:0,imp:0};
+          porM[mo]=porM[mo]||{motivo:mo,n:0,imp:0,dias:0,maxD:0};
           porM[mo].n++; porM[mo].imp+=x.imp;
+          porM[mo].dias+=x.dias;
+          if(x.dias>porM[mo].maxD) porM[mo].maxD=x.dias;
         });
+        Object.values(porM).forEach(function(m){ m.media=m.dias/m.n; });
         if(vivo) setRetrasosDep({
+          historico:historico,
           n:l.length,
           imp:l.reduce(function(t,x){return t+x.imp;},0),
           dias:l.reduce(function(t,x){return t+x.dias;},0)/l.length,
@@ -22607,7 +22635,11 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
               padding:"5px 0",borderTop:"1px solid #FCA5A5"}}>
               <span style={{flex:1,fontSize:12,color:m.motivo.startsWith("—")?"#991B1B":T.text,
                 fontWeight:m.motivo.startsWith("—")?700:400}}>{m.motivo}</span>
-              <span style={{fontSize:12,fontWeight:800,color:T.text}}>{m.n}</span>
+              <span style={{fontSize:11,color:T.muted,minWidth:78,textAlign:"right"}}>
+                {Math.round(m.media*10)/10} d medio{m.maxD>m.media*1.5
+                  ?" · hasta "+m.maxD:""}</span>
+              <span style={{fontSize:12,fontWeight:800,color:T.text,minWidth:24,
+                textAlign:"right"}}>{m.n}</span>
               <span style={{fontSize:11.5,color:T.muted,minWidth:64,textAlign:"right"}}>
                 {fmt(m.imp)}€</span>
             </div>;
@@ -22616,6 +22648,12 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
             <p style={{margin:"9px 0 0",fontSize:11.5,color:"#991B1B",lineHeight:1.5}}>
               Clasifica los que faltan en <b>Pedidos planificados → Diario</b>:
               sin motivo no se puede corregir nada, y no podrás cerrar la semana.</p>
+          )}
+          {retrasosDep.historico>0&&(
+            <p style={{margin:"7px 0 0",fontSize:10.5,color:T.muted,lineHeight:1.5}}>
+              Hay {retrasosDep.historico} retrasos anteriores al 8 de septiembre
+              sin clasificar. No cuentan ni bloquean nada: la obligación empieza
+              desde esa fecha.</p>
           )}
         </div>
       )}

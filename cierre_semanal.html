@@ -240,6 +240,32 @@ let PENDIENTES=[];
 let RETRASOS_SIN_MOTIVO=0;
 async function comprobarRetrasos(){
   try{
+    // (sep 2026) Solo se exige a quien gestiona pedidos: Customer Service,
+    // Operaciones, Logistica y Produccion. Bloquear el cierre de un comercial
+    // o de Calidad por un retraso de fabrica no tiene sentido.
+    let meToca=false;
+    try{
+      const ru=await fetch(`${FB}/usuarios?pageSize=300`);
+      if(ru.ok){
+        const ju=await ru.json();
+        const DE_PEDIDOS=["customer","operaciones","logistica","produccion"];
+        (ju.documents||[]).forEach(d=>{
+          const f=d.fields||{};
+          const id=ARR(f.id?.stringValue||decodeURIComponent(d.name.split("/").pop()));
+          const gr=ARR(f.grupoAgente?.stringValue||f.catalogoVendedor?.stringValue||"");
+          if(id!==AGENTE&&gr!==AGENTE) return;
+          const dep=String(f.departamentoId?.stringValue||"").toLowerCase();
+          const tip=String(f.tipologia?.stringValue||"").toLowerCase();
+          if(DE_PEDIDOS.includes(dep)||DE_PEDIDOS.includes(tip)) meToca=true;
+          // Los responsables de esos departamentos tambien
+          const resp=(f.responsableDe?.arrayValue?.values||[])
+            .map(v=>String(v.stringValue||"").toLowerCase());
+          if(resp.some(r=>DE_PEDIDOS.includes(r))) meToca=true;
+        });
+      }
+    }catch(e){}
+    if(!meToca){ RETRASOS_SIN_MOTIVO=0; refrescar(); return; }
+
     const iso=(d)=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${
       String(d.getDate()).padStart(2,"0")}`;
     const fechas=[];
@@ -264,10 +290,16 @@ async function comprobarRetrasos(){
     const clave=(m)=>[m.pedido||"",m.articulo||m.descripcion||"",
       m.cliente||m.nombre||""].join("|").replace(/[\s\/]/g,"_").slice(0,180);
 
+    // (sep 2026) Arranque limpio: solo se exige clasificar desde esta fecha.
+    // Habia 95 retrasos anteriores sin motivo y bloquear el cierre por todos
+    // ellos habria hecho que nadie cerrara la semana.
+    const DESDE_RETRASOS="2026-09-08";
     const vistos=new Set();
     let sin=0;
     crudos.filter(Boolean).forEach(doc=>{
       const f=doc.fields||{};
+      const fDoc=f.fecha?.stringValue||decodeURIComponent(doc.name.split("/").pop());
+      if(fDoc<DESDE_RETRASOS) return;
       let movs=[]; try{ movs=JSON.parse(f.movimientos?.stringValue||"[]"); }catch(e){}
       // esMio() se define mas abajo y solo dentro de pintar(): aqui se
       // compara contra el agente de la URL, que es quien cierra.
