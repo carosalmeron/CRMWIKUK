@@ -1,0 +1,89 @@
+<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Limpiador de duplicados · radar_rutas</title><style>
+body{font-family:Arial;background:#FBF8F4;color:#2B2622;margin:0}
+header{background:#7A1F2B;color:#fff;padding:14px 22px;font-size:18px;font-weight:bold}
+main{max-width:900px;margin:0 auto;padding:20px}
+.paso{background:#fff;border:1px solid #E4DCD2;border-radius:10px;padding:16px;margin:14px 0}
+h2{font-size:15px;color:#7A1F2B;margin:0 0 8px}
+button{background:#1A5276;color:#fff;border:0;border-radius:6px;padding:10px 18px;font-size:14px;font-weight:bold;cursor:pointer;margin:6px 6px 6px 0}
+button.rojo{background:#B3261E}button:disabled{opacity:.45}
+table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:10px}
+td,th{border-bottom:1px solid #E4DCD2;padding:6px 8px;text-align:left}
+th{background:#F6EFE7}
+.msg{padding:10px;border-radius:6px;margin:10px 0;font-size:13.5px;display:none}
+.on{display:block}.ok{background:#E8F0E8;color:#2F6B2F}.err{background:#FBE9E7;color:#B3261E}.info{background:#EAF0F6;color:#1A5276}
+small{color:#7A7068}
+</style></head><body>
+<header>🧯 Limpiador de duplicados · radar_rutas + radar_rutas_int</header>
+<main>
+<div class="paso">
+<h2>Qué hace</h2>
+<p style="font-size:13px"><b>Causa del problema (ya corregida en el planificador):</b> el 💾 Guardar solo escribía en <code>radar_rutas</code>, nunca limpiaba <code>radar_rutas_int</code> — así que cada ciclo de cargar/editar/guardar volvía a copiar filas viejas. Esta página deduplica TODO lo que hay ahora mismo en las dos colecciones, conserva UNA copia de cada acción real (por persona+cliente+día+acción) y reescribe <code>radar_rutas</code> limpia, dejando <code>radar_rutas_int</code> vacía para siempre.</p>
+<p style="font-size:13px;color:#B3261E"><b>No borra clientes ni visitas reales — solo colapsa las copias idénticas a una.</b></p>
+<button id="b1">🔍 Analizar</button>
+<button id="b2" class="rojo" disabled>🧯 Limpiar y reescribir</button>
+<div class="msg" id="m"></div>
+<div id="t"></div>
+</div>
+</main>
+<script>
+"use strict";
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const $=id=>document.getElementById(id);
+const norm=s=>String(s||"").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/\s+/g," ").trim();
+async function leeColeccion(col){
+ let todo=[];
+ for(let i=0;i<80;i++){
+  const r=await fetch(FB+"/"+col+"/chunk_"+i);
+  if(!r.ok)break;
+  const j=await r.json();
+  const arr=JSON.parse(j.fields?.datos?.stringValue||"[]");
+  if(!arr.length&&i>0&&todo.length)continue;
+  todo=todo.concat(arr);
+ }
+ return todo;}
+let LIMPIO=null,ANTES=0;
+$("b1").onclick=async()=>{
+ const m=$("m");m.className="msg on info";m.textContent="Leyendo radar_rutas y radar_rutas_int…";
+ try{
+  const A=await leeColeccion("radar_rutas");
+  const B=await leeColeccion("radar_rutas_int");
+  ANTES=A.length+B.length;
+  m.textContent="Leídas "+A.length+" (radar_rutas) + "+B.length+" (radar_rutas_int) = "+ANTES+" filas. Deduplicando…";
+  const vistos=new Map();
+  for(const r of [...A,...B]){
+   const clave=[norm(r.per||r.ka),norm(r.n),norm(r.dia),norm(r.acc),norm(r.mes||"")].join("|");
+   if(!vistos.has(clave))vistos.set(clave,r);
+  }
+  LIMPIO=[...vistos.values()];
+  const porPersona={};
+  for(const r of LIMPIO){const p=r.per||r.ka||"?";porPersona[p]=(porPersona[p]||0)+1;}
+  let html="<table><tr><th>Persona</th><th>Filas tras limpiar</th></tr>"+
+   Object.entries(porPersona).sort().map(([p,n])=>"<tr><td>"+p+"</td><td>"+n+"</td></tr>").join("")+"</table>";
+  $("t").innerHTML=html;
+  m.className="msg on "+(ANTES>LIMPIO.length?"err":"ok");
+  m.textContent="Antes: "+ANTES+" filas · Después de deduplicar: "+LIMPIO.length+" filas · se eliminarán "+(ANTES-LIMPIO.length)+" copias.";
+  $("b2").disabled=LIMPIO.length===0;
+ }catch(e){m.className="msg on err";m.textContent="Error: "+e.message;}};
+$("b2").onclick=async()=>{
+ if(!confirm("Se va a REESCRIBIR radar_rutas con "+LIMPIO.length+" filas limpias (eliminando "+(ANTES-LIMPIO.length)+" duplicados) y VACIAR radar_rutas_int. ¿Confirmas?"))return;
+ const m=$("m");m.className="msg on info";
+ try{
+  const TAM=400;const nCh=Math.ceil(LIMPIO.length/TAM)||1;
+  for(let i=0;i<nCh;i++){
+   m.textContent="Escribiendo radar_rutas… chunk "+(i+1)+"/"+nCh;
+   await fetch(FB+"/radar_rutas/chunk_"+i,{method:"PATCH",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({fields:{datos:{stringValue:JSON.stringify(LIMPIO.slice(i*TAM,(i+1)*TAM))},n:{integerValue:String(LIMPIO.length)}}})});
+  }
+  for(let i=nCh;i<nCh+8;i++){
+   await fetch(FB+"/radar_rutas/chunk_"+i,{method:"PATCH",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({fields:{datos:{stringValue:"[]"},n:{integerValue:"0"}}})});
+  }
+  for(let i=0;i<8;i++){
+   await fetch(FB+"/radar_rutas_int/chunk_"+i,{method:"PATCH",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({fields:{datos:{stringValue:"[]"},n:{integerValue:"0"}}})});
+  }
+  m.className="msg on ok";m.textContent="✓ Limpieza terminada: radar_rutas tiene "+LIMPIO.length+" filas · radar_rutas_int vacía. Recarga el planificador para comprobarlo.";
+  $("b2").disabled=true;
+ }catch(e){m.className="msg on err";m.textContent="Error escribiendo: "+e.message;}};
+</script></body></html>
