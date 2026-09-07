@@ -21650,6 +21650,78 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
   const [nuevoObj,setNuevoObj]=useState("");
   const [comentTxt,setComentTxt]=useState("");
   const [selObj,setSelObj]=useState(null);     // (v5.8.1) objetivo desplegado para cambiar estado
+
+  // (sep 2026) Retrasos de pedido de los ultimos 7 dias, con su causa.
+  // Customer Service y Operaciones comparten este objetivo: que no haya
+  // retrasos. Antes cada uno reportaba lo suyo y nadie miraba el dato comun.
+  const [retrasosDep,setRetrasosDep]=useState(null);
+  useEffect(function(){
+    var vivo=true;
+    (async function(){
+      try{
+        var iso=function(d){ return d.getFullYear()+"-"+
+          String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); };
+        var fechas=[]; for(var i=0;i<7;i++){ var d=new Date(); d.setDate(d.getDate()-i); fechas.push(iso(d)); }
+
+        var docs=await Promise.all(fechas.map(function(f){
+          return fetch(FB_BASE+"/pbi_pedidos_cambios/"+f)
+            .then(function(r){ return r.ok?r.json():null; }).catch(function(){ return null; });
+        }));
+
+        // Motivos ya puestos
+        var puestos={};
+        try{
+          var rm=await fetch(FB_BASE+"/pbi_retrasos_motivo?pageSize=300");
+          if(rm.ok){
+            var jm=await rm.json();
+            (jm.documents||[]).forEach(function(dd){
+              var f=dd.fields||{};
+              if(!f.motivo||!f.motivo.stringValue) return;
+              puestos[decodeURIComponent(dd.name.split("/").pop())]={
+                motivo:f.motivo.stringValue,
+                nota:(f.nota&&f.nota.stringValue)||""};
+            });
+          }
+        }catch(e){}
+
+        var clave=function(m){
+          return [m.pedido||"",m.articulo||m.descripcion||"",m.cliente||m.nombre||""]
+            .join("|").replace(/[\s\/]/g,"_").slice(0,180);
+        };
+        var vistos={};
+        docs.filter(Boolean).forEach(function(doc){
+          var f=doc.fields||{};
+          var movs=[];
+          try{ movs=JSON.parse((f.movimientos&&f.movimientos.stringValue)||"[]"); }catch(e){}
+          movs.filter(function(m){ return m.tipo==="retraso"&&Math.abs(m.dias||0)>=3; })
+            .forEach(function(m){
+              var k=clave(m);
+              // Un pedido movido tres veces es un retraso, no tres
+              if(vistos[k]){ vistos[k].dias=Math.max(vistos[k].dias,Math.abs(m.dias||0)); return; }
+              vistos[k]={imp:Number(m.importe)||0, dias:Math.abs(m.dias||0),
+                motivo:(puestos[k]||{}).motivo||null};
+            });
+        });
+
+        var l=Object.values(vistos);
+        if(!l.length){ if(vivo) setRetrasosDep({n:0}); return; }
+        var porM={};
+        l.forEach(function(x){
+          var mo=x.motivo||"— sin clasificar —";
+          porM[mo]=porM[mo]||{motivo:mo,n:0,imp:0};
+          porM[mo].n++; porM[mo].imp+=x.imp;
+        });
+        if(vivo) setRetrasosDep({
+          n:l.length,
+          imp:l.reduce(function(t,x){return t+x.imp;},0),
+          dias:l.reduce(function(t,x){return t+x.dias;},0)/l.length,
+          sinMotivo:l.filter(function(x){return !x.motivo;}).length,
+          porMotivo:Object.values(porM).sort(function(a,b){return b.n-a.n;}),
+        });
+      }catch(e){}
+    })();
+    return function(){ vivo=false; };
+  },[]);
   const [motivoTxt,setMotivoTxt]=useState("");  // motivo de bloqueo inline
   const [objParaTxt,setObjParaTxt]=useState(""); // objetivo que el superior escribe para un subordinado
   const [notaTxt,setNotaTxt]=useState("");       // (v5.8.2) anotación del hilo de un objetivo
@@ -22484,6 +22556,7 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
   }
   function snapCards(s){
     return (
+      <>
       <div style={{display:"flex",gap:8,marginBottom:12}}>
         <Card style={{flex:1,padding:"10px",textAlign:"center"}}>
           <p style={{margin:0,fontSize:17,fontWeight:900,color:s.incAb>0?T.red:T.green}}>{s.incAb}</p>
@@ -22501,6 +22574,52 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
           <p style={{margin:"2px 0 0",fontSize:9,color:T.muted}}>{s.tHechas} completadas</p>
         </Card>
       </div>
+
+      {/* (sep 2026) Retrasos de pedido. Customer Service y Operaciones
+          comparten un objetivo que ninguno controlaba del todo: aqui lo ven
+          con su causa, que la pone quien gestiona el pedido cada dia. */}
+      {retrasosDep&&retrasosDep.n>0&&(
+        <div style={{background:"#FEF2F4",border:"1.5px solid #FCA5A5",
+          borderRadius:12,padding:"12px 13px",marginBottom:12}}>
+          <div style={{display:"flex",gap:10,alignItems:"baseline",marginBottom:8}}>
+            <p style={{margin:0,fontSize:11,fontWeight:800,color:"#991B1B",
+              textTransform:"uppercase",letterSpacing:".4px",flex:1}}>
+              🚚 Retrasos de pedido · 7 días</p>
+            {retrasosDep.sinMotivo>0&&(
+              <span style={{fontSize:10.5,fontWeight:800,color:"#991B1B",
+                background:"#FEE2E2",borderRadius:99,padding:"2px 9px"}}>
+                {retrasosDep.sinMotivo} sin motivo</span>
+            )}
+          </div>
+          <div style={{display:"flex",gap:14,marginBottom:9,flexWrap:"wrap"}}>
+            <div><p style={{margin:0,fontSize:19,fontWeight:900,color:"#991B1B"}}>
+              {retrasosDep.n}</p>
+              <p style={{margin:0,fontSize:9.5,color:T.muted,fontWeight:700}}>PEDIDOS</p></div>
+            <div><p style={{margin:0,fontSize:19,fontWeight:900,color:"#991B1B"}}>
+              {fmt(retrasosDep.imp)}€</p>
+              <p style={{margin:0,fontSize:9.5,color:T.muted,fontWeight:700}}>EN RIESGO</p></div>
+            <div><p style={{margin:0,fontSize:19,fontWeight:900,color:"#991B1B"}}>
+              {Math.round(retrasosDep.dias*10)/10} d</p>
+              <p style={{margin:0,fontSize:9.5,color:T.muted,fontWeight:700}}>MEDIA</p></div>
+          </div>
+          {retrasosDep.porMotivo.map(function(m,i){
+            return <div key={i} style={{display:"flex",gap:8,alignItems:"baseline",
+              padding:"5px 0",borderTop:"1px solid #FCA5A5"}}>
+              <span style={{flex:1,fontSize:12,color:m.motivo.startsWith("—")?"#991B1B":T.text,
+                fontWeight:m.motivo.startsWith("—")?700:400}}>{m.motivo}</span>
+              <span style={{fontSize:12,fontWeight:800,color:T.text}}>{m.n}</span>
+              <span style={{fontSize:11.5,color:T.muted,minWidth:64,textAlign:"right"}}>
+                {fmt(m.imp)}€</span>
+            </div>;
+          })}
+          {retrasosDep.sinMotivo>0&&(
+            <p style={{margin:"9px 0 0",fontSize:11.5,color:"#991B1B",lineHeight:1.5}}>
+              Clasifica los que faltan en <b>Pedidos planificados → Diario</b>:
+              sin motivo no se puede corregir nada, y no podrás cerrar la semana.</p>
+          )}
+        </div>
+      )}
+      </>
     );
   }
   function listaObjetivos(p,editable){
