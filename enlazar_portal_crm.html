@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Enlazar portal ↔ CRM</title>
+<style>
+ :root{--papel:#F2F4F7;--tinta:#14181F;--tenue:#6B7684;--linea:#DCE1E7;
+       --ok:#0E7C5A;--mal:#C2263D;--med:#B07908;--okL:#EDF7F3;--malL:#FEF2F4;--medL:#FFFBEB}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--papel);color:var(--tinta);max-width:880px;
+   margin-inline:auto;padding:20px 14px 90px;
+   font:400 15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+ h1{margin:0 0 3px;font-size:21px;font-weight:800}
+ .sub{margin:0 0 16px;font-size:13px;color:var(--tenue)}
+ h2{font-size:15px;margin:22px 0 8px;padding-bottom:5px;border-bottom:2px solid var(--linea)}
+ .card{background:#fff;border:1px solid var(--linea);border-radius:8px;
+   padding:13px 14px;margin-bottom:9px;font-size:13.5px}
+ .card.ok{border-color:var(--ok);background:var(--okL)}
+ .card.mal{border-color:var(--mal);background:var(--malL)}
+ .card.med{border-color:var(--med);background:var(--medL)}
+ code{background:#F1F5F9;padding:1px 6px;border-radius:4px;font-size:11.5px;
+   font-family:ui-monospace,monospace}
+ table{width:100%;border-collapse:collapse;font-size:12.5px;background:#fff;
+   border:1px solid var(--linea);border-radius:8px;overflow:hidden}
+ th{background:#F1F5F9;text-align:left;padding:8px;font-size:10.5px;
+   text-transform:uppercase;color:var(--tenue)}
+ td{padding:8px;border-top:1px solid var(--linea);vertical-align:middle}
+ select{width:100%;padding:6px 8px;border-radius:7px;border:1px solid var(--linea);
+   font-size:12.5px;font-family:inherit}
+ .estado{padding:34px 4px;color:var(--tenue);text-align:center}
+ .barra{position:fixed;left:0;right:0;bottom:0;background:#fff;
+   border-top:1px solid var(--linea);padding:12px 14px;display:flex;gap:10px;
+   align-items:center;justify-content:space-between;box-shadow:0 -2px 12px #0000000f}
+ button.pri{padding:11px 20px;border-radius:8px;border:none;background:var(--tinta);
+   color:#fff;font-size:13.5px;font-weight:700;cursor:pointer}
+ button.pri:disabled{background:#94A3B8;cursor:default}
+ .seg{color:var(--ok);font-weight:700}
+ .duda{color:var(--med);font-weight:700}
+</style></head><body>
+<h1>🔗 Enlazar portal ↔ CRM</h1>
+<p class="sub">Cada persona entra con un usuario del portal
+  (<code>u_1776238293171</code>) pero sus datos se guardan con otro id del CRM
+  (<code>wk8</code>). Rellenando <code>crmId</code> quedan enlazados y sus
+  visitas, muestras y partes se le atribuyen en todas partes.</p>
+<div id="app"><p class="estado">Comparando fichas…</p></div>
+<div class="barra" id="barra" style="display:none">
+  <span class="sub" id="txt" style="margin:0"></span>
+  <button class="pri" id="btn" onclick="enlazar()">Enlazar</button>
+</div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const U=(s)=>String(s||"").toUpperCase().trim();
+const NORM=(s)=>U(s).normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^A-Z0-9]/g,"");
+
+function val(f){
+  if(!f) return null;
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.nullValue!==undefined) return null;
+  if(f.arrayValue!==undefined) return (f.arrayValue.values||[]).map(val);
+  return null;
+}
+async function leer(col){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<20);
+  return t;
+}
+
+let SUELTOS=[], USERS=[];
+
+(async()=>{
+  const app=document.getElementById("app");
+  try{
+    const [us,pu]=await Promise.all([leer("usuarios"),leer("portal_users")]);
+    USERS=us;
+
+    SUELTOS=pu.filter(p=>{
+      if(p.activo===false) return false;
+      if(p.crmId) return false;              // ya enlazado
+      if(us.some(u=>u._id===p._id)) return false;  // mismo id en ambas: no hace falta
+      return true;
+    }).map(p=>{
+      // A quién se parece: por código de vendedor, usuario o nombre
+      let match=null, seguridad="";
+      const cod=NORM(p.catalogoVendedor||p.grupoAgente);
+      if(cod){
+        match=us.find(u=>NORM(u.grupoAgente)===cod||NORM(u.catalogoVendedor)===cod);
+        if(match) seguridad="código de vendedor";
+      }
+      if(!match&&p.username){
+        match=us.find(u=>NORM(u.username)===NORM(p.username)||NORM(u.id)===NORM(p.username));
+        if(match) seguridad="usuario de acceso";
+      }
+      if(!match&&p.nombre){
+        match=us.find(u=>NORM(u.nombre)===NORM(p.nombre));
+        if(match) seguridad="nombre";
+      }
+      return {...p, match, seguridad, elegido:match?match._id:""};
+    });
+
+    pintar();
+  }catch(e){
+    app.innerHTML='<div class="card mal">Error: '+e.message+'</div>';
+  }
+})();
+
+function pintar(){
+  const app=document.getElementById("app");
+  if(!SUELTOS.length){
+    app.innerHTML='<div class="card ok"><b>Todo enlazado.</b> Cada ficha del '
+      +'portal apunta a su usuario del CRM.</div>';
+    document.getElementById("barra").style.display="none";
+    return;
+  }
+  const conMatch=SUELTOS.filter(x=>x.elegido).length;
+  const opciones=USERS.slice().sort((a,b)=>
+    String(a.nombre||a._id).localeCompare(String(b.nombre||b._id)));
+
+  app.innerHTML='<div class="card med"><b>'+SUELTOS.length+' fichas del portal '
+    +'sin enlazar.</b> Sus datos se guardan con un id que el CRM no reconoce, '
+    +'así que sus visitas y muestras no se le atribuyen ni las ve su jefe.</div>'
+    +'<table><thead><tr><th>Ficha del portal</th><th>Código</th>'
+    +'<th>Enlazar con</th></tr></thead><tbody>'
+    +SUELTOS.map((x,i)=>'<tr>'
+      +'<td><b>'+(x.nombre||x.username||x._id)+'</b><br>'
+        +'<code>'+x._id+'</code>'
+        +(x.equipo?' <span style="color:var(--tenue);font-size:11px">'+x.equipo+'</span>':"")+'</td>'
+      +'<td>'+(x.catalogoVendedor||x.grupoAgente
+          ?'<code>'+(x.catalogoVendedor||x.grupoAgente)+'</code>':"—")+'</td>'
+      +'<td><select onchange="elegir('+i+',this.value)">'
+        +'<option value="">— no enlazar —</option>'
+        +opciones.map(u=>'<option value="'+u._id+'"'
+          +(x.elegido===u._id?" selected":"")+'>'
+          +(u.nombre||u._id)+' ('+u._id+')</option>').join("")
+        +'</select>'
+        +(x.seguridad?'<div style="font-size:10.5px;margin-top:3px" class="'
+          +(x.seguridad==="código de vendedor"?"seg":"duda")+'">por '
+          +x.seguridad+'</div>':"")
+      +'</td></tr>').join("")
+    +'</tbody></table>'
+    +'<p class="sub" style="margin-top:8px">En verde, los emparejados por '
+    +'código de vendedor: son seguros. En ámbar, por usuario o nombre: '
+    +'revísalos antes de aplicar.</p>';
+
+  document.getElementById("barra").style.display="flex";
+  document.getElementById("txt").textContent=conMatch+" de "+SUELTOS.length+" listos";
+  document.getElementById("btn").disabled=!conMatch;
+}
+
+window.elegir=(i,v)=>{ SUELTOS[i].elegido=v; pintar(); };
+
+window.enlazar=async()=>{
+  const lista=SUELTOS.filter(x=>x.elegido);
+  if(!lista.length) return;
+  if(!confirm("Se enlazarán "+lista.length+" fichas del portal con su usuario "
+    +"del CRM.\n\nSolo se rellena el campo crmId. No se borra ni cambia nada "
+    +"más. ¿Seguimos?")) return;
+  const btn=document.getElementById("btn");
+  btn.disabled=true;
+  let ok=0,err=0;
+  for(const x of lista){
+    btn.textContent="Enlazando… "+(ok+err+1)+"/"+lista.length;
+    try{
+      const r=await fetch(`${FB}/portal_users/${encodeURIComponent(x._id)}`
+        +"?updateMask.fieldPaths=crmId",{
+        method:"PATCH",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({fields:{crmId:{stringValue:x.elegido}}})});
+      if(r.ok) ok++; else err++;
+    }catch(e){ err++; }
+  }
+  btn.textContent = err ? "Hecho con "+err+" errores" : "✓ "+ok+" enlazadas";
+  if(err) btn.disabled=false;
+  else document.getElementById("app").insertAdjacentHTML("afterbegin",
+    '<div class="card ok"><b>Listo.</b> Recarga el CRM: sus visitas y muestras '
+    +'ya se le atribuyen y su jefe las verá.</div>');
+};
+</script></body></html>
