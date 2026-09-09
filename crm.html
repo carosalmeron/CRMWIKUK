@@ -1483,6 +1483,50 @@ function nombreDeAgente(idAgente){
 // ── Helper: resolver todos los IDs CRM de un usuario ────────────
 // El portal puede asignar IDs distintos (ej: "U_xxx") al CRM (ej: "ik4").
 // Esta función devuelve un Set con todos los posibles IDs para comparar.
+// (sep 2026) Todos los codigos con los que puede aparecer un comercial en los
+// datos: su id del CRM (wk8), su codigo de vendedor (ACRUZ) y el id con el que
+// entra al portal (u_1776238293171). Los filtros de equipo solo miraban los
+// dos primeros, asi que las visitas y muestras guardadas con el tercero no las
+// veia su jefe.
+// (sep 2026) Encuentra al comercial por CUALQUIERA de sus codigos: id del CRM,
+// codigo de vendedor, usuario, nombre o el id con el que entra al portal.
+// Habia 18 sitios comparando codigos exactos, y cada uno fallaba de forma
+// distinta cuando el documento traia un codigo que no era el esperado.
+function buscarAgente(cod){
+  if(!cod) return null;
+  var c=String(cod).toUpperCase().trim();
+  if(!c) return null;
+  var _n=function(x){ return String(x||"").toUpperCase().trim()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g,""); };
+  var cN=_n(c);
+  // Primero por sus codigos conocidos, que es lo mas fiable
+  var u=USUARIOS.find(function(x){
+    try{ return codigosDeAgente(x).indexOf(c)>=0; }catch(e){ return false; }
+  });
+  if(u) return u;
+  // Luego por nombre, con y sin tildes
+  return USUARIOS.find(function(x){
+    return _n(x.nombre)===cN||_n(x.username)===cN||_n(x.catalogoVendedor)===cN;
+  })||null;
+}
+
+function codigosDeAgente(a){
+  if(!a) return [];
+  var out=[a.id,a.grupoAgente,a.catalogoVendedor,a.username,a.crmId,a._docId]
+    .filter(Boolean).map(function(x){return String(x).toUpperCase();});
+  try{
+    (window._portalUsersDB||[]).forEach(function(p){
+      var apunta=[p.crmId,p.catalogoVendedor,p.grupoAgente,p.username,p.nombre]
+        .filter(Boolean).map(function(x){return String(x).toUpperCase();});
+      if(apunta.some(function(x){return out.indexOf(x)>=0;})){
+        [p.id,p._docId,p.username].filter(Boolean)
+          .forEach(function(x){ out.push(String(x).toUpperCase()); });
+      }
+    });
+  }catch(e){}
+  return out.filter(function(v,i,arr){return arr.indexOf(v)===i;});
+}
+
 function resolverMisIds(usuario){
   if(!usuario) return new Set();
   // (v3.23.33) Incluir TODOS los identificadores posibles del usuario
@@ -3130,6 +3174,31 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
       }
     });
   });
+  // (sep 2026) Las visitas se guardan con el id del portal (u_1776238293171),
+  // que no esta en USUARIOS: su equipo salia vacio y el jefe no las veia.
+  // Se añaden esos ids apuntando al equipo del comercial al que pertenecen.
+  try{
+    (window._portalUsersDB||[]).forEach(function(p){
+      var eq = p.equipo || "";
+      if(!eq){
+        // Sin equipo propio: se hereda del comercial al que apunta
+        var ref=[p.crmId,p.catalogoVendedor,p.grupoAgente,p.username,p.nombre]
+          .filter(Boolean);
+        for(var i=0;i<ref.length&&!eq;i++){
+          eq = agenteEquipoMap[String(ref[i]).toUpperCase().trim()]
+            || agenteEquipoMap[_normEq(ref[i])] || "";
+        }
+      }
+      if(!eq) return;
+      ["id","_docId","username","catalogoVendedor","grupoAgente","nombre"].forEach(function(k){
+        if(p[k]){
+          var kk=String(p[k]).toUpperCase().trim();
+          if(!agenteEquipoMap[kk]) agenteEquipoMap[kk]=eq;
+          if(!agenteEquipoMap[_normEq(p[k])]) agenteEquipoMap[_normEq(p[k])]=eq;
+        }
+      });
+    });
+  }catch(e){}
   // Set de IDs por nombre (para resolver el filtro por agente individual)
   // (v3.23.79) Incluye variantes: id, grupoAgente, username, nombre con/sin tilde
   function _norm(s){
@@ -4101,15 +4170,29 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
     if(!esAgenteRol||appMisIds.has(agId)){
       // Aplicar filtro de día
       if(!pasaFiltroDia(v.fecha)) return;
+      // (sep 2026) Se buscaba solo por id y grupoAgente: una visita guardada
+      // con el id del portal (u_1776238293171) no encontraba a su comercial,
+      // asi que se contaba aparte y el suyo salia con 0 visitas.
+      var _buscarPorCodigo=function(cod){
+        return USUARIOS.find(function(u){
+          try{ return codigosDeAgente(u).indexOf(cod)>=0; }
+          catch(e){ return (u.id||"").toUpperCase()===cod
+            ||(u.grupoAgente||"").toUpperCase()===cod; }
+        });
+      };
+      var agU0=_buscarPorCodigo(agId);
       var vEq=(v.equipo||"").toUpperCase();
-      if(!vEq){var agU=USUARIOS.find(function(u){return(u.id||"").toUpperCase()===agId||(u.grupoAgente||"").toUpperCase()===agId;});if(agU)vEq=(agU.equipo||"").toUpperCase();}
+      if(!vEq&&agU0)vEq=(agU0.equipo||"").toUpperCase();
       if(vEq==="WIKUK")_visitasPorEquipo.WIKUK++;
       else if(vEq==="INTERKEY")_visitasPorEquipo.INTERKEY++;
       _visitasPorEquipo.TOTAL++;
       // Por agente
       var agNom=agId;
-      var agUsr=USUARIOS.find(function(u){return(u.id||"").toUpperCase()===agId||(u.grupoAgente||"").toUpperCase()===agId;});
-      if(agUsr) agNom=agUsr.nombre||agId;
+      if(agU0) agNom=agU0.nombre||agId;
+      else{
+        // Sin ficha: al menos el nombre que sepa resolver el CRM
+        try{ var _n=nombreAgenteId(agId); if(_n&&_n!==agId) agNom=_n; }catch(e){}
+      }
       _visitasPorAgente[agNom]=(_visitasPorAgente[agNom]||0)+1;
     }
     // Filtrado normal
@@ -6191,7 +6274,7 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
                           </div>
                         </div>
                         {keys.map(function(agId){
-                          var ag=USUARIOS.find(function(u){return (u.id||"").toUpperCase()===agId;});
+                          var ag=buscarAgente(agId);
                           var nom=ag?ag.nombre:agId;
                           var ic=ag?ag.icon:"🧑‍💼";
                           var lista=grupos[agId];
@@ -6248,7 +6331,7 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
                           </div>
                         </div>
                         {keys.map(function(agId){
-                          var ag=USUARIOS.find(function(u){return (u.id||"").toUpperCase()===agId;});
+                          var ag=buscarAgente(agId);
                           var nom=ag?ag.nombre:agId;
                           var ic=ag?ag.icon:"🧑‍💼";
                           var lista=grupos[agId];
@@ -6412,7 +6495,7 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
                 var p=estPreviewCaros;var hoy3=new Date().toLocaleDateString("es-ES");
                 var maxDto2=0;p.productos.forEach(function(pr){if(pr.dto>maxDto2)maxDto2=pr.dto;});
                 // (v3.29.2) Determinar cadena de aprobación correcta según equipo del agente
-                var agUser=USUARIOS.find(function(u){return u.id===p.agente||(u.grupoAgente||"").toUpperCase()===(p.agente||"").toUpperCase();});
+                var agUser=buscarAgente(p.agente);
                 var eqAgente=agUser?agUser.equipo:(p.equipo||"");
                 var resp=USUARIOS.find(function(u){return u.rol==="jefe"&&u.equipo===eqAgente;});
                 var jvDir=USUARIOS.find(function(u){return u.rol==="director";});
@@ -11232,8 +11315,8 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
         propias=data.filter(m=>!m.eliminada&&misIds.has((m.agente||"").toUpperCase()));
       } else if(esJefe){
         // Jefe: todas las de su equipo
-        const idsEquipo=new Set(agentesEquipo.map(a=>a.id.toUpperCase()));
-        agentesEquipo.forEach(a=>{if(a.grupoAgente)idsEquipo.add(a.grupoAgente.toUpperCase());});
+        const idsEquipo=new Set();
+        agentesEquipo.forEach(a=>codigosDeAgente(a).forEach(c=>idsEquipo.add(c)));
         propias=data.filter(m=>!m.eliminada&&idsEquipo.has((m.agente||"").toUpperCase()));
       } else {
         // Director, CEO, I+D y Calidad: todas
@@ -12761,7 +12844,7 @@ function MisMuestras({usuario, clientesFB, onAbrirCliente, onIrASeccion}){
 // APROBACIÓN DE ESTRATEGIA — por producto, siempre visible
 // ═══════════════════════════════════════════════════════════════════
 function EstrategiaAprobacionCard({e,usuario,onConfirmar,onRechazar,onEscalar}){
-  const ag=USUARIOS.find(function(u){var a=(e.agente||"").toUpperCase();return u.id===e.agente||(u.grupoAgente||"").toUpperCase()===a||(u.catalogoVendedor||"").toUpperCase()===a||(u.nombre||"").toUpperCase()===a;});
+  const ag=buscarAgente(e.agente);
   const director=USUARIOS.find(u=>u.rol==="director");
   const ceo=USUARIOS.find(u=>u.rol==="ceo");
   const ofertas=e.ofertas||[];
@@ -13306,7 +13389,7 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
 
   // Clasificación
   const deEquipo=(e)=>{
-    if(esRolJefe){const ag=USUARIOS.find(function(u){var a=(e.agente||"").toUpperCase();return u.id===e.agente||(u.grupoAgente||"").toUpperCase()===a||(u.catalogoVendedor||"").toUpperCase()===a||(u.nombre||"").toUpperCase()===a;});return ag?.equipo===miEquipo||e.equipo===miEquipo;}
+    if(esRolJefe){const ag=buscarAgente(e.agente);return ag?.equipo===miEquipo||e.equipo===miEquipo;}
     return true;
   };
 
@@ -14279,7 +14362,7 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
                     {/* Agente — mismo que la estrategia, no editable */}
                     <p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:T.muted}}>Agente comercial</p>
                     <div style={{padding:"10px 14px",border:"1.5px solid "+T.border,borderRadius:10,fontSize:13,marginBottom:12,background:"#F8FAFC",color:T.text,fontWeight:600}}>
-                      🧑‍💼 {(function(){var u=USUARIOS.find(function(x){return x.id===ofertaPreview.agente||(x.grupoAgente||"").toUpperCase()===(ofertaPreview.agente||"").toUpperCase()});return u?u.nombre+" ("+u.equipo+")":ofertaPreview.agente||"Sin asignar"})()}
+                      🧑‍💼 {(function(){var u=buscarAgente(ofertaPreview.agente);return u?u.nombre+" ("+u.equipo+")":ofertaPreview.agente||"Sin asignar"})()}
                     </div>
 
                     {/* Mensaje */}
@@ -14334,7 +14417,7 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
                       </button>
                       <button onClick={()=>{
                         if(ofertaPreview.lineas.length===0||!ofertaPreview.lineas.some(l=>l.producto.trim())){alert("Añade al menos un producto");return;}
-                        var agUser=USUARIOS.find(u=>u.id===ofertaPreview.agente||(u.grupoAgente||"").toUpperCase()===(ofertaPreview.agente||"").toUpperCase());
+                        var agUser=buscarAgente(ofertaPreview.agente);
                         var ofertaId="of_est_"+Date.now();
                         var lineasFinal=ofertaPreview.lineas.filter(l=>l.producto.trim()).map(l=>({...l,estado:"pendiente",notas:l.notas||("Dto: "+(ofertaPreview.dto||0)+"%")}));
                         var oferta={
@@ -14749,7 +14832,7 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
 
   // (v3.22.27) Tarjeta EXPANDIDA — muestra producto y banner aprobada, pero los botones siguen en el detalle
   const CardEstExpandida=({e})=>{
-    const ag=USUARIOS.find(function(u){var a=(e.agente||"").toUpperCase();return u.id===e.agente||(u.grupoAgente||"").toUpperCase()===a||(u.catalogoVendedor||"").toUpperCase()===a||(u.nombre||"").toUpperCase()===a;});
+    const ag=buscarAgente(e.agente);
     const sinCliente=!e.cliente&&!e.clienteNombre;
     const productos=e.ofertas||[];
     const yaApr=e.resolucion&&(e.resolucion.tipo==="aprobada"||e.resolucion.tipo==="aprobada_parcial");
@@ -14799,7 +14882,7 @@ function MisEstrategias({usuario, onVolverPotencial, onNavegar}){
   };
 
   const CardEst=({e,onClick,children})=>{
-    const ag=USUARIOS.find(function(u){var a=(e.agente||"").toUpperCase();return u.id===e.agente||(u.grupoAgente||"").toUpperCase()===a||(u.catalogoVendedor||"").toUpperCase()===a||(u.nombre||"").toUpperCase()===a;});
+    const ag=buscarAgente(e.agente);
     const sinCliente=!e.cliente&&!e.clienteNombre;
     const sinTexto=!e.texto&&!e.estrategia;
     const productoFallback=(e.ofertas||[])[0];
@@ -15801,7 +15884,7 @@ function IncidenciasCompras({usuario, incidenciasDB, setIncidenciasDB, clientesF
             {(function(){
               var agNom=sel.agenteNombre||"";
               if(!agNom&&sel.agente){
-                var u=USUARIOS.find(function(u){return u.id===sel.agente||(u.grupoAgente||"").toUpperCase()===(sel.agente||"").toUpperCase();});
+                var u=buscarAgente(sel.agente);
                 agNom=u?u.nombre:sel.agente;
               }
               if(!agNom) agNom=sel.autor||"—";
@@ -18107,7 +18190,7 @@ function VamosCaros({usuario, ofertasDB, setOfertasDB, onBack}){
                             // Buscar la oferta original
                             var ofOrig=(ofertasDB||[]).find(function(o){return o.id===l.ofertaId;});
                             if(ofOrig&&ofOrig.estrategiaVinculada){alert("✅ Ya tiene estrategia vinculada");return;}
-                            var agUser2=USUARIOS.find(function(u){return u.id===l.agente||(u.grupoAgente||"").toUpperCase()===(l.agente||"").toUpperCase()||u.nombre===l.agenteNombre;});
+                            var agUser2=(buscarAgente(l.agente)||buscarAgente(l.agenteNombre));
                             var hoy3=new Date().toLocaleDateString("es-ES");
                             var est2={
                               id:"est_caro_"+Date.now(),
@@ -18256,7 +18339,7 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
     if(lineas.length===0){alert("Añade al menos una línea de producto");return;}
     // (v3.25.4) Resolver agente: si no es comercial, usa el agente seleccionado en el form
     var agenteOf=formOf.agenteAsignado||idCanonico(usuario);
-    var agUser=USUARIOS.find(function(u){return u.id===agenteOf||(u.grupoAgente||"").toUpperCase()===(agenteOf||"").toUpperCase()});
+    var agUser=buscarAgente(agenteOf);
     var nueva = {
       id:"of_"+Date.now(),
       clienteNombre:formOf.clienteNombre,
@@ -18699,7 +18782,7 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
         {!esAgente && (sel.lineas||[]).some(function(l){return l.estado==="caro";}) && !sel.estrategiaVinculada && (
           <button onClick={function(){
             var lineasCaras=(sel.lineas||[]).filter(function(l){return l.estado==="caro";});
-            var agUser=USUARIOS.find(function(u){return u.id===(sel.agente||sel.agenteId)||(u.grupoAgente||"").toUpperCase()===((sel.agente||"").toUpperCase());});
+            var agUser=buscarAgente(sel.agente||sel.agenteId);
             var productos=lineasCaras.map(function(l){
               return{nombre:l.producto||"",calibre:l.calibre||"",precioActual:l.precio||0,precioOferta:l.precioCompetencia||l.precio||0,unidad:l.unidad||"kg",precioCompetencia:l.precioCompetencia||0};
             });
@@ -19533,7 +19616,7 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
                     {o.fechaCreacionStr?" · "+o.fechaCreacionStr:""}
                     {o.fechaCierre&&filtro!=="pendiente"?" → "+new Date(o.fechaCierre).toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit"}):""}
                     {o.cerradoPor&&filtro!=="pendiente"?" por "+o.cerradoPor:""}
-                    {!esAgente?" · 🧑‍💼 "+(function(){var ag=o.agente||o.agenteId||"";var u=USUARIOS.find(function(x){return x.id===ag||(x.grupoAgente||"").toUpperCase()===(ag||"").toUpperCase()||(x.nombre||"").toUpperCase()===(ag||"").toUpperCase()});return u?u.nombre:(o.agenteNombre||ag)})():""}
+                    {!esAgente?" · 🧑‍💼 "+(function(){var ag=o.agente||o.agenteId||"";var u=buscarAgente(ag);return u?u.nombre:(o.agenteNombre||ag)})():""}
                   </p>
                 </div>
                 {filtro==="pendiente" && (
@@ -24294,10 +24377,9 @@ function TareasWidget({ onNav, usuario }) {
     if (esJefe) {
       return lista.filter(t => {
         if (!t.agente) return true; // sin asignar → jefe las ve
+        // Todos sus codigos, incluido el id con el que entra al portal
         return agentesEquipo.some(a =>
-          a.id.toUpperCase() === (t.agente||"").toUpperCase() ||
-          (a.grupoAgente||"").toUpperCase() === (t.agente||"").toUpperCase()
-        );
+          codigosDeAgente(a).includes((t.agente||"").toUpperCase()));
       });
     }
     // Agente: solo las suyas, nunca sin_asignar
@@ -24354,10 +24436,7 @@ function TareasWidget({ onNav, usuario }) {
         boxShadow:"0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06)"}}>
         {tareas.slice(0,5).map((t,i) => {
           const cfg    = PRIORIDAD_CFG[t.prioridad] || PRIORIDAD_CFG.normal;
-          const agObj  = esJefeOmas ? USUARIOS.find(u =>
-            u.id.toUpperCase()===(t.agente||"").toUpperCase() ||
-            (u.grupoAgente||"").toUpperCase()===(t.agente||"").toUpperCase()
-          ) : null;
+          const agObj  = esJefeOmas ? buscarAgente(t.agente) : null;
           const sinAg  = !t.agente;
           return (
             <div key={t.id} onClick={()=>onNav("tareas")}
@@ -24472,8 +24551,7 @@ function GestorTareas({ usuario, clientesFB }) {
     if (esJefe) {
       const agT = (t.agente||"").toUpperCase();
       const esMiEquipo = agentesAsig.some(a =>
-        a.id.toUpperCase()===agT || (a.grupoAgente||"").toUpperCase()===agT
-      );
+        codigosDeAgente(a).includes(agT));
       const sinAsignar = !t.agente;
       return esMiEquipo || sinAsignar;
     }
@@ -24875,10 +24953,7 @@ function GestorTareas({ usuario, clientesFB }) {
         <div style={{display:"flex",flexDirection:"column",gap:8}}>
           {filtradas.map(t => {
             const cfg = PRIORIDAD_CFG[t.prioridad] || PRIORIDAD_CFG.normal;
-            const agObj = esJefeOmas ? USUARIOS.find(u=>
-              u.id===(t.agente||"") ||
-              (u.grupoAgente||"").toUpperCase()===(t.agente||"").toUpperCase()
-            ) : null;
+            const agObj = esJefeOmas ? buscarAgente(t.agente) : null;
             return (
               <div key={t.id} style={{background:"#fff",border:`1px solid ${T.border}`,
                 borderLeft:`4px solid ${cfg.color}`,borderRadius:12,padding:"12px 14px 12px 16px"}}>
@@ -25957,7 +26032,7 @@ function CentroPendientes({usuario, onBack, onNav, muestrasDB, ofertasDB, incide
           ["Días abierto",it.dias>0?it.dias+" días":null],
           ["Fecha creación",it.fechaCreacion?(typeof it.fechaCreacion==="string"?it.fechaCreacion.slice(0,10):""):""],
           ["Creado por",it.autorIncidencia?esc(it.autorIncidencia):null],
-          ["Agente comercial",it.agente?esc((function(){var u=USUARIOS.find(function(x){return x.id===it.agente||(x.grupoAgente||"").toUpperCase()===(it.agente||"").toUpperCase()||(x.nombre||"").toUpperCase()===(it.agente||"").toUpperCase()});return u?u.nombre:it.agente})()):null],
+          ["Agente comercial",it.agente?esc((function(){var u=buscarAgente(it.agente);return u?u.nombre:it.agente})()):null],
         ].filter(function(d){return d[1]});
         datos.forEach(function(d){
           html+='<tr><td style="padding:4px 0;font-size:11px;color:#64748B;width:120px;vertical-align:top">'+d[0]+'</td>';
@@ -28859,7 +28934,7 @@ function GestorOportunidades({usuario, onAbrirCliente, onNewCliente, opoDirecta,
       return campos.some(function(k){return o[k]&&misCrmIds.has(String(o[k]).toUpperCase());});
     }
     if(esRolJefe){
-      const ag=USUARIOS.find(function(u){var a=(o.agenteId||o.agente||"").toUpperCase();return u.id===(o.agenteId||o.agente)||(u.grupoAgente||"").toUpperCase()===a;});
+      const ag=buscarAgente(o.agenteId||o.agente);
       return (ag&&ag.equipo)===miEquipoOpo||o.equipoId===miEquipoOpo;
     }
     return true; // director/ceo ve todas
@@ -31163,7 +31238,10 @@ function HistorialClientes({usuario, actividad, muestrasDB, oportunidadesDB, inc
       // Asignar agente a cada cliente basándose en grupoAgente/agente
       return clientesFB.map(c=>{
         const grp=(c.grupoAgente||c.GRUPOAGENTE||c.agente||"").toUpperCase();
-        const ag=agentes.find(a=>(a.grupoAgente||"").toUpperCase()===grp||a.id===c.agente||a.id===c.agenteId);
+        const ag=(agentes.find(a=>{try{return codigosDeAgente(a).indexOf(grp)>=0
+            ||codigosDeAgente(a).indexOf(String(c.agente||"").toUpperCase())>=0
+            ||codigosDeAgente(a).indexOf(String(c.agenteId||"").toUpperCase())>=0;}
+          catch(e){return (a.grupoAgente||"").toUpperCase()===grp||a.id===c.agente;}}));
         return{...c,agenteId:ag?.id||c.agente||"",agenteNombre:ag?.nombre||"",agenteColor:ag?.color||T.muted};
       }).filter(c=>{
         // Filtrar por equipo si es jefe
@@ -31573,7 +31651,7 @@ function HistorialClientes({usuario, actividad, muestrasDB, oportunidadesDB, inc
                   var estLabel=o.estado==="pedido"?"Pedido":o.estado==="caro"?"Caro":o.estado==="no_responde"?"No responde":"Pendiente";
                   var estColor=o.estado==="pedido"?T.green:o.estado==="caro"?T.red:o.estado==="no_responde"?T.muted:T.amber;
                   var lineas=(o.lineas||[]);
-                  var agUser=USUARIOS.find(function(u){return u.id===(o.agente||o.agenteId)||(u.grupoAgente||"").toUpperCase()===((o.agente||"").toUpperCase());});
+                  var agUser=buscarAgente(o.agente||o.agenteId);
                   return(
                     <div key={o.id||i} style={{background:"#fff",borderRadius:12,padding:"12px 14px",
                       marginBottom:8,border:"1px solid "+T.border,borderLeft:"3px solid "+estColor}}>
@@ -38958,7 +39036,7 @@ function Reporting({usuario,muestrasDB,oportunidadesDB,incidenciasDB,estrategias
     if((esJefe||esDir) && (filtroAg==="todos"||filtroAg==="WIKUK"||filtroAg==="INTERKEY")){
       var byAg={};
       var nombre = function(ag){
-        var u=USUARIOS.find(function(uu){return (uu.id||"").toUpperCase()===(ag||"").toUpperCase() || (uu.grupoAgente||"").toUpperCase()===(ag||"").toUpperCase();});
+        var u=buscarAgente(ag);
         return u?u.nombre:ag;
       };
       visSem.forEach(function(v){
@@ -39829,7 +39907,7 @@ function Calendario({usuario, clientesFB, onAbrirCliente, onEventosChange}){
     return eventos.filter(e=>{
       if(!isoSet.has(e.fecha)) return false;
       if(esAgente) return appMisIds.has((e.agente||"").toUpperCase());
-      if(esJefe){const ag=USUARIOS.find(function(u){var a=(e.agente||"").toUpperCase();return u.id===e.agente||(u.grupoAgente||"").toUpperCase()===a||(u.catalogoVendedor||"").toUpperCase()===a||(u.nombre||"").toUpperCase()===a;});return ag?.equipo===usuario.equipo;}
+      if(esJefe){const ag=buscarAgente(e.agente);return ag?.equipo===usuario.equipo;}
       if(esDir) return true; // dirección ve toda la agenda de la casa
       // (v6.5.1) Perfiles de departamento (tipología/compras): SOLO su propia
       // agenda — sus eventos (agente = sus claves) o los creados por ellos.
