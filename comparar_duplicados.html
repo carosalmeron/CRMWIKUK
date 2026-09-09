@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Comparar fichas duplicadas</title>
+<style>
+ :root{--papel:#F2F4F7;--tinta:#14181F;--tenue:#6B7684;--linea:#DCE1E7;
+       --ok:#0E7C5A;--mal:#C2263D;--med:#B07908;--okL:#EDF7F3;--malL:#FEF2F4;--medL:#FFFBEB}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--papel);color:var(--tinta);max-width:880px;
+   margin-inline:auto;padding:20px 14px 50px;
+   font:400 15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+ h1{margin:0 0 3px;font-size:21px;font-weight:800}
+ .sub{margin:0 0 16px;font-size:13px;color:var(--tenue)}
+ h2{font-size:15px;margin:22px 0 8px;padding-bottom:5px;border-bottom:2px solid var(--linea)}
+ .card{background:#fff;border:1px solid var(--linea);border-radius:8px;
+   padding:13px 14px;margin-bottom:9px;font-size:13.5px}
+ .card.ok{border-color:var(--ok);background:var(--okL)}
+ .card.mal{border-color:var(--mal);background:var(--malL)}
+ .card.med{border-color:var(--med);background:var(--medL)}
+ code{background:#F1F5F9;padding:1px 6px;border-radius:4px;font-size:11.5px;
+   font-family:ui-monospace,monospace}
+ input{width:100%;padding:10px 12px;border-radius:8px;border:1.5px solid var(--linea);
+   font-size:14px;font-family:inherit;margin-bottom:8px}
+ table{width:100%;border-collapse:collapse;font-size:12.5px;background:#fff;
+   border:1px solid var(--linea);border-radius:8px;overflow:hidden}
+ th{background:#F1F5F9;text-align:left;padding:8px;font-size:10.5px;
+   text-transform:uppercase;color:var(--tenue)}
+ td{padding:8px;border-top:1px solid var(--linea);vertical-align:top}
+ .n{text-align:right;font-variant-numeric:tabular-nums;font-weight:700}
+ button{padding:11px 20px;border-radius:9px;border:none;background:var(--tinta);
+   color:#fff;font-weight:700;font-size:13.5px;cursor:pointer;margin-top:10px}
+ button.sec{background:#fff;color:var(--tinta);border:1.5px solid var(--linea)}
+ .estado{padding:26px 4px;color:var(--tenue);text-align:center}
+ .grande{font-size:22px;font-weight:800}
+</style></head><body>
+<h1>👥 Comparar fichas duplicadas</h1>
+<p class="sub">Busca a una persona con dos fichas y mira qué arrastra cada una
+  antes de decidir cuál conservar.</p>
+<input id="q" value="acruz" placeholder="Nombre o código">
+<button onclick="ver()">Comparar</button>
+<div id="app"></div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const U=(s)=>String(s||"").toUpperCase().trim();
+const NORM=(s)=>U(s).normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^A-Z0-9]/g,"");
+
+function val(f){
+  if(!f) return null;
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.nullValue!==undefined) return null;
+  if(f.arrayValue!==undefined) return (f.arrayValue.values||[]).map(val);
+  return null;
+}
+async function leer(col,max=15){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<max);
+  return t;
+}
+
+let FICHAS=[];
+
+window.ver=async()=>{
+  const app=document.getElementById("app");
+  const q=NORM(document.getElementById("q").value);
+  if(!q){ app.innerHTML='<div class="card mal">Escribe algo.</div>'; return; }
+  app.innerHTML='<p class="estado">Contando documentos de cada una…</p>';
+  try{
+    const [us,pu]=await Promise.all([leer("usuarios"),leer("portal_users")]);
+    const casa=(o)=>[o._id,o.id,o.nombre,o.username,o.crmId,o.catalogoVendedor,
+      o.grupoAgente].filter(Boolean).some(x=>NORM(x).includes(q));
+
+    FICHAS=[...us.filter(casa).map(o=>({...o,_col:"usuarios"})),
+            ...pu.filter(casa).map(o=>({...o,_col:"portal_users"}))];
+    if(!FICHAS.length){
+      app.innerHTML='<div class="card mal">No hay fichas que coincidan.</div>';
+      return;
+    }
+
+    // Qué arrastra cada ficha
+    const cols=[["visitas",["agente","agenteId"]],["muestras",["agente"]],
+      ["ofertas",["agente","responsableComercial"]],["estrategias",["agente"]],
+      ["informes",["agente"]],["planes_semanales",["agente"]],
+      ["clientes",["agente","agenteFinal"]]];
+    const datos=await Promise.all(cols.map(c=>leer(c[0],8)));
+
+    FICHAS.forEach(f=>{
+      const claves=new Set([f._id,f.id,f.username,f.catalogoVendedor,f.grupoAgente]
+        .filter(Boolean).map(NORM));
+      f._cuenta={}; f._total=0; f._ultima="";
+      cols.forEach((c,i)=>{
+        let n=0;
+        datos[i].forEach(d=>{
+          if(!c[1].some(k=>d[k]&&claves.has(NORM(d[k])))) return;
+          n++;
+          const fe=String(d.fecha||d.fechaCreacion||"").slice(0,10);
+          if(fe&&fe>f._ultima) f._ultima=fe;
+        });
+        if(n){ f._cuenta[c[0]]=n; f._total+=n; }
+      });
+    });
+    FICHAS.sort((a,b)=>b._total-a._total);
+
+    let h='<h2>Las fichas</h2>';
+    FICHAS.forEach((f,i)=>{
+      const esMasUsada=i===0&&f._total>0;
+      h+='<div class="card '+(esMasUsada?"ok":"")+'">'
+        +'<div style="display:flex;gap:12px;align-items:baseline">'
+        +'<div style="flex:1"><b style="font-size:15px">'+(f.nombre||f.username||f._id)+'</b>'
+        +' <code>'+f._id+'</code><br>'
+        +'<span style="font-size:12px;color:var(--tenue)">'+f._col
+        +' · '+(f.rol||"—")+(f.equipo?" · "+f.equipo:"")
+        +(f.catalogoVendedor||f.grupoAgente?" · "+(f.catalogoVendedor||f.grupoAgente):"")
+        +(f.crmId?" · crmId: "+f.crmId:"")+'</span></div>'
+        +'<div style="text-align:right"><span class="grande">'+f._total+'</span>'
+        +'<br><span style="font-size:11px;color:var(--tenue)">documentos</span></div>'
+        +'</div>';
+      if(f._total){
+        h+='<div style="margin-top:8px;font-size:12px;color:var(--tenue)">'
+          +Object.entries(f._cuenta).map(([k,v])=>k+": <b>"+v+"</b>").join(" · ")
+          +(f._ultima?' · última actividad: '+f._ultima.split("-").reverse().join("/"):"")
+          +'</div>';
+      } else {
+        h+='<div style="margin-top:8px;font-size:12px;color:var(--med)">'
+          +'Sin documentos a su nombre.</div>';
+      }
+      h+='</div>';
+    });
+
+    if(FICHAS.length>1){
+      const usada=FICHAS[0], otra=FICHAS[1];
+      h+='<h2>Qué haría yo</h2><div class="card med">'
+        +'Conservar <b>'+(usada.nombre||usada._id)+'</b> <code>'+usada._id+'</code>, '
+        +'que es la que tiene '+(usada._total?'los '+usada._total+' documentos'
+          :'la ficha más completa')+'.<br><br>'
+        +'La otra, <code>'+otra._id+'</code>, se marcaría como fusionada y sus '
+        +'alias apuntarían a la primera. <b>No se borra nada</b>: sus datos '
+        +'siguen ahí y pasan a contar como de la ficha buena.</div>'
+        +'<button onclick="fusionar(0,1)">Conservar '+(usada.nombre||usada._id)+'</button> '
+        +'<button class="sec" onclick="fusionar(1,0)">Conservar '+(otra.nombre||otra._id)+'</button>';
+    }
+    app.innerHTML=h;
+  }catch(e){
+    app.innerHTML='<div class="card mal">Error: '+e.message+'</div>';
+  }
+};
+
+window.fusionar=async(iBuena,iOtra)=>{
+  const buena=FICHAS[iBuena], otra=FICHAS[iOtra];
+  if(!confirm("Se conserva "+(buena.nombre||buena._id)+" ("+buena._id+").\n\n"
+    +"Los "+otra._total+" documentos de "+otra._id+" pasarán a contar como "
+    +"suyos, mediante alias. No se borra ninguna ficha.\n\n¿Seguimos?")) return;
+  try{
+    const alias=[...new Set([otra._id,otra.id,otra.username,otra.catalogoVendedor,
+      otra.grupoAgente,buena._id,buena.catalogoVendedor,buena.grupoAgente]
+      .filter(Boolean).map(NORM))];
+    for(const al of alias){
+      await fetch(`${FB}/agentes_alias/${encodeURIComponent(al)}`,{
+        method:"PATCH",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({fields:{
+          alias:{stringValue:al},
+          canonico:{stringValue:buena._id},
+          nombre:{stringValue:buena.nombre||buena._id},
+          equipo:{stringValue:U(buena.equipo||otra.equipo||"")},
+          origen:{stringValue:"fusion_duplicados"},
+          actualizado:{stringValue:new Date().toISOString()},
+        }})});
+    }
+    // La ficha sobrante queda marcada, no se borra
+    await fetch(`${FB}/${otra._col}/${encodeURIComponent(otra._id)}`
+      +"?updateMask.fieldPaths=crmId&updateMask.fieldPaths=fusionadoEn",{
+      method:"PATCH",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({fields:{
+        crmId:{stringValue:buena._id},
+        fusionadoEn:{stringValue:buena._id},
+      }})});
+
+    document.getElementById("app").insertAdjacentHTML("afterbegin",
+      '<div class="card ok"><b>Fusionadas.</b> Recarga el CRM: los documentos '
+      +'de <code>'+otra._id+'</code> ya cuentan como de '
+      +(buena.nombre||buena._id)+'.</div>');
+  }catch(e){ alert("Error: "+e.message); }
+};
+ver();
+</script></body></html>
