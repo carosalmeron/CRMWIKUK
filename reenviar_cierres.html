@@ -84,7 +84,7 @@ async function leer(col){
   return t;
 }
 
-let CIERRES=[], USERS=[];
+let CIERRES=[], USERS=[], NOMBRES={}, ABIERTO={};
 document.getElementById("sem").value=semanaISO();
 
 window.cargar=async()=>{
@@ -92,8 +92,22 @@ window.cargar=async()=>{
   const SEM=Number(document.getElementById("sem").value)||semanaISO();
   app.innerHTML='<p class="estado">Leyendo cierres de la semana '+SEM+'…</p>';
   try{
-    const [inf,us]=await Promise.all([leer("informes"),leer("usuarios")]);
+    const [inf,us,est,ofe,mue,inc,pro]=await Promise.all([
+      leer("informes"),leer("usuarios"),
+      leer("estrategias").catch(()=>[]), leer("ofertas").catch(()=>[]),
+      leer("muestras").catch(()=>[]), leer("incidencias").catch(()=>[]),
+      leer("proyectos").catch(()=>[]),
+    ]);
     USERS=us;
+    // (sep 2026) El correo mostraba "est_1780415207180" porque el cierre no
+    // guarda el nombre del cliente en todas las respuestas. Se resuelve aqui
+    // contra la ficha real de cada estrategia, oferta o muestra.
+    NOMBRES={};
+    [...est,...ofe,...mue].forEach(o=>{
+      const n=o.clienteNombre||o.cliente||o.nombre;
+      if(n) NOMBRES[o._id]=n;
+    });
+    ABIERTO={est,ofe,inc,pro};
 
     CIERRES=inf.filter(x=>Number(x.semana)===SEM&&x.respuestas)
       .map(x=>{
@@ -108,15 +122,83 @@ window.cargar=async()=>{
           if(rol==="ceo"||rol==="director"||rol==="crm_director") return true;
           return (rol==="jefe"||rol==="crm_jefe")&&eq&&ARR(u.equipo)===eq;
         });
-        return {...x, R, yo, dest, marcado:true};
+        // Lo que tiene abierto: no está en el cierre, se cuenta aquí
+        const MIOS=new Set([ARR(x.agente)]);
+        [yo&&yo._id,yo&&yo.id,yo&&yo.grupoAgente,yo&&yo.catalogoVendedor,
+         yo&&yo.username].filter(Boolean).forEach(k=>MIOS.add(ARR(k)));
+        const suyo=(o)=>MIOS.has(ARR(o.agente))||MIOS.has(ARR(o.responsableComercial))
+          ||MIOS.has(ARR(o.creadoPor));
+        const hoy=new Date();
+        const fechaDe=(o)=>{
+          const f=o.fecha||o.fechaCreacion||o.fechaCreacionStr||"";
+          const m=String(f).match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+          if(m) return new Date(+m[3],+m[2]-1,+m[1]);
+          const d=new Date(f); return isNaN(d)?null:d;
+        };
+        const abierto={
+          estr:(ABIERTO.est||[]).filter(o=>suyo(o)&&!o.eliminada
+            &&!/completada|ko|cerrada/.test(String(o.estado||"").toLowerCase())).length,
+          ofertas:(ABIERTO.ofe||[]).filter(o=>{
+            if(!suyo(o)||o.eliminada) return false;
+            if(/pedido|perdida|aceptada|rechazada/.test(String(o.estado||"").toLowerCase())) return false;
+            const f=fechaDe(o);
+            return f&&Math.round((hoy-f)/86400000)>10;
+          }).length,
+          inc:(ABIERTO.inc||[]).filter(o=>suyo(o)&&!o.eliminada
+            &&!/resuelta|cerrada|cancelada/.test(String(o.estado||"").toLowerCase())).length,
+          hitos:[],
+          cobros:0, nFacV:0,
+        };
+        // Hitos suyos sin resolver
+        (ABIERTO.pro||[]).forEach(pr=>{
+          if(String(pr.estado||"").toLowerCase()==="cerrado") return;
+          let hs=[]; try{ hs=JSON.parse(pr.hitos||"[]"); }catch(e){}
+          if(!Array.isArray(hs)) return;
+          hs.forEach(h=>{
+            if(!h||h.hecho||h.completado) return;
+            if(!MIOS.has(ARR(h.responsable))) return;
+            abierto.hitos.push({nom:h.nombre||h.titulo||"(sin nombre)",
+              proy:pr.nombre||"", fecha:String(h.fecha||"").slice(0,10)});
+          });
+        });
+        abierto.hitos.sort((a,b)=>String(a.fecha).localeCompare(String(b.fecha)));
+
+        return {...x, R, yo, dest, abierto, MIOS, marcado:true};
       })
       .sort((a,b)=>String(b.fechaEnvio||"").localeCompare(String(a.fechaEnvio||"")));
+
+    // Cobros fuera de plazo: un documento por codigo de comercial
+    await Promise.all(CIERRES.map(async c=>{
+      for(const cod of [...(c.MIOS||[])]){
+        try{
+          const rc=await fetch(`${FB}/cobros_comercial/${encodeURIComponent(cod)}`,
+            {cache:"no-store"});
+          if(!rc.ok) continue;
+          const j=await rc.json();
+          const f={};
+          for(const [k,v] of Object.entries(j.fields||{})) f[k]=val(v);
+          const v=Number(f.totalVencido||f.venc||0);
+          if(v>c.abierto.cobros){
+            c.abierto.cobros=v;
+            c.abierto.nFacV=Number(f.nFacturasVencidas||f.nFacV||0);
+          }
+        }catch(e){}
+      }
+    }));
 
     pintar(SEM);
   }catch(e){
     app.innerHTML='<div class="card mal">Error: '+e.message+'</div>';
   }
 };
+
+// El nombre bueno: el que guardo el cierre, o el de la ficha real
+function nomDe(k,v){
+  const n=(v&&v.nom||"").trim();
+  if(n) return n;
+  const id=String(k).split(/:(.+)/)[1]||k;
+  return NOMBRES[id]||id;
+}
 
 function resumen(c){
   const R=c.R||{};
@@ -163,7 +245,7 @@ function htmlCorreo(c){
         `<div style="border-left:3px solid ${
           /fue bien|lo hice/i.test(v.accion||"")?"#0E7C5A":"#B07908"};
           padding:5px 0 5px 11px;margin-bottom:9px">
-          <div style="font-size:13.5px;font-weight:700">${esc(v.nom||k.split(":")[1])}</div>
+          <div style="font-size:13.5px;font-weight:700">${esc(nomDe(k,v))}</div>
           <div style="font-size:12px;color:#6B7684">${esc(v.accion||"")}</div>
           ${v.texto?`<div style="font-size:12.5px;color:#3A424E;margin-top:3px;
             font-style:italic">“${esc(v.texto)}”</div>`:""}
@@ -172,7 +254,7 @@ function htmlCorreo(c){
       ${bloque("Clientes en riesgo",r.riesgo,([k,v])=>
         `<div style="border-left:3px solid #C2263D;padding:5px 0 5px 11px;
           margin-bottom:9px">
-          <div style="font-size:13.5px;font-weight:700">${esc(v.nom||k.split(":")[1])}</div>
+          <div style="font-size:13.5px;font-weight:700">${esc(nomDe(k,v))}</div>
           <div style="font-size:12px;color:#6B7684">${esc(v.accion||"")}</div>
           ${v.texto?`<div style="font-size:12.5px;color:#3A424E;margin-top:3px;
             font-style:italic">“${esc(v.texto)}”</div>`:""}
@@ -181,8 +263,35 @@ function htmlCorreo(c){
       ${r.cerr.length?`<h3 style="margin:20px 0 7px;font-size:14px">
         Ha cerrado ${r.cerr.length}</h3>
         <div style="font-size:12.5px;color:#6B7684">${
-          r.cerr.map(([k,v])=>esc(v.nom||k.split(":")[1])
+          r.cerr.map(([k,v])=>esc(nomDe(k,v))
             +" ("+esc(v.accion||"")+")").join(" · ")}</div>`:""}
+
+      ${(()=>{ const a=c.abierto||{};
+        if(!a.cobros&&!a.inc&&!a.estr&&!a.ofertas&&!(a.hitos||[]).length) return "";
+        const fila=(t,v,col)=>`<tr>
+          <td style="padding:7px 0;border-bottom:1px solid #EEF1F5">${t}</td>
+          <td style="padding:7px 0;border-bottom:1px solid #EEF1F5;text-align:right;
+            font-weight:800${col?";color:"+col:""}">${v}</td></tr>`;
+        return `<h3 style="margin:22px 0 8px;font-size:14px;color:#14181F">
+          Lo que tiene abierto</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          ${a.cobros?fila("💰 Cobros fuera de plazo"
+            +(a.nFacV?` <span style="color:#6B7684;font-size:11.5px">· ${a.nFacV} facturas</span>`:""),
+            Math.round(a.cobros).toLocaleString("es-ES")+" €","#C2263D"):""}
+          ${a.inc?fila("🚨 Incidencias sin resolver",a.inc):""}
+          ${a.estr?fila("🎯 Estrategias sin cerrar",a.estr):""}
+          ${a.ofertas?fila("💰 Ofertas de más de 10 días",a.ofertas):""}
+          ${(a.hitos||[]).length?fila("📁 Hitos de proyecto sin resolver",a.hitos.length):""}
+        </table>
+        ${(a.hitos||[]).length?`<div style="margin-top:9px">
+          ${a.hitos.slice(0,6).map(h=>`<div style="font-size:12.5px;color:#3A424E;
+            padding:4px 0 4px 11px;border-left:2px solid #DCE1E7;margin-bottom:4px">
+            ${esc(h.nom)}${h.proy?`<span style="color:#8A94A0"> · ${esc(h.proy)}</span>`:""}
+            ${h.fecha?`<span style="color:#B07908"> · ${
+              h.fecha.split("-").reverse().join("/")}</span>`:""}</div>`).join("")}
+          ${a.hitos.length>6?`<div style="font-size:11.5px;color:#8A94A0">
+            y ${a.hitos.length-6} más</div>`:""}</div>`:""}`;
+      })()}
 
       ${r.prioridad?`<div style="background:#FFFBEB;border:1px solid #F59E0B;
         border-radius:10px;padding:14px 16px;margin-top:20px">
