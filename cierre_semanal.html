@@ -385,11 +385,227 @@ async function avisarDelCierre(nCerradas){
 
   const ahora=new Date().toISOString();
   const titulo="📋 "+miNombre+" ha cerrado la semana "+SEMANA;
-  const mensaje=miNombre+" ha enviado su cierre de la semana "+SEMANA
-    +(nCerradas?" y ha cerrado "+nCerradas+" cosas en el sistema":"")
-    +". Puedes verlo en su parte semanal.";
   const enlace="https://crmwikuk.vercel.app/parte_semanal.html?agente="
     +encodeURIComponent(AGENTE);
+
+  // (sep 2026) El correo trae el contenido, no solo el aviso: el CEO se
+  // entera sin tener que entrar, y quien quiera el detalle tiene el enlace.
+  const esc=(t)=>String(t||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+  const R2=R||{};
+
+  // Lo prometido el lunes y qué pasó
+  const promesas=Object.entries(R2)
+    .filter(([k,v])=>k.startsWith("promesa:")&&(v.accion||v.texto))
+    .map(([k,v])=>({nom:(v.nom||"").trim()||k.split(":")[1],
+      accion:v.accion||"", texto:v.texto||""}));
+  const cumplidas=promesas.filter(x=>/fue bien|lo hice/i.test(x.accion)).length;
+
+  // Clientes en riesgo sobre los que ha dicho algo
+  const riesgo=Object.entries(R2)
+    .filter(([k,v])=>k.startsWith("cliente:")&&(v.accion||v.texto))
+    .map(([k,v])=>({nom:(v.nom||"").trim()||k.split(":")[1],
+      accion:v.accion||"", texto:v.texto||""}));
+
+  // Lo que ha dado por cerrado
+  const cerradas=Object.entries(R2)
+    .filter(([k,v])=>v.cierra)
+    .map(([k,v])=>({nom:(v.nom||"").trim()||k.split(":")[1],accion:v.accion||""}));
+
+  const comoHaIdo=(R2.semana||{}).texto||"";
+  const prioridad=(R2.prioridad||{}).texto||"";
+
+  // (sep 2026) El correo traia solo lo que el comercial escribe. Se le añade
+  // lo que el sistema sabe y el no cuenta: cobros vencidos, hitos, incidencias,
+  // estrategias y ofertas paradas. Asi el responsable ve la foto entera.
+  const extra={cobros:0, nFacV:0, hitos:[], inc:0, estr:0, ofertas:0};
+  try{
+    const _campos=(j)=>{ const o={}; for(const [k,v] of Object.entries((j&&j.fields)||{}))
+      o[k]=v.stringValue!==undefined?v.stringValue
+        :v.doubleValue!==undefined?Number(v.doubleValue)
+        :v.integerValue!==undefined?Number(v.integerValue)
+        :v.booleanValue!==undefined?v.booleanValue:null;
+      return o; };
+
+    const D=window._CIERRE_DATOS||{};
+    const MIOS=D.MIOS||new Set([AGENTE]);
+    const of=D.of||[], es=D.es||[], esMio=D.esMio||(()=>false), fecha=D.fecha||(()=>null);
+
+    // Cobros fuera de plazo: se prueba con cada codigo suyo
+    for(const cod of [...MIOS]){
+      try{
+        const rc=await fetch(`${FB}/cobros_comercial/${encodeURIComponent(cod)}`,{cache:"no-store"});
+        if(!rc.ok) continue;
+        const c=_campos(await rc.json());
+        const v=Number(c.totalVencido||c.venc||0);
+        if(v>extra.cobros){ extra.cobros=v; extra.nFacV=Number(c.nFacturasVencidas||c.nFacV||0); }
+      }catch(e){}
+    }
+
+    // Hitos de proyecto suyos sin resolver
+    try{
+      const rp=await fetch(`${FB}/proyectos?pageSize=300`);
+      if(rp.ok){
+        const jp=await rp.json();
+        (jp.documents||[]).forEach(d=>{
+          const f=_campos(d);
+          if(String(f.estado||"").toLowerCase()==="cerrado") return;
+          let hs=[]; try{ hs=JSON.parse(f.hitos||"[]"); }catch(e){}
+          if(!Array.isArray(hs)){
+            // Los hitos pueden venir como array de Firestore
+            const arr=(d.fields&&d.fields.hitos&&d.fields.hitos.arrayValue&&
+              d.fields.hitos.arrayValue.values)||[];
+            hs=arr.map(v=>{ const o={};
+              for(const [k,x] of Object.entries((v.mapValue&&v.mapValue.fields)||{}))
+                o[k]=x.stringValue!==undefined?x.stringValue
+                  :x.booleanValue!==undefined?x.booleanValue:null;
+              return o; });
+          }
+          hs.forEach(h=>{
+            if(!h||h.hecho||h.completado) return;
+            if(!MIOS.has(ARR(h.responsable))) return;
+            extra.hitos.push({nom:h.nombre||h.titulo||"(sin nombre)",
+              proy:f.nombre||"", fecha:String(h.fecha||"").slice(0,10)});
+          });
+        });
+        extra.hitos.sort((a,b)=>String(a.fecha).localeCompare(String(b.fecha)));
+      }
+    }catch(e){}
+
+    // Incidencias suyas sin resolver
+    try{
+      const ri=await fetch(`${FB}/incidencias?pageSize=300`);
+      if(ri.ok){
+        const ji=await ri.json();
+        extra.inc=(ji.documents||[]).filter(d=>{
+          const f=_campos(d);
+          if(f.eliminada) return false;
+          const e=String(f.estado||"").toLowerCase();
+          if(/resuelta|cerrada|cancelada/.test(e)) return false;
+          return MIOS.has(ARR(f.agente))||MIOS.has(ARR(f.creadoPor));
+        }).length;
+      }
+    }catch(e){}
+
+    // Estrategias y ofertas ya se han leido arriba para el cierre
+    extra.estr=(es||[]).filter(o=>esMio(o)
+      &&!/completada|ko|cerrada/.test(String(o.estado||"").toLowerCase())).length;
+    const hoyO=new Date();
+    extra.ofertas=(of||[]).filter(o=>{
+      if(!esMio(o)) return false;
+      if(/pedido|perdida|aceptada|rechazada/.test(String(o.estado||"").toLowerCase())) return false;
+      const f=fecha(o.fecha||o.fechaCreacion);
+      return f && Math.round((hoyO-f)/86400000)>10;
+    }).length;
+  }catch(e){}
+
+  const mensaje=miNombre+" ha cerrado la semana "+SEMANA+". "
+    +(promesas.length?"Cumplió "+cumplidas+" de "+promesas.length+" compromisos. ":"")
+    +(prioridad?"Su prioridad para la semana "+(SEMANA+1)+": "+prioridad:"");
+
+  const bloque=(tit,items,pinta)=>items.length
+    ? `<h3 style="margin:20px 0 7px;font-size:14px;color:#14181F">${tit}</h3>`
+      +items.map(pinta).join("")
+    : "";
+
+  const html=`<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',
+    Roboto,sans-serif;max-width:600px;margin:0 auto;color:#14181F;line-height:1.55">
+    <div style="background:#14181F;color:#fff;padding:18px 20px;border-radius:12px 12px 0 0">
+      <div style="font-size:11px;letter-spacing:.08em;opacity:.7;
+        text-transform:uppercase">Cierre semanal · semana ${SEMANA}</div>
+      <div style="font-size:20px;font-weight:800;margin-top:3px">${esc(miNombre)}</div>
+      ${yo&&yo.equipo?`<div style="font-size:12px;opacity:.75">${esc(yo.equipo)}</div>`:""}
+    </div>
+    <div style="border:1px solid #DCE1E7;border-top:none;border-radius:0 0 12px 12px;
+      padding:20px">
+
+      ${promesas.length?`<div style="background:#F7F9FB;border-radius:10px;
+        padding:14px 16px;margin-bottom:4px">
+        <div style="font-size:26px;font-weight:800;line-height:1">${cumplidas}
+          <span style="font-size:15px;font-weight:400;color:#6B7684">de ${
+            promesas.length}</span></div>
+        <div style="font-size:12px;color:#6B7684">compromisos del lunes cumplidos</div>
+      </div>`:""}
+
+      ${comoHaIdo?`<h3 style="margin:20px 0 7px;font-size:14px">Cómo ha ido</h3>
+        <p style="margin:0;font-size:13.5px;color:#3A424E;white-space:pre-wrap"
+          >${esc(comoHaIdo)}</p>`:""}
+
+      ${bloque("Lo que dijo el lunes",promesas,x=>
+        `<div style="border-left:3px solid ${
+          /fue bien|lo hice/i.test(x.accion)?"#0E7C5A":"#B07908"};
+          padding:5px 0 5px 11px;margin-bottom:9px">
+          <div style="font-size:13.5px;font-weight:700">${esc(x.nom)}</div>
+          <div style="font-size:12px;color:#6B7684">${esc(x.accion)}</div>
+          ${x.texto?`<div style="font-size:12.5px;color:#3A424E;margin-top:3px;
+            font-style:italic">“${esc(x.texto)}”</div>`:""}
+        </div>`)}
+
+      ${bloque("Clientes en riesgo",riesgo,x=>
+        `<div style="border-left:3px solid #C2263D;padding:5px 0 5px 11px;
+          margin-bottom:9px">
+          <div style="font-size:13.5px;font-weight:700">${esc(x.nom)}</div>
+          <div style="font-size:12px;color:#6B7684">${esc(x.accion)}</div>
+          ${x.texto?`<div style="font-size:12.5px;color:#3A424E;margin-top:3px;
+            font-style:italic">“${esc(x.texto)}”</div>`:""}
+        </div>`)}
+
+      ${cerradas.length?`<h3 style="margin:20px 0 7px;font-size:14px">
+        Ha cerrado ${cerradas.length}</h3>
+        <div style="font-size:12.5px;color:#6B7684">${
+          cerradas.map(x=>esc(x.nom)+" ("+esc(x.accion)+")").join(" · ")}</div>`:""}
+
+      ${(extra.cobros||extra.hitos.length||extra.inc||extra.estr||extra.ofertas)?`
+      <h3 style="margin:22px 0 8px;font-size:14px;color:#14181F">Lo que tiene abierto</h3>
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        ${extra.cobros?`<tr>
+          <td style="padding:7px 0;border-bottom:1px solid #EEF1F5">💰 Cobros fuera de plazo
+            ${extra.nFacV?`<span style="color:#6B7684;font-size:11.5px"> · ${
+              extra.nFacV} facturas</span>`:""}</td>
+          <td style="padding:7px 0;border-bottom:1px solid #EEF1F5;text-align:right;
+            font-weight:800;color:#C2263D">${
+            Math.round(extra.cobros).toLocaleString("es-ES")} €</td></tr>`:""}
+        ${extra.inc?`<tr>
+          <td style="padding:7px 0;border-bottom:1px solid #EEF1F5">🚨 Incidencias sin resolver</td>
+          <td style="padding:7px 0;border-bottom:1px solid #EEF1F5;text-align:right;
+            font-weight:800">${extra.inc}</td></tr>`:""}
+        ${extra.estr?`<tr>
+          <td style="padding:7px 0;border-bottom:1px solid #EEF1F5">🎯 Estrategias sin cerrar</td>
+          <td style="padding:7px 0;border-bottom:1px solid #EEF1F5;text-align:right;
+            font-weight:800">${extra.estr}</td></tr>`:""}
+        ${extra.ofertas?`<tr>
+          <td style="padding:7px 0;border-bottom:1px solid #EEF1F5">💰 Ofertas de más de 10 días</td>
+          <td style="padding:7px 0;border-bottom:1px solid #EEF1F5;text-align:right;
+            font-weight:800">${extra.ofertas}</td></tr>`:""}
+        ${extra.hitos.length?`<tr>
+          <td style="padding:7px 0">📁 Hitos de proyecto sin resolver</td>
+          <td style="padding:7px 0;text-align:right;font-weight:800">${extra.hitos.length}</td></tr>`:""}
+      </table>
+      ${extra.hitos.length?`<div style="margin-top:9px">
+        ${extra.hitos.slice(0,6).map(h=>`<div style="font-size:12.5px;color:#3A424E;
+          padding:4px 0 4px 11px;border-left:2px solid #DCE1E7;margin-bottom:4px">
+          ${esc(h.nom)}${h.proy?`<span style="color:#8A94A0"> · ${esc(h.proy)}</span>`:""}
+          ${h.fecha?`<span style="color:#B07908"> · ${
+            h.fecha.split("-").reverse().join("/")}</span>`:""}</div>`).join("")}
+        ${extra.hitos.length>6?`<div style="font-size:11.5px;color:#8A94A0">
+          y ${extra.hitos.length-6} más</div>`:""}
+      </div>`:""}`:""}
+
+      ${prioridad?`<div style="background:#FFFBEB;border:1px solid #F59E0B;
+        border-radius:10px;padding:14px 16px;margin-top:20px">
+        <div style="font-size:11px;font-weight:800;color:#92400E;
+          text-transform:uppercase;letter-spacing:.05em">Su prioridad · semana ${SEMANA+1}</div>
+        <div style="font-size:14px;margin-top:5px;color:#14181F">${esc(prioridad)}</div>
+      </div>`:""}
+
+      <div style="margin-top:22px;text-align:center">
+        <a href="${enlace}" style="display:inline-block;background:#14181F;
+          color:#fff;text-decoration:none;padding:11px 26px;border-radius:9px;
+          font-size:13.5px;font-weight:700">Ver el parte completo</a>
+      </div>
+      <p style="margin:18px 0 0;font-size:11px;color:#8A94A0;text-align:center">
+        Enviado automáticamente al cerrar la semana en el CRM.</p>
+    </div>
+  </div>`;
 
   for(const id of destinos){
     const dest=us.find(u=>u._id===id)||{};
@@ -421,10 +637,8 @@ async function avisarDelCierre(nCerradas){
     if(dest.email){
       fetch("/api/send-email",{
         method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({
-          to:dest.email, subject:titulo,
-          html:`<p>${mensaje}</p><p><a href="${enlace}">Ver el parte</a></p>`,
-        })}).catch(()=>{});
+        body:JSON.stringify({ to:dest.email, subject:titulo, html:html })
+      }).catch(()=>{});
     }
   }
 }
@@ -577,6 +791,8 @@ async function enviar(){
     // (ik4, wk2...), no con la clave del comercial. Sin traducir, AZARCO salia
     // sin ninguna muestra teniendo cientos.
     const MIOS=new Set([AGENTE]);
+    // El correo del cierre necesita estos datos y se construye fuera de aqui
+    window._CIERRE_DATOS={};
     perf.forEach(x=>{ if(ARR(x.agente)===AGENTE) MIOS.add(ARR(x._id)); });
     [...portal,...usus].forEach(f=>{
       if(ARR(f.grupoAgente||f.catalogoVendedor)!==AGENTE) return;
@@ -811,6 +1027,8 @@ async function enviar(){
     const plan=await leerDoc(`planes_semanales/plan_${UID}_${ANIO}_s${SEMANA}`)
       || await leerDoc(`planes_semanales/plan_${AGENTE}_${ANIO}_s${SEMANA}`)
       || await leerDoc(`planes_semanales/plan_${AGENTE.toLowerCase()}_${ANIO}_s${SEMANA}`);
+    window._CIERRE_DATOS={MIOS:MIOS, of:of, es:es, mu:mu, esMio:esMio, fecha:fecha, yo:yo};
+
     let prometido=[];
     if(plan&&plan.acciones){
       let A={}; try{ A=JSON.parse(plan.acciones); }catch(e){}
