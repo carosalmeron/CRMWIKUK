@@ -68,6 +68,23 @@ function val(f){
   if(f.nullValue!==undefined) return null;
   return null;
 }
+// (sep 2026) Los hitos vienen como arrayValue de Firestore, no como texto
+// JSON: hacer JSON.parse fallaba siempre y por eso no salia ninguno.
+function desdeFB(v){
+  if(!v) return null;
+  if(v.stringValue!==undefined) return v.stringValue;
+  if(v.booleanValue!==undefined) return v.booleanValue;
+  if(v.doubleValue!==undefined) return Number(v.doubleValue);
+  if(v.integerValue!==undefined) return Number(v.integerValue);
+  if(v.nullValue!==undefined) return null;
+  if(v.arrayValue!==undefined) return (v.arrayValue.values||[]).map(desdeFB);
+  if(v.mapValue!==undefined){
+    const o={};
+    for(const [k,x] of Object.entries(v.mapValue.fields||{})) o[k]=desdeFB(x);
+    return o;
+  }
+  return null;
+}
 async function leer(col){
   const t=[]; let tok=null,v=0;
   do{
@@ -76,7 +93,7 @@ async function leer(col){
     const j=await r.json();
     for(const d of j.documents||[]){
       const o={_id:decodeURIComponent(d.name.split("/").pop())};
-      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=desdeFB(x);
       t.push(o);
     }
     tok=j.nextPageToken||null; v++;
@@ -84,7 +101,7 @@ async function leer(col){
   return t;
 }
 
-let CIERRES=[], USERS=[], NOMBRES={}, ABIERTO={};
+let CIERRES=[], USERS=[], NOMBRES={}, ABIERTO={}, ALIAS={};
 document.getElementById("sem").value=semanaISO();
 
 window.cargar=async()=>{
@@ -92,12 +109,25 @@ window.cargar=async()=>{
   const SEM=Number(document.getElementById("sem").value)||semanaISO();
   app.innerHTML='<p class="estado">Leyendo cierres de la semana '+SEM+'…</p>';
   try{
-    const [inf,us,est,ofe,mue,inc,pro]=await Promise.all([
+    const [inf,us,est,ofe,mue,inc,pro,ali]=await Promise.all([
       leer("informes"),leer("usuarios"),
       leer("estrategias").catch(()=>[]), leer("ofertas").catch(()=>[]),
       leer("muestras").catch(()=>[]), leer("incidencias").catch(()=>[]),
       leer("proyectos").catch(()=>[]),
+      leer("agentes_alias").catch(()=>[]),
     ]);
+    // Alias por canonico: todos los codigos con los que aparece cada persona
+    ALIAS={};
+    (ali||[]).forEach(a=>{
+      const c=ARR(a.canonico);
+      if(!c) return;
+      (ALIAS[c]=ALIAS[c]||[]).push(ARR(a.alias||a._id));
+      if(a.original) ALIAS[c].push(ARR(a.original));
+    });
+    // Y al reves: desde cualquier alias se llega al resto
+    Object.entries({...ALIAS}).forEach(([c,l])=>{
+      l.forEach(al=>{ ALIAS[al]=[...new Set([c,...l])]; });
+    });
     USERS=us;
     // (sep 2026) El correo mostraba "est_1780415207180" porque el cierre no
     // guarda el nombre del cliente en todas las respuestas. Se resuelve aqui
@@ -123,9 +153,16 @@ window.cargar=async()=>{
           return (rol==="jefe"||rol==="crm_jefe")&&eq&&ARR(u.equipo)===eq;
         });
         // Lo que tiene abierto: no está en el cierre, se cuenta aquí
+        // (sep 2026) Cada coleccion usa un identificador distinto: las
+        // estrategias guardan el codigo de vendedor (DAVIDMAG) y los hitos el
+        // id del CRM (ik4). Comparando contra uno solo no cruzaba ninguno.
         const MIOS=new Set([ARR(x.agente)]);
-        [yo&&yo._id,yo&&yo.id,yo&&yo.grupoAgente,yo&&yo.catalogoVendedor,
-         yo&&yo.username].filter(Boolean).forEach(k=>MIOS.add(ARR(k)));
+        [yo&&yo._id,yo&&yo.id,yo&&yo.crmId,yo&&yo.grupoAgente,
+         yo&&yo.catalogoVendedor,yo&&yo.username,yo&&yo.nombre]
+          .filter(Boolean).forEach(k=>MIOS.add(ARR(k)));
+        // Y sus alias registrados, que cubren los ids del portal
+        (ALIAS[ARR(x.agente)]||[]).forEach(k=>MIOS.add(ARR(k)));
+        if(yo) (ALIAS[ARR(yo._id)]||[]).forEach(k=>MIOS.add(ARR(k)));
         const suyo=(o)=>MIOS.has(ARR(o.agente))||MIOS.has(ARR(o.responsableComercial))
           ||MIOS.has(ARR(o.creadoPor));
         const hoy=new Date();
@@ -152,8 +189,7 @@ window.cargar=async()=>{
         // Hitos suyos sin resolver
         (ABIERTO.pro||[]).forEach(pr=>{
           if(String(pr.estado||"").toLowerCase()==="cerrado") return;
-          let hs=[]; try{ hs=JSON.parse(pr.hitos||"[]"); }catch(e){}
-          if(!Array.isArray(hs)) return;
+          const hs=Array.isArray(pr.hitos)?pr.hitos:[];
           hs.forEach(h=>{
             if(!h||h.hecho||h.completado) return;
             if(!MIOS.has(ARR(h.responsable))) return;
