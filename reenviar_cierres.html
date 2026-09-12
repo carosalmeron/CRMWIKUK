@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reenviar cierres</title>
+<style>
+ :root{--papel:#F2F4F7;--tinta:#14181F;--tenue:#6B7684;--linea:#DCE1E7;
+       --ok:#0E7C5A;--mal:#C2263D;--med:#B07908;--okL:#EDF7F3;--malL:#FEF2F4;--medL:#FFFBEB}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--papel);color:var(--tinta);max-width:860px;
+   margin-inline:auto;padding:20px 14px 90px;
+   font:400 15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+ h1{margin:0 0 3px;font-size:21px;font-weight:800}
+ .sub{margin:0 0 14px;font-size:13px;color:var(--tenue)}
+ .card{background:#fff;border:1px solid var(--linea);border-radius:10px;
+   padding:14px 15px;margin-bottom:10px}
+ .card.ok{border-color:var(--ok);background:var(--okL)}
+ .card.mal{border-color:var(--mal);background:var(--malL)}
+ .card.med{border-color:var(--med);background:var(--medL)}
+ code{background:#F1F5F9;padding:1px 6px;border-radius:4px;font-size:11.5px;
+   font-family:ui-monospace,monospace}
+ .fila{display:flex;gap:12px;align-items:center}
+ .fila input[type=checkbox]{width:18px;height:18px}
+ .n{font-size:20px;font-weight:800;line-height:1}
+ select,input[type=text]{padding:8px 10px;border-radius:8px;
+   border:1.5px solid var(--linea);font-size:13px;font-family:inherit}
+ button{padding:11px 20px;border-radius:9px;border:none;background:var(--tinta);
+   color:#fff;font-weight:700;font-size:13.5px;cursor:pointer}
+ button:disabled{background:#94A3B8;cursor:default}
+ button.sec{background:#fff;color:var(--tinta);border:1.5px solid var(--linea);
+   padding:7px 13px;font-size:12.5px}
+ .estado{padding:32px 4px;color:var(--tenue);text-align:center}
+ .barra{position:fixed;left:0;right:0;bottom:0;background:#fff;
+   border-top:1px solid var(--linea);padding:12px 14px;display:flex;gap:10px;
+   align-items:center;justify-content:space-between;box-shadow:0 -2px 12px #0000000f}
+ .prev{max-height:420px;overflow:auto;border:1px solid var(--linea);
+   border-radius:10px;margin-top:10px;background:#fff}
+</style></head><body>
+<h1>✉️ Reenviar cierres de la semana</h1>
+<p class="sub">Lee los cierres ya guardados y compone el correo para el
+  responsable. Útil para los que se enviaron antes de que el aviso existiera.</p>
+<div style="display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
+  <label style="font-size:13px;color:var(--tenue)">Semana</label>
+  <input type="text" id="sem" style="width:80px" value="">
+  <button class="sec" onclick="cargar()">Buscar</button>
+</div>
+<div id="app"><p class="estado">Cargando…</p></div>
+<div class="barra" id="barra" style="display:none">
+  <span class="sub" id="txt" style="margin:0"></span>
+  <button id="btn" onclick="enviarTodos()">Enviar a los responsables</button>
+</div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const ARR=(s)=>String(s||"").toUpperCase().trim();
+const esc=(t)=>String(t||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+
+function semanaISO(d=new Date()){
+  const t=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));
+  t.setUTCDate(t.getUTCDate()+4-(t.getUTCDay()||7));
+  return Math.ceil(((t-new Date(Date.UTC(t.getUTCFullYear(),0,1)))/86400000+1)/7);
+}
+function val(f){
+  if(!f) return null;
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.nullValue!==undefined) return null;
+  return null;
+}
+async function leer(col){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<20);
+  return t;
+}
+
+let CIERRES=[], USERS=[];
+document.getElementById("sem").value=semanaISO();
+
+window.cargar=async()=>{
+  const app=document.getElementById("app");
+  const SEM=Number(document.getElementById("sem").value)||semanaISO();
+  app.innerHTML='<p class="estado">Leyendo cierres de la semana '+SEM+'…</p>';
+  try{
+    const [inf,us]=await Promise.all([leer("informes"),leer("usuarios")]);
+    USERS=us;
+
+    CIERRES=inf.filter(x=>Number(x.semana)===SEM&&x.respuestas)
+      .map(x=>{
+        let R={}; try{ R=JSON.parse(x.respuestas||"{}"); }catch(e){}
+        const yo=us.find(u=>[u._id,u.id,u.grupoAgente,u.catalogoVendedor,u.username]
+          .filter(Boolean).some(k=>ARR(k)===ARR(x.agente)));
+        // A quién le toca: su jefe de equipo, más director y CEO
+        const eq=ARR(yo&&yo.equipo);
+        const dest=us.filter(u=>{
+          const rol=String(u.rol||"").toLowerCase();
+          if(u._id===(yo&&yo._id)) return false;
+          if(rol==="ceo"||rol==="director"||rol==="crm_director") return true;
+          return (rol==="jefe"||rol==="crm_jefe")&&eq&&ARR(u.equipo)===eq;
+        });
+        return {...x, R, yo, dest, marcado:true};
+      })
+      .sort((a,b)=>String(b.fechaEnvio||"").localeCompare(String(a.fechaEnvio||"")));
+
+    pintar(SEM);
+  }catch(e){
+    app.innerHTML='<div class="card mal">Error: '+e.message+'</div>';
+  }
+};
+
+function resumen(c){
+  const R=c.R||{};
+  const prom=Object.entries(R).filter(([k,v])=>k.startsWith("promesa:")&&(v.accion||v.texto));
+  const cumpl=prom.filter(([k,v])=>/fue bien|lo hice/i.test(v.accion||"")).length;
+  const riesgo=Object.entries(R).filter(([k,v])=>k.startsWith("cliente:")&&(v.accion||v.texto));
+  const cerr=Object.entries(R).filter(([k,v])=>v.cierra);
+  return {prom,cumpl,riesgo,cerr,
+    comoHaIdo:(R.semana||{}).texto||"", prioridad:(R.prioridad||{}).texto||""};
+}
+
+function htmlCorreo(c){
+  const r=resumen(c);
+  const nom=(c.yo&&c.yo.nombre)||c.agente;
+  const enlace="https://crmwikuk.vercel.app/parte_semanal.html?agente="
+    +encodeURIComponent(c.agente);
+  const bloque=(tit,items,pinta)=>items.length
+    ? `<h3 style="margin:20px 0 7px;font-size:14px;color:#14181F">${tit}</h3>`
+      +items.map(pinta).join("") : "";
+
+  return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',
+    Roboto,sans-serif;max-width:600px;margin:0 auto;color:#14181F;line-height:1.55">
+    <div style="background:#14181F;color:#fff;padding:18px 20px;border-radius:12px 12px 0 0">
+      <div style="font-size:11px;letter-spacing:.08em;opacity:.7;
+        text-transform:uppercase">Cierre semanal · semana ${c.semana}</div>
+      <div style="font-size:20px;font-weight:800;margin-top:3px">${esc(nom)}</div>
+      ${c.yo&&c.yo.equipo?`<div style="font-size:12px;opacity:.75">${esc(c.yo.equipo)}</div>`:""}
+    </div>
+    <div style="border:1px solid #DCE1E7;border-top:none;border-radius:0 0 12px 12px;
+      padding:20px;background:#fff">
+      ${r.prom.length?`<div style="background:#F7F9FB;border-radius:10px;
+        padding:14px 16px;margin-bottom:4px">
+        <div style="font-size:26px;font-weight:800;line-height:1">${r.cumpl}
+          <span style="font-size:15px;font-weight:400;color:#6B7684">de ${
+            r.prom.length}</span></div>
+        <div style="font-size:12px;color:#6B7684">compromisos del lunes cumplidos</div>
+      </div>`:""}
+
+      ${r.comoHaIdo?`<h3 style="margin:20px 0 7px;font-size:14px">Cómo ha ido</h3>
+        <p style="margin:0;font-size:13.5px;color:#3A424E;white-space:pre-wrap"
+          >${esc(r.comoHaIdo)}</p>`:""}
+
+      ${bloque("Lo que dijo el lunes",r.prom,([k,v])=>
+        `<div style="border-left:3px solid ${
+          /fue bien|lo hice/i.test(v.accion||"")?"#0E7C5A":"#B07908"};
+          padding:5px 0 5px 11px;margin-bottom:9px">
+          <div style="font-size:13.5px;font-weight:700">${esc(v.nom||k.split(":")[1])}</div>
+          <div style="font-size:12px;color:#6B7684">${esc(v.accion||"")}</div>
+          ${v.texto?`<div style="font-size:12.5px;color:#3A424E;margin-top:3px;
+            font-style:italic">“${esc(v.texto)}”</div>`:""}
+        </div>`)}
+
+      ${bloque("Clientes en riesgo",r.riesgo,([k,v])=>
+        `<div style="border-left:3px solid #C2263D;padding:5px 0 5px 11px;
+          margin-bottom:9px">
+          <div style="font-size:13.5px;font-weight:700">${esc(v.nom||k.split(":")[1])}</div>
+          <div style="font-size:12px;color:#6B7684">${esc(v.accion||"")}</div>
+          ${v.texto?`<div style="font-size:12.5px;color:#3A424E;margin-top:3px;
+            font-style:italic">“${esc(v.texto)}”</div>`:""}
+        </div>`)}
+
+      ${r.cerr.length?`<h3 style="margin:20px 0 7px;font-size:14px">
+        Ha cerrado ${r.cerr.length}</h3>
+        <div style="font-size:12.5px;color:#6B7684">${
+          r.cerr.map(([k,v])=>esc(v.nom||k.split(":")[1])
+            +" ("+esc(v.accion||"")+")").join(" · ")}</div>`:""}
+
+      ${r.prioridad?`<div style="background:#FFFBEB;border:1px solid #F59E0B;
+        border-radius:10px;padding:14px 16px;margin-top:20px">
+        <div style="font-size:11px;font-weight:800;color:#92400E;
+          text-transform:uppercase;letter-spacing:.05em">Su prioridad · semana ${
+            Number(c.semana)+1}</div>
+        <div style="font-size:14px;margin-top:5px">${esc(r.prioridad)}</div>
+      </div>`:""}
+
+      <div style="margin-top:22px;text-align:center">
+        <a href="${enlace}" style="display:inline-block;background:#14181F;
+          color:#fff;text-decoration:none;padding:11px 26px;border-radius:9px;
+          font-size:13.5px;font-weight:700">Ver el parte completo</a>
+      </div>
+    </div>
+  </div>`;
+}
+
+function pintar(SEM){
+  const app=document.getElementById("app");
+  if(!CIERRES.length){
+    app.innerHTML='<div class="card med">No hay cierres guardados de la semana '
+      +SEM+'.</div>';
+    document.getElementById("barra").style.display="none";
+    return;
+  }
+  app.innerHTML=CIERRES.map((c,i)=>{
+    const r=resumen(c);
+    const nom=(c.yo&&c.yo.nombre)||c.agente;
+    const conEmail=c.dest.filter(d=>d.email);
+    return `<div class="card">
+      <div class="fila">
+        <input type="checkbox" ${c.marcado?"checked":""}
+          onchange="marcar(${i},this.checked)">
+        <div style="flex:1;min-width:0">
+          <b style="font-size:15px">${esc(nom)}</b>
+          ${c.yo&&c.yo.equipo?`<span style="color:var(--tenue);font-size:12px"> · ${
+            esc(c.yo.equipo)}</span>`:""}
+          <div style="font-size:12px;color:var(--tenue);margin-top:2px">
+            ${r.prom.length?r.cumpl+" de "+r.prom.length+" cumplidos · ":""}
+            ${r.riesgo.length?r.riesgo.length+" en riesgo · ":""}
+            ${r.cerr.length?r.cerr.length+" cerradas · ":""}
+            ${c.fechaEnvio?"enviado "+String(c.fechaEnvio).slice(0,10)
+              .split("-").reverse().join("/"):""}
+          </div>
+          <div style="font-size:11.5px;margin-top:4px;color:${
+            conEmail.length?"var(--ok)":"var(--mal)"}">
+            ${conEmail.length
+              ? "→ "+conEmail.map(d=>esc(d.nombre||d._id)).join(", ")
+              : "⚠ Ningún responsable con email"}</div>
+        </div>
+        <button class="sec" onclick="verPrev(${i})">Ver</button>
+      </div>
+      <div id="prev${i}"></div>
+    </div>`;
+  }).join("");
+
+  document.getElementById("barra").style.display="flex";
+  actualiza();
+}
+
+window.marcar=(i,v)=>{ CIERRES[i].marcado=v; actualiza(); };
+function actualiza(){
+  const n=CIERRES.filter(c=>c.marcado&&c.dest.some(d=>d.email)).length;
+  document.getElementById("txt").textContent=n+" cierre(s) se enviarán";
+  document.getElementById("btn").disabled=!n;
+}
+
+window.verPrev=(i)=>{
+  const d=document.getElementById("prev"+i);
+  if(d.innerHTML){ d.innerHTML=""; return; }
+  d.innerHTML='<div class="prev">'+htmlCorreo(CIERRES[i])+'</div>';
+};
+
+window.enviarTodos=async()=>{
+  const lista=CIERRES.filter(c=>c.marcado&&c.dest.some(d=>d.email));
+  if(!lista.length) return;
+  const nEnv=lista.reduce((t,c)=>t+c.dest.filter(d=>d.email).length,0);
+  if(!confirm("Se enviarán "+nEnv+" correos ("+lista.length+" cierres).\n\n¿Seguimos?")) return;
+  const btn=document.getElementById("btn");
+  btn.disabled=true;
+  let ok=0,err=0;
+  for(const c of lista){
+    const nom=(c.yo&&c.yo.nombre)||c.agente;
+    const asunto="📋 "+nom+" ha cerrado la semana "+c.semana;
+    const html=htmlCorreo(c);
+    for(const d of c.dest.filter(x=>x.email)){
+      btn.textContent="Enviando… "+(ok+err+1)+"/"+nEnv;
+      try{
+        const r=await fetch("/api/send-email",{
+          method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({to:d.email,subject:asunto,html})});
+        if(r.ok) ok++; else err++;
+      }catch(e){ err++; }
+    }
+  }
+  btn.textContent = err ? ok+" enviados, "+err+" fallaron" : "✓ "+ok+" enviados";
+  if(err) btn.disabled=false;
+};
+
+cargar();
+</script></body></html>
