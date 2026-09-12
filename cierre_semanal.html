@@ -347,6 +347,88 @@ function refrescar(){
   b.disabled=total>0;
 }
 
+// Avisa al responsable y al CEO de que este comercial ha cerrado su semana.
+// Se busca su superior igual que lo hace el CRM: por el equipo y por quien
+// figura como jefe o director, sin depender de un campo concreto.
+async function avisarDelCierre(nCerradas){
+  const us=await (async()=>{
+    const r=await fetch(`${FB}/usuarios?pageSize=300`);
+    if(!r.ok) return [];
+    const j=await r.json();
+    return (j.documents||[]).map(d=>{
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,v] of Object.entries(d.fields||{}))
+        o[k]=v.stringValue!==undefined?v.stringValue
+          :v.doubleValue!==undefined?v.doubleValue
+          :v.booleanValue!==undefined?v.booleanValue:null;
+      return o;
+    });
+  })();
+
+  const _n=(x)=>String(x||"").toUpperCase().trim();
+  const yo=us.find(u=>[u._id,u.id,u.grupoAgente,u.catalogoVendedor,u.username]
+    .filter(Boolean).some(k=>_n(k)===_n(UID)||_n(k)===_n(AGENTE)));
+  const miNombre=(yo&&yo.nombre)||AGENTE;
+  const miEquipo=_n(yo&&yo.equipo);
+
+  const destinos=new Set();
+  us.forEach(u=>{
+    const rol=String(u.rol||"").toLowerCase();
+    if(rol==="ceo"||rol==="director"||rol==="crm_director") destinos.add(u._id);
+    // Su jefe de equipo
+    if((rol==="jefe"||rol==="crm_jefe")&&miEquipo&&_n(u.equipo)===miEquipo)
+      destinos.add(u._id);
+  });
+  if(yo&&yo.reportaA) destinos.add(yo.reportaA);
+  destinos.delete(yo&&yo._id);
+  if(!destinos.size) return;
+
+  const ahora=new Date().toISOString();
+  const titulo="📋 "+miNombre+" ha cerrado la semana "+SEMANA;
+  const mensaje=miNombre+" ha enviado su cierre de la semana "+SEMANA
+    +(nCerradas?" y ha cerrado "+nCerradas+" cosas en el sistema":"")
+    +". Puedes verlo en su parte semanal.";
+  const enlace="https://crmwikuk.vercel.app/parte_semanal.html?agente="
+    +encodeURIComponent(AGENTE);
+
+  for(const id of destinos){
+    const dest=us.find(u=>u._id===id)||{};
+    // Mismo formato y coleccion que el resto de avisos del CRM, para que
+    // aparezcan juntos y salga el correo por la via de siempre.
+    const nid="notif_"+Date.now()+"_"+Math.random().toString(36).slice(2,6);
+    const campos={
+      id:{stringValue:nid},
+      tipo:{stringValue:"cierre_semanal"},
+      titulo:{stringValue:titulo},
+      mensaje:{stringValue:mensaje},
+      destinatarioId:{stringValue:id},
+      destinatarioEmail:{stringValue:dest.email||""},
+      enlace:{stringValue:enlace},
+      prioridad:{stringValue:"normal"},
+      creadoPor:{stringValue:UID},
+      creadoPorNombre:{stringValue:miNombre},
+      fecha:{stringValue:ahora},
+      leido:{booleanValue:false},
+      emailEnviado:{booleanValue:false},
+      agente:{stringValue:AGENTE},
+      semana:{doubleValue:SEMANA},
+    };
+    await fetch(`${FB}/notificaciones_email/${nid}`,{
+      method:"PATCH",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({fields:campos})}).catch(()=>{});
+
+    // Y el correo, si tiene direccion
+    if(dest.email){
+      fetch("/api/send-email",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          to:dest.email, subject:titulo,
+          html:`<p>${mensaje}</p><p><a href="${enlace}">Ver el parte</a></p>`,
+        })}).catch(()=>{});
+    }
+  }
+}
+
 async function enviar(){
   const b=document.getElementById("btn"); b.disabled=true; b.textContent="Guardando…";
   const doc={
@@ -447,6 +529,11 @@ async function enviar(){
             fechaCierre:{stringValue:new Date().toISOString()}}})}).catch(()=>{});
       }
     }catch(e){}
+
+    // (sep 2026) El cierre se guardaba y nadie se enteraba: el jefe tenia que
+    // acordarse de entrar a mirar. Ahora se le avisa a el y al CEO, como con
+    // las incidencias.
+    try{ await avisarDelCierre(cerrar.length); }catch(e){}
 
     document.getElementById("app").innerHTML=
       `<div class="listo"><b>Semana ${SEMANA} cerrada</b>
