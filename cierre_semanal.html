@@ -855,13 +855,25 @@ async function enviar(){
       }
     }catch(e){}
 
+    // Nombre de empresa comparable: sin tildes, sin S.L./S.A. y sin puntuacion
+    const NN=(x)=>String(x||"").toUpperCase().normalize("NFD")
+      .replace(/[\u0300-\u036f]/g,"")
+      .replace(/\b(S\.?L\.?U?|S\.?A\.?U?|S\.?R\.?L|SCL|LDA|SARL|SAS|GMBH|CB|SAT|COOP|SOC|SPA|DOO|OOD|BT|KG|CO)\b/g,"")
+      .replace(/[^A-Z0-9]/g,"");
+
     const avisos=[];
     for(const c of mios){
       const f=mes[ARR(c._id)]; if(!f) continue;
       const act=num(c.ventasAct), ant=num(c.ventasAntYTD);
       if(act<3000) continue;
       if(ant && act < ant*0.92) continue;        // ya cae en el año: se ve aparte
-      const m=[]; for(let i=1;i<=ultimo;i++) m.push(num(f[i]));
+      // (sep 2026) Esto mide FACTURACION, no envios: entre que se manda la
+      // mercancia y se factura pasan semanas. El mes recien cerrado todavia
+      // no refleja lo servido a final de mes, asi que se descarta: sin esto
+      // salian avisos de clientes a los que se acababa de mandar tripa.
+      const hastaMes=Math.max(ultimo-1,0);
+      const m=[]; for(let i=1;i<=hastaMes;i++) m.push(num(f[i]));
+      if(m.length<4) continue;      // sin cuatro meses no hay patron que juzgar
       const rec=m.slice(-2), pre=m.slice(0,-2).filter(x=>x>0);
       if(pre.length<2) continue;
       const ritmo=pre.reduce((a,b)=>a+b,0)/pre.length;
@@ -869,6 +881,21 @@ async function enviar(){
       const ahora=rec.reduce((a,b)=>a+b,0)/2;
       const caida=(ahora-ritmo)/ritmo*100;
       let seco=0; for(let i=m.length-1;i>=0&&m[i]===0;i--) seco++;
+
+      // Si hay actividad reciente, no esta perdido: una visita, un pedido o
+      // una muestra de las ultimas semanas desmiente la caida.
+      const _cl=ARR(c._id), _cn=NN(c.nombre);
+      const hayContacto=(vis||[]).some(v=>{
+        if(!esMio(v)) return false;
+        const d=dias(fecha(v.fecha));
+        if(d==null||d>45) return false;
+        return ARR(v.clienteId)===_cl||NN(v.clienteNombre||v.cliente)===_cn;
+      })||(mu||[]).some(x=>{
+        const d=dias(fecha(x.fecha||x.fechaCreacion));
+        if(d==null||d>45) return false;
+        return ARR(x.clienteId)===_cl||NN(x.clienteNombre||x.cliente)===_cn;
+      });
+      if(hayContacto) continue;
       let motivo=null, grav=0;
       if(seco>=2){ motivo=`lleva ${seco} meses sin comprar · venía de ${eur(ritmo)} al mes`;
         grav=ritmo*seco; }
@@ -1245,6 +1272,8 @@ async function enviar(){
       <div class="paso">
         <p class="tit"><span class="num">2</span>Clientes con indicios de bajada</p>
         <p class="sub">Todavía no caen en el año, pero han cambiado de comportamiento.
+      Se mide sobre lo <b>facturado</b>, así que un envío reciente puede no
+      aparecer todavía: si el dato no cuadra, dilo.
           Di qué vas a hacer con cada uno.</p>
         ${av.length? av.map(c=>{
           const k="cliente:"+c.id; PENDIENTES.push(k);
@@ -1265,8 +1294,9 @@ async function enviar(){
             <div class="imp pd">${eur(c.grav)}</div></div>
           ${rep}
           <div class="acc">${(c.yaDicho
-              ? ["Ya lo hice","Lo hago esta semana","No he podido","Ya lo sé, es normal"]
-              : ["Le visito","Le llamo","Le mando oferta","Ya lo sé, es normal"])
+              ? ["Ya lo hice","Lo hago esta semana","No he podido","El dato está mal"]
+              : ["Le visito","Le llamo","Le mando oferta","Ya lo sé, es normal",
+                 "El dato está mal"])
             .map(x=>`<button class="chip" onclick="marcar('${k}','${x}',this)">${x}</button>`).join("")}</div>
           <textarea placeholder="${c.yaDicho
             ? "Qué pasó con lo que dijiste la semana pasada"
