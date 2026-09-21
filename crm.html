@@ -6777,6 +6777,117 @@ class CobrosBoundary extends React.Component{
 // (sep 2026) Desarrollos aprobados que esperan a que Calidad cree el articulo.
 // Sin codigo, el proceso de muestra queda bloqueado: por eso sale en el
 // inicio de Calidad y no solo dentro de Desarrollo.
+// (sep 2026) Preguntas de Calidad pendientes de respuesta. Calidad pide datos
+// para crear un articulo y el correo decia "contesta en la ficha", pero el
+// comercial no sabia donde estaba (lo buscaba en Proyectos) y acababa
+// respondiendo al correo, que llega a un buzon que nadie lee. Ahora la pregunta
+// sale en su inicio y se contesta ahi mismo.
+function PeticionesCalidadWidget({usuario, onNav}){
+  const [devs,setDevs]=React.useState(null);
+  const [resp,setResp]=React.useState({});
+  const [enviando,setEnviando]=React.useState("");
+  const esIdyd=(function(){ try{ return (tipologiasDeMiRama(usuario)||[]).indexOf("id")>=0; }catch(e){ return false; } })();
+  const misCods=(function(){ try{ return codigosDeAgente(usuario); }catch(e){ return [String(usuario.id||"").toUpperCase()]; } })();
+
+  React.useEffect(function(){
+    var vivo=true;
+    fbLeer("desarrollos").then(function(ds){
+      if(!vivo) return;
+      setDevs((ds||[]).filter(function(d){
+        if(d.eliminado||!d.faltanDatos||d.codigoArticulo) return false;
+        var mio=misCods.indexOf(String(d.comercialId||"").toUpperCase())>=0;
+        return mio||esIdyd;
+      }));
+    }).catch(function(){ if(vivo) setDevs([]); });
+    return function(){ vivo=false; };
+  },[usuario.id]);
+
+  if(!devs||!devs.length) return null;
+
+  async function contestar(d){
+    var t=(resp[d.id]||"").trim();
+    if(!t){ alert("Escribe la respuesta."); return; }
+    setEnviando(d.id);
+    try{
+      // Se relee para no pisar nada que haya cambiado mientras tanto
+      var actual=d;
+      try{
+        var rr=await fetch(FB_BASE+"/desarrollos/"+encodeURIComponent(d.id),{cache:"no-store"});
+        if(rr.ok){ var fr=fromFirestore(await rr.json()); if(fr&&fr.id) actual={...d,...fr}; }
+      }catch(e){}
+      var pets=(actual.peticiones||[]).map(function(p){
+        return p.respuesta?p:{...p,respuesta:t,respondidoPor:usuario.nombre,respTs:Date.now()};
+      });
+      var n={...actual,peticiones:pets,faltanDatos:false,
+        historial:[...(actual.historial||[]),{ts:Date.now(),
+          evento:"💬 Respuesta a Calidad ("+usuario.nombre+"): "+t,por:usuario.nombre}]};
+      await fbEscribir("desarrollos",n.id,n);
+      try{ fbInvalidarCache("desarrollos"); }catch(e){}
+
+      // Aviso a Calidad: responsables del departamento y quien tenga su tipologia
+      var dest=[];
+      try{ dest=(responsablesDeDepto("calidad")||[]).slice(); }catch(e){}
+      USUARIOS.forEach(function(u){
+        if(u.duplicadaDe||u.activo===false) return;
+        if(String(u.tipologia||"").toLowerCase()==="calidad"&&!dest.some(function(x){return x.id===u.id;}))
+          dest.push(u);
+      });
+      var vistos={};
+      dest.forEach(function(u){
+        var em=u.email||emailDeUsuario(u.id)||"";
+        if(em&&!vistos[em.toLowerCase()]){
+          vistos[em.toLowerCase()]=1;
+          fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({to:em,subject:"💬 Ya tienes los datos — "+d.nombre,
+              html:"<p><b>"+usuario.nombre+"</b> ha contestado a lo que pediste para <b>"+d.nombre
+                +"</b> ("+(d.clienteNombre||"")+"):</p>"
+                +"<blockquote style='border-left:3px solid #16A34A;margin:10px 0;padding:6px 12px'>"+t+"</blockquote>"
+                +"<p>Ya puedes crear el artículo y registrar su código en <b>CRM → 🧪 Desarrollo</b>.</p>"})})
+            .catch(function(){});
+        }
+        try{ despacharNotificacion({tipo:"desarrollo",titulo:"💬 Datos para "+d.nombre,
+          mensaje:usuario.nombre+": "+t.slice(0,120),destinatarioId:u.id,
+          prioridad:"normal",creadoPor:usuario.id}); }catch(e){}
+      });
+      setDevs(function(prev){ return prev.filter(function(x){ return x.id!==d.id; }); });
+    }catch(e){ alert("No se ha podido enviar: "+e.message); }
+    setEnviando("");
+  }
+
+  return (
+    <div style={{background:"#FFFBEB",border:"2px solid #F59E0B",borderRadius:14,
+      padding:"13px 14px",marginBottom:12}}>
+      <p style={{margin:"0 0 2px",fontSize:14,fontWeight:800,color:"#92400E"}}>
+        ❓ Calidad te pide datos</p>
+      <p style={{margin:"0 0 8px",fontSize:11.5,color:"#92400E",lineHeight:1.45}}>
+        Para crear el artículo. Hasta que contestes, las muestras siguen bloqueadas.</p>
+      {devs.map(function(d){
+        var pend=(d.peticiones||[]).filter(function(p){ return !p.respuesta; });
+        return <div key={d.id} style={{background:"#fff",borderRadius:10,padding:"10px 11px",marginBottom:8}}>
+          <p style={{margin:0,fontSize:13,fontWeight:800,color:"#0F172A"}}>{d.nombre}</p>
+          <p style={{margin:"1px 0 6px",fontSize:11,color:"#64748B"}}>{d.clienteNombre||""}</p>
+          {pend.map(function(p,ix){
+            return <p key={ix} style={{margin:"0 0 6px",fontSize:12.5,color:"#92400E"}}>
+              <b>{p.de}:</b> {p.texto}</p>;
+          })}
+          <div style={{display:"flex",gap:6}}>
+            <input value={resp[d.id]||""} onChange={function(e){ var v=e.target.value;
+                setResp(function(r){ var n={...r}; n[d.id]=v; return n; }); }}
+              onKeyDown={function(e){ if(e.key==="Enter") contestar(d); }}
+              placeholder="Tu respuesta…"
+              style={{flex:1,minWidth:0,padding:"9px 11px",borderRadius:9,border:"1.5px solid #FCD34D",
+                fontSize:13,outline:"none"}}/>
+            <button onClick={function(){ contestar(d); }} disabled={enviando===d.id}
+              style={{padding:"9px 14px",borderRadius:9,border:"none",background:"#16A34A",
+                color:"#fff",fontWeight:800,fontSize:12.5,cursor:"pointer"}}>
+              {enviando===d.id?"…":"Responder"}</button>
+          </div>
+        </div>;
+      })}
+    </div>
+  );
+}
+
 function PendientesCodigoWidget({usuario, onNav}){
   const esCal=(function(){
     try{ return (tipologiasDeMiRama(usuario)||[]).indexOf("calidad")>=0
@@ -7156,6 +7267,7 @@ function DashTipologia({usuario, onNav, incidenciasDB}){
 
       {/* (v6.5) OBJETIVOS DE LA SEMANA — visibles desde el inicio */}
       <PendientesCodigoWidget usuario={usuario} onNav={onNav}/>
+      <PeticionesCalidadWidget usuario={usuario} onNav={onNav}/>
       <ObjetivosSemanaWidget usuario={usuario} onNav={onNav}/>
       <HitosProyectoWidget usuario={usuario} onNav={onNav}/>
 
@@ -8157,6 +8269,7 @@ function DashAgente({usuario, onNav, oportunidadesDB, clientesFB, muestrasDB, es
         <CobrosWidget usuario={usuario} onNav={onNav}/>
 
         {/* — Hitos de proyecto asignados — */}
+        <PeticionesCalidadWidget usuario={usuario} onNav={onNav}/>
         <HitosProyectoWidget usuario={usuario} onNav={onNav}/>
 
         {/* — Acciones urgentes — */}
@@ -21456,6 +21569,8 @@ function Embudo({usuario, clientesFB}){
   const [form,setForm]=useState({nombre:"",clienteNombre:"",clienteId:"",producto:"",sustituye:"",potencial:"",precioMercado:"",rangoMin:"",rangoMax:"",obs:""});
   const [motivoTxt,setMotivoTxt]=useState("");
   const [peticionTxt,setPeticionTxt]=useState("");   // lo que Calidad pide
+  const [editDev,setEditDev]=useState(null);         // ficha en edicion {id, campos}
+  const [notaDev,setNotaDev]=useState("");           // nota libre en el desarrollo
   const [respuestaTxt,setRespuestaTxt]=useState(""); // lo que le contestan
   const [dictamen,setDictamen]=useState({viabilidad:"",escandallo:"",obs:""});
   const [condTxt,setCondTxt]=useState("");
@@ -21670,7 +21785,11 @@ function Embudo({usuario, clientesFB}){
         "<p>Para crear el artículo de <b>"+d.nombre+"</b> ("+(d.clienteNombre||"")+"), "
         +usuario.nombre+" necesita:</p>"
         +"<blockquote style='border-left:3px solid #7C3AED;margin:10px 0;padding:6px 12px;color:#334155'>"+t+"</blockquote>"
-        +"<p>Contesta en la ficha del desarrollo, dentro del CRM. Hasta entonces el proceso de muestra sigue bloqueado.</p>");
+        +"<p><b>Contesta desde el CRM</b>: te aparece al entrar, en tu pantalla de inicio, "
+        +"en el recuadro «❓ Calidad te pide datos». También lo tienes en 🧪 Desarrollo → "+d.nombre+".</p>"
+        +"<p style='color:#B45309'>⚠️ No respondas a este correo: lo envía una dirección automática "
+        +"y tu respuesta no le llegaría a Calidad.</p>"
+        +"<p>Hasta que contestes, el proceso de muestra sigue bloqueado.</p>");
     });
     setPeticionTxt("");
   }
@@ -21688,6 +21807,72 @@ function Embudo({usuario, clientesFB}){
         +"<p>Ya puedes crear el artículo y registrar su código.</p>");
     });
     setRespuestaTxt("");
+  }
+
+  // (sep 2026) Corregir los datos de un desarrollo ya creado. Antes no habia
+  // forma: si faltaba el precio, el potencial o el calibre, se quedaba asi.
+  // Cada cambio queda en el historial y se avisa a los implicados.
+  var CAMPOS_DEV=[["nombre","Nombre"],["producto","Producto"],["sustituye","Sustituye a"],
+    ["potencial","Potencial"],["precioMercado","PVP mercado (€/ud)"],["obs","Observaciones"],
+    ["escandallo","Escandallo (€/ud)"],["obsIdyd","Obs. I+D"]];
+  function puedeEditarDev(d){
+    if(esDireccion||esIdyd||esCalidad) return true;
+    try{ return codigosDeAgente(usuario).indexOf(String(d.comercialId||"").toUpperCase())>=0; }
+    catch(e){ return d.comercialId===usuario.id; }
+  }
+  function implicadosDev(d){
+    var l=[comercialDe(d)].concat(personasIdyd()).concat(directoresComerciales());
+    if(d.etapa==="aprobado"||d.etapa==="aprobado_cond") l=l.concat(personasCalidad());
+    return l;
+  }
+  function guardarEdicionDev(d){
+    var c=(editDev&&editDev.campos)||{};
+    var num=["precioMercado","escandallo"];
+    var cambios=[], n={...d};
+    CAMPOS_DEV.forEach(function(par){
+      var k=par[0]; if(!(k in c)) return;
+      var nuevo=num.indexOf(k)>=0?(c[k]===""?null:parseFloat(String(c[k]).replace(",","."))):String(c[k]).trim();
+      var viejo=d[k];
+      if(String(nuevo==null?"":nuevo)===String(viejo==null?"":viejo)) return;
+      // Escandallo y observaciones de I+D solo los toca I+D o Direccion
+      if((k==="escandallo"||k==="obsIdyd")&&!(esIdyd||esDireccion)) return;
+      n[k]=nuevo;
+      cambios.push(par[1]+": «"+(viejo==null||viejo===""?"—":viejo)+"» → «"+(nuevo==null||nuevo===""?"—":nuevo)+"»");
+    });
+    if(!cambios.length){ setEditDev(null); return; }
+    n=conHito(n,"✏️ "+usuario.nombre+" corrige: "+cambios.join(" · "));
+    guardar(n,function(){
+      enviarMails(implicadosDev(d),"✏️ Datos corregidos — "+d.nombre,
+        "<p><b>"+usuario.nombre+"</b> ha corregido la ficha de <b>"+d.nombre+"</b> ("+(d.clienteNombre||"")+"):</p>"
+        +"<ul>"+cambios.map(function(x){return "<li>"+x+"</li>";}).join("")+"</ul>");
+    });
+    setEditDev(null);
+  }
+  // Deshacer una aprobacion: vuelve a la decision y se borran las firmas
+  function reabrirDecision(d){
+    var m=prompt("¿Por qué se reabre la decisión de «"+d.nombre+"»?","Aprobado por error");
+    if(m===null) return;
+    var n=conHito({...d,etapa:"decision",firmaIdyd:null,firmaDireccion:null,
+      decisionTs:null,pendienteCodigo:false,condiciones:"",faltanDatos:false},
+      "↩️ "+usuario.nombre+" reabre la decisión: "+(m||"sin motivo"));
+    guardar(n,function(){
+      enviarMails([comercialDe(d)].concat(personasIdyd()).concat(directoresComerciales()).concat(personasCalidad()),
+        "↩️ Decisión reabierta — "+d.nombre,
+        "<p><b>"+usuario.nombre+"</b> ha reabierto la decisión de <b>"+d.nombre+"</b>: "+(m||"")+".</p>"
+        +"<p>Vuelve a necesitar la doble firma. Calidad no tiene que crear el artículo hasta que se apruebe de nuevo.</p>"
+        +(d.proyectoId?"<p>Ojo: se había creado un proyecto de I+D al aprobarlo; revisa si hay que pararlo.</p>":""));
+    });
+  }
+  // Nota libre: no contesta a Calidad, solo queda en el historial
+  function anadirNotaDev(d){
+    var t=notaDev.trim(); if(!t) return;
+    var n=conHito(d,"💬 "+usuario.nombre+": "+t);
+    guardar(n,function(){
+      enviarMails(implicadosDev(d),"💬 Nota en "+d.nombre,
+        "<p><b>"+usuario.nombre+"</b> ha dejado una nota en <b>"+d.nombre+"</b>:</p>"
+        +"<blockquote style='border-left:3px solid #7C3AED;margin:10px 0;padding:6px 12px'>"+t+"</blockquote>");
+    });
+    setNotaDev("");
   }
 
   // (v6.1) Calidad registra el código de artículo → desbloquea las muestras
@@ -21924,11 +22109,53 @@ function Embudo({usuario, clientesFB}){
             {abiertoYo&&(
               <div style={{marginTop:12,paddingTop:12,borderTop:"1px dashed "+T.border}}>
                 {/* Ficha */}
-                {[["Producto",d.producto],["Sustituye a",d.sustituye],["Potencial",d.potencial],
-                  ["PVP mercado",d.precioMercado+" €/ud"+((d.rangoMin||d.rangoMax)?" · rango "+(d.rangoMin||"?")+"–"+(d.rangoMax||"?")+" €":"")],
-                  ["Observaciones",d.obs],["Obs. I+D",d.obsIdyd]].map(function(par){
-                  return par[1]?<p key={par[0]} style={{margin:"0 0 6px",fontSize:12,color:T.text,lineHeight:1.45}}><b style={{color:T.muted,fontSize:10.5}}>{par[0]}: </b>{par[1]}</p>:null;
-                })}
+                {editDev&&editDev.id===d.id?(
+                  <div style={{background:"#F5F3FF",border:"1.5px solid #C4B5FD",borderRadius:11,padding:"11px 12px",marginBottom:10}}>
+                    <p style={{margin:"0 0 8px",fontSize:11,fontWeight:800,color:T.purple}}>✏️ Corregir datos</p>
+                    {CAMPOS_DEV.filter(function(par){
+                      return (par[0]!=="escandallo"&&par[0]!=="obsIdyd")||esIdyd||esDireccion; }).map(function(par){
+                      var k=par[0], largo=(k==="producto"||k==="potencial"||k==="obs"||k==="obsIdyd");
+                      var v=(k in editDev.campos)?editDev.campos[k]:(d[k]==null?"":d[k]);
+                      var set=function(e){ var x=e.target.value;
+                        setEditDev(function(ed){ var c={...ed.campos}; c[k]=x; return {...ed,campos:c}; }); };
+                      return <div key={k} style={{marginBottom:7}}>
+                        <p style={{margin:"0 0 3px",fontSize:10,fontWeight:800,color:T.muted,textTransform:"uppercase"}}>{par[1]}</p>
+                        {largo
+                          ?<textarea value={v} onChange={set} rows={2} style={{width:"100%",padding:"8px 10px",borderRadius:8,
+                              border:"1.5px solid "+T.border,fontSize:12.5,fontFamily:"inherit",resize:"vertical",boxSizing:"border-box"}}/>
+                          :<input value={v} onChange={set} style={{width:"100%",padding:"8px 10px",borderRadius:8,
+                              border:"1.5px solid "+T.border,fontSize:12.5,boxSizing:"border-box"}}/>}
+                      </div>;
+                    })}
+                    <div style={{display:"flex",gap:6,marginTop:4}}>
+                      <button onClick={function(){guardarEdicionDev(d);}}
+                        style={{flex:1,padding:"10px",borderRadius:9,border:"none",background:T.purple,color:"#fff",fontWeight:800,fontSize:12.5,cursor:"pointer"}}>Guardar cambios</button>
+                      <button onClick={function(){setEditDev(null);}}
+                        style={{padding:"10px 14px",borderRadius:9,border:"1.5px solid "+T.border,background:"#fff",color:T.muted,fontWeight:700,fontSize:12.5,cursor:"pointer"}}>Cancelar</button>
+                    </div>
+                    <p style={{margin:"7px 0 0",fontSize:10,color:T.muted}}>Los cambios quedan en el historial y se avisa a los implicados.</p>
+                  </div>
+                ):(
+                  <div>
+                    {[["Producto",d.producto],["Sustituye a",d.sustituye],["Potencial",d.potencial],
+                      ["PVP mercado",d.precioMercado+" €/ud"+((d.rangoMin||d.rangoMax)?" · rango "+(d.rangoMin||"?")+"–"+(d.rangoMax||"?")+" €":"")],
+                      ["Observaciones",d.obs],["Obs. I+D",d.obsIdyd]].map(function(par){
+                      return par[1]?<p key={par[0]} style={{margin:"0 0 6px",fontSize:12,color:T.text,lineHeight:1.45}}><b style={{color:T.muted,fontSize:10.5}}>{par[0]}: </b>{par[1]}</p>:null;
+                    })}
+                    <div style={{display:"flex",gap:6,flexWrap:"wrap",margin:"4px 0 6px"}}>
+                      {puedeEditarDev(d)&&(
+                        <button onClick={function(){setEditDev({id:d.id,campos:{}});}}
+                          style={{padding:"6px 11px",borderRadius:8,border:"1.5px solid #C4B5FD",background:"#fff",
+                            color:T.purple,fontWeight:700,fontSize:11.5,cursor:"pointer"}}>✏️ Editar datos</button>
+                      )}
+                      {(esDireccion||esIdyd)&&(d.etapa==="aprobado"||d.etapa==="aprobado_cond")&&!d.codigoArticulo&&(
+                        <button onClick={function(){reabrirDecision(d);}}
+                          style={{padding:"6px 11px",borderRadius:8,border:"1.5px solid #FCA5A5",background:"#fff",
+                            color:T.red,fontWeight:700,fontSize:11.5,cursor:"pointer"}}>↩️ Reabrir la decisión</button>
+                      )}
+                    </div>
+                  </div>
+                )}
                 <p style={{margin:"6px 0 10px",fontSize:10,color:T.muted}}>{(ETAPAS[d.etapa]||{}).desc||""}</p>
 
                 {/* GATE ②: filtro de Dirección Comercial */}
@@ -22050,10 +22277,11 @@ function Embudo({usuario, clientesFB}){
                       </div>
                     ):d.faltanDatos?(
                       <div>
-                        <p style={{margin:"4px 0 5px",fontSize:10.5,fontWeight:800,color:"#92400E"}}>Calidad espera tu respuesta para poder crear el artículo</p>
+                        <p style={{margin:"4px 0 2px",fontSize:10.5,fontWeight:800,color:"#92400E"}}>Responder a Calidad</p>
+                        <p style={{margin:"0 0 5px",fontSize:10,color:"#92400E"}}>Solo el dato que pide: al enviarlo se da por contestada. Para cualquier otra cosa, usa la nota de abajo.</p>
                         <div style={{display:"flex",gap:6}}>
                           <input value={respuestaTxt} onChange={function(e){setRespuestaTxt(e.target.value);}}
-                            placeholder="Los datos que pide Calidad…"
+                            placeholder="Ej: calibre 110"
                             style={{flex:1,padding:"10px 11px",borderRadius:9,border:"1.5px solid "+T.border,fontSize:12.5,outline:"none",background:"#fff"}}/>
                           <button onClick={function(){responderDatos(d);}}
                             style={{padding:"10px 14px",borderRadius:9,border:"none",background:T.green,color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer"}}>💬 Responder</button>
@@ -22066,6 +22294,23 @@ function Embudo({usuario, clientesFB}){
                 )}
                 {d.codigoArticulo&&<p style={{margin:"0 0 8px",fontSize:11,color:T.green,fontWeight:700}}>🔐 Artículo {d.codigoArticulo} · creado por {d.codigoPor||"Calidad"} — muestras desbloqueadas</p>}
                 {d.proyectoId&&<p style={{margin:"0 0 8px",fontSize:11,color:T.green,fontWeight:700}}>📁 Proyecto de I+D creado: visible en la pestaña Proyectos</p>}
+
+                {/* Nota libre entre los implicados: no contesta a Calidad */}
+                {puedeEditarDev(d)&&(
+                  <div style={{marginBottom:10}}>
+                    <p style={{margin:"0 0 4px",fontSize:10,fontWeight:800,color:T.muted,textTransform:"uppercase"}}>💬 Nota para los implicados</p>
+                    <div style={{display:"flex",gap:6}}>
+                      <input value={notaDev} onChange={function(e){setNotaDev(e.target.value);}}
+                        onKeyDown={function(e){ if(e.key==="Enter") anadirNotaDev(d); }}
+                        placeholder="Ej: Ricardo, falta precio y potencial…"
+                        style={{flex:1,minWidth:0,padding:"9px 11px",borderRadius:9,border:"1.5px solid "+T.border,fontSize:12.5,outline:"none"}}/>
+                      <button onClick={function(){anadirNotaDev(d);}} disabled={!notaDev.trim()}
+                        style={{padding:"9px 13px",borderRadius:9,border:"none",
+                          background:notaDev.trim()?T.navy:"#E2E8F0",color:notaDev.trim()?"#fff":"#94A3B8",
+                          fontWeight:800,fontSize:12,cursor:notaDev.trim()?"pointer":"default"}}>Enviar</button>
+                    </div>
+                  </div>
+                )}
 
                 {/* Historial + ficha imprimible */}
                 <div style={{display:"flex",gap:6,marginBottom:8}}>
