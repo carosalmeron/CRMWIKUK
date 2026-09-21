@@ -107,14 +107,40 @@ const ID_A_TIPOLOGIA = {
 // (v5.5) Resolución de destinatarios desde el ORGANIGRAMA
 // ─────────────────────────────────────────────────────────────────────
 
+// (sep 2026) Organigrama base: el mismo que lleva el CRM en su codigo. En la
+// base de datos solo estan los departamentos creados o editados desde el panel;
+// Calidad, Produccion, I+D, Logistica, Administracion... viven solo aqui, y
+// sin esta lista el proceso no los encontraba y avisaba a quien no era.
+// Lo que haya en la base con el mismo id manda sobre esto.
+const DEPARTAMENTOS_BASE = [
+  {id:"direccion",     nombre:"Dirección",        padre:null,          responsableIds:["ceo"],       tipologias:[]},
+  {id:"ventas",        nombre:"Ventas",           padre:"direccion",   responsableIds:["dir"],       tipologias:[]},
+  {id:"customer",      nombre:"Customer Service", padre:"ventas",      responsableIds:[],            tipologias:[]},
+  {id:"compras",       nombre:"Compras",          padre:"direccion",   responsableIds:["compras"],   tipologias:["stock"]},
+  {id:"logistica",     nombre:"Logística",        padre:"compras",     responsableIds:["resp_log"],  tipologias:["logistica"]},
+  {id:"operaciones",   nombre:"Operaciones",      padre:"direccion",   responsableIds:[],            tipologias:[]},
+  {id:"produccion",    nombre:"Producción",       padre:"operaciones", responsableIds:["resp_prd"],  tipologias:["produccion"]},
+  {id:"coordinacion",  nombre:"Coordinación",     padre:"operaciones", responsableIds:["resp_coord"],tipologias:["coordinacion"]},
+  {id:"id",            nombre:"I+D",              padre:"direccion",   responsableIds:["resp_id"],   tipologias:["id"]},
+  {id:"ingredientes",  nombre:"Ingredientes",     padre:"id",          responsableIds:[],            tipologias:[]},
+  {id:"envolturas",    nombre:"Envolturas",       padre:"id",          responsableIds:[],            tipologias:[]},
+  {id:"calidad",       nombre:"Calidad",          padre:"direccion",   responsableIds:["resp_cal"],  tipologias:["calidad"]},
+  {id:"administracion",nombre:"Administración",   padre:"direccion",   responsableIds:["resp_adm"],  tipologias:["administracion"]},
+  {id:"it",            nombre:"IT",               padre:"direccion",   responsableIds:["resp_it"],   tipologias:["it"]},
+];
+
 // Carga las 3 colecciones UNA vez por invocación
 async function cargarDatos(){
-  const [departamentos, portal, usuarios] = await Promise.all([
+  const [depsBD, portal, usuarios] = await Promise.all([
     listColeccion("departamentos"),
     listColeccion("portal_users"),
     listColeccion("usuarios"),
   ]);
-  return {departamentos, portal, usuarios};
+  // Base + lo de la base de datos, que manda si coincide el id
+  const porId={};
+  DEPARTAMENTOS_BASE.forEach(d=>{ porId[d.id]={...d,_id:d.id,activo:true}; });
+  depsBD.forEach(d=>{ const id=d._id||d.id; porId[id]={...(porId[id]||{}),...d,_id:id}; });
+  return {departamentos:Object.values(porId), portal, usuarios};
 }
 
 function cuentaValida(u){
