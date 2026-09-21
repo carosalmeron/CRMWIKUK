@@ -47,8 +47,10 @@ a.back{display:inline-block;color:#64748B;font-size:13px;text-decoration:none;ma
 
 <div id="gate">
   <h1>🔐 Carga de cobros</h1>
-  <p class="sub">Zona de Administración. Introduce el PIN de acceso.</p>
-  <div class="card">
+  <p class="sub" id="gateMsg">Comprobando tu acceso…</p>
+  <div class="card" id="pinCard" style="display:none">
+    <p style="margin:0 0 10px;font-size:13px;color:#64748B">No te reconozco como
+      parte de Administración. Si tienes el PIN, puedes entrar con él.</p>
     <input type="password" id="pin" placeholder="PIN" autocomplete="off"/>
     <div style="height:10px"></div>
     <button class="btn" onclick="checkPin()">Entrar</button>
@@ -126,13 +128,6 @@ const ALIAS_COMERCIAL = {
   RPIEDRA   : "RPIEDRA",
 };
 
-// Clientes que no gestiona ningún comercial: sociedades del grupo,
-// intercompañía y ventas de tienda. Suponen casi la mitad del saldo
-// pendiente y taponaban la pantalla del vendedor, así que se separan
-// en su propio bloque, visible solo desde la vista global.
-const COMERCIALES_GRUPO = ["INTERCNACIONAL","INTERCINTERN","GRUPO","TIENDA","INTERCOMPANY"];
-const COD_GRUPO = "INTERCOMPANY";
-
 // ── Utilidades de texto ─────────────────────────────────────────
 function norm(s){
   return String(s==null?"":s).toUpperCase().trim()
@@ -186,10 +181,88 @@ function checkPin(){
   }
 }
 document.getElementById("pin").addEventListener("keydown",e=>{ if(e.key==="Enter") checkPin(); });
-if(sessionStorage.getItem("cobros_admin_ok")==="1"){
+
+// (sep 2026) Antes solo se entraba con un PIN comun, escrito aqui mismo. Ahora
+// entra directamente cualquiera de la rama de Administracion (Resp.
+// Administracion, Contabilidad, Tesoreria, Administracion Clientes y
+// Proveedores) y el CEO, identificados por su sesion del portal. El PIN
+// queda como respaldo por si alguien entra sin sesion.
+function sesionPortal(){
+  try{
+    const h=decodeURIComponent((location.hash||"").replace(/^#/,""));
+    if(h){ const u=JSON.parse(h); if(u&&(u.username||u.crmId||u.nombre)) return u; }
+  }catch(e){}
+  try{ return JSON.parse(localStorage.getItem("gc_portal_user")||"{}"); }catch(e){ return {}; }
+}
+function _v(f){
+  if(!f) return null;
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  if(f.arrayValue!==undefined) return (f.arrayValue.values||[]).map(_v);
+  return null;
+}
+async function _leerCol(col){
+  const r=await fetch(`${FB_BASE}/${col}?pageSize=300`);
+  if(!r.ok) return [];
+  const j=await r.json();
+  return (j.documents||[]).map(d=>{
+    const o={_id:decodeURIComponent(d.name.split("/").pop())};
+    for(const [k,v] of Object.entries(d.fields||{})) o[k]=_v(v);
+    return o;
+  });
+}
+async function esDeAdministracion(){
+  const s=sesionPortal();
+  if(!s||(!s.username&&!s.crmId&&!s.id&&!s.nombre)) return {ok:false};
+  const [us,deps]=await Promise.all([_leerCol("usuarios"),_leerCol("departamentos")]);
+  const U=(x)=>String(x||"").toUpperCase().trim();
+  const claves=[s.crmId,s.id,s.username,s.nombre].filter(Boolean).map(U);
+  const yo=us.find(u=>[u._id,u.id,u.username,u.nombre].filter(Boolean)
+    .some(k=>claves.includes(U(k))));
+  const nombre=(yo&&yo.nombre)||s.nombre||s.username||"";
+  const rol=String((yo&&yo.rol)||s.rol||"").toLowerCase();
+  if(rol==="ceo") return {ok:true,nombre};
+
+  // La rama: el departamento administracion y todos los que cuelgan de el
+  const rama=new Set(["administracion"]);
+  let crece=true;
+  while(crece){
+    crece=false;
+    deps.forEach(d=>{
+      if(!rama.has(d._id)&&d.padre&&rama.has(d.padre)){ rama.add(d._id); crece=true; }
+    });
+  }
+  const tipsRama=new Set([...rama]);
+  deps.filter(d=>rama.has(d._id)).forEach(d=>(d.tipologias||[]).forEach(t=>tipsRama.add(String(t).toLowerCase())));
+
+  const ids=[yo&&yo._id,yo&&yo.id,s.crmId,s.id,s.username].filter(Boolean);
+  const dentro=
+    (yo&&yo.departamentoId&&rama.has(yo.departamentoId))
+    ||(yo&&yo.tipologia&&tipsRama.has(String(yo.tipologia).toLowerCase()))
+    ||deps.some(d=>rama.has(d._id)&&(
+         (d.responsableIds||[]).some(r=>ids.includes(r))
+       ||(d.miembros||d.miembroIds||[]).some(m=>ids.includes(m))));
+  return {ok:!!dentro,nombre};
+}
+function abrirApp(quien){
   document.getElementById("gate").classList.add("hide");
   document.getElementById("app").classList.remove("hide");
+  if(quien){
+    const a=document.querySelector("#app .sub");
+    if(a) a.insertAdjacentHTML("afterend",
+      `<p style="margin:-6px 0 14px;font-size:12px;color:#64748B">Entras como <b>${quien}</b>.</p>`);
+  }
+  cargarUltima();
 }
+(async()=>{
+  if(sessionStorage.getItem("cobros_admin_ok")==="1"){ abrirApp(); return; }
+  try{
+    const r=await esDeAdministracion();
+    if(r.ok){ abrirApp(r.nombre); return; }
+  }catch(e){}
+  document.getElementById("gateMsg").textContent="Zona de Administración.";
+  document.getElementById("pinCard").style.display="block";
+})();
 
 // ── Localizar pestañas y columnas de forma tolerante ────────────
 function buscarHoja(wb, tokens){
@@ -396,10 +469,7 @@ function construir(wb, nombreFichero){
     const k = normCli(f.cli);
     const info = mapaCli[k] || null;
     const nombreCom = (info && info.comercial) ? info.comercial : "Sin Comercial";
-    let cod = normCom(nombreCom) || "SINCOMERCIAL";
-    const esGrupo = COMERCIALES_GRUPO.indexOf(cod)>=0 ||
-                    (info && norm(info.cat)==="GRUPO");
-    if(esGrupo) cod = COD_GRUPO;
+    const cod = normCom(nombreCom) || "SINCOMERCIAL";
     if(!info) sinComercial++;
     nombresComercial[cod] = nombresComercial[cod] || nombreCom;
 
@@ -439,8 +509,7 @@ function construir(wb, nombreFichero){
     docs.push({
       id: cod,
       comercial: cod,
-      comercialNombre: cod===COD_GRUPO ? "Intercompañía y grupo" : (nombresComercial[cod]||cod),
-      esGrupo: cod===COD_GRUPO,
+      comercialNombre: nombresComercial[cod]||cod,
       fechaDatos, actualizado: new Date().toISOString(),
       ficheroOrigen: nombreFichero,
       totalPendiente: Math.round(p*100)/100,
@@ -454,15 +523,10 @@ function construir(wb, nombreFichero){
   if(sinComercial>0)
     avisos.push(sinComercial+" facturas no han encontrado su cliente en las pestañas de resumen. Se han agrupado bajo «Sin Comercial» y no las verá ningún vendedor.");
 
-  const comercialesReales = docs.filter(d=>!d.esGrupo);
-  const totalPC = comercialesReales.reduce((s,d)=>s+d.totalPendiente,0);
-  const totalVC = comercialesReales.reduce((s,d)=>s+d.totalVencido,0);
-
   const pesado = docs.filter(d=>d.datos.length>900000);
   if(pesado.length) avisos.push("Los vendedores "+pesado.map(d=>d.comercial).join(", ")+" superan el tamaño máximo por documento. Avisa a IT.");
 
   return {docs, fechaDatos, avisos, totalP, totalV, totalF,
-          totalPC, totalVC,
           nComerciales:docs.length, nFacturas:facturas.length, nombreFichero};
 }
 
@@ -475,8 +539,6 @@ function pintar(R){
     ["Vendedores", R.nComerciales],
     ["Total pendiente", eur(R.totalP)],
     ["Vencido a "+hoy.split("-").reverse().join("/"), eur(R.totalV)],
-    ["Cartera comercial", eur(R.totalPC)],
-    ["Vencido comercial", eur(R.totalVC)],
   ].map(([l,v])=>`<div class="stat"><div class="stat-n">${v}</div><div class="stat-l">${l}</div></div>`).join("");
 
   document.getElementById("avisos").innerHTML =
@@ -585,8 +647,6 @@ async function publicar(){
       ficheroOrigen: RESULTADO.nombreFichero,
       totalPendiente: Math.round(RESULTADO.totalP*100)/100,
       totalVencido:   Math.round(RESULTADO.totalV*100)/100,
-      totalPendienteComercial: Math.round(RESULTADO.totalPC*100)/100,
-      totalVencidoComercial:   Math.round(RESULTADO.totalVC*100)/100,
       nComerciales: RESULTADO.nComerciales,
       nFacturas: RESULTADO.nFacturas,
       comerciales: RESULTADO.docs.map(d=>d.comercial),
