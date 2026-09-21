@@ -22101,6 +22101,9 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
   const [verHitosDe,setVerHitosDe]=useState(null); // de quien se despliegan los hitos
   const [transPara,setTransPara]=useState("");   // objetivo transversal: a quién
   const [transTxt,setTransTxt]=useState("");     // objetivo transversal: qué
+  const [transSem,setTransSem]=useState(0);      // objetivo transversal: cuántas semanas vista
+  const [objSemPropio,setObjSemPropio]=useState(0); // objetivo propio: cuántas semanas vista
+  const [objSemEquipo,setObjSemEquipo]=useState(0); // objetivo al equipo: cuántas semanas vista
   const hoy=new Date();
   // (v6.12) Si viene bloqueado, se abre ya en la semana que hay que cerrar:
   // no tiene sentido hacerle buscarla.
@@ -22439,9 +22442,15 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
     ((ano>pendienteDeCerrar.ano) || (ano===pendienteDeCerrar.ano && sem>pendienteDeCerrar.semana));
 
   // ── Acciones sobre mi parte ──
-  function addObjetivo(){
-    if(semanaBloqueada){ avisarBloqueo(); return; }
+  async function addObjetivo(){
     var t=nuevoObj.trim();if(!t)return;
+    // A futuro: va al parte de esa semana, aunque esta este bloqueada
+    if(objSemPropio>0){
+      var D=await ponerObjetivoEn(usuario,objSemPropio,{texto:t,origen:"propio"});
+      if(D){ setNuevoObj(""); alert("Objetivo planificado para la semana "+D.sem+"."); }
+      return;
+    }
+    if(semanaBloqueada){ avisarBloqueo(); return; }
     guardarParte({...miParte,objetivos:[...(miParte.objetivos||[]),
       {id:"o"+Date.now(),texto:t,estado:"pendiente",motivo:"",origen:"propio"}]});
     setNuevoObj("");
@@ -22806,6 +22815,15 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
       var pSig=partes[idSig]||{id:idSig,usuarioId:usuario.id,usuarioNombre:usuario.nombre,
         departamentoId:miParte.departamentoId,ano:aSig,semana:sSig,
         objetivos:[],resumen:"",estado:"borrador",comentarioSuperior:""};
+      // (sep 2026) La semana siguiente puede tener ya objetivos planificados
+      // por otra persona (Calidad, el superior) DESPUES de que este usuario
+      // abriera el CRM. Si se sumaba sobre su copia en pantalla, al guardar se
+      // perdian. Se relee de la base justo antes de escribir.
+      (async function(){
+      try{
+        var _rr=await fetch(FB_BASE+"/partes_departamento/"+encodeURIComponent(idSig),{cache:"no-store"});
+        if(_rr.ok){ var _fr=fromFirestore(await _rr.json()); if(_fr&&_fr.id) pSig={...pSig,..._fr}; }
+      }catch(e){}
       var yaHay={}; (pSig.objetivos||[]).forEach(function(o){ yaHay[o.texto]=1; });
       var nuevos=aPasar.filter(function(o){ return !yaHay[o.texto]; }).map(function(o){
         var q=(notas[o.id]||"").trim();
@@ -22823,6 +22841,7 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
       delete docSig._nuevo;
       fbEscribir("partes_departamento",docSig.id,docSig);
       setPartes(function(prev){var n={...prev};n[docSig.id]=docSig;return n;});
+      })();
     }
     // Escribir en los proyectos lo decidido sobre cada hito
     var hAcc=traspaso.hAcc||{}, hitosCierre=[];
@@ -23127,15 +23146,61 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
     return {u:u, dep:d?((d.icon?d.icon+" ":"")+d.nombre):"Sin departamento"};
   }).sort(function(a,b){ return (a.dep+a.u.nombre).localeCompare(b.dep+b.u.nombre); }):[];
 
-  function asignarTransversal(){
+  // Semana destino de un objetivo planificado: esta semana + N
+  function semanaDestino(off){
+    var sH=getSemanaISO(), aH=new Date().getFullYear();
+    var sT=sH+off, aT=aH;
+    while(sT>52){ sT-=52; aT++; }
+    var hoyL=new Date(); hoyL.setHours(0,0,0,0);
+    var lunes=new Date(hoyL); lunes.setDate(hoyL.getDate()-((hoyL.getDay()+6)%7)+7*off);
+    return {sem:sT, ano:aT, lunes:lunes};
+  }
+
+  // (sep 2026) Poner un objetivo en el parte de alguien para una semana futura.
+  // Lo usan los objetivos propios, los del equipo y los transversales, para que
+  // todos funcionen igual: relee la base antes de escribir y no toca semanas
+  // ya cerradas.
+  async function ponerObjetivoEn(u, off, obj){
+    var D=semanaDestino(off||0);
+    var idD=idParteSemanal(u.id,D.ano,D.sem);
+    var p=partes[idD]||{id:idD,usuarioId:u.id,usuarioNombre:u.nombre,
+      departamentoId:u.departamentoId||((deptosDondeEsResponsable(u)[0]||{}).id||""),
+      ano:D.ano,semana:D.sem,objetivos:[],resumen:"",estado:"borrador",comentarioSuperior:""};
+    try{
+      var _rr=await fetch(FB_BASE+"/partes_departamento/"+encodeURIComponent(idD),{cache:"no-store"});
+      if(_rr.ok){ var _fr=fromFirestore(await _rr.json()); if(_fr&&_fr.id) p={...p,..._fr}; }
+    }catch(e){}
+    if(p.estado==="entregado"||p.estado==="validado"){
+      alert((u.id===usuario.id?"Ya has":u.nombre+" ya ha")+" cerrado la semana "+D.sem+". Elige una semana posterior.");
+      return null;
+    }
+    var o={id:"o"+Date.now(),estado:"pendiente",motivo:"",fechaAlta:Date.now(),
+      planificadoPara:off>0?D.sem:null,...obj};
+    await new Promise(function(res){ guardarParte({...p,objetivos:[...(p.objetivos||[]),o]},res); });
+    return D;
+  }
+  function selectorSemana(valor,alCambiar,color){
+    return <select value={valor} onChange={function(e){alCambiar(parseInt(e.target.value,10)||0);}}
+      style={{padding:"9px 8px",borderRadius:9,border:"1.5px solid "+(color||T.border),
+        fontSize:12,background:"#fff",maxWidth:132,flexShrink:0}}>
+      {[0,1,2,3,4,5,6,7,8,10,12].map(function(k){
+        var D=semanaDestino(k);
+        return <option key={k} value={k}>{k===0?"Esta sem.":k===1?"Próxima":"+"+k+" sem."} · S{D.sem}</option>;
+      })}
+    </select>;
+  }
+
+  async function asignarTransversal(){
     var t=transTxt.trim();
     var u=USUARIOS.find(function(x){ return x.id===transPara; });
     if(!u){ alert("Elige a quién va el objetivo."); return; }
     if(!t){ alert("Escribe el objetivo."); return; }
-    var p=partes[idParteSemanal(u.id,ano,sem)]||parteDe(u);
-    guardarParte({...p,objetivos:[...(p.objetivos||[]),
-      {id:"o"+Date.now(),texto:t,estado:"pendiente",motivo:"",origen:"superior",
-       porNombre:usuario.nombre,porId:usuario.id,transversal:true,fechaAlta:Date.now()}]},function(){
+    // (sep 2026) Se puede planificar para una semana futura, no solo la actual
+    var D=await ponerObjetivoEn(u,transSem||0,{texto:t,origen:"superior",
+      porNombre:usuario.nombre,porId:usuario.id,transversal:true});
+    if(!D) return;
+    var sem=D.sem;   // lo que sigue habla de la semana destino
+    (function(){
       try{despacharNotificacion({tipo:"parte",titulo:"🎯 Objetivo de "+usuario.nombre,
         mensaje:t.slice(0,120)+" (semana "+sem+")",
         destinatarioId:u.id,prioridad:"normal",creadoPor:usuario.id});}catch(e){}
@@ -23149,13 +23214,23 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
               +"<p>Lo tienes en tu parte semanal del CRM. Tendrás que decir qué ha pasado con él al cerrar la semana.</p>"})})
           .catch(function(){});
       }catch(e){}
-    });
+    })();
     setTransTxt("");
-    alert("Objetivo enviado a "+u.nombre+".");
+    alert("Objetivo enviado a "+u.nombre+" para la semana "+D.sem+".");
   }
 
-  function asignarObjetivo(u){
+  async function asignarObjetivo(u){
     var t=objParaTxt.trim();if(!t)return;
+    var off=objSemEquipo||0;
+    if(off>0){
+      var D=await ponerObjetivoEn(u,off,{texto:t,origen:"superior",porNombre:usuario.nombre,porId:usuario.id});
+      if(!D) return;
+      try{despacharNotificacion({tipo:"parte",titulo:"🎯 Objetivo de "+usuario.nombre+" para la S"+D.sem,
+        mensaje:t.slice(0,120)+" (semana "+D.sem+")",
+        destinatarioId:u.id,prioridad:"normal",creadoPor:usuario.id});}catch(e){}
+      setObjParaTxt("");
+      return;
+    }
     var p=partes[idParteSemanal(u.id,ano,sem)]||parteDe(u);
     guardarParte({...p,objetivos:[...(p.objetivos||[]),
       {id:"o"+Date.now(),texto:t,estado:"pendiente",motivo:"",origen:"superior",porNombre:usuario.nombre}]},function(){
@@ -23839,12 +23914,38 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
           <div style={{display:"flex",gap:6,marginBottom:16}}>
             <input value={nuevoObj} onChange={function(e){setNuevoObj(e.target.value);}}
               onKeyDown={function(e){if(e.key==="Enter")addObjetivo();}}
-              placeholder="Nuevo objetivo…"
-              style={{flex:1,padding:"10px 12px",borderRadius:9,border:"1.5px solid "+T.border,fontSize:13,outline:"none"}}/>
+              placeholder={objSemPropio>0?"Objetivo para la S"+semanaDestino(objSemPropio).sem+"…":"Nuevo objetivo…"}
+              style={{flex:1,minWidth:0,padding:"10px 12px",borderRadius:9,border:"1.5px solid "+T.border,fontSize:13,outline:"none"}}/>
+            {selectorSemana(objSemPropio,setObjSemPropio)}
             <button onClick={addObjetivo} disabled={!nuevoObj.trim()}
               style={{padding:"10px 16px",borderRadius:9,border:"none",background:nuevoObj.trim()?T.navy:"#E2E8F0",
                 color:nuevoObj.trim()?"#fff":"#94A3B8",fontWeight:800,fontSize:13,cursor:nuevoObj.trim()?"pointer":"default"}}>＋</button>
           </div>
+
+          {/* Lo que ya tienes planificado para las proximas semanas */}
+          {(function(){
+            var sH=getSemanaISO(), aH=new Date().getFullYear();
+            var fut=[];
+            Object.values(partes||{}).forEach(function(pp){
+              if(!pp||pp.usuarioId!==usuario.id) return;
+              var dif=((pp.ano||aH)-aH)*52+((pp.semana||0)-sH);
+              if(dif<=0) return;
+              (pp.objetivos||[]).forEach(function(o){ fut.push({o:o,sem:pp.semana,dif:dif}); });
+            });
+            if(!fut.length) return null;
+            fut.sort(function(a,b){return a.dif-b.dif;});
+            return <div style={{background:T.bg,borderRadius:10,padding:"9px 11px",marginTop:-8,marginBottom:16}}>
+              <p style={{margin:"0 0 5px",fontSize:10.5,fontWeight:800,color:T.muted,
+                textTransform:"uppercase",letterSpacing:".05em"}}>📅 Planificado · {fut.length}</p>
+              {fut.map(function(x){
+                return <p key={x.sem+x.o.id} style={{margin:"3px 0",fontSize:12,color:T.text}}>
+                  <span style={{fontWeight:800,color:T.purple,marginRight:6}}>S{x.sem}</span>
+                  {x.o.texto}
+                  {x.o.porNombre&&x.o.origen==="superior"?<span style={{color:T.muted}}> · 🎯 {x.o.porNombre}</span>:null}
+                </p>;
+              })}
+            </div>;
+          })()}
 
           {esTransversal&&(
             <div style={{background:"#F0FDFA",border:"1.5px solid #99F6E4",borderRadius:12,
@@ -23868,6 +23969,17 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
                   });
                 })()}
               </select>
+              <select value={transSem} onChange={function(e){setTransSem(parseInt(e.target.value,10)||0);}}
+                style={{width:"100%",padding:"10px 11px",borderRadius:9,border:"1.5px solid "+T.border,
+                  fontSize:13,marginBottom:7,background:"#fff"}}>
+                {[0,1,2,3,4,5,6,7,8,10,12].map(function(k){
+                  var D=semanaDestino(k);
+                  var dom=new Date(D.lunes); dom.setDate(D.lunes.getDate()+6);
+                  var f=function(d){return d.getDate()+"/"+(d.getMonth()+1);};
+                  var nom=k===0?"Esta semana":k===1?"La semana que viene":"Dentro de "+k+" semanas";
+                  return <option key={k} value={k}>{nom} · S{D.sem} · {f(D.lunes)}–{f(dom)}</option>;
+                })}
+              </select>
               <div style={{display:"flex",gap:6}}>
                 <input value={transTxt} onChange={function(e){setTransTxt(e.target.value);}}
                   onKeyDown={function(e){ if(e.key==="Enter") asignarTransversal(); }}
@@ -23888,7 +24000,7 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
                   if(!pp||pp.usuarioId===usuario.id) return;
                   // Las ultimas cuatro semanas
                   var ds=(ano-(pp.ano||ano))*52+(sem-(pp.semana||sem));
-                  if(ds<0||ds>3) return;
+                  if(ds<-13||ds>3) return;   // cuatro semanas atras y lo planificado
                   (pp.objetivos||[]).forEach(function(o){
                     if(!o.transversal) return;
                     if(!(o.porId===usuario.id||(!o.porId&&o.porNombre===usuario.nombre))) return;
@@ -23922,7 +24034,9 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
                         </div>
                         <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
                           {x.nombre} · semana {x.p.semana}
-                          {x.entregado?" · parte entregado":" · aún sin cerrar"}
+                          {(x.p.semana>getSemanaISO()&&(x.p.ano||ano)>=new Date().getFullYear())||(x.p.ano||ano)>new Date().getFullYear()
+                            ?" · 📅 planificado"
+                            :x.entregado?" · parte entregado":" · aún sin cerrar"}
                           {x.o.traspasado?" · pasado a la semana siguiente":""}</p>
                         {x.o.motivo&&<p style={{margin:"4px 0 0",fontSize:11.5,color:"#334155",fontStyle:"italic"}}>
                           “{x.o.motivo}”</p>}
@@ -24078,12 +24192,13 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
                     )}
                     {/* (v5.8.1) Asignar objetivo: inline, siempre visible */}
                     <div style={{background:T.purpleL,border:"1.5px solid "+T.purple+"55",borderRadius:10,padding:"9px 10px",marginBottom:8}}>
-                      <p style={{margin:"0 0 6px",fontSize:10,fontWeight:800,color:T.purple,textTransform:"uppercase"}}>🎯 Asignar objetivo · semana {sem}</p>
+                      <p style={{margin:"0 0 6px",fontSize:10,fontWeight:800,color:T.purple,textTransform:"uppercase"}}>🎯 Asignar objetivo · semana {objSemEquipo>0?semanaDestino(objSemEquipo).sem:sem}</p>
                       <div style={{display:"flex",gap:6}}>
                         <input value={objParaTxt} onChange={function(e){setObjParaTxt(e.target.value);}}
                           onKeyDown={function(e){if(e.key==="Enter")asignarObjetivo(u);}}
                           placeholder={"Objetivo para "+(u.nombre||"").split(" ")[0]+"…"}
-                          style={{flex:1,padding:"9px 11px",borderRadius:9,border:"1.5px solid "+T.purple+"66",fontSize:12,outline:"none",background:"#fff"}}/>
+                          style={{flex:1,minWidth:0,padding:"9px 11px",borderRadius:9,border:"1.5px solid "+T.purple+"66",fontSize:12,outline:"none",background:"#fff"}}/>
+                        {selectorSemana(objSemEquipo,setObjSemEquipo,T.purple+"66")}
                         <button onClick={function(){asignarObjetivo(u);}} disabled={!objParaTxt.trim()}
                           style={{padding:"9px 14px",borderRadius:9,border:"none",
                             background:objParaTxt.trim()?T.purple:"#E2E8F0",color:objParaTxt.trim()?"#fff":"#94A3B8",
