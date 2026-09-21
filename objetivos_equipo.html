@@ -904,8 +904,150 @@ window.borrar=async(id)=>{
   try{ await escribir("objetivos_semana",id,Object.assign({},o,{eliminado:true})); }catch(e){}
 };
 
+// (sep 2026) Igual que en los departamentos: el jefe no cierra hasta que ha
+// cerrado todo su equipo (o esta marcado como ausente), y al cerrar sube un
+// consolidado con TODOS sus comerciales por email a su superior.
+function pendientesEquipo(){ return USUARIOS.filter(a=>!CIERRES[a.id]); }
+
+window.marcarAusente=async(agId)=>{
+  const a=USUARIOS.find(x=>x.id===agId); if(!a) return;
+  const motivo=prompt("¿Por qué no cierra "+a.nombre+" la semana "+SEMANA+"?\n"
+    +"(vacaciones, baja…)","Vacaciones");
+  if(motivo===null) return;
+  const cod=U(a.cod||a.id);
+  const doc={id:"informe_"+cod+"_s"+SEMANA,agente:cod,semana:SEMANA,anio:ANIO,
+    estado:"ausente",ausente:true,ausenteMotivo:motivo||"Ausente",
+    ausentePor:AGENTE,fechaEnvio:new Date().toISOString(),respuestas:"{}"};
+  try{
+    await escribir("informes",doc.id,doc);
+    CIERRES[a.id]={info:doc,propuesto:[],obviado:[],fecha:doc.fechaEnvio,ausente:true};
+    pintar();
+  }catch(e){ alert("No se ha podido marcar: "+e.message); }
+};
+
+async function enviarConsolidado(es){
+  const _v=(f)=>f==null?null:(f.stringValue!==undefined?f.stringValue:
+    f.doubleValue!==undefined?Number(f.doubleValue):null);
+  const leerFichas=async(col)=>{
+    const r=await fetch(FB+"/"+col+"?pageSize=300"); if(!r.ok) return [];
+    const j=await r.json();
+    return (j.documents||[]).map(d=>{
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,v] of Object.entries(d.fields||{})) o[k]=_v(v);
+      return o; });
+  };
+  const [us,pu]=await Promise.all([leerFichas("usuarios"),leerFichas("portal_users")]);
+  const yo=us.find(u=>U(u._id)===U(UID))||{};
+  const miNombre=yo.nombre||AGENTE;
+
+  // Destinatarios: su superior directo (a quien reporte, o el director) y,
+  // mientras dure la prueba, tambien el CEO.
+  const CEO_RECIBE_CONSOLIDADOS=true;
+  const dest=new Set();
+  if(yo.reportaA) dest.add(yo.reportaA);
+  if(!dest.size) us.forEach(u=>{ const r=String(u.rol||"").toLowerCase();
+    if(r==="director"||r==="crm_director") dest.add(u._id); });
+  if(!dest.size||CEO_RECIBE_CONSOLIDADOS) us.forEach(u=>{
+    if(String(u.rol||"").toLowerCase()==="ceo") dest.add(u._id); });
+  dest.delete(yo._id);
+
+  const escH=(t)=>String(t||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+  let nCerr=0,nAus=0,totProm=0,totCumpl=0,totRiesgo=0;
+  const filas=USUARIOS.map(a=>{
+    const c=CIERRES[a.id]||{};
+    const info=c.info||{};
+    if(info.estado==="ausente"||c.ausente){
+      nAus++;
+      return `<div style="border-left:3px solid #94A3B8;padding:8px 0 8px 12px;margin-bottom:8px">
+        <div style="font-size:13.5px;font-weight:800">${escH(a.nombre)}</div>
+        <div style="font-size:12px;color:#64748B">🌴 ${escH(info.ausenteMotivo||"Ausente")}</div></div>`;
+    }
+    nCerr++;
+    let R={}; try{ R=JSON.parse(info.respuestas||"{}"); }catch(e){}
+    const prom=Object.entries(R).filter(([k,v])=>k.startsWith("promesa:")&&(v.accion||v.texto));
+    const cumpl=prom.filter(([k,v])=>/fue bien|lo hice/i.test(v.accion||"")).length;
+    const riesgo=Object.entries(R).filter(([k,v])=>k.startsWith("cliente:")&&(v.accion||v.texto)).length;
+    const cerr=Object.values(R).filter(v=>v&&v.cierra).length;
+    totProm+=prom.length; totCumpl+=cumpl; totRiesgo+=riesgo;
+    const como=(R.semana||{}).texto||"", prio=(R.prioridad||{}).texto||"";
+    const col=prom.length&&cumpl<prom.length/2?"#C2263D":(riesgo?"#B07908":"#0E7C5A");
+    return `<div style="border-left:3px solid ${col};padding:8px 0 8px 12px;margin-bottom:10px">
+      <div style="font-size:13.5px;font-weight:800">${escH(a.nombre)}</div>
+      <div style="font-size:12px;color:#64748B">${prom.length?cumpl+" de "+prom.length+" compromisos":"sin compromisos"}
+        ${riesgo?" · "+riesgo+" clientes en riesgo":""}${cerr?" · "+cerr+" cerradas":""}</div>
+      ${como?`<div style="font-size:12.5px;color:#334155;margin-top:4px">${escH(como)}</div>`:""}
+      ${prio?`<div style="font-size:12px;color:#92400E;margin-top:3px">📌 ${escH(prio)}</div>`:""}
+    </div>`;
+  }).join("");
+
+  const sube=es.map(o=>{
+    const ag=USUARIOS.find(u=>U(u.id)===U(o.agente));
+    return `<li style="margin-bottom:5px;font-size:13px">${escH(o.texto)}
+      <span style="color:#64748B"> · ${escH(ag?ag.nombre:o.agente)}</span></li>`;
+  }).join("");
+
+  const html=`<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+    max-width:620px;margin:0 auto;color:#14181F;line-height:1.5">
+    <div style="background:#14181F;color:#fff;padding:18px 20px;border-radius:12px 12px 0 0">
+      <div style="font-size:11px;letter-spacing:.08em;opacity:.7;text-transform:uppercase">
+        Cierre de equipo · semana ${SEMANA}</div>
+      <div style="font-size:20px;font-weight:800;margin-top:3px">${escH(miNombre)}</div>
+      <div style="font-size:12px;opacity:.75">${escH(EQUIPO)} · ${nCerr} cerrados${nAus?" · "+nAus+" ausentes":""}</div>
+    </div>
+    <div style="border:1px solid #DCE1E7;border-top:none;border-radius:0 0 12px 12px;padding:20px">
+      <div style="background:#F7F9FB;border-radius:10px;padding:14px 16px">
+        <div style="font-size:24px;font-weight:800;line-height:1">${totCumpl}
+          <span style="font-size:14px;font-weight:400;color:#6B7684">de ${totProm}</span></div>
+        <div style="font-size:12px;color:#6B7684">compromisos del equipo cumplidos
+          ${totRiesgo?" · "+totRiesgo+" clientes en riesgo":""}</div>
+      </div>
+      ${sube?`<h3 style="margin:20px 0 8px;font-size:14px">Lo que sube (${es.length})</h3>
+        <ul style="margin:0;padding-left:18px">${sube}</ul>`:""}
+      <h3 style="margin:22px 0 8px;font-size:14px">El equipo, uno a uno</h3>
+      ${filas}
+      <div style="margin-top:20px;text-align:center">
+        <a href="https://crmwikuk.vercel.app/objetivos_equipo.html" style="display:inline-block;
+          background:#14181F;color:#fff;text-decoration:none;padding:11px 26px;border-radius:9px;
+          font-size:13.5px;font-weight:700">Ver el detalle</a></div>
+    </div></div>`;
+
+  const sinEmail=[];
+  for(const id of dest){
+    const d=us.find(u=>u._id===id)||{};
+    let em=d.email||"";
+    if(!em){ const p=pu.find(x=>[x._id,x.id,x.crmId,x.username].filter(Boolean)
+      .some(k=>U(k)===U(id))); em=(p&&p.email)||""; }
+    if(!em){ sinEmail.push(d.nombre||id); continue; }
+    try{
+      await fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({to:em,
+          subject:"📋 Cierre de equipo "+EQUIPO+" · semana "+SEMANA+" — "+miNombre,html})});
+    }catch(e){}
+    // Y el aviso en la campanita del CRM
+    const nid="notif_"+Date.now()+"_"+Math.random().toString(36).slice(2,6);
+    try{ await escribir("notificaciones_email",nid,{id:nid,tipo:"cierre_equipo",
+      titulo:"📋 "+miNombre+" ha cerrado el equipo "+EQUIPO+" · S"+SEMANA,
+      mensaje:nCerr+" comerciales cerrados"+(nAus?", "+nAus+" ausentes":"")+". "
+        +totCumpl+" de "+totProm+" compromisos cumplidos.",
+      destinatarioId:id,destinatarioEmail:em,prioridad:"normal",creadoPor:UID,
+      creadoPorNombre:miNombre,fecha:new Date().toISOString(),leido:false,
+      emailEnviado:true}); }catch(e){}
+  }
+  if(sinEmail.length) alert("Cierre enviado. Ojo: "+sinEmail.join(", ")
+    +" no tiene email en su ficha y solo lo verá en el CRM.");
+}
+
 window.cerrarSemana=async()=>{
   const es=escalados();
+  if(esJefe){
+    const pend=pendientesEquipo();
+    if(pend.length){
+      alert("Antes tiene que cerrar tu equipo la semana "+SEMANA+".\n\nFaltan: "
+        +pend.map(a=>a.nombre).join(", ")
+        +"\n\nSi alguien está de vacaciones o de baja, márcalo como ausente.");
+      return;
+    }
+  }
   if(!es.length){ alert("Selecciona al menos una cosa."); return; }
   if(!confirm("Cerrar la semana "+SEMANA+" con "+es.length+" objetivo(s) para "
     +(ESCALA_A==="director"?"el Jefe de Ventas":"el CEO")+"?")) return;
@@ -927,6 +1069,7 @@ window.cerrarSemana=async()=>{
         body:JSON.stringify({fields:{estado:{stringValue:"cerrado"},
           fechaCierre:{stringValue:new Date().toISOString()}}})});
     }catch(e){}
+    if(esJefe){ try{ await enviarConsolidado(es); }catch(e){} }
     CERRADA=true; pintar();
   }catch(e){
     btn.disabled=false; btn.textContent="Cerrar la semana";
@@ -990,7 +1133,9 @@ function filasVendedores(){
     const nObj=OBJETIVOS.filter(o=>U(o.agente)===U(a.id)).length;
     return '<div class="card '+(c?"cerr":"abierto")+'" onclick="abrir(\''+esc2(a.id)+'\')">'
       +'<div class="fila"><div style="min-width:0"><b>'+a.nombre+'</b><small>'
-      +(c ? c.propuesto.length+" propuesto(s)"
+      +(c&&(c.ausente||(c.info&&c.info.estado==="ausente"))
+          ? "🌴 "+((c.info&&c.info.ausenteMotivo)||"Ausente")
+        : c ? c.propuesto.length+" propuesto(s)"
             +(c.obviado.length?" · "+c.obviado.length+" sin contestar":"")
             +(nObj?" · "+nObj+" tuyo(s)":"")
             +(hechosDe(a.id)!==null?" · "+hechosDe(a.id)+" cumplido(s)":"")
@@ -1018,9 +1163,20 @@ function pintarLista(){
     h+='<div class="card" style="border-color:var(--amber);background:var(--amberL)">'
       +'<b style="font-size:13.5px;color:var(--amber)">⚠️ '+sinCerrar.length
       +' sin cerrar la semana '+SEMANA+'</b>'
-      +'<p style="margin:6px 0 0;font-size:12.5px">'+muestra
-      +(sinCerrar.length>12?' <span style="color:var(--muted)">y '
-        +(sinCerrar.length-12)+' más</span>':'')+'</p></div>';
+      +(esJefe
+        // El jefe no puede cerrar hasta que esten todos: se le da la salida
+        // para quien este de vacaciones o de baja.
+        ? '<p style="margin:6px 0 8px;font-size:12px;color:var(--muted)">No podrás cerrar '
+          +'hasta que cierren todos. Si alguien está fuera, márcalo como ausente.</p>'
+          +sinCerrar.map(a=>'<div style="display:flex;align-items:center;gap:8px;'
+            +'padding:5px 0;border-top:1px solid rgba(0,0,0,.06)">'
+            +'<span style="flex:1;font-size:13px">'+a.nombre+'</span>'
+            +'<button class="mini" onclick="marcarAusente(\''+esc2(a.id)+'\')">🌴 Ausente</button>'
+            +'</div>').join("")
+        : '<p style="margin:6px 0 0;font-size:12.5px">'+muestra
+          +(sinCerrar.length>12?' <span style="color:var(--muted)">y '
+            +(sinCerrar.length-12)+' más</span>':'')+'</p>')
+      +'</div>';
   }
 
   h+='<h3 id="cuenta-cierres">'+textoCuenta()+'</h3>'
@@ -1053,9 +1209,11 @@ function pintarLista(){
     h+='<div style="position:sticky;bottom:0;padding:12px 0 4px;'
       +'background:linear-gradient(transparent,#F8FAFC 30%)">'
       +'<button class="btn" id="btnCerrar" onclick="cerrarSemana()" '
-      +(es.length?"":"disabled")+' style="padding:14px;font-size:14px">'
-      +(es.length?"Cerrar la semana "+SEMANA+" con "+es.length+" objetivo(s)"
-                 :"Marca lo que sube antes de cerrar")
+      +(es.length&&!(esJefe&&sinCerrar.length)?"":"disabled")+' style="padding:14px;font-size:14px">'
+      +(esJefe&&sinCerrar.length
+         ? "Faltan "+sinCerrar.length+" por cerrar"
+         : es.length?"Cerrar la semana "+SEMANA+" con "+es.length+" objetivo(s)"
+                    :"Marca lo que sube antes de cerrar")
       +'</button></div>';
   } else if(ESCALA_A&&CERRADA){
     h+='<div class="card" style="border-color:var(--green);background:var(--greenL)">'
