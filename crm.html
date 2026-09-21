@@ -490,8 +490,10 @@ async function recordatorioCalidad(){
     if(ultimo && (Date.now()-Date.parse(ultimo))<47*36e5) return;
 
     var ds=await fbLeer("desarrollos");
+    // Los que esperan datos del comercial no se le recuerdan a Calidad
     var pend=(ds||[]).filter(function(d){
-      return !d.eliminado&&(d.etapa==="aprobado"||d.etapa==="aprobado_cond")&&!d.codigoArticulo;
+      return !d.eliminado&&(d.etapa==="aprobado"||d.etapa==="aprobado_cond")
+        &&!d.codigoArticulo&&!d.faltanDatos;
     }).sort(function(a,b){return (a.decisionTs||0)-(b.decisionTs||0);});
     if(!pend.length) return;
 
@@ -6776,8 +6778,10 @@ function PendientesCodigoWidget({usuario, onNav}){
           <span style={{flex:1,minWidth:0,fontSize:12.5,fontWeight:700,color:"#0F172A"}}>
             {d.nombre}<span style={{fontWeight:400,color:"#7F1D1D"}}>
               {d.clienteNombre?" · "+d.clienteNombre:""}</span></span>
-          {dias!=null&&<span style={{fontSize:11,fontWeight:800,flexShrink:0,
-            color:dias>=7?"#B91C1C":"#92400E"}}>{dias} d</span>}
+          {d.faltanDatos
+            ?<span style={{fontSize:10.5,fontWeight:800,flexShrink:0,color:"#B45309"}}>❓ esperando datos</span>
+            :dias!=null&&<span style={{fontSize:11,fontWeight:800,flexShrink:0,
+              color:dias>=7?"#B91C1C":"#92400E"}}>{dias} d</span>}
         </div>;
       })}
       {pend.length>5&&<p style={{margin:"6px 0 0",fontSize:11,color:"#7F1D1D"}}>
@@ -21417,6 +21421,8 @@ function Embudo({usuario, clientesFB}){
   const [showForm,setShowForm]=useState(false);
   const [form,setForm]=useState({nombre:"",clienteNombre:"",clienteId:"",producto:"",sustituye:"",potencial:"",precioMercado:"",rangoMin:"",rangoMax:"",obs:""});
   const [motivoTxt,setMotivoTxt]=useState("");
+  const [peticionTxt,setPeticionTxt]=useState("");   // lo que Calidad pide
+  const [respuestaTxt,setRespuestaTxt]=useState(""); // lo que le contestan
   const [dictamen,setDictamen]=useState({viabilidad:"",escandallo:"",obs:""});
   const [condTxt,setCondTxt]=useState("");
 
@@ -21612,6 +21618,42 @@ function Embudo({usuario, clientesFB}){
       });
     }
     setCondTxt("");
+  }
+
+  // (sep 2026) Si a Calidad le faltan datos para crear el articulo, los pide
+  // aqui en vez de por fuera. El desarrollo queda "esperando datos": no se le
+  // recuerda a Calidad (la pelota esta en el otro tejado) y se avisa al
+  // comercial y a I+D, que son quienes tienen la informacion.
+  function pedirDatos(d){
+    var t=peticionTxt.trim();
+    if(!t){alert("Escribe qué datos te faltan");return;}
+    var pets=(d.peticiones||[]).concat([{texto:t,de:usuario.nombre,deId:usuario.id,
+      ts:Date.now(),respuesta:"",respondidoPor:"",respTs:0}]);
+    var n=conHito({...d,peticiones:pets,faltanDatos:true},"❓ Calidad pide datos: "+t);
+    guardar(n,function(){
+      enviarMails([comercialDe(d)].concat(personasIdyd()),
+        "❓ Calidad necesita datos — "+d.nombre,
+        "<p>Para crear el artículo de <b>"+d.nombre+"</b> ("+(d.clienteNombre||"")+"), "
+        +usuario.nombre+" necesita:</p>"
+        +"<blockquote style='border-left:3px solid #7C3AED;margin:10px 0;padding:6px 12px;color:#334155'>"+t+"</blockquote>"
+        +"<p>Contesta en la ficha del desarrollo, dentro del CRM. Hasta entonces el proceso de muestra sigue bloqueado.</p>");
+    });
+    setPeticionTxt("");
+  }
+  function responderDatos(d){
+    var t=respuestaTxt.trim();
+    if(!t){alert("Escribe la respuesta");return;}
+    var pets=(d.peticiones||[]).map(function(p){
+      return p.respuesta?p:{...p,respuesta:t,respondidoPor:usuario.nombre,respTs:Date.now()};
+    });
+    var n=conHito({...d,peticiones:pets,faltanDatos:false},"💬 Respuesta a Calidad ("+usuario.nombre+"): "+t);
+    guardar(n,function(){
+      enviarMails(personasCalidad(),"💬 Ya tienes los datos — "+d.nombre,
+        "<p>"+usuario.nombre+" ha contestado a lo que pediste para <b>"+d.nombre+"</b>:</p>"
+        +"<blockquote style='border-left:3px solid #16A34A;margin:10px 0;padding:6px 12px;color:#334155'>"+t+"</blockquote>"
+        +"<p>Ya puedes crear el artículo y registrar su código.</p>");
+    });
+    setRespuestaTxt("");
   }
 
   // (v6.1) Calidad registra el código de artículo → desbloquea las muestras
@@ -21839,7 +21881,9 @@ function Embudo({usuario, clientesFB}){
               {(d.etapa==="aprobado"||d.etapa==="aprobado_cond")&&(
                 d.codigoArticulo
                   ?<p style={{margin:"5px 0 0",fontSize:11,color:T.green,fontWeight:700}}>🔐 Artículo: {d.codigoArticulo}</p>
-                  :<p style={{margin:"5px 0 0",fontSize:11,color:T.red,fontWeight:700}}>⛔ Muestra bloqueada — pendiente de código de Calidad</p>
+                  :d.faltanDatos
+                    ?<p style={{margin:"5px 0 0",fontSize:11,color:"#B45309",fontWeight:700}}>❓ Calidad espera datos para crear el artículo</p>
+                    :<p style={{margin:"5px 0 0",fontSize:11,color:T.red,fontWeight:700}}>⛔ Muestra bloqueada — pendiente de código de Calidad</p>
               )}
             </div>
 
@@ -21940,13 +21984,46 @@ function Embudo({usuario, clientesFB}){
                   <div style={{background:"#FEF2F2",border:"1.5px solid #FECACA",borderRadius:11,padding:"11px 12px",marginBottom:10}}>
                     <p style={{margin:"0 0 4px",fontSize:11,fontWeight:800,color:T.red}}>⛔ Proceso de muestra BLOQUEADO</p>
                     <p style={{margin:"0 0 8px",fontSize:11,color:"#7F1D1D"}}>Calidad debe crear el artículo y registrar aquí su código antes de avanzar con las muestras.</p>
+
+                    {/* Lo que Calidad ha pedido y lo que le han contestado */}
+                    {(d.peticiones||[]).map(function(p,ix){
+                      return <div key={ix} style={{background:"#fff",borderRadius:9,padding:"8px 10px",marginBottom:7,
+                        border:"1px solid "+(p.respuesta?"#BBF7D0":"#FDE68A")}}>
+                        <p style={{margin:0,fontSize:11.5,color:"#92400E"}}><b>❓ {p.de}:</b> {p.texto}</p>
+                        {p.respuesta
+                          ?<p style={{margin:"5px 0 0",fontSize:11.5,color:"#166534"}}><b>💬 {p.respondidoPor}:</b> {p.respuesta}</p>
+                          :<p style={{margin:"4px 0 0",fontSize:10.5,color:"#B45309",fontWeight:700}}>Esperando respuesta del comercial o de I+D</p>}
+                      </div>;
+                    })}
+
                     {esCalidad?(
-                      <div style={{display:"flex",gap:6}}>
-                        <input value={motivoTxt} onChange={function(e){setMotivoTxt(e.target.value);}}
-                          placeholder="Código de artículo creado…"
-                          style={{flex:1,padding:"10px 11px",borderRadius:9,border:"1.5px solid "+T.border,fontSize:13,outline:"none",background:"#fff"}}/>
-                        <button onClick={function(){registrarCodigo(d);}}
-                          style={{padding:"10px 14px",borderRadius:9,border:"none",background:T.green,color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer"}}>🔓 Registrar</button>
+                      <div>
+                        <div style={{display:"flex",gap:6}}>
+                          <input value={motivoTxt} onChange={function(e){setMotivoTxt(e.target.value);}}
+                            placeholder="Código de artículo creado…"
+                            style={{flex:1,padding:"10px 11px",borderRadius:9,border:"1.5px solid "+T.border,fontSize:13,outline:"none",background:"#fff"}}/>
+                          <button onClick={function(){registrarCodigo(d);}}
+                            style={{padding:"10px 14px",borderRadius:9,border:"none",background:T.green,color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer"}}>🔓 Registrar</button>
+                        </div>
+                        <p style={{margin:"10px 0 5px",fontSize:10.5,fontWeight:800,color:"#7F1D1D"}}>¿Te falta algún dato para crearlo?</p>
+                        <div style={{display:"flex",gap:6}}>
+                          <input value={peticionTxt} onChange={function(e){setPeticionTxt(e.target.value);}}
+                            placeholder="Calibre exacto, metros por madeja, envase…"
+                            style={{flex:1,padding:"10px 11px",borderRadius:9,border:"1.5px solid "+T.border,fontSize:12.5,outline:"none",background:"#fff"}}/>
+                          <button onClick={function(){pedirDatos(d);}}
+                            style={{padding:"10px 12px",borderRadius:9,border:"1.5px solid #D97706",background:"#FFFBEB",color:"#92400E",fontWeight:800,fontSize:12,cursor:"pointer"}}>❓ Pedir datos</button>
+                        </div>
+                      </div>
+                    ):d.faltanDatos?(
+                      <div>
+                        <p style={{margin:"4px 0 5px",fontSize:10.5,fontWeight:800,color:"#92400E"}}>Calidad espera tu respuesta para poder crear el artículo</p>
+                        <div style={{display:"flex",gap:6}}>
+                          <input value={respuestaTxt} onChange={function(e){setRespuestaTxt(e.target.value);}}
+                            placeholder="Los datos que pide Calidad…"
+                            style={{flex:1,padding:"10px 11px",borderRadius:9,border:"1.5px solid "+T.border,fontSize:12.5,outline:"none",background:"#fff"}}/>
+                          <button onClick={function(){responderDatos(d);}}
+                            style={{padding:"10px 14px",borderRadius:9,border:"none",background:T.green,color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer"}}>💬 Responder</button>
+                        </div>
                       </div>
                     ):(
                       <p style={{margin:0,fontSize:10.5,color:T.muted}}>Calidad ha recibido email con las características del producto.</p>
