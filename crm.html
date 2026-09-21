@@ -22099,6 +22099,8 @@ function Embudo({usuario, clientesFB}){
 // ═══════════════════════════════════════════════════════════════════
 function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
   const [verHitosDe,setVerHitosDe]=useState(null); // de quien se despliegan los hitos
+  const [transPara,setTransPara]=useState("");   // objetivo transversal: a quién
+  const [transTxt,setTransTxt]=useState("");     // objetivo transversal: qué
   const hoy=new Date();
   // (v6.12) Si viene bloqueado, se abre ya en la semana que hay que cerrar:
   // no tiene sentido hacerle buscarla.
@@ -23102,6 +23104,56 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
 
   // (v5.8.1) El superior asigna un objetivo escribiéndolo inline en la ficha
   // de la persona — queda marcado "🎯 de [nombre]" y le llega notificación.
+  // (sep 2026) Departamentos transversales: pueden poner objetivos a cualquier
+  // persona de cualquier departamento, no solo a quien les reporta. Calidad
+  // audita y exige a todas las areas, pero no tiene a nadie a su cargo.
+  var DEPTOS_TRANSVERSALES=["calidad"];
+  var esTransversal=(function(){
+    try{
+      var r=tipologiasDeMiRama(usuario)||[];
+      var t=String(usuario.tipologia||"").toLowerCase();
+      return DEPTOS_TRANSVERSALES.some(function(x){ return r.indexOf(x)>=0||t===x; });
+    }catch(e){ return false; }
+  })();
+  // Todas las personas de departamento, con el nombre de su area
+  var personasDepto=esTransversal?USUARIOS.filter(function(u){
+    if(!u||u.activo===false||u.duplicadaDe||u.id===usuario.id) return false;
+    return u.rol==="tipologia"||!!u.departamentoId||(deptosDondeEsResponsable(u)||[]).length>0;
+  }).map(function(u){
+    var d=(deptosDondeEsResponsable(u)||[])[0]||(u.departamentoId?deptoDe(u.departamentoId):null);
+    if(!d&&u.tipologia) d=(deptosActivos()||[]).find(function(x){
+      return String(x.id).toLowerCase()===String(u.tipologia).toLowerCase()
+        ||(x.tipologias||[]).indexOf(String(u.tipologia).toLowerCase())>=0; })||null;
+    return {u:u, dep:d?((d.icon?d.icon+" ":"")+d.nombre):"Sin departamento"};
+  }).sort(function(a,b){ return (a.dep+a.u.nombre).localeCompare(b.dep+b.u.nombre); }):[];
+
+  function asignarTransversal(){
+    var t=transTxt.trim();
+    var u=USUARIOS.find(function(x){ return x.id===transPara; });
+    if(!u){ alert("Elige a quién va el objetivo."); return; }
+    if(!t){ alert("Escribe el objetivo."); return; }
+    var p=partes[idParteSemanal(u.id,ano,sem)]||parteDe(u);
+    guardarParte({...p,objetivos:[...(p.objetivos||[]),
+      {id:"o"+Date.now(),texto:t,estado:"pendiente",motivo:"",origen:"superior",
+       porNombre:usuario.nombre,porId:usuario.id,transversal:true,fechaAlta:Date.now()}]},function(){
+      try{despacharNotificacion({tipo:"parte",titulo:"🎯 Objetivo de "+usuario.nombre,
+        mensaje:t.slice(0,120)+" (semana "+sem+")",
+        destinatarioId:u.id,prioridad:"normal",creadoPor:usuario.id});}catch(e){}
+      // Y por correo, que es por donde se enteran de verdad
+      try{
+        var em=u.email||emailDeUsuario(u.id)||"";
+        if(em) fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({to:em,subject:"🎯 Objetivo de "+usuario.nombre+" · semana "+sem,
+            html:"<p><b>"+usuario.nombre+"</b> te ha puesto un objetivo para la semana "+sem+":</p>"
+              +"<blockquote style='border-left:3px solid #0F766E;margin:10px 0;padding:6px 12px'>"+t+"</blockquote>"
+              +"<p>Lo tienes en tu parte semanal del CRM. Tendrás que decir qué ha pasado con él al cerrar la semana.</p>"})})
+          .catch(function(){});
+      }catch(e){}
+    });
+    setTransTxt("");
+    alert("Objetivo enviado a "+u.nombre+".");
+  }
+
   function asignarObjetivo(u){
     var t=objParaTxt.trim();if(!t)return;
     var p=partes[idParteSemanal(u.id,ano,sem)]||parteDe(u);
@@ -23793,6 +23845,96 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
               style={{padding:"10px 16px",borderRadius:9,border:"none",background:nuevoObj.trim()?T.navy:"#E2E8F0",
                 color:nuevoObj.trim()?"#fff":"#94A3B8",fontWeight:800,fontSize:13,cursor:nuevoObj.trim()?"pointer":"default"}}>＋</button>
           </div>
+
+          {esTransversal&&(
+            <div style={{background:"#F0FDFA",border:"1.5px solid #99F6E4",borderRadius:12,
+              padding:"12px 13px",marginBottom:16}}>
+              <p style={{margin:"0 0 2px",fontSize:12.5,fontWeight:800,color:"#0F766E"}}>
+                🌐 Poner objetivo a otro departamento</p>
+              <p style={{margin:"0 0 9px",fontSize:11,color:"#115E59",lineHeight:1.45}}>
+                Le llega a su parte de esta semana, con aviso y correo, y tendrá que
+                decir qué pasó con él al cerrarla.</p>
+              <select value={transPara} onChange={function(e){setTransPara(e.target.value);}}
+                style={{width:"100%",padding:"10px 11px",borderRadius:9,border:"1.5px solid "+T.border,
+                  fontSize:13,marginBottom:7,background:"#fff"}}>
+                <option value="">— ¿A quién? —</option>
+                {(function(){
+                  var grupos={};
+                  personasDepto.forEach(function(x){ (grupos[x.dep]=grupos[x.dep]||[]).push(x.u); });
+                  return Object.keys(grupos).map(function(g){
+                    return <optgroup key={g} label={g}>
+                      {grupos[g].map(function(u){ return <option key={u.id} value={u.id}>{u.nombre}</option>; })}
+                    </optgroup>;
+                  });
+                })()}
+              </select>
+              <div style={{display:"flex",gap:6}}>
+                <input value={transTxt} onChange={function(e){setTransTxt(e.target.value);}}
+                  onKeyDown={function(e){ if(e.key==="Enter") asignarTransversal(); }}
+                  placeholder="Qué tiene que hacer esta semana…"
+                  style={{flex:1,padding:"10px 12px",borderRadius:9,border:"1.5px solid "+T.border,fontSize:13,outline:"none"}}/>
+                <button onClick={asignarTransversal} disabled={!transPara||!transTxt.trim()}
+                  style={{padding:"10px 14px",borderRadius:9,border:"none",
+                    background:transPara&&transTxt.trim()?"#0F766E":"#E2E8F0",
+                    color:transPara&&transTxt.trim()?"#fff":"#94A3B8",fontWeight:800,fontSize:12.5,
+                    cursor:transPara&&transTxt.trim()?"pointer":"default"}}>Enviar</button>
+              </div>
+
+              {/* (sep 2026) Seguimiento de lo pedido: sin esto, Calidad ponia
+                  objetivos a otras areas y no sabia si se habian hecho. */}
+              {(function(){
+                var mios=[];
+                Object.values(partes||{}).forEach(function(pp){
+                  if(!pp||pp.usuarioId===usuario.id) return;
+                  // Las ultimas cuatro semanas
+                  var ds=(ano-(pp.ano||ano))*52+(sem-(pp.semana||sem));
+                  if(ds<0||ds>3) return;
+                  (pp.objetivos||[]).forEach(function(o){
+                    if(!o.transversal) return;
+                    if(!(o.porId===usuario.id||(!o.porId&&o.porNombre===usuario.nombre))) return;
+                    var u=USUARIOS.find(function(x){return x.id===pp.usuarioId;})||{};
+                    mios.push({o:o,p:pp,nombre:u.nombre||pp.usuarioNombre||pp.usuarioId,
+                      entregado:pp.estado==="entregado"||pp.estado==="validado"});
+                  });
+                });
+                if(!mios.length) return null;
+                var orden={bloqueado:0,pendiente:1,en_curso:2,hecho:3};
+                mios.sort(function(a,b){
+                  return ((orden[a.o.estado]!=null?orden[a.o.estado]:1)-(orden[b.o.estado]!=null?orden[b.o.estado]:1))
+                    ||((b.p.semana||0)-(a.p.semana||0));
+                });
+                var hechos=mios.filter(function(x){return x.o.estado==="hecho";}).length;
+                return (
+                  <div style={{marginTop:12,paddingTop:10,borderTop:"1px dashed #99F6E4"}}>
+                    <p style={{margin:"0 0 6px",fontSize:11,fontWeight:800,color:"#0F766E",
+                      textTransform:"uppercase",letterSpacing:".05em"}}>
+                      Lo que has pedido · {hechos} de {mios.length} hechos</p>
+                    {mios.map(function(x){
+                      var e=EST_OBJ[x.o.estado]||EST_OBJ.pendiente;
+                      var sinContestar=x.entregado&&x.o.estado!=="hecho"&&!x.o.motivo;
+                      return <div key={x.p.id+x.o.id} style={{background:"#fff",borderRadius:9,
+                        padding:"8px 10px",marginBottom:6,borderLeft:"3px solid "+e.color}}>
+                        <div style={{display:"flex",gap:8,alignItems:"baseline"}}>
+                          <p style={{margin:0,flex:1,minWidth:0,fontSize:12.5,fontWeight:700,color:T.text}}>
+                            {e.icon} {x.o.texto}</p>
+                          <span style={{fontSize:10,fontWeight:800,color:e.color,flexShrink:0}}>
+                            {e.label.toUpperCase()}</span>
+                        </div>
+                        <p style={{margin:"2px 0 0",fontSize:11,color:T.muted}}>
+                          {x.nombre} · semana {x.p.semana}
+                          {x.entregado?" · parte entregado":" · aún sin cerrar"}
+                          {x.o.traspasado?" · pasado a la semana siguiente":""}</p>
+                        {x.o.motivo&&<p style={{margin:"4px 0 0",fontSize:11.5,color:"#334155",fontStyle:"italic"}}>
+                          “{x.o.motivo}”</p>}
+                        {sinContestar&&<p style={{margin:"4px 0 0",fontSize:11,color:T.red,fontWeight:700}}>
+                          Cerró la semana sin hacerlo y sin explicar por qué</p>}
+                      </div>;
+                    })}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
 
           <p style={{margin:"0 0 8px",fontSize:12,fontWeight:800,color:T.muted,textTransform:"uppercase"}}>Mi semana en datos {entregado?"(foto al entregar)":"(en vivo)"}</p>
           {snapCards(miSnap,usuario)}
