@@ -473,6 +473,81 @@ function esDescendienteDe(deptoId, posibleAncestro){
   return false;
 }
 // Usuarios responsables de un departamento (objetos de USUARIOS)
+// (sep 2026) Recordatorio a Calidad de los articulos por crear, sin cron: cada
+// vez que alguien abre el CRM se mira cuando fue el ultimo aviso, y si han
+// pasado dos dias y sigue habiendo desarrollos aprobados sin codigo, se envia.
+// El CRM se abre muchas veces al dia, asi que sale a su hora. El aviso al
+// aprobarse ya lo manda el propio embudo; esto es la insistencia.
+var _recordatorioCalidadHecho=false;
+async function recordatorioCalidad(){
+  if(_recordatorioCalidadHecho) return;
+  _recordatorioCalidadHecho=true;
+  try{
+    var base="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+    var rc=await fetch(base+"/configuracion/avisos_calidad",{cache:"no-store"});
+    var ultimo=null;
+    if(rc.ok){ var jc=await rc.json(); ultimo=((jc.fields||{}).ultimoEnvio||{}).stringValue||null; }
+    if(ultimo && (Date.now()-Date.parse(ultimo))<47*36e5) return;
+
+    var ds=await fbLeer("desarrollos");
+    var pend=(ds||[]).filter(function(d){
+      return !d.eliminado&&(d.etapa==="aprobado"||d.etapa==="aprobado_cond")&&!d.codigoArticulo;
+    }).sort(function(a,b){return (a.decisionTs||0)-(b.decisionTs||0);});
+    if(!pend.length) return;
+
+    // Se apunta ANTES de enviar: si dos personas abren el CRM a la vez, solo
+    // una manda el correo.
+    await fetch(base+"/configuracion/avisos_calidad",{method:"PATCH",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({fields:{ultimoEnvio:{stringValue:new Date().toISOString()},
+        pendientes:{doubleValue:pend.length}}})});
+
+    // Quien es Calidad: responsables del departamento y quien tenga su tipologia
+    var dest=[];
+    try{ dest=(responsablesDeDepto("calidad")||[]).slice(); }catch(e){}
+    USUARIOS.forEach(function(u){
+      if(u.duplicadaDe||u.activo===false) return;
+      if(String(u.tipologia||"").toLowerCase()==="calidad"&&!dest.some(function(x){return x.id===u.id;}))
+        dest.push(u);
+    });
+
+    var esc=function(t){return String(t||"").replace(/[<>&]/g,function(c){return {"<":"&lt;",">":"&gt;","&":"&amp;"}[c];});};
+    var filas=pend.map(function(d){
+      var dias=d.decisionTs?Math.floor((Date.now()-d.decisionTs)/864e5):null;
+      return '<tr><td style="padding:8px 0;border-bottom:1px solid #EEF1F5">'
+        +'<div style="font-size:13.5px;font-weight:700">'+esc(d.nombre)+'</div>'
+        +'<div style="font-size:12px;color:#6B7684">'+esc(d.clienteNombre||"")
+        +(d.etapa==="aprobado_cond"?" · con condiciones":"")+'</div></td>'
+        +'<td style="padding:8px 0;border-bottom:1px solid #EEF1F5;text-align:right;'
+        +'font-size:12.5px;font-weight:800;color:'+(dias>=7?"#B91C1C":"#92400E")+'">'
+        +(dias!=null?dias+" días":"")+'</td></tr>';
+    }).join("");
+    var asunto="🔐 Calidad: "+pend.length+" artículo"+(pend.length===1?"":"s")+" por crear";
+    var html='<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;max-width:600px;margin:0 auto;color:#14181F">'
+      +'<div style="background:#991B1B;color:#fff;padding:18px 20px;border-radius:12px 12px 0 0">'
+      +'<div style="font-size:20px;font-weight:800">'+asunto.replace("🔐 Calidad: ","🔐 ")+'</div></div>'
+      +'<div style="border:1px solid #DCE1E7;border-top:none;border-radius:0 0 12px 12px;padding:20px">'
+      +'<p style="margin:0 0 14px;font-size:13.5px;color:#3A424E">Aprobados por ventas e I+D. '
+      +'Hasta que registres su código de artículo, el proceso de muestra está bloqueado.</p>'
+      +'<table style="width:100%;border-collapse:collapse">'+filas+'</table>'
+      +'<div style="margin-top:20px;text-align:center"><a href="https://crmwikuk.vercel.app" '
+      +'style="display:inline-block;background:#14181F;color:#fff;text-decoration:none;padding:11px 26px;'
+      +'border-radius:9px;font-size:13.5px;font-weight:700">Registrar códigos</a></div>'
+      +'<p style="margin:16px 0 0;font-size:11px;color:#8A94A0;text-align:center">'
+      +'Recibirás este aviso cada dos días mientras quede alguno pendiente.</p></div></div>';
+
+    var vistos={};
+    dest.forEach(function(u){
+      var em=u.email||"";
+      if(!em){ try{ em=emailDeUsuario(u.id)||""; }catch(e){} }
+      if(!em||vistos[em.toLowerCase()]) return;
+      vistos[em.toLowerCase()]=1;
+      fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({to:em,subject:asunto,html:html})}).catch(function(){});
+    });
+  }catch(e){ console.log("[CALIDAD] recordatorio:",e&&e.message); }
+}
+
 function responsablesDeDepto(deptoId){
   var d=deptoDe(deptoId); if(!d) return [];
   // (v6.5.3) Resolución robusta: id exacto → claves (crmId/usuario/vendedor/
@@ -6664,6 +6739,55 @@ class CobrosBoundary extends React.Component{
   componentDidCatch(e){ console.error("[COBROS] widget desactivado por error:", e); }
   render(){ return this.state.roto ? null : this.props.children; }
 }
+// (sep 2026) Desarrollos aprobados que esperan a que Calidad cree el articulo.
+// Sin codigo, el proceso de muestra queda bloqueado: por eso sale en el
+// inicio de Calidad y no solo dentro de Desarrollo.
+function PendientesCodigoWidget({usuario, onNav}){
+  const esCal=(function(){
+    try{ return (tipologiasDeMiRama(usuario)||[]).indexOf("calidad")>=0
+      ||String(usuario.tipologia||"").toLowerCase()==="calidad"; }catch(e){ return false; }
+  })();
+  const [pend,setPend]=React.useState(null);
+  React.useEffect(function(){
+    if(!esCal) return;
+    var vivo=true;
+    fbLeer("desarrollos").then(function(ds){
+      if(!vivo) return;
+      setPend((ds||[]).filter(function(d){
+        return !d.eliminado&&(d.etapa==="aprobado"||d.etapa==="aprobado_cond")&&!d.codigoArticulo;
+      }).sort(function(a,b){return (a.decisionTs||0)-(b.decisionTs||0);}));
+    }).catch(function(){ if(vivo) setPend([]); });
+    return function(){ vivo=false; };
+  },[esCal]);
+  if(!esCal||!pend||!pend.length) return null;
+  return (
+    <div onClick={function(){ if(onNav) onNav("embudo"); }}
+      style={{background:"#FEF2F2",border:"2px solid #FCA5A5",borderRadius:14,
+        padding:"13px 14px",marginBottom:12,cursor:"pointer"}}>
+      <p style={{margin:"0 0 2px",fontSize:14,fontWeight:800,color:"#991B1B"}}>
+        🔐 {pend.length} artículo{pend.length===1?"":"s"} por crear</p>
+      <p style={{margin:"0 0 9px",fontSize:11.5,color:"#7F1D1D",lineHeight:1.45}}>
+        Aprobados por ventas e I+D. Hasta que registres el código, el proceso de
+        muestra está bloqueado.</p>
+      {pend.slice(0,5).map(function(d){
+        var dias=d.decisionTs?Math.floor((Date.now()-d.decisionTs)/864e5):null;
+        return <div key={d.id} style={{display:"flex",gap:8,alignItems:"baseline",
+          padding:"6px 0",borderTop:"1px solid #FECACA"}}>
+          <span style={{flex:1,minWidth:0,fontSize:12.5,fontWeight:700,color:"#0F172A"}}>
+            {d.nombre}<span style={{fontWeight:400,color:"#7F1D1D"}}>
+              {d.clienteNombre?" · "+d.clienteNombre:""}</span></span>
+          {dias!=null&&<span style={{fontSize:11,fontWeight:800,flexShrink:0,
+            color:dias>=7?"#B91C1C":"#92400E"}}>{dias} d</span>}
+        </div>;
+      })}
+      {pend.length>5&&<p style={{margin:"6px 0 0",fontSize:11,color:"#7F1D1D"}}>
+        y {pend.length-5} más</p>}
+      <p style={{margin:"9px 0 0",fontSize:11.5,fontWeight:800,color:"#991B1B"}}>
+        Registrar códigos →</p>
+    </div>
+  );
+}
+
 function CobrosWidget(props){
   if(!puedeVerCobros(props&&props.usuario)) return null;
   return <CobrosBoundary><CobrosWidgetInterno {...props}/></CobrosBoundary>;
@@ -6994,6 +7118,7 @@ function DashTipologia({usuario, onNav, incidenciasDB}){
       <SemaforoDesempeno usuario={usuario} incidenciasDB={incidenciasDB} onNav={onNav}/>
 
       {/* (v6.5) OBJETIVOS DE LA SEMANA — visibles desde el inicio */}
+      <PendientesCodigoWidget usuario={usuario} onNav={onNav}/>
       <ObjetivosSemanaWidget usuario={usuario} onNav={onNav}/>
 
       {/* Resumen numérico */}
@@ -21575,13 +21700,21 @@ function Embudo({usuario, clientesFB}){
     if(esJefeEq)return d.equipo===usuario.equipo||clavesU({id:d.comercialId}).some(function(k){return misClaves.indexOf(k)>=0;});
     return misClaves.indexOf(String(d.comercialId||"").toUpperCase())>=0;
   }).sort(function(a,b){return (b.fechaCreacion||"").localeCompare(a.fechaCreacion||"");});
+  // (sep 2026) Un desarrollo aprobado por ventas e I+D NO esta terminado:
+  // falta que Calidad cree el articulo. Antes pasaba a "Cerrados" y nadie lo
+  // veia pendiente. Ahora sigue activo, en su propia etapa, hasta tener codigo.
+  var pendCod=function(d){
+    return (d.etapa==="aprobado"||d.etapa==="aprobado_cond")&&!d.codigoArticulo;
+  };
   var lista=visibles.filter(function(d){
-    if(filtroEt==="activos")return ACTIVAS.indexOf(d.etapa)>=0;
-    if(filtroEt==="cerrados")return ACTIVAS.indexOf(d.etapa)<0;
+    if(filtroEt==="activos")return ACTIVAS.indexOf(d.etapa)>=0||pendCod(d);
+    if(filtroEt==="codigo")return pendCod(d);
+    if(filtroEt==="cerrados")return ACTIVAS.indexOf(d.etapa)<0&&!pendCod(d);
     return d.etapa===filtroEt;
   });
   var nDe=function(et){return visibles.filter(function(d){return d.etapa===et;}).length;};
-  var cerradosN=visibles.filter(function(d){return ACTIVAS.indexOf(d.etapa)<0;}).length;
+  var codigoN=visibles.filter(pendCod).length;
+  var cerradosN=visibles.filter(function(d){return ACTIVAS.indexOf(d.etapa)<0&&!pendCod(d);}).length;
   var aprobTot=nDe("aprobado")+nDe("aprobado_cond");
   var conversion=(aprobTot+nDe("rechazado"))>0?Math.round(aprobTot/(aprobTot+nDe("rechazado"))*100):null;
 
@@ -21606,10 +21739,11 @@ function Embudo({usuario, clientesFB}){
 
       {/* Pipeline: chips de etapa con conteos */}
       <div style={{display:"flex",gap:6,overflowX:"auto",padding:"10px 0 6px"}}>
-        {[["activos","⚡ Activos ("+(nDe("solicitado")+nDe("filtro")+nDe("decision"))+")",T.navy],
+        {[["activos","⚡ Activos ("+(nDe("solicitado")+nDe("filtro")+nDe("decision")+codigoN)+")",T.navy],
           ["solicitado",ETAPAS.solicitado.label+" ("+nDe("solicitado")+")",ETAPAS.solicitado.color],
           ["filtro",ETAPAS.filtro.label+" ("+nDe("filtro")+")",ETAPAS.filtro.color],
           ["decision",ETAPAS.decision.label+" ("+nDe("decision")+")",ETAPAS.decision.color],
+          ["codigo","🔐 Código Calidad ("+codigoN+")",T.red],
           ["cerrados","📁 Cerrados ("+cerradosN+")","#64748B"]].map(function(par){
           var k=par[0],l=par[1],c=par[2],on=filtroEt===k;
           return (
@@ -36456,6 +36590,8 @@ function App(props){
   useEffect(()=>{
     cargarUsuariosFB().then(ok=>{
       if(ok) setUsrVer(v=>v+1);
+      // Con los usuarios ya cargados se sabe a quien avisar
+      if(ok) setTimeout(function(){ recordatorioCalidad(); },4000);
       // (v5.4.1) Re-resolver el usuario logueado: al entrar desde el portal,
       // el perfil se construye ANTES de que llegue la colección "usuarios" de
       // Firebase, así que puede nacer con el rol genérico del portal (jefe)
