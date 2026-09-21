@@ -2452,6 +2452,57 @@ function BottomNav({items,current,onChange}){
 
 // ─── DASHBOARD AGENTE ─────────────────────────────────────────────
 // ══ Componente reutilizable: búsqueda con lupa y sugerencias ══════
+// (sep 2026) Producto de una incidencia: SOLO se puede elegir de la lista, no
+// escribir a mano. Texto libre generaba productos que no existian ("tripa
+// cerdo 38", "la de siempre") y la incidencia no se podia cruzar con lotes,
+// pedidos ni stock. Lo que se teclea es solo para buscar.
+function ProductoDeLista({codigo, nombre, onChange, obligatorio}){
+  const [q,setQ]=React.useState("");
+  const [,refrescar]=React.useState(0);
+  React.useEffect(function(){
+    var f=function(){ refrescar(function(x){return x+1;}); };
+    window.addEventListener("crm_catalogo_cargado",f);
+    return function(){ window.removeEventListener("crm_catalogo_cargado",f); };
+  },[]);
+  var nrm=function(x){ return String(x||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,""); };
+  if(codigo){
+    return <div style={{display:"flex",gap:8,alignItems:"center",padding:"10px 12px",borderRadius:10,
+      border:"1.5px solid "+T.green,background:"#F0FDF4"}}>
+      <div style={{flex:1,minWidth:0}}>
+        <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{nombre||codigo}</p>
+        <p style={{margin:"1px 0 0",fontSize:11,color:T.muted,fontFamily:"monospace"}}>{codigo}</p>
+      </div>
+      <button onClick={function(){ onChange("",""); setQ(""); }}
+        style={{padding:"7px 12px",borderRadius:8,border:"1.5px solid "+T.border,background:"#fff",
+          color:T.text,fontSize:12,fontWeight:700,cursor:"pointer"}}>Cambiar</button>
+    </div>;
+  }
+  var qq=nrm(q);
+  var res=qq.length<2?[]:(PRODUCTOS_LOCAL||[]).filter(function(p){
+    return nrm(p.nombre).indexOf(qq)>=0||nrm(p.codigo).indexOf(qq)>=0||nrm(p.formato).indexOf(qq)>=0;
+  }).slice(0,12);
+  return <div>
+    <input value={q} onChange={function(e){ setQ(e.target.value); }}
+      placeholder="🔍 Busca por nombre o código y elige de la lista"
+      style={{width:"100%",padding:"11px 12px",borderRadius:10,fontSize:13,outline:"none",boxSizing:"border-box",
+        border:"1.5px solid "+(obligatorio&&!codigo?T.amber:T.border),fontFamily:"inherit"}}/>
+    {qq.length>=2&&(
+      <div style={{border:"1px solid "+T.border,borderRadius:10,marginTop:4,background:"#fff",maxHeight:280,overflowY:"auto"}}>
+        {res.length?res.map(function(p){
+          return <div key={p.codigo} onClick={function(){ onChange(p.codigo,p.nombre); setQ(""); }}
+            style={{padding:"10px 12px",borderTop:"1px solid "+T.border+"80",cursor:"pointer"}}>
+            <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{p.nombre}</p>
+            <p style={{margin:"1px 0 0",fontSize:11,color:T.muted}}>{p.codigo}{p.formato?" · "+p.formato:""}</p>
+          </div>;
+        }):<p style={{margin:0,padding:"10px 12px",fontSize:12,color:T.muted}}>
+          No hay ningún producto que coincida. Prueba con parte del nombre o el código.</p>}
+      </div>
+    )}
+    <p style={{margin:"4px 0 0",fontSize:10.5,color:obligatorio?T.amber:T.muted}}>
+      {obligatorio?"Obligatorio. ":""}Solo se puede elegir de la lista.</p>
+  </div>;
+}
+
 function SearchInput({value, onChange, placeholder, suggestions=[], onSelect, onPick, style={}, disabled=false}){
   const [open, setOpen] = React.useState(false);
   const [catOpen, setCatOpen] = React.useState(false);
@@ -20521,6 +20572,7 @@ function Incidencias({usuario, clientesFB, onAbrirCliente, incidenciasDB: incDB,
     // (v5.6.3) Incidencia interna: sin cliente, etiquetada como tal
     const esInterna=(form.origen||"cliente")==="interna";
     if(!esInterna&&!form.clienteNombre.trim()){alert("Selecciona el cliente, o marca la incidencia como Interna");return;}
+    if(!esInterna&&!form.productoCodigo){alert("Elige el producto afectado de la lista");return;}
     const nueva={
       id:`inc${Date.now()}`,
       ...form,
@@ -21302,17 +21354,11 @@ function DetIncidencia({sel,usuario,director,ceo,esJefe,esRolJefe,onBack,onEscal
 
           {/* Producto afectado */}
           <div style={{marginBottom:12}}>
-            <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Producto afectado (opcional)</p>
-            <SearchInput
-              value={form.productoNombre}
-              onChange={v=>setForm(f=>({...f,productoNombre:v,productoCodigo:""}))}
-              placeholder="🔍 Buscar producto o código..."
-              suggestions={PRODUCTOS_LOCAL
-                .filter(p=>form.productoNombre.length>=2&&((p.nombre||"").toLowerCase().includes(form.productoNombre.toLowerCase())||(p.codigo||"").toLowerCase().includes(form.productoNombre.toLowerCase())))
-                .slice(0,8).map(p=>({label:p.nombre,sub:p.codigo+" · "+p.formato,tipo:"producto",obj:p}))}
-              onSelect={s=>setForm(f=>({...f,productoNombre:s.label,productoCodigo:s.obj.codigo}))}
-            />
-            {form.productoCodigo&&<p style={{margin:"4px 0 0",fontSize:10,color:T.blue,fontWeight:700,fontFamily:"monospace"}}>{form.productoCodigo}</p>}
+            <p style={{margin:"0 0 5px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>
+              Producto afectado {(form.origen||"cliente")==="interna"?"(opcional)":"*"}</p>
+            <ProductoDeLista codigo={form.productoCodigo} nombre={form.productoNombre}
+              obligatorio={(form.origen||"cliente")!=="interna"}
+              onChange={(c,n)=>setForm(f=>({...f,productoCodigo:c,productoNombre:n}))}/>
           </div>
 
           {/* Tipo — (v5.6) selector jerárquico: área general o rama concreta */}
@@ -34123,6 +34169,8 @@ function GestorClientes({usuario, actividad, onActividad, onBack, clientesFB, mu
                 const nueva={...inc,id,fotos:fotosURLs,
                   clienteId:clienteSel.id,clienteNombre:clienteSel.nombre,
                   agente:idCanonico(usuario),equipo:usuario.equipo||"",
+                  autor:idCanonico(usuario),autorNombre:usuario.nombre||"",
+                  autorUsuario:usuario.usernamePortal||usuario.username||usuario.user||"",
                   fecha:new Date().toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"}),
                   semana:getSemanaISO(),
                   estado:"abierta"};
@@ -35724,6 +35772,12 @@ function IncidenciaTab({incidencias,clienteNombre,usuario,onAdd,onCerrar,onEdit,
             <SelectorTipoIncidencia value={form.tipo} onChange={k=>setForm(f=>({...f,tipo:k}))}/>
           </div>
 
+          <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Producto afectado *</p>
+          <div style={{marginBottom:14}}>
+            <ProductoDeLista codigo={form.productoCodigo} nombre={form.productoNombre} obligatorio={true}
+              onChange={(c,n)=>setForm(f=>({...f,productoCodigo:c,productoNombre:n}))}/>
+          </div>
+
           <p style={{margin:"0 0 8px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Prioridad</p>
           <div style={{display:"flex",gap:6,marginBottom:14}}>
             {PRIORIDADES.map(p=>(
@@ -35791,6 +35845,8 @@ function IncidenciaTab({incidencias,clienteNombre,usuario,onAdd,onCerrar,onEdit,
             </button>
             <button onClick={()=>{
               if(!form.tipo||!form.descripcion.trim()) return;
+              // Las nuevas llevan producto; las antiguas se pueden seguir editando
+              if(!editId&&!form.productoCodigo){ alert("Elige el producto afectado de la lista"); return; }
               if(editId&&onEdit){
                 onEdit(editId,form);
               }else{
