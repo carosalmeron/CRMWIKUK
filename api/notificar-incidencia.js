@@ -31,6 +31,7 @@ function fsToObj(doc){
     const v=doc.fields[k];
     if(v.stringValue!==undefined) o[k]=v.stringValue;
     else if(v.integerValue!==undefined) o[k]=parseInt(v.integerValue);
+    else if(v.doubleValue!==undefined) o[k]=Number(v.doubleValue);
     else if(v.booleanValue!==undefined) o[k]=v.booleanValue;
     else if(v.timestampValue!==undefined) o[k]=v.timestampValue;
     else if(v.arrayValue && v.arrayValue.values){
@@ -133,6 +134,10 @@ function emailDeCuenta(datos, cuentaId){
   let m=datos.usuarios.find(u=>coincide(u)&&u.email);
   if(m) return m.email;
   m=datos.portal.find(u=>coincide(u)&&u.email);
+  if(m) return m.email;
+  // (sep 2026) La ficha del portal puede apuntar a esta cuenta por crmId aunque
+  // tenga otro id propio: es donde suele estar el email.
+  m=datos.portal.find(u=>cuentaValida(u)&&u.email&&u.crmId&&String(u.crmId).toLowerCase()===idN);
   return m?m.email:null;
 }
 
@@ -145,12 +150,15 @@ function destinatariosDe(datos, tipologia){
 
   // 1. Departamento del organigrama cuya lista `tipologias` incluye este tipo,
   //    o cuyo id ES el tipo (tipos generados por departamento, v5.5)
-  const dep=datos.departamentos.find(d=>{
+  // (sep 2026) Antes se cogia solo el PRIMER departamento que casaba: si habia
+  // dos (uno antiguo y el del organigrama nuevo) y el primero no tenia
+  // responsable con email, no se avisaba a nadie. Ahora se recorren todos.
+  const deps=datos.departamentos.filter(d=>{
     if(d.activo===false) return false;
     const tips=(d.tipologias||[]).map(t=>String(t).toLowerCase());
     return tips.indexOf(tipologia)>=0 || String(d._id||d.id||"").toLowerCase()===tipologia;
   });
-  if(dep){
+  deps.forEach(dep=>{
     (dep.responsableIds||[]).forEach(rid=>addD(emailDeCuenta(datos,rid)));
     // Escalado: responsables del departamento PADRE (excepto dirección)
     if(dep.padre && dep.padre!=="direccion"){
@@ -159,7 +167,7 @@ function destinatariosDe(datos, tipologia){
         (padre.responsableIds||[]).forEach(rid=>addE(emailDeCuenta(datos,rid)));
       }
     }
-  }
+  });
 
   // 2. Compatibilidad: cualquier ficha con campo `tipologia` coincidente
   //    o con id legacy resp_* (comportamiento anterior, ahora aditivo)
@@ -212,7 +220,12 @@ async function enviarEmail(to, subject, text){
       if(!yaEsta) finales.push(cc);
     });
 
-  const base=process.env.VERCEL_URL?("https://"+process.env.VERCEL_URL):"https://crmwikuk.vercel.app";
+  // (sep 2026) VERCEL_URL es la direccion INTERNA del despliegue: con la
+  // proteccion de despliegues activada exige identificarse, la llamada falla
+  // en silencio y el correo no sale. Se usa siempre el dominio publico.
+  const base=process.env.VERCEL_PROJECT_PRODUCTION_URL
+    ?("https://"+process.env.VERCEL_PROJECT_PRODUCTION_URL)
+    :"https://crmwikuk.vercel.app";
   const r=await fetch(base+"/api/send-email",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
@@ -261,6 +274,29 @@ function construirEmail(inc, dias, esEscalado){
 
 module.exports = async function handler(req, res){
   try{
+    // ─────── MODO PRUEBA: ?probar=calidad → a quién avisaría, sin enviar ───────
+    // Con &enviar=1 manda de verdad un correo de prueba a esos destinatarios.
+    if(req.method==="GET" && req.query && req.query.probar){
+      const sec=process.env.CRON_SECRET;
+      if(sec && req.query.secret!==sec){ res.status(401).json({error:"falta el secreto"}); return; }
+      const tip=String(req.query.probar).toLowerCase();
+      const tipologia=TIPO_A_TIPOLOGIA[tip]||tip;
+      const datos=await cargarDatos();
+      const deps=datos.departamentos.filter(d=>{
+        const tips=(d.tipologias||[]).map(t=>String(t).toLowerCase());
+        return tips.indexOf(tipologia)>=0||String(d._id||d.id||"").toLowerCase()===tipologia;
+      }).map(d=>({id:d._id,nombre:d.nombre,activo:d.activo!==false,
+        responsables:(d.responsableIds||[]).map(r=>({id:r,email:emailDeCuenta(datos,r)||"❌ sin email"}))}));
+      const dest=destinatariosDe(datos,tipologia);
+      const out={tipologia, departamentos:deps, directos:dest.directos, escalado:dest.escalado,
+        copiaSiempre:CC_SIEMPRE};
+      if(req.query.enviar==="1" && dest.directos.length){
+        out.envio=await enviarEmail(dest.directos,"🧪 Prueba de aviso de incidencias ("+tipologia+")",
+          "Esto es una prueba del aviso de incidencias. Si lo recibes, el circuito funciona.");
+      }
+      res.status(200).json(out); return;
+    }
+
     // ─────── MODO 1: POST inmediato al crear una incidencia ───────
     if(req.method==="POST"){
       const {incidenciaId} = req.body||{};
