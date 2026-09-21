@@ -800,6 +800,8 @@ function doLogin(){
 var MODULE_DEF=[
   {id:"crm",      icon:"📋",label:"CRM",           sub:"Clientes · Estrategias · Oportunidades", iconBg:"#EBF2F8",color:"#1E5A8A"},
   {id:"pnch",     icon:"🧼",label:"PNCH",           sub:"Controles de higiene · preoperativo y operativo", iconBg:"#DCEBEE",color:"#0E5E6F"},
+  {id:"llegadas", icon:"🚢",label:"Llegadas de mercancía", sub:"Seguimiento de contenedores y camiones",  iconBg:"#DCEBEE",color:"#0E5E6F"},
+  {id:"almacen",  icon:"🏗️",label:"Plan de almacén", sub:"Entradas, salidas y picking del día",        iconBg:"#FCEBD5",color:"#B45309"},
   {id:"planificador",icon:"🗺",label:"Planificador de Rutas",sub:"Tu agenda · el asistente reordena · un clic guarda", iconBg:"#F6EFE7",color:"#7A1F2B"},
   {id:"catalogo", icon:"📦",label:"Catalogo",       sub:"Tarifa · Productos · Precios",           iconBg:"#EDF4F0",color:"#2E6B42"},
   {id:"rrhh",     icon:"👥",label:"Zona Empleado",  sub:"Nominas · Datos personales",            iconBg:"#FBF6EC",color:"#8A6B00"},
@@ -877,6 +879,38 @@ function pnchPerfilDe(u){
   return null;
 }
 
+// (sep 2026) Plan de almacen: Almacen (y Logistica) ven su plan y el picking;
+// Compras da de alta las entradas; Direccion lo ve todo.
+function almPerfilDe(u){
+  if(!u) return null;
+  var rol=String(u.rol||'').toLowerCase();
+  if(rol==='admin'||rol==='ceo'||rol==='direccion'||rol==='crm_director'||rol==='director') return 'direccion';
+  var ids=[u.crmId,u.id].filter(Boolean).map(function(x){return String(x).toLowerCase();});
+  var f=ORG_FICHAS[u.crmId||u.id]||{};
+  var tip=String(f.tipologia||u.tipologia||'').toLowerCase();
+  if(ids.indexOf('compras')>=0||tip==='stock'||tip==='compras'||rol==='compras') return 'compras';
+  var norm=function(x){return String(x||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');};
+  var porId={}; DEPTOS.forEach(function(d){porId[d.id]=d;});
+  var mios=[]; if(f.departamentoId) mios.push(f.departamentoId);
+  DEPTOS.forEach(function(d){
+    if((d.responsableIds||[]).some(function(r){return ids.indexOf(String(r).toLowerCase())>=0;})) mios.push(d.id);
+    if(tip&&(String(d.id).toLowerCase()===tip||(d.tipologias||[]).map(norm).indexOf(tip)>=0)) mios.push(d.id);
+  });
+  var res=null;
+  mios.forEach(function(id){
+    // El propio departamento manda: Logistica cuelga de Compras pero es almacen
+    var d0=porId[id]||{}, t0=norm(id)+' '+norm(d0.nombre);
+    if(/almacen|logistica/.test(t0)){ res='almacen'; return; }
+    if(/compras/.test(t0)&&!res){ res='compras'; return; }
+    var cur=d0.padre, g=0;
+    while(cur&&g<15&&!res){ var d=porId[cur]||{}, t=norm(cur)+' '+norm(d.nombre);
+      if(/almacen|logistica/.test(t)) res='almacen'; else if(/compras/.test(t)) res='compras';
+      cur=d.padre; g++; }
+  });
+  if(!res&&(u.accesos||[]).indexOf('almacen')>=0) res='almacen';
+  return res;
+}
+
 function renderHub(){
   // Sin organigrama no se sabe quien es de planta: se carga y se repinta
   if(!orgCargado&&currentUser){ loadOrgData().then(function(){ if(document.getElementById('hub').classList.contains('active')) renderHub(); }).catch(function(){}); }
@@ -887,6 +921,10 @@ function renderHub(){
   if(amb&&amb.ver&&!accesos.includes('planificador')) accesos.push('planificador');
   if(tieneAccesoStock(currentUser)&&!accesos.includes('stock')) accesos.push('stock');
   if(currentUser&&currentUser.rol==='admin'&&!accesos.includes('radar')) accesos.push('radar');
+  var almP=almPerfilDe(currentUser);
+  if(almP&&!accesos.includes('almacen')) accesos.push('almacen');
+  // La hoja de llegadas es de Compras (y Direccion); almacen la ve dentro de su plan
+  if((almP==='compras'||almP==='direccion')&&!accesos.includes('llegadas')) accesos.push('llegadas');
   var pnchP=pnchPerfilDe(currentUser);
   if(pnchP){
     if(!accesos.includes('pnch')) accesos.push('pnch');
@@ -1007,6 +1045,14 @@ function openModule(id){
       alert('Acceso restringido: solo administrador.');showScreen('hub');return;
     }
     url='Estacion_Radar.html';
+  } else if(id==='almacen'||id==='llegadas'){
+    var ap=almPerfilDe(currentUser);
+    if(!ap){ alert('Acceso restringido a Almacén, Compras y Dirección.'); showScreen('hub'); return; }
+    var fa=ORG_FICHAS[currentUser.crmId||currentUser.id]||{};
+    var sa={crmId:currentUser.crmId||currentUser.id||'',id:currentUser.id||'',username:currentUser.username||'',
+      nombre:currentUser.nombre||'',rol:currentUser.rol||'',tipologia:fa.tipologia||currentUser.tipologia||'',almPerfil:ap};
+    try{ localStorage.setItem('gc_portal_user',JSON.stringify(Object.assign({},currentUser,sa))); }catch(e){}
+    url='almacen.html'+(id==='llegadas'?'?zona=compras':'')+'#'+encodeURIComponent(JSON.stringify(sa));
   } else if(id==='pnch'){
     var pp=pnchPerfilDe(currentUser);
     if(!pp){ alert('Acceso restringido a Producción, Almacén y Calidad.'); showScreen('hub'); return; }
