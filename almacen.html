@@ -599,7 +599,7 @@ function abrirEntrada(id){
     e.estado="pendiente"; e.propuesta=""; await guardarYVolver(e,"Compras mantiene el "+fLarga(e.fecha)+(m?": "+m:""));
     avisar("almacen","📅 Se mantiene la entrada de "+e.proveedor+" el "+fLarga(e.fecha),
       `<p>Compras no puede mover la fecha${m?": "+esc(m):""}. Vuelve a revisarla en el plan.</p>`,e); });
-  on("bEdit",()=>{ cerrar(); formEntrada(e); });
+  on("bEdit",()=>{ cerrar(); nuevaFila(e); });
 }
 async function guardarYVolver(e,evento){
   try{ await guardarEntrada(e,evento); $("#capa").innerHTML=""; aviso("Guardado","ok"); pintar(); }
@@ -768,14 +768,20 @@ function pintarCompras(){
       <input class="t" id="cBus" placeholder="🔍 Buscar proveedor, contenedor, pedido…" value="${esc(S.buscaC||"")}" style="max-width:340px">
       <span class="guardado" id="cOk"></span>
     </div>
-    <p class="nota">Escribe directamente en la celda: se guarda sola. Si cambias la fecha de <b>BAZA</b>, almacén recibe un aviso y tiene que aceptarla.</p>
+    <p class="nota">Para cambiar un dato, escribe directamente en la celda: se guarda solo. O pulsa ✏️ para abrir la ficha entera,
+      y 🗑 para eliminarla. Si cambias la fecha de <b>BAZA</b>, almacén recibe un aviso y tiene que aceptarla.</p>
     ${l.length?`<div class="hoja-cal"><table>
       <thead><tr>${VIS.slice(0,3).map(c=>`<th style="min-width:${c.w}px">${c.t}</th>`).join("")}<th style="min-width:190px">Almacén</th>
-        ${VIS.slice(3).map(c=>`<th style="min-width:${c.w}px">${c.t}</th>`).join("")}</tr></thead>
+        <th style="min-width:92px"></th>
+        ${VIS.slice(3).map(c=>`<th style="min-width:${c.w}px">${c.t}</th>`).join("")}<th style="min-width:60px"></th></tr></thead>
       <tbody>${l.map(e=>`<tr class="${e.estado==="recibida"?"llegada":e.fecha&&e.fecha<=sumaDias(HOY,2)&&e.fecha>=HOY?"baza-hoy":""}">
         ${VIS.slice(0,3).map(c=>`<td>${celda(e,c)}</td>`).join("")}
         <td><button class="tgl" data-ent="${esc(e._id)}" style="border:0;background:none;padding:0;text-align:left">${etiquetaEstado(e)}</button></td>
+        <td style="white-space:nowrap"><button class="tgl" data-edit="${esc(e._id)}" title="Editar" aria-label="Editar">✏️</button>
+          <button class="tgl" data-borra="${esc(e._id)}" title="Eliminar" aria-label="Eliminar" style="color:var(--nc)">🗑</button></td>
         ${VIS.slice(3).map(c=>`<td>${celda(e,c)}</td>`).join("")}
+        <td><button class="tgl" data-borra="${esc(e._id)}" title="Eliminar esta llegada" aria-label="Eliminar"
+          style="color:var(--nc);border-color:#F1C6C3">🗑</button></td>
       </tr>`).join("")}</tbody></table></div>`
       :`<div class="vacio">No hay entradas en esta lista. Añade una con «＋ Nueva fila».</div>`}`;
   document.querySelectorAll("[data-fc]").forEach(b=>b.onclick=()=>{ S.filtroC=b.dataset.fc; pintarCompras(); });
@@ -785,9 +791,28 @@ function pintarCompras(){
   $("#cXls").onchange=(ev)=>{ const f=ev.target.files[0]; if(f) importarContenedores(f); ev.target.value=""; };
   const vr=$("#verResp"); if(vr) vr.onclick=()=>{ S.filtroC="respuesta"; pintarCompras(); };
   document.querySelectorAll("[data-c]").forEach(inp=>inp.onchange=()=>{ const [id,k]=inp.dataset.c.split("|"); guardarCampo(id,k,inp.value.trim()); });
+  document.querySelectorAll("[data-edit]").forEach(b=>b.onclick=()=>{ const e=S.entradas.find(x=>x._id===b.dataset.edit); if(e) nuevaFila(e); });
+  document.querySelectorAll("[data-borra]").forEach(b=>b.onclick=()=>{ const e=S.entradas.find(x=>x._id===b.dataset.borra); if(e) eliminarEntrada(e); });
   document.querySelectorAll("[data-tg]").forEach(b=>b.onclick=()=>{ const [id,k]=b.dataset.tg.split("|");
     const e=S.entradas.find(x=>x._id===id); guardarCampo(id,k,e&&e[k]?"":"OK"); });
+  document.querySelectorAll("[data-borra]").forEach(b=>b.onclick=()=>borrarEntrada(b.dataset.borra));
   enlazarEntradas();
+}
+
+// (sep 2026) Eliminar una llegada. No se borra de verdad: queda marcada como
+// eliminada con quién y cuándo, para que se pueda rastrear. Si almacén la tenía
+// en su plan, se le avisa.
+async function borrarEntrada(id){
+  const e=S.entradas.find(x=>x._id===id); if(!e) return;
+  if(!confirm("¿Eliminar la llegada de "+(e.proveedor||"sin proveedor")+" "+(e.ref||"")+"?"
+    +(e.fecha&&e.estado!=="recibida"?"\n\nAlmacén la tiene en su plan para el "+fLarga(e.fecha)+" y recibirá un aviso.":""))) return;
+  try{
+    await guardarEntrada({...e,eliminada:true,eliminadaPor:QUIEN,eliminadaEl:new Date().toISOString()},"Eliminada por compras");
+    S.entradas=S.entradas.filter(x=>x._id!==id);
+    aviso("Llegada eliminada","ok"); pintarCompras();
+    if(e.fecha&&e.estado!=="recibida"&&e.proveedor) avisar("almacen","🗑️ Anulada la llegada de "+e.proveedor+" "+(e.ref||""),
+      `<p>Compras ha anulado esta llegada, que estaba prevista para el ${fLarga(e.fecha)}. Ya no aparece en tu plan.</p>`,e);
+  }catch(x){ aviso("No se ha podido eliminar: "+x.message,"err"); }
 }
 
 // Guardar una celda. La fecha de Baza es la única que pone en marcha a almacén.
@@ -818,10 +843,12 @@ async function guardarCampo(id,k,v){
 }
 // (sep 2026) Alta con formulario, agrupado como se piensa una llegada: qué
 // es, cómo viene y cuándo llega. Las correcciones se hacen luego en la tabla.
-function nuevaFila(){
+function nuevaFila(ed){
   const x={proveedor:"",ref:"",pedido:"",notas:"",contenedor:"",naviera:"",situacion:"",transitario:"",
     incoterm:"",tipoContenedor:"20'DRY",doc:"",fechaSalida:"",puertoOrigen:"",fechaPuerto:"",puertoDestino:"VALENCIA",
     fecha:"",invForwarders:"",importeFactura:"",cantidad:"",unidad:"Pallets"};
+  if(ed){ Object.keys(x).forEach(k=>{ if(ed[k]!=null) x[k]=String(ed[k]); });
+    if(ed.transporte==="Camión") x.tipoContenedor="Camión"; else if(!ed.tipoContenedor) x.tipoContenedor=""; }
   const provs=[...new Set(S.entradas.map(y=>y.proveedor).filter(Boolean))].sort();
   const navs=[...new Set(S.entradas.map(y=>y.naviera).filter(Boolean))].sort();
   const trans=[...new Set(S.entradas.map(y=>y.transitario).filter(Boolean))].sort();
@@ -832,8 +859,8 @@ function nuevaFila(){
   const pinta=()=>{
     const esCamion=x.tipoContenedor==="Camión";
     $("#capa").innerHTML=`<div class="velo" id="velo"><div class="hoja" role="dialog" aria-modal="true" style="max-width:860px">
-      <h3>Nueva llegada</h3>
-      <p class="nota">Solo el proveedor es obligatorio. Lo demás se puede completar después en la tabla.</p>
+      <h3>${ed?"Cambiar llegada":"Nueva llegada"}</h3>
+      <p class="nota">${ed?"Si cambias la llegada a Baza, almacén recibe un aviso para aceptarla.":"Solo el proveedor es obligatorio. Lo demás se puede completar después en la tabla."}</p>
 
       <h3 style="font-size:17px;margin:16px 0 0;color:var(--ent)">Qué llega</h3>
       <div class="rej">
@@ -883,19 +910,39 @@ function nuevaFila(){
       </div>
 
       <div style="display:flex;gap:10px;margin-top:20px">
+        ${ed?`<button class="btn nc" id="nDel">🗑 Eliminar</button>`:""}
         <button class="btn sec" id="nCan" style="flex:1">Cancelar</button>
-        <button class="btn ent" id="nOk" style="flex:2">Dar de alta</button></div>
+        <button class="btn ent" id="nOk" style="flex:2">${ed?"Guardar cambios":"Dar de alta"}</button></div>
     </div></div>`;
     const lee=()=>document.querySelectorAll("[data-n]").forEach(i=>{ x[i.dataset.n]=i.value.trim(); });
     document.querySelectorAll("[data-nt]").forEach(b=>b.onclick=()=>{ lee(); x.tipoContenedor=b.dataset.nt; pinta(); });
     document.querySelectorAll("[data-nu]").forEach(b=>b.onclick=()=>{ lee(); x.unidad=b.dataset.nu; pinta(); });
     document.querySelectorAll("[data-nb]").forEach(b=>b.onclick=()=>{ lee(); x[b.dataset.nb]=x[b.dataset.nb]?"":"OK"; pinta(); });
     $("#nCan").onclick=()=>{ $("#capa").innerHTML=""; };
+    const bd=$("#nDel"); if(bd) bd.onclick=()=>eliminarEntrada(ed);
     $("#nOk").onclick=async()=>{
       lee();
       if(!x.proveedor){ aviso("Falta el proveedor","err"); $("#n_proveedor").focus(); return; }
       const camion=x.tipoContenedor==="Camión";
       const tc=tipoContenedor(camion?"":x.tipoContenedor);
+      if(ed){
+        // Solo lo que ha cambiado, y cada cambio al historial
+        const y={...ed,...x,tipoTxt:camion?"":tc.txt,frio:!!tc.frio,transporte:camion?"Camión":tc.transporte,
+          unidad:camion?x.unidad:"Contenedor",cantidad:camion?(x.cantidad===""?"":Number(x.cantidad)):1};
+        const cambios=[];
+        COLS.forEach(c=>{ if(String(ed[c.k]??"")!==String(y[c.k]??"")) cambios.push(c.t+": «"+(ed[c.k]||"—")+"» → «"+(y[c.k]||"—")+"»"); });
+        if(camion&&String(ed.cantidad??"")!==String(y.cantidad??"")) cambios.push("Cantidad: "+(ed.cantidad||"—")+" → "+(y.cantidad||"—"));
+        if(!cambios.length){ $("#capa").innerHTML=""; return; }
+        const cambiaFecha=String(ed.fecha||"")!==String(y.fecha||"");
+        if(cambiaFecha){ y.fechaAnterior=ed.fecha||""; y.estado="pendiente"; y.propuesta=""; }
+        try{ await guardarEntrada(y,"Compras cambia "+cambios.join(" · ")); }
+        catch(e){ aviso("No se ha podido guardar: "+e.message,"err"); return; }
+        $("#capa").innerHTML=""; aviso("Cambios guardados","ok"); pintarCompras();
+        if(cambiaFecha) avisar("almacen","📅 Cambio de fecha: "+y.proveedor+" "+(y.ref||"")+(y.fecha?" → "+fLarga(y.fecha):" queda sin fecha"),
+          `<p>Compras ha cambiado la llegada a Baza${ed.fecha?" (antes: "+fLarga(ed.fecha)+")":""}.</p>
+           <p>${y.fecha?"Acéptala o pide otra fecha según tu carga, desde el plan de almacén.":"Te avisaremos cuando haya fecha."}</p>`,y);
+        return;
+      }
       const y={...x,_id:"ent_"+Date.now()+"_"+Math.random().toString(36).slice(2,5),
         tipoTxt:camion?"":tc.txt,frio:!!tc.frio,transporte:camion?"Camión":tc.transporte,
         unidad:camion?x.unidad:"Contenedor",cantidad:camion?(x.cantidad===""?"":Number(x.cantidad)):1,
@@ -914,6 +961,20 @@ function nuevaFila(){
   };
   pinta();
 }
+// Eliminar: no se borra el documento, se marca como eliminado con el motivo.
+// Así queda rastro de que existió y de quién lo quitó.
+async function eliminarEntrada(e){
+  const m=prompt("¿Por qué se elimina la llegada de "+e.proveedor+" "+(e.ref||"")+"?\n(duplicada, anulada por el proveedor…)","");
+  if(m===null) return;
+  const y={...e,eliminada:true,eliminadaPor:QUIEN,eliminadaEl:new Date().toISOString(),motivoEliminacion:m};
+  try{ await guardarEntrada(y,"Eliminada"+(m?": "+m:"")); }
+  catch(x){ aviso("No se ha podido eliminar: "+x.message,"err"); return; }
+  S.entradas=S.entradas.filter(z=>z._id!==e._id);
+  $("#capa").innerHTML=""; aviso("Llegada eliminada","ok"); pintar();
+  if(e.fecha&&e.estado!=="recibida") avisar("almacen","🗑️ Anulada la llegada de "+e.proveedor+" "+(e.ref||""),
+    `<p>Compras ha anulado esta llegada, prevista para el ${fLarga(e.fecha)}${m?": "+esc(m):""}.</p>`,e);
+}
+
 function descargarExcel(l){
   if(typeof XLSX==="undefined"){ aviso("No se ha podido cargar el generador de Excel","err"); return; }
   const filas=l.map(e=>{ const o={}; COLS.forEach(c=>{
