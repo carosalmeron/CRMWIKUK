@@ -1582,6 +1582,39 @@ function codigosDeAgente(a){
 }
 
 // Encuentra al comercial por CUALQUIERA de sus codigos.
+// (sep 2026) ¿Es suyo este hito? Por cualquiera de sus codigos o porque esta
+// asignado a su departamento (los de I+D van a "id", no a una persona). Lo
+// usan el inicio y Proyectos, para que ambos cuenten lo mismo.
+function hitoEsMio(h, u){
+  if(!h||!u) return false;
+  var R=String(h.responsable||"").toUpperCase();
+  if(!R) return false;
+  var cods=[];
+  try{ cods=codigosDeAgente(u); }catch(e){}
+  [u.id,u.grupoAgente,u.username].filter(Boolean)
+    .forEach(function(c){ cods.push(String(c).toUpperCase()); });
+  if(cods.indexOf(R)>=0) return true;
+  var deps={};
+  try{
+    var bajar=function(id,n){ var K=String(id).toUpperCase(); if(n>15||deps[K]) return; deps[K]=1;
+      (deptosHijosDe(id)||[]).forEach(function(x){ bajar(x.id,n+1); }); };
+    (deptosDondeEsResponsable(u)||[]).forEach(function(d){ bajar(d.id,0); });
+    if(u.departamentoId) deps[String(u.departamentoId).toUpperCase()]=1;
+    var tip=String(u.tipologia||"").toLowerCase();
+    if(tip) (deptosActivos()||[]).forEach(function(d){
+      if(String(d.id).toLowerCase()===tip||(d.tipologias||[]).some(function(t){return String(t).toLowerCase()===tip;}))
+        deps[String(d.id).toUpperCase()]=1;
+    });
+  }catch(e){}
+  return !!deps[R];
+}
+function fechaHito(f){
+  if(!f) return null;
+  var m=String(f).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  var d=m?new Date(+m[3],+m[2]-1,+m[1]):new Date(f);
+  return isNaN(d)?null:d;
+}
+
 function buscarAgente(cod){
   if(!cod) return null;
   var c=String(cod).toUpperCase().trim();
@@ -31365,6 +31398,48 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
         </Card>
       </div>
 
+      {/* (sep 2026) Mis hitos pendientes, con la misma claridad que en el
+          parte: antes solo se veia "3/9 hitos" por proyecto, sin saber cuales
+          eran tuyos ni cuando vencian. */}
+      {(()=>{
+        const hoyH=new Date(); hoyH.setHours(0,0,0,0);
+        const mios=[];
+        proyectos.filter(p=>p.estado==="activo").forEach(p=>{
+          (p.hitos||[]).forEach((h,ix)=>{
+            if(h.hecho||h.completado||!hitoEsMio(h,usuario)) return;
+            const f=fechaHito(h.fecha);
+            mios.push({p,h,ix,f,venc:!!(f&&f<hoyH),
+              dias:f?Math.round((f-hoyH)/864e5):null});
+          });
+        });
+        if(!mios.length) return null;
+        mios.sort((a,b)=>(b.venc-a.venc)||((a.f?a.f.getTime():9e15)-(b.f?b.f.getTime():9e15)));
+        const nV=mios.filter(x=>x.venc).length;
+        return (
+          <Card style={{marginBottom:14,border:"1.5px solid "+(nV?T.red+"55":T.border)}}>
+            <p style={{margin:"0 0 2px",fontSize:14,fontWeight:800,color:T.text}}>
+              📍 Mis hitos pendientes · {mios.length}</p>
+            <p style={{margin:"0 0 8px",fontSize:11,color:nV?T.red:T.muted,fontWeight:nV?700:400}}>
+              {nV?nV+" vencido"+(nV===1?"":"s")+" · primero lo que va tarde":"Ordenados por fecha"}</p>
+            {mios.map(x=>(
+              <div key={x.p.id+"#"+x.ix} onClick={()=>setSel(x.p)}
+                style={{display:"flex",gap:8,alignItems:"baseline",padding:"8px 0",
+                  borderTop:"1px solid "+T.border+"80",cursor:"pointer"}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{margin:0,fontSize:12.5,fontWeight:700,color:T.text}}>
+                    {x.venc?"🔴 ":""}{x.h.nombre||x.h.titulo||"(hito sin nombre)"}</p>
+                  <p style={{margin:"1px 0 0",fontSize:11,color:T.muted}}>📁 {x.p.nombre}</p>
+                </div>
+                {x.f&&<span style={{fontSize:11,fontWeight:800,flexShrink:0,
+                  color:x.venc?T.red:(x.dias<=3?"#B45309":T.muted)}}>
+                  {x.venc?"vencido "+(-x.dias)+" d":x.dias===0?"hoy":x.dias===1?"mañana":
+                    x.f.toLocaleDateString("es-ES")}</span>}
+              </div>
+            ))}
+          </Card>
+        );
+      })()}
+
       {/* ── Acceso al Panel de decisión ── */}
       {(
         <Card onClick={function(){setVistaPanel(true);}}
@@ -31602,6 +31677,20 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
                 <div style={{height:5,borderRadius:99,background:T.border}}>
                   <div style={{height:"100%",width:`${pPct}%`,background:pPct===100?T.green:tipo.color,borderRadius:99}}/>
                 </div>
+                {(()=>{
+                  // El proximo hito pendiente: lo que hay que mover ahora
+                  const hoyP=new Date(); hoyP.setHours(0,0,0,0);
+                  const pend=hV.filter(h=>!h.hecho&&!h.completado)
+                    .map(h=>({h,f:fechaHito(h.fecha)}))
+                    .sort((a,b)=>(a.f?a.f.getTime():9e15)-(b.f?b.f.getTime():9e15));
+                  if(!pend.length) return null;
+                  const x=pend[0], venc=!!(x.f&&x.f<hoyP), mio=hitoEsMio(x.h,usuario);
+                  return <p style={{margin:"7px 0 0",fontSize:11.5,color:venc?T.red:T.text}}>
+                    <b>Próximo:</b> {x.h.nombre||x.h.titulo}
+                    {x.f?" · "+(venc?"vencido":x.f.toLocaleDateString("es-ES")):""}
+                    {mio&&<span style={{marginLeft:6,fontSize:10,fontWeight:800,color:T.purple}}>· TUYO</span>}
+                  </p>;
+                })()}
               </>);
             })()}
           </Card>
