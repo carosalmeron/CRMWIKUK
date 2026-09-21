@@ -141,6 +141,20 @@ function emailDeCuenta(datos, cuentaId){
   return m?m.email:null;
 }
 
+// ¿Este departamento corresponde a esta tipologia? Por su lista de
+// tipologias, por su id o (sep 2026) por su nombre: el de Calidad del
+// organigrama no tenia ni id ni tipologia "calidad" y no se encontraba.
+function _norm(x){ return String(x||"").toLowerCase().normalize("NFD")
+  .replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]/g,""); }
+function casaDepto(d,tipologia){
+  const t=_norm(tipologia);
+  const tips=(d.tipologias||[]).map(_norm);
+  if(tips.indexOf(t)>=0) return true;
+  if(_norm(d._id||d.id)===t) return true;
+  const lbl=_norm(LABEL_TIPO[tipologia]||tipologia);
+  return _norm(d.nombre)===t||_norm(d.nombre)===lbl;
+}
+
 // Destinatarios de una tipología según el organigrama:
 // { directos:[emails], escalado:[emails del depto padre] }
 function destinatariosDe(datos, tipologia){
@@ -155,8 +169,7 @@ function destinatariosDe(datos, tipologia){
   // responsable con email, no se avisaba a nadie. Ahora se recorren todos.
   const deps=datos.departamentos.filter(d=>{
     if(d.activo===false) return false;
-    const tips=(d.tipologias||[]).map(t=>String(t).toLowerCase());
-    return tips.indexOf(tipologia)>=0 || String(d._id||d.id||"").toLowerCase()===tipologia;
+    return casaDepto(d,tipologia);
   });
   deps.forEach(dep=>{
     (dep.responsableIds||[]).forEach(rid=>addD(emailDeCuenta(datos,rid)));
@@ -282,14 +295,19 @@ module.exports = async function handler(req, res){
       const tip=String(req.query.probar).toLowerCase();
       const tipologia=TIPO_A_TIPOLOGIA[tip]||tip;
       const datos=await cargarDatos();
-      const deps=datos.departamentos.filter(d=>{
-        const tips=(d.tipologias||[]).map(t=>String(t).toLowerCase());
-        return tips.indexOf(tipologia)>=0||String(d._id||d.id||"").toLowerCase()===tipologia;
-      }).map(d=>({id:d._id,nombre:d.nombre,activo:d.activo!==false,
+      const deps=datos.departamentos.filter(d=>casaDepto(d,tipologia))
+        .map(d=>({id:d._id,nombre:d.nombre,activo:d.activo!==false,
         responsables:(d.responsableIds||[]).map(r=>({id:r,email:emailDeCuenta(datos,r)||"❌ sin email"}))}));
       const dest=destinatariosDe(datos,tipologia);
-      const out={tipologia, departamentos:deps, directos:dest.directos, escalado:dest.escalado,
-        copiaSiempre:CC_SIEMPRE};
+      // Quien tiene esta tipologia en su ficha (la via de respaldo)
+      const porFicha=[...datos.usuarios,...datos.portal]
+        .filter(u=>cuentaValida(u)&&String(u.tipologia||ID_A_TIPOLOGIA[u.id||u._id]||"").toLowerCase()===tipologia)
+        .map(u=>({id:u._id,nombre:u.nombre||u.username,email:u.email||"❌ sin email"}));
+      const out={tipologia, departamentos:deps, porFicha,
+        directos:dest.directos, escalado:dest.escalado, copiaSiempre:CC_SIEMPRE,
+        // Si no se encuentra el departamento, el organigrama entero para ver como se llama
+        organigrama: deps.length?undefined:datos.departamentos
+          .map(d=>({id:d._id,nombre:d.nombre,tipologias:d.tipologias||[],activo:d.activo!==false}))};
       if(req.query.enviar==="1" && dest.directos.length){
         out.envio=await enviarEmail(dest.directos,"🧪 Prueba de aviso de incidencias ("+tipologia+")",
           "Esto es una prueba del aviso de incidencias. Si lo recibes, el circuito funciona.");
