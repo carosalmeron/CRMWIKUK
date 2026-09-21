@@ -799,6 +799,7 @@ function doLogin(){
 // ══════════════════════════════════════════════════════════════════
 var MODULE_DEF=[
   {id:"crm",      icon:"📋",label:"CRM",           sub:"Clientes · Estrategias · Oportunidades", iconBg:"#EBF2F8",color:"#1E5A8A"},
+  {id:"pnch",     icon:"🧼",label:"PNCH",           sub:"Controles de higiene · preoperativo y operativo", iconBg:"#DCEBEE",color:"#0E5E6F"},
   {id:"planificador",icon:"🗺",label:"Planificador de Rutas",sub:"Tu agenda · el asistente reordena · un clic guarda", iconBg:"#F6EFE7",color:"#7A1F2B"},
   {id:"catalogo", icon:"📦",label:"Catalogo",       sub:"Tarifa · Productos · Precios",           iconBg:"#EDF4F0",color:"#2E6B42"},
   {id:"rrhh",     icon:"👥",label:"Zona Empleado",  sub:"Nominas · Datos personales",            iconBg:"#FBF6EC",color:"#8A6B00"},
@@ -837,7 +838,48 @@ function ambitoPlanificador(u){
     if(nom.indexOf(PLAN_MAP_VENDEDOR[i].busca)>=0) return {ver:PLAN_MAP_VENDEDOR[i].ver};
   return {err:'Tu usuario no está vinculado a un vendedor del planificador. Pide al administrador que te añada en PLAN_MAP_VENDEDOR (index).'};
 }
+// (sep 2026) PNCH: controles de higiene. Lo usan Produccion, Almacen y Calidad
+// (y sus subdepartamentos), y Direccion para los informes. Se deduce del
+// organigrama: la cuenta del portal no dice de que departamento es cada uno.
+//   "calidad"   → Calidad y lo que cuelga de ella
+//   "planta"    → Produccion, Almacen y lo que cuelga de ellos
+//   "direccion" → CEO, director, admin
+function pnchPerfilDe(u){
+  if(!u) return null;
+  var rol=String(u.rol||'').toLowerCase();
+  if(rol==='admin'||rol==='ceo'||rol==='direccion'||rol==='crm_director'||rol==='director') return 'direccion';
+  var ids=[u.crmId,u.id].filter(Boolean).map(function(x){return String(x).toLowerCase();});
+  var f=ORG_FICHAS[u.crmId||u.id]||{};
+  var tip=String(f.tipologia||u.tipologia||'').toLowerCase();
+  var norm=function(x){return String(x||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');};
+  var porId={}; DEPTOS.forEach(function(d){porId[d.id]=d;});
+  var mios=[];
+  if(f.departamentoId) mios.push(f.departamentoId);
+  if(u.departamentoId) mios.push(u.departamentoId);
+  DEPTOS.forEach(function(d){
+    if(d.activo===false) return;
+    if((d.responsableIds||[]).some(function(r){return ids.indexOf(String(r).toLowerCase())>=0;})) mios.push(d.id);
+    if(tip&&(String(d.id).toLowerCase()===tip||(d.tipologias||[]).map(norm).indexOf(tip)>=0)) mios.push(d.id);
+  });
+  var cal=false, planta=false;
+  mios.forEach(function(id){
+    var cur=id, g=0;
+    while(cur&&g<15){
+      var d=porId[cur]||{}, t=norm(cur)+' '+norm(d.nombre);
+      if(/calidad/.test(t)) cal=true;
+      if(/produccion|almacen/.test(t)) planta=true;
+      cur=d.padre; g++;
+    }
+  });
+  if(cal) return 'calidad';
+  if(planta) return 'planta';
+  if((u.accesos||[]).indexOf('pnch')>=0) return 'planta';
+  return null;
+}
+
 function renderHub(){
+  // Sin organigrama no se sabe quien es de planta: se carga y se repinta
+  if(!orgCargado&&currentUser){ loadOrgData().then(function(){ if(document.getElementById('hub').classList.contains('active')) renderHub(); }).catch(function(){}); }
   var list=document.getElementById('hub-list');
   list.innerHTML='';
   var accesos=currentUser?(currentUser.accesos||[]).slice():[];
@@ -845,6 +887,12 @@ function renderHub(){
   if(amb&&amb.ver&&!accesos.includes('planificador')) accesos.push('planificador');
   if(tieneAccesoStock(currentUser)&&!accesos.includes('stock')) accesos.push('stock');
   if(currentUser&&currentUser.rol==='admin'&&!accesos.includes('radar')) accesos.push('radar');
+  var pnchP=pnchPerfilDe(currentUser);
+  if(pnchP){
+    if(!accesos.includes('pnch')) accesos.push('pnch');
+    // A Produccion, Almacen y Calidad no les sirven las rutas ni el stock
+    if(pnchP!=='direccion') accesos=accesos.filter(function(a){return a!=='planificador'&&a!=='stock';});
+  }
   MODULE_DEF.filter(function(m){return accesos.includes(m.id);}).forEach(function(m){
     var div=document.createElement('div');
     div.className='hub-item';
@@ -959,6 +1007,17 @@ function openModule(id){
       alert('Acceso restringido: solo administrador.');showScreen('hub');return;
     }
     url='Estacion_Radar.html';
+  } else if(id==='pnch'){
+    var pp=pnchPerfilDe(currentUser);
+    if(!pp){ alert('Acceso restringido a Producción, Almacén y Calidad.'); showScreen('hub'); return; }
+    var f=ORG_FICHAS[currentUser.crmId||currentUser.id]||{};
+    var senas={crmId:currentUser.crmId||currentUser.id||'',id:currentUser.id||'',
+      username:currentUser.username||'',nombre:currentUser.nombre||'',rol:currentUser.rol||'',
+      tipologia:f.tipologia||currentUser.tipologia||'',departamentoId:f.departamentoId||'',
+      pnchPerfil:pp};
+    try{ localStorage.setItem('gc_portal_user',JSON.stringify(Object.assign({},currentUser,senas))); }catch(e){}
+    // Tambien en la direccion, por si el navegador no guarda localStorage
+    url='controles_higiene.html#'+encodeURIComponent(JSON.stringify(senas));
   } else if(id==='rrhh'){
     url='rrhh.html';
   } else if(id==='stock'){
