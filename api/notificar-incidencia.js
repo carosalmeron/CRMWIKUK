@@ -154,8 +154,11 @@ const EMAILS_GENERICOS=["info@unitedcaro.com"];
 function emailDeCuenta(datos, cuentaId){
   if(!cuentaId) return null;
   const idN=String(cuentaId).toLowerCase();
+  // (sep 2026) Para buscar el EMAIL no se descartan las fichas marcadas como
+  // duplicadas: siguen siendo de la misma persona. La de Resp. Calidad estaba
+  // marcada como duplicada de si misma y por eso su email no se usaba nunca.
   const coincide=u=>{
-    if(!cuentaValida(u)) return false;
+    if(!u||u.activo===false) return false;
     return [u.id,u._id,u.crmId,u.perfilCRM,u.username]
       .some(k=>k&&String(k).toLowerCase()===idN);
   };
@@ -166,7 +169,7 @@ function emailDeCuenta(datos, cuentaId){
   const cands=[];
   datos.usuarios.filter(u=>coincide(u)&&u.email).forEach(u=>cands.push(u.email));
   datos.portal.filter(u=>coincide(u)&&u.email).forEach(u=>cands.push(u.email));
-  datos.portal.filter(u=>cuentaValida(u)&&u.email&&u.crmId&&String(u.crmId).toLowerCase()===idN)
+  datos.portal.filter(u=>u&&u.activo!==false&&u.email&&u.crmId&&String(u.crmId).toLowerCase()===idN)
     .forEach(u=>cands.push(u.email));
   if(!cands.length) return null;
   const personal=cands.find(e=>EMAILS_GENERICOS.indexOf(String(e).toLowerCase().trim())<0);
