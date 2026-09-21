@@ -147,6 +147,9 @@ function cuentaValida(u){
   return u && !u.duplicadaDe && u.activo!==false && !u._legacy;
 }
 
+// Buzones compartidos: solo se usan si la persona no tiene otro email
+const EMAILS_GENERICOS=["info@unitedcaro.com"];
+
 // Todas las cuentas (portal + usuarios) de una persona por id, deduplicadas
 function emailDeCuenta(datos, cuentaId){
   if(!cuentaId) return null;
@@ -156,15 +159,18 @@ function emailDeCuenta(datos, cuentaId){
     return [u.id,u._id,u.crmId,u.perfilCRM,u.username]
       .some(k=>k&&String(k).toLowerCase()===idN);
   };
-  // usuarios primero (ficha CRM), luego portal (credenciales suelen llevar email)
-  let m=datos.usuarios.find(u=>coincide(u)&&u.email);
-  if(m) return m.email;
-  m=datos.portal.find(u=>coincide(u)&&u.email);
-  if(m) return m.email;
-  // (sep 2026) La ficha del portal puede apuntar a esta cuenta por crmId aunque
-  // tenga otro id propio: es donde suele estar el email.
-  m=datos.portal.find(u=>cuentaValida(u)&&u.email&&u.crmId&&String(u.crmId).toLowerCase()===idN);
-  return m?m.email:null;
+  // (sep 2026) La misma persona puede tener email en la ficha del CRM y en la
+  // del portal, y el panel de administrador actualiza la del portal. Se reunen
+  // todos y se prefiere uno personal: si se cambia el del portal y la otra
+  // ficha conserva el buzon generico, debe ganar el personal.
+  const cands=[];
+  datos.usuarios.filter(u=>coincide(u)&&u.email).forEach(u=>cands.push(u.email));
+  datos.portal.filter(u=>coincide(u)&&u.email).forEach(u=>cands.push(u.email));
+  datos.portal.filter(u=>cuentaValida(u)&&u.email&&u.crmId&&String(u.crmId).toLowerCase()===idN)
+    .forEach(u=>cands.push(u.email));
+  if(!cands.length) return null;
+  const personal=cands.find(e=>EMAILS_GENERICOS.indexOf(String(e).toLowerCase().trim())<0);
+  return personal||cands[0];
 }
 
 // ¿Este departamento corresponde a esta tipologia? Por su lista de
@@ -217,6 +223,10 @@ function destinatariosDe(datos, tipologia){
       if(tip===tipologia) addD(u.email);
     });
   });
+
+  // Si hay algun email personal, el buzon generico sobra
+  if([...directos].some(e=>EMAILS_GENERICOS.indexOf(e)<0))
+    EMAILS_GENERICOS.forEach(g=>directos.delete(g));
 
   // Quien ya recibe directo no necesita copia de escalado
   escalado.forEach(e=>{ if(directos.has(e)) escalado.delete(e); });
