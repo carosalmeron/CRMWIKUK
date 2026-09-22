@@ -327,6 +327,31 @@ function partirCodigo(c){
   return i>0?{prod:s.slice(0,i),env:s.slice(i+1)}:{prod:s||"—",env:""};
 }
 const cantidadEnt=(e)=>Number(e.cantidad)||0;
+// (sep 2026) Lo que importa a almacen es CUANTO llega, no en que viene: un
+// camion puede traer un palé y un contenedor, 80 barriles. Se separan.
+// (sep 2026) Qué llega. Un contenedor siempre es completo; por aire o por
+// carretera puede ser un camión completo, barriles, pallets, cajas sueltas o
+// una muestra, y entonces hay que decir cuántos.
+const UNIDADES_CONT=["Camión completo","Barriles","Pallets","Cajas","Bultos","Kg","Muestra"];
+const QUE_AEREO=["Barriles","Pallets","Cajas","Muestra"];
+const QUE_TERRESTRE=["Camión completo","Barriles","Pallets","Cajas","Muestra"];
+function contenidoEnt(e){
+  const c=cantidadEnt(e), u=e.unidad;
+  if(e.transporte==="Contenedor"||u==="Contenedor") return "Contenedor completo";
+  if(u==="Muestra"||(e.transporte==="Paquetería"&&!c)) return "Muestra";
+  if(u==="Camión completo"){ const n=c||1; return n+(n===1?" camión completo":" camiones completos"); }
+  const SG={Barriles:"barril",Pallets:"pallet",Cajas:"caja suelta",Bultos:"bulto",Kg:"kg"};
+  const PL={Barriles:"barriles",Pallets:"pallets",Cajas:"cajas sueltas",Bultos:"bultos",Kg:"kg"};
+  return c&&SG[u]?n0(c)+" "+(c===1?SG[u]:PL[u]):"";
+}
+function medioEnt(e){
+  if(e.transporte==="Paquetería") return "Muestra";
+  if(e.transporte==="Avión") return "Aéreo";
+  if(e.transporte==="Camión") return "Camión";
+  if(e.tipoTxt) return "Contenedor "+e.tipoTxt;
+  return e.transporte==="Contenedor"?"Contenedor":"";
+}
+const sinCantidad=(e)=>!contenidoEnt(e);
 const entradasDe=(f)=>S.entradas.filter(e=>e.fecha===f);
 const salidasDe=(f)=>S.pedidos.filter(l=>l._f===f);
 function pedidosDe(f){
@@ -337,8 +362,16 @@ function pedidosDe(f){
 }
 // Carga del día, para pintar la barra: barriles y pallets que entran + líneas que salen
 function cargaDe(f){
-  const e=entradasDe(f).reduce((t,x)=>t+(x.transporte==="Paquetería"?1:x.unidad==="Contenedor"?40:
-    x.unidad==="Pallets"?cantidadEnt(x)*2:(cantidadEnt(x)||10)),0);
+  // Con cantidad, se cuenta lo que llega; sin ella, una estimación por el medio
+  const peso=(x)=>{
+    const c=cantidadEnt(x);
+    if(x.transporte==="Contenedor"||x.unidad==="Contenedor") return 40;
+    if(x.unidad==="Muestra"||x.transporte==="Paquetería") return 1;
+    if(x.unidad==="Camión completo") return 30*(c||1);
+    if(contenidoEnt(x)) return x.unidad==="Pallets"?c*2:x.unidad==="Barriles"?c:x.unidad==="Kg"?c/100:c*0.5;
+    return x.transporte==="Camión"?10:5;
+  };
+  const e=entradasDe(f).reduce((t,x)=>t+peso(x),0);
   return e+salidasDe(f).length*2;
 }
 function colorCarga(c){ return c>=160?"var(--nc)":c>=90?"var(--amb)":"var(--ok)"; }
@@ -386,7 +419,7 @@ async function avisar(raiz,asunto,cuerpo,e){
         ${cuerpo}
         ${e?`<table style="width:100%;border-collapse:collapse;margin-top:12px;font-size:14px">
           ${[["Proveedor",e.proveedor],["Referencia",e.ref],["Pedido",e.pedido],
-             ["Cantidad",(e.cantidad||"")+" "+(e.unidad||"").toLowerCase()],["Transporte",e.transporte],
+             ["Qué llega",contenidoEnt(e)||"Cantidad por confirmar"],["Cómo llega",medioEnt(e)],
              ["Almacén",e.almacen]].map(([k,v])=>`<tr><td style="padding:5px 0;color:#5C6B66;width:120px">${k}</td><td style="padding:5px 0"><b>${esc(v||"—")}</b></td></tr>`).join("")}
         </table>`:""}
         <div style="text-align:center;margin-top:18px"><a href="https://crmwikuk.vercel.app/almacen.html"
@@ -464,11 +497,14 @@ function pintarPlan(){
 
 function resumenEnt(l){
   const t={}; l.forEach(e=>{
-    const u=e.transporte==="Paquetería"?"Muestras":e.unidad==="Contenedor"?(e.transporte==="Avión"?"Aéreos":"Contenedores")
-      :(e.transporte==="Camión"&&!e.cantidad)?"Camiones":(e.unidad||"Barriles");
-    t[u]=(t[u]||0)+((e.unidad==="Contenedor"||e.transporte==="Paquetería"||!e.cantidad)?1:cantidadEnt(e)); });
-  const SING={Muestras:"muestra",Camiones:"camión",Contenedores:"contenedor",Aéreos:"aéreo",Barriles:"barril",Pallets:"pallet",Cajas:"caja"};
-  return Object.entries(t).map(([u,n])=>n0(n)+" "+(n===1&&SING[u]?SING[u]:u.toLowerCase())).join(" · ")||"—";
+    const cont=e.transporte==="Contenedor"||e.unidad==="Contenedor";
+    const u=cont?"Contenedores":(e.unidad==="Muestra"||e.transporte==="Paquetería")?"Muestras":
+      !contenidoEnt(e)?"Sin cantidad":e.unidad==="Camión completo"?"Camiones completos":e.unidad;
+    t[u]=(t[u]||0)+((cont||u==="Muestras"||u==="Sin cantidad")?1:(cantidadEnt(e)||1)); });
+  const SING={Muestras:"muestra",Barriles:"barril",Pallets:"pallet",Cajas:"caja",Bultos:"bulto",
+    Contenedores:"contenedor","Camiones completos":"camión completo"};
+  return Object.entries(t).map(([u,n])=>u==="Sin cantidad"?`<b style="color:var(--amb)">${n} sin cantidad</b>`
+    :n0(n)+" "+(n===1&&SING[u]?SING[u]:u.toLowerCase())).join(" · ")||"—";
 }
 function pintarSemana(){
   const l=lunesDe(S.ref), dias=[0,1,2,3,4,5].map(i=>sumaDias(l,i));
@@ -529,10 +565,8 @@ function pintarDia(){
 }
 
 function icoEnt(e){ return e.frio?"❄️":e.transporte==="Avión"?"✈️":e.transporte==="Paquetería"?"📦":e.transporte==="Contenedor"?"🚢":"🚚"; }
-function cantEnt(e){
-  if(e.transporte==="Paquetería") return "Muestra";
-  if(e.transporte==="Camión"&&!e.cantidad) return "Camión";
-  if(e.unidad==="Contenedor"&&e.tipoTxt) return (e.transporte==="Avión"?"Envío aéreo":"Contenedor "+e.tipoTxt);
+function cantEnt(e){ return contenidoEnt(e)||"Cantidad por confirmar"; }
+function cantEntViejo(e){
   return e.cantidad?n0(e.cantidad)+" "+esc((e.unidad||"").toLowerCase()):"Cantidad por confirmar";
 }
 function rutaEnt(e){
@@ -544,7 +578,9 @@ function tarjEntrada(e){
   return `<div class="tarj ent" data-ent="${esc(e._id)}" style="cursor:pointer">
     <div class="prov">${icoEnt(e)} ${esc(e.proveedor)}</div>
     <div class="det">Ref. ${esc(e.ref||"—")} · Pedido ${esc(e.pedido||"—")}${e.contenedor?" · "+esc(e.contenedor):""}</div>
-    <div class="cant">${cantEnt(e)}</div>
+    <div class="cant" style="${sinCantidad(e)?"color:var(--amb)":""}">${cantEnt(e)}</div>
+    ${medioEnt(e)?`<div class="det">${medioEnt(e)}</div>`:""}
+    ${sinCantidad(e)?`<div class="det" style="color:var(--amb);font-weight:700">⚠ No se sabe cuánto llega: pregúntalo a compras</div>`:""}
     ${e.frio?`<div class="det" style="color:var(--ent);font-weight:700">❄️ Frigorífico: a cámara nada más llegar</div>`:""}
     ${rutaEnt(e)}
     ${etiquetaEstado(e)}
@@ -726,6 +762,8 @@ const COLS=[
   {k:"transitario",t:"Transitario",w:105},
   {k:"incoterm",t:"Incoterm",w:80,opc:["","EXW","FOB","FCA","CFR","CIF","CPT","CIP","DAP","DDP"]},
   {k:"tipoContenedor",t:"Contenedor",w:100,opc:[""].concat(TIPOS_CONT)},
+  {k:"cantidad",t:"Cantidad",w:85,num:true},
+  {k:"unidad",t:"Unidad",w:100,opc:[""].concat(UNIDADES_CONT)},
   {k:"doc",t:"DOC",w:60,tgl:true},
   {k:"fechaSalida",t:"Salida",w:135,fecha:true},
   {k:"puertoOrigen",t:"Puerto origen",w:115},
@@ -746,7 +784,10 @@ function pintarCompras(){
   if(q) l=l.filter(e=>COLS.some(c=>String(e[c.k]||"").toLowerCase().includes(q)));
   // En pantalla, BAZA y la respuesta de almacén van junto al proveedor: es lo
   // que más se mira. La descarga conserva el orden del Excel de siempre.
-  const VIS=[COLS[0],COLS[1],COLS.find(c=>c.k==="fecha")].concat(COLS.slice(2).filter(c=>c.k!=="fecha"));
+  const PRIM=["fecha","cantidad","unidad"];
+  const VIS=[COLS[0],COLS[1]].concat(PRIM.map(k=>COLS.find(c=>c.k===k)))
+    .concat(COLS.slice(2).filter(c=>!PRIM.includes(c.k)));
+  const NPRIM=5;
   l.sort((a,b)=>(a.fecha||"9999").localeCompare(b.fecha||"9999"));
   const nCamb=S.entradas.filter(e=>e.estado==="cambio").length;
   const celda=(e,c)=>{
@@ -754,6 +795,12 @@ function pintarCompras(){
     if(c.tgl) return `<button class="tgl${v?" on":""}" data-tg="${esc(e._id)}|${c.k}">${v?"OK":"—"}</button>`;
     if(c.opc) return `<select class="cel" data-c="${esc(e._id)}|${c.k}">${c.opc.map(o=>`<option ${o===v?"selected":""} value="${esc(o)}">${esc(o||"—")}</option>`).join("")}</select>`;
     if(c.fecha) return `<input class="cel${c.baza?" baza":""}" type="date" data-c="${esc(e._id)}|${c.k}" value="${esc(v)}">`;
+    const esCont=e.transporte==="Contenedor"||e.unidad==="Contenedor";
+    if((c.k==="cantidad"||c.k==="unidad")&&esCont)
+      return c.k==="unidad"?`<span style="font-size:13px;color:var(--suave);padding:0 6px">Completo</span>`:"";
+    if(c.k==="cantidad"&&(e.unidad==="Muestra"||e.transporte==="Paquetería")) return "";
+    if(c.num) return `<input class="cel${sinCantidad(e)?" vacio-ob":""}" type="number" min="0" data-c="${esc(e._id)}|${c.k}" value="${esc(v)}"
+      title="${sinCantidad(e)?"Falta la cantidad":""}">`;
     return `<input class="cel${c.ob&&!v?" vacio-ob":""}" data-c="${esc(e._id)}|${c.k}" value="${esc(v)}">`;
   };
   $("#app").innerHTML=`
@@ -777,22 +824,22 @@ function pintarCompras(){
     <p class="nota">Para cambiar un dato, escribe directamente en la celda: se guarda solo. O pulsa ✏️ para abrir la ficha entera,
       y 🗑 para eliminarla. Si cambias la fecha de <b>BAZA</b>, almacén recibe un aviso y tiene que aceptarla.</p>
     ${l.length?`<div class="hoja-cal"><table>
-      <thead><tr>${VIS.slice(0,3).map(c=>`<th style="min-width:${c.w}px">${c.t}</th>`).join("")}<th style="min-width:190px">Almacén</th>
+      <thead><tr>${VIS.slice(0,NPRIM).map(c=>`<th style="min-width:${c.w}px">${c.t}</th>`).join("")}<th style="min-width:190px">Almacén</th>
         <th style="min-width:92px"></th>
-        ${VIS.slice(3).map(c=>`<th style="min-width:${c.w}px">${c.t}</th>`).join("")}<th style="min-width:60px"></th></tr></thead>
+        ${VIS.slice(NPRIM).map(c=>`<th style="min-width:${c.w}px">${c.t}</th>`).join("")}</tr></thead>
       <tbody>${l.map(e=>`<tr class="${e.estado==="recibida"?"llegada":e.fecha&&e.fecha<=sumaDias(HOY,2)&&e.fecha>=HOY?"baza-hoy":""}">
-        ${VIS.slice(0,3).map(c=>`<td>${celda(e,c)}</td>`).join("")}
+        ${VIS.slice(0,NPRIM).map(c=>`<td>${celda(e,c)}</td>`).join("")}
         <td><button class="tgl" data-ent="${esc(e._id)}" style="border:0;background:none;padding:0;text-align:left">${etiquetaEstado(e)}</button></td>
         <td style="white-space:nowrap"><button class="tgl" data-edit="${esc(e._id)}" title="Editar" aria-label="Editar">✏️</button>
           <button class="tgl" data-borra="${esc(e._id)}" title="Eliminar" aria-label="Eliminar" style="color:var(--nc)">🗑</button></td>
-        ${VIS.slice(3).map(c=>`<td>${celda(e,c)}</td>`).join("")}
+        ${VIS.slice(NPRIM).map(c=>`<td>${celda(e,c)}</td>`).join("")}
         <td><button class="tgl" data-borra="${esc(e._id)}" title="Eliminar esta llegada" aria-label="Eliminar"
           style="color:var(--nc);border-color:#F1C6C3">🗑</button></td>
       </tr>`).join("")}</tbody></table></div>`
       :`<div class="vacio">No hay entradas en esta lista. Añade una con «＋ Nueva fila».</div>`}`;
   document.querySelectorAll("[data-fc]").forEach(b=>b.onclick=()=>{ S.filtroC=b.dataset.fc; pintarCompras(); });
   $("#cBus").oninput=(ev)=>{ S.buscaC=ev.target.value; clearTimeout(S._tb); S._tb=setTimeout(()=>{ pintarCompras(); const i=$("#cBus"); i.focus(); i.setSelectionRange(i.value.length,i.value.length); },350); };
-  $("#cNueva").onclick=nuevaFila;
+  $("#cNueva").onclick=()=>nuevaFila();
   $("#cBaj").onclick=()=>descargarExcel(l);
   $("#cXls").onchange=(ev)=>{ const f=ev.target.files[0]; if(f) importarContenedores(f); ev.target.value=""; };
   const vr=$("#verResp"); if(vr) vr.onclick=()=>{ S.filtroC="respuesta"; pintarCompras(); };
@@ -826,12 +873,14 @@ async function guardarCampo(id,k,v){
   const e=S.entradas.find(x=>x._id===id); if(!e) return;
   const ant=e[k]==null?"":String(e[k]);
   if(ant===v) return;
-  const y={...e}; y[k]=v;
+  if(k==="unidad"&&v&&!["Muestra","Camión completo"].includes(v)&&!e.cantidad) aviso("Pon también la cantidad","err");
+  const y={...e}; y[k]=k==="cantidad"?(v===""?"":Number(v)):v;
   if(k==="tipoContenedor"){
     const tc=tipoContenedor(v);
     y.tipoTxt=v==="Camión"?"":tc.txt; y.frio=!!tc.frio; y.transporte=tc.transporte;
-    y.unidad=v==="Camión"?(e.unidad&&!["Contenedor","Muestra"].includes(e.unidad)?e.unidad:"Barriles"):v==="Muestra"?"Muestra":"Contenedor";
-    if(y.unidad==="Contenedor"||y.unidad==="Muestra") y.cantidad=1;
+    if(y.transporte==="Contenedor"){ y.unidad="Contenedor"; y.cantidad=1; }
+    else if(y.unidad==="Contenedor"){ y.unidad=""; y.cantidad=""; }
+    if(y.transporte==="Avión"&&y.unidad==="Camión completo") y.unidad="";
   }
   const nom=(COLS.find(c=>c.k===k)||{}).t||k;
   let evento="Compras cambia "+nom+": «"+(ant||"—")+"» → «"+(v||"—")+"»";
@@ -840,7 +889,7 @@ async function guardarCampo(id,k,v){
   try{
     await guardarEntrada(y,evento);
     const ok=$("#cOk"); if(ok){ ok.textContent="✓ Guardado "+nom; setTimeout(()=>{ if(ok) ok.textContent=""; },2500); }
-    if(k==="fecha"||k==="tipoContenedor") pintarCompras();
+    if(["fecha","tipoContenedor","cantidad","unidad"].includes(k)) pintarCompras();
     if(k==="fecha"&&y.proveedor) avisar("almacen",
       (ant?"📅 Cambio de fecha: ":"🚚 Nueva llegada: ")+y.proveedor+" "+(y.ref||"")+(v?" → "+fLarga(v):" queda sin fecha"),
       `<p>Compras ha ${ant?"cambiado":"puesto"} la llegada a Baza${ant?" (antes: "+fLarga(ant)+")":""}.</p>
@@ -850,12 +899,16 @@ async function guardarCampo(id,k,v){
 // (sep 2026) Alta con formulario, agrupado como se piensa una llegada: qué
 // es, cómo viene y cuándo llega. Las correcciones se hacen luego en la tabla.
 function nuevaFila(ed){
-  const x={proveedor:"",ref:"",pedido:"",notas:"",contenedor:"",naviera:"",situacion:"",transitario:"",
-    incoterm:"",tipoContenedor:"20'DRY",doc:"",fechaSalida:"",puertoOrigen:"",fechaPuerto:"",puertoDestino:"VALENCIA",
-    fecha:"",invForwarders:"",importeFactura:"",cantidad:"",unidad:"Pallets"};
-  if(ed){ Object.keys(x).forEach(k=>{ if(ed[k]!=null) x[k]=String(ed[k]); });
-    if(ed.transporte==="Camión") x.tipoContenedor="Camión"; else if(ed.transporte==="Paquetería") x.tipoContenedor="Muestra";
-    else if(!ed.tipoContenedor) x.tipoContenedor=""; }
+  if(!ed||!ed._id) ed=null;   // solo es edición si llega una entrada de verdad
+  const x={modo:"",proveedor:"",ref:"",pedido:"",notas:"",contenedor:"",naviera:"",situacion:"",transitario:"",
+    incoterm:"",tipoContenedor:"20'DRY",doc:"",fechaSalida:"",puertoOrigen:"",fechaPuerto:"",puertoDestino:"",
+    fecha:"",invForwarders:"",importeFactura:"",cantidad:"",unidad:""};
+  if(ed){
+    Object.keys(x).forEach(k=>{ if(ed[k]!=null) x[k]=String(ed[k]); });
+    x.modo=ed.transporte==="Contenedor"?"contenedor":ed.transporte==="Avión"?"aereo":"terrestre";
+    if(ed.transporte==="Paquetería"&&!x.unidad) x.unidad="Muestra";
+    if(x.unidad==="Contenedor") x.unidad="";
+  }
   const provs=[...new Set(S.entradas.map(y=>y.proveedor).filter(Boolean))].sort();
   const navs=[...new Set(S.entradas.map(y=>y.naviera).filter(Boolean))].sort();
   const trans=[...new Set(S.entradas.map(y=>y.transitario).filter(Boolean))].sort();
@@ -863,42 +916,65 @@ function nuevaFila(ed){
   const campo=(k,t,extra)=>`<div><label class="c" for="n_${k}">${t}</label>
     <input class="t" id="n_${k}" data-n="${k}" value="${esc(x[k])}" ${extra||""}></div>`;
   const lista=(id,l)=>`<datalist id="${id}">${l.map(v=>`<option value="${esc(v)}">`).join("")}</datalist>`;
+  const tit=(t)=>`<h3 style="font-size:17px;margin:18px 0 0;color:var(--ent)">${t}</h3>`;
+  const MODOS=[["contenedor","🚢","Contenedor","Barco. Siempre contenedor completo"],
+               ["aereo","✈️","Aéreo","Barriles, pallets, cajas o muestras"],
+               ["terrestre","🚚","Terrestre","Camión completo o carga suelta"]];
   const pinta=()=>{
-    const esCamion=x.tipoContenedor==="Camión";
+    const M=x.modo;
+    const QUE=M==="aereo"?QUE_AEREO:QUE_TERRESTRE;
+    const necesitaCant=x.unidad&&!["Muestra"].includes(x.unidad);
     $("#capa").innerHTML=`<div class="velo" id="velo"><div class="hoja" role="dialog" aria-modal="true" style="max-width:860px">
       <h3>${ed?"Cambiar llegada":"Nueva llegada"}</h3>
-      <p class="nota">${ed?"Si cambias la llegada a Baza, almacén recibe un aviso para aceptarla.":"Solo el proveedor es obligatorio. Lo demás se puede completar después en la tabla."}</p>
 
-      <h3 style="font-size:17px;margin:16px 0 0;color:var(--ent)">Qué llega</h3>
+      <label class="c">¿Cómo llega?</label>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+        ${MODOS.map(([k,i,t,d])=>`<button class="tile-m" data-modo="${k}" aria-pressed="${M===k}"
+          style="border:3px solid ${M===k?"var(--ent)":"var(--linea)"};background:${M===k?"var(--entL)":"#fff"};
+          border-radius:16px;padding:14px 12px;text-align:left;min-height:96px">
+          <div style="font-size:30px;line-height:1">${i}</div>
+          <div style="font-size:18px;font-weight:700;margin-top:6px">${t}</div>
+          <div style="font-size:13px;color:var(--suave)">${d}</div></button>`).join("")}
+      </div>
+
+      ${!M?`<p class="nota" style="margin-top:14px">Elige primero cómo llega: cada caso pide datos distintos.</p>`:`
+      ${tit("Qué llega")}
       <div class="rej">
         ${campo("proveedor","Proveedor *",'list="nProv" autocomplete="off"')}${lista("nProv",provs)}
-        ${campo("ref","Nº FRA / lote",'placeholder="GLO127"')}
+        ${campo("ref","Nº FRA / lote")}
         ${campo("pedido","Order#",'inputmode="numeric"')}
-        ${campo("notas","Notas",'placeholder="lot#288 MP"')}
+        ${campo("notas","Notas / producto",'placeholder="MBL60.90, lot#288…"')}
       </div>
 
-      <h3 style="font-size:17px;margin:18px 0 0;color:var(--ent)">Cómo viene</h3>
-      <label class="c">Tipo</label>
-      <div class="chips">${TIPOS_CONT.map(t=>`<button class="chip" data-nt="${esc(t)}" aria-pressed="${x.tipoContenedor===t}">${
-        t==="AIR"?"✈️ Aéreo":t==="Camión"?"🚚 Camión":t==="Muestra"?"📦 Muestra":(/RF/.test(t)?"❄️ ":"🚢 ")+t.replace("DRY"," seco").replace("RF"," frío").replace("HC"," HC")}</button>`).join("")}</div>
-      ${esCamion?`<div class="rej">
-        <div><label class="c" for="n_cantidad">Cantidad</label><input class="t" id="n_cantidad" data-n="cantidad" type="number" min="0" value="${esc(x.cantidad)}"></div>
-        <div><label class="c">Unidad</label><div class="chips">${["Barriles","Pallets","Cajas"].map(u=>`<button class="chip" data-nu="${u}" aria-pressed="${x.unidad===u}">${u}</button>`).join("")}</div></div>
-      </div>`:""}
+      ${M==="contenedor"?`
+        <label class="c">Tipo de contenedor</label>
+        <div class="chips">${["20'DRY","40'DRY","40'HC","20'RF","40'RF"].map(t=>`<button class="chip" data-nt="${esc(t)}" aria-pressed="${x.tipoContenedor===t}">${
+          (/RF/.test(t)?"❄️ ":"🚢 ")+t.replace("DRY"," seco").replace("RF"," frío").replace("HC"," HC")}</button>`).join("")}</div>
+        <p class="nota" style="margin-top:6px">Siempre es un contenedor completo.</p>`
+      :`<div style="background:var(--ambL);border-radius:14px;padding:4px 14px 14px;margin-top:12px">
+        <label class="c" style="color:#7A5205">¿Qué llega?</label>
+        <div class="chips">${QUE.map(u=>`<button class="chip" data-nu="${u}" aria-pressed="${x.unidad===u}">${
+          u==="Camión completo"?"🚚 Camión completo":u==="Cajas"?"Cajas sueltas":u==="Muestra"?"📦 Muestra":u}</button>`).join("")}</div>
+        ${necesitaCant?`<label class="c" for="n_cantidad" style="color:#7A5205">${x.unidad==="Camión completo"?"¿Cuántos camiones?":"¿Cuántos?"}</label>
+          <input class="t" id="n_cantidad" data-n="cantidad" type="number" min="1" value="${esc(x.cantidad||(x.unidad==="Camión completo"?"1":""))}" style="max-width:140px">`:""}
+        <p class="nota" style="margin:6px 0 0">Es lo que usa almacén para saber cuánto trabajo tiene ese día.</p>
+      </div>`}
+
+      ${tit("Envío")}
       <div class="rej">
-        ${esCamion?"":campo("contenedor","Nº contenedor / guía",'autocomplete="off"')}
-        ${campo("naviera",esCamion?"Transportista":"Naviera / aerolínea",'list="nNav" autocomplete="off"')}${lista("nNav",navs)}
-        ${campo("transitario","Transitario",'list="nTra" autocomplete="off"')}${lista("nTra",trans)}
-        <div><label class="c" for="n_incoterm">Incoterm</label><select class="t" id="n_incoterm" data-n="incoterm">
-          ${["","EXW","FOB","FCA","CFR","CIF","CPT","CIP","DAP","DDP"].map(o=>`<option ${o===x.incoterm?"selected":""} value="${o}">${o||"—"}</option>`).join("")}</select></div>
+        ${M==="contenedor"?campo("contenedor","Nº contenedor",'autocomplete="off"')
+          :M==="aereo"?campo("contenedor","Nº guía aérea (AWB)",'autocomplete="off"'):""}
+        ${campo("naviera",M==="contenedor"?"Naviera":M==="aereo"?"Aerolínea":"Transportista",'list="nNav" autocomplete="off"')}${lista("nNav",navs)}
+        ${M!=="terrestre"?campo("transitario","Transitario",'list="nTra" autocomplete="off"')+lista("nTra",trans):""}
+        ${M==="contenedor"?`<div><label class="c" for="n_incoterm">Incoterm</label><select class="t" id="n_incoterm" data-n="incoterm">
+          ${["","EXW","FOB","FCA","CFR","CIF","CPT","CIP","DAP","DDP"].map(o=>`<option ${o===x.incoterm?"selected":""} value="${o}">${o||"—"}</option>`).join("")}</select></div>`:""}
       </div>
 
-      <h3 style="font-size:17px;margin:18px 0 0;color:var(--ent)">Cuándo llega</h3>
+      ${tit("Cuándo llega")}
       <div class="rej">
         ${campo("fechaSalida","Salida",'type="date"')}
-        ${campo("puertoOrigen","Puerto de origen",'list="nPue" autocomplete="off"')}${lista("nPue",puertos)}
-        ${campo("fechaPuerto","Llegada a puerto",'type="date"')}
-        ${campo("puertoDestino","Puerto de destino")}
+        ${campo("puertoOrigen",M==="contenedor"?"Puerto de origen":M==="aereo"?"Aeropuerto de origen":"Origen (ciudad o país)",'list="nPue" autocomplete="off"')}${lista("nPue",puertos)}
+        ${M==="contenedor"?campo("fechaPuerto","Llegada a puerto",'type="date"')+campo("puertoDestino","Puerto de destino",'placeholder="VALENCIA"'):""}
       </div>
       <div style="background:var(--entL);border-radius:14px;padding:4px 14px 14px;margin-top:14px">
         <label class="c" for="n_fecha" style="color:var(--ent)">Llegada a BAZA</label>
@@ -906,39 +982,51 @@ function nuevaFila(ed){
         <p class="nota" style="margin:6px 0 0">Si la pones, almacén recibe un aviso para aceptarla. Si aún no se sabe, déjala vacía.</p>
       </div>
 
-      <h3 style="font-size:17px;margin:18px 0 0;color:var(--ent)">Administración</h3>
+      ${tit("Administración")}
       <div class="rej">
         <div><label class="c" for="n_situacion">Situación</label><select class="t" id="n_situacion" data-n="situacion">
           ${["","Pagado","Pendiente"].map(o=>`<option ${o===x.situacion?"selected":""} value="${o}">${o||"—"}</option>`).join("")}</select></div>
         ${campo("importeFactura","Invoice",'placeholder="48.062,48 €"')}
         <div><label class="c">Documentación</label><div class="chips">
           <button class="chip" data-nb="doc" aria-pressed="${!!x.doc}">DOC OK</button>
-          <button class="chip" data-nb="invForwarders" aria-pressed="${!!x.invForwarders}">Inv. forwarders OK</button></div></div>
-      </div>
+          ${M==="contenedor"?`<button class="chip" data-nb="invForwarders" aria-pressed="${!!x.invForwarders}">Inv. forwarders OK</button>`:""}</div></div>
+      </div>`}
 
       <div style="display:flex;gap:10px;margin-top:20px">
         ${ed?`<button class="btn nc" id="nDel">🗑 Eliminar</button>`:""}
         <button class="btn sec" id="nCan" style="flex:1">Cancelar</button>
-        <button class="btn ent" id="nOk" style="flex:2">${ed?"Guardar cambios":"Dar de alta"}</button></div>
+        <button class="btn ent" id="nOk" style="flex:2" ${M?"":"disabled"}>${ed?"Guardar cambios":"Dar de alta"}</button></div>
     </div></div>`;
     const lee=()=>document.querySelectorAll("[data-n]").forEach(i=>{ x[i.dataset.n]=i.value.trim(); });
+    document.querySelectorAll("[data-modo]").forEach(b=>b.onclick=()=>{ lee(); if(x.modo!==b.dataset.modo){ x.modo=b.dataset.modo; x.unidad=""; x.cantidad=""; } pinta(); });
     document.querySelectorAll("[data-nt]").forEach(b=>b.onclick=()=>{ lee(); x.tipoContenedor=b.dataset.nt; pinta(); });
-    document.querySelectorAll("[data-nu]").forEach(b=>b.onclick=()=>{ lee(); x.unidad=b.dataset.nu; pinta(); });
+    document.querySelectorAll("[data-nu]").forEach(b=>b.onclick=()=>{ lee(); x.unidad=b.dataset.nu;
+      if(x.unidad==="Camión completo"&&!x.cantidad) x.cantidad="1"; pinta();
+      const c=$("#n_cantidad"); if(c&&x.unidad!=="Camión completo"){ c.focus(); } });
     document.querySelectorAll("[data-nb]").forEach(b=>b.onclick=()=>{ lee(); x[b.dataset.nb]=x[b.dataset.nb]?"":"OK"; pinta(); });
     $("#nCan").onclick=()=>{ $("#capa").innerHTML=""; };
     const bd=$("#nDel"); if(bd) bd.onclick=()=>eliminarEntrada(ed);
     $("#nOk").onclick=async()=>{
       lee();
+      if(!x.modo){ aviso("Elige cómo llega","err"); return; }
       if(!x.proveedor){ aviso("Falta el proveedor","err"); $("#n_proveedor").focus(); return; }
-      const camion=x.tipoContenedor==="Camión", muestra=x.tipoContenedor==="Muestra";
-      const tc=tipoContenedor(camion||muestra?x.tipoContenedor:x.tipoContenedor);
+      if(x.modo!=="contenedor"&&!x.unidad){ aviso("Indica qué llega: "+(x.modo==="aereo"?"barriles, pallets, cajas o muestra":"camión completo, barriles, pallets, cajas o muestra"),"err"); return; }
+      if(x.unidad&&!["Muestra","Camión completo"].includes(x.unidad)&&!x.cantidad){ aviso("Indica cuántos llegan","err"); const c=$("#n_cantidad"); if(c) c.focus(); return; }
+      // Lo que se guarda según cómo llega
+      let d;
+      if(x.modo==="contenedor"){ const tc=tipoContenedor(x.tipoContenedor);
+        d={transporte:"Contenedor",tipoContenedor:x.tipoContenedor,tipoTxt:tc.txt,frio:!!tc.frio,unidad:"Contenedor",cantidad:1}; }
+      else if(x.modo==="aereo") d={transporte:"Avión",tipoContenedor:"AIR",tipoTxt:"Aéreo",frio:false,
+        unidad:x.unidad,cantidad:x.unidad==="Muestra"?1:Number(x.cantidad)};
+      else d={transporte:"Camión",tipoContenedor:"Camión",tipoTxt:"",frio:false,
+        unidad:x.unidad,cantidad:x.unidad==="Muestra"?1:Number(x.cantidad||1)};
+      const datos={...x,...d}; delete datos.modo;
+      if(x.modo!=="contenedor"){ datos.fechaPuerto=""; datos.incoterm=datos.incoterm||""; }
+      if(x.modo==="terrestre"){ datos.transitario=""; datos.contenedor=datos.contenedor||""; datos.puertoDestino=""; }
       if(ed){
-        // Solo lo que ha cambiado, y cada cambio al historial
-        const y={...ed,...x,tipoTxt:camion?"":tc.txt,frio:!!tc.frio,transporte:tc.transporte,
-          unidad:camion?x.unidad:muestra?"Muestra":"Contenedor",cantidad:camion?(x.cantidad===""?"":Number(x.cantidad)):1};
+        const y={...ed,...datos};
         const cambios=[];
         COLS.forEach(c=>{ if(String(ed[c.k]??"")!==String(y[c.k]??"")) cambios.push(c.t+": «"+(ed[c.k]||"—")+"» → «"+(y[c.k]||"—")+"»"); });
-        if(camion&&String(ed.cantidad??"")!==String(y.cantidad??"")) cambios.push("Cantidad: "+(ed.cantidad||"—")+" → "+(y.cantidad||"—"));
         if(!cambios.length){ $("#capa").innerHTML=""; return; }
         const cambiaFecha=String(ed.fecha||"")!==String(y.fecha||"");
         if(cambiaFecha){ y.fechaAnterior=ed.fecha||""; y.estado="pendiente"; y.propuesta=""; }
@@ -950,24 +1038,27 @@ function nuevaFila(ed){
            <p>${y.fecha?"Acéptala o pide otra fecha según tu carga, desde el plan de almacén.":"Te avisaremos cuando haya fecha."}</p>`,y);
         return;
       }
-      const y={...x,_id:"ent_"+Date.now()+"_"+Math.random().toString(36).slice(2,5),
-        tipoTxt:camion?"":tc.txt,frio:!!tc.frio,transporte:tc.transporte,
-        unidad:camion?x.unidad:muestra?"Muestra":"Contenedor",cantidad:camion?(x.cantidad===""?"":Number(x.cantidad)):1,
+      const y={...datos,_id:"ent_"+Date.now()+"_"+Math.random().toString(36).slice(2,5),
         almacen:"BAZA",estado:"pendiente",creadoPor:QUIEN,creadoEl:new Date().toISOString(),historial:[]};
       $("#nOk").disabled=true; $("#nOk").textContent="Guardando…";
-      try{ await guardarEntrada(y,"Alta"+(y.fecha?" con llegada a Baza el "+fLarga(y.fecha):" sin fecha de Baza")); }
+      try{ await guardarEntrada(y,"Alta ("+contenidoEnt(y)+", "+medioEnt(y).toLowerCase()+")"+(y.fecha?" con llegada a Baza el "+fLarga(y.fecha):" sin fecha de Baza")); }
       catch(e){ aviso("No se ha podido guardar: "+e.message,"err"); $("#nOk").disabled=false; $("#nOk").textContent="Dar de alta"; return; }
       $("#capa").innerHTML=""; aviso("Llegada dada de alta","ok");
       S.filtroC="todas"; S.buscaC=""; pintarCompras();
       const i=document.querySelector(`[data-c="${y._id}|proveedor"]`);
       if(i){ i.scrollIntoView({block:"center"}); const tr=i.closest("tr"); if(tr){ tr.style.outline="3px solid var(--ent)"; setTimeout(()=>{ tr.style.outline=""; },2500); } }
       if(y.fecha) avisar("almacen","🚚 Nueva llegada: "+y.proveedor+" "+(y.ref||"")+" el "+fLarga(y.fecha),
-        `<p>Compras ha dado de alta una llegada. Acéptala o pide otra fecha desde el plan de almacén.</p>`,y);
+        `<p>Compras ha dado de alta una llegada: <b>${esc(contenidoEnt(y))}</b> (${esc(medioEnt(y).toLowerCase())}).
+         Acéptala o pide otra fecha desde el plan de almacén.</p>`,y);
     };
-    setTimeout(()=>{ const f=$("#n_proveedor"); if(f&&!x.proveedor) f.focus(); },50);
+    if(!x.modo) return;
+    setTimeout(()=>{ const f=$("#n_proveedor"), a=document.activeElement;
+      // Solo si no se está escribiendo ya en otro campo
+      if(f&&!f.value&&!(a&&/INPUT|TEXTAREA|SELECT/.test(a.tagName))) f.focus(); },50);
   };
   pinta();
 }
+
 // Eliminar: no se borra el documento, se marca como eliminado con el motivo.
 // Así queda rastro de que existió y de quién lo quitó.
 async function eliminarEntrada(e){
@@ -1132,10 +1223,11 @@ function pegarExcel(){
 // almacén) · INV FROM FORWARDERS · Invoice. Se localizan por el nombre de la
 // cabecera, así que da igual si Compras añade o mueve columnas.
 function cantidadDeNotas(t){
-  const m=String(t||"").match(/(\d+)\s*(barril|pallet|palet|caja)/i);
+  const m=String(t||"").match(/(\d+[.,]?\d*)\s*(barril|barrel|pallet|palet|caja|box|bulto|kg|kilo)/i);
   if(!m) return null;
-  const u=/barril/i.test(m[2])?"Barriles":/caja/i.test(m[2])?"Cajas":"Pallets";
-  return {cantidad:Number(m[1]),unidad:u};
+  const k=m[2].toLowerCase();
+  const u=/barril|barrel/.test(k)?"Barriles":/caja|box/.test(k)?"Cajas":/bulto/.test(k)?"Bultos":/kg|kilo/.test(k)?"Kg":"Pallets";
+  return {cantidad:Number(String(m[1]).replace(",",".")),unidad:u};
 }
 function fechaExcel(v){
   if(v==null||v==="") return "";
@@ -1169,7 +1261,7 @@ async function importarContenedores(file){
     const C={prov:col("PROVEEDOR"),ref:col("NFRALOTE"),notas:col("NOTES"),pedido:col("ORDER#"),cont:col("NCONTENEDOR"),
       naviera:col("NAVIERA"),sit:col("SITUACION"),transit:col("TRANSITARIO"),inco:col("INCOTERM"),tipo:col("CONTENEDOR"),
       fSal:col("FECHA",0),pOri:col("PUERTO"),fPuerto:col("FECHA",1),pDes:col("PUERTODESTINO"),baza:col("BAZA"),importe:col("INVOICE"),
-      doc:col("DOC"),inv:col("INVFROMFORWARDERS")};
+      doc:col("DOC"),inv:col("INVFROMFORWARDERS"),cant:col("CANTIDAD"),uni:col("UNIDAD")};
     if(C.prov<0||C.baza<0) throw new Error("Faltan las columnas «Proveedor» o «BAZA»");
     const g=(r,i)=>i<0?"":r[i];
     for(let i=iCab+1;i<m.length;i++){
@@ -1186,9 +1278,14 @@ async function importarContenedores(file){
         fecha:fechaExcel(g(r,C.baza)),importeFactura:String(g(r,C.importe)||"").replace(/\s+/g," ").trim(),
         doc:/ok/i.test(String(g(r,C.doc)||""))?"OK":"",invForwarders:/ok/i.test(String(g(r,C.inv)||""))?"OK":"",
         almacen:"BAZA",cantidad:1,unidad:"Contenedor"});
+      // Cuánto llega: de su columna si la hay (Excel descargado del sistema), si
+      // no de las notas ("CONSIGNA-16 BARRILES"). Si no aparece, queda vacío.
       const ul=filas[filas.length-1];
-      if(ul.transporte==="Camión"){ const c=cantidadDeNotas(ul.notas); ul.cantidad=c?c.cantidad:""; ul.unidad=c?c.unidad:"Barriles"; }
-      else if(ul.transporte==="Paquetería"){ ul.cantidad=1; ul.unidad="Muestra"; }
+      const cc=Number(String(g(r,C.cant)||"").replace(",",".")), uu=String(g(r,C.uni)||"").trim();
+      const dn=cantidadDeNotas(ul.notas);
+      ul.cantidad=cc?cc:(dn?dn.cantidad:""); ul.unidad=cc&&UNIDADES_CONT.includes(uu)?uu:(dn?dn.unidad:"");
+      if(ul.transporte==="Contenedor"){ ul.cantidad=1; ul.unidad="Contenedor"; }
+      else if(ul.transporte==="Paquetería"&&!cc&&!dn){ ul.cantidad=1; ul.unidad="Muestra"; }
     }
   }catch(e){ aviso("No se ha podido leer el Excel: "+e.message,"err"); return; }
 
@@ -1199,7 +1296,7 @@ async function importarContenedores(file){
   const limite=sumaDias(HOY,-7);
   const plan={nuevas:[],fecha:[],datos:[],iguales:0,pasadas:0,historico:[]};
   const CAMPOS=["proveedor","contenedor","naviera","situacion","transitario","incoterm","tipoContenedor",
-    "fechaSalida","puertoOrigen","fechaPuerto","puertoDestino","notas","importeFactura","doc","invForwarders"];
+    "fechaSalida","puertoOrigen","fechaPuerto","puertoDestino","notas","importeFactura","doc","invForwarders","cantidad","unidad"];
   filas.forEach(f=>{
     const e=porClave[clave(f)];
     // Sin fecha de Baza manda la de llegada a puerto: si fue hace tiempo, ya llegó
