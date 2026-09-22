@@ -34,7 +34,8 @@
  .p-com{background:#EFF6FF;color:var(--azul)} .p-dep{background:var(--okL);color:var(--ok)}
 </style></head><body>
 <h1>👥 Personas y departamentos</h1>
-<p class="sub">El rol decide qué ve cada uno al entrar y dónde aparece en el organigrama.
+<p class="sub">Se cambia en las dos fichas de cada persona: la del CRM y su cuenta de acceso,
+  que es la que decide qué menú ve al entrar.<br>El rol decide qué ve cada uno al entrar y dónde aparece en el organigrama.
   Quien trabaja en un departamento no debe figurar como comercial: si no, ve el menú de ventas
   y no le llegan los partes ni los objetivos de su área.</p>
 <input class="busca" id="q" placeholder="🔍 Busca por nombre o usuario (nacho, piedad, lucia…)">
@@ -77,11 +78,22 @@ async function leer(col){
   }while(tok&&v<20);
   return t;
 }
-let US=[], DEPS=[], CAMBIOS={};
+let US=[], PU=[], DEPS=[], CAMBIOS={};
+// La tipología del área: si el departamento no tiene, se busca en el de arriba
+// (Técnico de Calidad → Calidad, Ingredientes → I+D).
+function tipologiaDe(dep){
+  let d=dep, g=0;
+  while(d&&g<10){
+    if((d.tipologias||[]).length) return d.tipologias[0];
+    d=d.padre?DEPS.find(x=>x.id===d.padre):null; g++;
+  }
+  return dep?dep.id:"";
+}
 
 (async()=>{
   try{
-    const [us,dbd]=await Promise.all([leer("usuarios"),leer("departamentos")]);
+    const [us,pu,dbd]=await Promise.all([leer("usuarios"),leer("portal_users"),leer("departamentos")]);
+    PU=pu;
     US=us.filter(u=>u.activo!==false&&!u.duplicadaDe);
     const m={}; BASE.forEach(([id,nombre])=>m[id]={id,nombre,responsableIds:[]});
     dbd.forEach(d=>{ m[d._id]={...(m[d._id]||{}),...d,id:d._id}; });
@@ -96,7 +108,12 @@ function pintar(){
   const q=nrm(document.getElementById("q").value);
   const lista=q.length>=2
     ? US.filter(u=>[u.nombre,u.username,u._id].some(k=>nrm(k).includes(q)))
-    : US.filter(u=>CAMBIOS[u._id]).concat(US.filter(u=>u.departamentoId&&["agente","crm_agente"].includes(String(u.rol||"").toLowerCase())));
+    : US.filter(u=>CAMBIOS[u._id]).concat(US.filter(u=>{
+        if(!u.departamentoId) return false;
+        const p=PU.find(x=>x._id===u._id||x.crmId===u._id||x.perfilCRM===u._id);
+        const roles=[u.rol,p&&p.rol].map(r=>String(r||"").toLowerCase());
+        return roles.some(r=>r==="agente"||r==="crm_agente");
+      }));
   const app=document.getElementById("app");
   if(!lista.length){
     app.innerHTML=`<div class="card ok">Busca a la persona por su nombre para cambiar su rol o su departamento.</div>`;
@@ -159,7 +176,7 @@ async function guardar(){
       campos.rol=esc(c.rol);
       const dep=DEPS.find(d=>d.id===(c.departamentoId??u.departamentoId));
       // El personal de departamento lleva la tipología de su área
-      if(c.rol==="tipologia"&&dep) campos.tipologia=esc((dep.tipologias||[])[0]||dep.id);
+      if(c.rol==="tipologia"&&dep) campos.tipologia=esc(tipologiaDe(dep));
     }
     if(c.departamentoId!==undefined) campos.departamentoId=esc(c.departamentoId);
     try{
@@ -168,6 +185,18 @@ async function guardar(){
         const r=await fetch(`${FB}/usuarios/${encodeURIComponent(id)}?${mask}`,{method:"PATCH",
           headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:campos})});
         if(!r.ok) throw new Error("HTTP "+r.status);
+      }
+      // La cuenta de acceso del portal es la que manda al entrar: si ahí sigue
+      // como comercial, verá el menú de ventas aunque su ficha del CRM esté bien.
+      if(Object.keys(campos).length){
+        const p=PU.find(x=>x._id===id||x.id===id||x.crmId===id||x.perfilCRM===id);
+        if(p){
+          const mask2=Object.keys(campos).map(k=>"updateMask.fieldPaths="+k).join("&");
+          const r2=await fetch(`${FB}/portal_users/${encodeURIComponent(p._id)}?${mask2}`,{method:"PATCH",
+            headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:campos})});
+          if(!r2.ok) throw new Error("portal HTTP "+r2.status);
+          Object.assign(p,{rol:c.rol||p.rol});
+        }
       }
       if(c.esResp!==undefined){
         const dep=DEPS.find(d=>d.id===(c.departamentoId??u.departamentoId));
