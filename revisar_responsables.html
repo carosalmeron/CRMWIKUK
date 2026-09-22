@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Revisar responsables</title>
+<style>
+ :root{--papel:#F2F4F7;--tinta:#14181F;--tenue:#6B7684;--linea:#DCE1E7;
+       --ok:#0E7C5A;--mal:#C2263D;--med:#B07908;--okL:#EDF7F3;--malL:#FEF2F4;--medL:#FFFBEB}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--papel);color:var(--tinta);max-width:960px;
+   margin-inline:auto;padding:20px 14px 110px;
+   font:400 15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+ h1{margin:0 0 3px;font-size:21px;font-weight:800}
+ .sub{margin:0 0 14px;font-size:13px;color:var(--tenue)}
+ .card{background:#fff;border:1px solid var(--linea);border-radius:10px;
+   padding:13px 15px;margin-bottom:10px}
+ .card.ok{border-color:var(--ok);background:var(--okL)}
+ .card.mal{border-left:5px solid var(--mal)}
+ .card.med{border-left:5px solid var(--med)}
+ code{background:#F1F5F9;padding:1px 6px;border-radius:4px;font-size:12px;
+   font-family:ui-monospace,monospace}
+ .cab{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+ .cab b{font-size:16px}
+ .falta{display:inline-block;background:var(--malL);color:var(--mal);border-radius:99px;
+   padding:2px 10px;font-size:12px;font-weight:700;margin:4px 6px 0 0}
+ .falta.med{background:var(--medL);color:var(--med)}
+ label{display:block;font-size:12px;font-weight:700;color:var(--tenue);margin:9px 0 4px}
+ input{width:100%;max-width:320px;padding:9px 11px;border-radius:8px;
+   border:1.5px solid var(--linea);font-size:14px;font-family:inherit}
+ .barra{position:fixed;left:0;right:0;bottom:0;background:#fff;border-top:1px solid var(--linea);
+   padding:12px 14px;display:flex;gap:12px;align-items:center;justify-content:space-between;
+   box-shadow:0 -2px 12px #0000000f}
+ button{padding:12px 22px;border-radius:9px;border:none;background:var(--tinta);
+   color:#fff;font-weight:700;font-size:13.5px;cursor:pointer}
+ button:disabled{background:#94A3B8;cursor:default}
+ .estado{padding:34px 4px;color:var(--tenue);text-align:center}
+</style></head><body>
+<h1>🧭 Responsables de departamento</h1>
+<p class="sub">Cada departamento tiene un responsable. Si su ficha no existe en el CRM, no tiene
+  departamento asignado o no tiene email personal, no aparece en el organigrama y sus avisos,
+  partes y objetivos se quedan por el camino.</p>
+<div id="app"><p class="estado">Revisando…</p></div>
+<div class="barra" id="barra" style="display:none">
+  <span class="sub" id="txt" style="margin:0"></span>
+  <button id="btn">Arreglar</button>
+</div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const GENERICOS=["info@unitedcaro.com"];
+// Organigrama base del código: en la base de datos solo están los editados
+const BASE=[
+  {id:"direccion",nombre:"Dirección",padre:null,responsableIds:["ceo"],tipologias:[]},
+  {id:"ventas",nombre:"Ventas",padre:"direccion",responsableIds:["dir"],tipologias:[]},
+  {id:"customer",nombre:"Customer Service",padre:"ventas",responsableIds:[],tipologias:[]},
+  {id:"compras",nombre:"Compras",padre:"direccion",responsableIds:["compras"],tipologias:["stock"]},
+  {id:"logistica",nombre:"Logística",padre:"compras",responsableIds:["resp_log"],tipologias:["logistica"]},
+  {id:"operaciones",nombre:"Operaciones",padre:"direccion",responsableIds:[],tipologias:[]},
+  {id:"produccion",nombre:"Producción",padre:"operaciones",responsableIds:["resp_prd"],tipologias:["produccion"]},
+  {id:"coordinacion",nombre:"Coordinación",padre:"operaciones",responsableIds:["resp_coord"],tipologias:["coordinacion"]},
+  {id:"id",nombre:"I+D",padre:"direccion",responsableIds:["resp_id"],tipologias:["id"]},
+  {id:"ingredientes",nombre:"Ingredientes",padre:"id",responsableIds:[],tipologias:[]},
+  {id:"envolturas",nombre:"Envolturas",padre:"id",responsableIds:[],tipologias:[]},
+  {id:"calidad",nombre:"Calidad",padre:"direccion",responsableIds:["resp_cal"],tipologias:["calidad"]},
+  {id:"administracion",nombre:"Administración",padre:"direccion",responsableIds:["resp_adm"],tipologias:["administracion"]},
+  {id:"it",nombre:"IT",padre:"direccion",responsableIds:["resp_it"],tipologias:["it"]},
+];
+
+function val(f){
+  if(!f) return null;
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.arrayValue!==undefined) return (f.arrayValue.values||[]).map(val);
+  return null;
+}
+async function leer(col){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""),{cache:"no-store"});
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<20);
+  return t;
+}
+let CASOS=[];
+
+(async()=>{
+  const app=document.getElementById("app");
+  try{
+    const [us,pu,dbDeps]=await Promise.all([leer("usuarios"),leer("portal_users"),leer("departamentos")]);
+    const porId={}; BASE.forEach(d=>porId[d.id]={...d});
+    dbDeps.forEach(d=>{ const id=d._id; porId[id]={...(porId[id]||{}),...d,id}; });
+    const deps=Object.values(porId).filter(d=>d.activo!==false);
+
+    CASOS=[];
+    deps.forEach(d=>{
+      (d.responsableIds||[]).forEach(rid=>{
+        const ficha=us.find(u=>u._id===rid||u.id===rid);
+        const portal=pu.find(u=>u._id===rid||u.id===rid||u.crmId===rid);
+        const emails=[ficha&&ficha.email,portal&&portal.email].filter(Boolean);
+        const personal=emails.find(e=>!GENERICOS.includes(String(e).toLowerCase()));
+        const faltas=[];
+        if(!ficha&&!portal) faltas.push(["no existe","mal"]);
+        else{
+          if(!ficha) faltas.push(["sin ficha en el CRM","mal"]);
+          else if(!ficha.departamentoId) faltas.push(["sin departamento","mal"]);
+          else if(ficha.departamentoId!==d.id) faltas.push(["apunta a "+ficha.departamentoId,"med"]);
+          if(!personal) faltas.push([emails.length?"solo email genérico":"sin email","med"]);
+        }
+        CASOS.push({dep:d,rid,ficha,portal,personal:personal||"",faltas,
+          nombre:(ficha&&ficha.nombre)||(portal&&portal.nombre)||rid,
+          nuevoEmail:personal||"", arreglar:faltas.length>0&&!!(ficha||portal)});
+      });
+      if(!(d.responsableIds||[]).length) CASOS.push({dep:d,rid:null,faltas:[["sin responsable","med"]],nombre:"—",arreglar:false});
+    });
+    pintar();
+  }catch(e){ app.innerHTML='<div class="card mal">Error: '+e.message+'</div>'; }
+})();
+
+function pintar(){
+  const app=document.getElementById("app");
+  const conFallo=CASOS.filter(c=>c.faltas.length);
+  app.innerHTML=(conFallo.length?`<div class="card med"><b>${conFallo.length} cosas por revisar.</b>
+      Marca los emails que falten y pulsa Arreglar: se crean las fichas que no existen, se coloca a cada
+      responsable en su departamento y se guarda el email.</div>`
+    :`<div class="card ok"><b>Todo correcto.</b> Cada departamento tiene su responsable bien enlazado.</div>`)
+    +CASOS.map((c,i)=>{
+      const cls=c.faltas.some(f=>f[1]==="mal")?"mal":c.faltas.length?"med":"ok";
+      return `<div class="card ${cls}">
+        <div class="cab"><b>${c.dep.icon||"🏢"} ${c.dep.nombre}</b>
+          <span style="color:var(--tenue)">${c.rid?c.nombre+" · ":""}<code>${c.rid||"sin responsable"}</code></span></div>
+        ${c.faltas.map(f=>`<span class="falta ${f[1]}">${f[0]}</span>`).join("")}
+        ${c.faltas.length&&c.rid&&(c.ficha||c.portal)?`
+          <label for="m${i}">Email de ${c.nombre}</label>
+          <input id="m${i}" type="email" value="${c.nuevoEmail}" placeholder="nombre@unitedcaro.com"
+            oninput="CASOS[${i}].nuevoEmail=this.value.trim()">`:""}
+        ${!c.rid?`<p class="sub" style="margin:6px 0 0">Asigna un responsable desde el panel de administrador,
+          en el organigrama.</p>`:""}
+      </div>`;
+    }).join("");
+  const n=CASOS.filter(c=>c.arreglar).length;
+  document.getElementById("barra").style.display=n?"flex":"none";
+  document.getElementById("txt").textContent=n+" responsable(s) por arreglar";
+  document.getElementById("btn").onclick=arreglar;
+}
+
+async function arreglar(){
+  const lista=CASOS.filter(c=>c.arreglar);
+  if(!lista.length) return;
+  if(!confirm("Se crearán las fichas que falten, se pondrá a cada responsable en su departamento\n"
+    +"y se guardará el email escrito. No se borra nada. ¿Seguimos?")) return;
+  const b=document.getElementById("btn"); b.disabled=true;
+  const esc=(v)=>({stringValue:String(v||"")});
+  let ok=0, err=0;
+  for(const c of lista){
+    b.textContent="Arreglando… "+(ok+err+1)+"/"+lista.length;
+    const campos={departamentoId:esc(c.dep.id)};
+    if(c.nuevoEmail) campos.email=esc(c.nuevoEmail);
+    try{
+      if(!c.ficha){
+        // Ficha nueva en el CRM, con lo que sepamos de su acceso al portal
+        const p=c.portal||{};
+        const r=await fetch(`${FB}/usuarios/${encodeURIComponent(c.rid)}`,{method:"PATCH",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({fields:{
+            id:esc(c.rid), nombre:esc(p.nombre||c.nombre), rol:esc("tipologia"),
+            tipologia:esc((c.dep.tipologias||[])[0]||c.dep.id),
+            departamentoId:esc(c.dep.id), icon:esc(c.dep.icon||"🏢"),
+            activo:{booleanValue:true}, ...(c.nuevoEmail?{email:esc(c.nuevoEmail)}:{}),
+          }})});
+        if(!r.ok) throw new Error("HTTP "+r.status);
+      } else {
+        const mask=Object.keys(campos).map(k=>"updateMask.fieldPaths="+k).join("&");
+        const r=await fetch(`${FB}/usuarios/${encodeURIComponent(c.rid)}?${mask}`,{method:"PATCH",
+          headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:campos})});
+        if(!r.ok) throw new Error("HTTP "+r.status);
+      }
+      // El email también en su acceso del portal, que es donde lo busca el CRM
+      if(c.nuevoEmail&&c.portal){
+        await fetch(`${FB}/portal_users/${encodeURIComponent(c.portal._id)}?updateMask.fieldPaths=email`,{
+          method:"PATCH",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({fields:{email:esc(c.nuevoEmail)}})}).catch(()=>{});
+      }
+      ok++;
+    }catch(e){ err++; }
+  }
+  b.textContent = err ? ok+" arreglados, "+err+" con error" : "✓ "+ok+" arreglados";
+  if(!err) document.getElementById("app").insertAdjacentHTML("afterbegin",
+    '<div class="card ok"><b>Listo.</b> Recarga el CRM: cada responsable aparece ya en su departamento.</div>');
+}
+</script></body></html>
