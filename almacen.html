@@ -352,7 +352,18 @@ function medioEnt(e){
   return e.transporte==="Contenedor"?"Contenedor":"";
 }
 const sinCantidad=(e)=>!contenidoEnt(e);
-const entradasDe=(f)=>S.entradas.filter(e=>e.fecha===f);
+// Tipo de llegada, para filtrar
+function tipoDe(e){
+  if(e.unidad==="Muestra"||e.transporte==="Paquetería") return "muestra";
+  if(e.transporte==="Contenedor") return "contenedor";
+  if(e.transporte==="Avión") return "aereo";
+  return "terrestre";
+}
+const TIPOS_FILTRO=[["todos","Todos",""],["contenedor","Contenedor","🚢"],["aereo","Aéreo","✈️"],
+  ["terrestre","Terrestre","🚚"],["muestra","Muestras","📦"]];
+const almDe=(e)=>String(e.almacen||"BAZA").trim().toUpperCase()||"BAZA";
+function almacenes(){ return [...new Set(["BAZA"].concat(S.entradas.map(almDe)))].sort(); }
+const entradasDe=(f)=>S.entradas.filter(e=>e.fecha===f&&(!S.planAlm||S.planAlm==="todos"||almDe(e)===S.planAlm));
 const salidasDe=(f)=>S.pedidos.filter(l=>l._f===f);
 function pedidosDe(f){
   const m={};
@@ -470,7 +481,7 @@ function pintarPlan(){
     ant=()=>sumaDias(S.ref,-7); sig=()=>sumaDias(S.ref,7); }
   else { const d=deISO(S.ref); titulo=MESES[d.getMonth()]+" "+d.getFullYear();
     ant=()=>iso(new Date(d.getFullYear(),d.getMonth()-1,1)); sig=()=>iso(new Date(d.getFullYear(),d.getMonth()+1,1)); }
-  const sinFecha=S.entradas.filter(e=>!e.fecha&&e.estado!=="recibida");
+  const sinFecha=S.entradas.filter(e=>!e.fecha&&e.estado!=="recibida"&&(!S.planAlm||S.planAlm==="todos"||almDe(e)===S.planAlm));
   const pendientes=S.entradas.filter(e=>e.fecha&&e.estado==="pendiente"&&e.fecha>=HOY);
   $("#app").innerHTML=`
     <div class="fila-ctl">
@@ -481,6 +492,9 @@ function pintarPlan(){
       <span class="titulo-per" style="text-transform:${V==="mes"?"capitalize":"none"}">${titulo}</span>
       <button class="flecha" id="sig" aria-label="Siguiente">›</button>
       <button class="btn sec" id="hoy">Hoy</button>
+      ${almacenes().length>1?`<select class="t" id="pAlm" style="width:auto;min-width:160px" aria-label="Almacén">
+        <option value="todos">Todos los almacenes</option>
+        ${almacenes().map(a=>`<option value="${esc(a)}" ${S.planAlm===a?"selected":""}>🏭 ${esc(a)}</option>`).join("")}</select>`:""}
     </div>
     ${PERFIL!=="compras"&&pendientes.length?`<div class="aviso">📬 ${pendientes.length} entrada${pendientes.length>1?"s":""}
       con fecha nueva esperando tu respuesta. Tócalas para aceptarlas o pedir otra fecha.</div>`:""}
@@ -491,6 +505,7 @@ function pintarPlan(){
   $("#ant").onclick=()=>{ S.ref=ant(); pintarPlan(); };
   $("#sig").onclick=()=>{ S.ref=sig(); pintarPlan(); };
   $("#hoy").onclick=()=>{ S.ref=HOY; pintarPlan(); };
+  const pa=$("#pAlm"); if(pa) pa.onchange=(ev)=>{ S.planAlm=ev.target.value; pintarPlan(); };
   if(V==="dia") pintarDia(); else if(V==="semana") pintarSemana(); else pintarMes();
   enlazarEntradas();
 }
@@ -769,7 +784,8 @@ const COLS=[
   {k:"puertoOrigen",t:"Puerto origen",w:115},
   {k:"fechaPuerto",t:"Llegada puerto",w:135,fecha:true},
   {k:"puertoDestino",t:"Puerto destino",w:110},
-  {k:"fecha",t:"BAZA",w:140,fecha:true,baza:true},
+  {k:"fecha",t:"Llegada",w:140,fecha:true,baza:true},
+  {k:"almacen",t:"Almacén",w:95},
   {k:"invForwarders",t:"Inv. forwarders",w:80,tgl:true},
   {k:"importeFactura",t:"Invoice",w:115},
 ];
@@ -782,16 +798,27 @@ function pintarCompras(){
   else if(F==="respuesta") l=l.filter(e=>e.estado==="cambio");
   else if(F==="recibidas") l=l.filter(e=>e.estado==="recibida");
   if(q) l=l.filter(e=>COLS.some(c=>String(e[c.k]||"").toLowerCase().includes(q)));
+  // (sep 2026) Por almacén y por tipo. Los recuentos se calculan antes de
+  // aplicar el propio filtro, para ver cuántos hay de cada.
+  const FA=S.filtroAlm||"todos", FT=S.filtroTipo||"todos";
+  const porAlm=l.filter(e=>FA==="todos"||almDe(e)===FA);
+  const cuentaTipo={}; porAlm.forEach(e=>{ const t=tipoDe(e); cuentaTipo[t]=(cuentaTipo[t]||0)+1; });
+  const porTipo=l.filter(e=>FT==="todos"||tipoDe(e)===FT);
+  const cuentaAlm={}; porTipo.forEach(e=>{ const a=almDe(e); cuentaAlm[a]=(cuentaAlm[a]||0)+1; });
+  l=porAlm.filter(e=>FT==="todos"||tipoDe(e)===FT);
   // En pantalla, BAZA y la respuesta de almacén van junto al proveedor: es lo
   // que más se mira. La descarga conserva el orden del Excel de siempre.
-  const PRIM=["fecha","cantidad","unidad"];
+  const PRIM=["fecha","almacen","cantidad","unidad"];
   const VIS=[COLS[0],COLS[1]].concat(PRIM.map(k=>COLS.find(c=>c.k===k)))
     .concat(COLS.slice(2).filter(c=>!PRIM.includes(c.k)));
-  const NPRIM=5;
+  const NPRIM=6;
   l.sort((a,b)=>(a.fecha||"9999").localeCompare(b.fecha||"9999"));
   const nCamb=S.entradas.filter(e=>e.estado==="cambio").length;
   const celda=(e,c)=>{
     const v=e[c.k]==null?"":e[c.k];
+    const esCont0=e.transporte==="Contenedor"||e.unidad==="Contenedor";
+    if((c.k==="cantidad"||c.k==="unidad")&&esCont0)
+      return c.k==="unidad"?`<span style="font-size:13px;color:var(--suave);padding:0 6px">Completo</span>`:"";
     if(c.tgl) return `<button class="tgl${v?" on":""}" data-tg="${esc(e._id)}|${c.k}">${v?"OK":"—"}</button>`;
     if(c.opc) return `<select class="cel" data-c="${esc(e._id)}|${c.k}">${c.opc.map(o=>`<option ${o===v?"selected":""} value="${esc(o)}">${esc(o||"—")}</option>`).join("")}</select>`;
     if(c.fecha) return `<input class="cel${c.baza?" baza":""}" type="date" data-c="${esc(e._id)}|${c.k}" value="${esc(v)}">`;
@@ -821,10 +848,22 @@ function pintarCompras(){
       <input class="t" id="cBus" placeholder="🔍 Buscar proveedor, contenedor, pedido…" value="${esc(S.buscaC||"")}" style="max-width:340px">
       <span class="guardado" id="cOk"></span>
     </div>
+    <div class="fila-ctl">
+      <div class="seg" role="group" aria-label="Tipo">
+        ${TIPOS_FILTRO.map(([k,t,i])=>{ const n=k==="todos"?porAlm.length:(cuentaTipo[k]||0);
+          return `<button data-ft="${k}" aria-pressed="${FT===k}">${i?i+" ":""}${t} <span style="opacity:.6">${n}</span></button>`; }).join("")}
+      </div>
+      <label style="display:flex;gap:8px;align-items:center;font-weight:700;font-size:16px">Almacén
+        <select class="t" id="cAlm" style="width:auto;min-width:170px">
+          <option value="todos" ${FA==="todos"?"selected":""}>Todos (${porTipo.length})</option>
+          ${almacenes().map(a=>`<option value="${esc(a)}" ${FA===a?"selected":""}>${esc(a)} (${cuentaAlm[a]||0})</option>`).join("")}
+        </select></label>
+      ${FA!=="todos"||FT!=="todos"?`<button class="btn sec" id="cLimpia" style="min-height:48px;padding:8px 14px;font-size:15px">Quitar filtros</button>`:""}
+    </div>
     <p class="nota">Para cambiar un dato, escribe directamente en la celda: se guarda solo. O pulsa ✏️ para abrir la ficha entera,
-      y 🗑 para eliminarla. Si cambias la fecha de <b>BAZA</b>, almacén recibe un aviso y tiene que aceptarla.</p>
+      y 🗑 para eliminarla. Si cambias la fecha de <b>llegada</b>, almacén recibe un aviso y tiene que aceptarla.</p>
     ${l.length?`<div class="hoja-cal"><table>
-      <thead><tr>${VIS.slice(0,NPRIM).map(c=>`<th style="min-width:${c.w}px">${c.t}</th>`).join("")}<th style="min-width:190px">Almacén</th>
+      <thead><tr>${VIS.slice(0,NPRIM).map(c=>`<th style="min-width:${c.w}px">${c.t}</th>`).join("")}<th style="min-width:190px">Respuesta de almacén</th>
         <th style="min-width:92px"></th>
         ${VIS.slice(NPRIM).map(c=>`<th style="min-width:${c.w}px">${c.t}</th>`).join("")}</tr></thead>
       <tbody>${l.map(e=>`<tr class="${e.estado==="recibida"?"llegada":e.fecha&&e.fecha<=sumaDias(HOY,2)&&e.fecha>=HOY?"baza-hoy":""}">
@@ -838,6 +877,9 @@ function pintarCompras(){
       </tr>`).join("")}</tbody></table></div>`
       :`<div class="vacio">No hay entradas en esta lista. Añade una con «＋ Nueva fila».</div>`}`;
   document.querySelectorAll("[data-fc]").forEach(b=>b.onclick=()=>{ S.filtroC=b.dataset.fc; pintarCompras(); });
+  document.querySelectorAll("[data-ft]").forEach(b=>b.onclick=()=>{ S.filtroTipo=b.dataset.ft; pintarCompras(); });
+  $("#cAlm").onchange=(ev)=>{ S.filtroAlm=ev.target.value; pintarCompras(); };
+  const cl=$("#cLimpia"); if(cl) cl.onclick=()=>{ S.filtroTipo="todos"; S.filtroAlm="todos"; pintarCompras(); };
   $("#cBus").oninput=(ev)=>{ S.buscaC=ev.target.value; clearTimeout(S._tb); S._tb=setTimeout(()=>{ pintarCompras(); const i=$("#cBus"); i.focus(); i.setSelectionRange(i.value.length,i.value.length); },350); };
   $("#cNueva").onclick=()=>nuevaFila();
   $("#cBaj").onclick=()=>descargarExcel(l);
@@ -874,7 +916,7 @@ async function guardarCampo(id,k,v){
   const ant=e[k]==null?"":String(e[k]);
   if(ant===v) return;
   if(k==="unidad"&&v&&!["Muestra","Camión completo"].includes(v)&&!e.cantidad) aviso("Pon también la cantidad","err");
-  const y={...e}; y[k]=k==="cantidad"?(v===""?"":Number(v)):v;
+  const y={...e}; y[k]=k==="cantidad"?(v===""?"":Number(v)):k==="almacen"?(String(v).toUpperCase()||"BAZA"):v;
   if(k==="tipoContenedor"){
     const tc=tipoContenedor(v);
     y.tipoTxt=v==="Camión"?"":tc.txt; y.frio=!!tc.frio; y.transporte=tc.transporte;
@@ -902,7 +944,7 @@ function nuevaFila(ed){
   if(!ed||!ed._id) ed=null;   // solo es edición si llega una entrada de verdad
   const x={modo:"",proveedor:"",ref:"",pedido:"",notas:"",contenedor:"",naviera:"",situacion:"",transitario:"",
     incoterm:"",tipoContenedor:"20'DRY",doc:"",fechaSalida:"",puertoOrigen:"",fechaPuerto:"",puertoDestino:"",
-    fecha:"",invForwarders:"",importeFactura:"",cantidad:"",unidad:""};
+    fecha:"",invForwarders:"",importeFactura:"",cantidad:"",unidad:"",almacen:"BAZA"};
   if(ed){
     Object.keys(x).forEach(k=>{ if(ed[k]!=null) x[k]=String(ed[k]); });
     x.modo=ed.transporte==="Contenedor"?"contenedor":ed.transporte==="Avión"?"aereo":"terrestre";
@@ -977,7 +1019,12 @@ function nuevaFila(ed){
         ${M==="contenedor"?campo("fechaPuerto","Llegada a puerto",'type="date"')+campo("puertoDestino","Puerto de destino",'placeholder="VALENCIA"'):""}
       </div>
       <div style="background:var(--entL);border-radius:14px;padding:4px 14px 14px;margin-top:14px">
-        <label class="c" for="n_fecha" style="color:var(--ent)">Llegada a BAZA</label>
+        <label class="c" style="color:var(--ent)">Almacén de destino</label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <div class="chips">${almacenes().map(a=>`<button class="chip" data-na="${esc(a)}" aria-pressed="${String(x.almacen).toUpperCase()===a}">${esc(a)}</button>`).join("")}</div>
+          <input class="t" id="n_almacen" data-n="almacen" value="${esc(x.almacen)}" style="max-width:170px" placeholder="Otro almacén">
+        </div>
+        <label class="c" for="n_fecha" style="color:var(--ent)">Llegada a ${esc(String(x.almacen||"BAZA").toUpperCase())}</label>
         <input class="t" id="n_fecha" data-n="fecha" type="date" value="${esc(x.fecha)}" style="max-width:240px">
         <p class="nota" style="margin:6px 0 0">Si la pones, almacén recibe un aviso para aceptarla. Si aún no se sabe, déjala vacía.</p>
       </div>
@@ -1004,6 +1051,7 @@ function nuevaFila(ed){
       if(x.unidad==="Camión completo"&&!x.cantidad) x.cantidad="1"; pinta();
       const c=$("#n_cantidad"); if(c&&x.unidad!=="Camión completo"){ c.focus(); } });
     document.querySelectorAll("[data-nb]").forEach(b=>b.onclick=()=>{ lee(); x[b.dataset.nb]=x[b.dataset.nb]?"":"OK"; pinta(); });
+    document.querySelectorAll("[data-na]").forEach(b=>b.onclick=()=>{ lee(); x.almacen=b.dataset.na; pinta(); });
     $("#nCan").onclick=()=>{ $("#capa").innerHTML=""; };
     const bd=$("#nDel"); if(bd) bd.onclick=()=>eliminarEntrada(ed);
     $("#nOk").onclick=async()=>{
@@ -1021,6 +1069,7 @@ function nuevaFila(ed){
       else d={transporte:"Camión",tipoContenedor:"Camión",tipoTxt:"",frio:false,
         unidad:x.unidad,cantidad:x.unidad==="Muestra"?1:Number(x.cantidad||1)};
       const datos={...x,...d}; delete datos.modo;
+      datos.almacen=String(datos.almacen||"BAZA").trim().toUpperCase()||"BAZA";
       if(x.modo!=="contenedor"){ datos.fechaPuerto=""; datos.incoterm=datos.incoterm||""; }
       if(x.modo==="terrestre"){ datos.transitario=""; datos.contenedor=datos.contenedor||""; datos.puertoDestino=""; }
       if(ed){
@@ -1039,7 +1088,7 @@ function nuevaFila(ed){
         return;
       }
       const y={...datos,_id:"ent_"+Date.now()+"_"+Math.random().toString(36).slice(2,5),
-        almacen:"BAZA",estado:"pendiente",creadoPor:QUIEN,creadoEl:new Date().toISOString(),historial:[]};
+        estado:"pendiente",creadoPor:QUIEN,creadoEl:new Date().toISOString(),historial:[]};
       $("#nOk").disabled=true; $("#nOk").textContent="Guardando…";
       try{ await guardarEntrada(y,"Alta ("+contenidoEnt(y)+", "+medioEnt(y).toLowerCase()+")"+(y.fecha?" con llegada a Baza el "+fLarga(y.fecha):" sin fecha de Baza")); }
       catch(e){ aviso("No se ha podido guardar: "+e.message,"err"); $("#nOk").disabled=false; $("#nOk").textContent="Dar de alta"; return; }
@@ -1079,7 +1128,7 @@ function descargarExcel(l){
       let v=e[c.k]==null?"":e[c.k];
       if(c.fecha&&v){ const d=deISO(v); v=d; }
       o[c.t]=v; });
-    o["Almacén"]=(ESTADO[e.estado]||{}).t||""; return o; });
+    o["Respuesta de almacén"]=!e.fecha?"Por confirmar":(ESTADO[e.estado]||{}).t||""; return o; });
   const ws=XLSX.utils.json_to_sheet(filas,{cellDates:true,dateNF:"dd/mm/yyyy"});
   ws["!cols"]=COLS.map(c=>({wch:Math.round(c.w/8)})).concat([{wch:22}]);
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Llegadas");
@@ -1258,11 +1307,15 @@ async function importarContenedores(file){
     if(iCab<0) throw new Error("No encuentro la fila de cabecera (la que empieza por «Proveedor»)");
     const cab=m[iCab].map(norm);
     const col=(nombre,n=0)=>{ let v=-1,k=0; cab.forEach((c,i)=>{ if(v<0&&c===nombre){ if(k===n) v=i; k++; } }); return v; };
-    const C={prov:col("PROVEEDOR"),ref:col("NFRALOTE"),notas:col("NOTES"),pedido:col("ORDER#"),cont:col("NCONTENEDOR"),
-      naviera:col("NAVIERA"),sit:col("SITUACION"),transit:col("TRANSITARIO"),inco:col("INCOTERM"),tipo:col("CONTENEDOR"),
-      fSal:col("FECHA",0),pOri:col("PUERTO"),fPuerto:col("FECHA",1),pDes:col("PUERTODESTINO"),baza:col("BAZA"),importe:col("INVOICE"),
-      doc:col("DOC"),inv:col("INVFROMFORWARDERS"),cant:col("CANTIDAD"),uni:col("UNIDAD")};
-    if(C.prov<0||C.baza<0) throw new Error("Faltan las columnas «Proveedor» o «BAZA»");
+    // Acepta los nombres del Excel original de compras y los del Excel que
+    // descarga el propio sistema, para poder bajarlo y volver a subirlo.
+    const una=(...ns)=>{ for(const n of ns){ const [nom,k]=Array.isArray(n)?n:[n,0]; const i=col(nom,k); if(i>=0) return i; } return -1; };
+    const C={prov:una("PROVEEDOR"),ref:una("NFRALOTE"),notas:una("NOTES","NOTAS"),pedido:una("ORDER#"),cont:una("NCONTENEDOR"),
+      naviera:una("NAVIERA"),sit:una("SITUACION"),transit:una("TRANSITARIO"),inco:una("INCOTERM"),tipo:una("CONTENEDOR"),
+      fSal:una(["FECHA",0],"SALIDA"),pOri:una("PUERTO","PUERTOORIGEN"),fPuerto:una(["FECHA",1],"LLEGADAPUERTO"),
+      pDes:una("PUERTODESTINO"),baza:una("BAZA","LLEGADA"),importe:una("INVOICE"),
+      doc:una("DOC"),inv:una("INVFROMFORWARDERS","INVFORWARDERS"),cant:una("CANTIDAD"),uni:una("UNIDAD"),alm:una("ALMACEN")};
+    if(C.prov<0||C.baza<0) throw new Error("Faltan las columnas «Proveedor» o la de la llegada («BAZA» o «Llegada»)");
     const g=(r,i)=>i<0?"":r[i];
     for(let i=iCab+1;i<m.length;i++){
       const r=m[i]; const prov=String(g(r,C.prov)||"").trim();
@@ -1277,7 +1330,7 @@ async function importarContenedores(file){
         fechaPuerto:fechaExcel(g(r,C.fPuerto)),puertoDestino:String(g(r,C.pDes)||"").trim(),
         fecha:fechaExcel(g(r,C.baza)),importeFactura:String(g(r,C.importe)||"").replace(/\s+/g," ").trim(),
         doc:/ok/i.test(String(g(r,C.doc)||""))?"OK":"",invForwarders:/ok/i.test(String(g(r,C.inv)||""))?"OK":"",
-        almacen:"BAZA",cantidad:1,unidad:"Contenedor"});
+        almacen:String(g(r,C.alm)||"BAZA").trim().toUpperCase()||"BAZA",cantidad:1,unidad:"Contenedor"});
       // Cuánto llega: de su columna si la hay (Excel descargado del sistema), si
       // no de las notas ("CONSIGNA-16 BARRILES"). Si no aparece, queda vacío.
       const ul=filas[filas.length-1];
@@ -1296,7 +1349,7 @@ async function importarContenedores(file){
   const limite=sumaDias(HOY,-7);
   const plan={nuevas:[],fecha:[],datos:[],iguales:0,pasadas:0,historico:[]};
   const CAMPOS=["proveedor","contenedor","naviera","situacion","transitario","incoterm","tipoContenedor",
-    "fechaSalida","puertoOrigen","fechaPuerto","puertoDestino","notas","importeFactura","doc","invForwarders","cantidad","unidad"];
+    "fechaSalida","puertoOrigen","fechaPuerto","puertoDestino","notas","importeFactura","doc","invForwarders","cantidad","unidad","almacen"];
   filas.forEach(f=>{
     const e=porClave[clave(f)];
     // Sin fecha de Baza manda la de llegada a puerto: si fue hace tiempo, ya llegó
