@@ -81,13 +81,26 @@ async function leer(col){
 let US=[], PU=[], DEPS=[], CAMBIOS={};
 // La tipología del área: si el departamento no tiene, se busca en el de arriba
 // (Técnico de Calidad → Calidad, Ingredientes → I+D).
+const AREAS=[["calidad","calidad"],["produccion","produccion"],["i+d","id"],["id","id"],
+  ["ingredient","id"],["envoltur","id"],["logistic","logistica"],["almacen","logistica"],
+  ["compras","stock"],["stock","stock"],["administracion","administracion"],["contabilidad","administracion"],
+  ["tesoreria","administracion"],["coordinacion","coordinacion"],["it","it"]];
 function tipologiaDe(dep){
   let d=dep, g=0;
   while(d&&g<10){
     if((d.tipologias||[]).length) return d.tipologias[0];
     d=d.padre?DEPS.find(x=>x.id===d.padre):null; g++;
   }
-  return dep?dep.id:"";
+  // Si el organigrama no lo dice, se deduce del nombre del departamento o del suyo padre
+  d=dep; g=0;
+  while(d&&g<10){
+    const t=(String(d.id)+" "+String(d.nombre||"")).toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+    const m=AREAS.find(([k])=>t.includes(k));
+    if(m) return m[1];
+    d=d.padre?DEPS.find(x=>x.id===d.padre):null; g++;
+  }
+  return "";
 }
 
 (async()=>{
@@ -124,10 +137,15 @@ function pintar(){
       const esDep=rolAhora==="tipologia"||(rolAhora==="crm_jefe"&&u.tipologia);
       const dep=DEPS.find(d=>d.id===(c.departamentoId??u.departamentoId));
       const hayCambio=Object.keys(c).length>0;
+      const port=PU.find(x=>x._id===u._id||x.crmId===u._id||x.perfilCRM===u._id);
+      const rolPort=String((port&&port.rol)||"").toLowerCase();
+      const descuadre=port&&rolPort&&rolPort!==String(u.rol||"").toLowerCase()
+        &&!(rolPort==="crm_jefe"&&String(u.rol||"")==="jefe");
       return `<div class="card ${hayCambio?"cambia":""}">
         <div class="cab"><b>${u.nombre||u._id}</b>
           <span class="pill ${esDep?"p-dep":"p-com"}">${esDep?"Personal de departamento":"Comercial / Vendedor"}</span>
-          <span style="color:var(--tenue)"><code>${u._id}</code>${u.username?" · entra como "+u.username:""}</span></div>
+          <span style="color:var(--tenue)"><code>${u._id}</code>${u.username?" · entra como "+u.username:""}</span>
+          ${descuadre?`<span class="pill p-com" title="Es lo que ve al entrar">⚠ su acceso dice «${rolPort}»</span>`:""}</div>
         <div class="rej">
           <div><label>Rol</label>
             <select onchange="cambia('${u._id}','rol',this.value)">
@@ -139,14 +157,23 @@ function pintar(){
               ${DEPS.map(d=>`<option value="${d.id}" ${(c.departamentoId??u.departamentoId??"")===d.id?"selected":""}>${d.nombre}</option>`).join("")}
             </select></div>
         </div>
+        ${dep?`<p style="margin:8px 0 0;font-size:13px;color:var(--tenue)">Se guardará:
+          rol <b>${(c.rol||u.rol||"—")}</b> · departamento <b>${dep.nombre}</b>
+          ${(c.rol||u.rol)==="tipologia"?`· área para las incidencias <b>${tipologiaDe(dep)||"—"}</b>`:""}</p>`:""}
         ${dep?`<label class="chk"><input type="checkbox" ${(c.esResp??(dep.responsableIds||[]).includes(u._id))?"checked":""}
           onchange="cambia('${u._id}','esResp',this.checked)"> Es responsable de ${dep.nombre}</label>`:""}
       </div>`;
     }).join("")+(lista.length>40?`<p class="sub">Y ${lista.length-40} más: afina la búsqueda.</p>`:"");
   }
   const n=Object.keys(CAMBIOS).length;
-  document.getElementById("barra").style.display=n?"flex":"none";
-  document.getElementById("txt").textContent=n+" persona(s) con cambios";
+  const desc=lista.filter(u=>{ const p=PU.find(x=>x._id===u._id||x.crmId===u._id||x.perfilCRM===u._id);
+    const rp=String((p&&p.rol)||"").toLowerCase();
+    return p&&rp&&rp!==String(u.rol||"").toLowerCase()&&!(rp==="crm_jefe"&&String(u.rol||"")==="jefe"); });
+  desc.forEach(u=>{ if(!CAMBIOS[u._id]) CAMBIOS[u._id]={}; });   // cuadrar su acceso
+  const n2=Object.keys(CAMBIOS).length;
+  document.getElementById("barra").style.display=n2?"flex":"none";
+  document.getElementById("txt").textContent=n2+" persona(s) por guardar"
+    +(desc.length?" · "+desc.length+" con el acceso descuadrado":"");
   document.getElementById("btn").onclick=guardar;
 }
 function cambia(id,campo,valor){
@@ -170,7 +197,7 @@ async function guardar(){
   let ok=0, err=0;
   for(const id of ids){
     b.textContent="Guardando… "+(ok+err+1)+"/"+ids.length;
-    const u=US.find(x=>x._id===id), c=CAMBIOS[id];
+    const u=US.find(x=>x._id===id), c=CAMBIOS[id]||{};
     const campos={};
     if(c.rol){
       campos.rol=esc(c.rol);
@@ -186,16 +213,27 @@ async function guardar(){
           headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:campos})});
         if(!r.ok) throw new Error("HTTP "+r.status);
       }
-      // La cuenta de acceso del portal es la que manda al entrar: si ahí sigue
-      // como comercial, verá el menú de ventas aunque su ficha del CRM esté bien.
-      if(Object.keys(campos).length){
+      // La cuenta de acceso del portal es la que manda al entrar. Se deja
+      // siempre igual que la ficha del CRM, aunque en esta pasada solo se haya
+      // cambiado el departamento o el responsable.
+      {
         const p=PU.find(x=>x._id===id||x.id===id||x.crmId===id||x.perfilCRM===id);
         if(p){
-          const mask2=Object.keys(campos).map(k=>"updateMask.fieldPaths="+k).join("&");
-          const r2=await fetch(`${FB}/portal_users/${encodeURIComponent(p._id)}?${mask2}`,{method:"PATCH",
-            headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:campos})});
-          if(!r2.ok) throw new Error("portal HTTP "+r2.status);
-          Object.assign(p,{rol:c.rol||p.rol});
+          const rolFinal=c.rol||u.rol||"";
+          const depFinal=c.departamentoId??u.departamentoId??"";
+          const depObj=DEPS.find(d=>d.id===depFinal);
+          const tipFinal=rolFinal==="tipologia"&&depObj?tipologiaDe(depObj):(u.tipologia||"");
+          const dif={};
+          if(rolFinal&&String(p.rol||"")!==rolFinal) dif.rol=esc(rolFinal);
+          if(String(p.departamentoId||"")!==String(depFinal)) dif.departamentoId=esc(depFinal);
+          if(tipFinal&&String(p.tipologia||"")!==tipFinal) dif.tipologia=esc(tipFinal);
+          if(Object.keys(dif).length){
+            const mask2=Object.keys(dif).map(k=>"updateMask.fieldPaths="+k).join("&");
+            const r2=await fetch(`${FB}/portal_users/${encodeURIComponent(p._id)}?${mask2}`,{method:"PATCH",
+              headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:dif})});
+            if(!r2.ok) throw new Error("portal HTTP "+r2.status);
+            Object.assign(p,{rol:rolFinal,departamentoId:depFinal,tipologia:tipFinal});
+          }
         }
       }
       if(c.esResp!==undefined){
