@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Personas y departamentos</title>
+<style>
+ :root{--papel:#F2F4F7;--tinta:#14181F;--tenue:#6B7684;--linea:#DCE1E7;
+       --ok:#0E7C5A;--mal:#C2263D;--med:#B07908;--okL:#EDF7F3;--malL:#FEF2F4;--medL:#FFFBEB;--azul:#1D4ED8}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--papel);color:var(--tinta);max-width:980px;
+   margin-inline:auto;padding:20px 14px 110px;
+   font:400 15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+ h1{margin:0 0 3px;font-size:21px;font-weight:800}
+ .sub{margin:0 0 14px;font-size:13px;color:var(--tenue)}
+ .card{background:#fff;border:1px solid var(--linea);border-radius:10px;padding:13px 15px;margin-bottom:10px}
+ .card.cambia{border-left:5px solid var(--azul);background:#F8FAFF}
+ .card.ok{border-color:var(--ok);background:var(--okL)}
+ code{background:#F1F5F9;padding:1px 6px;border-radius:4px;font-size:12px;font-family:ui-monospace,monospace}
+ .cab{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+ .cab b{font-size:16px}
+ .rej{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px 14px;margin-top:10px}
+ label{display:block;font-size:12px;font-weight:700;color:var(--tenue);margin-bottom:4px}
+ select,input{width:100%;padding:9px 11px;border-radius:8px;border:1.5px solid var(--linea);
+   font-size:14px;font-family:inherit;background:#fff}
+ .chk{display:flex;gap:8px;align-items:center;font-size:14px;font-weight:700;margin-top:10px;cursor:pointer}
+ .chk input{width:20px;height:20px}
+ .busca{width:100%;padding:12px 14px;border-radius:10px;border:1.5px solid var(--linea);font-size:15px;margin-bottom:12px}
+ .barra{position:fixed;left:0;right:0;bottom:0;background:#fff;border-top:1px solid var(--linea);
+   padding:12px 14px;display:flex;gap:12px;align-items:center;justify-content:space-between;box-shadow:0 -2px 12px #0000000f}
+ button{padding:12px 22px;border-radius:9px;border:none;background:var(--tinta);color:#fff;
+   font-weight:700;font-size:13.5px;cursor:pointer}
+ button:disabled{background:#94A3B8;cursor:default}
+ .estado{padding:34px 4px;color:var(--tenue);text-align:center}
+ .pill{border-radius:99px;padding:2px 10px;font-size:12px;font-weight:700}
+ .p-com{background:#EFF6FF;color:var(--azul)} .p-dep{background:var(--okL);color:var(--ok)}
+</style></head><body>
+<h1>👥 Personas y departamentos</h1>
+<p class="sub">Se cambia en las dos fichas de cada persona: la del CRM y su cuenta de acceso,
+  que es la que decide qué menú ve al entrar.<br>El rol decide qué ve cada uno al entrar y dónde aparece en el organigrama.
+  Quien trabaja en un departamento no debe figurar como comercial: si no, ve el menú de ventas
+  y no le llegan los partes ni los objetivos de su área.</p>
+<input class="busca" id="q" placeholder="🔍 Busca por nombre o usuario (nacho, piedad, lucia…)">
+<div id="app"><p class="estado">Cargando…</p></div>
+<div class="barra" id="barra" style="display:none">
+  <span class="sub" id="txt" style="margin:0"></span>
+  <button id="btn">Guardar cambios</button>
+</div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const BASE=[["direccion","Dirección"],["ventas","Ventas"],["customer","Customer Service"],["compras","Compras"],
+  ["logistica","Logística"],["operaciones","Operaciones"],["produccion","Producción"],["coordinacion","Coordinación"],
+  ["id","I+D"],["ingredientes","Ingredientes"],["envolturas","Envolturas"],["calidad","Calidad"],
+  ["administracion","Administración"],["it","IT"]];
+const ROLES=[["","— sin tocar —"],["tipologia","Personal de departamento"],["crm_agente","Comercial / Vendedor"],
+  ["jefe","Jefe de equipo comercial"],["director","Dirección"]];
+
+function val(f){
+  if(!f) return null;
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.arrayValue!==undefined) return (f.arrayValue.values||[]).map(val);
+  return null;
+}
+async function leer(col){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""),{cache:"no-store"});
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<20);
+  return t;
+}
+let US=[], PU=[], DEPS=[], CAMBIOS={};
+// La tipología del área: si el departamento no tiene, se busca en el de arriba
+// (Técnico de Calidad → Calidad, Ingredientes → I+D).
+function tipologiaDe(dep){
+  let d=dep, g=0;
+  while(d&&g<10){
+    if((d.tipologias||[]).length) return d.tipologias[0];
+    d=d.padre?DEPS.find(x=>x.id===d.padre):null; g++;
+  }
+  return dep?dep.id:"";
+}
+
+(async()=>{
+  try{
+    const [us,pu,dbd]=await Promise.all([leer("usuarios"),leer("portal_users"),leer("departamentos")]);
+    PU=pu;
+    US=us.filter(u=>u.activo!==false&&!u.duplicadaDe);
+    const m={}; BASE.forEach(([id,nombre])=>m[id]={id,nombre,responsableIds:[]});
+    dbd.forEach(d=>{ m[d._id]={...(m[d._id]||{}),...d,id:d._id}; });
+    DEPS=Object.values(m).filter(d=>d.activo!==false).sort((a,b)=>a.nombre.localeCompare(b.nombre));
+    document.getElementById("q").oninput=pintar;
+    pintar();
+  }catch(e){ document.getElementById("app").innerHTML='<div class="card">Error: '+e.message+'</div>'; }
+})();
+
+const nrm=(x)=>String(x||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+function pintar(){
+  const q=nrm(document.getElementById("q").value);
+  const lista=q.length>=2
+    ? US.filter(u=>[u.nombre,u.username,u._id].some(k=>nrm(k).includes(q)))
+    : US.filter(u=>CAMBIOS[u._id]).concat(US.filter(u=>{
+        if(!u.departamentoId) return false;
+        const p=PU.find(x=>x._id===u._id||x.crmId===u._id||x.perfilCRM===u._id);
+        const roles=[u.rol,p&&p.rol].map(r=>String(r||"").toLowerCase());
+        return roles.some(r=>r==="agente"||r==="crm_agente");
+      }));
+  const app=document.getElementById("app");
+  if(!lista.length){
+    app.innerHTML=`<div class="card ok">Busca a la persona por su nombre para cambiar su rol o su departamento.</div>`;
+  } else {
+    app.innerHTML=lista.slice(0,40).map(u=>{
+      const c=CAMBIOS[u._id]||{};
+      const rolAhora=String(u.rol||"").toLowerCase();
+      const esDep=rolAhora==="tipologia"||(rolAhora==="crm_jefe"&&u.tipologia);
+      const dep=DEPS.find(d=>d.id===(c.departamentoId??u.departamentoId));
+      const hayCambio=Object.keys(c).length>0;
+      return `<div class="card ${hayCambio?"cambia":""}">
+        <div class="cab"><b>${u.nombre||u._id}</b>
+          <span class="pill ${esDep?"p-dep":"p-com"}">${esDep?"Personal de departamento":"Comercial / Vendedor"}</span>
+          <span style="color:var(--tenue)"><code>${u._id}</code>${u.username?" · entra como "+u.username:""}</span></div>
+        <div class="rej">
+          <div><label>Rol</label>
+            <select onchange="cambia('${u._id}','rol',this.value)">
+              ${ROLES.map(([k,t])=>`<option value="${k}" ${(c.rol??"")===k?"selected":""}>${t}</option>`).join("")}
+            </select></div>
+          <div><label>Departamento</label>
+            <select onchange="cambia('${u._id}','departamentoId',this.value)">
+              <option value="">— sin departamento —</option>
+              ${DEPS.map(d=>`<option value="${d.id}" ${(c.departamentoId??u.departamentoId??"")===d.id?"selected":""}>${d.nombre}</option>`).join("")}
+            </select></div>
+        </div>
+        ${dep?`<label class="chk"><input type="checkbox" ${(c.esResp??(dep.responsableIds||[]).includes(u._id))?"checked":""}
+          onchange="cambia('${u._id}','esResp',this.checked)"> Es responsable de ${dep.nombre}</label>`:""}
+      </div>`;
+    }).join("")+(lista.length>40?`<p class="sub">Y ${lista.length-40} más: afina la búsqueda.</p>`:"");
+  }
+  const n=Object.keys(CAMBIOS).length;
+  document.getElementById("barra").style.display=n?"flex":"none";
+  document.getElementById("txt").textContent=n+" persona(s) con cambios";
+  document.getElementById("btn").onclick=guardar;
+}
+function cambia(id,campo,valor){
+  const u=US.find(x=>x._id===id); if(!u) return;
+  const c=CAMBIOS[id]||{};
+  c[campo]=valor;
+  // Si vuelve a lo que ya era, deja de contar como cambio
+  const dep=DEPS.find(d=>d.id===(c.departamentoId??u.departamentoId));
+  if(campo==="rol"&&!valor) delete c.rol;
+  if(campo==="departamentoId"&&valor===(u.departamentoId||"")) delete c.departamentoId;
+  if(campo==="esResp"&&dep&&valor===(dep.responsableIds||[]).includes(id)) delete c.esResp;
+  if(Object.keys(c).length) CAMBIOS[id]=c; else delete CAMBIOS[id];
+  pintar();
+}
+async function guardar(){
+  const ids=Object.keys(CAMBIOS);
+  if(!ids.length) return;
+  if(!confirm("Se guardarán los cambios de "+ids.length+" persona(s). No se borra nada. ¿Seguimos?")) return;
+  const b=document.getElementById("btn"); b.disabled=true;
+  const esc=(v)=>({stringValue:String(v||"")});
+  let ok=0, err=0;
+  for(const id of ids){
+    b.textContent="Guardando… "+(ok+err+1)+"/"+ids.length;
+    const u=US.find(x=>x._id===id), c=CAMBIOS[id];
+    const campos={};
+    if(c.rol){
+      campos.rol=esc(c.rol);
+      const dep=DEPS.find(d=>d.id===(c.departamentoId??u.departamentoId));
+      // El personal de departamento lleva la tipología de su área
+      if(c.rol==="tipologia"&&dep) campos.tipologia=esc(tipologiaDe(dep));
+    }
+    if(c.departamentoId!==undefined) campos.departamentoId=esc(c.departamentoId);
+    try{
+      if(Object.keys(campos).length){
+        const mask=Object.keys(campos).map(k=>"updateMask.fieldPaths="+k).join("&");
+        const r=await fetch(`${FB}/usuarios/${encodeURIComponent(id)}?${mask}`,{method:"PATCH",
+          headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:campos})});
+        if(!r.ok) throw new Error("HTTP "+r.status);
+      }
+      // La cuenta de acceso del portal es la que manda al entrar: si ahí sigue
+      // como comercial, verá el menú de ventas aunque su ficha del CRM esté bien.
+      if(Object.keys(campos).length){
+        const p=PU.find(x=>x._id===id||x.id===id||x.crmId===id||x.perfilCRM===id);
+        if(p){
+          const mask2=Object.keys(campos).map(k=>"updateMask.fieldPaths="+k).join("&");
+          const r2=await fetch(`${FB}/portal_users/${encodeURIComponent(p._id)}?${mask2}`,{method:"PATCH",
+            headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:campos})});
+          if(!r2.ok) throw new Error("portal HTTP "+r2.status);
+          Object.assign(p,{rol:c.rol||p.rol});
+        }
+      }
+      if(c.esResp!==undefined){
+        const dep=DEPS.find(d=>d.id===(c.departamentoId??u.departamentoId));
+        if(dep){
+          const l=(dep.responsableIds||[]).filter(x=>x!==id);
+          if(c.esResp) l.push(id);
+          const r=await fetch(`${FB}/departamentos/${encodeURIComponent(dep.id)}`,{method:"PATCH",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({fields:{
+              id:esc(dep.id), nombre:esc(dep.nombre), icon:esc(dep.icon||"🏢"), color:esc(dep.color||"#64748B"),
+              padre:esc(dep.padre||""), orden:{doubleValue:Number(dep.orden||10)}, activo:{booleanValue:true},
+              responsableIds:{arrayValue:{values:l.map(esc)}},
+              tipologias:{arrayValue:{values:(dep.tipologias||[]).map(esc)}},
+            }})});
+          if(!r.ok) throw new Error("depto HTTP "+r.status);
+          dep.responsableIds=l;
+        }
+      }
+      Object.assign(u,{rol:c.rol||u.rol,departamentoId:c.departamentoId??u.departamentoId});
+      delete CAMBIOS[id]; ok++;
+    }catch(e){ err++; }
+  }
+  b.disabled=false; b.textContent="Guardar cambios";
+  pintar();
+  document.getElementById("app").insertAdjacentHTML("afterbegin",
+    err?`<div class="card">Guardados ${ok}, con ${err} error(es).</div>`
+      :`<div class="card ok"><b>Listo.</b> ${ok} persona(s) actualizadas. Recarga el CRM para verlo.</div>`);
+}
+</script></body></html>
