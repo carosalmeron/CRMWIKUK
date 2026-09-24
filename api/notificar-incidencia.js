@@ -446,10 +446,29 @@ module.exports = async function handler(req, res){
       }
     }
 
+    // (sep 2026) De paso, los avisos de retrasos de pedido, para no tener que
+    // programar otro cron: el diario todos los días (solo sale si hay pedidos
+    // sin clasificar) y el resumen completo los lunes.
+    let retrasos=null;
+    if(String((req.query||{}).retrasos||"1")!=="0"){
+      try{
+        const base=process.env.VERCEL_PROJECT_PRODUCTION_URL
+          ? "https://"+process.env.VERCEL_PROJECT_PRODUCTION_URL : "https://crmwikuk.vercel.app";
+        const sec=process.env.CRON_SECRET ? "&secret="+encodeURIComponent(process.env.CRON_SECRET) : "";
+        const tipos=(new Date().getDay()===1) ? ["semanal","diario"] : ["diario"];
+        retrasos={};
+        for(const t of tipos){
+          const r=await fetch(base+"/api/aviso-retrasos?tipo="+t+sec);
+          retrasos[t]=r.ok?await r.json():{ok:false,status:r.status};
+        }
+      }catch(e){ retrasos={error:String(e&&e.message||e)}; }
+    }
+
     res.status(200).json({
       ok:true,
       revisadas: abiertas.length,
       enviadas, saltadas, sinEmail, fallidas,
+      retrasos,
       errores: errores.length>0 ? errores.slice(0,5) : undefined
     });
   } catch(e){
