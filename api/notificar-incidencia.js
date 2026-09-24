@@ -326,7 +326,9 @@ function construirEmail(inc, dias, esEscalado){
 
 const DIAS_HIST = 60;
 const MIN_DIAS  = 3;            // menos de 3 días no se considera retraso
-const DESDE     = "2026-09-08"; // arranque limpio: antes no se exigía clasificar
+// Arranque limpio de los avisos: lo anterior queda como historial y no se
+// reclama. Se empieza a exigir el motivo desde el 24 de septiembre de 2026.
+const DESDE     = "2026-09-24";
 const CRM       = "https://crmwikuk.vercel.app";
 
 // Quién recibe cada aviso: Operaciones y lo que cuelga de ella, más dirección
@@ -436,7 +438,7 @@ async function cargarRetrasos(hoy){
         motivo:(motivos[k]||{}).motivo||null, quien:(motivos[k]||{}).por||""};
     });
   });
-  return Object.values(vistos).filter(x=>x.desde>=DESDE);
+  return Object.values(vistos);
 }
 
 // ── Destinatarios ────────────────────────────────────────────────────
@@ -525,7 +527,7 @@ function emailDiario(sinMotivo, hoy, ayer, mes, clasifican){
   };
 }
 
-function emailSemanal(todos, hoy){
+function emailSemanal(todos, hoy, hist){
   const lunes=new Date(hoy+"T12:00:00");
   lunes.setDate(lunes.getDate()-((lunes.getDay()+6)%7));
   const desdeSem=isoR(lunes);
@@ -589,6 +591,10 @@ function emailSemanal(todos, hoy){
         :`<p style="background:#E2F3E8;color:#145E35;border-radius:10px;padding:10px 12px;font-size:14px;margin:0">
             ✅ Todos los retrasos de esta semana están clasificados.</p>`}
 
+        ${hist&&hist.n?`<p style="font-size:12.5px;color:#5C6B66;margin:18px 0 0;line-height:1.5">
+          Además hay <b>${hist.n}</b> retrasos anteriores al arranque (${eur(hist.imp)}) sin clasificar.
+          Quedan como historial: no hace falta ponerse al día con ellos.</p>`:""}
+
         <div style="text-align:center;margin-top:20px">
           <a href="${CRM}/pedidos.html" style="display:inline-block;background:#15201D;color:#fff;text-decoration:none;
             padding:12px 26px;border-radius:10px;font-weight:700">Ver los pedidos</a></div>
@@ -607,14 +613,84 @@ async function enviarRetrasos(to,subject,html){
 }
 
 
+function emailHistorial(viejos, hoy){
+  const porM={};
+  viejos.forEach(x=>{
+    const mo=x.motivo||"Sin clasificar";
+    porM[mo]=porM[mo]||{motivo:mo,n:0,imp:0,dias:0};
+    porM[mo].n++; porM[mo].imp+=x.imp; porM[mo].dias+=x.dias;
+  });
+  const filas=Object.values(porM).sort((a,b)=>b.n-a.n);
+  const tot={n:viejos.length,imp:viejos.reduce((t,x)=>t+x.imp,0),
+    dias:viejos.length?viejos.reduce((t,x)=>t+x.dias,0)/viejos.length:0};
+  const sinM=viejos.filter(x=>!x.motivo).sort((a,b)=>b.imp-a.imp);
+
+  const th='style="text-align:left;padding:7px 9px;font-size:12px;color:#5C6B66;border-bottom:2px solid #E2E8F0"';
+  const td='style="padding:7px 9px;font-size:13px;border-bottom:1px solid #EEF2F1"';
+  const tdn='style="padding:7px 9px;font-size:13px;border-bottom:1px solid #EEF2F1;text-align:right;white-space:nowrap"';
+  const tdr='style="padding:7px 9px;font-size:13px;border-bottom:1px solid #EEF2F1;color:#C4302B;font-weight:700"';
+
+  return {
+    subject:`📚 Retrasos anteriores al arranque · ${tot.n} · ${eur(tot.imp)}`,
+    html:`<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:640px;margin:0 auto;color:#15201D">
+      <div style="background:#5F5E5A;color:#fff;padding:18px 20px;border-radius:14px 14px 0 0">
+        <div style="font-size:13px;opacity:.8">Historial · hasta el ${DESDE}</div>
+        <div style="font-size:21px;font-weight:700;margin-top:2px">📚 Retrasos anteriores al arranque</div>
+      </div>
+      <div style="border:1px solid #C9D3CF;border-top:none;border-radius:0 0 14px 14px;padding:18px 20px">
+        <p style="font-size:19px;margin:0 0 4px"><b>${tot.n}</b> retrasos · <b>${eur(tot.imp)}</b> ·
+          <b>${d1(tot.dias)} días</b> de media</p>
+        <p style="font-size:13px;color:#5C6B66;margin:0 0 14px">No se reclaman: quedan como registro de lo que pasó antes de empezar a exigir el motivo.</p>
+        <table style="width:100%;border-collapse:collapse">
+          <tr><th ${th}>Motivo</th><th ${th} style="text-align:right">Pedidos</th>
+            <th ${th} style="text-align:right">Días medios</th><th ${th} style="text-align:right">Importe</th></tr>
+          ${filas.map(m=>{
+            const sm=m.motivo==="Sin clasificar";
+            return `<tr><td ${sm?tdr:td}>${escR(m.motivo)}</td><td ${tdn}>${m.n}</td>
+              <td ${tdn}>${d1(m.dias/m.n)}</td><td ${tdn}>${eur(m.imp)}</td></tr>`;
+          }).join("")}
+          <tr><td ${td}><b>Total</b></td><td ${tdn}><b>${tot.n}</b></td>
+            <td ${tdn}><b>${d1(tot.dias)}</b></td><td ${tdn}><b>${eur(tot.imp)}</b></td></tr>
+        </table>
+        ${sinM.length?`<h3 style="font-size:15px;margin:22px 0 6px">Los que quedaron sin clasificar</h3>
+          <table style="width:100%;border-collapse:collapse">
+            <tr><th ${th}>Cliente</th><th ${th}>Pedido</th><th ${th} style="text-align:right">Días</th>
+              <th ${th} style="text-align:right">Importe</th></tr>
+            ${sinM.slice(0,40).map(x=>`<tr>
+              <td ${td}>${escR(x.cliente||"—")}${x.agente?`<br><span style="font-size:11.5px;color:#5C6B66">${escR(x.agente)}</span>`:""}</td>
+              <td ${td}>${escR(x.pedido||"—")}<br><span style="font-size:11.5px;color:#5C6B66">${escR(x.desde)}</span></td>
+              <td ${tdn}>+${x.dias}</td><td ${tdn}>${eur(x.imp)}</td></tr>`).join("")}
+          </table>
+          ${sinM.length>40?`<p style="font-size:12.5px;color:#5C6B66;margin:6px 0 0">Y ${sinM.length-40} más.</p>`:""}`:""}
+      </div></div>`
+  };
+}
+
 // Los dos avisos, para llamarlos desde el cron de incidencias o directamente
 async function avisoRetrasos(opciones){
   const o=opciones||{};
-  const tipo = o.tipo==="semanal" ? "semanal" : "diario";
+  const tipo = ["semanal","historial"].includes(o.tipo) ? o.tipo : "diario";
   const hoy  = o.fecha || isoR(new Date());
-  const [todos,{to,clasifican}] = await Promise.all([
+  const [crudos,{to,clasifican}] = await Promise.all([
     cargarRetrasos(new Date(hoy+"T12:00:00")), equipoRetrasos()]);
+  const todos     = crudos.filter(x=>x.desde>=DESDE);
   const sinMotivo = todos.filter(x=>!x.motivo);
+  // Lo anterior al arranque: se enseña en el semanal, pero no se reclama
+  const viejos    = crudos.filter(x=>x.desde<DESDE&&!x.motivo);
+  const hist      = {n:viejos.length, imp:viejos.reduce((t,x)=>t+x.imp,0)};
+
+  if(tipo==="historial"){
+    const viejosTodos=crudos.filter(x=>x.desde<DESDE);
+    const correoH=emailHistorial(viejosTodos,hoy);
+    if(o.probar) return {ok:true,tipo,to,asunto:correoH.subject,
+      retrasos:viejosTodos.length,sinMotivo:hist.n,html:correoH.html};
+    const dest = o.to
+      ? String(o.to).split(/[;,]/).map(x=>x.trim()).filter(x=>x.indexOf("@")>0) : to;
+    if(!dest.length) return {ok:false,error:"sin destinatarios con email"};
+    const okH=await enviarRetrasos(dest,correoH.subject,correoH.html);
+    return {ok:okH,tipo,to:dest,soloPrueba:!!o.to,asunto:correoH.subject,
+      retrasos:viejosTodos.length,sinMotivo:hist.n};
+  }
 
   if(tipo==="diario" && !sinMotivo.length)
     return {ok:true,tipo,enviado:false,motivo:"no hay pedidos sin clasificar"};
@@ -640,7 +716,7 @@ async function avisoRetrasos(opciones){
     memoria.imp=sinMotivo.reduce((t,x)=>t+x.imp,0);
     memoria.ids=JSON.stringify(sinMotivo.map(x=>x.k));
     memoria.ultimoEnvio=new Date().toISOString();
-  } else correo=emailSemanal(todos,hoy);
+  } else correo=emailSemanal(todos,hoy,hist);
 
   if(o.probar) return {ok:true,tipo,to,asunto:correo.subject,
     retrasos:todos.length,sinMotivo:sinMotivo.length,clasifican,html:correo.html};
@@ -660,7 +736,7 @@ module.exports = async function handler(req, res){
     // ─────── Avisos de retrasos de pedido, por URL ───────
     // ?retrasos=diario  ·  ?retrasos=semanal  (+ &to= para probar, &probar=1 para verlo)
     if(req.method==="GET" && req.query && req.query.retrasos
-       && ["diario","semanal"].includes(String(req.query.retrasos))){
+       && ["diario","semanal","historial"].includes(String(req.query.retrasos))){
       const sec=process.env.CRON_SECRET;
       if(sec && req.query.secret!==sec){ res.status(401).json({error:"falta el secreto"}); return; }
       const r=await avisoRetrasos({tipo:String(req.query.retrasos),
