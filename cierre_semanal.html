@@ -350,7 +350,8 @@ function refrescar(){
 // Avisa al responsable y al CEO de que este comercial ha cerrado su semana.
 // Se busca su superior igual que lo hace el CRM: por el equipo y por quien
 // figura como jefe o director, sin depender de un campo concreto.
-async function avisarDelCierre(nCerradas){
+async function avisarDelCierre(nCerradas, opts){
+  opts=opts||{};
   const us=await (async()=>{
     const r=await fetch(`${FB}/usuarios?pageSize=300`);
     if(!r.ok) return [];
@@ -723,10 +724,13 @@ async function avisarDelCierre(nCerradas){
   // en Partes con el mismo formato, sin tener que recalcular las cifras.
   try{
     await fetch(`${FB}/informes/${encodeURIComponent("informe_"+AGENTE+"_s"+SEMANA)}`
-      +"?updateMask.fieldPaths=htmlEmail&updateMask.fieldPaths=uid",{
+      +"?updateMask.fieldPaths=htmlEmail"+(P.get("uid")?"&updateMask.fieldPaths=uid":""),{
       method:"PATCH",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({fields:{htmlEmail:{stringValue:html},uid:{stringValue:UID||""}}})});
+      body:JSON.stringify({fields:Object.assign({htmlEmail:{stringValue:html}},
+        P.get("uid")?{uid:{stringValue:UID}}:{})})});
   }catch(e){}
+  // Modo "solo ver": el CRM pide el correo de un cierre antiguo para enseñarlo
+  if(opts.soloHtml) return html;
   if(sinDestinos) return;
 
   // Emails del portal, por si la ficha del CRM no lo tiene
@@ -1569,8 +1573,28 @@ async function enviar(){
         hacer. Se guarda en <b>informes/${AGENTE}_s${SEMANA}</b> atado a cada
         cliente y oferta, para poder preguntar por ello la semana que viene.</p>`;
     refrescar();
+
+    // (sep 2026) Modo "solo ver" (?solover=1): el CRM abre esta pagina oculta
+    // para rehacer el correo de un cierre ya entregado con la misma plantilla
+    // y los mismos calculos. No envia nada; guarda el html en el informe y se
+    // lo devuelve al CRM.
+    if(P.get("solover")==="1"){
+      const avisa=(o)=>{ try{ parent.postMessage(Object.assign({type:"CIERRE_HTML",agente:AGENTE,semana:SEMANA},o),"*"); }catch(e){} };
+      try{
+        const ri=await fetch(`${FB}/informes/${encodeURIComponent("informe_"+AGENTE+"_s"+SEMANA)}`,{cache:"no-store"});
+        if(!ri.ok){ avisa({error:"sin informe"}); }
+        else{
+          const j=await ri.json(); let RR={};
+          try{ RR=JSON.parse((j.fields&&j.fields.respuestas&&j.fields.respuestas.stringValue)||"{}"); }catch(e){}
+          Object.keys(R).forEach(k=>delete R[k]); Object.assign(R,RR);
+          const html=await avisarDelCierre(0,{soloHtml:true});
+          avisa({html:html||""});
+        }
+      }catch(e){ avisa({error:e.message}); }
+    }
   }catch(e){
     document.getElementById("app").innerHTML=`<p class="estado">No se ha podido montar: ${e.message}</p>`;
+    if(P.get("solover")==="1") try{ parent.postMessage({type:"CIERRE_HTML",agente:AGENTE,semana:SEMANA,error:e.message},"*"); }catch(e2){}
   }
 })();
 </script></body></html>
