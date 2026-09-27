@@ -731,8 +731,389 @@ async function avisoRetrasos(opciones){
     retrasos:todos.length,sinMotivo:sinMotivo.length};
 }
 
+// ═════════════════════════════════════════════════════════════════════
+//  (sep 2026) INFORME SEMANAL DE DIRECCIÓN (CEO)
+//  Un solo correo con todos los equipos, en vez de recibir cada cierre
+//  suelto. Mismos calculos que el consolidado del jefe (objetivos_equipo):
+//  la nota de cada comercial es la misma en los dos correos.
+//  Sale el sabado (el viernes cierran comerciales y jefes) y una sola vez
+//  por semana: se apunta en informes_ceo/<año>_s<semana>.
+//  Por URL: ?ceo=semanal [&probar=1 devuelve el html] [&to=x@y] [&semana=39]
+// ═════════════════════════════════════════════════════════════════════
+const CEO_PESOS={venta:40,margen:20,actividad:25,cobro:15};
+
+async function leerTodoC(col){
+  const out=[]; let tok=null, v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?"&pageToken="+encodeURIComponent(tok):""));
+    if(!r.ok) break;
+    const j=await r.json();
+    (j.documents||[]).forEach(d=>{ const o=objR(d); if(o) out.push(o); });
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<60);
+  return out;
+}
+const numC=x=>Number(x||0)||0;
+const UC=s=>String(s||"").toUpperCase().trim();
+const eurC=n=>String(Math.round(Number(n)||0)).replace(/\B(?=(\d{3})+(?!\d))/g,".")+" €";
+const decC=v=>(Math.round(v*10)/10).toFixed(1).replace(".",",");
+
+// --- Identidad de comercial: misma logica que agentes.js ---------------
+function normC(s){ return String(s==null?"":s).toUpperCase().trim()
+  .normalize("NFD").replace(/[̀-ͯ]/g,"").replace(/[^A-Z0-9]/g,""); }
+function variantesC(c){
+  c=normC(c); if(!c) return [];
+  const out=[c];
+  for(let i=0;i<c.length;i++) if(c.charAt(i)==="0") out.push(c.slice(0,i)+c.slice(i+1));
+  const m=c.match(/^([A-Z]*)(\d+)$/);
+  if(m){ out.push(m[1]+"0"+m[2]); out.push(m[2]); out.push("U"+m[2]); }
+  return out.filter((v,ix,a)=>v&&a.indexOf(v)===ix);
+}
+function crearAgentes(filas){
+  const MAPA={};
+  filas.forEach(o=>{
+    const a=normC(o.alias||o._id); if(!a||!o.canonico) return;
+    MAPA[a]={canonico:o.canonico,nombre:o.nombre||o.canonico,equipo:o.equipo||""};
+  });
+  const ficha=x=>{ const k=normC(x); if(!k) return null; if(MAPA[k]) return MAPA[k];
+    for(const v of variantesC(k)) if(MAPA[v]) return MAPA[v]; return null; };
+  const mismo=(a,b)=>{ if(!a||!b) return false;
+    const fa=ficha(a), fb=ficha(b);
+    if(fa&&fb) return fa.canonico===fb.canonico;
+    const va=variantesC(a), vb=variantesC(b); return va.some(x=>vb.indexOf(x)>=0); };
+  const CAMPOS=["agente","agenteId","agenteNombre","responsableComercial","creadoPor","vendedor","comercial","uid"];
+  const esDe=(doc,p)=>CAMPOS.some(c=>doc[c]&&mismo(doc[c],p));
+  return {ficha,mismo,esDe,
+    id:x=>{ const f=ficha(x); return f?f.canonico:(x?String(x):""); },
+    nombre:x=>{ const f=ficha(x); return f?f.nombre:(x?String(x):""); },
+    equipo:x=>{ const f=ficha(x); return f?f.equipo:""; },
+    conocido:x=>!!ficha(x)};
+}
+
+function isoSemanaC(d){
+  const t=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));
+  const dn=t.getUTCDay()||7; t.setUTCDate(t.getUTCDate()+4-dn);
+  const a=new Date(Date.UTC(t.getUTCFullYear(),0,1));
+  return {sem:Math.ceil((((t-a)/86400000)+1)/7), anio:t.getUTCFullYear()};
+}
+function lunesC(anio,sem){
+  const e=new Date(anio,0,4);
+  const l=new Date(e); l.setDate(e.getDate()-((e.getDay()||7)-1));
+  l.setDate(l.getDate()+(sem-1)*7); l.setHours(0,0,0,0); return l;
+}
+function fechaC(v){
+  if(!v) return null; const s=String(v);
+  let m=s.match(/^(\d{4})-(\d{2})-(\d{2})/); if(m) return new Date(+m[1],+m[2]-1,+m[3]);
+  m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+  if(m){ let a=+m[3]; if(a<100) a+=2000; return new Date(a,+m[2]-1,+m[1]); }
+  const d=new Date(s); return isNaN(d.getTime())?null:d;
+}
+const fechaDocC=o=>{ for(const c of ["fecha","fechaCreacion","creadoEl","fechaAlta","fechaSolicitud","createdAt","fechaEnvio"]){
+  const d=fechaC(o[c]); if(d) return d; } return null; };
+
+async function datosCEO(anio,sem){
+  const lunes=lunesC(anio,sem);
+  const domingo=new Date(lunes); domingo.setDate(lunes.getDate()+6); domingo.setHours(23,59,59,999);
+  const jueves=new Date(lunes); jueves.setDate(lunes.getDate()+3);
+  const mNum=jueves.getMonth()+1;
+  const hace30=new Date(lunes); hace30.setDate(lunes.getDate()-30);
+  const enSem=d=>d&&d>=lunes&&d<=domingo;
+
+  const [alias,us,pu,inf,res,cob,estac,objs,objEq,mues,vis,sems,objSem]=await Promise.all([
+    leerTodoC("agentes_alias"),leerTodoC("usuarios"),leerTodoC("portal_users"),leerTodoC("informes"),
+    leerTodoC("pbi_resumen_agente"),leerTodoC("cobros_comercial"),leerTodoC("pbi_estacionalidad"),
+    leerTodoC("pbi_objetivos"),leerTodoC("objetivos_equipo"),leerTodoC("muestras"),leerTodoC("visitas"),
+    leerTodoC("pbi_semanas"),leerTodoC("objetivos_semana")]);
+  const A=crearAgentes(alias);
+
+  // Comerciales: misma regla que cargarUsuarios() de objetivos_equipo
+  const NO_PERSONA=/^(interc|clientsdirect|cataluna|cataluña|tienda|telefono|sinagente|_?total|campofrio|wikuk|interkey|francia|distribuidor)/i;
+  const esCanal=x=>NO_PERSONA.test(String(x||"").replace(/[.\s_-]/g,""));
+  const map={};
+  [...us,...pu].forEach(u=>{
+    const rol=String(u.rol||"").toLowerCase();
+    if(!["agente","crm_agente","comercial","vendedor"].includes(rol)) return;
+    if(u.activo===false) return;
+    const pos=[u.id,u._id,u.crmId,u.grupoAgente,u.catalogoVendedor,u.username,u.nombre].filter(Boolean);
+    let canon=null,ficha=null;
+    for(const k of pos) if(A.conocido(k)){ canon=A.id(k); ficha=k; break; }
+    if(!canon){ canon=u.id||u._id||u.username; ficha=canon; }
+    if(!canon) return;
+    const nombre=A.nombre(ficha)||u.nombre||u.username||canon;
+    if(esCanal(nombre)||esCanal(canon)||esCanal(u.catalogoVendedor)) return;
+    if(/^u_\d+$/i.test(String(nombre))) return;
+    if(!map[canon]) map[canon]={id:canon,nombre,equipo:UC(A.equipo(ficha)||u.equipo||""),
+      cod:UC(u.grupoAgente||u.catalogoVendedor||canon)};
+    else{ const m=map[canon];
+      if(nombre.length>m.nombre.length&&!/^[a-z]+$/.test(nombre)) m.nombre=nombre;
+      if(!m.equipo&&u.equipo) m.equipo=UC(u.equipo); }
+  });
+  const gente=Object.values(map).filter(g=>g.equipo);
+
+  // Jefes por equipo, para el nombre en la tarjeta
+  const jefes={};
+  us.forEach(u=>{ const r=String(u.rol||"").toLowerCase();
+    if((r==="jefe"||r==="crm_jefe")&&u.equipo&&!jefes[UC(u.equipo)]) jefes[UC(u.equipo)]=u.nombre||u._id; });
+
+  const suyo=(lista,g)=>lista.find(x=>A.mismo(x._id,g.cod)||A.mismo(x._id,g.id)||
+    A.mismo(x.agente,g.cod)||A.mismo(x.comercial,g.cod)||A.mismo(x.comercialNombre,g.nombre))||{};
+  const deQuien=(d,g)=>A.esDe(d,g.cod)||A.esDe(d,g.id);
+
+  const semsPrev=sems.filter(x=>numC(x.semana||x._id)<sem)
+    .sort((a,b)=>numC(b.semana||b._id)-numC(a.semana||a._id)).slice(0,4)
+    .map(x=>{ try{ return JSON.parse(x.agentes||"[]"); }catch(e){ return []; } });
+  const hoyISO=new Date().toISOString().slice(0,10);
+
+  const equipos={};
+  const G={vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,nFacV:0,t30:0,t60:0,t90:0,t90mas:0,
+    vis:0,lla:0,mEnv:0,mOk:0,mKo:0,mPend:0,mOkAnt:0,mResAnt:0,objVis:0,objLla:0,objMue:0,objMueOk:0,
+    rechazos:[],sinResp:[],peor:[]};
+
+  for(const g of gente){
+    const E=equipos[g.equipo]||(equipos[g.equipo]={eq:g.equipo,jefe:jefes[g.equipo]||"",
+      gente:[],vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,vis:0,lla:0,mEnv:0,mOk:0,mKo:0,
+      cerr:0,aus:0,sinCerrar:[]});
+    // ¿Ha cerrado? informes de esa semana suyos
+    const suInf=inf.filter(i=>numC(i.semana)===sem&&(A.mismo(i.agente,g.cod)||A.mismo(i.agente,g.id)));
+    const ausente=suInf.some(i=>i.estado==="ausente"||i.ausente===true);
+    if(ausente){ E.aus++; E.gente.push({...g,ausente:true,motivo:(suInf.find(i=>i.ausenteMotivo)||{}).ausenteMotivo||"Ausente"}); continue; }
+    if(suInf.length) E.cerr++; else E.sinCerrar.push(g.nombre);
+
+    const p={...g,vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,nFacV:0,vis:0,lla:0,mEnv:0,mOk:0,semMal:0};
+    const r=suyo(res,g), e2=suyo(estac,g), o2=suyo(objs,g);
+    p.vSem=numC(r.ventasSem);
+    p.mAct=numC(e2["act_"+mNum]);
+    p.mObj=numC(o2["mes_"+mNum]);
+    if(!p.mObj) p.mObj=numC(o2.objAnual)*(numC(e2["peso_"+mNum])||1/12);
+    p.objSem=p.mObj?p.mObj/4.33:0;
+    p.mg=(r.margenPctSem!=null&&r.margenPctSem!=="")?numC(r.margenPctSem):null;
+    p.mgObj=numC(r.objetivoMargen)||null;
+    p.vMes=numC(r.ventasMes)||p.mAct;
+    for(const ag of semsPrev){
+      const f=ag.find(x=>A.mismo(x.id||x.agente,g.cod)||A.mismo(x.id||x.agente,g.id));
+      if(f&&p.objSem&&numC(f.ventasSem)<p.objSem*0.5) p.semMal++; else break;
+    }
+    const c=suyo(cob,g);
+    try{
+      for(const cli of JSON.parse(c.datos||"[]")) for(const f of (cli.f||[])){
+        if(!f.fv||f.fv>hoyISO) continue;
+        const im=numC(f.im); p.cobros+=im; p.nFacV++;
+        const dias=Math.round((Date.now()-new Date(f.fv).getTime())/86400000);
+        if(dias<=30) G.t30+=im; else if(dias<=60) G.t60+=im; else if(dias<=90) G.t90+=im; else G.t90mas+=im;
+        G.peor.push({cli:cli.c||"",im,dias,quien:g.nombre});
+      }
+    }catch(err){ p.cobros=numC(c.totalVencido); }
+    for(const v of vis){
+      if(v.eliminada||!enSem(fechaDocC(v))||!deQuien(v,g)) continue;
+      if(/llamada|no_contesta/i.test(String(v.resultado||v.tipo||""))) p.lla++; else p.vis++;
+    }
+    for(const m of mues){
+      if(m.eliminada||!deQuien(m,g)) continue;
+      const est=String(m.estado||"").toLowerCase(), fFb=fechaC(m.fechaFeedback);
+      if(enSem(fechaDocC(m))){ p.mEnv++; }
+      if(enSem(fFb)){
+        if(/pedido|positiv|aceptada|proyecto/.test(est)){ p.mOk++; }
+        else if(/ko|negativ|rechazada/.test(est)){ E.mKo++; G.mKo++;
+          G.rechazos.push({cli:m.cliente||m.clienteNombre||"(sin cliente)",prod:m.prod||m.prodNombre||"",
+            motivo:m.motivo||m.nota||"Sin motivo",quien:g.nombre,eq:g.equipo}); }
+      } else if(fFb&&fFb>=hace30&&fFb<lunes){
+        if(/pedido|positiv|aceptada|proyecto/.test(est)){ G.mOkAnt++; G.mResAnt++; }
+        else if(/ko|negativ|rechazada/.test(est)) G.mResAnt++;
+      }
+      if(!fFb&&!/proyecto|rechazada/.test(est)){ G.mPend++;
+        const fe=fechaDocC(m); if(fe&&(lunes-fe)/86400000>21) G.sinResp.push(m.cliente||m.clienteNombre||"(sin cliente)"); }
+    }
+    E.gente.push(p);
+    for(const k of ["vSem","objSem","mAct","mObj","cobros","vis","lla","mEnv","mOk"]) E[k]+=p[k];
+    for(const k of ["vSem","objSem","mAct","mObj","cobros","nFacV","vis","lla","mEnv","mOk"]) G[k]+=p[k];
+  }
+
+  // Objetivos de actividad por equipo (mensual -> semana -> por cabeza)
+  for(const E of Object.values(equipos)){
+    const oe=objEq.find(o=>UC(o.equipo)===E.eq)||objEq.find(o=>UC(o.equipo)==="TODOS")||{};
+    const semO=k=>Math.max(0,Math.round(numC(oe[k])*7/30));
+    E.obj={visitas:semO("visitas"),llamadas:semO("llamadas"),muestras:semO("muestras"),muestrasOk:semO("muestrasOk")};
+    G.objVis+=E.obj.visitas; G.objLla+=E.obj.llamadas; G.objMue+=E.obj.muestras; G.objMueOk+=E.obj.muestrasOk;
+    const activos=E.gente.filter(x=>!x.ausente).length||1;
+    const porCabeza=k=>Math.max(0,Math.round(E.obj[k]/activos));
+    const tope=x=>Math.max(0,Math.min(150,x));
+    let mgS=0,mgP=0;
+    E.gente.forEach(p=>{
+      if(p.ausente) return;
+      const c={};
+      if(p.objSem) c.venta=tope(p.vSem/p.objSem*100);
+      if(p.mg!=null&&p.mgObj) c.margen=tope(p.mg/p.mgObj*100);
+      const act=[];
+      if(porCabeza("visitas")) act.push(tope(p.vis/porCabeza("visitas")*100));
+      if(porCabeza("llamadas")) act.push(tope(p.lla/porCabeza("llamadas")*100));
+      if(act.length) c.actividad=act.reduce((a,b)=>a+b,0)/act.length;
+      if(p.vMes||p.cobros) c.cobro=tope(100-(p.vMes?p.cobros/p.vMes*100:100));
+      let s=0,w=0; for(const k in CEO_PESOS) if(c[k]!=null){ s+=c[k]*CEO_PESOS[k]; w+=CEO_PESOS[k]; }
+      p.nota=w?Math.round(s/w):null; p.c=c;
+      const sig=[];
+      if(p.semMal>=2) sig.push("🔻 "+(p.semMal+1)+"ª semana seguida por debajo del 50 %");
+      if(c.venta>=95&&c.actividad!=null&&c.actividad<75) sig.push("🏛 vende sin moverse: "+Math.round(c.venta)+" % venta con "+Math.round(c.actividad)+" % actividad. Cartera heredada, no prospecta");
+      if(c.actividad>=90&&c.venta!=null&&c.venta<70) sig.push("🔁 mucha actividad, poca venta: "+Math.round(c.actividad)+" % actividad y "+Math.round(c.venta)+" % venta. Eficacia, no esfuerzo");
+      if(p.cobros>=5000&&p.vMes&&p.cobros/p.vMes>0.2) sig.push("💸 cobra tarde: "+eurC(p.cobros)+" vencidos, "+p.nFacV+" facturas");
+      if(p.mg!=null&&p.mgObj&&p.mg<p.mgObj-3) sig.push("📉 vende barato: margen "+decC(p.mg)+" % con objetivo "+decC(p.mgObj)+" %");
+      p.sig=sig;
+      if(p.mg!=null){ mgS+=p.mg*(p.vSem||1); mgP+=(p.vSem||1); }
+    });
+    E.mg=mgP?mgS/mgP:null;
+    const conN=E.gente.filter(x=>x.nota!=null);
+    E.media=conN.length?Math.round(conN.reduce((a,x)=>a+x.nota,0)/conN.length):null;
+  }
+
+  const sube=objSem.filter(o=>numC(o.semana)===sem&&numC(o.anio||anio)===anio&&!o.eliminado
+    &&(o.escaladoA==="ceo"||o.escaladoA==="director"))
+    .map(o=>{ const g=gente.find(x=>A.mismo(x.id,o.agente)||A.mismo(x.cod,o.agente));
+      return {texto:o.texto||"",nivel:o.escaladoA,eq:o.equipo||(g&&g.equipo)||"",de:g?g.nombre:(o.agente||"")}; });
+
+  G.peor.sort((a,b)=>b.im-a.im);
+  G.sinResp=[...new Set(G.sinResp)].slice(0,6);
+  return {sem,anio,mNum,G,equipos:Object.values(equipos).filter(E=>E.gente.length)
+    .sort((a,b)=>b.vSem-a.vSem),sube};
+}
+
+function htmlCEO(D){
+  const {G,equipos,sube,sem}=D;
+  const pc=(a,b)=>b?Math.round(a/b*100):null;
+  const col=p=>p==null?"#6B7684":(p>=100?"#0E7C5A":p>=80?"#B07908":"#C2263D");
+  const e=escR;
+  const barra=(r,o,c)=>{ const w=Math.min(100,o?Math.round(r/o*100):0);
+    return `<div style="background:#EEF1F5;border-radius:99px;height:7px;overflow:hidden"><div style="background:${c};width:${w}%;height:7px;border-radius:99px"></div></div>`; };
+  const h3=(t,sub)=>`<h3 style="margin:24px 0 ${sub?"2px":"8px"};font-size:14px">${t}</h3>${sub?`<div style="font-size:11.5px;color:#8A94A0;margin-bottom:8px">${sub}</div>`:""}`;
+  const tile=(t,v,s,c)=>`<td style="padding:0 4px;width:33.3%;vertical-align:top"><div style="background:#F7F9FB;border-radius:10px;padding:11px 12px">
+    <div style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:#8A94A0;font-weight:700">${t}</div>
+    <div style="font-size:18px;font-weight:800;margin-top:2px;color:${c}">${v}</div>
+    <div style="font-size:10.5px;color:#6B7684">${s}</div></div></td>`;
+  const pS=pc(G.vSem,G.objSem), pM=pc(G.mAct,G.mObj);
+  const nCerr=equipos.reduce((a,E)=>a+E.cerr,0), nAus=equipos.reduce((a,E)=>a+E.aus,0);
+  const sinC=equipos.flatMap(E=>E.sinCerrar);
+  const flojosTot=equipos.flatMap(E=>E.gente.filter(x=>x.nota!=null&&x.nota<80));
+
+  const porEq=`<table style="width:100%;border-collapse:collapse;font-size:13px">
+    <tr>${["Equipo","Semana","Mes","Vencido"].map((t,i)=>`<th style="text-align:${i?"right":"left"};font-size:10.5px;text-transform:uppercase;color:#8A94A0;padding:0 0 6px">${t}</th>`).join("")}</tr>
+    ${equipos.map(E=>{ const ps=pc(E.vSem,E.objSem), pm=pc(E.mAct,E.mObj); return `<tr>
+      <td style="padding:9px 0;border-top:1px solid #EEF1F5">
+        <div style="font-weight:700">${e(E.eq)}</div>
+        <div style="font-size:11px;color:#8A94A0">${e(E.jefe||"sin jefe")} · ${E.cerr} cerrados${E.aus?" · "+E.aus+" ausente"+(E.aus>1?"s":""):""}${E.sinCerrar.length?` · <span style="color:#C2263D">${E.sinCerrar.length} sin cerrar</span>`:""}</div>
+        <div style="font-size:11px;color:#8A94A0">👋 ${E.vis}/${E.obj.visitas} · 📞 ${E.lla}/${E.obj.llamadas} · 📦 ${E.mEnv} muestras (${E.mOk} ok, ${E.mKo} ko)</div></td>
+      <td style="padding:9px 0;border-top:1px solid #EEF1F5;text-align:right;vertical-align:top"><div style="font-weight:800">${eurC(E.vSem)}</div>${ps!=null?`<div style="font-size:11px;font-weight:700;color:${col(ps)}">${ps} %</div>`:""}</td>
+      <td style="padding:9px 0;border-top:1px solid #EEF1F5;text-align:right;vertical-align:top"><div style="font-weight:800">${eurC(E.mAct)}</div>${pm!=null?`<div style="font-size:11px;font-weight:700;color:${col(pm)}">${pm} %</div>`:""}</td>
+      <td style="padding:9px 0;border-top:1px solid #EEF1F5;text-align:right;vertical-align:top;font-weight:800;color:#C2263D">${eurC(E.cobros)}</td></tr>`;}).join("")}
+  </table>`;
+
+  const act=[["👋 Visitas",G.vis,G.objVis],["📞 Llamadas",G.lla,G.objLla],["📦 Muestras env.",G.mEnv,G.objMue],["✅ Muestras ok",G.mOk,G.objMueOk]]
+    .filter(x=>x[1]||x[2]);
+  const actividad=act.length?h3("Actividad comercial","Suma de los equipos contra el objetivo mensual repartido por semanas.")+
+    `<table style="width:100%;border-collapse:collapse">${act.map(([l,r,o])=>{ const p=pc(r,o),c=col(p); return `<tr>
+      <td style="padding:7px 0;font-size:12.5px;white-space:nowrap">${l}</td><td style="padding:7px 8px;width:60%">${barra(r,o,c)}</td>
+      <td style="padding:7px 0;text-align:right;white-space:nowrap"><b>${r}</b>${o?`<span style="font-size:11.5px;color:#8A94A0">/${o}</span> <span style="font-size:11.5px;font-weight:700;color:${c}">${p} %</span>`:""}</td></tr>`;}).join("")}</table>`:"";
+
+  const ranking=h3("Quién tira y quién falla, por equipo","Nota = venta 40 · margen 20 · actividad 25 · cobro 15. Y lo que el número solo no dice.")+
+    equipos.map(E=>{
+      const orden=E.gente.filter(x=>!x.ausente&&x.nota!=null).sort((a,b)=>b.nota-a.nota);
+      if(!orden.length) return "";
+      const flojos=orden.filter(x=>x.nota<80);
+      const fila=(x,i)=>`<tr>
+        <td style="padding:6px 0;border-top:1px solid #EEF1F5;width:22px;font-size:12px;color:#8A94A0;vertical-align:top">${i===0?"🥇":i+1}</td>
+        <td style="padding:6px 0;border-top:1px solid #EEF1F5;vertical-align:top">
+          <div style="font-size:12.5px;font-weight:${i===0?800:600}">${e(x.nombre)}</div>
+          <div style="font-size:10.5px;color:#8A94A0">${eurC(x.vSem)}${x.mg!=null?" · mg "+decC(x.mg)+" %":""}${x.c.actividad!=null?" · act. "+Math.round(x.c.actividad)+" %":""}</div>
+          ${x.sig.map(t=>`<div style="font-size:11px;color:#7A4E06;margin-top:2px">${e(t)}</div>`).join("")}</td>
+        <td style="padding:6px 0 6px 10px;border-top:1px solid #EEF1F5;text-align:right;font-size:13px;font-weight:800;color:${col(x.nota)};white-space:nowrap;vertical-align:top">${x.nota} %</td></tr>`;
+      return `<div style="border:1px solid #DCE1E7;border-radius:11px;padding:12px 14px;margin-bottom:11px">
+        <table style="width:100%;border-collapse:collapse;margin-bottom:2px"><tr>
+          <td><div style="font-size:13.5px;font-weight:800">${e(E.eq)}</div><div style="font-size:11px;color:#8A94A0">${e(E.jefe||"")}${E.mg!=null?" · margen "+decC(E.mg)+" %":""}</div></td>
+          <td style="text-align:right;white-space:nowrap"><div style="font-size:15px;font-weight:800;color:${col(E.media)}">${E.media} %</div><div style="font-size:10.5px;color:#8A94A0">media del equipo</div></td></tr></table>
+        <table style="width:100%;border-collapse:collapse">${orden.map(fila).join("")}</table>
+        <div style="margin-top:8px;font-size:12px;padding:6px 10px;border-radius:8px;background:${flojos.length?"#FEF2F2":"#F0FDF4"};color:${flojos.length?"#C2263D":"#0E7C5A"}">
+          ${flojos.length?"⚠️ Por debajo del 80 %: <b>"+flojos.map(x=>e(x.nombre)+" ("+x.nota+" %)").join(", ")+"</b>":"✅ Nadie por debajo del 80 %"}</div></div>`;
+    }).join("");
+
+  const res=G.mOk+G.mKo, conv=res?Math.round(G.mOk/res*100):null,
+    convAnt=G.mResAnt?Math.round(G.mOkAnt/G.mResAnt*100):null, dif=(conv!=null&&convAnt!=null)?conv-convAnt:null;
+  const cj=(n,l,c,bg)=>`<td style="padding:0 4px;width:25%"><div style="background:${bg};border-radius:9px;padding:9px 10px;text-align:center"><div style="font-size:20px;font-weight:800;color:${c};line-height:1.1">${n}</div><div style="font-size:10.5px;color:#6B7684">${l}</div></div></td>`;
+  const muestras=(G.mEnv||G.mOk||G.mKo||G.mPend)?h3("Muestras")+
+    `<table style="width:100%;border-collapse:separate;border-spacing:0;margin:0 -4px"><tr>${cj(G.mEnv,"enviadas","#14181F","#F7F9FB")}${cj(G.mOk,"aceptadas","#0E7C5A","#F0FDF4")}${cj(G.mKo,"rechazadas","#C2263D","#FEF2F2")}${cj(G.mPend,"sin respuesta","#B07908","#FFFBEB")}</tr></table>
+    ${conv!=null?`<div style="margin-top:9px;padding:9px 12px;background:#F7F9FB;border-radius:9px"><table style="width:100%"><tr><td style="font-size:12.5px;color:#3A424E">Conversión de las resueltas</td><td style="text-align:right;font-size:14px;font-weight:800">${conv} % ${dif==null?"":dif===0?`<span style="font-size:11.5px;color:#8A94A0;font-weight:400">igual que el mes pasado</span>`:`<span style="font-size:11.5px;font-weight:700;color:${dif>0?"#0E7C5A":"#C2263D"}">${dif>0?"▲":"▼"} ${Math.abs(dif)} pts vs mes pasado</span>`}</td></tr></table></div>`:""}
+    ${G.rechazos.length?`<div style="margin-top:10px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#8A94A0;font-weight:700;margin-bottom:5px">Por qué nos han dicho que no</div>
+      ${G.rechazos.slice(0,8).map(r=>`<div style="border-left:3px solid #C2263D;padding:5px 0 5px 11px;margin-bottom:7px"><div style="font-size:12.5px;font-weight:700">${e(r.cli)}${r.prod?`<span style="font-weight:400;color:#8A94A0"> · ${e(r.prod)}</span>`:""}</div><div style="font-size:12px;color:#3A424E;font-style:italic">“${e(r.motivo)}”</div><div style="font-size:11px;color:#8A94A0">${e(r.quien)} · ${e(r.eq)}</div></div>`).join("")}</div>`:""}
+    ${G.sinResp.length?`<div style="margin-top:6px;font-size:12px;color:#B07908">⏳ Sin respuesta hace más de 3 semanas: ${G.sinResp.map(e).join(" · ")}</div>`:""}`:"";
+
+  const totC=G.t30+G.t60+G.t90+G.t90mas;
+  const cobros=totC?h3("Cobros pendientes",`${eurC(totC)} vencidos · ${G.nFacV} facturas`)+
+    `<table style="width:100%;border-collapse:collapse">${[["1–30 d",G.t30,"#B07908"],["31–60 d",G.t60,"#E0803C"],["61–90 d",G.t90,"#C2263D"],["+90 d",G.t90mas,"#8B1230"]].map(([l,v,c])=>`<tr><td style="padding:6px 0;font-size:12.5px;white-space:nowrap">${l}</td><td style="padding:6px 8px;width:70%">${barra(v,totC,c)}</td><td style="padding:6px 0;text-align:right;font-size:12.5px;font-weight:800;white-space:nowrap">${eurC(v)}</td></tr>`).join("")}</table>
+    ${G.peor.length?`<div style="font-size:12px;color:#3A424E;margin-top:6px">Las mayores: ${G.peor.slice(0,3).map(x=>`${e(x.cli)} ${eurC(x.im)} (${x.dias} d, ${e(x.quien)})`).join(" · ")}</div>`:""}`:"";
+
+  const subeH=sube.length?h3(`Lo que sube a dirección (${sube.length})`)+`<ul style="margin:0;padding-left:18px">${sube.map(o=>`<li style="margin-bottom:5px;font-size:13px">${e(o.texto)}<span style="color:#64748B"> · ${e(o.eq)}${o.de?", "+e(o.de):""}</span></li>`).join("")}</ul>`:"";
+
+  const aten=[];
+  if(flojosTot.length) aten.push(["#C2263D",`${flojosTot.length} comercial${flojosTot.length>1?"es":""} por debajo del 80 %`,flojosTot.map(x=>x.nombre+" ("+x.nota+" %)").join(" · ")]);
+  if(G.t90mas) aten.push(["#C2263D",`${eurC(G.t90mas)} vencidos a más de 90 días`,"Ya no es un retraso: es riesgo de impago."]);
+  if(sinC.length) aten.push(["#94A3B8",`${sinC.length} sin cerrar la semana`,sinC.join(" · ")]);
+  const atencion=aten.length?h3("Lo que pide atención")+aten.map(([c,t,s])=>`<div style="border-left:3px solid ${c};padding:7px 0 7px 12px;margin-bottom:9px"><div style="font-size:13.5px;font-weight:700">${e(t)}</div><div style="font-size:12px;color:#64748B">${e(s)}</div></div>`).join(""):"";
+
+  const html=`<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:620px;margin:0 auto;color:#14181F;line-height:1.5">
+    <div style="background:#14181F;color:#fff;padding:18px 20px;border-radius:12px 12px 0 0">
+      <div style="font-size:11px;letter-spacing:.08em;opacity:.7;text-transform:uppercase">Dirección · cierre comercial semana ${sem}</div>
+      <div style="font-size:20px;font-weight:800;margin-top:3px">Grupo Consolidado</div>
+      <div style="font-size:12px;opacity:.75">${nCerr} comerciales cerrados${nAus?" · "+nAus+" ausente"+(nAus>1?"s":""):""}${sinC.length?" · "+sinC.length+" sin cerrar":""} · ${equipos.length} equipos</div>
+    </div>
+    <div style="border:1px solid #DCE1E7;border-top:none;border-radius:0 0 12px 12px;padding:20px">
+      <table style="width:100%;border-collapse:separate;border-spacing:0;margin:0 -4px 4px"><tr>
+        ${tile("Semana",eurC(G.vSem),pS!=null?pS+" % del objetivo":"sin objetivo",col(pS))}
+        ${tile("Mes",eurC(G.mAct),pM!=null?pM+" % del objetivo":"sin objetivo",col(pM))}
+        ${tile("Vencido",eurC(G.cobros),G.nFacV+" facturas","#C2263D")}</tr></table>
+      ${h3("Por equipo")}${porEq}
+      ${actividad}${ranking}${muestras}${subeH}${cobros}${atencion}
+      <div style="margin-top:20px;text-align:center"><a href="${CRM}/objetivos_equipo.html?rol=ceo" style="display:inline-block;background:#14181F;color:#fff;text-decoration:none;padding:11px 26px;border-radius:9px;font-size:13.5px;font-weight:700">Abrir en el CRM</a></div>
+      <p style="margin:18px 0 0;font-size:11px;color:#8A94A0;text-align:center">Informe automático del CRM · sale los sábados con el cierre de la semana.</p>
+    </div></div>`;
+  const subject=`📊 Cierre comercial S${sem} · ${pS!=null?pS+" % venta":eurC(G.vSem)} · mes ${pM!=null?pM+" %":eurC(G.mAct)}${flojosTot.length?" · "+flojosTot.length+" por debajo del 80 %":""}`;
+  return {html,subject};
+}
+
+async function informeCEO(o){
+  o=o||{};
+  const hoy=new Date();
+  let {sem,anio}=isoSemanaC(hoy);
+  if(o.semana) sem=Number(o.semana);
+  const marca=`informes_ceo/${anio}_s${sem}`;
+  if(o.auto){
+    // Solo sabado o domingo, y una vez por semana
+    const d=hoy.getDay(); if(d!==6&&d!==0) return {ok:true,omitido:"no es fin de semana"};
+    const ya=await leerDocR(marca); if(ya&&ya.enviado) return {ok:true,omitido:"ya enviado",semana:sem};
+  }
+  const D=await datosCEO(anio,sem);
+  const {html,subject}=htmlCEO(D);
+  if(o.probar) return {ok:true,semana:sem,subject,html};
+  let to=o.to?[o.to]:[];
+  if(!to.length){
+    const us=await leerTodoC("usuarios"), pu=await leerTodoC("portal_users");
+    const ceos=[...us,...pu].filter(u=>String(u.rol||"").toLowerCase()==="ceo")
+      .map(u=>u.email).filter(x=>x&&!GENERICOS_R.includes(String(x).toLowerCase()));
+    to=[...new Set(ceos.length?ceos:[CC_SIEMPRE])];
+  }
+  const env=[];
+  for(const t of to) env.push(await enviarRetrasos(t,subject,html));
+  if(!o.to) await guardarDocR(marca,{enviado:"si",fecha:new Date().toISOString(),semana:sem,a:to.join(",")});
+  return {ok:env.every(Boolean),semana:sem,to,subject,equipos:D.equipos.length};
+}
+
 module.exports = async function handler(req, res){
   try{
+    // ─────── Informe semanal de dirección, por URL ───────
+    // ?ceo=semanal  (+ &probar=1 devuelve el html sin enviar, &to= para probar, &semana=39)
+    if(req.method==="GET" && req.query && req.query.ceo==="semanal"){
+      const sec=process.env.CRON_SECRET;
+      if(sec && req.query.secret!==sec){ res.status(401).json({error:"falta el secreto"}); return; }
+      const r=await informeCEO({to:req.query.to, probar:req.query.probar==="1", semana:req.query.semana});
+      if(req.query.probar==="1"&&req.query.ver==="1"){ res.setHeader("Content-Type","text/html; charset=utf-8"); res.status(200).send(r.html); return; }
+      res.status(200).json(req.query.probar==="1"?{...r,html:undefined,htmlLength:(r.html||"").length}:r); return;
+    }
+
     // ─────── Avisos de retrasos de pedido, por URL ───────
     // ?retrasos=diario  ·  ?retrasos=semanal  (+ &to= para probar, &probar=1 para verlo)
     if(req.method==="GET" && req.query && req.query.retrasos
@@ -876,8 +1257,15 @@ module.exports = async function handler(req, res){
       }catch(e){ retrasos={error:String(e&&e.message||e)}; }
     }
 
+    // Y el informe de direccion: sabado (o domingo si el sabado fallo), una vez
+    let ceo=null;
+    if(String((req.query||{}).sinCeo||"")!=="1"){
+      try{ ceo=await informeCEO({auto:true}); }catch(e){ ceo={error:String(e&&e.message||e)}; }
+    }
+
     res.status(200).json({
       ok:true,
+      ceo,
       revisadas: abiertas.length,
       enviadas, saltadas, sinEmail, fallidas,
       retrasos,
