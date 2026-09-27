@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nombres de fichas del CRM</title>
+<style>
+  :root{--navy:#0F172A;--muted:#64748B;--border:#E2E8F0;--green:#16A34A;--greenL:#F0FDF4;--red:#DC2626;--redL:#FEF2F2;--amber:#B45309;--amberL:#FFFBEB;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F8FAFC;color:var(--navy)}
+  header{padding:18px 16px 14px;background:#fff;border-bottom:1px solid var(--border)}
+  h1{margin:0 0 4px;font-size:19px;font-weight:800}
+  .sub{margin:0;font-size:12.5px;color:var(--muted);line-height:1.5}
+  main{padding:16px;max-width:760px;margin:0 auto}
+  .estado{padding:40px 20px;text-align:center;color:var(--muted);font-size:14px}
+  .fila{background:#fff;border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:8px;display:flex;gap:12px;align-items:center}
+  .fila input[type=checkbox]{width:20px;height:20px;flex-shrink:0}
+  .fila .datos{flex:1;min-width:0}
+  .id{font-size:11px;color:var(--muted);font-family:ui-monospace,Menlo,monospace}
+  .nuevo{width:100%;margin-top:6px;padding:8px 10px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;font-weight:700;font-family:inherit}
+  .de{font-size:11px;color:var(--muted);margin-top:3px}
+  .ok{background:var(--greenL);border-color:#BBF7D0}
+  .err{background:var(--redL);border-color:#FECACA}
+  .barra{position:sticky;bottom:0;background:#fff;border-top:1px solid var(--border);padding:12px 16px;display:flex;gap:10px;align-items:center;justify-content:space-between}
+  button{padding:12px 18px;border:none;border-radius:10px;background:var(--navy);color:#fff;font-weight:800;font-size:14px;cursor:pointer}
+  button:disabled{background:#CBD5E1;cursor:default}
+  h2{font-size:13px;margin:18px 0 8px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+</style>
+</head>
+<body>
+<header>
+  <h1>🪪 Fichas del CRM sin nombre</h1>
+  <p class="sub">Busca las fichas del CRM (colección <b>usuarios</b>) cuyo nombre es su código, como <code>u_1776238293171</code>,
+    y les propone el nombre de la cuenta del portal de esa misma persona. Solo cambia el campo <b>nombre</b>
+    de las que marques. No toca contraseñas, equipos, roles ni la cuenta del portal.</p>
+</header>
+<main><div class="estado" id="app">Leyendo fichas…</div></main>
+<div class="barra" id="barra" hidden>
+  <span id="cuenta" style="font-size:13px;color:var(--muted)"></span>
+  <button id="btn" onclick="aplicar()">Poner los nombres</button>
+</div>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+function val(f){
+  if(!f) return null;
+  if(f.stringValue!==undefined) return f.stringValue;
+  if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.doubleValue!==undefined) return Number(f.doubleValue);
+  if(f.booleanValue!==undefined) return f.booleanValue;
+  return null;
+}
+async function leer(col){
+  const t=[]; let tok=null,v=0;
+  do{
+    const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break;
+    const j=await r.json();
+    for(const d of j.documents||[]){
+      const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x);
+      t.push(o);
+    }
+    tok=j.nextPageToken||null; v++;
+  }while(tok&&v<40);
+  return t;
+}
+const U=s=>String(s||"").toUpperCase().trim();
+const sinNombre=(f)=>{ const n=String(f.nombre||"").trim();
+  return !n||/^u_\d+$/i.test(n)||U(n)===U(f._id); };
+const esc=s=>String(s||"").replace(/[<>&"]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]));
+let CASOS=[];
+
+(async()=>{
+  const app=document.getElementById("app");
+  try{
+    const [us,pu]=await Promise.all([leer("usuarios"),leer("portal_users")]);
+    CASOS=us.filter(sinNombre).map(f=>{
+      const k=[f._id,f.id,f.grupoAgente,f.catalogoVendedor,f.username,f.duplicadaDe].map(U).filter(Boolean);
+      // La cuenta del portal de esa persona: la que apunta a esta ficha, o a la que apunta ella
+      const cands=pu.filter(p=>{
+        const kp=[p._id,p.id,p.crmId,p.username,p.catalogoVendedor,p.grupoAgente,p.duplicadaDe].map(U).filter(Boolean);
+        return kp.some(x=>k.includes(x));
+      }).filter(p=>p.nombre&&!/^u_\d+$/i.test(p.nombre));
+      // Preferir la que enlaza por id (crmId / duplicadaDe) sobre las que casan por codigo
+      cands.sort((a,b)=>{
+        const pa=(U(a.crmId)===U(f._id)||U(a.duplicadaDe)===U(f._id)||U(f.duplicadaDe)===U(a._id))?0:1;
+        const pb=(U(b.crmId)===U(f._id)||U(b.duplicadaDe)===U(f._id)||U(f.duplicadaDe)===U(b._id))?0:1;
+        return pa-pb;
+      });
+      const p=cands[0]||null;
+      return {f, p, nuevo:p?p.nombre:"", varios:cands.length>1?cands.map(c=>c.nombre):null};
+    });
+    pintar();
+  }catch(e){ app.innerHTML=`<div class="estado">No se ha podido leer: ${esc(e.message)}</div>`; }
+})();
+
+function pintar(){
+  const app=document.getElementById("app");
+  if(!CASOS.length){ app.innerHTML=`<div class="estado">✅ Todas las fichas del CRM tienen nombre. No hay nada que arreglar.</div>`; return; }
+  const con=CASOS.filter(c=>c.p), sin=CASOS.filter(c=>!c.p);
+  const fila=(c,i)=>`<div class="fila" id="f${i}">
+    <input type="checkbox" id="c${i}" ${c.nuevo?"checked":""} onchange="cuenta()">
+    <div class="datos">
+      <div class="id">usuarios/${esc(c.f._id)} · ahora: “${esc(c.f.nombre||"(vacío)")}”
+        ${c.f.equipo?" · "+esc(c.f.equipo):""}${c.f.rol?" · "+esc(c.f.rol):""}</div>
+      <input class="nuevo" id="n${i}" value="${esc(c.nuevo)}" placeholder="Escribe el nombre" oninput="document.getElementById('c${i}').checked=!!this.value.trim();cuenta()">
+      <div class="de">${c.p?`De su cuenta del portal <b>${esc(c.p._id)}</b>${c.p.username?" (usuario "+esc(c.p.username)+")":""}`
+        :"No se ha encontrado su cuenta del portal: escríbelo a mano si sabes quién es."}
+        ${c.varios?` · ⚠️ Varias cuentas casan: ${c.varios.map(esc).join(", ")}. Revisa que sea el bueno.`:""}</div>
+    </div></div>`;
+  app.innerHTML=(con.length?`<h2>Con nombre propuesto (${con.length})</h2>`+CASOS.map((c,i)=>c.p?fila(c,i):"").join(""):"")
+    +(sin.length?`<h2>Sin cuenta del portal (${sin.length})</h2>`+CASOS.map((c,i)=>!c.p?fila(c,i):"").join(""):"");
+  document.getElementById("barra").hidden=false;
+  cuenta();
+}
+function cuenta(){
+  const n=CASOS.filter((c,i)=>document.getElementById("c"+i).checked&&document.getElementById("n"+i).value.trim()).length;
+  document.getElementById("cuenta").textContent=n+" ficha"+(n===1?"":"s")+" para cambiar";
+  document.getElementById("btn").disabled=!n;
+}
+async function aplicar(){
+  const btn=document.getElementById("btn");
+  const todos=CASOS.map((c,i)=>({c,i})).filter(({i})=>document.getElementById("c"+i).checked&&document.getElementById("n"+i).value.trim());
+  if(!todos.length) return;
+  if(!confirm("Cambiar el nombre de "+todos.length+" ficha(s) del CRM?")) return;
+  btn.disabled=true; btn.textContent="Guardando…";
+  let ok=0;
+  for(const {c,i} of todos){
+    const nombre=document.getElementById("n"+i).value.trim();
+    const el=document.getElementById("f"+i);
+    try{
+      const r=await fetch(`${FB}/usuarios/${encodeURIComponent(c.f._id)}?updateMask.fieldPaths=nombre`,{
+        method:"PATCH",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({fields:{nombre:{stringValue:nombre}}})});
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      el.classList.add("ok"); document.getElementById("c"+i).checked=false; document.getElementById("c"+i).disabled=true;
+      c.f.nombre=nombre; ok++;
+    }catch(e){ el.classList.add("err"); }
+  }
+  btn.textContent="Poner los nombres";
+  cuenta();
+  alert(ok+" de "+todos.length+" fichas actualizadas."+(ok<todos.length?" Las marcadas en rojo han fallado.":""));
+}
+</script>
+</body>
+</html>
