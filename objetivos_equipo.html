@@ -925,6 +925,174 @@ window.marcarAusente=async(agId)=>{
   }catch(e){ alert("No se ha podido marcar: "+e.message); }
 };
 
+/* (sep 2026) -------------------------------------------------------------
+   El consolidado del jefe subia solo palabras: cuantos compromisos habia
+   cumplido cada uno. Faltaba lo unico con lo que se decide -- cifra de
+   negocio, cobros, muestras y actividad contra objetivo -- y todo eso ya
+   estaba en Firebase: esta pagina simplemente no lo leia nunca. Se lee una
+   vez para todo el equipo y se reparte por persona.
+   ------------------------------------------------------------------------ */
+function lunesDeSem(anio,sem){
+  const e=new Date(anio,0,4);
+  const l=new Date(e); l.setDate(e.getDate()-((e.getDay()||7)-1));
+  l.setDate(l.getDate()+(sem-1)*7); l.setHours(0,0,0,0);
+  return l;
+}
+// Las fechas llegan como 2026-09-24, 24/09/2026 o un sello con hora, segun
+// quien haya escrito el documento. Sin esto la mitad de la semana se pierde.
+function fechaTxt(v){
+  if(!v) return null;
+  const s=String(v);
+  let m=s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if(m) return new Date(+m[1],+m[2]-1,+m[3]);
+  m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+  if(m){ let a=+m[3]; if(a<100) a+=2000; return new Date(a,+m[2]-1,+m[1]); }
+  const d=new Date(s);
+  return isNaN(d.getTime())?null:d;
+}
+function fechaDoc(o){
+  for(const c of ["fecha","fechaCreacion","creadoEl","fechaAlta",
+                  "fechaSolicitud","createdAt","fechaEnvio"]){
+    const d=fechaTxt(o[c]); if(d) return d;
+  }
+  return null;
+}
+const esLlamada=(r)=>/llamada|no_contesta/i.test(String(r||""));
+
+async function datosDelEquipo(){
+  const lunes=lunesDeSem(ANIO,SEMANA);
+  const domingo=new Date(lunes); domingo.setDate(lunes.getDate()+6);
+  domingo.setHours(23,59,59,999);
+  // El mes es el de la semana que se cierra, no el de hoy: la 31 acabo el 2
+  // de agosto pero es de julio. Manda el jueves, que es el criterio ISO.
+  const jueves=new Date(lunes); jueves.setDate(lunes.getDate()+3);
+  const mNum=jueves.getMonth()+1;
+  // Ventana de comparacion de la conversion: los 30 dias previos a la semana
+  const hace30=new Date(lunes); hace30.setDate(lunes.getDate()-30);
+
+  const [res,ent,cob,estac,objs,objEq,mues,vis,sems]=await Promise.all([
+    leer("pbi_resumen_agente"), leer("pbi_entrada_agente"), leer("cobros_comercial"),
+    leer("pbi_estacionalidad"), leer("pbi_objetivos"), leer("objetivos_equipo"),
+    leer("muestras"), leer("visitas"),
+    // Foto de cada semana cerrada: para saber si alguien lleva varias
+    // semanas seguidas hundido o es un bache puntual.
+    leer("pbi_semanas").catch(()=>[]),
+  ]);
+  const semsPrev=sems.filter(x=>Number(x.semana||x._id)<SEMANA)
+    .sort((a,b)=>Number(b.semana||b._id)-Number(a.semana||a._id)).slice(0,4)
+    .map(x=>{ let ag=[]; try{ ag=JSON.parse(x.agentes||"[]"); }catch(e){} return ag; });
+
+  const num=(x)=>Number(x||0)||0;
+  const enSem=(d)=>d&&d>=lunes&&d<=domingo;
+  // Un documento por comercial: se busca por cualquiera de sus identidades,
+  // que es justo lo que resuelve agentes_alias.
+  const suyo=(lista,u)=>lista.find(x=>
+    Agentes.mismo(x._id,u.cod)||Agentes.mismo(x._id,u.id)||
+    Agentes.mismo(x.agente,u.cod)||Agentes.mismo(x.comercial,u.cod)||
+    Agentes.mismo(x.comercialNombre,u.nombre))||{};
+  const deQuien=(doc,u)=>Agentes.esDe(doc,u.cod)||Agentes.esDe(doc,u.id);
+
+  // Objetivos de actividad: se fijan por equipo y por mes en la Sala de
+  // Mandos. Aqui se reparten a la semana que se cierra.
+  const oe=objEq.find(o=>U(o.equipo)===EQUIPO)
+        ||objEq.find(o=>U(o.equipo)==="TODOS")||{};
+  const objSem=(k)=>Math.max(0,Math.round(num(oe[k])*7/30));
+  const OBJ_ACT={visitas:objSem("visitas"), llamadas:objSem("llamadas"),
+    muestras:objSem("muestras"), muestrasOk:objSem("muestrasOk"),
+    ofertas:objSem("ofertas"), clientesNuevos:objSem("clientesNuevos")};
+
+  const hoyISO=new Date().toISOString().slice(0,10);
+  const T={vSem:0,objSemE:0,mAct:0,mObj:0,cobros:0,nFacV:0,
+    t30:0,t60:0,t90:0,t90mas:0,peor:{cli:"",imp:0,dias:0},
+    vis:0,lla:0,nuevos:0,
+    mEnv:0,mOk:0,mKo:0,mPend:0,mOkAnt:0,mResAnt:0,
+    rechazos:[],sinRespuesta:[]};
+  const PP={};   // por persona, indexado por u.id
+
+  for(const u of USUARIOS){
+    const p={vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,nFacV:0,
+      vis:0,lla:0,mEnv:0,mOk:0};
+
+    // --- Cifra de negocio -------------------------------------------------
+    const r=suyo(res,u), e2=suyo(estac,u), o2=suyo(objs,u);
+    p.vSem=num(r.ventasSem);
+    p.mAct=num(e2["act_"+mNum]);
+    p.mObj=num(o2["mes_"+mNum]);
+    if(!p.mObj){
+      // Sin objetivo del mes se reparte el anual con el peso que tuvo ese mes
+      // el año pasado; si tampoco hay peso, a doceavas partes.
+      const anual=num(o2.objAnual);
+      p.mObj=anual*(num(e2["peso_"+mNum])||1/12);
+    }
+    p.objSem=p.mObj?p.mObj/4.33:0;
+    // Margen de la semana contra su objetivo de margen (lo publica pbi-sync)
+    p.mg=(r.margenPctSem!=null&&r.margenPctSem!=="")?num(r.margenPctSem):null;
+    p.mgObj=num(r.objetivoMargen)||null;
+    p.vMes=num(r.ventasMes)||p.mAct;
+    // Semanas previas: cuantas seguidas por debajo del 50 % de su objetivo
+    p.semMal=0;
+    for(const ag of semsPrev){
+      const f=ag.find(x=>Agentes.mismo(x.id||x.agente,u.cod)||Agentes.mismo(x.id||x.agente,u.id));
+      if(f&&p.objSem&&num(f.ventasSem)<p.objSem*0.5) p.semMal++; else break;
+    }
+
+    // --- Cobros: se recalculan contra hoy, no se fia del total publicado ---
+    const c=suyo(cob,u);
+    try{
+      for(const cli of JSON.parse(c.datos||"[]")){
+        for(const f of (cli.f||[])){
+          if(!f.fv||f.fv>hoyISO) continue;
+          const imp=num(f.im); p.cobros+=imp; p.nFacV++;
+          const dias=Math.round((Date.now()-new Date(f.fv).getTime())/86400000);
+          if(dias<=30) T.t30+=imp; else if(dias<=60) T.t60+=imp;
+          else if(dias<=90) T.t90+=imp; else T.t90mas+=imp;
+          if(imp>T.peor.imp) T.peor={cli:cli.c||"",imp:imp,dias:dias};
+        }
+      }
+    }catch(err){ p.cobros=num(c.totalVencido); p.nFacV=num(c.nFacturas); }
+
+    // --- Actividad ---------------------------------------------------------
+    for(const v of vis){
+      if(v.eliminada||!deQuien(v,u)||!enSem(fechaDoc(v))) continue;
+      if(esLlamada(v.resultado||v.tipo)) p.lla++; else p.vis++;
+    }
+
+    // --- Muestras ----------------------------------------------------------
+    for(const m of mues){
+      if(m.eliminada||!deQuien(m,u)) continue;
+      const est=String(m.estado||"").toLowerCase();
+      const fFb=fechaTxt(m.fechaFeedback);
+      if(enSem(fechaDoc(m))){ p.mEnv++; T.mEnv++; }
+      if(enSem(fFb)){
+        if(/pedido|positiv|aceptada|proyecto/.test(est)){ p.mOk++; T.mOk++; }
+        else if(/ko|negativ|rechazada/.test(est)){
+          T.mKo++;
+          T.rechazos.push({cli:m.cliente||m.clienteNombre||"(sin cliente)",
+            prod:m.prod||m.prodNombre||"", motivo:m.motivo||m.nota||"Sin motivo",
+            quien:u.nombre});
+        }
+      } else if(fFb&&fFb>=hace30&&fFb<lunes){
+        // Mes anterior, solo para saber si la conversion sube o baja
+        if(/pedido|positiv|aceptada|proyecto/.test(est)){ T.mOkAnt++; T.mResAnt++; }
+        else if(/ko|negativ|rechazada/.test(est)) T.mResAnt++;
+      }
+      if(!fFb&&!/proyecto|rechazada/.test(est)){
+        T.mPend++;
+        const fe=fechaDoc(m);
+        if(fe&&(lunes-fe)/86400000>21)
+          T.sinRespuesta.push(m.cliente||m.clienteNombre||"(sin cliente)");
+      }
+    }
+
+    T.vSem+=p.vSem; T.objSemE+=p.objSem; T.mAct+=p.mAct; T.mObj+=p.mObj;
+    T.cobros+=p.cobros; T.nFacV+=p.nFacV; T.vis+=p.vis; T.lla+=p.lla;
+    PP[u.id]=p;
+  }
+  T.sinRespuesta=[...new Set(T.sinRespuesta)].slice(0,6);
+  T.rechazos=T.rechazos.slice(0,6);
+  return {T,PP,OBJ_ACT};
+}
+
 async function enviarConsolidado(es){
   const _v=(f)=>f==null?null:(f.stringValue!==undefined?f.stringValue:
     f.doubleValue!==undefined?Number(f.doubleValue):null);
@@ -952,7 +1120,177 @@ async function enviarConsolidado(es){
   dest.delete(yo._id);
 
   const escH=(t)=>String(t||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+
+  // Si algo falla leyendo las cifras el cierre no se bloquea: sale el correo
+  // de siempre, sin los bloques nuevos.
+  let D=null;
+  try{ D=await datosDelEquipo(); }catch(err){ console.warn("[consolidado] sin cifras:",err); }
+  const T=D&&D.T, PP=(D&&D.PP)||{}, OBJ_ACT=(D&&D.OBJ_ACT)||{};
+  // toLocaleString("es-ES") no separa los miles con 4 cifras ("4100 €")
+  const eur=(n)=>String(Math.round(n||0)).replace(/\B(?=(\d{3})+(?!\d))/g,".")+" €";
+  const pcT=(a,b)=>b?Math.round(a/b*100):null;
+  const colT=(p)=>p==null?"#6B7684":(p>=100?"#0E7C5A":p>=80?"#B07908":"#C2263D");
+
+  const blqCifras=()=>{
+    if(!T||(!T.vSem&&!T.mAct&&!T.cobros)) return "";
+    const tar=(tit,v,s,c)=>`<td style="padding:0 4px;width:33.3%;vertical-align:top">
+      <div style="background:#F7F9FB;border-radius:10px;padding:11px 12px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:#8A94A0;font-weight:700">${tit}</div>
+        <div style="font-size:18px;font-weight:800;margin-top:2px;color:${c}">${v}</div>
+        <div style="font-size:10.5px;color:#6B7684">${s}</div></div></td>`;
+    const pS=pcT(T.vSem,T.objSemE), pM=pcT(T.mAct,T.mObj);
+    return `<table style="width:100%;border-collapse:separate;border-spacing:0;margin:0 -4px 4px"><tr>
+      ${tar("Semana",eur(T.vSem),pS!=null?pS+" % del objetivo":"sin objetivo",colT(pS))}
+      ${tar("Mes",eur(T.mAct),pM!=null?pM+" % del objetivo":"sin objetivo",colT(pM))}
+      ${tar("Vencido",eur(T.cobros),T.nFacV+" facturas","#C2263D")}
+    </tr></table>`;
+  };
+
+  const barra=(real,obj,col)=>{
+    const w=Math.min(100,obj?Math.round(real/obj*100):0);
+    return `<div style="background:#EEF1F5;border-radius:99px;height:7px;overflow:hidden">
+      <div style="background:${col};width:${w}%;height:7px;border-radius:99px"></div></div>`;
+  };
+
+  const blqActividad=()=>{
+    if(!T) return "";
+    const fs=[
+      {ic:"👋",l:"Visitas",real:T.vis,obj:OBJ_ACT.visitas},
+      {ic:"📞",l:"Llamadas",real:T.lla,obj:OBJ_ACT.llamadas},
+      {ic:"📦",l:"Muestras env.",real:T.mEnv,obj:OBJ_ACT.muestras},
+      {ic:"✅",l:"Muestras ok",real:T.mOk,obj:OBJ_ACT.muestrasOk},
+    ].filter(f=>f.obj||f.real);
+    if(!fs.length) return "";
+    const sinObj=fs.some(f=>!f.obj);
+    return `<h3 style="margin:22px 0 6px;font-size:14px">Actividad comercial</h3>
+      <table style="width:100%;border-collapse:collapse">
+        ${fs.map(f=>{ const p=pcT(f.real,f.obj), c=colT(p);
+          return `<tr>
+            <td style="padding:7px 0;font-size:12.5px;white-space:nowrap">${f.ic} ${f.l}</td>
+            <td style="padding:7px 8px;width:60%">${barra(f.real,f.obj,c)}</td>
+            <td style="padding:7px 0;text-align:right;white-space:nowrap">
+              <span style="font-size:13px;font-weight:800">${f.real}</span>
+              ${f.obj?`<span style="font-size:11.5px;color:#8A94A0">/${f.obj}</span>
+                <span style="font-size:11.5px;font-weight:700;color:${c}"> ${p} %</span>`:""}
+            </td></tr>`;}).join("")}
+      </table>
+      <div style="font-size:11.5px;color:#8A94A0;margin-top:5px">
+        ${sinObj?"Falta fijar el objetivo mensual del equipo en la Sala de Mandos."
+                :"Objetivo mensual del equipo repartido por semanas."}</div>`;
+  };
+
+  const blqMuestras=()=>{
+    if(!T||(!T.mEnv&&!T.mOk&&!T.mKo&&!T.mPend)) return "";
+    const res=T.mOk+T.mKo;
+    const conv=res?Math.round(T.mOk/res*100):null;
+    const convAnt=T.mResAnt?Math.round(T.mOkAnt/T.mResAnt*100):null;
+    const dif=(conv!=null&&convAnt!=null)?conv-convAnt:null;
+    const cj=(n,l,c,bg)=>`<td style="padding:0 4px;width:25%;vertical-align:top">
+      <div style="background:${bg};border-radius:9px;padding:9px 10px;text-align:center">
+        <div style="font-size:20px;font-weight:800;color:${c};line-height:1.1">${n}</div>
+        <div style="font-size:10.5px;color:#6B7684">${l}</div></div></td>`;
+    return `<h3 style="margin:22px 0 6px;font-size:14px">Muestras</h3>
+      <table style="width:100%;border-collapse:separate;border-spacing:0;margin:0 -4px"><tr>
+        ${cj(T.mEnv,"enviadas","#14181F","#F7F9FB")}
+        ${cj(T.mOk,"aceptadas","#0E7C5A","#F0FDF4")}
+        ${cj(T.mKo,"rechazadas","#C2263D","#FEF2F2")}
+        ${cj(T.mPend,"sin respuesta","#B07908","#FFFBEB")}
+      </tr></table>
+      ${conv!=null?`<div style="margin-top:9px;padding:9px 12px;background:#F7F9FB;border-radius:9px">
+        <table style="width:100%"><tr>
+          <td style="font-size:12.5px;color:#3A424E">Conversión de las resueltas</td>
+          <td style="text-align:right;font-size:14px;font-weight:800">${conv} %
+            ${dif!=null?(dif===0?`<span style="font-size:11.5px;color:#8A94A0">igual que el mes pasado</span>`
+              :`<span style="font-size:11.5px;font-weight:700;color:${dif>0?"#0E7C5A":"#C2263D"}">
+              ${dif>0?"▲":"▼"} ${Math.abs(dif)} pts vs mes pasado</span>`):""}</td>
+        </tr></table></div>`:""}
+      ${T.rechazos.length?`<div style="margin-top:10px">
+        <div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#8A94A0;
+          font-weight:700;margin-bottom:5px">Por qué nos han dicho que no</div>
+        ${T.rechazos.map(r=>`<div style="border-left:3px solid #C2263D;padding:5px 0 5px 11px;margin-bottom:7px">
+          <div style="font-size:12.5px;font-weight:700">${escH(r.cli)}
+            ${r.prod?`<span style="font-weight:400;color:#8A94A0"> · ${escH(r.prod)}</span>`:""}</div>
+          <div style="font-size:12px;color:#3A424E;font-style:italic">“${escH(r.motivo)}”</div>
+          <div style="font-size:11px;color:#8A94A0">${escH(r.quien)}</div>
+        </div>`).join("")}</div>`:""}
+      ${T.sinRespuesta.length?`<div style="margin-top:6px;font-size:12px;color:#B07908">
+        ⏳ Sin respuesta hace más de 3 semanas: ${T.sinRespuesta.map(escH).join(" · ")}</div>`:""}`;
+  };
+
+  const blqCobros=()=>{
+    if(!T||!T.cobros) return "";
+    const tot=T.t30+T.t60+T.t90+T.t90mas;
+    if(!tot) return "";
+    const tr=(l,v,c)=>`<tr>
+      <td style="padding:6px 0;font-size:12.5px;white-space:nowrap">${l}</td>
+      <td style="padding:6px 8px;width:70%">${barra(v,tot,c)}</td>
+      <td style="padding:6px 0;text-align:right;font-size:12.5px;font-weight:800;white-space:nowrap">${eur(v)}</td>
+    </tr>`;
+    return `<h3 style="margin:22px 0 4px;font-size:14px">Cobros pendientes</h3>
+      <div style="font-size:11.5px;color:#8A94A0;margin-bottom:6px">${eur(tot)} vencidos ·
+        ${T.nFacV} facturas${T.peor.imp?` · la mayor: ${escH(T.peor.cli)} ${eur(T.peor.imp)} (${T.peor.dias} días)`:""}</div>
+      <table style="width:100%;border-collapse:collapse">
+        ${tr("1–30 d",T.t30,"#B07908")}${tr("31–60 d",T.t60,"#E0803C")}
+        ${tr("61–90 d",T.t90,"#C2263D")}${tr("+90 d",T.t90mas,"#8B1230")}
+      </table>`;
+  };
+
+  // Objetivo de actividad por cabeza: el del equipo entre los que trabajan
+  // esta semana. Si no, quien esta de vacaciones hunde la media de todos.
+  const activos=USUARIOS.filter(a=>{
+    const i=(CIERRES[a.id]||{}).info||{};
+    return !(i.estado==="ausente"||(CIERRES[a.id]||{}).ausente);
+  }).length||1;
+  const objPersona=(k)=>Math.max(0,Math.round((OBJ_ACT[k]||0)/activos));
+
+  // Nota de cada uno, ponderada como la mira un controller: lo que vende
+  // pesa mas que lo que se mueve, y lo que no se cobra no es venta.
+  //   venta 40 · margen 20 · actividad 25 · cobro 15
+  // Si falta un componente (sin objetivo de margen, p.ej.) se reparte su
+  // peso entre los demas en vez de contarlo como cero.
+  const tope=(x)=>Math.max(0,Math.min(150,x));
+  function componentes(a){
+    const p=PP[a.id]; if(!p) return null;
+    const c={};
+    if(p.objSem) c.venta=tope(p.vSem/p.objSem*100);
+    if(p.mg!=null&&p.mgObj) c.margen=tope(p.mg/p.mgObj*100);
+    const act=[];
+    if(objPersona("visitas")) act.push(tope(p.vis/objPersona("visitas")*100));
+    if(objPersona("llamadas")) act.push(tope(p.lla/objPersona("llamadas")*100));
+    if(act.length) c.actividad=act.reduce((x,y)=>x+y,0)/act.length;
+    // Cobro: 100 si no debe nada; resta lo que pesa el vencido sobre su venta del mes
+    if(p.vMes||p.cobros) c.cobro=tope(100-(p.vMes?p.cobros/p.vMes*100:100));
+    return c;
+  }
+  const PESOS={venta:40,margen:20,actividad:25,cobro:15};
+  function notaDe(a){
+    const c=componentes(a); if(!c) return null;
+    let sum=0,pes=0;
+    for(const k in PESOS) if(c[k]!=null){ sum+=c[k]*PESOS[k]; pes+=PESOS[k]; }
+    return pes?Math.round(sum/pes):null;
+  }
+  // Lo que el numero solo no dice: el mismo 80 % puede ser cuatro problemas
+  // distintos, y cada uno pide una conversacion distinta.
+  function senalesDe(a){
+    const p=PP[a.id], c=componentes(a)||{}, out=[];
+    if(!p) return out;
+    if(p.semMal>=2) out.push("🔻 "+(p.semMal+1)+"ª semana seguida por debajo del 50 %");
+    if(c.venta>=95&&c.actividad!=null&&c.actividad<75)
+      out.push("🏛 vende sin moverse: "+Math.round(c.venta)+" % venta con "+Math.round(c.actividad)
+        +" % actividad. Cartera heredada, no prospecta");
+    if(c.actividad>=90&&c.venta!=null&&c.venta<70)
+      out.push("🔁 mucha actividad, poca venta: "+Math.round(c.actividad)+" % actividad y "
+        +Math.round(c.venta)+" % venta. Eficacia, no esfuerzo");
+    if(p.cobros>=5000&&p.vMes&&p.cobros/p.vMes>0.2)
+      out.push("💸 cobra tarde: "+eur(p.cobros)+" vencidos, "+p.nFacV+" facturas");
+    if(p.mg!=null&&p.mgObj&&p.mg<p.mgObj-3)
+      out.push("📉 vende barato: margen "+p.mg.toFixed(1).replace(".",",")+" % con objetivo "
+        +p.mgObj.toFixed(1).replace(".",",")+" %");
+    return out;
+  }
+
   let nCerr=0,nAus=0,totProm=0,totCumpl=0,totRiesgo=0;
+  const notas=[];
   const filas=USUARIOS.map(a=>{
     const c=CIERRES[a.id]||{};
     const info=c.info||{};
@@ -970,15 +1308,67 @@ async function enviarConsolidado(es){
     const cerr=Object.values(R).filter(v=>v&&v.cierra).length;
     totProm+=prom.length; totCumpl+=cumpl; totRiesgo+=riesgo;
     const como=(R.semana||{}).texto||"", prio=(R.prioridad||{}).texto||"";
-    const col=prom.length&&cumpl<prom.length/2?"#C2263D":(riesgo?"#B07908":"#0E7C5A");
-    return `<div style="border-left:3px solid ${col};padding:8px 0 8px 12px;margin-bottom:10px">
-      <div style="font-size:13.5px;font-weight:800">${escH(a.nombre)}</div>
-      <div style="font-size:12px;color:#64748B">${prom.length?cumpl+" de "+prom.length+" compromisos":"sin compromisos"}
-        ${riesgo?" · "+riesgo+" clientes en riesgo":""}${cerr?" · "+cerr+" cerradas":""}</div>
+    const p=PP[a.id], nota=notaDe(a);
+    if(nota!=null) notas.push({nombre:a.nombre,nota:nota,p:p,
+      act:(componentes(a)||{}).actividad,sig:senalesDe(a)});
+    const pV=p&&p.objSem?pcT(p.vSem,p.objSem):null;
+    const col=nota!=null?colT(nota)
+      :(prom.length&&cumpl<prom.length/2?"#C2263D":(riesgo?"#B07908":"#0E7C5A"));
+    return `<div style="border-left:3px solid ${col};padding:8px 0 8px 12px;margin-bottom:11px">
+      <table style="width:100%;border-collapse:collapse"><tr>
+        <td style="vertical-align:top">
+          <div style="font-size:13.5px;font-weight:800">${escH(a.nombre)}</div>
+          <div style="font-size:12px;color:#64748B">${prom.length?cumpl+" de "+prom.length+" compromisos":"sin compromisos"}${riesgo?" · "+riesgo+" en riesgo":""}${cerr?" · "+cerr+" cerradas":""}</div>
+        </td>
+        ${p?`<td style="text-align:right;vertical-align:top;white-space:nowrap">
+          <div style="font-size:14px;font-weight:800">${eur(p.vSem)}</div>
+          ${pV!=null?`<div style="font-size:11px;font-weight:700;color:${colT(pV)}">${pV} % objetivo</div>`:""}
+        </td>`:""}
+      </tr></table>
+      ${p?`<div style="font-size:11.5px;color:#64748B;margin-top:4px">
+        👋 ${p.vis}${objPersona("visitas")?"/"+objPersona("visitas"):""} visitas ·
+        📞 ${p.lla}${objPersona("llamadas")?"/"+objPersona("llamadas"):""} llamadas ·
+        📦 ${p.mEnv} muestras${p.mOk?" ("+p.mOk+" ok)":""}
+        ${p.cobros?` · <span style="color:#C2263D">${eur(p.cobros)} vencido</span>`:""}</div>`:""}
       ${como?`<div style="font-size:12.5px;color:#334155;margin-top:4px">${escH(como)}</div>`:""}
       ${prio?`<div style="font-size:12px;color:#92400E;margin-top:3px">📌 ${escH(prio)}</div>`:""}
     </div>`;
   }).join("");
+
+  // Quien tira y quien falla: mismo formato que el informe de direccion,
+  // para que jefe y CEO miren el mismo numero de la misma persona.
+  const blqRanking=()=>{
+    if(!notas.length) return "";
+    const orden=notas.slice().sort((x,y)=>y.nota-x.nota);
+    const flojos=orden.filter(x=>x.nota<80);
+    const media=Math.round(orden.reduce((t,x)=>t+x.nota,0)/orden.length);
+    const mgs=orden.filter(x=>x.p&&x.p.mg!=null);
+    const mgEq=mgs.length?(mgs.reduce((t,x)=>t+x.p.mg*(x.p.vSem||1),0)
+      /mgs.reduce((t,x)=>t+(x.p.vSem||1),0)):null;
+    const fila=(x,i)=>`<tr>
+      <td style="padding:6px 0;border-top:1px solid #EEF1F5;width:22px;font-size:12px;color:#8A94A0;vertical-align:top">${i===0?"🥇":i+1}</td>
+      <td style="padding:6px 0;border-top:1px solid #EEF1F5;vertical-align:top">
+        <div style="font-size:12.5px;font-weight:${i===0?800:600}">${escH(x.nombre)}</div>
+        <div style="font-size:10.5px;color:#8A94A0">${eur(x.p.vSem)}${x.p.mg!=null?" · mg "+x.p.mg.toFixed(1).replace(".",",")+" %":""}${x.act!=null?" · act. "+Math.round(x.act)+" %":""}</div>
+        ${x.sig.map(t=>`<div style="font-size:11px;color:#7A4E06;margin-top:2px">${escH(t)}</div>`).join("")}</td>
+      <td style="padding:6px 0 6px 10px;border-top:1px solid #EEF1F5;text-align:right;
+        font-size:13px;font-weight:800;color:${colT(x.nota)};white-space:nowrap;vertical-align:top">${x.nota} %</td>
+    </tr>`;
+    return `<h3 style="margin:22px 0 2px;font-size:14px">Quién tira y quién falla</h3>
+      <div style="font-size:11.5px;color:#8A94A0;margin-bottom:8px">Nota = venta 40 · margen 20 · actividad 25 · cobro 15. Y lo que el número solo no dice.</div>
+      <div style="border:1px solid #DCE1E7;border-radius:11px;padding:12px 14px">
+        <table style="width:100%;border-collapse:collapse;margin-bottom:2px"><tr>
+          <td><div style="font-size:13.5px;font-weight:800">${escH(EQUIPO)}</div>
+            <div style="font-size:11px;color:#8A94A0">${escH(miNombre)}${mgEq!=null?" · margen "+mgEq.toFixed(1).replace(".",",")+" %":""}</div></td>
+          <td style="text-align:right;white-space:nowrap">
+            <div style="font-size:15px;font-weight:800;color:${colT(media)}">${media} %</div>
+            <div style="font-size:10.5px;color:#8A94A0">media del equipo</div></td></tr></table>
+        <table style="width:100%;border-collapse:collapse">${orden.map(fila).join("")}</table>
+        <div style="margin-top:8px;font-size:12px;padding:6px 10px;border-radius:8px;
+          background:${flojos.length?"#FEF2F2":"#F0FDF4"};color:${flojos.length?"#C2263D":"#0E7C5A"}">
+          ${flojos.length?"⚠️ Por debajo del 80 %: <b>"+flojos.map(x=>escH(x.nombre)+" ("+x.nota+" %)").join(", ")+"</b>":"✅ Nadie por debajo del 80 %"}</div>
+      </div>`;
+  };
 
   const sube=es.map(o=>{
     const ag=USUARIOS.find(u=>U(u.id)===U(o.agente));
@@ -992,16 +1382,21 @@ async function enviarConsolidado(es){
       <div style="font-size:11px;letter-spacing:.08em;opacity:.7;text-transform:uppercase">
         Cierre de equipo · semana ${SEMANA}</div>
       <div style="font-size:20px;font-weight:800;margin-top:3px">${escH(miNombre)}</div>
-      <div style="font-size:12px;opacity:.75">${escH(EQUIPO)} · ${nCerr} cerrados${nAus?" · "+nAus+" ausentes":""}</div>
+      <div style="font-size:12px;opacity:.75">${escH(EQUIPO)} · ${nCerr} cerrados${nAus?" · "+nAus+(nAus>1?" ausentes":" ausente"):""}</div>
     </div>
     <div style="border:1px solid #DCE1E7;border-top:none;border-radius:0 0 12px 12px;padding:20px">
-      <div style="background:#F7F9FB;border-radius:10px;padding:14px 16px">
-        <div style="font-size:24px;font-weight:800;line-height:1">${totCumpl}
+      ${blqCifras()}
+      <div style="background:#F7F9FB;border-radius:10px;padding:12px 14px;margin-top:4px">
+        <div style="font-size:22px;font-weight:800;line-height:1">${totCumpl}
           <span style="font-size:14px;font-weight:400;color:#6B7684">de ${totProm}</span></div>
         <div style="font-size:12px;color:#6B7684">compromisos del equipo cumplidos
           ${totRiesgo?" · "+totRiesgo+" clientes en riesgo":""}</div>
       </div>
-      ${sube?`<h3 style="margin:20px 0 8px;font-size:14px">Lo que sube (${es.length})</h3>
+      ${blqActividad()}
+      ${blqRanking()}
+      ${blqMuestras()}
+      ${blqCobros()}
+      ${sube?`<h3 style="margin:22px 0 8px;font-size:14px">Lo que sube (${es.length})</h3>
         <ul style="margin:0;padding-left:18px">${sube}</ul>`:""}
       <h3 style="margin:22px 0 8px;font-size:14px">El equipo, uno a uno</h3>
       ${filas}
