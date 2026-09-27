@@ -22482,6 +22482,136 @@ function Embudo({usuario, clientesFB}){
 // calcula EN VIVO del organigrama; los partes entregados quedan como foto.
 // Colección Firebase: partes_departamento · id: {usuarioId}_{año}w{semana}
 // ═══════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
+// (sep 2026) CIERRES COMERCIALES dentro de Partes
+// Los comerciales no entregan parte de departamento: cierran la semana en
+// cierre_semanal.html y queda en "informes". Aqui se ven, semana a semana,
+// con lo que escribieron y su venta y actividad de esa semana.
+// CEO y director ven a todos; un jefe de equipo, a los suyos.
+// ═════════════════════════════════════════════════════════════════
+function CierresComerciales({usuario, ano, sem}){
+  const [datos,setDatos]=useState(null);
+  const [abierto,setAbierto]=useState(null);
+  const rol=String(usuario.rol||"").toLowerCase();
+  const verTodos=rol==="ceo"||rol.indexOf("director")>=0;
+  const miEquipo=String(usuario.equipo||"").toUpperCase();
+  const ROLES=["agente","crm_agente","comercial","vendedor"];
+  const NO_AG=["WIKUK","INTERKEY","FRANCIA","DISTRIBUIDOR"];
+  const up=function(x){return String(x||"").toUpperCase().trim();};
+  const gente=(USUARIOS||[]).filter(function(u){
+    if(!u||u.activo===false||u.duplicadaDe) return false;
+    if(ROLES.indexOf(String(u.rol||"").toLowerCase())<0) return false;
+    return verTodos||(miEquipo&&up(u.equipo)===miEquipo);
+  });
+  const clavesDe=function(u){
+    var c=[u.id,u.grupoAgente,u.catalogoVendedor,u.username];
+    try{ c.push(agenteCanonico(u)); }catch(e){}
+    return c.map(up).filter(function(x,i,a){return x&&NO_AG.indexOf(x)<0&&a.indexOf(x)===i;});
+  };
+  useEffect(function(){
+    var vivo=true; setDatos(null); setAbierto(null);
+    var esActual=(sem===getSemanaISO()&&ano===new Date().getFullYear());
+    Promise.all([
+      fbLeer("informes").catch(function(){return [];}),
+      (typeof fbLeerVisitasRecientes==="function"?fbLeerVisitasRecientes(14):fbLeer("visitas")).catch(function(){return [];}),
+      esActual
+        ? fbLeer("pbi_resumen_agente").catch(function(){return [];})
+        : fetch(FB_BASE+"/pbi_semanas/"+sem,{cache:"no-store"}).then(function(r){return r.ok?r.json():null;})
+            .then(function(j){ var d=j?fromFirestore(j):null; try{ return JSON.parse((d&&d.agentes)||"[]"); }catch(e){ return []; } })
+            .catch(function(){return [];})
+    ]).then(function(res){
+      if(!vivo) return;
+      var inf=(res[0]||[]).filter(function(i){
+        if(Number(i.semana)!==Number(sem)||i.estado==="borrador"||i.tipo==="responsable") return false;
+        var y=Number(i.anio||i.ano)||0;
+        if(!y){ var m=String(i.fechaEnvio||"").match(/(\d{4})/); y=m?Number(m[1]):0; }
+        return !y||y===ano;
+      });
+      setDatos({inf:inf, vis:res[1]||[], ventas:res[2]||[]});
+    });
+    return function(){vivo=false;};
+  },[ano,sem]);
+
+  if(!gente.length) return null;
+  var filas=gente.map(function(u){
+    var cl=clavesDe(u);
+    var inf=datos?datos.inf.find(function(i){return cl.indexOf(up(i.agente))>=0||(i.uid&&i.uid===u.id);}):null;
+    var R={}; try{ R=JSON.parse((inf&&inf.respuestas)||"{}"); }catch(e){}
+    var vis=0,lla=0;
+    if(datos) datos.vis.forEach(function(v){
+      if(v.eliminada||Number(v.semana)!==Number(sem)) return;
+      if(cl.indexOf(up(v.agente))<0) return;
+      if(/llamada|no_contesta/i.test(String(v.resultado||v.tipo||""))) lla++; else vis++;
+    });
+    var vRow=datos?datos.ventas.find(function(a){return cl.indexOf(up(a.id||a._id||a.agente))>=0;}):null;
+    return {u:u, inf:inf, R:R, vis:vis, lla:lla, venta:vRow?Number(vRow.ventasSem||0):null,
+      ausente:!!(inf&&(inf.estado==="ausente"||inf.ausente))};
+  });
+  var porEq={};
+  filas.forEach(function(f){ var e=up(f.u.equipo)||"SIN EQUIPO"; (porEq[e]=porEq[e]||[]).push(f); });
+  var nCerr=filas.filter(function(f){return f.inf&&!f.ausente;}).length;
+  var eur=function(n){return String(Math.round(n||0)).replace(/\B(?=(\d{3})+(?!\d))/g,".")+" €";};
+
+  function detalle(f){
+    var R=f.R;
+    var prom=Object.keys(R).filter(function(k){return k.indexOf("promesa:")===0&&(R[k].accion||R[k].texto);});
+    var cumpl=prom.filter(function(k){return /fue bien|lo hice/i.test(R[k].accion||"");}).length;
+    var riesgo=Object.keys(R).filter(function(k){return k.indexOf("cliente:")===0&&(R[k].accion||R[k].texto);});
+    var cerr=Object.keys(R).filter(function(k){return R[k]&&R[k].cierra;});
+    var como=(R.semana||{}).texto||"", prio=(R.prioridad||{}).texto||"";
+    var item=function(k,col){ var v=R[k]; return <div key={k} style={{borderLeft:"3px solid "+col,padding:"4px 0 4px 10px",marginBottom:6}}>
+      <p style={{margin:0,fontSize:12.5,fontWeight:700,color:T.text}}>{v.nom||k.split(/:(.+)/)[1]}</p>
+      {v.accion&&<p style={{margin:0,fontSize:11.5,color:T.muted}}>{v.accion}</p>}
+      {v.texto&&<p style={{margin:"2px 0 0",fontSize:12,color:"#334155",fontStyle:"italic"}}>“{v.texto}”</p>}
+    </div>; };
+    var h=function(t){return <p style={{margin:"12px 0 6px",fontSize:11,fontWeight:800,color:T.muted,textTransform:"uppercase",letterSpacing:".04em"}}>{t}</p>;};
+    return <div style={{padding:"10px 12px 4px",background:"#F8FAFC",borderRadius:10,marginTop:6}}>
+      <p style={{margin:0,fontSize:11,color:T.muted}}>Cerrado el {f.inf.fechaEnvio?new Date(f.inf.fechaEnvio).toLocaleString("es-ES",{dateStyle:"short",timeStyle:"short"}):"—"}</p>
+      {prom.length>0&&<p style={{margin:"8px 0 0",fontSize:13,fontWeight:800,color:T.text}}>{cumpl} de {prom.length} compromisos del lunes cumplidos</p>}
+      {como&&<>{h("Cómo ha ido")}<p style={{margin:0,fontSize:13,color:"#334155",whiteSpace:"pre-wrap"}}>{como}</p></>}
+      {prom.length>0&&<>{h("Lo que dijo el lunes")}{prom.map(function(k){return item(k,/fue bien|lo hice/i.test(R[k].accion||"")?"#0E7C5A":"#B07908");})}</>}
+      {riesgo.length>0&&<>{h("Clientes en riesgo")}{riesgo.map(function(k){return item(k,"#C2263D");})}</>}
+      {cerr.length>0&&<>{h("Ha cerrado "+cerr.length)}<p style={{margin:0,fontSize:12,color:T.muted}}>{cerr.map(function(k){return (R[k].nom||k)+" ("+(R[k].accion||"")+")";}).join(" · ")}</p></>}
+      {prio&&<div style={{background:"#FFFBEB",border:"1px solid #F59E0B",borderRadius:9,padding:"9px 11px",margin:"12px 0 8px"}}>
+        <p style={{margin:0,fontSize:10.5,fontWeight:800,color:"#92400E",textTransform:"uppercase"}}>Su prioridad · semana {sem>=52?1:sem+1}</p>
+        <p style={{margin:"3px 0 0",fontSize:13,color:T.text}}>{prio}</p></div>}
+      {!como&&!prom.length&&!riesgo.length&&!prio&&<p style={{margin:"8px 0",fontSize:12,color:T.muted}}>Cerró sin escribir nada.</p>}
+    </div>;
+  }
+
+  return <div style={{background:"#fff",border:"1.5px solid "+T.border,borderRadius:12,padding:"12px 13px",marginBottom:16}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:4}}>
+      <p style={{margin:0,fontSize:12.5,fontWeight:800,color:T.text}}>💼 Cierres comerciales · S{sem}</p>
+      <span style={{fontSize:11,fontWeight:700,color:nCerr===filas.length?T.green:T.amber}}>{datos?nCerr+" de "+filas.length+" cerrados":"cargando…"}</span>
+    </div>
+    <p style={{margin:"0 0 8px",fontSize:11,color:T.muted}}>Toca a un comercial para ver su cierre. Cambia de semana arriba para ver semanas pasadas.</p>
+    {Object.keys(porEq).sort().map(function(eq){
+      return <div key={eq} style={{marginBottom:6}}>
+        {Object.keys(porEq).length>1&&<p style={{margin:"8px 0 4px",fontSize:10.5,fontWeight:800,color:T.muted,letterSpacing:".05em"}}>{eq}</p>}
+        {porEq[eq].sort(function(a,b){return String(a.u.nombre).localeCompare(String(b.u.nombre));}).map(function(f){
+          var est=!datos?"…":f.ausente?"🌴":f.inf?"✅":"⏳";
+          var puede=!!f.inf&&!f.ausente;
+          var abiertoYo=abierto===f.u.id;
+          return <div key={f.u.id} style={{borderTop:"1px solid "+T.border,padding:"8px 0"}}>
+            <div onClick={function(){ if(puede) setAbierto(abiertoYo?null:f.u.id); }}
+              style={{display:"flex",alignItems:"center",gap:8,cursor:puede?"pointer":"default"}}>
+              <span style={{fontSize:14}}>{est}</span>
+              <div style={{flex:1,minWidth:0}}>
+                <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{f.u.nombre}</p>
+                <p style={{margin:0,fontSize:11,color:T.muted}}>
+                  {f.venta!=null?eur(f.venta)+" · ":""}👋 {f.vis} visitas · 📞 {f.lla} llamadas
+                  {f.ausente?" · "+(f.inf.ausenteMotivo||"ausente"):!f.inf&&datos?" · sin cerrar":""}</p>
+              </div>
+              {puede&&<span style={{fontSize:12,color:T.muted}}>{abiertoYo?"▲":"▼"}</span>}
+            </div>
+            {abiertoYo&&detalle(f)}
+          </div>;
+        })}
+      </div>;
+    })}
+  </div>;
+}
+
 function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
   const [verHitosDe,setVerHitosDe]=useState(null); // de quien se despliegan los hitos
   const [transPara,setTransPara]=useState("");   // objetivo transversal: a quién
@@ -24510,6 +24640,11 @@ function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
       {tab==="equipo"&&(
         <div>
           {esCeoObj&&cajaTransversal}
+          {(function(){
+            var r=String(usuario.rol||"").toLowerCase();
+            var ve=r==="ceo"||r.indexOf("director")>=0||((r==="jefe"||r==="crm_jefe")&&!usuario.tipologia);
+            return ve?<CierresComerciales usuario={usuario} ano={ano} sem={sem}/>:null;
+          })()}
           {/* (v6.16) Quién falta por cerrar. Hasta que no cierren todos, el
               responsable no puede entregar el suyo. */}
           {equipoPendiente.length>0?(
