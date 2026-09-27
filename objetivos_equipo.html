@@ -470,13 +470,16 @@ async function cargarUsuarios(){
       id:canon, nombre:nombre,
       equipo:U(Agentes.equipo(ficha)||u.equipo||""),
       cod:U(u.grupoAgente||u.catalogoVendedor||canon),
-      alias:Agentes.alias(ficha)
+      alias:Agentes.alias(ficha),
+      // Telefonico o de campo: cambia el objetivo de actividad (zona admin)
+      perfil:String(u.perfilComercial||"").toLowerCase()
     };
     else{
       // Si otra ficha de la misma persona trae mejor nombre o equipo, se usa
       const m=map[canon];
       if(nombre.length>m.nombre.length&&!/^[a-z]+$/.test(nombre)) m.nombre=nombre;
       if(!m.equipo&&u.equipo) m.equipo=U(u.equipo);
+      if(!m.perfil&&u.perfilComercial) m.perfil=String(u.perfilComercial).toLowerCase();
     }
   });
   let l=Object.values(map);
@@ -1029,6 +1032,9 @@ async function datosDelEquipo(){
     p.mg=(r.margenPctSem!=null&&r.margenPctSem!=="")?num(r.margenPctSem):null;
     p.mgObj=num(r.objetivoMargen)||null;
     p.vMes=num(r.ventasMes)||p.mAct;
+    // Politica de cobro: vencido <= 5 % de la venta de los dos ultimos meses cerrados
+    p.v2m=[mNum-1,mNum-2].reduce((t,k)=>t+(k>=1?num(e2["act_"+k]):num(e2["mes_"+(k+12)])),0);
+    p.limite=p.v2m*0.05;
     // Semanas previas: cuantas seguidas por debajo del 50 % de su objetivo
     p.semMal=0;
     for(const ag of semsPrev){
@@ -1090,7 +1096,7 @@ async function datosDelEquipo(){
   }
   T.sinRespuesta=[...new Set(T.sinRespuesta)].slice(0,6);
   T.rechazos=T.rechazos.slice(0,6);
-  return {T,PP,OBJ_ACT};
+  return {T,PP,OBJ_ACT,objEq};
 }
 
 async function enviarConsolidado(es){
@@ -1155,10 +1161,10 @@ async function enviarConsolidado(es){
   const blqActividad=()=>{
     if(!T) return "";
     const fs=[
-      {ic:"👋",l:"Visitas",real:T.vis,obj:OBJ_ACT.visitas},
-      {ic:"📞",l:"Llamadas",real:T.lla,obj:OBJ_ACT.llamadas},
-      {ic:"📦",l:"Muestras env.",real:T.mEnv,obj:OBJ_ACT.muestras},
-      {ic:"✅",l:"Muestras ok",real:T.mOk,obj:OBJ_ACT.muestrasOk},
+      {ic:"👋",l:"Visitas",real:T.vis,obj:objEquipo("visitas")},
+      {ic:"📞",l:"Llamadas",real:T.lla,obj:objEquipo("llamadas")},
+      {ic:"📦",l:"Muestras env.",real:T.mEnv,obj:objEquipo("muestras")},
+      {ic:"✅",l:"Muestras ok",real:T.mOk,obj:objEquipo("muestrasOk")},
     ].filter(f=>f.obj||f.real);
     if(!fs.length) return "";
     const sinObj=fs.some(f=>!f.obj);
@@ -1175,8 +1181,8 @@ async function enviarConsolidado(es){
             </td></tr>`;}).join("")}
       </table>
       <div style="font-size:11.5px;color:#8A94A0;margin-top:5px">
-        ${sinObj?"Falta fijar el objetivo mensual del equipo en la Sala de Mandos."
-                :"Objetivo mensual del equipo repartido por semanas."}</div>`;
+        ${sinObj?"Falta fijar el objetivo en Administración → 🎯 Objetivos."
+                :"Objetivo de cada comercial (Administración → 🎯 Objetivos) llevado a la semana."}</div>`;
   };
 
   const blqMuestras=()=>{
@@ -1226,7 +1232,16 @@ async function enviarConsolidado(es){
       <td style="padding:6px 8px;width:70%">${barra(v,tot,c)}</td>
       <td style="padding:6px 0;text-align:right;font-size:12.5px;font-weight:800;white-space:nowrap">${eur(v)}</td>
     </tr>`;
-    return `<h3 style="margin:22px 0 4px;font-size:14px">Cobros pendientes</h3>
+    const lim=Object.values(PP).reduce((t,p)=>t+(p.limite||0),0);
+    const fuera=USUARIOS.map(a=>({a,p:PP[a.id]})).filter(x=>x.p&&x.p.limite&&x.p.cobros>x.p.limite)
+      .sort((x,y)=>y.p.cobros/y.p.limite-x.p.cobros/x.p.limite);
+    const pol=lim?`<div style="margin:8px 0 10px;padding:9px 12px;border-radius:9px;
+        background:${T.cobros<=lim?"#F0FDF4":"#FEF2F2"};color:${T.cobros<=lim?"#0E7C5A":"#C2263D"};font-size:12.5px">
+        <b>${T.cobros<=lim?"✅ Equipo dentro de política":"⚠️ Equipo fuera de política"}</b> ·
+        ${Math.round(T.cobros/lim*100)} % de lo permitido (${eur(lim)}, 5 % de la venta de dos meses)
+        ${fuera.length?`<div style="margin-top:4px;color:#334155">Fuera: ${fuera.map(x=>escH(x.a.nombre)+" "+Math.round(x.p.cobros/x.p.limite*100)+" %").join(" · ")}</div>`:""}
+      </div>`:"";
+    return `<h3 style="margin:22px 0 4px;font-size:14px">Cobros pendientes</h3>${pol}
       <div style="font-size:11.5px;color:#8A94A0;margin-bottom:6px">${eur(tot)} vencidos ·
         ${T.nFacV} facturas${T.peor.imp?` · la mayor: ${escH(T.peor.cli)} ${eur(T.peor.imp)} (${T.peor.dias} días)`:""}</div>
       <table style="width:100%;border-collapse:collapse">
@@ -1241,7 +1256,23 @@ async function enviarConsolidado(es){
     const i=(CIERRES[a.id]||{}).info||{};
     return !(i.estado==="ausente"||(CIERRES[a.id]||{}).ausente);
   }).length||1;
-  const objPersona=(k)=>Math.max(0,Math.round((OBJ_ACT[k]||0)/activos));
+  // (sep 2026) El objetivo se fija ahora por comercial y mes en la zona admin
+  // (🎯 Objetivos), con un perfil para WIKUK, otro para Key Account y otro
+  // para telefonicos. Si un equipo aun tiene el objetivo antiguo, del equipo
+  // entero, se sigue repartiendo entre los que trabajan.
+  const OBJEQ=(D&&D.objEq)||[];
+  const docPerfil=(clave)=>OBJEQ.find(o=>U(o.equipo)===clave&&(o.porPersona===true||o.porPersona==="true"))||null;
+  function objPersonaDe(a,k){
+    const d=(a&&a.perfil==="telefonico"&&docPerfil("TELEFONICO"))||docPerfil(U(a&&a.equipo)||EQUIPO)||docPerfil(EQUIPO);
+    if(d){ const m=Number(d[k]||0); return m?Math.max(1,Math.round(m*7/30)):0; }
+    return Math.max(0,Math.round((OBJ_ACT[k]||0)/activos));
+  }
+  // Objetivo del equipo esta semana: la suma de los de quienes trabajan
+  function objEquipo(k){
+    return USUARIOS.filter(a=>{ const i=(CIERRES[a.id]||{}).info||{};
+      return !(i.estado==="ausente"||(CIERRES[a.id]||{}).ausente); })
+      .reduce((t,a)=>t+objPersonaDe(a,k),0);
+  }
 
   // Nota de cada uno, ponderada como la mira un controller: lo que vende
   // pesa mas que lo que se mueve, y lo que no se cobra no es venta.
@@ -1255,11 +1286,13 @@ async function enviarConsolidado(es){
     if(p.objSem) c.venta=tope(p.vSem/p.objSem*100);
     if(p.mg!=null&&p.mgObj) c.margen=tope(p.mg/p.mgObj*100);
     const act=[];
-    if(objPersona("visitas")) act.push(tope(p.vis/objPersona("visitas")*100));
-    if(objPersona("llamadas")) act.push(tope(p.lla/objPersona("llamadas")*100));
+    if(objPersonaDe(a,"visitas")) act.push(tope(p.vis/objPersonaDe(a,"visitas")*100));
+    if(objPersonaDe(a,"llamadas")) act.push(tope(p.lla/objPersonaDe(a,"llamadas")*100));
     if(act.length) c.actividad=act.reduce((x,y)=>x+y,0)/act.length;
     // Cobro: 100 si no debe nada; resta lo que pesa el vencido sobre su venta del mes
-    if(p.vMes||p.cobros) c.cobro=tope(100-(p.vMes?p.cobros/p.vMes*100:100));
+    // Cobro: 100 si esta dentro de politica; si no, lo que le cabe entre lo que debe
+    if(p.limite) c.cobro=p.cobros<=p.limite?100:tope(p.limite/p.cobros*100);
+    else if(p.vMes||p.cobros) c.cobro=tope(100-(p.vMes?p.cobros/p.vMes*100:100));
     return c;
   }
   const PESOS={venta:40,margen:20,actividad:25,cobro:15};
@@ -1281,7 +1314,10 @@ async function enviarConsolidado(es){
     if(c.actividad>=90&&c.venta!=null&&c.venta<70)
       out.push("🔁 mucha actividad, poca venta: "+Math.round(c.actividad)+" % actividad y "
         +Math.round(c.venta)+" % venta. Eficacia, no esfuerzo");
-    if(p.cobros>=5000&&p.vMes&&p.cobros/p.vMes>0.2)
+    if(p.limite&&p.cobros>p.limite)
+      out.push("💸 fuera de política de cobro: "+eur(p.cobros)+" vencidos, "+Math.round(p.cobros/p.limite*100)
+        +" % de lo permitido ("+eur(p.limite)+")");
+    else if(!p.limite&&p.cobros>=5000&&p.vMes&&p.cobros/p.vMes>0.2)
       out.push("💸 cobra tarde: "+eur(p.cobros)+" vencidos, "+p.nFacV+" facturas");
     if(p.mg!=null&&p.mgObj&&p.mg<p.mgObj-3)
       out.push("📉 vende barato: margen "+p.mg.toFixed(1).replace(".",",")+" % con objetivo "
@@ -1326,10 +1362,10 @@ async function enviarConsolidado(es){
         </td>`:""}
       </tr></table>
       ${p?`<div style="font-size:11.5px;color:#64748B;margin-top:4px">
-        👋 ${p.vis}${objPersona("visitas")?"/"+objPersona("visitas"):""} visitas ·
-        📞 ${p.lla}${objPersona("llamadas")?"/"+objPersona("llamadas"):""} llamadas ·
+        👋 ${p.vis}${objPersonaDe(a,"visitas")?"/"+objPersonaDe(a,"visitas"):""} visitas ·
+        📞 ${p.lla}${objPersonaDe(a,"llamadas")?"/"+objPersonaDe(a,"llamadas"):""} llamadas ·
         📦 ${p.mEnv} muestras${p.mOk?" ("+p.mOk+" ok)":""}
-        ${p.cobros?` · <span style="color:#C2263D">${eur(p.cobros)} vencido</span>`:""}</div>`:""}
+        ${p.cobros?` · <span style="color:${p.limite&&p.cobros<=p.limite?"#0E7C5A":"#C2263D"}">${eur(p.cobros)} vencido${p.limite?" ("+Math.round(p.cobros/p.limite*100)+" % del permitido)":""}</span>`:""}</div>`:""}
       ${como?`<div style="font-size:12.5px;color:#334155;margin-top:4px">${escH(como)}</div>`:""}
       ${prio?`<div style="font-size:12px;color:#92400E;margin-top:3px">📌 ${escH(prio)}</div>`:""}
     </div>`;
