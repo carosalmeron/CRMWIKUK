@@ -22553,7 +22553,14 @@ function CierresComerciales({usuario, ano, sem:semSel}){
     var vivo=true; setDatos(null); setAbierto(null);
     var esActual=(sem===getSemanaISO()&&ano===new Date().getFullYear());
     Promise.all([
-      fbLeer("informes").catch(function(){return [];}),
+      // Consulta directa y sin cache: quien acaba de cerrar tiene que salir ya
+      fetch(FB_BASE+":runQuery",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({structuredQuery:{from:[{collectionId:"informes"}],
+          where:{fieldFilter:{field:{fieldPath:"semana"},op:"EQUAL",value:{integerValue:String(sem)}}}}})})
+        .then(function(r){return r.ok?r.json():[];})
+        .then(function(rows){ return (rows||[]).filter(function(x){return x.document;})
+          .map(function(x){ var d=fromFirestore(x.document)||{}; if(!d.id) d.id=decodeURIComponent(x.document.name.split("/").pop()); return d; }); })
+        .catch(function(){ return fbLeer("informes").catch(function(){return [];}); }),
       fbLeer("agentes_alias").catch(function(){return [];}),
       (typeof fbLeerVisitasRecientes==="function"?fbLeerVisitasRecientes(14):fbLeer("visitas")).catch(function(){return [];}),
       esActual
@@ -22681,6 +22688,30 @@ function CierresComerciales({usuario, ano, sem:semSel}){
     </div>;
   }
 
+  // Cierres entregados que no casan con ninguna persona de la lista (ficha
+  // sin equipo, solo cuenta de portal, codigo nuevo...). Antes desaparecian:
+  // un cierre entregado tiene que verse siempre.
+  if(datos){
+    var usados={}; filas.forEach(function(f){ if(f.inf) usados[f.inf.id||f.inf.agente]=1; });
+    var PUx=(window._portalUsersDB||[]);
+    datos.inf.forEach(function(i){
+      if(usados[i.id||i.agente]) return;
+      var ag=up(i.agente), al=datos.alias&&datos.alias[ag];
+      var buscar=function(lista){ return (lista||[]).find(function(x){
+        return [x.id,x.crmId,x.username,x.catalogoVendedor,x.grupoAgente].map(up).indexOf(ag)>=0
+          ||(i.uid&&[x.id,x.crmId].map(up).indexOf(up(i.uid))>=0); }); };
+      var p=buscar(USUARIOS)||buscar(PUx);
+      var eq=up((al&&al.equipo)||(p&&p.equipo)||"");
+      if(eq&&!/^(WIKUK|INTERKEY|KEY ?ACCOUNT)/.test(eq)) return;
+      if(!verTodos&&eq!==miEquipo) return;
+      var nom=(p&&p.nombre)||(al&&al.nombre)||i.agenteNombre||i.agente;
+      if(esCanal(nom)) return;
+      var R2={}; try{ R2=JSON.parse(i.respuestas||"{}"); }catch(e){}
+      filas.push({u:{id:"inf_"+ag,nombre:nom,equipo:eq||"—"},inf:i,R:R2,vis:0,lla:0,venta:null,
+        ausente:i.estado==="ausente"||!!i.ausente});
+    });
+    nCerr=filas.filter(function(f){return f.inf&&!f.ausente;}).length;
+  }
   var cerrados=filas.filter(function(f){return f.inf&&!f.ausente;})
     .sort(function(a,b){return String(b.inf.fechaEnvio||"").localeCompare(String(a.inf.fechaEnvio||""));});
   var ausentes=filas.filter(function(f){return f.ausente;});
