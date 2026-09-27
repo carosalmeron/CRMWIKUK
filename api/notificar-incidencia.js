@@ -843,10 +843,12 @@ async function datosCEO(anio,sem){
     if(esCanal(nombre)||esCanal(canon)||esCanal(u.catalogoVendedor)) return;
     if(/^u_\d+$/i.test(String(nombre))) return;
     if(!map[canon]) map[canon]={id:canon,nombre,equipo:UC(A.equipo(ficha)||u.equipo||""),
-      cod:UC(u.grupoAgente||u.catalogoVendedor||canon)};
+      cod:UC(u.grupoAgente||u.catalogoVendedor||canon),
+      perfil:String(u.perfilComercial||"").toLowerCase()};
     else{ const m=map[canon];
       if(nombre.length>m.nombre.length&&!/^[a-z]+$/.test(nombre)) m.nombre=nombre;
-      if(!m.equipo&&u.equipo) m.equipo=UC(u.equipo); }
+      if(!m.equipo&&u.equipo) m.equipo=UC(u.equipo);
+      if(!m.perfil&&u.perfilComercial) m.perfil=String(u.perfilComercial).toLowerCase(); }
   });
   const gente=Object.values(map).filter(g=>g.equipo);
 
@@ -889,6 +891,9 @@ async function datosCEO(anio,sem){
     p.mg=(r.margenPctSem!=null&&r.margenPctSem!=="")?numC(r.margenPctSem):null;
     p.mgObj=numC(r.objetivoMargen)||null;
     p.vMes=numC(r.ventasMes)||p.mAct;
+    // Politica de cobro: vencido <= 5 % de la venta de los dos ultimos meses cerrados
+    p.v2m=[mNum-1,mNum-2].reduce((t,k)=>t+(k>=1?numC(e2["act_"+k]):numC(e2["mes_"+(k+12)])),0);
+    p.limite=p.v2m*0.05;
     for(const ag of semsPrev){
       const f=ag.find(x=>A.mismo(x.id||x.agente,g.cod)||A.mismo(x.id||x.agente,g.id));
       if(f&&p.objSem&&numC(f.ventasSem)<p.objSem*0.5) p.semMal++; else break;
@@ -929,13 +934,21 @@ async function datosCEO(anio,sem){
   }
 
   // Objetivos de actividad por equipo (mensual -> semana -> por cabeza)
+  // (sep 2026) Objetivo por comercial y mes desde Administracion -> Objetivos
+  // (WIKUK, Key Account, Telefonicos). Si el equipo aun tiene el antiguo, del
+  // equipo entero, se reparte entre los que trabajan.
+  const docPP=clave=>objEq.find(o=>UC(o.equipo)===clave&&(o.porPersona===true||o.porPersona==="true"));
   for(const E of Object.values(equipos)){
     const oe=objEq.find(o=>UC(o.equipo)===E.eq)||objEq.find(o=>UC(o.equipo)==="TODOS")||{};
-    const semO=k=>Math.max(0,Math.round(numC(oe[k])*7/30));
-    E.obj={visitas:semO("visitas"),llamadas:semO("llamadas"),muestras:semO("muestras"),muestrasOk:semO("muestrasOk")};
-    G.objVis+=E.obj.visitas; G.objLla+=E.obj.llamadas; G.objMue+=E.obj.muestras; G.objMueOk+=E.obj.muestrasOk;
     const activos=E.gente.filter(x=>!x.ausente).length||1;
-    const porCabeza=k=>Math.max(0,Math.round(E.obj[k]/activos));
+    const porCabezaDe=(p,k)=>{
+      const d=(p.perfil==="telefonico"&&docPP("TELEFONICO"))||docPP(E.eq);
+      if(d){ const m=numC(d[k]); return m?Math.max(1,Math.round(m*7/30)):0; }
+      return Math.max(0,Math.round(numC(oe[k])*7/30/activos));
+    };
+    const suma=k=>E.gente.filter(x=>!x.ausente).reduce((t,p)=>t+porCabezaDe(p,k),0);
+    E.obj={visitas:suma("visitas"),llamadas:suma("llamadas"),muestras:suma("muestras"),muestrasOk:suma("muestrasOk")};
+    G.objVis+=E.obj.visitas; G.objLla+=E.obj.llamadas; G.objMue+=E.obj.muestras; G.objMueOk+=E.obj.muestrasOk;
     const tope=x=>Math.max(0,Math.min(150,x));
     let mgS=0,mgP=0;
     E.gente.forEach(p=>{
@@ -944,22 +957,26 @@ async function datosCEO(anio,sem){
       if(p.objSem) c.venta=tope(p.vSem/p.objSem*100);
       if(p.mg!=null&&p.mgObj) c.margen=tope(p.mg/p.mgObj*100);
       const act=[];
-      if(porCabeza("visitas")) act.push(tope(p.vis/porCabeza("visitas")*100));
-      if(porCabeza("llamadas")) act.push(tope(p.lla/porCabeza("llamadas")*100));
+      if(porCabezaDe(p,"visitas")) act.push(tope(p.vis/porCabezaDe(p,"visitas")*100));
+      if(porCabezaDe(p,"llamadas")) act.push(tope(p.lla/porCabezaDe(p,"llamadas")*100));
       if(act.length) c.actividad=act.reduce((a,b)=>a+b,0)/act.length;
-      if(p.vMes||p.cobros) c.cobro=tope(100-(p.vMes?p.cobros/p.vMes*100:100));
+      if(p.limite) c.cobro=p.cobros<=p.limite?100:tope(p.limite/p.cobros*100);
+      else if(p.vMes||p.cobros) c.cobro=tope(100-(p.vMes?p.cobros/p.vMes*100:100));
       let s=0,w=0; for(const k in CEO_PESOS) if(c[k]!=null){ s+=c[k]*CEO_PESOS[k]; w+=CEO_PESOS[k]; }
       p.nota=w?Math.round(s/w):null; p.c=c;
       const sig=[];
       if(p.semMal>=2) sig.push("🔻 "+(p.semMal+1)+"ª semana seguida por debajo del 50 %");
       if(c.venta>=95&&c.actividad!=null&&c.actividad<75) sig.push("🏛 vende sin moverse: "+Math.round(c.venta)+" % venta con "+Math.round(c.actividad)+" % actividad. Cartera heredada, no prospecta");
       if(c.actividad>=90&&c.venta!=null&&c.venta<70) sig.push("🔁 mucha actividad, poca venta: "+Math.round(c.actividad)+" % actividad y "+Math.round(c.venta)+" % venta. Eficacia, no esfuerzo");
-      if(p.cobros>=5000&&p.vMes&&p.cobros/p.vMes>0.2) sig.push("💸 cobra tarde: "+eurC(p.cobros)+" vencidos, "+p.nFacV+" facturas");
+      if(p.limite&&p.cobros>p.limite) sig.push("💸 fuera de política de cobro: "+eurC(p.cobros)+" vencidos, "+Math.round(p.cobros/p.limite*100)+" % de lo permitido ("+eurC(p.limite)+")");
+      else if(!p.limite&&p.cobros>=5000&&p.vMes&&p.cobros/p.vMes>0.2) sig.push("💸 cobra tarde: "+eurC(p.cobros)+" vencidos, "+p.nFacV+" facturas");
       if(p.mg!=null&&p.mgObj&&p.mg<p.mgObj-3) sig.push("📉 vende barato: margen "+decC(p.mg)+" % con objetivo "+decC(p.mgObj)+" %");
       p.sig=sig;
       if(p.mg!=null){ mgS+=p.mg*(p.vSem||1); mgP+=(p.vSem||1); }
     });
     E.mg=mgP?mgS/mgP:null;
+    E.limite=E.gente.filter(x=>!x.ausente).reduce((t,p)=>t+(p.limite||0),0);
+    G.limite=(G.limite||0)+E.limite;
     const conN=E.gente.filter(x=>x.nota!=null);
     E.media=conN.length?Math.round(conN.reduce((a,x)=>a+x.nota,0)/conN.length):null;
   }
@@ -1001,12 +1018,14 @@ function htmlCEO(D){
         <div style="font-size:11px;color:#8A94A0">👋 ${E.vis}/${E.obj.visitas} · 📞 ${E.lla}/${E.obj.llamadas} · 📦 ${E.mEnv} muestras (${E.mOk} ok, ${E.mKo} ko)</div></td>
       <td style="padding:9px 0;border-top:1px solid #EEF1F5;text-align:right;vertical-align:top"><div style="font-weight:800">${eurC(E.vSem)}</div>${ps!=null?`<div style="font-size:11px;font-weight:700;color:${col(ps)}">${ps} %</div>`:""}</td>
       <td style="padding:9px 0;border-top:1px solid #EEF1F5;text-align:right;vertical-align:top"><div style="font-weight:800">${eurC(E.mAct)}</div>${pm!=null?`<div style="font-size:11px;font-weight:700;color:${col(pm)}">${pm} %</div>`:""}</td>
-      <td style="padding:9px 0;border-top:1px solid #EEF1F5;text-align:right;vertical-align:top;font-weight:800;color:#C2263D">${eurC(E.cobros)}</td></tr>`;}).join("")}
+      <td style="padding:9px 0;border-top:1px solid #EEF1F5;text-align:right;vertical-align:top">
+        <div style="font-weight:800;color:${E.limite&&E.cobros<=E.limite?"#0E7C5A":"#C2263D"}">${eurC(E.cobros)}</div>
+        ${E.limite?`<div style="font-size:11px;font-weight:700;color:${E.cobros<=E.limite?"#0E7C5A":"#C2263D"}">${Math.round(E.cobros/E.limite*100)} % perm.</div>`:""}</td></tr>`;}).join("")}
   </table>`;
 
   const act=[["👋 Visitas",G.vis,G.objVis],["📞 Llamadas",G.lla,G.objLla],["📦 Muestras env.",G.mEnv,G.objMue],["✅ Muestras ok",G.mOk,G.objMueOk]]
     .filter(x=>x[1]||x[2]);
-  const actividad=act.length?h3("Actividad comercial","Suma de los equipos contra el objetivo mensual repartido por semanas.")+
+  const actividad=act.length?h3("Actividad comercial","Suma de los objetivos de cada comercial (Administración → 🎯 Objetivos) llevados a la semana.")+
     `<table style="width:100%;border-collapse:collapse">${act.map(([l,r,o])=>{ const p=pc(r,o),c=col(p); return `<tr>
       <td style="padding:7px 0;font-size:12.5px;white-space:nowrap">${l}</td><td style="padding:7px 8px;width:60%">${barra(r,o,c)}</td>
       <td style="padding:7px 0;text-align:right;white-space:nowrap"><b>${r}</b>${o?`<span style="font-size:11.5px;color:#8A94A0">/${o}</span> <span style="font-size:11.5px;font-weight:700;color:${c}">${p} %</span>`:""}</td></tr>`;}).join("")}</table>`:"";
@@ -1043,7 +1062,12 @@ function htmlCEO(D){
     ${G.sinResp.length?`<div style="margin-top:6px;font-size:12px;color:#B07908">⏳ Sin respuesta hace más de 3 semanas: ${G.sinResp.map(e).join(" · ")}</div>`:""}`:"";
 
   const totC=G.t30+G.t60+G.t90+G.t90mas;
-  const cobros=totC?h3("Cobros pendientes",`${eurC(totC)} vencidos · ${G.nFacV} facturas`)+
+  const fueraPol=equipos.flatMap(E=>E.gente.filter(p=>!p.ausente&&p.limite&&p.cobros>p.limite).map(p=>({p,eq:E.eq})))
+    .sort((a,b)=>b.p.cobros/b.p.limite-a.p.cobros/a.p.limite);
+  const polC=G.limite?`<div style="margin:0 0 10px;padding:9px 12px;border-radius:9px;background:${G.cobros<=G.limite?"#F0FDF4":"#FEF2F2"};color:${G.cobros<=G.limite?"#0E7C5A":"#C2263D"};font-size:12.5px">
+      <b>${G.cobros<=G.limite?"✅ Dentro de política":"⚠️ Fuera de política"}</b> · ${Math.round(G.cobros/G.limite*100)} % de lo permitido (${eurC(G.limite)}, 5 % de la venta de dos meses)
+      ${fueraPol.length?`<div style="margin-top:4px;color:#334155">Fuera (${fueraPol.length}): ${fueraPol.map(x=>e(x.p.nombre)+" "+Math.round(x.p.cobros/x.p.limite*100)+" %").join(" · ")}</div>`:""}</div>`:"";
+  const cobros=totC?h3("Cobros pendientes",`${eurC(totC)} vencidos · ${G.nFacV} facturas`)+polC+
     `<table style="width:100%;border-collapse:collapse">${[["1–30 d",G.t30,"#B07908"],["31–60 d",G.t60,"#E0803C"],["61–90 d",G.t90,"#C2263D"],["+90 d",G.t90mas,"#8B1230"]].map(([l,v,c])=>`<tr><td style="padding:6px 0;font-size:12.5px;white-space:nowrap">${l}</td><td style="padding:6px 8px;width:70%">${barra(v,totC,c)}</td><td style="padding:6px 0;text-align:right;font-size:12.5px;font-weight:800;white-space:nowrap">${eurC(v)}</td></tr>`).join("")}</table>
     ${G.peor.length?`<div style="font-size:12px;color:#3A424E;margin-top:6px">Las mayores: ${G.peor.slice(0,3).map(x=>`${e(x.cli)} ${eurC(x.im)} (${x.dias} d, ${e(x.quien)})`).join(" · ")}</div>`:""}`:"";
 
@@ -1051,6 +1075,7 @@ function htmlCEO(D){
 
   const aten=[];
   if(flojosTot.length) aten.push(["#C2263D",`${flojosTot.length} comercial${flojosTot.length>1?"es":""} por debajo del 80 %`,flojosTot.map(x=>x.nombre+" ("+x.nota+" %)").join(" · ")]);
+  if(fueraPol.length) aten.push(["#C2263D",`${fueraPol.length} fuera de la política de cobro (5 % de dos meses)`,fueraPol.map(x=>x.p.nombre+" "+Math.round(x.p.cobros/x.p.limite*100)+" %").join(" · ")]);
   if(G.t90mas) aten.push(["#C2263D",`${eurC(G.t90mas)} vencidos a más de 90 días`,"Ya no es un retraso: es riesgo de impago."]);
   if(sinC.length) aten.push(["#94A3B8",`${sinC.length} sin cerrar la semana`,sinC.join(" · ")]);
   const atencion=aten.length?h3("Lo que pide atención")+aten.map(([c,t,s])=>`<div style="border-left:3px solid ${c};padding:7px 0 7px 12px;margin-bottom:9px"><div style="font-size:13.5px;font-weight:700">${e(t)}</div><div style="font-size:12px;color:#64748B">${e(s)}</div></div>`).join(""):"";
