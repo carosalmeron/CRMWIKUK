@@ -22524,12 +22524,15 @@ function CierresComerciales({usuario, ano, sem:semSel}){
       return [p.id,p.crmId,p.username,p.catalogoVendedor,p.grupoAgente].map(up).some(function(x){return x&&k.indexOf(x)>=0;});
     });
   };
-  const gente=(USUARIOS||[]).filter(function(u){
+  var gente=(USUARIOS||[]).filter(function(u){
     if(!u||u.activo===false||u.duplicadaDe) return false;
     if(ROLES.indexOf(String(u.rol||"").toLowerCase())<0) return false;
     if(!u.nombre||esCanal(u.nombre)||esCanal(u.id)||esCanal(u.catalogoVendedor)) return false;
     if(!tieneCuenta(u)) return false;
-    return verTodos||(miEquipo&&up(u.equipo)===miEquipo);
+    // Solo los equipos que cierran semana en el CRM: WIKUK e INTERKEY (key account)
+    var eq=up(u.equipo);
+    if(!/^(WIKUK|INTERKEY|KEY ?ACCOUNT)/.test(eq)) return false;
+    return verTodos||(miEquipo&&eq===miEquipo);
   });
   const clavesDe=function(u){
     var c=[u.id,u.grupoAgente,u.catalogoVendedor,u.username];
@@ -22541,6 +22544,7 @@ function CierresComerciales({usuario, ano, sem:semSel}){
     var esActual=(sem===getSemanaISO()&&ano===new Date().getFullYear());
     Promise.all([
       fbLeer("informes").catch(function(){return [];}),
+      fbLeer("agentes_alias").catch(function(){return [];}),
       (typeof fbLeerVisitasRecientes==="function"?fbLeerVisitasRecientes(14):fbLeer("visitas")).catch(function(){return [];}),
       esActual
         ? fbLeer("pbi_resumen_agente").catch(function(){return [];})
@@ -22555,15 +22559,30 @@ function CierresComerciales({usuario, ano, sem:semSel}){
         if(!y){ var m=String(i.fechaEnvio||"").match(/(\d{4})/); y=m?Number(m[1]):0; }
         return !y||y===ano;
       });
-      setDatos({inf:inf, vis:res[1]||[], ventas:res[2]||[]});
+      var AL={};
+      (res[1]||[]).forEach(function(x){ var k=up(x.alias||x.id||x._id); if(k&&x.canonico) AL[k]=x; });
+      setDatos({inf:inf, alias:AL, vis:res[2]||[], ventas:res[3]||[]});
     });
     return function(){vivo=false;};
   },[ano,sem]);
 
+  // La misma persona sale con varios codigos (AZARCO, ik4, Antonio): se
+  // resuelve con agentes_alias, igual que el resto de pantallas.
+  var canon=function(x){ var a=datos&&datos.alias&&datos.alias[up(x)]; return a?up(a.canonico):""; };
+  var canonDe=function(u){ var c=clavesDe(u); for(var i=0;i<c.length;i++){ var k=canon(c[i]); if(k) return k; } return up(u.id); };
+  // Una fila por persona real
+  if(datos){
+    var vistos={};
+    gente=gente.filter(function(u){ var k=canonDe(u); if(vistos[k]) return false; vistos[k]=1; return true; });
+  }
   if(!gente.length) return null;
   var filas=gente.map(function(u){
     var cl=clavesDe(u);
-    var inf=datos?datos.inf.find(function(i){return cl.indexOf(up(i.agente))>=0||(i.uid&&i.uid===u.id);}):null;
+    var cu=datos?canonDe(u):"";
+    var inf=datos?datos.inf.find(function(i){
+      return cl.indexOf(up(i.agente))>=0||(i.uid&&up(i.uid)===up(u.id))
+        ||(cu&&(canon(i.agente)===cu||canon(i.uid)===cu));
+    }):null;
     var R={}; try{ R=JSON.parse((inf&&inf.respuestas)||"{}"); }catch(e){}
     var vis=0,lla=0;
     if(datos) datos.vis.forEach(function(v){
@@ -22580,31 +22599,42 @@ function CierresComerciales({usuario, ano, sem:semSel}){
   var nCerr=filas.filter(function(f){return f.inf&&!f.ausente;}).length;
   var eur=function(n){return String(Math.round(n||0)).replace(/\B(?=(\d{3})+(?!\d))/g,".")+" €";};
 
-  function detalle(f){
-    var R=f.R;
+  // El parte en pantalla con el formato del correo. Los cierres nuevos llevan
+  // el correo guardado (htmlEmail); los anteriores se rehacen con la misma
+  // plantilla a partir de lo que escribio el comercial.
+  function htmlDesde(f){
+    var R=f.R, esc=function(t){return String(t||"").replace(/[<>&]/g,function(c){return {"<":"&lt;",">":"&gt;","&":"&amp;"}[c];});};
     var prom=Object.keys(R).filter(function(k){return k.indexOf("promesa:")===0&&(R[k].accion||R[k].texto);});
     var cumpl=prom.filter(function(k){return /fue bien|lo hice/i.test(R[k].accion||"");}).length;
     var riesgo=Object.keys(R).filter(function(k){return k.indexOf("cliente:")===0&&(R[k].accion||R[k].texto);});
     var cerr=Object.keys(R).filter(function(k){return R[k]&&R[k].cierra;});
     var como=(R.semana||{}).texto||"", prio=(R.prioridad||{}).texto||"";
-    var item=function(k,col){ var v=R[k]; return <div key={k} style={{borderLeft:"3px solid "+col,padding:"4px 0 4px 10px",marginBottom:6}}>
-      <p style={{margin:0,fontSize:12.5,fontWeight:700,color:T.text}}>{v.nom||k.split(/:(.+)/)[1]}</p>
-      {v.accion&&<p style={{margin:0,fontSize:11.5,color:T.muted}}>{v.accion}</p>}
-      {v.texto&&<p style={{margin:"2px 0 0",fontSize:12,color:"#334155",fontStyle:"italic"}}>“{v.texto}”</p>}
-    </div>; };
-    var h=function(t){return <p style={{margin:"12px 0 6px",fontSize:11,fontWeight:800,color:T.muted,textTransform:"uppercase",letterSpacing:".04em"}}>{t}</p>;};
-    return <div style={{padding:"10px 12px 4px",background:"#F8FAFC",borderRadius:10,marginTop:6}}>
-      <p style={{margin:0,fontSize:11,color:T.muted}}>Cerrado el {f.inf.fechaEnvio?new Date(f.inf.fechaEnvio).toLocaleString("es-ES",{dateStyle:"short",timeStyle:"short"}):"—"}</p>
-      {prom.length>0&&<p style={{margin:"8px 0 0",fontSize:13,fontWeight:800,color:T.text}}>{cumpl} de {prom.length} compromisos del lunes cumplidos</p>}
-      {como&&<>{h("Cómo ha ido")}<p style={{margin:0,fontSize:13,color:"#334155",whiteSpace:"pre-wrap"}}>{como}</p></>}
-      {prom.length>0&&<>{h("Lo que dijo el lunes")}{prom.map(function(k){return item(k,/fue bien|lo hice/i.test(R[k].accion||"")?"#0E7C5A":"#B07908");})}</>}
-      {riesgo.length>0&&<>{h("Clientes en riesgo")}{riesgo.map(function(k){return item(k,"#C2263D");})}</>}
-      {cerr.length>0&&<>{h("Ha cerrado "+cerr.length)}<p style={{margin:0,fontSize:12,color:T.muted}}>{cerr.map(function(k){return (R[k].nom||k)+" ("+(R[k].accion||"")+")";}).join(" · ")}</p></>}
-      {prio&&<div style={{background:"#FFFBEB",border:"1px solid #F59E0B",borderRadius:9,padding:"9px 11px",margin:"12px 0 8px"}}>
-        <p style={{margin:0,fontSize:10.5,fontWeight:800,color:"#92400E",textTransform:"uppercase"}}>Su prioridad · semana {sem>=52?1:sem+1}</p>
-        <p style={{margin:"3px 0 0",fontSize:13,color:T.text}}>{prio}</p></div>}
-      {!como&&!prom.length&&!riesgo.length&&!prio&&<p style={{margin:"8px 0",fontSize:12,color:T.muted}}>Cerró sin escribir nada.</p>}
-    </div>;
+    var nom=function(k){return esc(R[k].nom||k.split(/:(.+)/)[1]);};
+    var item=function(k,col){ var v=R[k]; return '<div style="border-left:3px solid '+col+';padding:5px 0 5px 11px;margin-bottom:9px">'
+      +'<div style="font-size:13.5px;font-weight:700">'+nom(k)+'</div>'
+      +(v.accion?'<div style="font-size:12px;color:#6B7684">'+esc(v.accion)+'</div>':'')
+      +(v.texto?'<div style="font-size:12.5px;color:#3A424E;margin-top:3px;font-style:italic">“'+esc(v.texto)+'”</div>':'')+'</div>'; };
+    var h3=function(t){return '<h3 style="margin:20px 0 7px;font-size:14px;color:#14181F">'+t+'</h3>';};
+    return '<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;max-width:600px;margin:0 auto;color:#14181F;line-height:1.55">'
+      +'<div style="background:#14181F;color:#fff;padding:18px 20px;border-radius:12px 12px 0 0">'
+      +'<div style="font-size:11px;letter-spacing:.08em;opacity:.7;text-transform:uppercase">Cierre semanal · semana '+sem+'</div>'
+      +'<div style="font-size:20px;font-weight:800;margin-top:3px">'+esc(f.u.nombre)+'</div>'
+      +'<div style="font-size:12px;opacity:.75">'+esc(f.u.equipo||"")+'</div></div>'
+      +'<div style="border:1px solid #DCE1E7;border-top:none;border-radius:0 0 12px 12px;padding:20px;background:#fff">'
+      +(prom.length?'<div style="background:#F7F9FB;border-radius:10px;padding:14px 16px;margin-bottom:4px"><div style="font-size:26px;font-weight:800;line-height:1">'+cumpl
+        +' <span style="font-size:15px;font-weight:400;color:#6B7684">de '+prom.length+'</span></div><div style="font-size:12px;color:#6B7684">compromisos del lunes cumplidos</div></div>':'')
+      +(como?h3("Cómo ha ido")+'<p style="margin:0;font-size:13.5px;color:#3A424E;white-space:pre-wrap">'+esc(como)+'</p>':'')
+      +(prom.length?h3("Lo que dijo el lunes")+prom.map(function(k){return item(k,/fue bien|lo hice/i.test(R[k].accion||"")?"#0E7C5A":"#B07908");}).join(""):'')
+      +(riesgo.length?h3("Clientes en riesgo")+riesgo.map(function(k){return item(k,"#C2263D");}).join(""):'')
+      +(cerr.length?h3("Ha cerrado "+cerr.length)+'<div style="font-size:12.5px;color:#6B7684">'+cerr.map(function(k){return nom(k)+" ("+esc(R[k].accion||"")+")";}).join(" · ")+'</div>':'')
+      +(prio?'<div style="background:#FFFBEB;border:1px solid #F59E0B;border-radius:10px;padding:14px 16px;margin-top:20px"><div style="font-size:11px;font-weight:800;color:#92400E;text-transform:uppercase;letter-spacing:.05em">Su prioridad · semana '+(sem>=52?1:sem+1)+'</div><div style="font-size:14px;margin-top:5px;color:#14181F">'+esc(prio)+'</div></div>':'')
+      +(!como&&!prom.length&&!riesgo.length&&!prio?'<p style="font-size:13px;color:#6B7684">Cerró sin escribir nada.</p>':'')
+      +'<p style="margin:18px 0 0;font-size:11px;color:#8A94A0;text-align:center">Parte anterior al guardado del correo: sin las cifras de esa semana.</p>'
+      +'</div></div>';
+  }
+  function detalle(f){
+    var html=f.inf.htmlEmail||htmlDesde(f);
+    return <div style={{marginTop:8,marginBottom:10}} dangerouslySetInnerHTML={{__html:html}}/>;
   }
 
   var cerrados=filas.filter(function(f){return f.inf&&!f.ausente;})
