@@ -700,6 +700,169 @@ function showHub(){
   document.getElementById('hub-user-name').textContent=currentUser.icon+' '+currentUser.nombre;
   renderHub();
   showScreen('hub');
+  aplicarCandado();
+}
+
+// ══════════════════════════════════════════════════════════════════
+// (sep 2026) CANDADO SEMANAL
+// Desde el sabado a las 9:00, quien no haya cerrado la semana no pasa del
+// portal: solo ve el boton para cerrarla. Asi los partes llegan todos y a
+// tiempo. Cada uno cierra donde le toca:
+//   comercial        -> cierre_semanal.html      (informes)
+//   jefe / director  -> objetivos_equipo.html    (informes, tipo responsable)
+//   departamentos    -> parte semanal del CRM    (partes_departamento)
+// El responsable no puede cerrar hasta que su equipo haya cerrado (eso lo
+// exige cada pantalla de cierre); aqui se le enseña quien le falta.
+// Quedan fuera: CEO y admin (no reportan a nadie) y quien no tiene acceso al
+// CRM (no tiene donde cerrar: se quedaria bloqueado para siempre).
+// Si no se puede comprobar (sin conexion) se deja pasar: mejor eso que
+// dejar a alguien encerrado por un fallo de red.
+// ══════════════════════════════════════════════════════════════════
+var CANDADO_DESDE={ano:2026,sem:40};   // primera semana que se exige
+var CANDADO_HORA=9;                     // sabado a esta hora
+var EQUIPOS_NO_AGENTE=["WIKUK","INTERKEY","FRANCIA","DISTRIBUIDOR"];
+
+function _isoSemP(d){
+  var t=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));
+  var dn=t.getUTCDay()||7; t.setUTCDate(t.getUTCDate()+4-dn);
+  var a=new Date(Date.UTC(t.getUTCFullYear(),0,1));
+  return {ano:t.getUTCFullYear(), sem:Math.ceil((((t-a)/86400000)+1)/7)};
+}
+function _lunesP(ano,sem){
+  var e=new Date(ano,0,4), l=new Date(e);
+  l.setDate(e.getDate()-((e.getDay()||7)-1)); l.setDate(l.getDate()+(sem-1)*7);
+  l.setHours(0,0,0,0); return l;
+}
+// Semana que hay que tener cerrada ahora mismo: la actual desde su sabado a
+// las 9:00; antes de eso, la anterior.
+function semanaExigida(ahora){
+  ahora=ahora||new Date();
+  var w=_isoSemP(ahora);
+  var sab=_lunesP(w.ano,w.sem); sab.setDate(sab.getDate()+5); sab.setHours(CANDADO_HORA,0,0,0);
+  if(ahora<sab){ var p=new Date(ahora); p.setDate(p.getDate()-7); w=_isoSemP(p); }
+  if(w.ano*100+w.sem < CANDADO_DESDE.ano*100+CANDADO_DESDE.sem) return null;
+  return w;
+}
+function _up(x){ return String(x||"").toUpperCase().trim(); }
+function perfilCierre(u){
+  if(!u) return null;
+  if(String(u.rol||"").toLowerCase()==="admin") return null;
+  if((u.accesos||[]).indexOf("crm")<0) return null;
+  var crmId=u.crmId||u.id, f=ORG_FICHAS[crmId]||{};
+  var rol=String(f.rol||u.rol||"").toLowerCase();
+  var tip=f.tipologia||u.tipologia||"";
+  if(rol==="ceo") return null;
+  var cod=[f.grupoAgente,u.grupoAgente,f.catalogoVendedor,u.catalogoVendedor]
+    .map(_up).filter(function(c){return c&&EQUIPOS_NO_AGENTE.indexOf(c)<0;})[0]||_up(crmId);
+  var claves=[cod,crmId,u.id,u.username,f.id,f.grupoAgente,u.grupoAgente,f.catalogoVendedor,u.catalogoVendedor]
+    .map(_up).filter(function(c,i,a){return c&&EQUIPOS_NO_AGENTE.indexOf(c)<0&&a.indexOf(c)===i;});
+  var base={crmId:crmId,cod:cod,claves:claves,rol:rol,equipo:_up(f.equipo||u.equipo)};
+  if(["agente","crm_agente","comercial","vendedor"].indexOf(rol)>=0) return Object.assign(base,{tipo:"comercial"});
+  if((rol==="jefe"||rol==="crm_jefe")&&!tip) return Object.assign(base,{tipo:"jefe"});
+  if(rol==="director"||rol==="crm_director") return Object.assign(base,{tipo:"director"});
+  if(tip||f.departamentoId) return Object.assign(base,{tipo:"depto"});
+  return null;
+}
+// Todos los informes de una semana, en una sola consulta
+function informesSemana(w){
+  return fetch(PORTAL_FB+":runQuery",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({structuredQuery:{from:[{collectionId:"informes"}],
+      where:{fieldFilter:{field:{fieldPath:"semana"},op:"EQUAL",value:{integerValue:String(w.sem)}}}}})})
+    .then(function(r){ if(!r.ok) throw new Error("HTTP "+r.status); return r.json(); })
+    .then(function(rows){
+      return (rows||[]).filter(function(x){return x.document;}).map(function(x){return _fromFB(x.document);})
+        .filter(function(d){
+          if(!d||d.estado==="borrador") return false;
+          // Mismo numero de semana de otro año no vale
+          var y=Number(d.anio||d.ano)||0;
+          if(!y){ var m=String(d.fechaEnvio||"").match(/(\d{4})/); y=m?Number(m[1]):0; }
+          return !y||y===w.ano;
+        });
+    });
+}
+function informeDe(lista,claves,uids){
+  return lista.some(function(d){
+    return claves.indexOf(_up(d.agente))>=0||uids.indexOf(String(d.uid||""))>=0;
+  });
+}
+function comprobarCierre(u){
+  var w=semanaExigida(); if(!w) return Promise.resolve(null);
+  var P=perfilCierre(u); if(!P) return Promise.resolve(null);
+  var marca="candado_ok_"+P.crmId+"_"+w.ano+"_"+w.sem;
+  try{ if(sessionStorage.getItem(marca)) return Promise.resolve(null); }catch(e){}
+  var ok=function(){ try{sessionStorage.setItem(marca,"1");}catch(e){} return null; };
+  if(P.tipo==="depto"){
+    return fetch(PORTAL_FB+"/partes_departamento/"+encodeURIComponent(P.crmId+"_"+w.ano+"w"+w.sem))
+      .then(function(r){ if(r.status===404) return null; if(!r.ok) throw new Error("HTTP "+r.status); return r.json(); })
+      .then(function(j){
+        var p=j?_fromFB(j):null;
+        if(p&&(p.estado==="entregado"||p.estado==="validado"||p.ausente)) return ok();
+        return {w:w,P:P,faltan:[]};
+      });
+  }
+  return informesSemana(w).then(function(lista){
+    if(informeDe(lista,P.claves,[P.crmId,String(u.id)])) return ok();
+    // Responsables: a quien le falta de su equipo, para que lo persiga
+    var faltan=[];
+    Object.keys(ORG_FICHAS).forEach(function(id){
+      var f=ORG_FICHAS[id]; if(!f||f.activo===false||f.duplicadaDe) return;
+      var r=String(f.rol||"").toLowerCase();
+      var suyo=false;
+      if(P.tipo==="jefe") suyo=["agente","crm_agente","comercial","vendedor"].indexOf(r)>=0&&P.equipo&&_up(f.equipo)===P.equipo;
+      if(P.tipo==="director") suyo=(r==="jefe"||r==="crm_jefe")&&!f.tipologia;
+      if(!suyo) return;
+      var cl=[f.grupoAgente,f.catalogoVendedor,f.id,f.username].map(_up).filter(Boolean);
+      if(!informeDe(lista,cl,[f.id])) faltan.push(f.nombre||f.id);
+    });
+    return {w:w,P:P,faltan:faltan};
+  });
+}
+function aplicarCandado(){
+  var u=currentUser; if(!u) return;
+  var list=document.getElementById('hub-list');
+  if(!semanaExigida()) return;
+  // Mientras se comprueba no se puede entrar en ningun modulo
+  list.style.opacity=".35"; list.style.pointerEvents="none";
+  var fin=function(){ list.style.opacity=""; list.style.pointerEvents=""; };
+  (orgCargado?Promise.resolve():loadOrgData()).then(function(){ return comprobarCierre(u); })
+    .then(function(lk){ fin(); if(lk&&currentUser===u) pintarCandado(lk); })
+    .catch(function(){ fin(); });
+}
+function pintarCandado(lk){
+  var w=lk.w, P=lk.P, u=currentUser;
+  var list=document.getElementById('hub-list');
+  var lbl=document.querySelector('#hub .hub-label');
+  if(lbl) lbl.textContent='Semana '+w.sem+' sin cerrar';
+  var donde=P.tipo==="comercial"?"tu cierre semanal"
+    :P.tipo==="depto"?"tu parte semanal":"el cierre de tu equipo";
+  var equipo=(P.tipo==="jefe"||P.tipo==="director"||P.tipo==="depto")
+    ?'<p style="margin:10px 0 0;font-size:12.5px;color:#7A4E06;line-height:1.45">'
+      +'Tu equipo tiene que cerrar antes que tú. Si alguien está de vacaciones o de baja, márcalo como ausente dentro.</p>'
+    :'';
+  var faltan=lk.faltan&&lk.faltan.length
+    ?'<div style="margin-top:10px;padding:9px 12px;background:#FEF2F2;border-radius:9px;font-size:12.5px;color:#B91C1C;line-height:1.45">'
+      +'<b>Aún no han cerrado ('+lk.faltan.length+'):</b><br>'+lk.faltan.map(function(n){return String(n).replace(/[<>&]/g,"");}).join(' · ')+'</div>'
+    :'';
+  list.innerHTML='<div style="background:var(--white);border:2px solid #B91C1C;border-radius:16px;padding:20px 20px 18px">'
+    +'<div style="font-size:30px;line-height:1">🔒</div>'
+    +'<div style="font-size:17px;font-weight:800;margin-top:8px">Cierra la semana '+w.sem+' para continuar</div>'
+    +'<p style="margin:6px 0 0;font-size:13px;color:var(--muted);line-height:1.5">Desde el sábado a las '+CANDADO_HORA+':00 el portal no se abre hasta que entregues '+donde+'. Así los partes llegan todos y a su hora.</p>'
+    +equipo+faltan
+    +'<button id="btn-candado" style="margin-top:16px;width:100%;padding:14px;border:none;border-radius:12px;background:#B91C1C;color:#fff;font-size:15px;font-weight:800;cursor:pointer">Cerrar la semana '+w.sem+' →</button>'
+    +'<button id="btn-candado-re" style="margin-top:8px;width:100%;padding:10px;border:1.5px solid var(--border);border-radius:12px;background:transparent;color:var(--muted);font-size:12.5px;font-weight:700;cursor:pointer">Ya la he cerrado · comprobar otra vez</button>'
+    +'</div>';
+  document.getElementById('btn-candado-re').onclick=function(){ showHub(); };
+  document.getElementById('btn-candado').onclick=function(){
+    if(P.tipo==="depto"){ openModule('crm'); return; }
+    var q="agente="+encodeURIComponent(P.cod)+"&uid="+encodeURIComponent(P.crmId)+"&semana="+w.sem;
+    var url=P.tipo==="comercial"?"cierre_semanal.html?"+q
+      :"objetivos_equipo.html?"+q+"&rol="+encodeURIComponent(P.rol)+"&equipo="+encodeURIComponent(P.equipo)+"&embed=1";
+    currentModule='cierre';
+    document.getElementById('frame-title').textContent='🔒 Cierre semana '+w.sem;
+    document.getElementById('frame-sub').textContent=u?u.nombre:'';
+    document.getElementById('module-iframe').src=url;
+    showScreen('module-frame');
+  };
 }
 function showAdmin(){
   adminTab="usuarios";
