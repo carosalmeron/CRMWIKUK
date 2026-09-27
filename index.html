@@ -1911,23 +1911,45 @@ function renderObjetivosCom(){
     });
     h+='</div><button onclick="guardarObjetivosCom(\''+p.id+'\',this)" style="margin-top:10px;width:100%;padding:11px;border:none;border-radius:10px;background:var(--accent);color:#fff;font-weight:800;cursor:pointer;font-family:inherit">Guardar '+p.nombre+'</button></div>';
   });
-  // Quien es telefonico
-  var coms=Object.keys(ORG_FICHAS).map(function(k){return ORG_FICHAS[k];}).filter(function(f){
-    var r=String(f.rol||"").toLowerCase(), eq=String(f.equipo||"").toUpperCase();
-    return f&&f.activo!==false&&!fichaDuplicada(f)&&!/^u_\d+$/i.test(String(f.nombre||f.id))&&["agente","crm_agente","comercial","vendedor"].indexOf(r)>=0
-      &&/^(WIKUK|INTERKEY)/.test(eq)&&!/^(interc|clientsdirect|catalu|tienda|telefono|sin)/i.test(String(f.nombre||f.id).replace(/[.\s_-]/g,""));
-  }).sort(function(a,b){return (String(a.equipo)+a.nombre).localeCompare(String(b.equipo)+b.nombre);});
+  // Quien es telefonico. Cada persona puede tener ficha del CRM (usuarios) y
+  // cuenta del portal (portal_users) con datos distintos o desactualizados:
+  // se juntan las dos y basta con que una la situe como comercial de WIKUK o
+  // INTERKEY. La marca se guarda en todas sus fichas.
+  var regs=[];
+  Object.keys(ORG_FICHAS).forEach(function(k){ regs.push({col:"usuarios",d:ORG_FICHAS[k]}); });
+  // adminUsers mezcla las dos colecciones; cada ficha dice la suya en _col
+  (adminUsers||[]).forEach(function(u){ if(u&&u.id) regs.push({col:u._col||"portal_users",d:u}); });
+  var grupos=[], idx={};
+  regs.forEach(function(r){
+    var cl=orgClavesDe(r.d).filter(function(c){return !/^(WIKUK|INTERKEY|FRANCIA|DISTRIBUIDOR)$/.test(c);});
+    var g=null; cl.forEach(function(c){ if(!g&&idx[c]) g=idx[c]; });
+    if(!g){ g={regs:[]}; grupos.push(g); }
+    g.regs.push(r); cl.forEach(function(c){ idx[c]=g; });
+  });
+  var esCom=function(d){
+    var r=String(d.rol||"").toLowerCase(), eq=String(d.equipo||"").toUpperCase();
+    return d.activo!==false&&["agente","crm_agente","comercial","vendedor"].indexOf(r)>=0&&/^(WIKUK|INTERKEY)/.test(eq);
+  };
+  var coms=grupos.map(function(g){
+    var buenos=g.regs.filter(function(r){return esCom(r.d);});
+    if(!buenos.length) return null;
+    var f=(buenos.find(function(r){return r.col==="usuarios";})||buenos[0]).d;
+    var nom=String(f.nombre||f.id||"");
+    if(/^u_\d+$/i.test(nom)||/^(interc|clientsdirect|catalu|tienda|telefono|sin)/i.test(nom.replace(/[.\s_-]/g,""))) return null;
+    return {nombre:nom, equipo:String(f.equipo||"").toUpperCase(),
+      on:g.regs.some(function(r){return String(r.d.perfilComercial||"").toLowerCase()==="telefonico";}),
+      refs:g.regs.map(function(r){return r.col+"/"+r.d.id;}).filter(function(x,i,arr){return arr.indexOf(x)===i;}).join("|")};
+  }).filter(Boolean).sort(function(a,b){return (a.equipo+a.nombre).localeCompare(b.equipo+b.nombre);});
   h+='<div style="background:var(--white);border:1.5px solid var(--border);border-radius:14px;padding:14px 16px;margin-bottom:24px">'
     +'<div style="font-weight:800;color:var(--text);margin-bottom:4px">📞 ¿Quién es telefónico?</div>'
-    +'<div style="font-size:.72rem;color:var(--muted);margin-bottom:10px">Los marcados usan el objetivo de Telefónicos en vez el de su equipo. Se guarda al tocar.</div>';
+    +'<div style="font-size:.72rem;color:var(--muted);margin-bottom:10px">Los marcados usan el objetivo de Telefónicos en vez del de su equipo. Se guarda al tocar.</div>';
   coms.forEach(function(f){
-    var on=String(f.perfilComercial||"").toLowerCase()==="telefonico";
     h+='<label style="display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--border);cursor:pointer">'
-      +'<input type="checkbox" '+(on?'checked':'')+' onchange="marcarTelefonico(\''+String(f.id).replace(/'/g,"")+'\',this.checked)" style="width:18px;height:18px">'
-      +'<span style="flex:1;font-size:.85rem;color:var(--text);font-weight:600">'+_escHtml(f.nombre||f.id)+'</span>'
-      +'<span style="font-size:.7rem;color:var(--muted)">'+_escHtml(f.equipo||"")+'</span></label>';
+      +'<input type="checkbox" '+(f.on?'checked':'')+' onchange="marcarTelefonico(\''+f.refs.replace(/'/g,"")+'\',this.checked)" style="width:18px;height:18px">'
+      +'<span style="flex:1;font-size:.85rem;color:var(--text);font-weight:600">'+_escHtml(f.nombre)+'</span>'
+      +'<span style="font-size:.7rem;color:var(--muted)">'+_escHtml(f.equipo)+'</span></label>';
   });
-  if(!coms.length) h+='<div style="font-size:.78rem;color:var(--muted)">No hay comerciales de WIKUK o INTERKEY en las fichas.</div>';
+  if(!coms.length) h+='<div style="font-size:.78rem;color:var(--muted)">No hay comerciales de WIKUK o INTERKEY.</div>';
   h+='</div></div>';
   return h;
 }
@@ -1950,13 +1972,17 @@ function guardarObjetivosCom(perfil,btn){
       objState.docs[perfil]=doc; btn.textContent="✓ Guardado"; setTimeout(function(){btn.disabled=false;btn.textContent=txt0;},1500); })
     .catch(function(e){ btn.disabled=false; btn.textContent="Reintentar"; alert("No se ha podido guardar: "+e.message); });
 }
-function marcarTelefonico(id,on){
+function marcarTelefonico(refs,on){
   var v=on?"telefonico":"";
-  if(ORG_FICHAS[id]) ORG_FICHAS[id].perfilComercial=v;
-  fetch(PORTAL_FB+"/usuarios/"+encodeURIComponent(id)+"?updateMask.fieldPaths=perfilComercial",{method:"PATCH",
-    headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:{perfilComercial:{stringValue:v}}})})
-    .then(function(r){ if(!r.ok) throw new Error("HTTP "+r.status); })
-    .catch(function(e){ alert("No se ha podido guardar: "+e.message); });
+  var ps=String(refs).split("|").filter(Boolean).map(function(ref){
+    var p=ref.split("/"), col=p[0], id=p.slice(1).join("/");
+    if(col==="usuarios"&&ORG_FICHAS[id]) ORG_FICHAS[id].perfilComercial=v;
+    if(col==="portal_users") (adminUsers||[]).forEach(function(u){ if(u.id===id) u.perfilComercial=v; });
+    return fetch(PORTAL_FB+"/"+col+"/"+encodeURIComponent(id)+"?updateMask.fieldPaths=perfilComercial",{method:"PATCH",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:{perfilComercial:{stringValue:v}}})})
+      .then(function(r){ if(!r.ok) throw new Error("HTTP "+r.status); });
+  });
+  Promise.all(ps).catch(function(e){ alert("No se ha podido guardar: "+e.message); });
 }
 
 function renderAdmin(){
