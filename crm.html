@@ -22489,8 +22489,20 @@ function Embudo({usuario, clientesFB}){
 // con lo que escribieron y su venta y actividad de esa semana.
 // CEO y director ven a todos; un jefe de equipo, a los suyos.
 // ═════════════════════════════════════════════════════════════════
-function CierresComerciales({usuario, ano, sem}){
+function CierresComerciales({usuario, ano, sem:semSel}){
+  // La semana en curso no se cierra hasta el sabado a las 9:00: hasta entonces
+  // se enseña la anterior, que es la ultima que tiene cierres.
+  var sem=semSel;
+  (function(){
+    var d=new Date(), t=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));
+    var dn=t.getUTCDay()||7; t.setUTCDate(t.getUTCDate()+4-dn);
+    var iso=Math.ceil((((t-new Date(Date.UTC(t.getUTCFullYear(),0,1)))/86400000)+1)/7);
+    var sab=new Date(); sab.setDate(sab.getDate()-((sab.getDay()+6)%7)+5); sab.setHours(9,0,0,0);
+    var exig=new Date()>=sab?iso:iso-1;
+    if(ano===new Date().getFullYear()&&sem>exig) sem=exig;
+  })();
   const [datos,setDatos]=useState(null);
+  const [abiertaTarjeta,setAbiertaTarjeta]=useState(false);
   const [abierto,setAbierto]=useState(null);
   const rol=String(usuario.rol||"").toLowerCase();
   const verTodos=rol==="ceo"||rol.indexOf("director")>=0;
@@ -22498,9 +22510,25 @@ function CierresComerciales({usuario, ano, sem}){
   const ROLES=["agente","crm_agente","comercial","vendedor"];
   const NO_AG=["WIKUK","INTERKEY","FRANCIA","DISTRIBUIDOR"];
   const up=function(x){return String(x||"").toUpperCase().trim();};
+  // Canales de venta e intercompañia no son personas y no cierran semana
+  const NO_PERSONA=/^(interc|clientsdirect|cataluna|cataluña|tienda|telefono|sinagente|_?total|campofrio|wikuk|interkey|francia|distribuidor)/i;
+  const esCanal=function(x){return NO_PERSONA.test(String(x||"").replace(/[.\s_-]/g,""));};
+  // Solo quien tiene cuenta en el portal: los agentes que vienen de SAP sin
+  // usuario no pueden cerrar y solo harian bulto.
+  const PU=(window._portalUsersDB||[]);
+  const tieneCuenta=function(u){
+    if(!PU.length) return true;
+    var k=[u.id,u.grupoAgente,u.catalogoVendedor,u.username].map(up).filter(Boolean);
+    return PU.some(function(p){
+      if(p.activo===false||p.duplicadaDe) return false;
+      return [p.id,p.crmId,p.username,p.catalogoVendedor,p.grupoAgente].map(up).some(function(x){return x&&k.indexOf(x)>=0;});
+    });
+  };
   const gente=(USUARIOS||[]).filter(function(u){
     if(!u||u.activo===false||u.duplicadaDe) return false;
     if(ROLES.indexOf(String(u.rol||"").toLowerCase())<0) return false;
+    if(!u.nombre||esCanal(u.nombre)||esCanal(u.id)||esCanal(u.catalogoVendedor)) return false;
+    if(!tieneCuenta(u)) return false;
     return verTodos||(miEquipo&&up(u.equipo)===miEquipo);
   });
   const clavesDe=function(u){
@@ -22579,37 +22607,52 @@ function CierresComerciales({usuario, ano, sem}){
     </div>;
   }
 
-  return <div style={{background:"#fff",border:"1.5px solid "+T.border,borderRadius:12,padding:"12px 13px",marginBottom:16}}>
-    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:4}}>
-      <p style={{margin:0,fontSize:12.5,fontWeight:800,color:T.text}}>💼 Cierres comerciales · S{sem}</p>
-      <span style={{fontSize:11,fontWeight:700,color:nCerr===filas.length?T.green:T.amber}}>{datos?nCerr+" de "+filas.length+" cerrados":"cargando…"}</span>
+  var cerrados=filas.filter(function(f){return f.inf&&!f.ausente;})
+    .sort(function(a,b){return String(b.inf.fechaEnvio||"").localeCompare(String(a.inf.fechaEnvio||""));});
+  var ausentes=filas.filter(function(f){return f.ausente;});
+  var pendientes=filas.filter(function(f){return !f.inf;});
+  var todo=datos&&pendientes.length===0;
+  var fechaC=function(x){ try{ return new Date(x).toLocaleString("es-ES",{weekday:"short",day:"numeric",month:"numeric",hour:"2-digit",minute:"2-digit"}); }catch(e){ return ""; } };
+  return <Card style={{marginBottom:10,padding:"12px 14px",
+      borderLeft:"4px solid "+(!datos?"#CBD5E1":todo?T.green:nCerr>0?T.blue:T.amber)}}>
+    <div onClick={function(){setAbiertaTarjeta(!abiertaTarjeta);setAbierto(null);}}
+      style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer"}}>
+      <div style={{width:38,height:38,borderRadius:"50%",flexShrink:0,background:"#1D4ED822",
+        display:"flex",alignItems:"center",justifyContent:"center",fontSize:17}}>💼</div>
+      <div style={{flex:1,minWidth:0}}>
+        <p style={{margin:0,fontSize:14,fontWeight:800,color:T.text}}>Partes comerciales</p>
+        <p style={{margin:"1px 0 0",fontSize:10,color:T.muted}}>Semana {sem}
+          {datos?" · "+nCerr+" de "+filas.length+" entregados"+(ausentes.length?" · "+ausentes.length+" ausentes":""):" · cargando…"}</p>
+      </div>
+      {datos&&<span style={{fontSize:10,fontWeight:800,padding:"3px 8px",borderRadius:99,
+        background:todo?"#DCFCE7":"#FEF3C7",color:todo?"#15803D":"#B45309"}}>
+        {todo?"COMPLETO":pendientes.length+" SIN CERRAR"}</span>}
+      <span style={{fontSize:11,color:T.muted}}>{abiertaTarjeta?"▴":"▾"}</span>
     </div>
-    <p style={{margin:"0 0 8px",fontSize:11,color:T.muted}}>Toca a un comercial para ver su cierre. Cambia de semana arriba para ver semanas pasadas.</p>
-    {Object.keys(porEq).sort().map(function(eq){
-      return <div key={eq} style={{marginBottom:6}}>
-        {Object.keys(porEq).length>1&&<p style={{margin:"8px 0 4px",fontSize:10.5,fontWeight:800,color:T.muted,letterSpacing:".05em"}}>{eq}</p>}
-        {porEq[eq].sort(function(a,b){return String(a.u.nombre).localeCompare(String(b.u.nombre));}).map(function(f){
-          var est=!datos?"…":f.ausente?"🌴":f.inf?"✅":"⏳";
-          var puede=!!f.inf&&!f.ausente;
-          var abiertoYo=abierto===f.u.id;
-          return <div key={f.u.id} style={{borderTop:"1px solid "+T.border,padding:"8px 0"}}>
-            <div onClick={function(){ if(puede) setAbierto(abiertoYo?null:f.u.id); }}
-              style={{display:"flex",alignItems:"center",gap:8,cursor:puede?"pointer":"default"}}>
-              <span style={{fontSize:14}}>{est}</span>
+    {abiertaTarjeta&&datos&&(
+      <div style={{marginTop:12,paddingTop:10,borderTop:"1px dashed "+T.border}}>
+        {cerrados.length===0&&<p style={{margin:"0 0 8px",fontSize:12,color:T.muted}}>Nadie ha entregado todavía el parte de la semana {sem}.</p>}
+        {cerrados.map(function(f){
+          var yo=abierto===f.u.id;
+          return <div key={f.u.id} style={{marginBottom:6}}>
+            <div onClick={function(){setAbierto(yo?null:f.u.id);}}
+              style={{display:"flex",alignItems:"center",gap:10,padding:"9px 11px",borderRadius:10,cursor:"pointer",
+                background:yo?"#EFF6FF":"#F8FAFC",border:"1px solid "+(yo?"#BFDBFE":T.border)}}>
+              <span style={{fontSize:13}}>✅</span>
               <div style={{flex:1,minWidth:0}}>
                 <p style={{margin:0,fontSize:13,fontWeight:700,color:T.text}}>{f.u.nombre}</p>
-                <p style={{margin:0,fontSize:11,color:T.muted}}>
-                  {f.venta!=null?eur(f.venta)+" · ":""}👋 {f.vis} visitas · 📞 {f.lla} llamadas
-                  {f.ausente?" · "+(f.inf.ausenteMotivo||"ausente"):!f.inf&&datos?" · sin cerrar":""}</p>
+                <p style={{margin:0,fontSize:10.5,color:T.muted}}>{up(f.u.equipo)||"—"} · entregado {fechaC(f.inf.fechaEnvio)}</p>
               </div>
-              {puede&&<span style={{fontSize:12,color:T.muted}}>{abiertoYo?"▲":"▼"}</span>}
+              <span style={{fontSize:11,fontWeight:700,color:"#1D4ED8"}}>{yo?"Cerrar":"Ver parte"}</span>
             </div>
-            {abiertoYo&&detalle(f)}
+            {yo&&detalle(f)}
           </div>;
         })}
-      </div>;
-    })}
-  </div>;
+        {ausentes.length>0&&<p style={{margin:"10px 0 0",fontSize:11.5,color:T.muted}}>🌴 Ausentes: {ausentes.map(function(f){return f.u.nombre+(f.inf.ausenteMotivo?" ("+f.inf.ausenteMotivo+")":"");}).join(" · ")}</p>}
+        {pendientes.length>0&&<p style={{margin:"6px 0 0",fontSize:11.5,color:"#B45309"}}>⏳ Sin cerrar ({pendientes.length}): {pendientes.map(function(f){return f.u.nombre;}).join(" · ")}</p>}
+      </div>
+    )}
+  </Card>;
 }
 
 function ParteSemanalDepto({usuario, incidenciasDB, bloqueo, onDesbloquear}){
