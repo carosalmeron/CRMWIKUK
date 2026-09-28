@@ -445,10 +445,14 @@ async function cargarUsuarios(){
   const esCanal=(x)=>NO_PERSONA.test(String(x||"").replace(/[.\s_-]/g,""));
 
   const map={};
+  const PU_IDS=new Set(pu.map(p=>p._id));
+  // Nombre de persona de verdad: ni un id (u_177...) ni un codigo en minusculas (acruz)
+  const pareceCodigo=(n)=>!n||/^u_\d+$/i.test(n)||/^[a-z0-9_.]+$/.test(n);
   [...us,...pu].forEach(u=>{
     const rol=String(u.rol||"").toLowerCase();
     if(rol!=="agente"&&rol!=="crm_agente"&&rol!=="comercial"&&rol!=="vendedor") return;
     if(u.activo===false) return;
+    const esCuenta=PU_IDS.has(u._id)&&us.every(x=>x._id!==u._id);
 
     // Se prueba con TODOS sus identificadores hasta dar con uno que la tabla
     // conozca: basta que uno cruce para reunir a la persona.
@@ -461,10 +465,9 @@ async function cargarUsuarios(){
     if(!canon){ canon=u.id||u._id||u.username; ficha=canon; }
     if(!canon) return;
 
-    const nombre=Agentes.nombre(ficha)||u.nombre||u.username||canon;
+    const cands=[u.nombre,Agentes.nombre(ficha),u.username,canon].map(x=>String(x||"").trim()).filter(Boolean);
+    const nombre=cands.find(n=>!pareceCodigo(n))||cands[0]||canon;
     if(esCanal(nombre)||esCanal(canon)||esCanal(u.catalogoVendedor)) return;
-    // Sin nombre real no aporta nada: seria una fila "u_177..." mas
-    if(/^u_\d+$/i.test(String(nombre))) return;
 
     if(!map[canon]) map[canon]={
       id:canon, nombre:nombre,
@@ -473,18 +476,22 @@ async function cargarUsuarios(){
       alias:Agentes.alias(ficha),
       // Telefonico o de campo: cambia el objetivo de actividad (zona admin)
       perfil:String(u.perfilComercial||"").toLowerCase(),
-      entrega:String(u.entregaParte||"").toLowerCase()
+      entrega:String(u.entregaParte||"").toLowerCase(),
+      // Sin cuenta en el portal no puede cerrar: no se le espera
+      cuenta:esCuenta
     };
     else{
       // Si otra ficha de la misma persona trae mejor nombre o equipo, se usa
       const m=map[canon];
-      if(nombre.length>m.nombre.length&&!/^[a-z]+$/.test(nombre)) m.nombre=nombre;
+      if(pareceCodigo(m.nombre)&&!pareceCodigo(nombre)) m.nombre=nombre;
+      else if(nombre.length>m.nombre.length&&!pareceCodigo(nombre)) m.nombre=nombre;
+      if(esCuenta) m.cuenta=true;
       if(!m.equipo&&u.equipo) m.equipo=U(u.equipo);
       if(!m.perfil&&u.perfilComercial) m.perfil=String(u.perfilComercial).toLowerCase();
       if(!m.entrega&&u.entregaParte) m.entrega=String(u.entregaParte).toLowerCase();
     }
   });
-  let l=Object.values(map);
+  let l=Object.values(map).filter(u=>!/^u_\d+$/i.test(u.nombre));
   if(esJefe&&EQUIPO) l=l.filter(u=>u.equipo===EQUIPO);
   l.sort((a,b)=>a.nombre.localeCompare(b.nombre));
   return l;
@@ -913,7 +920,10 @@ window.borrar=async(id)=>{
 // cerrado todo su equipo (o esta marcado como ausente), y al cerrar sube un
 // consolidado con TODOS sus comerciales por email a su superior.
 // Quien esta marcado como que no entrega parte no bloquea al jefe
-function pendientesEquipo(){ return USUARIOS.filter(a=>!CIERRES[a.id]&&a.entrega!=="no"); }
+// Ni quien esta marcado "no entrega parte" ni quien no tiene usuario en el
+// portal (no puede entrar a cerrar) bloquean al jefe.
+const noCierra=(a)=>a.entrega==="no"||(a.entrega!=="si"&&!a.cuenta);
+function pendientesEquipo(){ return USUARIOS.filter(a=>!CIERRES[a.id]&&!noCierra(a)); }
 
 window.marcarAusente=async(agId)=>{
   const a=USUARIOS.find(x=>x.id===agId); if(!a) return;
@@ -1577,7 +1587,8 @@ function vendedoresFiltrados(){
 function textoCuenta(){
   const l=vendedoresFiltrados();
   const cerrados=l.filter(a=>CIERRES[a.id]).length;
-  return "Cierres recibidos ("+cerrados+" de "+l.length+")"
+  const cuentan=l.filter(a=>CIERRES[a.id]||!noCierra(a)).length;
+  return "Cierres recibidos ("+cerrados+" de "+cuentan+")"
     +(FILTRO?" · filtrando":"");
 }
 function filasVendedores(){
@@ -1594,16 +1605,17 @@ function filasVendedores(){
             +(c.obviado.length?" · "+c.obviado.length+" sin contestar":"")
             +(nObj?" · "+nObj+" tuyo(s)":"")
             +(hechosDe(a.id)!==null?" · "+hechosDe(a.id)+" cumplido(s)":"")
+          : noCierra(a) ? (a.entrega==="no"?"No entrega parte":"Sin usuario en el portal · no cierra")
           : "Todavía no ha cerrado")
       +'</small></div>'
-      +'<span class="pill '+(c?"ok":"no")+'">'+(c?"Cerrado":"Pendiente")+'</span>'
+      +'<span class="pill '+(c?"ok":"no")+'"'+(!c&&noCierra(a)?' style="opacity:.45"':'')+'>'+(c?"Cerrado":noCierra(a)?"—":"Pendiente")+'</span>'
       +'</div></div>';
   }).join("");
 }
 
 function pintarLista(){
   let h=cabeceraSemana();
-  const sinCerrar=USUARIOS.filter(a=>!CIERRES[a.id]);
+  const sinCerrar=pendientesEquipo();
   const es=escalados();
 
   if(ESCALA_A){
@@ -1664,11 +1676,11 @@ function pintarLista(){
     h+='<div style="position:sticky;bottom:0;padding:12px 0 4px;'
       +'background:linear-gradient(transparent,#F8FAFC 30%)">'
       +'<button class="btn" id="btnCerrar" onclick="cerrarSemana()" '
-      +(es.length&&!(esJefe&&sinCerrar.length)?"":"disabled")+' style="padding:14px;font-size:14px">'
+      +(!(esJefe&&sinCerrar.length)?"":"disabled")+' style="padding:14px;font-size:14px">'
       +(esJefe&&sinCerrar.length
          ? "Faltan "+sinCerrar.length+" por cerrar"
          : es.length?"Cerrar la semana "+SEMANA+" con "+es.length+" objetivo(s)"
-                    :"Marca lo que sube antes de cerrar")
+                    :"Cerrar la semana "+SEMANA+" sin subir nada")
       +'</button></div>';
   } else if(ESCALA_A&&CERRADA){
     h+='<div class="card" style="border-color:var(--green);background:var(--greenL)">'
