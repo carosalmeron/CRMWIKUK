@@ -253,7 +253,8 @@ function diasDesde(fechaRaw){
 }
 
 // Construye y envía un email a una lista de destinatarios (array o string)
-async function enviarEmail(to, subject, text){
+async function enviarEmail(to, subject, text, opts){
+  opts=opts||{};
   if(!to) return {ok:false, error:"sin destinatario"};
   const lista=Array.isArray(to)?to:String(to).split(/[;,]/);
   const destinatarios = lista
@@ -263,7 +264,7 @@ async function enviarEmail(to, subject, text){
 
   // (v3.23.95) Añadir copias automáticas (CC_SIEMPRE), evitando duplicados
   const finales = destinatarios.slice();
-  String(CC_SIEMPRE||"")
+  if(!opts.sinCopia) String(CC_SIEMPRE||"")
     .split(/[;,]/)
     .map(s=>s.trim())
     .filter(s=>s.length>0 && s.indexOf("@")>0)
@@ -863,8 +864,11 @@ async function datosCEO(anio,sem){
     A.mismo(x.agente,g.cod)||A.mismo(x.comercial,g.cod)||A.mismo(x.comercialNombre,g.nombre))||{};
   const deQuien=(d,g)=>A.esDe(d,g.cod)||A.esDe(d,g.id);
 
-  const semsPrev=sems.filter(x=>numC(x.semana||x._id)<sem)
-    .sort((a,b)=>numC(b.semana||b._id)-numC(a.semana||a._id)).slice(0,4)
+  // La foto se guarda como "2026-W40": año y numero de semana
+  const semDeC=x=>{ const t=String(x.semana||x._id||""); const m=t.match(/(\d{4})-W(\d{1,2})/);
+    return m?(+m[1])*100+(+m[2]):anio*100+(Number(t)||0); };
+  const semsPrev=sems.filter(x=>semDeC(x)<anio*100+sem)
+    .sort((a,b)=>semDeC(b)-semDeC(a)).slice(0,4)
     .map(x=>{ try{ return JSON.parse(x.agentes||"[]"); }catch(e){ return []; } });
   const hoyISO=new Date().toISOString().slice(0,10);
 
@@ -886,6 +890,14 @@ async function datosCEO(anio,sem){
     const p={...g,vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,nFacV:0,vis:0,lla:0,mEnv:0,mOk:0,semMal:0};
     const r=suyo(res,g), e2=suyo(estac,g), o2=suyo(objs,g);
     p.vSem=numC(r.ventasSem);
+    // Semana pasada (informe pedido a mano): la foto congelada de esa semana
+    if(sem<isoSemanaC(new Date()).sem){
+      const foto=(sems.find(x=>semDeC(x)===anio*100+sem)||{}).agentes;
+      let ag=[]; try{ ag=JSON.parse(foto||"[]"); }catch(e){}
+      const f=ag.find(x=>A.mismo(x.id||x.agente,g.cod)||A.mismo(x.id||x.agente,g.id));
+      p.vSem=f?numC(f.ventasSem):(sem===isoSemanaC(new Date()).sem-1?numC(r.ventasSemAnt):0);
+      if(f&&numC(f.baseSem)){ r.margenPctSem=numC(f.margenSem)/numC(f.baseSem)*100; } else r.margenPctSem=null;
+    }
     p.mAct=numC(e2["act_"+mNum]);
     p.mObj=numC(o2["mes_"+mNum]);
     if(!p.mObj) p.mObj=numC(o2.objAnual)*(numC(e2["peso_"+mNum])||1/12);
@@ -1236,40 +1248,84 @@ module.exports = async function handler(req, res){
       return e==="abierta"; // solo abiertas: en_proceso, resuelta, cerrada se excluyen
     });
 
+    // (sep 2026) RECORDATORIOS AGRUPADOS
+    // Antes: un correo por incidencia y dia, con copia al CEO. Con 24 abiertas
+    // eran 24 correos diarios repetidos. Ahora:
+    //  - Cada incidencia se recuerda a los 1, 3 y 7 dias, y luego cada semana.
+    //  - Cada responsable recibe UN correo con todas las suyas que tocan hoy.
+    //  - El CEO no va en copia de los recordatorios: recibe los lunes un
+    //    resumen de las que llevan mas de 7 dias abiertas.
+    const pasoDe=(d)=>d<=1?1:d<=3?2:d<=7?4:7;   // dias entre recordatorios
+    const diasEntre=(iso)=>{ if(!iso) return 9999;
+      const t=new Date(iso); return isNaN(t)?9999:Math.floor((Date.now()-t.getTime())/86400000); };
     let enviadas=0, saltadas=0, sinEmail=0, fallidas=0;
     const errores=[];
+    const porPersona={};   // email -> [incidencias]
+    const tocanHoy=[];
     for(const inc of abiertas){
       const dias = diasDesde(inc.fecha);
       if(dias<1) continue; // 0 días = se acaba de crear, ya tiene su email inicial
-
-      // No enviar más de uno por día — si ya se envió hoy, saltar
       const ultimoISO = (inc.ultimoAvisoFecha||"").substring(0,10);
       if(ultimoISO===hoyISO){ saltadas++; continue; }
-
+      if(diasEntre(inc.ultimoAvisoFecha) < pasoDe(dias)){ saltadas++; continue; }
       const tipoLc = String(inc.tipo||"").toLowerCase();
-      const tipologia = TIPO_A_TIPOLOGIA[tipoLc] || tipoLc; // (v5.5) pass-through
+      const tipologia = TIPO_A_TIPOLOGIA[tipoLc] || tipoLc;
       if(!tipologia){ saltadas++; continue; }
       const dest = destinatariosDe(datos, tipologia);
       if(dest.directos.length===0){ sinEmail++; continue; }
+      tocanHoy.push({inc,dias});
+      dest.directos.forEach(em=>{ const k=String(em).trim().toLowerCase(); if(!k) return;
+        (porPersona[k]=porPersona[k]||[]).push({inc,dias}); });
+    }
+    const etiqTipo=(inc)=>LABEL_TIPO[TIPO_A_TIPOLOGIA[String(inc.tipo||"").toLowerCase()]]||inc.tipo||"—";
+    const avisadas=new Set();
+    for(const [em,lista] of Object.entries(porPersona)){
+      lista.sort((a,b)=>b.dias-a.dias);
+      const subject="⏰ Tienes "+lista.length+" incidencia"+(lista.length>1?"s":"")+" abierta"+(lista.length>1?"s":"")
+        +" · la más antigua de "+lista[0].dias+" días";
+      const body="Estas incidencias siguen abiertas y esperan respuesta:\n\n"
+        +lista.map(({inc,dias},i)=>{
+          const prio=(inc.prioridad||"media").toLowerCase();
+          const p=prio==="alta"||prio==="urgente"?"🔴":prio==="baja"?"⚪":"🟡";
+          return (i+1)+". "+p+" "+(inc.cliente||inc.clienteNombre||"—")+" · "+etiqTipo(inc)+" · "+dias+" día"+(dias>1?"s":"")
+            +"\n   "+String(inc.descripcion||"(sin descripción)").replace(/\s+/g," ").slice(0,160);
+        }).join("\n\n")
+        +"\n\nPara gestionarlas, entra al CRM → Incidencias:\nhttps://crmwikuk.vercel.app/\n\n"
+        +"Te volverá a llegar este resumen a los 3 y 7 días, y después cada semana, mientras sigan abiertas.\n"
+        +"—\nCRM Grupo Consolidado · Aviso automático";
+      const send=await enviarEmail([em], subject, body, {sinCopia:true});
+      if(send.ok){ enviadas++; lista.forEach(x=>avisadas.add(x.inc._id)); }
+      else { fallidas++; errores.push({para:em, status:send.status,
+        response: send.response ? String(send.response).substring(0, 200) : null}); }
+    }
+    for(const {inc,dias} of tocanHoy){
+      if(!avisadas.has(inc._id)) continue;
+      await setCampo("incidencias", inc._id, "ultimoAvisoFecha", new Date().toISOString());
+      await setCampo("incidencias", inc._id, "ultimoAvisoTipo", "recordatorio_d"+dias);
+    }
 
-      // Recordatorios: solo a los responsables directos (sin escalado diario)
-      const {subject, body} = construirEmail(inc, dias, false);
-      const send = await enviarEmail(dest.directos, subject, body);
-      if(send.ok){
-        // (v3.23.94) Solo marcar como avisada si el envío fue OK
-        await setCampo("incidencias", inc._id, "ultimoAvisoFecha", new Date().toISOString());
-        await setCampo("incidencias", inc._id, "ultimoAvisoTipo", "recordatorio_d"+dias);
-        enviadas++;
-      } else {
-        fallidas++;
-        errores.push({
-          id: inc._id,
-          tipo: inc.tipo,
-          destinatarios: send.destinatarios,
-          status: send.status,
-          response: send.response ? String(send.response).substring(0, 200) : null
-        });
-      }
+    // Resumen semanal al CEO (lunes): lo que lleva mas de 7 dias abierto
+    let resumenCeo=null;
+    if(hoy.getDay()===1&&String((req.query||{}).sinResumenInc||"")!=="1"){
+      try{
+        const marca="avisos_meta/incidencias_"+hoyISO;
+        const ya=await leerDocR(marca);
+        const viejas=abiertas.map(inc=>({inc,dias:diasDesde(inc.fecha)})).filter(x=>x.dias>7)
+          .sort((a,b)=>b.dias-a.dias);
+        if(!(ya&&ya.enviado)&&viejas.length){
+          const porTipo={};
+          viejas.forEach(x=>{ const t=etiqTipo(x.inc); (porTipo[t]=porTipo[t]||[]).push(x); });
+          const body="Incidencias abiertas hace más de 7 días: "+viejas.length+"\n\n"
+            +Object.entries(porTipo).sort((a,b)=>b[1].length-a[1].length).map(([t,l])=>
+              "■ "+t+" ("+l.length+")\n"+l.map(({inc,dias})=>"   · "+(inc.cliente||inc.clienteNombre||"—")+" — "+dias+" días · "
+                +String(inc.descripcion||"").replace(/\s+/g," ").slice(0,90)).join("\n")).join("\n\n")
+            +"\n\nSus responsables reciben el recordatorio. Esto es solo para que sepas qué se está atascando.\n"
+            +"https://crmwikuk.vercel.app/\n—\nCRM Grupo Consolidado · Resumen semanal";
+          const s=await enviarEmail([CC_SIEMPRE],"📋 "+viejas.length+" incidencias con más de 7 días abiertas",body,{sinCopia:true});
+          if(s.ok) await guardarDocR(marca,{enviado:"si",n:viejas.length,fecha:new Date().toISOString()});
+          resumenCeo={ok:s.ok,incidencias:viejas.length};
+        } else resumenCeo={omitido:ya&&ya.enviado?"ya enviado":"ninguna de más de 7 días"};
+      }catch(e){ resumenCeo={error:String(e&&e.message||e)}; }
     }
 
     // (sep 2026) De paso, los avisos de retrasos de pedido, para no tener que
@@ -1293,6 +1349,8 @@ module.exports = async function handler(req, res){
     res.status(200).json({
       ok:true,
       ceo,
+      resumenCeo,
+      personasAvisadas:Object.keys(porPersona).length,
       revisadas: abiertas.length,
       enviadas, saltadas, sinEmail, fallidas,
       retrasos,
