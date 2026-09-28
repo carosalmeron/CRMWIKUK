@@ -757,6 +757,8 @@ function perfilCierre(u){
   if(String(u.rol||"").toLowerCase()==="admin") return null;
   if((u.accesos||[]).indexOf("crm")<0) return null;
   var crmId=u.crmId||u.id, f=ORG_FICHAS[crmId]||{};
+  var ep=String(u.entregaParte||f.entregaParte||"").toLowerCase();
+  if(ep==="no") return null;
   var rol=String(f.rol||u.rol||"").toLowerCase();
   var tip=f.tipologia||u.tipologia||"";
   if(rol==="ceo") return null;
@@ -769,6 +771,8 @@ function perfilCierre(u){
   if((rol==="jefe"||rol==="crm_jefe")&&!tip) return Object.assign(base,{tipo:"jefe"});
   if(rol==="director"||rol==="crm_director") return Object.assign(base,{tipo:"director"});
   if(tip||f.departamentoId) return Object.assign(base,{tipo:"depto"});
+  // Marcado como obligado sin rol que lo exija: cierra como comercial
+  if(ep==="si") return Object.assign(base,{tipo:"comercial"});
   return null;
 }
 // Todos los informes de una semana, en una sola consulta
@@ -814,6 +818,7 @@ function comprobarCierre(u){
     var faltan=[];
     Object.keys(ORG_FICHAS).forEach(function(id){
       var f=ORG_FICHAS[id]; if(!f||f.activo===false||fichaDuplicada(f)) return;
+      if(String(f.entregaParte||"").toLowerCase()==="no") return;
       var r=String(f.rol||"").toLowerCase();
       var suyo=false;
       if(P.tipo==="jefe") suyo=["agente","crm_agente","comercial","vendedor"].indexOf(r)>=0&&P.equipo&&_up(f.equipo)===P.equipo;
@@ -2470,6 +2475,18 @@ function renderUsuarios(){
           +'<div style="font-size:.7rem;color:#8A8078;margin-top:3px">Determina en qué equipo aparece este vendedor</div>'
           +'</div>';
 
+        // (sep 2026) ¿Tiene que entregar el parte semanal? Automatico = lo que
+        // le toque por su rol; Si / No lo fuerza. Lo respetan el candado del
+        // sabado, las listas de "sin cerrar" y los informes.
+        html+='<div><div class="field-label">Parte semanal</div>'
+          +'<select class="form-inp" onchange="updateEntregaParte(\''+u.id+'\',this.value)">'
+          +[['','Automático (según su rol)'],['si','✅ Obligado a entregar parte'],['no','🚫 No entrega parte']].map(function(o){
+              return '<option value="'+o[0]+'"'+((u.entregaParte||'')===o[0]?' selected':'')+'>'+o[1]+'</option>';
+            }).join('')
+          +'</select>'
+          +'<div style="font-size:.7rem;color:#8A8078;margin-top:3px">Quien no entrega no tiene candado el sábado ni sale en «sin cerrar»</div>'
+          +'</div>';
+
         // ── Códigos de facturación ────────────────────────────────────
         // El ERP etiqueta cada venta con SU codigo, que no es el del CRM.
         // Sin registrarlo aqui, las ventas y pedidos de esta persona quedan
@@ -3657,6 +3674,22 @@ function updateEquipoUsuario(uid,val){
         guardadoEl:{stringValue:new Date().toISOString()}}})
     }).catch(function(){});
   }
+  renderAdminBody();
+}
+// (sep 2026) Obligado o no a entregar parte. Se guarda en su cuenta del portal
+// y en su ficha del CRM, porque cada pantalla lee una u otra.
+function updateEntregaParte(uid,val){
+  updateUser(uid,function(u){u.entregaParte=val||"";});
+  var u=adminUsers.find(function(x){return x.id===uid;})||{};
+  var ids=[u.crmId,u.duplicadaDe].filter(function(x){return x&&x!==uid;});
+  Object.keys(ORG_FICHAS).forEach(function(k){ var f=ORG_FICHAS[k];
+    if(f&&(f.duplicadaDe===uid||k===u.crmId)&&ids.indexOf(k)<0) ids.push(k); });
+  ids.forEach(function(id){
+    if(ORG_FICHAS[id]) ORG_FICHAS[id].entregaParte=val||"";
+    fetch(PORTAL_FB+'/usuarios/'+encodeURIComponent(id)+'?updateMask.fieldPaths=entregaParte',{
+      method:'PATCH',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({fields:{entregaParte:{stringValue:val||''}}})}).catch(function(){});
+  });
   renderAdminBody();
 }
 // (v3.23.92) Cambiar el email de un usuario
