@@ -1011,18 +1011,32 @@ async function datosDelEquipo(){
     // semanas seguidas hundido o es un bache puntual.
     leer("pbi_semanas").catch(()=>[]),
   ]);
-  const semsPrev=sems.filter(x=>Number(x.semana||x._id)<SEMANA)
-    .sort((a,b)=>Number(b.semana||b._id)-Number(a.semana||a._id)).slice(0,4)
+  // La foto se guarda como "2026-W40": se saca año y numero de semana
+  const semDe=(x)=>{ const t=String(x.semana||x._id||""); const m=t.match(/(\d{4})-W(\d{1,2})/);
+    return m?{a:+m[1],s:+m[2]}:{a:ANIO,s:Number(t)||0}; };
+  const idxS=(x)=>{ const d=semDe(x); return d.a*100+d.s; };
+  const semsPrev=sems.filter(x=>idxS(x)<ANIO*100+SEMANA)
+    .sort((a,b)=>idxS(b)-idxS(a)).slice(0,4)
     .map(x=>{ let ag=[]; try{ ag=JSON.parse(x.agentes||"[]"); }catch(e){} return ag; });
 
   const num=(x)=>Number(x||0)||0;
   const enSem=(d)=>d&&d>=lunes&&d<=domingo;
   // Un documento por comercial: se busca por cualquiera de sus identidades,
   // que es justo lo que resuelve agentes_alias.
+  // Todos sus codigos, tambien los de fichas unidas por nombre
+  const codsDe=(u)=>[...new Set([u.cod,u.id,...(u.alias||[])].map(U).filter(Boolean))];
+  const casa=(v,u)=>!!v&&codsDe(u).some(c=>Agentes.mismo(v,c));
   const suyo=(lista,u)=>lista.find(x=>
-    Agentes.mismo(x._id,u.cod)||Agentes.mismo(x._id,u.id)||
-    Agentes.mismo(x.agente,u.cod)||Agentes.mismo(x.comercial,u.cod)||
+    casa(x._id,u)||casa(x.id,u)||casa(x.agente,u)||casa(x.comercial,u)||
     Agentes.mismo(x.comercialNombre,u.nombre))||{};
+  // (sep 2026) pbi_resumen_agente solo tiene la semana EN CURSO: el lunes ya
+  // es la siguiente y las cifras de la que se cierra salian a 0. Para una
+  // semana pasada se usa la foto que se congela al cerrarla (pbi_semanas);
+  // si no la hay y es la anterior, ventasSemAnt.
+  const semHoy=semanaISO(new Date());
+  const esPasada=SEMANA<semHoy;
+  const fotoSem=(()=>{ const d=sems.find(x=>idxS(x)===ANIO*100+SEMANA);
+    try{ return d?JSON.parse(d.agentes||"[]"):null; }catch(e){ return null; } })();
   const deQuien=(doc,u)=>Agentes.esDe(doc,u.cod)||Agentes.esDe(doc,u.id);
 
   // Objetivos de actividad: se fijan por equipo y por mes en la Sala de
@@ -1049,6 +1063,11 @@ async function datosDelEquipo(){
     // --- Cifra de negocio -------------------------------------------------
     const r=suyo(res,u), e2=suyo(estac,u), o2=suyo(objs,u);
     p.vSem=num(r.ventasSem);
+    let fSem=null;
+    if(esPasada){
+      fSem=fotoSem?fotoSem.find(x=>casa(x.id,u)||casa(x.agente,u)):null;
+      p.vSem=fSem?num(fSem.ventasSem):(SEMANA===semHoy-1?num(r.ventasSemAnt):0);
+    }
     p.mAct=num(e2["act_"+mNum]);
     p.mObj=num(o2["mes_"+mNum]);
     if(!p.mObj){
@@ -1060,7 +1079,8 @@ async function datosDelEquipo(){
     p.objSem=p.mObj?p.mObj/4.33:0;
     // Margen de la semana contra su objetivo de margen (lo publica pbi-sync)
     p.mg=(r.margenPctSem!=null&&r.margenPctSem!=="")?num(r.margenPctSem):null;
-    p.mgObj=num(r.objetivoMargen)||null;
+    if(esPasada) p.mg=(fSem&&num(fSem.baseSem))?num(fSem.margenSem)/num(fSem.baseSem)*100:null;
+    p.mgObj=num(r.objetivoMargen)||num(fSem&&fSem.objetivoMargen)||null;
     p.vMes=num(r.ventasMes)||p.mAct;
     // Politica de cobro: vencido <= 5 % de la venta de los dos ultimos meses cerrados
     p.v2m=[mNum-1,mNum-2].reduce((t,k)=>t+(k>=1?num(e2["act_"+k]):num(e2["mes_"+(k+12)])),0);
@@ -1068,7 +1088,7 @@ async function datosDelEquipo(){
     // Semanas previas: cuantas seguidas por debajo del 50 % de su objetivo
     p.semMal=0;
     for(const ag of semsPrev){
-      const f=ag.find(x=>Agentes.mismo(x.id||x.agente,u.cod)||Agentes.mismo(x.id||x.agente,u.id));
+      const f=ag.find(x=>casa(x.id,u)||casa(x.agente,u));
       if(f&&p.objSem&&num(f.ventasSem)<p.objSem*0.5) p.semMal++; else break;
     }
 
@@ -1388,7 +1408,8 @@ async function enviarConsolidado(es){
         </td>
         ${p?`<td style="text-align:right;vertical-align:top;white-space:nowrap">
           <div style="font-size:14px;font-weight:800">${eur(p.vSem)}</div>
-          ${pV!=null?`<div style="font-size:11px;font-weight:700;color:${colT(pV)}">${pV} % objetivo</div>`:""}
+          ${pV!=null?`<div style="font-size:11px;font-weight:700;color:${colT(pV)}">${pV} % semana</div>`:""}
+          ${p.mAct||p.mObj?`<div style="font-size:11px;color:#64748B;margin-top:2px">mes ${eur(p.mAct)}${p.mObj?` · <b style="color:${colT(pcT(p.mAct,p.mObj))}">${pcT(p.mAct,p.mObj)} %</b>`:""}</div>`:""}
         </td>`:""}
       </tr></table>
       ${p?`<div style="font-size:11.5px;color:#64748B;margin-top:4px">
