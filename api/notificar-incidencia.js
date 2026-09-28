@@ -844,11 +844,13 @@ async function datosCEO(anio,sem){
     if(/^u_\d+$/i.test(String(nombre))) return;
     if(!map[canon]) map[canon]={id:canon,nombre,equipo:UC(A.equipo(ficha)||u.equipo||""),
       cod:UC(u.grupoAgente||u.catalogoVendedor||canon),
-      perfil:String(u.perfilComercial||"").toLowerCase()};
+      perfil:String(u.perfilComercial||"").toLowerCase(),
+      entrega:String(u.entregaParte||"").toLowerCase()};
     else{ const m=map[canon];
       if(nombre.length>m.nombre.length&&!/^[a-z]+$/.test(nombre)) m.nombre=nombre;
       if(!m.equipo&&u.equipo) m.equipo=UC(u.equipo);
-      if(!m.perfil&&u.perfilComercial) m.perfil=String(u.perfilComercial).toLowerCase(); }
+      if(!m.perfil&&u.perfilComercial) m.perfil=String(u.perfilComercial).toLowerCase();
+      if(!m.entrega&&u.entregaParte) m.entrega=String(u.entregaParte).toLowerCase(); }
   });
   const gente=Object.values(map).filter(g=>g.equipo);
 
@@ -879,7 +881,7 @@ async function datosCEO(anio,sem){
     const suInf=inf.filter(i=>numC(i.semana)===sem&&(A.mismo(i.agente,g.cod)||A.mismo(i.agente,g.id)));
     const ausente=suInf.some(i=>i.estado==="ausente"||i.ausente===true);
     if(ausente){ E.aus++; E.gente.push({...g,ausente:true,motivo:(suInf.find(i=>i.ausenteMotivo)||{}).ausenteMotivo||"Ausente"}); continue; }
-    if(suInf.length) E.cerr++; else E.sinCerrar.push(g.nombre);
+    if(suInf.length) E.cerr++; else if(g.entrega!=="no") E.sinCerrar.push(g.nombre);
 
     const p={...g,vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,nFacV:0,vis:0,lla:0,mEnv:0,mOk:0,semMal:0};
     const r=suyo(res,g), e2=suyo(estac,g), o2=suyo(objs,g);
