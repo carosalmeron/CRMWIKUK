@@ -73,7 +73,7 @@ const NN=s=>String(s||"").toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g,"")
   .replace(/[^A-Z0-9]/g,"");
 const eur=n=>String(Math.round(n||0)).replace(/\B(?=(\d{3})+(?!\d))/g,".")+" €";
 const esc=s=>String(s||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
-let CRM=null, ALIAS=null, FILAS=null, FILTRO="dif";
+let CRM=null, ALIAS=null, FILAS=null, FILTRO="dif", META=null;
 
 document.getElementById("fich").onchange=async(e)=>{
   const f=e.target.files[0]; if(!f) return;
@@ -99,9 +99,11 @@ async function cruzar(){
   const est=document.getElementById("estado");
   if(!CRM){
     est.textContent="Leyendo clientes del CRM…";
-    [CRM,ALIAS]=await Promise.all([
+    [CRM,ALIAS,META]=await Promise.all([
       leer("pbi_ventas_cliente",n=>est.textContent="Leyendo clientes del CRM… "+n),
-      leer("agentes_alias")]);
+      leer("agentes_alias"),
+      fetch(FB+"/pbi_meta/estado").then(r=>r.ok?r.json():null).then(j=>{ if(!j) return null;
+        const o={}; for(const [k,x] of Object.entries(j.fields||{})) o[k]=val(x); return o; }).catch(()=>null)]);
   }
   est.textContent=CRM.length+" códigos de cliente en el CRM";
   const AG=U(document.getElementById("agente").value);
@@ -146,7 +148,8 @@ function cruzarGlobal(){
       const ag=d.agenteFinal||d.agente||"";
       const cuenta=d.cuenta!==undefined?d.cuenta:!(d.intercompany||d.fusionadoEn);
       return {cod:d._id,nombre:d.nombre,ag:(!ag||/SIN/i.test(ag))?"":U(ag),act:Number(d.ventasAct)||0,
-        ant:Number(d.ventasAntYTD)||0,cuenta,fusion:d.fusionadoEn||"",inter:!!d.intercompany};
+        ant:Number(d.ventasAntYTD)||0,cuenta,fusion:d.fusionadoEn||"",inter:!!d.intercompany,
+        act_en:String(d.actualizado||"").slice(0,10),ult:String(d.ultimaVenta||"").slice(0,10)};
     });
     const vivos=cods.filter(c=>c.cuenta);
     const crm=vivos.reduce((t,c)=>t+c.act,0);
@@ -160,7 +163,12 @@ function cruzarGlobal(){
     return {...f,cods,crm,ags,sinCom,tipo};
   });
   const suma=(t)=>res.filter(x=>x.tipo===t);
-  const G={tPbi:dinero(res),tCrm:res.reduce((a,x)=>a+x.crm,0),
+  const vistos=new Set(); let tCrm=0;
+  res.forEach(x=>x.cods.forEach(c=>{ if(c.cuenta&&!vistos.has(c.cod)){ vistos.add(c.cod); tCrm+=c.act; } }));
+  // Datos viejos: codigos cuya ultima escritura es de hace mas de 3 dias
+  const hoyMs=Date.now();
+  const viejos=[]; res.forEach(x=>x.cods.forEach(c=>{ if(c.cuenta&&c.act_en&&(hoyMs-new Date(c.act_en))/86400000>3) viejos.push(c); }));
+  const G={tPbi:dinero(res),tCrm:tCrm,viejos:[...new Map(viejos.map(c=>[c.cod,c])).values()],
     noesta:suma("noesta"),repartido:suma("repartido"),sin:suma("sin"),importe:suma("importe")};
   pintarGlobal(res,G);
 }
@@ -176,6 +184,10 @@ function pintarGlobal(res,G){
     <div class="caja" style="background:#EFF6FF;border-color:#BFDBFE;font-size:13px">
       Esta exportación <b>no trae el comercial</b> de cada cliente. Aquí salen los clientes que descuadran a <b>algún</b> comercial.
       Para cuadrar uno en concreto, escribe su código arriba (p. ej. AGUSTIN) y sube su exportación filtrada.</div>
+    ${META?`<div class="caja" style="font-size:13px">Última sincronización de ventas en el CRM:
+      <b>${META.ultimaSync?new Date(META.ultimaSync).toLocaleString("es-ES"):"desconocida"}</b>
+      ${META.tipo||META.tipoSync?" · "+esc(META.tipo||META.tipoSync):""}
+      · <b style="color:${G.viejos.length?"var(--red)":"var(--green)"}">${G.viejos.length} códigos con datos de hace más de 3 días</b></div>`:""}
     <div class="tiles">
       <div class="tile"><span>Power BI ${FILAS.anioAct||""}</span><b>${eur(G.tPbi)}</b></div>
       <div class="tile"><span>CRM (mismos clientes)</span><b>${eur(G.tCrm)}</b></div>
@@ -192,6 +204,8 @@ function pintarGlobal(res,G){
         ${!c.cuenta?`<span class="tag t-sin">${c.fusion?"fusionado en "+esc(c.fusion):c.inter?"intercompañía":"no cuenta"}</span>`
           :c.ag?`<span class="tag t-yo">${esc(c.ag)}</span>`:`<span class="tag t-sin">sin comercial</span>`}
         · ${eur(c.act)} este año · ${eur(c.ant)} año pasado
+        ${c.act_en?`<span class="mut"> · actualizado ${c.act_en.split("-").reverse().join("/")}</span>`:""}
+        ${c.ult?`<span class="mut"> · última venta ${c.ult.split("-").reverse().join("/")}</span>`:""}
         ${U(c.nombre)!==U(x.nombre)?`<span class="mut"> · «${esc(c.nombre)}»</span>`:""}</div>`).join("")
         :`<div class="cod" style="color:var(--red)">Ningún cliente con este nombre en el CRM (puede estar escrito distinto)</div>`}
     </div>`).join("")||`<p class="mut">Nada en este grupo.</p>`}
