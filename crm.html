@@ -72,7 +72,8 @@
     };
   </script>
 
-  <script type="text/babel" data-presets="react">
+  <script src="/recuperacion_comun.js"></script>
+<script type="text/babel" data-presets="react">
 // ── Extraer hooks de React global ──────────────────────────────────
 const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
@@ -42799,6 +42800,190 @@ function AsistenteIA({ usuario, clientesFB, oportunidadesDB }) {
 // artículos. Sustituye a la página analisis.html: dentro del CRM no hay
 // recarga y la estrategia se abre con el formulario ya relleno.
 // ══════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════
+// (sep 2026) PLAN DE RECUPERACIÓN dentro de Análisis. Al abrir un cliente se
+// ve si tiene caso, en qué estado está y qué ha dicho el comercial. El jefe
+// y el CEO pueden mandar una instrucción en el momento: le llega por correo
+// al comercial y le sale en el caso, sin esperar al comité del viernes.
+// Mismos datos que recuperacion.html (colección "recuperacion").
+// ══════════════════════════════════════════════════════════════════════
+let _recupProm=null;
+const recupId=(cli)=>"rec_"+String(cli||"").replace(/[\/\s#?]/g,"_");
+const recupVal=(x)=>x.stringValue!==undefined?x.stringValue:x.doubleValue!==undefined?Number(x.doubleValue)
+  :x.integerValue!==undefined?Number(x.integerValue):x.booleanValue!==undefined?x.booleanValue:null;
+const recupObj=(d)=>{ const o={_id:decodeURIComponent(d.name.split("/").pop())};
+  for(const [k,x] of Object.entries(d.fields||{})) o[k]=recupVal(x);
+  try{ o.historial=JSON.parse(o.historial||"[]"); }catch(e){ o.historial=[]; }
+  try{ o.productos=o.productos?JSON.parse(o.productos):null; }catch(e){ o.productos=null; }
+  return o; };
+function cargarRecupMap(forzar){
+  if(!_recupProm||forzar){
+    _recupProm=(async()=>{
+      const m={}; let tok=null,v=0;
+      do{
+        const r=await fetch(`${FB_BASE}/recuperacion?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""),{cache:"no-store"});
+        if(!r.ok) break;
+        const j=await r.json();
+        (j.documents||[]).forEach(d=>{ const o=recupObj(d); m[String(o.cliente||"").toUpperCase()]=o; });
+        tok=j.nextPageToken||null; v++;
+      }while(tok&&v<40);
+      return m;
+    })();
+  }
+  return _recupProm;
+}
+function useRecupMap(){
+  const [m,setM]=useState(window._RECUP_MAP||null);
+  useEffect(()=>{ let vivo=true;
+    cargarRecupMap().then(x=>{ window._RECUP_MAP=x; if(vivo) setM(x); }).catch(()=>{});
+    const f=()=>{ if(vivo) setM(Object.assign({},window._RECUP_MAP||{})); };
+    window.addEventListener("recup-cambia",f);
+    return ()=>{ vivo=false; window.removeEventListener("recup-cambia",f); }; },[]);
+  return m;
+}
+const RECUP_ABIERTOS=["abierto","diagnosticado","en_accion","propuesta_archivo"];
+const recupDias=(iso)=>{ const t=Date.parse(iso||""); return isNaN(t)?null:Math.floor((Date.now()-t)/86400000); };
+const recupNivel=(c)=>{ const p=Number(c.perdido)||0; const b=p>=50000?3:p>=20000?2:1;
+  const d=recupDias(c.ultimaAccion||c.abierto);
+  return Math.min(3,b+((d!=null&&d>14&&c.estado!=="propuesta_archivo")?1:0)); };
+const RECUP_NIV={1:["Comercial","#16A34A"],2:["Con jefe de ventas","#D97706"],3:["CEO","#DC2626"]};
+
+function BadgeRecup({cliente}){
+  const m=useRecupMap();
+  const c=m&&m[String(cliente||"").toUpperCase()];
+  if(!c) return null;
+  const ab=RECUP_ABIERTOS.includes(c.estado||"abierto");
+  const [txt,col]=!ab
+    ? (c.estado==="recuperado"?["✅ recuperado","#16A34A"]:["🗄 archivado","#64748B"])
+    : c.estado==="propuesta_archivo"?["⏳ pide archivo","#B45309"]
+    : [!c.causa?"🚨 sin plan":"🚨 en recuperación", RECUP_NIV[recupNivel(c)][1]];
+  return <span style={{marginLeft:6,fontSize:10.5,fontWeight:700,color:"#fff",background:col,
+    borderRadius:99,padding:"1px 7px",whiteSpace:"nowrap",verticalAlign:"middle"}}>{txt}</span>;
+}
+
+function CasoRecuperacionCRM({cliente, nombre, agente, equipo, ventasAct, ventasAntYTD, usuario}){
+  const m=useRecupMap();
+  const [texto,setTexto]=useState("");
+  const [enviando,setEnviando]=useState(false);
+  const [aviso,setAviso]=useState("");
+  const rol=String(usuario&&usuario.rol||"").toLowerCase();
+  const esCeo=usuario&&(usuario.id==="ceo"||rol==="admin"||rol==="ceo");
+  const manda=esCeo||["crm_director","director","crm_jefe","jefe"].includes(rol);
+  const quien=esCeo?"CEO":(usuario&&(usuario.nombre||usuario.id))||"Jefe";
+  if(!m) return null;
+  const c=m[String(cliente||"").toUpperCase()];
+  const eurR=(n)=>Math.round(n||0).toLocaleString("es-ES")+" €";
+  const fch=(s)=>s?String(s).slice(0,10).split("-").reverse().join("/"):"";
+
+  const guardar=async(id,campos)=>{
+    const f={}; const qs=[];
+    for(const [k,v] of Object.entries(campos)){
+      qs.push("updateMask.fieldPaths="+encodeURIComponent(k));
+      f[k]= typeof v==="number"?{doubleValue:v}:typeof v==="boolean"?{booleanValue:v}
+        : typeof v==="object"&&v!==null?{stringValue:JSON.stringify(v)}:{stringValue:String(v??"")};
+    }
+    const r=await fetch(`${FB_BASE}/recuperacion/${encodeURIComponent(id)}?${qs.join("&")}`,{
+      method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:f})});
+    if(!r.ok) throw new Error("HTTP "+r.status);
+  };
+  const refrescar=(obj)=>{ window._RECUP_MAP=Object.assign({},window._RECUP_MAP||{},{[String(obj.cliente).toUpperCase()]:obj});
+    _recupProm=Promise.resolve(window._RECUP_MAP); window.dispatchEvent(new Event("recup-cambia")); };
+  const emailDe=async(ag)=>{
+    try{
+      const U=(s)=>String(s||"").toUpperCase().trim();
+      const [a,b]=await Promise.all([fetch(`${FB_BASE}/usuarios?pageSize=300`).then(r=>r.json()),
+        fetch(`${FB_BASE}/portal_users?pageSize=300`).then(r=>r.json())]);
+      const l=[...(a.documents||[]),...(b.documents||[])].map(recupObj);
+      const f=l.find(x=>x.email&&[x._id,x.id,x.crmId,x.grupoAgente,x.catalogoVendedor,x.username].some(k=>U(k)===U(ag)));
+      return f?f.email:"";
+    }catch(e){ return ""; }
+  };
+  const semana=(()=>{ const d=new Date(); const t=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));
+    const n=t.getUTCDay()||7; t.setUTCDate(t.getUTCDate()+4-n); const y=new Date(Date.UTC(t.getUTCFullYear(),0,1));
+    return Math.ceil(((t-y)/86400000+1)/7); })();
+
+  const enviar=async()=>{
+    const t=texto.trim(); if(t.length<5){ setAviso("Escribe la instrucción."); return; }
+    setEnviando(true); setAviso("");
+    const ahora=new Date().toISOString();
+    try{
+      let caso=c;
+      if(!caso){
+        // Sin caso todavía: se abre a mano con la instrucción
+        const perd=Math.max(0,Math.round((Number(ventasAntYTD)||0)-(Number(ventasAct)||0)));
+        caso={_id:recupId(cliente),cliente:String(cliente),nombre:nombre||String(cliente),agente:agente||"",equipo:equipo||"",
+          abierto:ahora,semanaApertura:semana,tipo:"manual",motivo:`abierto por ${quien}`,perdido:perd,
+          ventasAct:Math.round(Number(ventasAct)||0),ventasAnt:Math.round(Number(ventasAntYTD)||0),
+          estado:"abierto",historial:[],nivel:perd>=50000?3:perd>=20000?2:1,creadoPor:quien};
+      }
+      const hist=(caso.historial||[]).concat([{sem:semana,fecha:ahora,por:quien,sistema:"Instrucción: "+t}]);
+      const campos=Object.assign(c?{}:Object.assign({},caso,{_id:undefined}),
+        {historial:hist,instruccion:t,instruccionPor:quien,instruccionEn:ahora,instruccionLeida:false,actualizado:ahora});
+      delete campos._id;
+      await guardar(caso._id,campos);
+      refrescar(Object.assign({},caso,campos,{_id:caso._id}));
+      setTexto("");
+      if(window.RC&&RC.avisarInstruccion){
+        const d=await RC.avisarInstruccion(Object.assign({},caso,{agente:caso.agente||agente}),t,quien,usuario&&(usuario.crmId||usuario.id));
+        setAviso(RC.textoAviso(d));
+      } else setAviso("Guardada en el caso.");
+    }catch(e){ setAviso("No se ha podido guardar: "+e.message); }
+    setEnviando(false);
+  };
+  const entendido=async()=>{
+    const ahora=new Date().toISOString();
+    const hist=(c.historial||[]).concat([{sem:semana,fecha:ahora,por:(usuario&&usuario.nombre)||agente,sistema:"Instrucción recibida"}]);
+    try{ await guardar(c._id,{instruccionLeida:true,historial:hist}); refrescar(Object.assign({},c,{instruccionLeida:true,historial:hist})); }catch(e){}
+  };
+
+  const box={margin:"8px 15px 8px 26px",background:"#fff",border:"1px solid #E2E8F0",borderRadius:10,padding:"10px 12px",fontSize:12.5};
+  if(!c && !manda) return null;
+  if(!c) return (
+    <div style={box} onClick={e=>e.stopPropagation()}>
+      <b>Sin caso de recuperación.</b>
+      <span style={{color:T.muted}}> Si quieres que el comercial lo trabaje ya, escríbele: se abre el caso con tu instrucción.</span>
+      <textarea value={texto} onChange={e=>setTexto(e.target.value)} placeholder="Instrucción para el comercial"
+        style={{width:"100%",marginTop:6,padding:"8px 10px",border:"1.5px solid #E2E8F0",borderRadius:8,fontSize:13,fontFamily:"inherit",minHeight:52}}/>
+      <button disabled={enviando} onClick={enviar} style={{marginTop:6,padding:"8px 14px",border:"none",borderRadius:8,background:"#0F172A",color:"#fff",fontWeight:800,fontSize:12.5,cursor:"pointer"}}>
+        {enviando?"Enviando…":"Abrir caso y enviar"}</button>
+      {aviso&&<div style={{marginTop:6,color:T.muted}}>{aviso}</div>}
+    </div>);
+  const ab=RECUP_ABIERTOS.includes(c.estado||"abierto");
+  const niv=recupNivel(c); const [ntxt,ncol]=RECUP_NIV[niv];
+  const dAcc=recupDias(c.ultimaAccion||c.abierto);
+  const ult=(c.historial||[]).slice(-3).reverse();
+  return (
+    <div style={box} onClick={e=>e.stopPropagation()}>
+      <div style={{display:"flex",justifyContent:"space-between",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+        <b>🚨 Plan de recuperación</b>
+        <span style={{fontSize:11,fontWeight:700,color:"#fff",background:ab?ncol:"#64748B",borderRadius:99,padding:"2px 9px"}}>
+          {c.estado==="recuperado"?"Recuperado":c.estado==="archivado"?"Archivado":c.estado==="propuesta_archivo"?"Pide archivarlo":ntxt}</span>
+      </div>
+      <div style={{color:T.muted,marginTop:2}}>
+        {c.motivo||""} · abierto el {fch(c.abierto)}{ab&&dAcc!=null?` · ${dAcc} días desde la última acción`:""}</div>
+      {c.causa
+        ? <div style={{marginTop:6}}><b>Causa:</b> {c.causa}{c.causaNota?" — "+c.causaNota:""}<br/>
+            <b>Plan:</b> {c.accion}{c.margenOferta!=null&&c.margenOferta!==""?` (${c.margenOferta} % margen)`:""} · {eurR(c.eurosObjetivo)} antes del {fch(c.fechaObjetivo)}</div>
+        : ab&&<div style={{marginTop:6,color:"#DC2626",fontWeight:700}}>Sin diagnosticar todavía</div>}
+      {c.estado==="archivado"&&<div style={{marginTop:6}}>Archivado por {c.archivadoPor||"—"}: {c.archivoMotivo} {c.archivoNota?"· "+c.archivoNota:""}</div>}
+      {ult.length>0&&<div style={{marginTop:6,color:T.muted}}>{ult.map((x,i)=>
+        <div key={i}>S{x.sem} · {x.por||""}: {x.sistema||[x.hecho,x.respuesta,x.siguiente&&("→ "+x.siguiente)].filter(Boolean).join(" · ")}</div>)}</div>}
+      {c.instruccion&&<div style={{marginTop:8,background:"#EFF6FF",borderRadius:8,padding:"7px 10px",color:"#1E3A8A"}}>
+        📌 <b>Instrucción</b> de {c.instruccionPor} ({fch(c.instruccionEn)}): {c.instruccion}
+        {c.instruccionLeida===true?<span style={{color:"#16A34A"}}> · ✓ recibida</span>
+          :!manda&&<button onClick={entendido} style={{marginLeft:8,padding:"3px 10px",border:"1px solid #93C5FD",background:"#fff",borderRadius:7,fontWeight:700,fontSize:11.5,cursor:"pointer"}}>Entendido</button>}
+      </div>}
+      {manda&&ab&&<>
+        <textarea value={texto} onChange={e=>setTexto(e.target.value)} placeholder="Nueva instrucción para el comercial (le llega ahora por correo)"
+          style={{width:"100%",marginTop:8,padding:"8px 10px",border:"1.5px solid #E2E8F0",borderRadius:8,fontSize:13,fontFamily:"inherit",minHeight:52}}/>
+        <div style={{display:"flex",gap:8,alignItems:"center",marginTop:6,flexWrap:"wrap"}}>
+          <button disabled={enviando} onClick={enviar} style={{padding:"8px 14px",border:"none",borderRadius:8,background:"#0F172A",color:"#fff",fontWeight:800,fontSize:12.5,cursor:"pointer"}}>
+            {enviando?"Enviando…":"Enviar instrucción"}</button>
+          {aviso&&<span style={{color:T.muted}}>{aviso}</span>}
+        </div></>}
+    </div>);
+}
+
 function PanelAnalisis({usuario, onNav}){
   const [datos,setDatos]=useState(null);      // null = cargando
   const [error,setError]=useState(null);
@@ -43474,7 +43659,7 @@ function PanelAnalisis({usuario, onNav}){
                           borderTop:i?`1px solid #F1F5F9`:"none",cursor:"pointer"}}>
                         <div style={{flex:1,minWidth:0}}>
                           <p style={{margin:0,fontSize:14,fontWeight:700}}>
-                            {c.nombre||c.cliente}</p>
+                            {c.nombre||c.cliente}<BadgeRecup cliente={c.cliente}/></p>
                           <p style={{margin:"1px 0 0",fontSize:11.5,color:T.muted}}>
                             {c.poblacion||""}{c.agente?" · "+c.agente:""} · venía de {eur(c.ventasAntYTD)}
                           </p>
@@ -43504,6 +43689,8 @@ function PanelAnalisis({usuario, onNav}){
                       </div>
                       {cliAbierto===c.cliente && (
                         <div style={{background:"#F8FAFC",padding:"2px 0"}}>
+                          <CasoRecuperacionCRM cliente={c.cliente} nombre={c.nombre} agente={c.agente}
+                            equipo={c.equipo} ventasAct={c.ventasAct} ventasAntYTD={c.ventasAntYTD} usuario={usuario}/>
                           {/* Evolución mes a mes: dice cuándo empezó la caída */}
                           {(()=>{
                             const pr=progre[c.cliente];
@@ -43775,7 +43962,7 @@ function PanelAnalisis({usuario, onNav}){
                                   borderTop:`1px solid #EEF2F6`,cursor:"pointer"}}>
                                 <div style={{flex:1,minWidth:0}}>
                                   <p style={{margin:0,fontSize:13.5,fontWeight:600}}>
-                                    {c.nombre||c.cliente}</p>
+                                    {c.nombre||c.cliente}<BadgeRecup cliente={c.cliente}/></p>
                                   <p style={{margin:"1px 0 0",fontSize:11,color:T.muted}}>
                                     {c.poblacion||""} · venía de {eur(c.ventasAntYTD)}</p>
                                 </div>
@@ -43793,6 +43980,8 @@ function PanelAnalisis({usuario, onNav}){
                               {/* Artículos y acciones */}
                               {cliAbierto===c.cliente && (
                                 <div style={{background:"#F1F5F9"}}>
+                                  <CasoRecuperacionCRM cliente={c.cliente} nombre={c.nombre} agente={c.agente||abierto}
+                                    equipo={c.equipo} ventasAct={c.ventasAct} ventasAntYTD={c.ventasAntYTD} usuario={usuario}/>
                                   {!arts[c.cliente]
                                     ? <p style={{margin:0,padding:"10px 15px 10px 34px",
                                         fontSize:12,color:T.muted}}>Buscando artículos…</p>

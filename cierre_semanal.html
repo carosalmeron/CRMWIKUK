@@ -66,6 +66,7 @@
 <main id="app"><p class="estado">Leyendo…</p></main>
 <div id="pie"></div>
 
+<script src="/recuperacion_comun.js"></script>
 <script>
 const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
 const P=new URLSearchParams(location.search);
@@ -233,6 +234,227 @@ function plantear(k,tipo,nom,desc){
 }
 
 let PENDIENTES=[];
+
+// ═══════════════════════════════════════════════════════════════════════
+// (sep 2026) PLAN DE RECUPERACIÓN
+// Cada cliente que cae tiene un caso con dueño, causa, plan, plazo y euros.
+// No se cierra la semana sin diagnosticar los nuevos (8 por semana, los más
+// grandes primero, y todos los de nivel CEO) ni sin contar el avance de los
+// que ya tienen plan. Solo el CEO puede dar un caso por perdido.
+// ═══════════════════════════════════════════════════════════════════════
+window.CASOS=[];            // casos abiertos de este comercial
+window.RECUP={};            // lo que responde en esta pantalla, por caso
+window.CASOS_REQ=new Set(); // los que tiene que responder esta semana
+window.CASOS_EDIT=new Set();// los que ha pedido cambiar de plan
+const _escR=(s)=>String(s??"").replace(/[<>&"]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]));
+function recDe(id){ return (window.RECUP[id]=window.RECUP[id]||{}); }
+function casoDe(id){ return window.CASOS.find(c=>c._id===id)||{}; }
+window.recChip=(id,campo,v,el)=>{
+  const r=recDe(id);
+  r[campo]= r[campo]===v ? "" : v;          // pulsar otra vez lo desmarca
+  [...el.parentNode.children].forEach(x=>x.classList&&x.classList.remove("on"));
+  if(r[campo]) el.classList.add("on");
+  if(campo==="accion"){
+    const m=document.getElementById("mg_"+id);
+    if(m) m.style.display=(r.accion==="Oferta de vuelta")?"block":"none";
+  }
+  if(campo==="archMotivo"){
+    const w=document.getElementById("arw_"+id);
+    if(w) w.style.display=r.archMotivo?"block":"none";
+  }
+  recAviso(id); refrescar();
+};
+window.recVal=(id,campo,el)=>{ recDe(id)[campo]=String(el.value||"").trim(); recAviso(id); refrescar(); };
+window.recEditar=(id)=>{
+  window.CASOS_EDIT.add(id);
+  const c=casoDe(id), r=recDe(id);
+  // Se parte del plan que ya tenía
+  ["causa","causaNota","accion","accionNota","fechaObjetivo","eurosObjetivo","margenOferta"]
+    .forEach(k=>{ if(r[k]===undefined&&c[k]!=null) r[k]=String(c[k]); });
+  const box=document.getElementById("caso_"+id);
+  if(box) box.outerHTML=pintarCaso(c,window.CASOS_REQ.has(id));
+  refrescar();
+};
+function recAviso(id){
+  const r=recDe(id), el=document.getElementById("mgav_"+id);
+  if(!el) return;
+  const m=Number(String(r.margenOferta||"").replace(",","."));
+  el.innerHTML = r.accion==="Oferta de vuelta"&&r.margenOferta!==""&&r.margenOferta!=null&&!isNaN(m)&&m<RC.UMBRAL.margenMin
+    ? `⚠️ Por debajo del ${RC.UMBRAL.margenMin} % la oferta la tiene que aprobar el CEO. Se le pedirá al cerrar.`
+    : "";
+}
+// ¿Qué le falta a un caso para poder cerrar la semana? ("" si nada)
+function recFalta(c){
+  const r=recDe(c._id);
+  if(c.estado==="propuesta_archivo") return "";
+  if(r.archMotivo) return (r.archNota||"").length>=10 ? "" : "explica por qué archivarlo";
+  const conPlan=RC.tienePlan(c)&&!window.CASOS_EDIT.has(c._id);
+  if(!conPlan){
+    const causa=r.causa||"", acc=r.accion||"";
+    if(!causa) return "falta la causa";
+    if(!acc) return "falta la acción";
+    if(acc==="Oferta de vuelta"&&(r.margenOferta===undefined||r.margenOferta===""||isNaN(Number(String(r.margenOferta).replace(",","."))))) return "falta el margen de la oferta";
+    if(!r.fechaObjetivo) return "falta la fecha";
+    if(!(Number(r.eurosObjetivo)>0)) return "faltan los euros a recuperar";
+  }
+  // Si ya tenía plan (de otra semana), se cuenta el avance
+  if(RC.tienePlan(c)){
+    if(!r.hecho) return "falta qué hiciste";
+    if((r.respuesta||"").length<5) return "falta qué dijo el cliente";
+    if((r.siguiente||"").length<5) return "falta qué harás";
+  }
+  return "";
+}
+function recFaltan(){
+  let n=0;
+  window.CASOS.forEach(c=>{
+    const req=window.CASOS_REQ.has(c._id);
+    const r=window.RECUP[c._id]||{};
+    const tocado=Object.values(r).some(v=>v);
+    const f=recFalta(c);
+    // Los de la cola no obligan, pero si los empieza tiene que acabarlos
+    if(f&&(req||tocado)) n++;
+    const el=document.getElementById("rf_"+c._id);
+    if(el) el.textContent=(req||tocado)&&f?"⚠️ "+f:"";
+  });
+  return n;
+}
+function pintarCaso(c,req){
+  const id=c._id, r=recDe(id);
+  const nv=RC.nivelDe(c);
+  const col=RC.NIVEL_COL[nv.nivel];
+  const dAb=RC.dias(c.abierto)||0;
+  const conPlan=RC.tienePlan(c)&&!window.CASOS_EDIT.has(id);
+  const chips=(campo,ops)=>`<div class="acc">${ops.map(o=>
+    `<button class="chip${r[campo]===o?" on":""}" onclick="recChip('${id}','${campo}','${_escR(o)}',this)">${_escR(o)}</button>`).join("")}</div>`;
+  const fchTxt=(s)=>s?String(s).slice(0,10).split("-").reverse().join("/"):"";
+  const hist=(c.historial||[]).slice(-2).reverse();
+  let h=`<div id="caso_${id}" style="border:1.5px solid ${req?col:"var(--linea)"};border-radius:6px;padding:12px 13px;margin:12px 0;background:#fff">
+    <div class="item" style="border:none;padding:0 0 4px">
+      <div><b>${_escR(c.nombre)}</b><small>${_escR(c.motivo||"")}${c.poblacion?" · "+_escR(c.poblacion):""}</small></div>
+      <div class="imp dn">−${RC.eur(c.perdido)}</div></div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 2px;font-size:11px">
+      <span style="background:${col};color:#fff;border-radius:99px;padding:2px 9px;font-weight:700">${RC.NIVEL_TXT[nv.nivel]}</span>
+      <span style="color:var(--tenue)">abierto hace ${dAb} día${dAb===1?"":"s"}${nv.motivo&&nv.nivel>RC.nivelBase(c.perdido)?" · ⬆ "+_escR(nv.motivo):""}</span>
+      ${c.traspaso?`<span style="color:#1D4ED8">↪ parte sigue por ${_escR(c.traspaso)}</span>`:""}
+    </div>
+    <div id="arts_${id}" style="background:#F7F9FB;border-radius:6px;padding:6px 10px;margin:8px 0 2px">${RC.htmlProductos(c.productos,{cargando:true})}</div>`;
+  if(c.instruccion&&RC.dias(c.instruccionEn)!=null&&RC.dias(c.instruccionEn)<=10)
+    h+=`<div style="background:#EFF6FF;border-radius:6px;padding:8px 10px;margin:6px 0;font-size:12.5px;color:#1E3A8A">
+      📌 <b>Comité:</b> ${_escR(c.instruccion)}${c.instruccionPor?` <span style="opacity:.7">(${_escR(c.instruccionPor)})</span>`:""}</div>`;
+  if(c.archivoDecision==="rechazado"&&c.archivoRespuesta)
+    h+=`<div style="background:#FEF2F2;border-radius:6px;padding:8px 10px;margin:6px 0;font-size:12.5px;color:#991B1B">
+      No se aprueba archivarlo: <b>${_escR(c.archivoRespuesta)}</b></div>`;
+  if(c.estado==="propuesta_archivo"){
+    h+=`<div style="background:#FFFBEB;border-radius:6px;padding:9px 11px;margin:8px 0 0;font-size:12.5px;color:#92400E">
+      ⏳ Pediste archivarlo (<b>${_escR(c.archivoMotivo)}</b>). Pendiente de que lo aprueben tu jefe o el CEO.</div></div>`;
+    return h;
+  }
+  if(conPlan){
+    h+=`<div class="dato" style="margin:8px 0 4px;font-size:12.5px">
+      <b>Causa:</b> ${_escR(c.causa)}${c.causaNota?" · "+_escR(c.causaNota):""}<br>
+      <b>Plan:</b> ${_escR(c.accion)}${c.margenOferta!=null&&c.margenOferta!==""?" al "+_escR(c.margenOferta)+" % de margen":""}${c.accionNota?" · "+_escR(c.accionNota):""}<br>
+      <b>Objetivo:</b> ${RC.eur(c.eurosObjetivo)} antes del ${fchTxt(c.fechaObjetivo)}
+      ${c.necesitaAprobacion==="margen"?`<br><span style="color:#B45309">⏳ Margen pendiente de aprobar por el CEO</span>`:""}
+      ${c.margenAprobado==="no"?`<br><span style="color:#B91C1C">✖ El CEO no aprueba ese margen${c.margenRespuesta?": "+_escR(c.margenRespuesta):""}</span>`:""}
+      ${hist.length?`<div style="margin-top:6px;color:var(--tenue)">${hist.map(x=>
+        `S${x.sem}: ${_escR(x.sistema||[x.hecho,x.respuesta].filter(Boolean).join(" · "))}`).join("<br>")}</div>`:""}
+      <div style="margin-top:6px"><a href="#" onclick="recEditar('${id}');return false" style="font-size:12px;color:var(--tinta)">Cambiar el plan</a></div>
+    </div>
+    <p class="rot" style="margin-top:10px">Esta semana</p>
+    ${chips("hecho",RC.HECHO)}
+    <textarea placeholder="¿Qué te ha dicho el cliente?" oninput="recVal('${id}','respuesta',this)">${_escR(r.respuesta||"")}</textarea>
+    <textarea style="margin-top:6px" placeholder="¿Qué harás la semana que viene?" oninput="recVal('${id}','siguiente',this)">${_escR(r.siguiente||"")}</textarea>`;
+  } else {
+    h+=`<p class="rot" style="margin-top:10px">¿Por qué cae?</p>
+    ${chips("causa",RC.CAUSAS)}
+    <textarea placeholder="Por qué ha dejado esos productos: qué te ha dicho, a quién compra ahora…" oninput="recVal('${id}','causaNota',this)">${_escR(r.causaNota||"")}</textarea>
+    <p class="rot">¿Qué vas a hacer?</p>
+    ${chips("accion",RC.ACCIONES)}
+    <div id="mg_${id}" style="display:${r.accion==="Oferta de vuelta"?"block":"none"};margin:4px 0 8px;font-size:13px">
+      Margen de la oferta: <input type="number" step="0.5" value="${_escR(r.margenOferta??"")}" oninput="recVal('${id}','margenOferta',this)"
+        style="width:80px;padding:6px 8px;border:1.5px solid var(--linea);border-radius:4px"> %
+      <div id="mgav_${id}" style="font-size:12px;color:#B45309;margin-top:4px"></div></div>
+    <textarea placeholder="Detalle del plan (opcional)" oninput="recVal('${id}','accionNota',this)">${_escR(r.accionNota||"")}</textarea>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;font-size:12.5px;color:var(--tenue)">
+      <label>Fecha objetivo<br><input type="date" value="${_escR(r.fechaObjetivo||"")}" onchange="recVal('${id}','fechaObjetivo',this)"
+        style="padding:7px 8px;border:1.5px solid var(--linea);border-radius:4px;font-size:14px"></label>
+      <label>€ a recuperar<br><input type="number" min="0" step="100" value="${_escR(r.eurosObjetivo||"")}" placeholder="${Math.round(c.perdido/2)}" oninput="recVal('${id}','eurosObjetivo',this)"
+        style="width:130px;padding:7px 8px;border:1.5px solid var(--linea);border-radius:4px;font-size:14px"></label>
+    </div>`;
+  }
+  h+=`<details style="margin-top:10px;font-size:12.5px"${r.archMotivo?" open":""}>
+      <summary style="cursor:pointer;color:var(--tenue)">No merece la pena insistir (lo decide tu jefe o el CEO)</summary>
+      ${chips("archMotivo",RC.MOTIVOS_ARCHIVO)}
+      <div id="arw_${id}" style="display:${r.archMotivo?"block":"none"}">
+        <textarea placeholder="Explica por qué (obligatorio)" oninput="recVal('${id}','archNota',this)">${_escR(r.archNota||"")}</textarea></div>
+    </details>
+    <p id="rf_${id}" style="margin:6px 0 0;font-size:11.5px;color:var(--mal);font-weight:700"></p>
+  </div>`;
+  return h;
+}
+function bloqueRecuperacion(){
+  const ab=window.CASOS;
+  if(!ab.length) return "";
+  const req=ab.filter(c=>window.CASOS_REQ.has(c._id));
+  const cola=ab.filter(c=>!window.CASOS_REQ.has(c._id));
+  const tot=ab.reduce((t,c)=>t+RC.num(c.perdido),0);
+  return `<div class="paso" style="border-color:#DC2626;border-width:1.5px">
+    <p class="tit"><span class="num" style="background:#DC2626">!</span>Plan de recuperación</p>
+    <p class="sub"><b>${ab.length} cliente${ab.length===1?"":"s"} en caída · ${RC.eur(tot)} en juego.</b>
+      Por cada uno: por qué cae, qué vas a hacer, para cuándo y cuánto vas a recuperar.
+      Las semanas siguientes, qué hiciste y qué dijo el cliente.
+      Se revisa en el comité del viernes. Solo tu jefe (hasta 20.000 €) o el CEO pueden dar un cliente por perdido.</p>
+    ${req.map(c=>pintarCaso(c,true)).join("")}
+    ${cola.length?`<details style="margin-top:6px"><summary style="cursor:pointer;font-size:13px;font-weight:700">
+      ${cola.length} más en cola (${RC.eur(cola.reduce((t,c)=>t+RC.num(c.perdido),0))}) · entran las próximas semanas</summary>
+      ${cola.map(c=>pintarCaso(c,false)).join("")}</details>`:""}
+  </div>`;
+}
+// Guarda en cada caso lo respondido. Devuelve cuántos fallan.
+async function guardarRecuperacion(){
+  const ahora=new Date().toISOString();
+  let fallos=0;
+  for(const c of window.CASOS){
+    const r=window.RECUP[c._id]||{};
+    if(!Object.values(r).some(v=>v)) continue;
+    if(recFalta(c)) continue;             // a medias y de la cola: no se guarda
+    const campos={actualizado:ahora};
+    const hist=(c.historial||[]).filter(x=>!(x.sem===SEMANA&&x.por===AGENTE));
+    const planNuevo=!RC.tienePlan(c)||window.CASOS_EDIT.has(c._id);
+    if(planNuevo&&!r.archMotivo){
+      const mg=r.accion==="Oferta de vuelta"?Number(String(r.margenOferta).replace(",",".")):null;
+      Object.assign(campos,{causa:r.causa,causaNota:r.causaNota||"",accion:r.accion,
+        accionNota:r.accionNota||"",fechaObjetivo:r.fechaObjetivo,eurosObjetivo:Number(r.eurosObjetivo)||0,
+        margenOferta:mg,necesitaAprobacion:(mg!=null&&mg<RC.UMBRAL.margenMin)?"margen":"",
+        margenAprobado:"",estado:"diagnosticado",diagnosticadoEn:c.diagnosticadoEn||ahora});
+    }
+    const ent={sem:SEMANA,fecha:ahora,por:AGENTE};
+    if(r.archMotivo){
+      Object.assign(campos,{estado:"propuesta_archivo",archivoMotivo:r.archMotivo,
+        archivoNota:r.archNota||"",archivoPropuestoPor:AGENTE,archivoPropuestoEn:ahora,
+        archivoDecision:"",archivoRespuesta:""});
+      ent.sistema=`Pide archivarlo: ${r.archMotivo} · ${r.archNota||""}`;
+    } else if(RC.tienePlan(c)){
+      Object.assign(ent,{hecho:r.hecho,respuesta:r.respuesta||"",siguiente:r.siguiente||""});
+      if(r.hecho&&r.hecho!=="No he podido"){ campos.ultimaAccion=ahora; campos.estado="en_accion"; }
+    } else {
+      ent.sistema=`Diagnóstico: ${r.causa} · plan: ${r.accion}`;
+    }
+    campos.historial=hist.concat([ent]);
+    campos.ultimaSemana=SEMANA;
+    // Para el informe y el correo del jefe
+    R["recup:"+c._id]={nom:c.nombre,perdido:c.perdido,nivel:RC.nivelDe(c).nivel,
+      causa:campos.causa||c.causa||"",accion:campos.accion||c.accion||"",
+      margen:campos.margenOferta??c.margenOferta??null,
+      fecha:campos.fechaObjetivo||c.fechaObjetivo||"",euros:campos.eurosObjetivo||c.eurosObjetivo||0,
+      hecho:ent.hecho||"",respuesta:ent.respuesta||"",siguiente:ent.siguiente||"",
+      archivo:r.archMotivo?(r.archMotivo+" · "+(r.archNota||"")):"",
+      productos:(c.productos&&c.productos.caen||[]).slice(0,3)};
+    try{ await RC.guardar(c._id,campos); }catch(e){ fallos++; }
+  }
+  return fallos;
+}
 // (sep 2026) Retrasos sin clasificar. Un retraso sin motivo es un dato muerto:
 // nadie sabe si fue capacidad, produccion o cliente, asi que nadie puede
 // corregirlo. Se clasifica a diario en Pedidos planificados, y aqui se
@@ -334,11 +556,13 @@ function refrescar(){
   });
   const b=document.getElementById("btn");
   if(!b) return;
-  const total=faltan.length+RETRASOS_SIN_MOTIVO;
+  const RF=(typeof recFaltan==="function")?recFaltan():0;
+  const total=faltan.length+RETRASOS_SIN_MOTIVO+RF;
   document.getElementById("cuenta").innerHTML = total
     ? (faltan.length
         ? `Faltan <b style="color:#fff">${faltan.length}</b> de ${PENDIENTES.length}`
         : "")
+      +(RF?(faltan.length?" · ":"")+`<b style="color:#fff">${RF}</b> caso${RF===1?"":"s"} de recuperación`:"")
       +(RETRASOS_SIN_MOTIVO
         ? (faltan.length?" · ":"")+`<b style="color:#fff">${RETRASOS_SIN_MOTIVO}</b> retraso${
             RETRASOS_SIN_MOTIVO===1?"":"s"} sin motivo`
@@ -633,6 +857,25 @@ async function avisarDelCierre(nCerradas, opts){
             :"Su objetivo del mes"+(A.telefonico?" (telefónico)":"")+" llevado a la semana."}</div>`;
       })()}
 
+      ${(()=>{ const rc=Object.entries(R2).filter(([k])=>k.startsWith("recup:")).map(([,v])=>v);
+        if(!rc.length) return "";
+        const eu=(n)=>String(Math.round(n||0)).replace(/\B(?=(\d{3})+(?!\d))/g,".")+" €";
+        const colN={1:"#16A34A",2:"#D97706",3:"#DC2626"}, txtN={1:"Comercial",2:"Jefe de ventas",3:"CEO"};
+        rc.sort((a,b)=>(b.perdido||0)-(a.perdido||0));
+        return `<h3 style="margin:22px 0 6px;font-size:14px">🚨 Plan de recuperación · ${rc.length} cliente${rc.length===1?"":"s"}</h3>
+        ${rc.map(v=>`<div style="border:1px solid #EEF1F5;border-left:3px solid ${colN[v.nivel]||"#6B7684"};border-radius:6px;padding:9px 11px;margin:6px 0">
+          <div style="display:flex;justify-content:space-between;gap:8px"><b style="font-size:13px">${esc(v.nom)}</b>
+            <span style="font-size:12.5px;font-weight:800;color:#C2263D;white-space:nowrap">−${eu(v.perdido)}</span></div>
+          <div style="font-size:11px;color:${colN[v.nivel]||"#6B7684"};font-weight:700">${txtN[v.nivel]||""}</div>
+          ${v.productos&&v.productos.length&&window.RC?RC.htmlProductos({caen:v.productos},{max:3,sinSuben:true}):""}
+          ${v.archivo?`<div style="font-size:12.5px;color:#92400E;margin-top:3px">Pide archivarlo: ${esc(v.archivo)}</div>`
+          :`<div style="font-size:12.5px;color:#3A424E;margin-top:3px"><b>Causa:</b> ${esc(v.causa)} · <b>Plan:</b> ${esc(v.accion)}${v.margen!=null&&v.margen!==""?" ("+esc(v.margen)+" % margen)":""}
+            · ${eu(v.euros)} antes del ${esc(String(v.fecha||"").split("-").reverse().join("/"))}</div>
+          ${v.hecho?`<div style="font-size:12.5px;color:#3A424E;margin-top:2px"><b>Esta semana:</b> ${esc(v.hecho)}${v.respuesta?" — "+esc(v.respuesta):""}</div>`:""}
+          ${v.siguiente?`<div style="font-size:12.5px;color:#3A424E"><b>Siguiente:</b> ${esc(v.siguiente)}</div>`:""}`}
+        </div>`).join("")}`;
+      })()}
+
       ${comoHaIdo?`<h3 style="margin:20px 0 7px;font-size:14px">Cómo ha ido</h3>
         <p style="margin:0;font-size:13.5px;color:#3A424E;white-space:pre-wrap"
           >${esc(comoHaIdo)}</p>`:""}
@@ -843,6 +1086,18 @@ async function enviar(){
   }
   doc.cerrados = cerrar.length;
 
+  // Plan de recuperación: se guarda antes que el informe. Si falla, no se cierra.
+  const fR=await guardarRecuperacion();
+  if(fR){
+    b.disabled=false; b.textContent="Reintentar";
+    alert(fR+" caso(s) de recuperación no se han podido guardar. No se ha cerrado la semana.");
+    return;
+  }
+  doc.respuestas=JSON.stringify(R);
+  f.respuestas={stringValue:doc.respuestas};
+  doc.casosRecuperacion=window.CASOS.length;
+  f.casosRecuperacion={doubleValue:window.CASOS.length};
+
   // Las fusiones se ANOTAN; las aplica la sincronizacion, que es donde vive esa
   // logica. Dos sitios fusionando es como se rompen los datos.
   for(const [k,v] of Object.entries(R)){
@@ -968,6 +1223,31 @@ async function enviar(){
       return ok && ARR(c.agenteFinal||c.agente)===AGENTE;
     });
 
+    // Plan de recuperación: abre y actualiza sus casos (todos menos Francia)
+    const EN_CASO=new Set();
+    if(P.get("solover")!=="1"&&window.RC&&!RC.esFrancia(yo.equipo)){
+      try{
+        const ids=new Set(mios.map(c=>RC.idDe(c._id)));
+        const previos=(await RC.leerCasos()).filter(c=>ids.has(c._id));
+        const todos=await RC.sincronizar(AGENTE,yo.equipo||"",mios,mes,previos,{por:AGENTE});
+        const ab=todos.filter(RC.abierto);
+        ab.forEach(c=>EN_CASO.add(ARR(c.cliente)));
+        // Primero lo que exige respuesta: los que ya tienen plan (avance), los
+        // de nivel CEO, y de los nuevos los 8 más grandes.
+        ab.sort((a,b)=>RC.num(b.nivel)-RC.num(a.nivel)||RC.num(b.perdido)-RC.num(a.perdido));
+        let nuevos=0;
+        ab.forEach(c=>{
+          if(c.estado==="propuesta_archivo") return;
+          if(RC.tienePlan(c)||RC.nivelDe(c).nivel>=3) window.CASOS_REQ.add(c._id);
+          else if(nuevos<RC.UMBRAL.nuevosPorSemana){ window.CASOS_REQ.add(c._id); nuevos++; }
+        });
+        // Los que exigen respuesta, arriba
+        ab.sort((a,b)=>(window.CASOS_REQ.has(b._id)-window.CASOS_REQ.has(a._id))
+          ||RC.num(b.perdido)-RC.num(a.perdido));
+        window.CASOS=ab;
+      }catch(e){ console.warn("recuperación",e); }
+    }
+
     // 2 · Los que dan señales de bajada, con la misma regla del parte
     // (sep 2026) El cierre recalculaba desde cero cada viernes: un cliente
     // sobre el que ya dijiste "Le visito" volvia a salir la semana siguiente,
@@ -997,6 +1277,7 @@ async function enviar(){
 
     const avisos=[];
     for(const c of mios){
+      if(EN_CASO.has(ARR(c._id))) continue;   // ya está en el plan de recuperación
       const f=mes[ARR(c._id)]; if(!f) continue;
       const act=num(c.ventasAct), ant=num(c.ventasAntYTD);
       if(act<3000) continue;
@@ -1531,6 +1812,8 @@ async function enviar(){
         <p class="obl">Obligatorio para cerrar</p>
       </div>
 
+      ${bloqueRecuperacion()}
+
       <div class="paso">
         <p class="tit"><span class="num">2</span>Clientes con indicios de bajada</p>
         <p class="sub">Todavía no caen en el año, pero han cambiado de comportamiento.
@@ -1617,6 +1900,11 @@ async function enviar(){
     // se comprueba: cerrar la semana con retrasos sin motivo dejaria el dato
     // muerto y nadie volveria a mirarlo.
     comprobarRetrasos();
+    // Qué productos ha dejado de comprar cada cliente en caída
+    if(window.CASOS.length) RC.cargarVarios(window.CASOS,(c,p)=>{
+      const el=document.getElementById("arts_"+c._id);
+      if(el) el.innerHTML=RC.htmlProductos(p);
+    });
 
     document.getElementById("pie").innerHTML=`
       <div class="barra"><p id="cuenta">—</p>

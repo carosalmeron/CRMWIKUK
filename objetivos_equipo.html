@@ -142,6 +142,7 @@
 <main><div class="estado" id="app">Cargando…</div></main>
 
 <script src="agentes.js"></script>
+<script src="/recuperacion_comun.js"></script>
 <script>
 const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
 const P=new URLSearchParams(location.search);
@@ -1182,6 +1183,10 @@ async function enviarConsolidado(es){
   let D=null;
   try{ D=await datosDelEquipo(); }catch(err){ console.warn("[consolidado] sin cifras:",err); }
   const T=D&&D.T, PP=(D&&D.PP)||{}, OBJ_ACT=(D&&D.OBJ_ACT)||{};
+  // (sep 2026) Plan de recuperación del equipo, para el comité del viernes
+  let CR=[];
+  try{ if(window.RC) CR=(await RC.leerCasos()).filter(c=>!RC.esFrancia(c.equipo)
+    &&(esDir||!EQUIPO||U(c.equipo)===EQUIPO||U(c.equipo).includes(EQUIPO))); }catch(e){}
   // toLocaleString("es-ES") no separa los miles con 4 cifras ("4100 €")
   const eur=(n)=>String(Math.round(n||0)).replace(/\B(?=(\d{3})+(?!\d))/g,".")+" €";
   const pcT=(a,b)=>b?Math.round(a/b*100):null;
@@ -1457,6 +1462,46 @@ async function enviarConsolidado(es){
       </div>`;
   };
 
+  const blqRecup=()=>{
+    if(!window.RC||!CR.length) return "";
+    const r=RC.resumen(CR), ab=CR.filter(RC.abierto);
+    const semR=RC.semanaISO(new Date());
+    const conAvance=(c)=>(c.historial||[]).some(x=>x.sem===semR&&!x.sistema);
+    const g={}; ab.forEach(c=>(g[U(c.agente)]=g[U(c.agente)]||[]).push(c));
+    const filasR=Object.entries(g).sort((a,b)=>b[1].reduce((t,c)=>t+(+c.perdido||0),0)-a[1].reduce((t,c)=>t+(+c.perdido||0),0))
+      .map(([a,l])=>{
+        const sinP=l.filter(c=>!RC.tienePlan(c)&&c.estado!=="propuesta_archivo").length;
+        const sinA=l.filter(c=>RC.tienePlan(c)&&!conAvance(c)).length;
+        const ag=(typeof USUARIOS!=="undefined"?USUARIOS:[]).find(u=>U(u.id)===a||U(u.grupoAgente)===a);
+        return `<tr><td style="padding:6px 0;border-top:1px solid #EEF1F5;font-size:12.5px;font-weight:700">${escH(ag?ag.nombre:a)}
+          <div style="font-size:10.5px;color:#8A94A0;font-weight:400">${l.length} casos${sinP?` · <span style="color:#C2263D">${sinP} sin plan</span>`:""}${sinA?` · <span style="color:#C2263D">${sinA} sin avance</span>`:""}</div></td>
+          <td style="padding:6px 0;border-top:1px solid #EEF1F5;text-align:right;font-size:13px;font-weight:800;color:#C2263D;white-space:nowrap">−${eur(l.reduce((t,c)=>t+(+c.perdido||0),0))}</td></tr>`;
+      }).join("");
+    const top=ab.slice().sort((a,b)=>(+b.perdido||0)-(+a.perdido||0)).slice(0,5);
+    const colN={1:"#16A34A",2:"#D97706",3:"#DC2626"};
+    return `<h3 style="margin:22px 0 2px;font-size:14px">🚨 Plan de recuperación</h3>
+      <div style="font-size:11.5px;color:#8A94A0;margin-bottom:8px">Clientes en caída del equipo, para el comité del viernes.</div>
+      <table style="width:100%;border-collapse:separate;border-spacing:0;margin:0 -4px 6px"><tr>
+        ${[["En riesgo",eur(r.enRiesgo),"#C2263D"],["Sin plan",r.sinPlan,r.sinPlan?"#C2263D":"#0E7C5A"],
+           ["Parados +14 d",r.parados,r.parados?"#C2263D":"#0E7C5A"],["Recuperados",r.recuperados,"#0E7C5A"]]
+          .map(([t,v,c])=>`<td style="padding:0 4px;width:25%;vertical-align:top"><div style="background:#F7F9FB;border-radius:10px;padding:9px 10px">
+            <div style="font-size:9.5px;text-transform:uppercase;color:#8A94A0;font-weight:700">${t}</div>
+            <div style="font-size:15px;font-weight:800;color:${c}">${v}</div></div></td>`).join("")}
+      </tr></table>
+      <table style="width:100%;border-collapse:collapse">${filasR}</table>
+      ${top.length?`<div style="font-size:12px;font-weight:800;margin:12px 0 4px">Los 5 más grandes</div>
+      ${top.map(c=>{ const u=(c.historial||[]).filter(x=>x.sem===semR&&!x.sistema).slice(-1)[0];
+        const nv=RC.nivelDe(c).nivel;
+        return `<div style="border:1px solid #EEF1F5;border-left:3px solid ${colN[nv]};border-radius:6px;padding:8px 10px;margin:5px 0;font-size:12px">
+          <b>${escH(c.nombre)}</b> · <span style="color:#C2263D;font-weight:800">−${eur(c.perdido)}</span> · ${escH(c.agente)}
+          ${RC.htmlProductos(c.productos,{max:3,sinSuben:true})}
+          <div style="color:#3A424E">${RC.tienePlan(c)?`${escH(c.causa)} → ${escH(c.accion)} · ${eur(c.eurosObjetivo)}`:`<span style="color:#C2263D">Sin diagnosticar</span>`}</div>
+          ${u?`<div style="color:#3A424E">Esta semana: ${escH(u.hecho)} — ${escH(u.respuesta)}</div>`:RC.tienePlan(c)?`<div style="color:#C2263D">Sin avance esta semana</div>`:""}
+        </div>`;}).join("")}`:""}
+      ${r.propuestas+r.margenPend?`<div style="margin-top:8px;font-size:12px;padding:6px 10px;border-radius:8px;background:#FFFBEB;color:#92400E">
+        ⏳ ${r.propuestas} peticiones de archivo y ${r.margenPend} márgenes esperando al CEO</div>`:""}`;
+  };
+
   const sube=es.map(o=>{
     const ag=USUARIOS.find(u=>U(u.id)===U(o.agente));
     return `<li style="margin-bottom:5px;font-size:13px">${escH(o.texto)}
@@ -1481,6 +1526,7 @@ async function enviarConsolidado(es){
       </div>
       ${blqActividad()}
       ${blqRanking()}
+      ${blqRecup()}
       ${blqMuestras()}
       ${blqCobros()}
       ${sube?`<h3 style="margin:22px 0 8px;font-size:14px">Lo que sube (${es.length})</h3>
