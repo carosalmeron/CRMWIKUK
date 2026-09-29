@@ -4156,6 +4156,65 @@ EVALUATE
         };
       });
 
+      // (sep 2026) Se hace ANTES de la fusion por codigo contable/nombre, para
+      // que la fusion trabaje ya con un documento por codigo y no sume dos veces.
+      // Un mismo codigo viene en varias filas: una por cada
+      // combinacion de VENDEDOR y EMPRESA con la que se le ha facturado.
+      // Antes se quedaba solo la fila con mas venta y se tiraban las demas
+      // ("duplicadosDescartados": 456 filas), asi que los clientes atendidos
+      // por dos vendedores o facturados por dos sociedades perdian parte de
+      // su venta: el CRM iba un 10-20 % por debajo de Power BI en muchos
+      // clientes. Ahora se SUMAN; el comercial es el de la fila que mas vende.
+      {
+        const SUMA = ["ventasAntFull","margenAntFull","ventasAntYTD","margenAntYTD",
+          "ventasAct","margenAct","ventasMes","ventasSem","ventasMesAnt","ventasSemAnt",
+          "margenSem","baseSem","margenMes","baseMes","margenMesAnt","baseMesAnt"];
+        const base = (d, v, c) => num(d[v]) * num(d[c]) / 100;   // base con coste = venta x cobertura
+        const grupos = new Map();
+        for (const d of docs) {
+          const k = String(d._id);
+          (grupos.get(k) || grupos.set(k, []).get(k)).push(d);
+        }
+        if (grupos.size !== docs.length) {
+          const unidos = [];
+          let filasUnidas = 0;
+          for (const filas of grupos.values()) {
+            if (filas.length === 1) { unidos.push(filas[0]); continue; }
+            filasUnidas += filas.length - 1;
+            filas.sort((x, y) => num(y.ventasAct) - num(x.ventasAct)
+              || num(y.ventasAntFull) - num(x.ventasAntFull));
+            const m = { ...filas[0] };
+            const bAct = filas.reduce((t, d) => t + base(d, "ventasAct", "coberturaAct"), 0);
+            const bYTD = filas.reduce((t, d) => t + base(d, "ventasAntYTD", "coberturaAntYTD"), 0);
+            const bFull = filas.reduce((t, d) => t + base(d, "ventasAntFull", "coberturaAntFull"), 0);
+            for (const k of SUMA) m[k] = num(filas.reduce((t, d) => t + num(d[k]), 0));
+            const p = (mg, b) => (b ? num((100 * mg) / b) : null);
+            const cob = (b, v) => (v ? num((100 * b) / v) : 0);
+            m.coberturaAct = cob(bAct, m.ventasAct);
+            m.coberturaAntYTD = cob(bYTD, m.ventasAntYTD);
+            m.coberturaAntFull = cob(bFull, m.ventasAntFull);
+            m.margenPctAct = p(m.margenAct, bAct);
+            m.margenPctAntYTD = p(m.margenAntYTD, bYTD);
+            m.margenPctAntFull = p(m.margenAntFull, bFull);
+            m.margenPctSem = p(m.margenSem, m.baseSem);
+            m.margenPctMes = p(m.margenMes, m.baseMes);
+            m.margenPctMesAnt = p(m.margenMesAnt, m.baseMesAnt);
+            m.variacionPct = m.ventasAntYTD ? num((100 * (m.ventasAct - m.ventasAntYTD)) / m.ventasAntYTD) : null;
+            m.variacionMargenPts = (m.margenPctAct !== null && m.margenPctAntYTD !== null)
+              ? num(m.margenPctAct - m.margenPctAntYTD) : null;
+            const baja = num(m.ventasAct - m.ventasAntYTD);
+            if (!m.intercompany && baja < 0) m.caida = baja; else delete m.caida;
+            m.ultimaVenta = filas.map((d) => d.ultimaVenta).filter(Boolean).sort().pop() || m.ultimaVenta;
+            m.vendedores = [...new Set(filas.map((d) => d.vendedor).filter(Boolean))].join(",");
+            m.empresas = [...new Set(filas.map((d) => d.empresa).filter(Boolean))].join(",");
+            unidos.push(m);
+          }
+          log.filasUnidas = filasUnidas;
+          docs.length = 0;
+          for (const d of unidos) docs.push(d);
+        }
+      }
+
       // ── Consolidar clientes recodificados ──
       // En 2026 se cambio la codificacion (U4... -> C0...). El codigo
       // viejo conserva el historico y el nuevo solo tiene ventas de este
@@ -4327,30 +4386,6 @@ EVALUATE
       let rescatadosCRM = 0;
 
       for (const d of docs) {
-      // Un mismo codigo puede venir en varias filas (una por sociedad). Todas
-      // escriben en el MISMO documento, asi que la ultima pisa a las demas: si
-      // esa trae cero, la venta buena desaparece. Se deja una sola por codigo,
-      // la que mas venta tenga, que es la que ya lleva la suma del grupo.
-      {
-        const mejor = new Map();
-        for (const d of docs) {
-          const k = String(d._id);
-          const a = mejor.get(k);
-          if (!a || num(d.ventasAct) > num(a.ventasAct)
-                 || (num(d.ventasAct) === num(a.ventasAct)
-                     && num(d.ventasAntFull) > num(a.ventasAntFull))) {
-            mejor.set(k, d);
-          }
-        }
-        if (mejor.size !== docs.length) {
-          log.duplicadosDescartados = docs.length - mejor.size;
-          // docs es const: se vacia y se rellena, en vez de reasignar
-          const buenos = [...mejor.values()];
-          docs.length = 0;
-          for (const d of buenos) docs.push(d);
-        }
-      }
-
         // Red de seguridad: fusionado en si mismo no es fusionado
         if (d.fusionadoEn && String(d.fusionadoEn) === String(d._id || d.cliente))
           delete d.fusionadoEn;
