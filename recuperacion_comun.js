@@ -591,7 +591,7 @@
   // Aprobada antes de esta semana → toca decir qué ha pasado
   RC.tocaResultado=(e,hoy)=>{
     if(!RC.estAbierta(e)) return false;
-    const f=Date.parse(e.fechaAprobacion||e.fechaCreacion||0)||0;
+    const f=RC.fechaAprob(e);
     if(f>=RC.lunesDe(hoy||new Date()).getTime()) return false;
     const s=e.seguimientoSemanal; return !(s&&s.semana===RC.semanaISO(hoy||new Date()));
   };
@@ -954,10 +954,102 @@
       precioBase:num(p.precio)||0,dtoCliente:p.dtoCli!=null?p.dtoCli:null,catCliente:p.catCli||"",
       precioActual:Number(v("pa").replace(",","."))||0,precioOferta:Number(v("po").replace(",","."))||0,unidad:v("ud")||"m",nota:v("nota")};
   };
+  // ══ Al decidir: proponer OTRO PRECIO o una ALTERNATIVA ═══════════════
+  RC._extraEst=null;   // {id, tipo:"precio"|"alt"}
+  RC.topeDe=async(nivel)=>{ const lim=await RC.limitesDto();
+    return nivel==="ceo"?100:nivel==="director"?lim.director:nivel==="jefe"?lim.jefe:lim.agente; };
+  // Precio de referencia (tarifa del cliente) de la línea de una estrategia
+  RC.refEst=async(e)=>{
+    const o=(e.ofertas||[])[0]||{};
+    if(num(o.precioActual)>0) return num(o.precioActual);
+    if(num(o.precioBase)>0){ const t=await RC.tarifaCliente(e.clienteId||e.clienteCodigo,e.cliente||e.clienteNombre);
+      return Math.round(num(o.precioBase)*(1-t.dto/100)*100)/100; }
+    return 0;
+  };
+  RC.abrirExtraEst=(id,tipo)=>{ RC._extraEst=(RC._extraEst&&RC._extraEst.id===id&&RC._extraEst.tipo===tipo)?null:{id,tipo};
+    if(typeof window.pintar==="function") window.pintar(); };
+  RC.htmlExtrasEst=(e)=>{
+    const id=e._id||e.id, ab=RC._extraEst&&RC._extraEst.id===id?RC._extraEst.tipo:null;
+    const o=(e.ofertas||[])[0]||{}, pref="xe"+String(id).replace(/[^A-Za-z0-9_]/g,"");
+    const b=(t,txt,col)=>`<button type="button" onclick="RC.abrirExtraEst('${id}','${t}')" style="padding:9px;border-radius:10px;border:1.5px solid ${col};background:${ab===t?col:"#fff"};color:${ab===t?"#fff":col};font-weight:700;font-size:13px;cursor:pointer">${txt}</button>`;
+    let h=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px">${b("precio","💬 Proponer otro precio","#2563EB")}${b("alt","🔄 Proponer alternativa","#EA580C")}</div>`;
+    if(ab==="precio"){
+      const ref=num(o.precioActual)||"";
+      h+=`<div style="display:grid;gap:6px;background:#EFF6FF;border:1px solid #BFDBFE;border-radius:12px;padding:10px;margin-top:6px">
+        <div style="font-weight:800;color:#1D4ED8">💬 Otro precio para ${RC.esc(o.nombre||"el artículo")}</div>
+        <div style="font-size:12.5px;color:#374151">Pide <b>${RC.esc(o.precioFinal||o.precioOferta||"")} €/${RC.esc(o.unidad||"m")}</b>. Pon el precio que sí le das.</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+          <label style="font-size:12px;color:#6B7280">Tarifa del cliente<input id="${pref}_pa" type="number" step="0.01" value="${ref}" readonly style="width:100%;padding:9px;border:1.5px solid #BFDBFE;border-radius:9px;font-size:14px;background:#F1F5F9"></label>
+          <label style="font-size:12px;color:#6B7280">Tu precio<input id="${pref}_po" type="number" step="0.01" oninput="RC.dtoUI('${pref}')" style="width:100%;padding:9px;border:1.5px solid #2563EB;border-radius:9px;font-size:14px;font-weight:700"></label></div>
+        <div id="${pref}_dto" style="font-size:12.5px;font-weight:700"></div>
+        <button type="button" onclick="extraEstEnviar('${id}','precio')" style="padding:11px;border-radius:10px;border:none;background:#2563EB;color:#fff;font-weight:800;font-size:14px;cursor:pointer">Enviar este precio</button>
+        <div style="font-size:12px;color:#6B7280">Si entra en tu límite queda aprobada a ese precio; si no, sube a tu superior con el precio nuevo. Al comercial le llega el aviso.</div></div>`;
+      if(!ref) setTimeout(async()=>{ const r=await RC.refEst(e); const el=document.getElementById(pref+"_pa"); if(el&&r){ el.value=r.toFixed(2); RC.dtoUI(pref); } },0);
+    }
+    if(ab==="alt"){
+      h+=RC.formAlternativa(pref,{art:o.codigo||"",desc:o.nombre||""},{cliente:e.clienteId||e.clienteCodigo||"",nombre:e.cliente||e.clienteNombre||""})
+        +`<button type="button" onclick="extraEstEnviar('${id}','alt')" style="width:100%;margin-top:6px;padding:11px;border-radius:10px;border:none;background:#EA580C;color:#fff;font-weight:800;font-size:14px;cursor:pointer">Proponer esta alternativa</button>
+        <div style="font-size:12px;color:#6B7280;margin-top:4px">La estrategia se cierra como «cambiada por alternativa» y al comercial le llega la oferta nueva (o va a aprobación si pasa tu límite).</div>`;
+    }
+    return h;
+  };
+  RC.prefExtra=(id)=>"xe"+String(id).replace(/[^A-Za-z0-9_]/g,"");
+  // Otro precio: aprueba (o eleva) la estrategia con el precio nuevo
+  RC.contraofertaEst=async(e,precio,por,nota)=>{
+    const ofs=(e.ofertas||[]).map(o=>Object.assign({},o)); const o=ofs[0]||{};
+    const ref=await RC.refEst(e), antes=num(o.precioFinal||o.precioOferta);
+    const dto=ref>0?RC.dtoDe(ref,precio):num(e.maxDescuento);
+    Object.assign(o,{precioSolicitado:antes,precioFinal:num(precio),precioAprobado:num(precio),precioActual:o.precioActual||ref||"",dto});
+    const hoyS=new Date().toLocaleDateString("es-ES");
+    const campos={ofertas:ofs,productos:ofs,maxDescuento:dto,contraoferta:{precio:num(precio),antes,por:por.nombre,rol:por.nivel,fecha:hoyS,nota:nota||""}};
+    await RC.guardarEn("estrategias",e._id||e.id,campos,true); Object.assign(e,campos);
+    const tope=await RC.topeDe(por.nivel);
+    const txt=`Contraoferta: ${num(precio)} € en vez de ${antes} € (${dto} % sobre su tarifa)`+(nota?". "+nota:"");
+    return RC.resolverEstrategia(e,dto<=tope?"aprobar":"elevar",por,txt);
+  };
+  // Alternativa: cierra la estrategia y crea la oferta (o estrategia) del otro artículo
+  RC.alternativaEst=async(e,alt,por,nota)=>{
+    let caso=null; if(e.casoId){ try{ caso=await RC.leerUno(e.casoId); }catch(x){} }
+    caso=caso||{_id:"",nombre:e.cliente||e.clienteNombre||"",cliente:e.clienteId||e.clienteCodigo||"",agente:e.agente,equipo:e.equipo||"",historial:[]};
+    const o=(e.ofertas||[])[0]||{};
+    const r=await RC.crearAlternativa(caso,{art:o.codigo||"",desc:o.nombre||""},Object.assign({},alt,{nota:[alt.nota,nota].filter(Boolean).join(" · ")}),por);
+    const hoyS=new Date().toLocaleDateString("es-ES");
+    const que=`${alt.desc}${alt.cal?" "+alt.cal:""} a ${num(alt.precio)} €/${alt.unidad||"m"}`;
+    const campos={estado:"sin_exito",pendienteDe:null,escaladoA:null,
+      resolucion:{tipo:"alternativa",por:por.nombre,rol:por.nivel,fecha:hoyS,nota:nota||"",alternativa:que,ref:r.id||""},
+      historialEscalado:(e.historialEscalado||[]).concat([{accion:"🔄 Cambiada por alternativa: "+que,por:por.nombre,fecha:hoyS,nota:nota||""}])};
+    await RC.guardarEn("estrategias",e._id||e.id,campos,true); Object.assign(e,campos);
+    if(r._esEstrategia){ try{ await RC.avisarA(e.agente,`🔄 Alternativa para ${e.cliente}`,`${RC.esc(por.nombre)} propone ${RC.esc(que)} en lugar de ${RC.esc(o.nombre||"")}. Supera su límite: está pendiente de aprobación.`); }catch(x){} }
+    return r;
+  };
+  // Fecha de una estrategia venga de donde venga (las del CRM guardan «fecha»
+  // en texto y a veces solo el id lleva la marca de tiempo)
+  const deES=(t)=>{ const m=String(t||"").match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/); if(!m) return 0;
+    const y=Number(m[3])<100?2000+Number(m[3]):Number(m[3]); return new Date(y,Number(m[2])-1,Number(m[1]),12).getTime(); };
+  RC.fechaEst=(e)=>{
+    const a=Date.parse(e.fechaCreacion||""); if(a) return a;
+    const b=deES(e.fechaCreacionStr||e.fecha); if(b) return b;
+    const m=String(e._id||e.id||"").match(/(1[6-9]\d{11})/); return m?Number(m[1]):0; };
+  RC.fechaAprob=(e)=>{
+    const a=Date.parse(e.fechaAprobacion||""); if(a) return a;
+    const r=deES(e.resolucion&&e.resolucion.tipo==="aprobada"&&e.resolucion.fecha); if(r) return r;
+    const h=(e.historialEscalado||[]).filter(x=>/aprobad/i.test(x.accion||"")).map(x=>deES(x.fecha)).filter(Boolean).pop(); if(h) return h;
+    return RC.fechaEst(e); };
+  RC.fechaTxt=(e)=>{
+    const f=RC.fechaEst(e); if(!f) return `<span style="color:#B45309">sin fecha</span>`;
+    const d=new Date(f), dias=Math.floor((Date.now()-f)/86400000);
+    const txt=d.toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"numeric"});
+    const hace=dias<=0?"hoy":dias===1?"ayer":`hace ${dias} días`;
+    const col=e.estado==="pendiente_aprobacion"&&dias>=3?"#B91C1C":"inherit";
+    return `${txt} <b style="color:${col}">(${hace})</b>`; };
   RC.htmlEstrategia=(e,botones)=>{
     let [t,c,bg]=RC.ESTADO_EST[e.estado]||["📋 "+(e.estado||""),"#475569","#F8FAFC"];
     const cf=e.cierreFinal, ss=e.seguimientoSemanal;
     if(cf&&cf.resultado==="ko") t="❌ Sin pedido";
+    const rz=e.resolucion||{};
+    if(rz.tipo==="alternativa"){ t="🔄 Cambiada por alternativa"; c="#C2410C"; bg="#FFF7ED"; }
+    const extra=(e.contraoferta?`<div style="font-size:12.5px;font-weight:700;margin-top:4px;color:#1D4ED8">💬 ${RC.esc(e.contraoferta.por)} le da ${RC.esc(e.contraoferta.precio)} € (pedía ${RC.esc(e.contraoferta.antes)} €)</div>`:"")
+      +(rz.tipo==="alternativa"?`<div style="font-size:12.5px;font-weight:700;margin-top:4px;color:#C2410C">🔄 ${RC.esc(rz.por)} propone ${RC.esc(rz.alternativa||"")}${rz.nota?" — “"+RC.esc(rz.nota)+"”":""}</div>`:"");
     const res=cf?`<div style="font-size:12.5px;font-weight:700;margin-top:4px;color:${cf.resultado==="pedido"?"#15803D":"#B91C1C"}">${cf.resultado==="pedido"?"✅ Ha entrado pedido":"❌ No ha salido"}${cf.subTipo?" · "+RC.esc((RC.MOTIVOS_KO.find(m=>m[0]===cf.subTipo)||[,cf.subTipo])[1]):""} · ${RC.esc(cf.fecha||"")}${cf.nota?" — “"+RC.esc(cf.nota)+"”":""}</div>`
       :ss&&ss.estado==="pendiente"&&e.estado==="aprobada"?`<div style="font-size:12.5px;font-weight:700;margin-top:4px;color:#B45309">⏳ Sin pedido todavía (semana ${RC.esc(ss.semana)})${ss.nota?" — “"+RC.esc(ss.nota)+"”":""}</div>`:"";
     const o=(e.ofertas||[])[0]||{};
@@ -965,9 +1057,9 @@
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
         <b style="font-size:13.5px">💶 ${RC.esc(o.nombre||e.estrategia||"Estrategia")}${o.calibre?" · "+RC.esc(o.calibre):""}</b>
         <span style="font-size:11.5px;font-weight:800;color:${c};background:${bg};border-radius:99px;padding:3px 9px">${t}${e.estado==="pendiente_aprobacion"&&e.pendienteDeNombre?" · "+RC.esc(e.pendienteDeNombre):""}</span></div>
-      <div style="font-size:13px;margin-top:4px">${o.precioActual?RC.esc(o.precioActual)+" € → ":""}<b style="color:#6D28D9">${RC.esc(o.precioFinal||o.precioOferta||"")} €/${RC.esc(o.unidad||"m")}</b> · descuento ${num(e.maxDescuento)} %</div>
-      <div style="font-size:12px;color:#6B7280;margin-top:2px">${e.solicitudAgente?"Lo pide "+RC.esc(e.agenteNombre||e.agente):"Creada por "+RC.esc(e.creadoPorNombre||"")} · ${RC.esc(e.fechaCreacionStr||"")}${e.descripcion?" · “"+RC.esc(e.descripcion)+"”":""}</div>
-      ${res}${botones||""}</div>`;
+      <div style="font-size:13px;margin-top:4px">${o.precioActual?RC.esc(o.precioActual)+" € → ":o.precioBase?"catálogo "+RC.esc(o.precioBase)+" € → ":""}<b style="color:#6D28D9">${RC.esc(o.precioFinal||o.precioOferta||"")} €/${RC.esc(o.unidad||"m")}</b> · descuento ${num(e.maxDescuento)} %</div>
+      <div style="font-size:12px;color:#6B7280;margin-top:2px">${e.solicitudAgente?"Lo pide "+RC.esc(e.agenteNombre||e.agente):"Creada por "+RC.esc(e.creadoPorNombre||"")} · ${RC.fechaTxt(e)}${e.descripcion?" · “"+RC.esc(e.descripcion)+"”":""}</div>
+      ${extra}${res}${botones||""}</div>`;
   };
 
   // Resumen para informes (jefe, CEO, comité)
