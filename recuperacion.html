@@ -45,6 +45,8 @@
  details summary{cursor:pointer}
  .filtros{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
  .filtros select{width:auto;padding:7px 9px;font-size:13px}
+ .chipA{border:1.5px solid var(--c);background:#fff;color:var(--c);border-radius:99px;padding:7px 12px;font-weight:800;font-size:12.5px;cursor:pointer}
+ .chipA.on{background:var(--c);color:#fff}
 </style>
 </head>
 <body>
@@ -248,7 +250,7 @@ async function pedirDiag(ids){
 let FICHA=null, _scrollLista=0;
 const FICHA_ART={tab:"caen",abierto:null};
 async function cargarOfs(){ if(OFS) return; OFS=[]; try{ OFS=await RC.leerProfundo("ofertas"); }catch(e){} if(FICHA) pintar(); }
-function abrirFicha(id){ cargarOfs(); _scrollLista=window.scrollY||0; FICHA=id; FICHA_ART.tab="caen"; FICHA_ART.abierto=null; pintar(); window.scrollTo(0,0);
+function abrirFicha(id){ cargarOfs(); _scrollLista=window.scrollY||0; FICHA=id; FICHA_ART.tab="caen"; FICHA_ART.abierto=null; FICHA_ART.acc=null; FICHA_ART.fams=null; pintar(); window.scrollTo(0,0);
   const c=CASOS.find(x=>x._id===id); if(c){ cargarTodosArt(c); cargarProg(c); } }
 function cerrarFicha(){ FICHA=null; pintar(); window.scrollTo(0,_scrollLista); }
 async function cargarTodosArt(c,forzar){
@@ -283,6 +285,8 @@ function vistaFicha(c){
   else if(P.error) meses=`<p class="muted">No se ha podido cargar el mes a mes (${esc(P.error)}).</p>`;
   else{
     const ms=(P.meses||[]).filter(m=>!m.futuro);
+    if(!ms.length){ meses=`<p class="muted">Sin datos mensuales de este cliente.</p>`; }
+    else {
     const mx=Math.max(1,...ms.map(m=>Math.max(num(m.actual),num(m.anterior))));
     meses=`<div style="display:flex;gap:4px;align-items:flex-end;height:120px;padding-top:6px;overflow-x:auto">
       ${ms.map(m=>`<div style="flex:1;min-width:24px;display:flex;flex-direction:column;align-items:center;gap:3px">
@@ -292,7 +296,8 @@ function vistaFicha(c){
         </div>
         <div style="font-size:10px;color:var(--muted)">${esc(String(m.mes).slice(0,3))}${m.enCurso?"*":""}</div></div>`).join("")}
     </div>
-    <div class="muted" style="font-size:11px;margin-top:4px">Gris: ${P.anoAnterior}. Color: ${P.anoActual} (rojo si cae más del 30 %). * mes en curso.${P.caeDesde?` <b style="color:var(--red)">Cae desde ${esc(P.caeDesde)}.</b>`:""}</div>`;
+    <div class="muted" style="font-size:11px;margin-top:4px">Gris: ${P.anoAnterior||"año pasado"}. Color: ${P.anoActual||"este año"} (rojo si cae más del 30 %). * mes en curso.${P.caeDesde?` <b style="color:var(--red)">Cae desde ${esc(P.caeDesde)}.</b>`:""}</div>`;
+    }
   }
   // Artículos
   const A=c._arts;
@@ -302,26 +307,54 @@ function vistaFicha(c){
   else{
     const l=FICHA_ART.tab==="caen"?A.caen:A.suben;
     const sumC=A.caen.reduce((t,a)=>t-a.dif,0), sumS=A.suben.reduce((t,a)=>t+a.dif,0);
+    // Familias: lo que va antes del primer espacio (MAD.CERDO, MAD.BUEY…)
+    const fam=(a)=>String(a.desc||a.art||"").trim().split(/\s+/)[0]||"Otros";
+    const grupos={}; l.forEach((a,i)=>{ const k=fam(a); (grupos[k]=grupos[k]||[]).push(Object.assign({_i:i},a)); });
+    const orden=Object.entries(grupos).sort((x,y)=>Math.abs(y[1].reduce((t,a)=>t+a.dif,0))-Math.abs(x[1].reduce((t,a)=>t+a.dif,0)));
+    if(!FICHA_ART.fams) FICHA_ART.fams=new Set(orden.length?[orden[0][0]]:[]);
+    const estsC=RC.estrategiasDeCaso(ESTS,c), ofsC=(OFS||[]).filter(o=>o.casoId===c._id||ARR(o.clienteId)===ARR(c.cliente));
+    const marcas=(a)=>{
+      const k=ARR(a.art), n=ARR(a.desc);
+      // Primero por código; por nombre solo si la línea no trae código
+      const casa=(cod,nom)=>cod?ARR(cod)===k:(k&&ARR(nom).split(/[\s—·]+/).includes(k))||(!k&&ARR(nom)===n);
+      const es=estsC.filter(e=>(e.ofertas||[]).some(o=>casa(o.codigo,o.nombre)));
+      const of=ofsC.filter(o=>(o.lineas||[]).some(x=>casa(x.codigo,x.producto)));
+      return es.map(e=>{ const [t,co,bg]=RC.ESTADO_EST[e.estado]||["📋","#475569","#F1F5F9"];
+          return `<span class="pill" style="background:${bg};color:${co};border:1px solid ${co}33">💶 ${t}</span>`; }).join(" ")
+        +(of.length?` <span class="pill" style="background:#EFF6FF;color:#1D4ED8;border:1px solid #BFDBFE">📨 ${of.length} oferta${of.length===1?"":"s"}</span>`:"");
+    };
+    const filaArt=(a)=>{
+      const i=a._i, w=a.ant?Math.max(0,Math.min(100,Math.round(a.act/a.ant*100))):100;
+      const acc=FICHA_ART.acc&&FICHA_ART.acc.i===i?FICHA_ART.acc.tipo:null;
+      const m=marcas(a);
+      return `<div style="border-top:1px solid #F1F5F9;padding:9px 0">
+        <div class="row"><div style="min-width:0"><b style="font-size:13px">${esc(a.desc)}</b>
+          <div class="muted" style="font-size:11.5px">${esc(a.art)}${a.cal?" · calibre "+esc(a.cal):""}${a.metros?" · "+esc(a.metros)+" m":""}</div></div>
+          <div style="text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;font-size:12.5px">
+            ${eur(a.ant)} → <b style="color:${a.act<0||a.dif<0?"var(--red)":"var(--green)"}">${eur(a.act)}</b>${a.act<0?' <span class="muted">(abono)</span>':""}
+            <div style="font-weight:800;color:${a.dif<0?"var(--red)":"var(--green)"}">${a.dif>0?"+":""}${eur(a.dif)}</div></div></div>
+        ${FICHA_ART.tab==="caen"?`<div class="barra" style="background:#E2E8F0"><i style="width:${w}%;background:var(--red)"></i></div>`:""}
+        ${m?`<div style="margin-top:6px;display:flex;gap:5px;flex-wrap:wrap">${m}</div>`:""}
+        ${RC.abierto(c)&&FICHA_ART.tab==="caen"?`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:7px">
+          <button class="chipA${acc==="est"?" on":""}" style="--c:#6D28D9" onclick="accArt(${i},'est')">💶 ${NIVEL==="comercial"?"Pedir estrategia":"Estrategia"}</button>
+          <button class="chipA${acc==="of"?" on":""}" style="--c:#1D4ED8" onclick="accArt(${i},'of')">📨 Oferta</button>
+          ${ES_JEFE?`<button class="chipA${acc==="plan"?" on":""}" style="--c:#0F766E" onclick="accArt(${i},'plan')">📌 Pedir plan</button>`:""}
+        </div>`:""}
+        ${acc?formArt(c,a,acc):""}
+      </div>`;
+    };
     arts=`<div class="tabs" style="margin-bottom:6px">
-        <button class="${FICHA_ART.tab==="caen"?"on":""}" onclick="FICHA_ART.tab='caen';FICHA_ART.abierto=null;pintar()">Caen (${A.caen.length}) · −${eur(sumC)}</button>
-        <button class="${FICHA_ART.tab==="suben"?"on":""}" onclick="FICHA_ART.tab='suben';FICHA_ART.abierto=null;pintar()">Crecen (${A.suben.length}) · +${eur(sumS)}</button></div>
-      ${!l.length?`<p class="muted">Ninguno.</p>`:l.map((a,i)=>{
-        const w=a.ant?Math.max(0,Math.min(100,Math.round(a.act/a.ant*100))):100;
-        const ab=FICHA_ART.abierto===i;
-        return `<div style="border-top:1px solid #F1F5F9;padding:9px 0">
-          <div class="row"><div style="min-width:0"><b style="font-size:13px">${esc(a.desc)}</b>
-            <div class="muted" style="font-size:11.5px">${esc(a.art)}${a.cal?" · calibre "+esc(a.cal):""}${a.metros?" · "+esc(a.metros)+" m":""}</div></div>
-            <div style="text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;font-size:12.5px">
-              ${eur(a.ant)} → <b style="color:${a.act<0||a.dif<0?"var(--red)":"var(--green)"}">${eur(a.act)}</b>${a.act<0?' <span class="muted">(abono)</span>':""}
-              <div style="font-weight:800;color:${a.dif<0?"var(--red)":"var(--green)"}">${a.dif>0?"+":""}${eur(a.dif)}</div></div></div>
-          ${FICHA_ART.tab==="caen"?`<div class="barra" style="background:#E2E8F0"><i style="width:${w}%;background:var(--red)"></i></div>`:""}
-          ${FICHA_ART.tab==="caen"?`<div style="margin-top:6px"><a href="#" onclick="abrirFormEst('${c._id}',${i});return false" style="font-size:12px;font-weight:700;color:#6D28D9">💶 ${NIVEL==="comercial"?"Pedir estrategia de precio":"Estrategia de precio"}</a></div>`:""}
-          ${ES_JEFE&&FICHA_ART.tab==="caen"?`<div style="margin-top:4px"><a href="#" onclick="FICHA_ART.abierto=${ab?"null":i};pintar();return false" style="font-size:12px;font-weight:700;color:var(--blue)">📌 Pedir plan de este artículo</a></div>
-            ${ab?`<div style="display:grid;gap:6px;margin-top:6px">
-              <textarea id="pa_txt">${esc(`Plan para recuperar ${a.desc}${a.cal?" (calibre "+a.cal+")":""}: venía de ${eur(a.ant)} y este año lleva ${eur(a.act)}. Dime qué ha pasado y qué vas a hacer (oferta, muestra, visita…).`)}</textarea>
-              <div style="display:flex;gap:6px"><button class="btn ok" onclick="pedirPlanArt('${c._id}')">Enviar al comercial</button>
-                <button class="btn gris" onclick="FICHA_ART.abierto=null;pintar()">Cancelar</button></div></div>`:""}`:""}
-        </div>`;}).join("")}`;
+        <button class="${FICHA_ART.tab==="caen"?"on":""}" onclick="FICHA_ART.tab='caen';FICHA_ART.acc=null;FICHA_ART.fams=null;pintar()">Caen (${A.caen.length}) · −${eur(sumC)}</button>
+        <button class="${FICHA_ART.tab==="suben"?"on":""}" onclick="FICHA_ART.tab='suben';FICHA_ART.acc=null;FICHA_ART.fams=null;pintar()">Crecen (${A.suben.length}) · +${eur(sumS)}</button></div>
+      ${!l.length?`<p class="muted">Ninguno.</p>`:orden.map(([k,g])=>{
+        const ab=FICHA_ART.fams.has(k), tot=g.reduce((t,a)=>t+a.dif,0);
+        return `<div style="border:1px solid var(--border);border-radius:12px;margin:8px 0;overflow:hidden">
+          <div onclick="togFam('${esc(k)}')" style="display:flex;gap:8px;align-items:center;padding:10px 12px;cursor:pointer;background:#F8FAFC">
+            <b style="flex:1;font-size:14px">${esc(k)}</b><span class="muted">${g.length} artículo${g.length===1?"":"s"}</span>
+            <b style="color:${tot<0?"var(--red)":"var(--green)"};white-space:nowrap">${tot>0?"+":""}${eur(tot)}</b>
+            <span class="muted" style="width:14px;text-align:center">${ab?"▾":"›"}</span></div>
+          ${ab?`<div style="padding:0 12px 4px">${g.map(filaArt).join("")}</div>`:""}
+        </div>`; }).join("")}`;
   }
   return `<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
       <button class="btn gris" onclick="cerrarFicha()">← Volver a la lista</button></div>
@@ -346,6 +379,42 @@ function vistaFicha(c){
       ${RC.tienePlan(c)&&RC.abierto(c)?formDiagnostico(c,false,"✏️ Cambiar el diagnóstico"):""}
       ${lineaCaso(c,true,{sinCabecera:true,sinProductos:true})}</div>`;
 }
+// ── Acciones sobre un artículo, justo debajo de él ──
+function togFam(k){ if(!FICHA_ART.fams) FICHA_ART.fams=new Set(); FICHA_ART.fams.has(k)?FICHA_ART.fams.delete(k):FICHA_ART.fams.add(k); pintar(); }
+function accArt(i,tipo){ FICHA_ART.acc=(FICHA_ART.acc&&FICHA_ART.acc.i===i&&FICHA_ART.acc.tipo===tipo)?null:{i,tipo}; pintar(); }
+function formArt(c,a,tipo){
+  if(tipo==="plan") return `<div style="display:grid;gap:6px;margin-top:8px;background:#F0FDFA;border:1px solid #99F6E4;border-radius:12px;padding:10px">
+      <textarea id="pa_txt">${esc(`Plan para recuperar ${a.desc}${a.cal?" (calibre "+a.cal+")":""}: venía de ${eur(a.ant)} y este año lleva ${eur(a.act)}. Dime qué ha pasado y qué vas a hacer.`)}</textarea>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px"><button class="btn ok" onclick="pedirPlanArt('${c._id}')">Enviar al comercial</button>
+      <button class="btn gris" onclick="FICHA_ART.acc=null;pintar()">Cancelar</button></div></div>`;
+  const pref="fa";
+  const color=tipo==="of"?"#2563EB":"#7C3AED";
+  const tit=tipo==="of"?"📨 Oferta al cliente":(NIVEL==="comercial"?"💶 Pedir estrategia de precio a tu jefe":"💶 Estrategia de precio para "+nomAg(c.agente));
+  return `<div>${RC.formEstrategia(pref,[a],tit).replace('onchange=','data-x=')}
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px">
+      <button class="btn ok" style="background:${color}" onclick="enviarArt('${c._id}',${a._i},'${tipo}')">${tipo==="of"?"Registrar oferta":NIVEL==="comercial"?"Enviar a mi jefe":"Crear y avisar"}</button>
+      <button class="btn gris" onclick="FICHA_ART.acc=null;pintar()">Cancelar</button></div></div>`;
+}
+async function enviarArt(id,i,tipo){
+  const c=CASOS.find(x=>x._id===id); if(!c||!c._arts) return;
+  const lista=FICHA_ART.tab==="caen"?c._arts.caen:c._arts.suben;
+  const a=lista[i];
+  const l=RC.leerFormEstrategia("fa",[a]);
+  if(!(l.precioOferta>0)){ alert("Pon el precio."); return; }
+  try{
+    if(tipo==="of"){
+      const r=await RC.crearOferta(c,l,l.nota,YO_EST);
+      if(r.tipo==="oferta"){ (OFS=OFS||[]).push(r.doc); alert("Oferta registrada en el CRM."); }
+      else { r.doc._id=r.doc.id; ESTS.push(r.doc); alert(`Un ${r.dto} % de descuento supera el límite del ${r.tope} %: se ha creado como estrategia para aprobar.`); }
+    } else {
+      const e=await RC.crearEstrategia(c,l,l.nota,YO_EST); e._id=e.id; ESTS.push(e);
+      alert(e.estado==="aprobada"?"Estrategia creada y aprobada. Se le ha avisado al comercial."
+        :"Estrategia enviada. La tiene que aprobar "+(e.pendienteDeNombre||"su responsable")+".");
+    }
+    FICHA_ART.acc=null; pintar();
+  }catch(x){ alert("No se ha podido guardar: "+x.message); }
+}
+
 // ── Estrategias en la ficha ──
 let FORM_EST=null;   // {id, idx}
 function artsDe(c){ return (c._arts&&c._arts.caen)||(c.productos&&c.productos.caen)||[]; }
@@ -429,7 +498,7 @@ async function pedirPlanArt(id){
   try{
     await RC.guardar(id,{historial:hist,instruccion:t,instruccionPor:QUIEN,instruccionEn:ahora,instruccionLeida:false});
     Object.assign(c,{historial:hist,instruccion:t,instruccionPor:QUIEN,instruccionEn:ahora,instruccionLeida:false});
-    FICHA_ART.abierto=null; pintar();
+    FICHA_ART.acc=null; pintar();
     const d=await RC.avisarInstruccion(c,t,QUIEN,ES_CEO?"ceo":AGENTE); alert(RC.textoAviso(d));
   }catch(e){ alert("No se ha guardado: "+e.message); }
 }
