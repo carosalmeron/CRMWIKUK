@@ -894,6 +894,8 @@ async function datosCEO(anio,sem){
     if(suInf.length) E.cerr++; else if(g.entrega!=="no") E.sinCerrar.push(g.nombre);
 
     const p={...g,vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,nFacV:0,vis:0,lla:0,mEnv:0,mOk:0,semMal:0};
+    // (sep 2026) Sus planes del parte: cobro, muestras de la semana que viene y actividad
+    try{ const ki=suInf.find(i=>i.kpis); p.k=ki?JSON.parse(ki.kpis):null; }catch(err){ p.k=null; }
     const r=suyo(res,g), e2=suyo(estac,g), o2=suyo(objs,g);
     p.vSem=numC(r.ventasSem);
     // Semana pasada (informe pedido a mano): la foto congelada de esa semana
@@ -1139,6 +1141,19 @@ function htmlCEO(D){
 
   const subeH=sube.length?h3(`Lo que sube a dirección (${sube.length})`)+`<ul style="margin:0;padding-left:18px">${sube.map(o=>`<li style="margin-bottom:5px;font-size:13px">${e(o.texto)}<span style="color:#64748B"> · ${e(o.eq)}${o.de?", "+e(o.de):""}</span></li>`).join("")}</ul>`:"";
 
+  // (sep 2026) Quién falla y cuál es su plan (lo escribe el comercial en su parte)
+  const conK=equipos.flatMap(E=>E.gente.filter(p=>!p.ausente&&p.k).map(p=>({p,eq:E.eq})));
+  const falla=conK.filter(({p})=>p.k.cobros&&p.k.cobros.pasa||p.k.actividad&&p.k.actividad.flojo
+    ||(p.k.muestras&&p.k.muestras.objEnv&&p.k.muestras.env<p.k.muestras.objEnv*0.8));
+  const planesH=conK.length?h3("Quién falla y cuál es su plan",`${falla.length} de ${conK.length} con algo por debajo · lo escribe cada comercial en su parte`)+
+    (falla.length?falla.map(({p,eq})=>{ const k=p.k, c=k.cobros||{}, m=k.muestras||{}, a=k.actividad||{};
+      const lin=(ic,t,cifra,plan,mal)=>`<div style="font-size:12.5px;margin-top:3px"><b style="color:${mal?"#C2263D":"#3A424E"}">${ic} ${t}</b> ${cifra}${plan?`<div style="color:#3A424E;margin-left:18px">↳ ${e(plan)}</div>`:(mal?`<div style="color:#C2263D;margin-left:18px">↳ sin plan</div>`:"")}</div>`;
+      return `<div style="border:1px solid #EEF1F5;border-left:3px solid #C2263D;border-radius:6px;padding:8px 11px;margin:6px 0">
+        <div style="font-weight:800;font-size:13px">${e(p.nombre)} <span style="color:#8A94A0;font-weight:600">· ${e(eq)}</span></div>
+        ${c.pasa?lin("💰","Cobros",`${eurC(c.venc)} vencido (máx. ${eurC(c.limite)})`,c.plan,true):""}
+        ${a.flojo?lin("👋","Actividad",`${a.vis}/${a.objVis||"—"} visitas · ${a.lla}/${a.objLla||"—"} llamadas`,a.plan,true):""}
+        ${lin("📦","Muestras",`${m.env}${m.objEnv?"/"+m.objEnv:""} enviadas · ${m.ok} ok · ${m.ko} ko`,m.plan,m.objEnv&&m.env<m.objEnv*0.8)}</div>`; }).join("")
+      :`<div style="font-size:13px;color:#0E7C5A">✅ Todos dentro de cobros y en objetivo de actividad.</div>`):"";
   const aten=[];
   if(flojosTot.length) aten.push(["#C2263D",`${flojosTot.length} comercial${flojosTot.length>1?"es":""} por debajo del 80 %`,flojosTot.map(x=>x.nombre+" ("+x.nota+" %)").join(" · ")]);
   if(fueraPol.length) aten.push(["#C2263D",`${fueraPol.length} fuera de la política de cobro (5 % de dos meses)`,fueraPol.map(x=>x.p.nombre+" "+Math.round(x.p.cobros/x.p.limite*100)+" %").join(" · ")]);
@@ -1159,7 +1174,7 @@ function htmlCEO(D){
         ${tile("Mes",eurC(G.mAct),pM!=null?pM+" % del objetivo":"sin objetivo",col(pM))}
         ${tile("Vencido",eurC(G.cobros),G.nFacV+" facturas","#C2263D")}</tr></table>
       ${h3("Por equipo")}${porEq}
-      ${actividad}${ranking}${recupH}${muestras}${subeH}${cobros}${atencion}
+      ${actividad}${ranking}${recupH}${muestras}${subeH}${cobros}${planesH}${atencion}
       <div style="margin-top:20px;text-align:center"><a href="${CRM}/objetivos_equipo.html?rol=ceo" style="display:inline-block;background:#14181F;color:#fff;text-decoration:none;padding:11px 26px;border-radius:9px;font-size:13.5px;font-weight:700">Abrir en el CRM</a></div>
       <p style="margin:18px 0 0;font-size:11px;color:#8A94A0;text-align:center">Informe automático del CRM · sale los sábados con el cierre de la semana.</p>
     </div></div>`;
