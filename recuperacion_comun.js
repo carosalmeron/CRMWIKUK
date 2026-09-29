@@ -1101,6 +1101,79 @@
     if(r._esEstrategia){ try{ await RC.avisarA(e.agente,`🔄 Alternativa para ${e.cliente}`,`${RC.esc(por.nombre)} propone ${RC.esc(que)} en lugar de ${RC.esc(o.nombre||"")}. Supera su límite: está pendiente de aprobación.`); }catch(x){} }
     return r;
   };
+  // ══ Incidencias a otros departamentos por pérdida de venta ════════════
+  // Se crean en la colección «incidencias» del CRM (mismo formato), con el
+  // caso enlazado (casoId). Las respuestas del departamento quedan en su
+  // historial y se ven en la ficha del cliente: el hilo completo en un sitio.
+  RC.TIPOS_INC=[["stock","📦 Stock"],["logistica","🚚 Logística / plazos"],["produccion","🏭 Producción"],["calidad","⚠️ Calidad"],
+    ["administracion","📄 Administración / cobros"],["id","🔬 I+D"],["coordinacion","🧭 Coordinación"]];
+  RC.ESTADO_INC={abierta:["🔴 Abierta","#B91C1C"],en_gestion:["🟠 En gestión","#B45309"],en_proceso:["🟠 En gestión","#B45309"],escalada:["🟣 Escalada","#6D28D9"],
+    informada:["🔵 Informada","#1D4ED8"],resuelta:["✅ Resuelta","#15803D"],cerrada:["✅ Cerrada","#15803D"]};
+  RC.tipoIncDeCausa=(causa)=>{ const c=ARR(causa);
+    return /PLAZO|ENTREGA|STOCK|SERVICIO/.test(c)?"stock":/CALIDAD/.test(c)?"calidad":/CALIBRE|FORMATO/.test(c)?"produccion":/IMPAGO|COBRO|RIESGO|CR[EÉ]DITO/.test(c)?"administracion":"stock"; };
+  RC.nombreTipoInc=(k)=>(RC.TIPOS_INC.find(t=>t[0]===k)||[,k])[1];
+  RC.crearIncidencia=async(caso,d,por)=>{
+    const hoy=new Date(), hoyS=hoy.toLocaleDateString("es-ES");
+    const id="inc_rec_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
+    const art=d.art?`${d.art.desc||""}${d.art.cal?" "+d.art.cal:""}${d.art.art?" ("+d.art.art+")":""}`:"";
+    const desc=`💸 PÉRDIDA DE VENTA · ${caso.nombre}\n`
+      +`El cliente ha dejado de comprar ${Math.round(num(caso.perdido)).toLocaleString("es-ES")} € frente al año pasado.`
+      +(art?`\nArtículo: ${art}${d.art.ant?" · venía de "+Math.round(num(d.art.ant)).toLocaleString("es-ES")+" €":""}`:"")
+      +`\n\n${d.texto}\n\n(Desde el plan de recuperación. Responde en la incidencia: la respuesta se ve en el seguimiento del cliente.)`;
+    const doc={id,tipo:d.tipo,clienteNombre:caso.nombre,cliente:caso.nombre,clienteCodigo:caso.cliente,clienteId:caso.cliente,
+      titulo:"Pérdida de venta: "+caso.nombre+(art?" · "+art:""),descripcion:desc,prioridad:d.prioridad||"alta",
+      estado:"abierta",autor:por.id||por.nombre,agente:caso.agente,autorNombre:por.nombre,equipo:caso.equipo||"",
+      fecha:hoyS,fechaCreacion:hoy.toISOString(),semana:RC.semanaISO(hoy),
+      origen:"recuperacion",casoId:caso._id||"",perdidaVenta:Math.round(num(caso.perdido)),articulo:art,
+      historialEscalado:[{accion:"Creada desde el plan de recuperación",por:por.nombre,fecha:hoyS}],historial:[]};
+    await RC.guardarEn("incidencias",id,doc);
+    try{ await fetch("/api/notificar-incidencia",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({incidenciaId:id})}); }catch(e){}
+    if(caso._id){
+      const hist=(caso.historial||[]).concat([{sem:RC.semanaISO(hoy),fecha:hoy.toISOString(),por:por.nombre,
+        sistema:`🧩 Incidencia a ${RC.nombreTipoInc(d.tipo)}${art?" ("+art+")":""}: ${d.texto}`}]);
+      try{ await RC.guardar(caso._id,{historial:hist,ultimaAccion:hoy.toISOString()}); caso.historial=hist; caso.ultimaAccion=hoy.toISOString(); }catch(e){}
+    }
+    doc._id=id; return doc;
+  };
+  RC.comentarIncidencia=async(inc,texto,por)=>{
+    const hoyS=new Date().toLocaleDateString("es-ES");
+    const hist=(inc.historial||[]).concat([{accion:"💬 Comentario",fecha:hoyS,por:por.nombre,nota:texto}]);
+    await RC.guardarEn("incidencias",inc._id||inc.id,{historial:hist,fechaUltimoCambio:new Date().toISOString(),ultimoCambioPor:por.nombre},true);
+    inc.historial=hist;
+    // Le llega a todos los del hilo (departamento, comercial, jefe y quien la abrió)
+    try{ await fetch("/api/notificar-incidencia",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({incidenciaId:inc._id||inc.id,evento:"hilo"})}); }catch(e){}
+    return inc;
+  };
+  RC.incidenciasDeCaso=(incs,c)=>(incs||[]).filter(i=>!i.eliminada&&(i.casoId===c._id||(i.origen==="recuperacion"&&ARR(i.clienteCodigo||i.clienteId)===ARR(c.cliente))));
+  RC.htmlIncidencia=(i,conResponder)=>{
+    const [t,col]=RC.ESTADO_INC[i.estado]||[i.estado||"",""];
+    const hilo=(i.historial||[]).filter(h=>h&&(h.nota||h.accion));
+    const dias=Math.floor((Date.now()-(Date.parse(i.fechaCreacion||"")||Date.now()))/86400000);
+    const id=i._id||i.id;
+    return `<div style="border:1px solid #E5E7EB;border-left:4px solid ${col||"#94A3B8"};border-radius:12px;padding:10px 12px;margin:8px 0;background:#fff">
+      <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b style="font-size:13.5px">${RC.esc(RC.nombreTipoInc(i.tipo))}${i.articulo?" · "+RC.esc(i.articulo):""}</b>
+        <span style="font-size:11.5px;font-weight:800;color:${col}">${t}${!/resuelta|cerrada/.test(i.estado||"")&&dias>=2?` · <span style="color:#B91C1C">${dias} días</span>`:""}</span></div>
+      <div style="font-size:12px;color:#6B7280">${RC.esc(i.autorNombre||"")} · ${RC.esc(i.fecha||"")}</div>
+      <div style="font-size:13px;margin-top:4px;white-space:pre-wrap">${RC.esc(String(i.descripcion||"").split("\n\n").slice(1,2).join("") || i.descripcion||"")}</div>
+      ${hilo.length?`<div style="margin-top:6px;border-top:1px dashed #E5E7EB;padding-top:6px">${hilo.map(h=>`<div style="font-size:12.5px;margin:3px 0"><b>${RC.esc(h.por||"")}</b> <span style="color:#6B7280">${RC.esc(h.fecha||"")} · ${RC.esc(h.accion||"")}</span>${h.nota?`<div style="white-space:pre-wrap">${RC.esc(h.nota)}</div>`:""}</div>`).join("")}</div>`
+        :`<div style="font-size:12px;color:#B45309;margin-top:4px">Sin respuesta todavía.</div>`}
+      ${conResponder?`<div style="display:flex;gap:6px;margin-top:6px"><input id="ic_${id}" placeholder="Añadir comentario al hilo" style="flex:1;padding:8px;border:1.5px solid #CBD5E1;border-radius:9px;font:inherit;font-size:13px">
+        <button type="button" onclick="comentarInc('${id}')" style="padding:8px 12px;border-radius:9px;border:none;background:#0F172A;color:#fff;font-weight:700;cursor:pointer">Enviar</button></div>`:""}
+    </div>`;
+  };
+  RC.formIncidencia=(pref,caso,art)=>`<div style="display:grid;gap:7px;background:#F0F9FF;border:1px solid #BAE6FD;border-radius:12px;padding:12px;margin-top:8px">
+      <div style="font-weight:800;color:#0369A1">🧩 Implicar a otro departamento${art?" · "+RC.esc(art.desc||art.art):""}</div>
+      <div style="font-size:12.5px;color:#374151">Se le manda como incidencia de <b>pérdida de venta</b> (${Math.round(num(caso.perdido)).toLocaleString("es-ES")} €). Su respuesta queda aquí, en el hilo del cliente.</div>
+      <div id="${pref}_tipos" style="display:flex;gap:6px;flex-wrap:wrap">${RC.TIPOS_INC.map(([k,l])=>`<button type="button" data-k="${k}" onclick="RC.elegirTipoInc('${pref}','${k}')" style="padding:7px 11px;border-radius:99px;border:1.5px solid #0284C7;background:${k===RC.tipoIncDeCausa(caso.causa)?"#0284C7":"#fff"};color:${k===RC.tipoIncDeCausa(caso.causa)?"#fff":"#0369A1"};font-weight:700;font-size:12.5px;cursor:pointer">${l}</button>`).join("")}</div>
+      <input type="hidden" id="${pref}_tipo" value="${RC.tipoIncDeCausa(caso.causa)}">
+      <textarea id="${pref}_txt" placeholder="Qué pasa y qué necesitas (p. ej. «espera 2 barriles de CX60 desde hace 2 semanas, ¿cuándo hay stock?»)" style="min-height:64px;padding:9px;border:1.5px solid #BAE6FD;border-radius:9px;font:inherit;font-size:14px">${caso.causaNota?RC.esc(caso.causaNota):""}</textarea>
+      <div style="display:flex;gap:6px;align-items:center;font-size:12.5px;color:#374151">Prioridad
+        <select id="${pref}_pri" style="padding:7px;border:1.5px solid #BAE6FD;border-radius:9px;font:inherit"><option value="alta">Alta</option><option value="urgente">Urgente</option><option value="media">Media</option></select></div>
+    </div>`;
+  RC.elegirTipoInc=(pref,k)=>{ const h=document.getElementById(pref+"_tipo"); if(h) h.value=k;
+    document.querySelectorAll(`#${pref}_tipos button`).forEach(b=>{ const on=b.getAttribute("data-k")===k; b.style.background=on?"#0284C7":"#fff"; b.style.color=on?"#fff":"#0369A1"; }); };
+  RC.leerIncidencia=(pref)=>({tipo:(document.getElementById(pref+"_tipo")||{}).value||"stock",
+    texto:((document.getElementById(pref+"_txt")||{}).value||"").trim(),prioridad:(document.getElementById(pref+"_pri")||{}).value||"alta"});
   // Fecha de una estrategia venga de donde venga (las del CRM guardan «fecha»
   // en texto y a veces solo el id lleva la marca de tiempo)
   const deES=(t)=>{ const m=String(t||"").match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/); if(!m) return 0;
