@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cuadre Power BI vs CRM</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{--navy:#0F172A;--muted:#64748B;--border:#E2E8F0;--green:#15803D;--greenL:#F0FDF4;--red:#B91C1C;--redL:#FEF2F2;--amber:#B45309;--amberL:#FFFBEB;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F8FAFC;color:var(--navy)}
+  header{padding:18px 16px 14px;background:#fff;border-bottom:1px solid var(--border)}
+  h1{margin:0 0 4px;font-size:19px;font-weight:800}
+  .sub{margin:0;font-size:12.5px;color:var(--muted);line-height:1.5}
+  main{padding:16px;max-width:860px;margin:0 auto}
+  .caja{background:#fff;border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-bottom:12px}
+  label.sel{display:block;border:2px dashed var(--border);border-radius:12px;padding:22px;text-align:center;cursor:pointer;background:#fff}
+  .tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px}
+  .tile{background:#fff;border:1px solid var(--border);border-radius:12px;padding:11px 12px}
+  .tile b{display:block;font-size:18px}
+  .tile span{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+  .cli{background:#fff;border:1px solid var(--border);border-left:4px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px}
+  .cli.mal{border-left-color:var(--red)} .cli.medio{border-left-color:var(--amber)} .cli.ok{border-left-color:var(--green)}
+  .cab{display:flex;justify-content:space-between;gap:10px;font-weight:700;font-size:13.5px}
+  .cod{font-size:12px;color:#334155;padding:3px 0 3px 10px;border-left:2px solid var(--border);margin-top:4px}
+  .tag{display:inline-block;font-size:10.5px;font-weight:800;border-radius:99px;padding:1px 7px;margin-left:5px}
+  .t-otro{background:var(--redL);color:var(--red)} .t-sin{background:var(--amberL);color:var(--amber)} .t-yo{background:var(--greenL);color:var(--green)}
+  .mut{color:var(--muted);font-size:12px}
+  .filtros button{padding:6px 11px;border-radius:99px;border:1.5px solid var(--border);background:#fff;font-weight:700;font-size:12px;cursor:pointer;margin:0 4px 6px 0}
+  .filtros button.on{background:var(--navy);color:#fff;border-color:var(--navy)}
+  @media (max-width:560px){ .tiles{grid-template-columns:1fr 1fr} }
+</style>
+</head>
+<body>
+<header>
+  <h1>⚖️ Cuadre Power BI vs CRM</h1>
+  <p class="sub">Sube la exportación de Power BI de un comercial (cliente, ventas por año). Para cada cliente
+    busca en el CRM todos sus códigos, a qué comercial está asignado cada uno y cuánto dinero se va a otro sitio.
+    Solo lee: no cambia nada.</p>
+</header>
+<main>
+  <div class="caja">
+    <label class="sel"><input type="file" id="fich" accept=".xlsx,.xls,.csv" hidden>
+      <b>📂 Elegir el Excel de Power BI</b><br><span class="mut">El mismo que exportas con «Exportar datos»</span></label>
+    <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <span class="mut">Comercial:</span>
+      <input id="agente" placeholder="p. ej. AGUSTIN" style="padding:8px 10px;border:1.5px solid var(--border);border-radius:8px;font-weight:700;text-transform:uppercase">
+      <span class="mut" id="estado"></span>
+    </div>
+  </div>
+  <div id="res"></div>
+</main>
+
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+function val(f){ if(!f) return null;
+  if(f.stringValue!==undefined) return f.stringValue; if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.doubleValue!==undefined) return Number(f.doubleValue); if(f.booleanValue!==undefined) return f.booleanValue; return null; }
+async function leer(col,cb){
+  const t=[]; let tok=null,v=0;
+  do{ const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+    if(!r.ok) break; const j=await r.json();
+    for(const d of j.documents||[]){ const o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x); t.push(o); }
+    tok=j.nextPageToken||null; v++; if(cb) cb(t.length);
+  }while(tok&&v<120);
+  return t;
+}
+const U=s=>String(s||"").toUpperCase().trim();
+// Nombre comparable: sin tildes, sin forma juridica, sin puntuacion
+const NN=s=>String(s||"").toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g,"")
+  .replace(/\b(S\.?\s?L\.?\s?U?|S\.?\s?A\.?\s?U?|S\.?\s?C\.?\s?A|S\.?\s?C\.?\s?L|SCL|SL|SA|SLU|SAU|COOP|LTDA)\b/g," ")
+  .replace(/[^A-Z0-9]/g,"");
+const eur=n=>String(Math.round(n||0)).replace(/\B(?=(\d{3})+(?!\d))/g,".")+" €";
+const esc=s=>String(s||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+let CRM=null, ALIAS=null, FILAS=null, FILTRO="dif", META=null;
+
+document.getElementById("fich").onchange=async(e)=>{
+  const f=e.target.files[0]; if(!f) return;
+  const wb=XLSX.read(await f.arrayBuffer(),{type:"array"});
+  const ws=wb.Sheets[wb.SheetNames[0]];
+  const aoa=XLSX.utils.sheet_to_json(ws,{header:1,raw:true});
+  const cab=(aoa[0]||[]).map(String);
+  const iN=cab.findIndex(c=>/NOMBRE|CLIENTE/i.test(c));
+  const anios=cab.map((c,i)=>{ const m=c.match(/(20\d\d)/); return m?{a:+m[1],i}:null; }).filter(Boolean).sort((a,b)=>b.a-a.a);
+  const iAct=anios[0]&&anios[0].i, iAnt=anios[1]&&anios[1].i;
+  // Comercial: del texto de filtros de Power BI si viene
+  const txt=aoa.flat().filter(x=>typeof x==="string").join(" ");
+  const m=txt.match(/GRUPOAGENTE es ([A-Z0-9ÑÁÉÍÓÚ ._-]+)/i);
+  if(m&&!document.getElementById("agente").value) document.getElementById("agente").value=m[1].trim().split(/\s/)[0];
+  FILAS=aoa.slice(1).filter(r=>r[iN]&&!/^total$/i.test(String(r[iN]))&&!/^filtros/i.test(String(r[iN])))
+    .map(r=>({nombre:String(r[iN]),act:Number(r[iAct])||0,ant:Number(r[iAnt])||0}));
+  FILAS.anioAct=anios[0]&&anios[0].a; FILAS.anioAnt=anios[1]&&anios[1].a;
+  await cruzar();
+};
+document.getElementById("agente").onchange=()=>{ if(FILAS) cruzar(); };
+
+async function cruzar(){
+  const est=document.getElementById("estado");
+  if(!CRM){
+    est.textContent="Leyendo clientes del CRM…";
+    [CRM,ALIAS,META]=await Promise.all([
+      leer("pbi_ventas_cliente",n=>est.textContent="Leyendo clientes del CRM… "+n),
+      leer("agentes_alias"),
+      fetch(FB+"/pbi_meta/estado").then(r=>r.ok?r.json():null).then(j=>{ if(!j) return null;
+        const o={}; for(const [k,x] of Object.entries(j.fields||{})) o[k]=val(x); return o; }).catch(()=>null)]);
+  }
+  if(!CRM._limpio){
+    // Mismo cliente con dos formatos de codigo (U433559 y U4303559): solo
+    // cuenta el mas reciente. El otro es un resto de una pasada antigua.
+    const canon=c=>{ const m=/^U43(\d{4})$/.exec(U(c)); return m?"U430"+m[1]:U(c); };
+    const ts=d=>Date.parse(d.actualizado||"")||0;
+    const g={}; CRM.forEach(d=>{ if(d.obsoleto) return; (g[canon(d._id)]=g[canon(d._id)]||[]).push(d); });
+    let n=0;
+    Object.values(g).forEach(a=>{ if(a.length<2) return;
+      a.sort((x,y)=>ts(y)-ts(x)); a.slice(1).forEach(d=>{ d._viejo=a[0]._id; n++; }); });
+    CRM._limpio=true; CRM._duplicadosViejos=n;
+  }
+  est.textContent=CRM.length+" códigos de cliente en el CRM"
+    +(CRM._duplicadosViejos?" · "+CRM._duplicadosViejos+" restos antiguos descontados":"");
+  const AG=U(document.getElementById("agente").value);
+  if(!AG) return cruzarGlobal();
+  // Todos los codigos de ese comercial segun la tabla de alias
+  const canonDe=x=>{ const a=ALIAS.find(z=>U(z.alias||z._id)===U(x)); return a?U(a.canonico):U(x); };
+  const miCanon=canonDe(AG);
+  const esMio=ag=>ag&&(U(ag)===AG||canonDe(ag)===miCanon);
+  const porNombre={};
+  CRM.forEach(d=>{ const k=NN(d.nombre||d.cliente||""); if(k) (porNombre[k]=porNombre[k]||[]).push(d); });
+
+  const res=unirFilas().map(f=>{
+    const docs=porNombre[NN(f.nombre)]||[];
+    const cods=docs.map(d=>{
+      const ag=d.agenteFinal||d.agente||"";
+      const cuenta=!d.obsoleto&&!d._viejo&&(d.cuenta!==undefined?d.cuenta:!(d.intercompany||d.fusionadoEn));
+      return {cod:d._id,nombre:d.nombre,ag,act:Number(d.ventasAct)||0,ant:Number(d.ventasAntYTD)||0,
+        cuenta,fusion:d.fusionadoEn||d._viejo||"",inter:!!d.intercompany,obs:!!(d.obsoleto||d._viejo),
+        tipo:!cuenta?"fuera":esMio(ag)?"yo":(!ag||/SIN/i.test(ag))?"sin":"otro"};
+    });
+    const crmMio=cods.filter(c=>c.tipo==="yo").reduce((t,c)=>t+c.act,0);
+    const fuera=cods.filter(c=>c.tipo!=="yo").reduce((t,c)=>t+c.act,0);
+    return {...f,cods,crmMio,fuera,dif:f.act-crmMio};
+  });
+  // Cada codigo se cuenta una sola vez aunque salga en dos filas
+  const unico=(tipo)=>{ const v=new Set(); let t=0;
+    res.forEach(x=>x.cods.forEach(c=>{ if(c.tipo===tipo&&!v.has(c.cod)){ v.add(c.cod); t+=c.act; } })); return t; };
+  const tPbi=res.reduce((t,x)=>t+x.act,0), tCrm=unico("yo");
+  const tOtro=unico("otro"), tSin=unico("sin");
+  const noEsta=res.filter(x=>!x.cods.length&&x.act);
+  pintar(res,{tPbi,tCrm,tOtro,tSin,noEsta,AG});
+}
+
+// ── Modo global: la exportacion no trae comercial ──────────────────────
+// No se puede decir si cada comercial cuadra, pero si lo que lo descuadra:
+// clientes con codigos repartidos entre comerciales, sin comercial, fuera del
+// CRM, o con importe distinto.
+// Power BI escribe a veces el mismo cliente de dos formas ("JAMONES RUTE, S.L"
+// y "JAMONES RUTE S.L."). Se juntan para no comparar cada media fila contra
+// el cliente entero ni contar su venta del CRM dos veces.
+function unirFilas(){
+  const unidas=new Map();
+  FILAS.forEach(f=>{ const k=NN(f.nombre); const u=unidas.get(k);
+    if(u){ u.act+=f.act; u.ant+=f.ant; if(!u.otros.includes(f.nombre)) u.otros.push(f.nombre); }
+    else unidas.set(k,{...f,otros:[]}); });
+  return [...unidas.values()];
+}
+function cruzarGlobal(){
+  const FIL=unirFilas();
+  const porNombre={};
+  CRM.forEach(d=>{ const k=NN(d.nombre||d.cliente||""); if(k) (porNombre[k]=porNombre[k]||[]).push(d); });
+  const res=FIL.map(f=>{
+    const docs=porNombre[NN(f.nombre)]||[];
+    const cods=docs.map(d=>{
+      const ag=d.agenteFinal||d.agente||"";
+      const cuenta=!d.obsoleto&&!d._viejo&&(d.cuenta!==undefined?d.cuenta:!(d.intercompany||d.fusionadoEn));
+      return {cod:d._id,nombre:d.nombre,ag:(!ag||/SIN/i.test(ag))?"":U(ag),act:Number(d.ventasAct)||0,
+        ant:Number(d.ventasAntYTD)||0,cuenta,fusion:d.fusionadoEn||d._viejo||"",inter:!!d.intercompany,obs:!!(d.obsoleto||d._viejo),
+        act_en:String(d.actualizado||"").slice(0,10),ult:String(d.ultimaVenta||"").slice(0,10)};
+    });
+    const vivos=cods.filter(c=>c.cuenta);
+    const crm=vivos.reduce((t,c)=>t+c.act,0);
+    const ags=[...new Set(vivos.filter(c=>c.act||c.ant).map(c=>c.ag||"(sin comercial)"))];
+    const sinCom=vivos.filter(c=>!c.ag).reduce((t,c)=>t+c.act,0);
+    let tipo="ok";
+    if(!cods.length) tipo="noesta";
+    else if(ags.length>1) tipo="repartido";
+    else if(sinCom>0) tipo="sin";
+    else if(Math.abs(f.act-crm)>Math.max(200,Math.abs(f.act)*0.05)) tipo="importe";
+    return {...f,cods,crm,ags,sinCom,tipo};
+  });
+  const suma=(t)=>res.filter(x=>x.tipo===t);
+  const vistos=new Set(); let tCrm=0;
+  res.forEach(x=>x.cods.forEach(c=>{ if(c.cuenta&&!vistos.has(c.cod)){ vistos.add(c.cod); tCrm+=c.act; } }));
+  // Datos viejos: codigos cuya ultima escritura es de hace mas de 3 dias
+  const hoyMs=Date.now();
+  const viejos=[]; res.forEach(x=>x.cods.forEach(c=>{ if(c.cuenta&&c.act_en&&(hoyMs-new Date(c.act_en))/86400000>3) viejos.push(c); }));
+  const G={tPbi:dinero(res),tCrm:tCrm,viejos:[...new Map(viejos.map(c=>[c.cod,c])).values()],
+    noesta:suma("noesta"),repartido:suma("repartido"),sin:suma("sin"),importe:suma("importe")};
+  pintarGlobal(res,G);
+}
+let FG="repartido";
+const dinero=(l,k)=>l.reduce((a,x)=>a+(k?x[k]:x.act),0);
+function pintarGlobal(res,G){
+  const orden={repartido:1,sin:2,noesta:3,importe:4,ok:5};
+  const lista=res.filter(x=>FG==="todos"?x.tipo!=="ok":x.tipo===FG)
+    .sort((a,b)=>Math.abs(b.act)-Math.abs(a.act));
+  const et={repartido:"Repartidos entre comerciales",sin:"Con código sin comercial",noesta:"No están en el CRM",importe:"Importe distinto"};
+  const btn=(k)=>`<button class="${FG===k?"on":""}" onclick="FG='${k}';cruzarGlobal()">${et[k]||"Todos"} (${k==="todos"?res.filter(x=>x.tipo!=="ok").length:G[k].length})</button>`;
+  document.getElementById("res").innerHTML=`
+    <div class="caja" style="background:#EFF6FF;border-color:#BFDBFE;font-size:13px">
+      Esta exportación <b>no trae el comercial</b> de cada cliente. Aquí salen los clientes que descuadran a <b>algún</b> comercial.
+      Para cuadrar uno en concreto, escribe su código arriba (p. ej. AGUSTIN) y sube su exportación filtrada.</div>
+    ${META?`<div class="caja" style="font-size:13px">Última sincronización de ventas en el CRM:
+      <b>${META.ultimaSync?new Date(META.ultimaSync).toLocaleString("es-ES"):"desconocida"}</b>
+      ${META.tipo||META.tipoSync?" · "+esc(META.tipo||META.tipoSync):""}
+      ${CRM&&CRM._duplicadosViejos?` · ${CRM._duplicadosViejos} restos antiguos descontados`:""}</div>`:""}
+    <div class="tiles">
+      <div class="tile"><span>Power BI ${FILAS.anioAct||""}</span><b>${eur(G.tPbi)}</b></div>
+      <div class="tile"><span>CRM (mismos clientes)</span><b>${eur(G.tCrm)}</b></div>
+      <div class="tile"><span>Diferencia</span><b style="color:var(--red)">${eur(G.tPbi-G.tCrm)}</b></div>
+      <div class="tile"><span>Repartidos</span><b style="color:var(--red)">${G.repartido.length} · ${eur(dinero(G.repartido))}</b></div>
+      <div class="tile"><span>Sin comercial</span><b style="color:var(--amber)">${G.sin.length} · ${eur(dinero(G.sin,"sinCom"))}</b></div>
+      <div class="tile"><span>No están en el CRM</span><b>${G.noesta.length} · ${eur(dinero(G.noesta))}</b></div>
+    </div>
+    <div class="filtros">${btn("repartido")}${btn("sin")}${btn("noesta")}${btn("importe")}${btn("todos")}</div>
+    ${lista.slice(0,300).map(x=>`<div class="cli ${x.tipo==="importe"?"medio":"mal"}">
+      <div class="cab"><span>${esc(x.nombre)}${x.otros&&x.otros.length?`<span class="mut" style="font-weight:400"> · en PBI también «${x.otros.map(esc).join("», «")}»</span>`:""}</span><span>${eur(x.act)} PBI · ${eur(x.crm)} CRM</span></div>
+      ${x.tipo==="repartido"?`<div class="mut" style="margin-top:2px">Comerciales: <b>${x.ags.map(esc).join(" · ")}</b></div>`:""}
+      ${x.cods.length?x.cods.map(c=>`<div class="cod">código <b>${esc(c.cod)}</b>
+        ${!c.cuenta?`<span class="tag t-sin">${c.obs?"resto antiguo"+(c.fusion?" · vale "+esc(c.fusion):""):c.fusion?"fusionado en "+esc(c.fusion):c.inter?"intercompañía":"no cuenta"}</span>`
+          :c.ag?`<span class="tag t-yo">${esc(c.ag)}</span>`:`<span class="tag t-sin">sin comercial</span>`}
+        · ${eur(c.act)} este año · ${eur(c.ant)} año pasado
+        ${c.act_en?`<span class="mut"> · actualizado ${c.act_en.split("-").reverse().join("/")}</span>`:""}
+        ${c.ult?`<span class="mut"> · última venta ${c.ult.split("-").reverse().join("/")}</span>`:""}
+        ${U(c.nombre)!==U(x.nombre)?`<span class="mut"> · «${esc(c.nombre)}»</span>`:""}</div>`).join("")
+        :`<div class="cod" style="color:var(--red)">Ningún cliente con este nombre en el CRM (puede estar escrito distinto)</div>`}
+    </div>`).join("")||`<p class="mut">Nada en este grupo.</p>`}
+    ${lista.length>300?`<p class="mut">Se muestran los 300 de más venta de ${lista.length}.</p>`:""}`;
+}
+
+function pintar(res,T){
+  const lista=res.filter(x=>FILTRO==="todos"?true:Math.abs(x.dif)>=50)
+    .sort((a,b)=>Math.abs(b.dif)-Math.abs(a.dif));
+  const tag=c=>c.tipo==="yo"?`<span class="tag t-yo">${esc(T.AG)}</span>`
+    :c.tipo==="otro"?`<span class="tag t-otro">asignado a ${esc(c.ag)}</span>`
+    :c.tipo==="sin"?`<span class="tag t-sin">sin comercial</span>`
+    :`<span class="tag t-sin">${c.obs?"resto antiguo"+(c.fusion?" · vale "+esc(c.fusion):""):c.fusion?"fusionado en "+esc(c.fusion):c.inter?"intercompañía":"no cuenta"}</span>`;
+  document.getElementById("res").innerHTML=`
+    <div class="tiles">
+      <div class="tile"><span>Power BI ${FILAS.anioAct||""}</span><b>${eur(T.tPbi)}</b></div>
+      <div class="tile"><span>CRM a ${esc(T.AG)}</span><b>${eur(T.tCrm)}</b></div>
+      <div class="tile"><span>Diferencia</span><b style="color:var(--red)">${eur(T.tPbi-T.tCrm)}</b></div>
+      <div class="tile"><span>En otro comercial</span><b style="color:var(--red)">${eur(T.tOtro)}</b></div>
+      <div class="tile"><span>Sin comercial</span><b style="color:var(--amber)">${eur(T.tSin)}</b></div>
+      <div class="tile"><span>No están en el CRM</span><b>${T.noEsta.length}</b></div>
+    </div>
+    <p class="mut" style="margin:0 0 10px">Nota: el CRM guarda la venta del año hasta la última sincronización; unos euros de diferencia en un cliente
+      pueden ser solo los últimos días. Lo que importa son los códigos en <b style="color:var(--red)">otro comercial</b> o <b style="color:var(--amber)">sin comercial</b>.</p>
+    <div class="filtros"><button class="${FILTRO==="dif"?"on":""}" onclick="FILTRO='dif';cruzar()">Solo los que no cuadran</button>
+      <button class="${FILTRO==="todos"?"on":""}" onclick="FILTRO='todos';cruzar()">Todos</button></div>
+    ${lista.map(x=>{
+      const cls=Math.abs(x.dif)<50?"ok":x.cods.some(c=>c.tipo==="otro"||c.tipo==="sin")||!x.cods.length?"mal":"medio";
+      return `<div class="cli ${cls}">
+        <div class="cab"><span>${esc(x.nombre)}${x.otros&&x.otros.length?`<span class="mut" style="font-weight:400"> · en PBI también «${x.otros.map(esc).join("», «")}»</span>`:""}</span><span>${eur(x.act)} PBI · ${eur(x.crmMio)} CRM</span></div>
+        ${x.cods.length?x.cods.map(c=>`<div class="cod">código <b>${esc(c.cod)}</b> ${tag(c)} · ${eur(c.act)} este año · ${eur(c.ant)} año pasado
+          ${U(c.nombre)!==U(x.nombre)?`<span class="mut"> · «${esc(c.nombre)}»</span>`:""}</div>`).join("")
+          :`<div class="cod" style="color:var(--red)">No hay ningún cliente con este nombre en el CRM</div>`}
+      </div>`;}).join("")||`<p class="mut">Todo cuadra.</p>`}`;
+}
+</script>
+</body>
+</html>
