@@ -515,7 +515,9 @@
     let estado="aprobada", pend=null, cadena=[];
     const nivel=por.nivel;
     if(nivel==="comercial"){
-      estado="pendiente_aprobacion"; pend=cad.resp||cad.dir;
+      estado="pendiente_aprobacion";
+      // (sep 2026) Va directo a quien puede aprobar ese descuento (el jefe se entera por copia)
+      pend=dto>RC.LIM_DTO.director?(cad.ceo||cad.dir||cad.resp):dto>RC.LIM_DTO.jefe?(cad.dir||cad.ceo||cad.resp):(cad.resp||cad.dir);
       cadena=[{rol:"responsable",id:cad.resp&&cad.resp.id,nombre:cad.resp&&cad.resp.nombre,estado:"pendiente",limiteDto:10}];
       if(dto>10) cadena.push({rol:"jefe_ventas",id:cad.dir&&cad.dir.id,nombre:cad.dir&&cad.dir.nombre,estado:"pendiente",limiteDto:15});
       if(dto>15) cadena.push({rol:"ceo",id:cad.ceo&&cad.ceo.id,nombre:cad.ceo&&cad.ceo.nombre,estado:"pendiente",limiteDto:100});
@@ -556,6 +558,8 @@
       if(nivel==="comercial"&&pend){
         await RC.avisarA(pend.id,`💰 ${cad.ag.nombre} pide estrategia: ${caso.nombre}`,
           `<b>${RC.esc(cad.ag.nombre)}</b> pide <b>${RC.esc(linea.nombre)}${linea.calibre?" "+RC.esc(linea.calibre):""}</b> a <b>${linea.precioOferta} €/${linea.unidad}</b> (ahora ${linea.precioActual} €, descuento ${dto} %) para recuperar a <b>${RC.esc(caso.nombre)}</b>, que cae ${RC.eur(caso.perdido)}.${nota?"<br><i>“"+RC.esc(nota)+"”</i>":""}<br><br>Apruébala, elévala o recházala en el portal → 🚨 Plan de recuperación, o en el CRM → Estrategias.`);
+        if(cad.resp&&pend.id!==cad.resp.id) await RC.avisarA(cad.resp.id,`💰 Copia: ${cad.ag.nombre} pide estrategia: ${caso.nombre}`,
+          `Pide <b>${RC.esc(linea.nombre)}</b> a <b>${linea.precioOferta} €/${linea.unidad}</b> (${dto} % sobre su tarifa). Pasa tu límite: la decide <b>${RC.esc(pend.nombre)}</b>. Te llega por copia.`);
       } else if(nivel!=="comercial"){
         await RC.avisarGenerico({agente:caso.agente,quienId:por.id,quien:por.nombre,titulo:caso.nombre,etiqueta:"Estrategia",
           texto:`Precio especial: ${linea.nombre}${linea.calibre?" "+linea.calibre:""} a ${linea.precioOferta} €/${linea.unidad} (descuento ${dto} %).${nota?" "+nota:""}`,
@@ -651,7 +655,8 @@
       campos={estado:"sin_exito",ofertas:ofs,pendienteDe:null,
         resolucion:{tipo:"rechazada",por:por.nombre,rol:por.nivel,fecha:hoyS,nota:nota||""}};
     } else {
-      const dest=por.nivel==="jefe"?(cad.dir||cad.ceo):cad.ceo;
+      const need=RC.nivelNecesario(e);
+      const dest=need==="ceo"||por.nivel!=="jefe"?(cad.ceo||cad.dir):(cad.dir||cad.ceo);
       campos={estado:"pendiente_aprobacion",escaladoA:dest&&dest.id,pendienteDe:dest&&dest.id,pendienteDeNombre:dest&&dest.nombre};
     }
     campos.historialEscalado=(e.historialEscalado||[]).concat([{accion:accion==="aprobar"?"✅ Aprobada por "+por.nombre
@@ -681,10 +686,28 @@
   RC.puedeResolverEst=(e,nivel,miId)=>{
     if(e.estado!=="pendiente_aprobacion") return false;
     if(nivel==="ceo") return true;
-    if(nivel==="director") return num(e.maxDescuento)<=RC.LIM_DTO.director;
-    if(nivel==="jefe") return num(e.maxDescuento)<=RC.LIM_DTO.jefe;
+    if(nivel==="director") return RC.dtoEf(e)<=RC.LIM_DTO.director;
+    if(nivel==="jefe") return RC.dtoEf(e)<=RC.LIM_DTO.jefe;
     return false;
   };
+  // ── Descuento que cuenta para aprobar: el EXTRA sobre la tarifa del cliente
+  // Las estrategias del CRM guardan el descuento total sobre catálogo; aquí se
+  // pasa a descuento sobre su tarifa (hay que llamar antes a prepararEsts).
+  RC.dtoEf=(e)=>e._dtoEf!=null?e._dtoEf:num(e.maxDescuento);
+  RC.prepararEsts=async(lista)=>{
+    const pend=(lista||[]).filter(e=>e.estado==="pendiente_aprobacion"||e.estado==="aprobada");
+    await Promise.all(pend.map(async e=>{
+      const o=(e.ofertas||[])[0]||{}, fin=num(o.precioFinal||o.precioOferta);
+      if(num(o.precioActual)>0||!(num(o.precioBase)>0)||!(fin>0)) return;
+      try{ const t=await RC.tarifaCliente(e.clienteId||e.clienteCodigo,e.cliente||e.clienteNombre);
+        const tar=num(o.precioBase)*(1-t.dto/100);
+        e._dtoCli=t.dto; e._catCli=t.cat; e._sinTarifa=!!t.sinDato; e._tarifaCli=Math.round(tar*100)/100;
+        e._dtoEf=tar>0?Math.max(0,Math.round((1-fin/tar)*1000)/10):num(e.maxDescuento); }catch(x){}
+    }));
+    return lista;
+  };
+  const RANGO={jefe:1,director:2,ceo:3};
+  RC.nivelNecesario=(e)=>{ const d=RC.dtoEf(e); return d>RC.LIM_DTO.director?"ceo":d>RC.LIM_DTO.jefe?"director":"jefe"; };
   // ══ Ofertas (colección «ofertas» del CRM) ═══════════════════════════
   // Límites de descuento del comercial en una oferta: los del CRM
   // (configuracion/general → limites_dto; por defecto 4 / 10 / 15 %).
@@ -793,13 +816,53 @@
   };
 
   // ¿Le toca verla y decidir (aprobar si puede, si no elevar o rechazar)?
+  // (sep 2026) Solo le toca a quien la tiene: al que figura en «pendienteDe»
+  // (o «escaladoA»). Si no figura nadie, por el descuento: jefe hasta su
+  // límite, jefe de ventas hasta el suyo, CEO por encima.
+  RC._forzar=new Set();   // «Decidir yo»: el CEO/jefe de ventas se la queda
+  RC.rolDeId=(id)=>{
+    const k=ARR(id); if(!k) return "";
+    if(k==="CEO") return "ceo";
+    const u=(RC._us||[]).find(x=>[x._id,x.id,x.username,x.grupoAgente,x.crmId].some(v=>v&&ARR(v)===k));
+    if(!u) return "";
+    const r=String(u.rol||"").toLowerCase();
+    if(r==="ceo"||r==="admin"||[u._id,u.id,u.username].some(v=>ARR(v)==="CEO")) return "ceo";
+    if(r==="director"||r==="crm_director") return "director";
+    if(r==="jefe"||r==="crm_jefe") return "jefe";
+    return "otro";
+  };
+  RC.mismoUsuario=(a,b)=>{
+    if(ARR(a)===ARR(b)) return true;
+    const u=(RC._us||[]).find(x=>[x._id,x.id,x.username,x.grupoAgente,x.crmId].some(v=>v&&ARR(v)===ARR(a)));
+    return !!u&&[u._id,u.id,u.username,u.grupoAgente,u.crmId,u.catalogoVendedor].some(v=>v&&ARR(v)===ARR(b));
+  };
+  // Quién la tiene de verdad: si está con alguien que no llega a su
+  // descuento (p. ej. con un jefe de equipo y pide un 20 %), pasa al nivel
+  // que sí puede aprobarla.
+  RC.quienLaTiene=(e)=>{
+    const need=RC.nivelNecesario(e), dest=e.pendienteDe||e.escaladoA||"";
+    const r=dest?RC.rolDeId(dest):"";
+    if(dest&&(r==="otro"||(r&&RANGO[r]>=RANGO[need]))) return {id:dest,nombre:e.pendienteDeNombre||dest,rol:r,ok:true};
+    if(dest&&!r&&need==="jefe") return {id:dest,nombre:e.pendienteDeNombre||dest,rol:"",ok:true};
+    return {id:"",nombre:need==="ceo"?"CEO":need==="director"?"Jefe de ventas":"Jefe de equipo",rol:need,ok:!dest,
+      antes:dest?(e.pendienteDeNombre||dest):""};
+  };
   RC.meTocaEst=(e,nivel,miId)=>{
     if(e.estado!=="pendiente_aprobacion") return false;
-    const dest=ARR(e.escaladoA||"");
-    if(nivel==="ceo") return true;
-    if(nivel==="director") return !dest||dest!=="CEO"&&!/^CEO/.test(dest)||ARR(e.pendienteDe)===ARR(miId);
-    if(nivel==="jefe") return !dest||dest===ARR(miId);
-    return false;
+    if(RC._forzar.has(e._id||e.id)&&(nivel==="ceo"||nivel==="director")) return true;
+    const q=RC.quienLaTiene(e);
+    if(q.id) return !!miId&&RC.mismoUsuario(q.id,miId)||(q.rol===nivel&&q.rol!=="jefe"&&q.rol!=="otro");
+    return q.rol===nivel;
+  };
+  RC.decidirYo=(id)=>{ RC._forzar.add(id); if(typeof window.pintar==="function") window.pintar(); };
+  // Pendientes de mi ámbito que tiene otra persona (para verlas sin decidir)
+  RC.htmlDeOtros=(lista,nivel)=>{
+    const forzar=nivel==="ceo"||nivel==="director";
+    if(!lista.length) return "";
+    const porQuien={}; lista.forEach(e=>{ const q=RC.quienLaTiene(e).nombre; (porQuien[q]=porQuien[q]||[]).push(e); });
+    return `<details style="margin-top:10px"><summary style="cursor:pointer;font-weight:800;font-size:13.5px;color:#475569">👀 ${forzar?"Las tienen otros":"De tu equipo, en manos de otros"} (${lista.length}) · no te toca decidirlas</summary>
+      ${Object.entries(porQuien).sort((a,b)=>b[1].length-a[1].length).map(([q,l])=>`<div style="margin-top:8px"><b style="font-size:13px">${RC.esc(q)} · ${l.length}</b>
+        ${l.sort((a,b)=>RC.fechaEst(a)-RC.fechaEst(b)).map(e=>`<div style="opacity:.9">${RC.htmlEstrategia(e,forzar?`<button type="button" onclick="RC.decidirYo('${e._id||e.id}')" style="margin-top:6px;padding:7px 12px;border-radius:9px;border:1.5px solid #CBD5E1;background:#fff;font-weight:700;font-size:12.5px;cursor:pointer">⚡ Decidir yo</button>`:"")}<div style="font-size:11.5px;color:#6B7280;margin:-4px 0 6px">${RC.esc(e.cliente||"")} · ${RC.esc(e.agenteNombre||e.agente||"")}</div></div>`).join("")}</div>`).join("")}</details>`;
   };
   // ══ Catálogo (colección «productos», la misma del CRM) ═══════════════
   // El precio del catálogo es la tarifa base: el descuento se calcula contra
@@ -1056,8 +1119,10 @@
     return `<div style="border:1px solid #E5E7EB;border-radius:12px;padding:10px 12px;margin:8px 0;background:#fff">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
         <b style="font-size:13.5px">💶 ${RC.esc(o.nombre||e.estrategia||"Estrategia")}${o.calibre?" · "+RC.esc(o.calibre):""}</b>
-        <span style="font-size:11.5px;font-weight:800;color:${c};background:${bg};border-radius:99px;padding:3px 9px">${t}${e.estado==="pendiente_aprobacion"&&e.pendienteDeNombre?" · "+RC.esc(e.pendienteDeNombre):""}</span></div>
-      <div style="font-size:13px;margin-top:4px">${o.precioActual?RC.esc(o.precioActual)+" € → ":o.precioBase?"catálogo "+RC.esc(o.precioBase)+" € → ":""}<b style="color:#6D28D9">${RC.esc(o.precioFinal||o.precioOferta||"")} €/${RC.esc(o.unidad||"m")}</b> · descuento ${num(e.maxDescuento)} %</div>
+        <span style="font-size:11.5px;font-weight:800;color:${c};background:${bg};border-radius:99px;padding:3px 9px">${t}${e.estado==="pendiente_aprobacion"?(()=>{ const q=RC.quienLaTiene(e); return " · "+RC.esc(q.nombre)+(q.antes?" (estaba con "+RC.esc(q.antes)+")":""); })():""}</span></div>
+      <div style="font-size:13px;margin-top:4px">${o.precioActual?RC.esc(o.precioActual)+" € → ":o.precioBase?"catálogo "+RC.esc(o.precioBase)+" € → ":""}<b style="color:#6D28D9">${RC.esc(o.precioFinal||o.precioOferta||"")} €/${RC.esc(o.unidad||"m")}</b> · ${e._dtoEf!=null
+        ?`<b>${e._dtoEf} % sobre su tarifa</b> <span style="color:#6B7280">(tarifa ${num(e._tarifaCli).toFixed(2)} € · ${e._dtoCli} % ${RC.esc(e._catCli||"")}${e._sinTarifa?" · sin tarifa en el CRM":""} · ${num(e.maxDescuento)} % sobre catálogo)</span>`
+        :`descuento ${num(e.maxDescuento)} %`}</div>
       <div style="font-size:12px;color:#6B7280;margin-top:2px">${e.solicitudAgente?"Lo pide "+RC.esc(e.agenteNombre||e.agente):"Creada por "+RC.esc(e.creadoPorNombre||"")} · ${RC.fechaTxt(e)}${e.descripcion?" · “"+RC.esc(e.descripcion)+"”":""}</div>
       ${extra}${res}${botones||""}</div>`;
   };
