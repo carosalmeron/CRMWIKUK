@@ -2258,11 +2258,28 @@ ${med.join(",\n")}
       // en todos los que sí escribe.
       const CADUCA_HORAS = 36;
       const corte = Date.now() - CADUCA_HORAS * 3600000;
-      const viejo = (d) => {
-        const t = d.actualizado ? Date.parse(d.actualizado) : NaN;
-        return !isNaN(t) && t < corte;
-      };
-      const obsoletos = todos.filter(viejo);
+      // (sep 2026) Desde que solo se reescriben los clientes que cambian, un
+      // "actualizado" antiguo NO significa obsoleto: un cliente sin compras
+      // nuevas conserva su sello. Contar por fecha dejaba fuera venta buena.
+      // Ahora solo sobra lo marcado "obsoleto" por la pasada completa y, de
+      // dos codigos del mismo cliente, el que lleva mas tiempo sin tocarse.
+      void corte;
+      const tsR = (x) => Date.parse(x.actualizado || "") || 0;
+      const gruposR = new Map();
+      for (const d of todos) {
+        if (d.obsoleto) continue;
+        const k = canonico(d._id);
+        if (!gruposR.has(k)) gruposR.set(k, []);
+        gruposR.get(k).push(d);
+      }
+      const duplicadoViejo = new Set();
+      for (const g of gruposR.values()) {
+        if (g.length < 2) continue;
+        g.sort((a, b) => tsR(b) - tsR(a) || String(b._id).localeCompare(String(a._id)));
+        g.slice(1).forEach((d) => duplicadoViejo.add(d._id));
+      }
+      const viejo = (d) => !!d.obsoleto || duplicadoViejo.has(d._id);
+      const obsoletos = todos.filter((d) => duplicadoViejo.has(d._id));
       const docs = todos.filter((d) => !viejo(d));
       out.obsoletos = obsoletos.length;
 
@@ -4420,11 +4437,29 @@ EVALUATE
           // (U43XXXX) cuando su venta ya vive bajo el nuevo (U430XXXX).
           // Si se dejan, la sincronizacion incremental los vuelve a sumar
           // y el total sale inflado. Se descartan y se borran.
-          const obsoletos = guardados.filter((g) => {
-            const can = canonico(g._id);
-            return can !== g._id && (nuevos.has(can) ||
-              guardados.some((x) => x._id === can));
-          });
+          // (sep 2026) Power BI vuelve a mandar algunos clientes con el
+          // codigo antiguo (INTRESPA llega como U433559), asi que ya no vale
+          // "el antiguo sobra". De dos codigos del mismo cliente sobra el
+          // que esta marcado obsoleto o, si no, el que no ha llegado ahora
+          // o el que se actualizo hace mas tiempo.
+          const ts = (x) => Date.parse(x.actualizado || "") || 0;
+          const grupos = new Map();
+          for (const g of guardados) {
+            const k = canonico(g._id);
+            if (!grupos.has(k)) grupos.set(k, []);
+            grupos.get(k).push(g);
+          }
+          const obsoletos = [];
+          for (const g of guardados) {
+            if (g.obsoleto) { obsoletos.push(g); continue; }
+            const otros = grupos.get(canonico(g._id)).filter((x) => x._id !== g._id && !x.obsoleto);
+            if (!otros.length) continue;
+            const pierde = otros.some((x) =>
+              (nuevos.has(x._id) && !nuevos.has(g._id)) ||
+              (nuevos.has(x._id) === nuevos.has(g._id) &&
+                (ts(x) > ts(g) || (ts(x) === ts(g) && String(x._id) > String(g._id)))));
+            if (pierde) obsoletos.push(g);
+          }
 
           const fuera = new Set(obsoletos.map((o) => o._id));
           universo = guardados
@@ -4436,8 +4471,9 @@ EVALUATE
 
           log.universoResumen = universo.length;
           log.obsoletosPurgados = obsoletos.length;
-          if (obsoletos.length) {
-            await fbBorrar("pbi_ventas_cliente", obsoletos.map((o) => o._id));
+          const aBorrar = obsoletos.filter((o) => !o.obsoleto && !nuevos.has(o._id));
+          if (aBorrar.length) {
+            await fbBorrar("pbi_ventas_cliente", aBorrar.map((o) => o._id));
           }
         }
 
@@ -4921,9 +4957,9 @@ EVALUATE
       // de una pasada a otra, asi que se comparan con lo guardado y solo se
       // escriben los que de verdad son distintos.
       let aEscribir = docs;
+      const previos = new Map();
       if (!dry) {
         try {
-          const previos = new Map();
           for (const d of await fbLeerColeccion("pbi_ventas_cliente")) {
             previos.set(String(d._id), d);
           }
@@ -4957,6 +4993,52 @@ EVALUATE
       } else {
         log.ventas = dry ? docs.length : await fbCommit("pbi_ventas_cliente", aEscribir);
         if (dry) log.muestraVentas = docs.slice(0, 3);
+      }
+
+      // (sep 2026) Documentos que Power BI ya no manda. Solo una pasada
+      // COMPLETA trae la cartera entera, asi que solo entonces se puede
+      // saber que un codigo sobra. Pasaba con los clientes que cambiaron de
+      // formato de codigo (INTRESPA: U4303559 de agosto y U433559 de hoy,
+      // los dos con 143.591 €): el viejo nunca se tocaba y se sumaba dos
+      // veces. No se borran: se ponen a cero, se marcan "obsoleto" y, si
+      // su venta vive ahora bajo otro codigo, se enlazan con fusionadoEn.
+      if (!dry && !desde && !soloMaestro && typeof log.ventas === "number" && previos.size) {
+        try {
+          const vivos = new Set(docs.map((d) => String(d._id)));
+          const porCanon = new Map();
+          for (const d of docs) porCanon.set(canonico(d._id), String(d._id));
+          const sobran = [...previos.values()].filter((a) =>
+            !vivos.has(String(a._id)) && !a.obsoleto);
+          const pct = sobran.length / previos.size;
+          if (sobran.length && pct > 0.20 && req.query.purgar !== "si") {
+            log.obsoletosOmitidos = `${sobran.length} de ${previos.size} (${Math.round(pct * 100)}%): `
+              + "demasiados, parece una lectura incompleta. Forzar con &purgar=si";
+          } else if (sobran.length) {
+            const CEROS = ["ventasAntFull", "margenAntFull", "ventasAntYTD", "margenAntYTD",
+              "ventasAct", "margenAct", "ventasMes", "ventasSem", "ventasMesAnt",
+              "ventasSemAnt", "margenSem", "baseSem", "margenMes", "baseMes",
+              "margenMesAnt", "baseMesAnt", "coberturaAntFull", "coberturaAntYTD", "coberturaAct"];
+            const marcados = sobran.map((a) => {
+              const o = { ...a, obsoleto: true, cuenta: false,
+                obsoletoDesde: new Date().toISOString(),
+                ventasActAntes: num(a.ventasAct), ventasAntFullAntes: num(a.ventasAntFull) };
+              for (const k of CEROS) o[k] = 0;
+              o.margenPctAntFull = null; o.margenPctAntYTD = null; o.margenPctAct = null;
+              o.variacionPct = null; o.variacionMargenPts = null;
+              delete o.caida;
+              const hermano = porCanon.get(canonico(a._id));
+              if (hermano && hermano !== String(a._id)) o.fusionadoEn = hermano;
+              return o;
+            });
+            await fbCommit("pbi_ventas_cliente", marcados);
+            log.obsoletosMarcados = marcados.length;
+            log.ejemplosObsoletos = marcados.slice(0, 8).map((o) =>
+              `${o._id} ${o.nombre || ""} · ${Math.round(o.ventasActAntes)} €`
+              + (o.fusionadoEn ? " → " + o.fusionadoEn : ""));
+          } else log.obsoletosMarcados = 0;
+        } catch (e) {
+          log.errores.push(`marcar obsoletos: ${e.message}`);
+        }
       }
     } catch (e) {
       log.errores.push(`ventas: ${e.message}`);
