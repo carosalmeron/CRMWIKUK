@@ -260,27 +260,34 @@
     .filter(Boolean).join(" · ");
   RC.cargarProductos=async(caso,forzar)=>{
     if(!caso||!caso.cliente) return null;
-    if(!forzar&&caso.productos){
+    if(!forzar&&caso.productos&&!caso.productos.error){
       const d=RC.dias(caso.productosEn);
       if(d!=null&&d<RC.PROD_DIAS) return caso.productos;
     }
+    // Power BI puede tardar si el cliente no está consultado de antes
+    const ctl=typeof AbortController!=="undefined"?new AbortController():null;
+    const tope=setTimeout(()=>{ try{ ctl&&ctl.abort(); }catch(e){} },55000);
     try{
-      const r=await fetch(`/api/pbi-sync?articulosCliente=${encodeURIComponent(caso.cliente)}&top=6`);
-      if(!r.ok) throw new Error("HTTP "+r.status);
+      const r=await fetch(`/api/pbi-sync?articulosCliente=${encodeURIComponent(caso.cliente)}&top=6`,ctl?{signal:ctl.signal}:{});
+      if(!r.ok) throw new Error("Power BI respondió "+r.status);
       const j=await r.json();
+      if(j&&j.ok===false) throw new Error(j.error||"sin respuesta");
       const m=(a)=>({art:a.articulo,desc:RC.prodTexto(a),act:Math.round(num(a.ventasAct)),ant:Math.round(num(a.ventasAnt))});
       const p={caen:(j.articulos||[]).filter(a=>num(a.diferencia)<0).slice(0,5).map(m),
                suben:(j.suben||[]).filter(a=>num(a.diferencia)>0).slice(0,2).map(m)};
       caso.productos=p; caso.productosEn=new Date().toISOString();
       try{ await RC.guardar(caso._id,{productos:p,productosEn:caso.productosEn}); }catch(e){}
       return p;
-    }catch(e){ return caso.productos||null; }
+    }catch(e){
+      return {error:(e&&e.name==="AbortError")?"Power BI tarda demasiado":String(e&&e.message||e)};
+    }finally{ clearTimeout(tope); }
   };
   RC.prodDe=(c)=>{ let p=c&&c.productos; if(typeof p==="string"){ try{ p=JSON.parse(p); }catch(e){ p=null; } } return p; };
   // Lista corta en HTML (para pantallas y correos: estilos en línea)
   RC.htmlProductos=(p,opts)=>{
     opts=opts||{};
-    if(!p) return opts.cargando?`<div style="font-size:12px;color:#8A94A0">Buscando qué ha dejado de comprar…</div>`:"";
+    if(!p) return opts.cargando?`<div style="font-size:12px;color:#8A94A0">Buscando qué ha dejado de comprar… (la primera vez tarda unos segundos)</div>`:"";
+    if(p.error) return `<div style="font-size:12px;color:#B45309">No se ha podido consultar qué ha dejado de comprar (${String(p.error).replace(/[<>&]/g,"")}).${opts.reintentar?` <a href="#" onclick="${opts.reintentar};return false" style="color:#2563EB;font-weight:700">Reintentar</a>`:""}</div>`;
     const esc=(t)=>String(t??"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
     const max=opts.max||5;
     if(!p.caen||!p.caen.length) return `<div style="font-size:12px;color:#8A94A0">No hay un producto concreto que caiga: baja un poco en todo.</div>`;

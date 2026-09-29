@@ -42848,6 +42848,52 @@ const recupNivel=(c)=>{ const p=Number(c.perdido)||0; const b=p>=50000?3:p>=2000
   return Math.min(3,b+((d!=null&&d>14&&c.estado!=="propuesta_archivo")?1:0)); };
 const RECUP_NIV={1:["Comercial","#16A34A"],2:["Con jefe de ventas","#D97706"],3:["CEO","#DC2626"]};
 
+// Guarda una instrucción en el caso del cliente (lo abre si no existe) y
+// avisa por correo al comercial con copia a su cadena. Lo usan la ficha del
+// caso y el botón «Pedir plan» de cada artículo en Análisis.
+async function recupInstruir(ctx,t,usuario,extra){
+  const rol=String(usuario&&usuario.rol||"").toLowerCase();
+  const esCeo=usuario&&(usuario.id==="ceo"||rol==="admin"||rol==="ceo");
+  const quien=esCeo?"CEO":(usuario&&(usuario.nombre||usuario.id))||"Jefe";
+  const ahora=new Date().toISOString();
+  const d0=new Date(); const tt=new Date(Date.UTC(d0.getFullYear(),d0.getMonth(),d0.getDate()));
+  const nn=tt.getUTCDay()||7; tt.setUTCDate(tt.getUTCDate()+4-nn);
+  const semana=Math.ceil(((tt-new Date(Date.UTC(tt.getUTCFullYear(),0,1)))/86400000+1)/7);
+  try{
+    const mapa=await cargarRecupMap();
+    let caso=mapa[String(ctx.cliente||"").toUpperCase()];
+    const nuevo=!caso;
+    if(nuevo){
+      const perd=Math.max(0,Math.round((Number(ctx.ventasAntYTD)||0)-(Number(ctx.ventasAct)||0)));
+      caso={_id:recupId(ctx.cliente),cliente:String(ctx.cliente),nombre:ctx.nombre||String(ctx.cliente),agente:ctx.agente||"",
+        equipo:ctx.equipo||"",abierto:ahora,semanaApertura:semana,tipo:"manual",motivo:`abierto por ${quien}`,perdido:perd,
+        ventasAct:Math.round(Number(ctx.ventasAct)||0),ventasAnt:Math.round(Number(ctx.ventasAntYTD)||0),
+        estado:"abierto",historial:[],nivel:perd>=50000?3:perd>=20000?2:1,creadoPor:quien};
+    }
+    const hist=(caso.historial||[]).concat([{sem:semana,fecha:ahora,por:quien,sistema:"Instrucción: "+t}]);
+    const campos=Object.assign(nuevo?Object.assign({},caso):{},
+      {historial:hist,instruccion:t,instruccionPor:quien,instruccionEn:ahora,instruccionLeida:false,actualizado:ahora},extra||{});
+    delete campos._id;
+    const f={}; const qs=[];
+    for(const [k,v] of Object.entries(campos)){
+      qs.push("updateMask.fieldPaths="+encodeURIComponent(k));
+      f[k]= typeof v==="number"?{doubleValue:v}:typeof v==="boolean"?{booleanValue:v}
+        : typeof v==="object"&&v!==null?{stringValue:JSON.stringify(v)}:{stringValue:String(v??"")};
+    }
+    const r=await fetch(`${FB_BASE}/recuperacion/${encodeURIComponent(caso._id)}?${qs.join("&")}`,{
+      method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:f})});
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    const obj=Object.assign({},caso,campos,{_id:caso._id});
+    window._RECUP_MAP=Object.assign({},window._RECUP_MAP||{},{[String(obj.cliente).toUpperCase()]:obj});
+    _recupProm=Promise.resolve(window._RECUP_MAP); window.dispatchEvent(new Event("recup-cambia"));
+    if(window.RC&&RC.avisarInstruccion){
+      const d=await RC.avisarInstruccion(Object.assign({},obj,{agente:obj.agente||ctx.agente}),t,quien,usuario&&(usuario.crmId||usuario.id));
+      return {ok:true,aviso:RC.textoAviso(d)};
+    }
+    return {ok:true,aviso:"Guardada en el caso."};
+  }catch(e){ return {ok:false,aviso:"No se ha podido guardar: "+e.message}; }
+}
+
 function BadgeRecup({cliente}){
   const m=useRecupMap();
   const c=m&&m[String(cliente||"").toUpperCase()];
@@ -42905,30 +42951,9 @@ function CasoRecuperacionCRM({cliente, nombre, agente, equipo, ventasAct, ventas
   const enviar=async()=>{
     const t=texto.trim(); if(t.length<5){ setAviso("Escribe la instrucción."); return; }
     setEnviando(true); setAviso("");
-    const ahora=new Date().toISOString();
-    try{
-      let caso=c;
-      if(!caso){
-        // Sin caso todavía: se abre a mano con la instrucción
-        const perd=Math.max(0,Math.round((Number(ventasAntYTD)||0)-(Number(ventasAct)||0)));
-        caso={_id:recupId(cliente),cliente:String(cliente),nombre:nombre||String(cliente),agente:agente||"",equipo:equipo||"",
-          abierto:ahora,semanaApertura:semana,tipo:"manual",motivo:`abierto por ${quien}`,perdido:perd,
-          ventasAct:Math.round(Number(ventasAct)||0),ventasAnt:Math.round(Number(ventasAntYTD)||0),
-          estado:"abierto",historial:[],nivel:perd>=50000?3:perd>=20000?2:1,creadoPor:quien};
-      }
-      const hist=(caso.historial||[]).concat([{sem:semana,fecha:ahora,por:quien,sistema:"Instrucción: "+t}]);
-      const campos=Object.assign(c?{}:Object.assign({},caso,{_id:undefined}),
-        {historial:hist,instruccion:t,instruccionPor:quien,instruccionEn:ahora,instruccionLeida:false,actualizado:ahora});
-      delete campos._id;
-      await guardar(caso._id,campos);
-      refrescar(Object.assign({},caso,campos,{_id:caso._id}));
-      setTexto("");
-      if(window.RC&&RC.avisarInstruccion){
-        const d=await RC.avisarInstruccion(Object.assign({},caso,{agente:caso.agente||agente}),t,quien,usuario&&(usuario.crmId||usuario.id));
-        setAviso(RC.textoAviso(d));
-      } else setAviso("Guardada en el caso.");
-    }catch(e){ setAviso("No se ha podido guardar: "+e.message); }
-    setEnviando(false);
+    const r=await recupInstruir({cliente,nombre,agente,equipo,ventasAct,ventasAntYTD},t,usuario);
+    if(r.ok) setTexto("");
+    setAviso(r.aviso); setEnviando(false);
   };
   const entendido=async()=>{
     const ahora=new Date().toISOString();
@@ -43010,6 +43035,9 @@ function PanelAnalisis({usuario, onNav}){
   const [clientes,setClientes]=useState(null);
   const [cliAbierto,setCliAbierto]=useState(null);
   const [arts,setArts]=useState({});
+  const [planArt,setPlanArt]=useState(null);     // "cliente|articulo" con el cuadro abierto
+  const [planTxt,setPlanTxt]=useState("");
+  const [planAviso,setPlanAviso]=useState({});
 
   const eur=(n)=>Math.round(n||0).toLocaleString("es-ES")+" €";
   const pc=(n)=>(n>0?"+":"")+Number(n||0).toFixed(1)+" %";
@@ -43441,7 +43469,7 @@ function PanelAnalisis({usuario, onNav}){
         }));
       } else
       sessionStorage.setItem("estrategia_recup_cliente",JSON.stringify({
-        nombre:c.nombre||c.cliente, codigo:c.cliente, agente:abierto||"",
+        nombre:c.nombre||c.cliente, codigo:c.cliente, agente:c.agente||abierto||"",
         arts:lista, perdida, pct:caida,
         cls: !c.ventasAct ? "lost" : caida<=-30 ? "risk" : "down",
         origen:"analisis", solicitud:tipo==="solicitud",
@@ -43464,7 +43492,7 @@ function PanelAnalisis({usuario, onNav}){
     fbEscribir("acciones_analisis",id,{
       tipo, cliente:c.cliente, nombreCliente:c.nombre||"",
       articulo:art.articulo, descripcion:art.descripcion||"",
-      agente:abierto||"", usuario:usuario.nombre||"",
+      agente:c.agente||abierto||"", usuario:usuario.nombre||"",
       fecha:new Date().toISOString(),
     }).catch(()=>{});
 
@@ -43754,7 +43782,8 @@ function PanelAnalisis({usuario, onNav}){
                                   fontSize:12,color:T.muted}}>Sin movimientos por artículo.</p>
                               );
                               const fila=(x,baja)=>(
-                                <div key={x.articulo} style={{display:"flex",gap:10,
+                                <React.Fragment key={x.articulo}>
+                                <div style={{display:"flex",gap:10,
                                   padding:"9px 15px 9px 26px",borderTop:"1px solid #E9EEF3"}}>
                                   <div style={{flex:1,minWidth:0}}>
                                     <p style={{margin:0,fontSize:13,fontWeight:700}}>
@@ -43773,6 +43802,57 @@ function PanelAnalisis({usuario, onNav}){
                                       {x.variacionPct!=null?` · ${pc(x.variacionPct)}`:""}</p>
                                   </div>
                                 </div>
+                                {baja && (()=>{
+                                  const k=`${c.cliente}|${x.articulo}`;
+                                  const ant=Number(x.ventasAnt)||0, act=Number(x.ventasAct)||0;
+                                  const hist=(acciones[k]||[]).slice().sort((a,b)=>String(b.fecha||"").localeCompare(String(a.fecha||"")));
+                                  const nomA=(t)=>t==="oferta"?"Oferta enviada":t==="solicitud"?"Estrategia solicitada"
+                                    :t==="plan"?"Plan pedido al comercial":"Estrategia lanzada";
+                                  const btn=(txt,fn,prim)=>(
+                                    <button onClick={e=>{e.stopPropagation();fn();}} style={{font:"inherit",fontSize:12,fontWeight:700,
+                                      padding:"7px 11px",borderRadius:9,cursor:"pointer",
+                                      border:`1.5px solid ${prim?T.navy:T.border}`,background:prim?T.navy:"#fff",color:prim?"#fff":T.text}}>{txt}</button>);
+                                  const texto0=`Plan para recuperar ${x.descripcion||x.articulo}${x.calibre?" (calibre "+x.calibre+")":""}: `
+                                    +`venía de ${eur(ant)} y este año lleva ${eur(act)}. Dime qué ha pasado y qué vas a hacer.`;
+                                  return (
+                                  <div style={{padding:"0 15px 11px 26px"}} onClick={e=>e.stopPropagation()}>
+                                    {/* Lo que queda de lo que compraba: barra gris = año pasado */}
+                                    <div style={{height:6,background:"#E2E8F0",borderRadius:99,overflow:"hidden",margin:"0 0 8px"}}>
+                                      <div style={{height:6,width:`${ant?Math.min(100,Math.round(act/ant*100)):0}%`,background:T.red,borderRadius:99}}/></div>
+                                    <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
+                                      {btn(mando?"🎯 Lanzar estrategia":"🎯 Pedir estrategia",()=>lanzar(mando?"estrategia":"solicitud",c,x),true)}
+                                      {btn("💶 Enviar oferta",()=>lanzar("oferta",c,x))}
+                                      {mando&&btn("📌 Pedir plan al comercial",()=>{ setPlanArt(planArt===k?null:k); setPlanTxt(texto0); })}
+                                    </div>
+                                    {planArt===k && (
+                                      <div style={{marginTop:8,background:"#fff",border:`1px solid ${T.border}`,borderRadius:10,padding:"9px 10px"}}>
+                                        <textarea value={planTxt} onChange={e=>setPlanTxt(e.target.value)}
+                                          style={{width:"100%",minHeight:64,padding:"8px 10px",border:"1.5px solid #E2E8F0",borderRadius:8,fontSize:13,fontFamily:"inherit"}}/>
+                                        <div style={{display:"flex",gap:8,alignItems:"center",marginTop:6,flexWrap:"wrap"}}>
+                                          {btn("Enviar al comercial",async()=>{
+                                            setPlanAviso(p=>({...p,[k]:"Enviando…"}));
+                                            const r=await recupInstruir({cliente:c.cliente,nombre:c.nombre,agente:c.agente||abierto,
+                                              equipo:c.equipo,ventasAct:c.ventasAct,ventasAntYTD:c.ventasAntYTD},planTxt.trim(),usuario);
+                                            setPlanAviso(p=>({...p,[k]:r.aviso}));
+                                            if(r.ok){
+                                              setPlanArt(null);
+                                              const id=`${Date.now()}_${String(c.cliente).replace(/[^A-Za-z0-9]/g,"")}_${String(x.articulo).replace(/[^A-Za-z0-9]/g,"")}`;
+                                              fbEscribir("acciones_analisis",id,{tipo:"plan",cliente:c.cliente,nombreCliente:c.nombre||"",
+                                                articulo:x.articulo,descripcion:x.descripcion||"",agente:c.agente||abierto||"",
+                                                usuario:usuario.nombre||"",fecha:new Date().toISOString()}).catch(()=>{});
+                                              setAcciones(prev=>({...prev,[k]:[{tipo:"plan",usuario:usuario.nombre||"",fecha:new Date().toISOString()},...(prev[k]||[])]}));
+                                            }
+                                          },true)}
+                                          {btn("Cancelar",()=>setPlanArt(null))}
+                                        </div>
+                                      </div>)}
+                                    {planAviso[k]&&<p style={{margin:"6px 0 0",fontSize:11.5,color:T.muted}}>{planAviso[k]}</p>}
+                                    {hist.length>0&&<div style={{marginTop:6}}>{hist.slice(0,3).map((h,i2)=>(
+                                      <p key={i2} style={{margin:"2px 0 0",fontSize:11,fontWeight:600,color:i2===0?T.green:T.muted}}>
+                                        ✓ {nomA(h.tipo)}{h.usuario?` · ${h.usuario}`:""}{h.fecha?` · ${new Date(h.fecha).toLocaleDateString("es-ES")}`:""}</p>))}</div>}
+                                  </div>);
+                                })()}
+                                </React.Fragment>
                               );
                               const titulo=(t,c2)=>(
                                 <p style={{margin:0,padding:"9px 15px 5px 26px",
