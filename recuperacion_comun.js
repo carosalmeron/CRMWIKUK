@@ -351,7 +351,12 @@
     const quien=U(quienId);
     const fuera=(u)=>quien&&[u._id,u.id,u.crmId,u.username,u.grupoAgente].some(k=>k&&U(k)===quien);
     const lista=(l,papel)=>l.filter(u=>!fuera(u)).map(u=>({email:emailDe(u),nombre:u.nombre||u.id||u._id,papel})).filter(x=>x.email);
-    const para=com&&!fuera(com)?lista([com],"comercial"):[];
+    // El email del comercial puede estar en cualquiera de sus fichas (CRM o portal)
+    let para=com&&!fuera(com)?lista([com],"comercial"):[];
+    if(com&&!fuera(com)&&!para.length){
+      const otra=[...us,...pu].find(u=>esDe(u,agente)&&String(u.email||"").includes("@"));
+      if(otra) para=[{email:String(otra.email).trim(),nombre:com.nombre||agente,papel:"comercial"}];
+    }
     const vistos=new Set(para.map(x=>x.email.toLowerCase()));
     const copias=[...lista(jefes,"jefe de equipo"),...lista(dir,"jefe de ventas"),...lista(ceo,"CEO")]
       .filter(x=>!vistos.has(x.email.toLowerCase())&&(vistos.add(x.email.toLowerCase()),true));
@@ -453,7 +458,7 @@
     return d;
   };
   RC.textoAviso=(d)=>!d||(!d.para.length&&!d.copias.length)?"Guardada en el caso. No encuentro correos: la verá en el panel y en su parte."
-    :`Enviada a ${d.para.length?d.para.map(x=>x.nombre).join(", "):"(sin correo del comercial)"}${d.copias.length?" · copia a "+d.copias.map(x=>x.nombre+" ("+x.papel+")").join(", "):""}.`;
+    :`Enviada a ${d.para.length?d.para.map(x=>x.nombre).join(", "):"(al comercial no le llega: "+(d.nombreComercial||"")+" no tiene email; ponlo en Admin → Usuarios → 📧 Email)"}${d.copias.length?" · copia a "+d.copias.map(x=>x.nombre+" ("+x.papel+")").join(", "):""}.`;
 
   // ══ Estrategias (las mismas del CRM, colección «estrategias») ═════════
   // Formato idéntico al del CRM (arrays y mapas nativos de Firestore), para
@@ -636,6 +641,10 @@
     const u=RC._us.find(x=>ARR(x.id||x._id)===ARR(idUsuario))||pu.find(x=>ARR(x.crmId||x.id||x._id)===ARR(idUsuario));
     let em=u&&u.email;
     if(!em&&u){ const p=pu.find(x=>x.email&&[x.crmId,x.id,x._id].some(k=>k&&ARR(k)===ARR(u.id||u._id))); em=p&&p.email; }
+    // (sep 2026) Si no, cualquier ficha (CRM o portal) de esa persona que tenga email
+    if(!em){ const ks=[idUsuario,u&&u.id,u&&u._id,u&&u.grupoAgente,u&&u.username,u&&u.nombre].filter(Boolean).map(ARR);
+      const o=[...RC._us,...pu].find(x=>String(x.email||"").includes("@")&&[x._id,x.id,x.crmId,x.grupoAgente,x.catalogoVendedor,x.username].some(k=>k&&ks.includes(ARR(k))));
+      em=o&&o.email; }
     if(!em) return false;
     await fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({to:em,subject:asunto,
       html:`<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;margin:0 auto;color:#14181F"><div style="background:#14181F;color:#fff;padding:16px 20px;border-radius:12px 12px 0 0;font-size:17px;font-weight:800">${RC.esc(asunto)}</div><div style="border:1px solid #DCE1E7;border-top:none;border-radius:0 0 12px 12px;padding:18px 20px;font-size:14px;line-height:1.5">${cuerpo}<br><a href="https://crmwikuk.vercel.app/" style="display:inline-block;margin-top:14px;background:#14181F;color:#fff;text-decoration:none;padding:10px 20px;border-radius:9px;font-size:13px;font-weight:700">Abrir el portal</a></div></div>`})});
