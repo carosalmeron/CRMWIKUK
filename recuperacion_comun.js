@@ -304,10 +304,13 @@
     let cuadre="";
     if(tot>0){
       const resto=Math.round(tot-pierde+gana);
-      cuadre=`<div style="font-size:11.5px;color:#6B7684;margin-top:5px;line-height:1.4">
-        ${caen.length===1?"Este artículo explica":"Estos "+caen.length+" artículos explican"} <b>${RC.eur(pierde)}</b> de los <b>${RC.eur(tot)}</b> que cae el cliente${gana?`, y lo que compra más compensa ${RC.eur(gana)}`:""}.
-        ${Math.abs(resto)>Math.max(50,tot*0.02)?(resto>0?`Los otros <b>${RC.eur(resto)}</b> vienen de artículos más pequeños o de abonos.`
-          :`El resto de artículos compensa ${RC.eur(-resto)}.`):""}</div>`;
+      const dice=caen.length===1?"Este artículo cae":"Estos "+caen.length+" artículos caen";
+      cuadre=`<div style="font-size:11.5px;color:#6B7684;margin-top:5px;line-height:1.4">`
+        +(pierde-gana<=tot+Math.max(50,tot*0.02)
+          ? `${dice} <b>${RC.eur(pierde)}</b>${gana?`, lo que compra más compensa ${RC.eur(gana)}`:""}. El cliente cae <b>${RC.eur(tot)}</b> en total`
+            +(resto>Math.max(50,tot*0.02)?`: los otros <b>${RC.eur(resto)}</b> vienen de artículos más pequeños o de abonos.`:".")
+          : `${dice} <b>${RC.eur(pierde)}</b>, pero otros artículos compensan ${RC.eur(-resto)}: el cliente cae <b>${RC.eur(tot)}</b> en total.`)
+        +`</div>`;
     }
     return `<div style="margin:6px 0 2px">
       <div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#8A94A0">Lo que más cae · año pasado → este año</div>
@@ -448,6 +451,272 @@
   };
   RC.textoAviso=(d)=>!d||(!d.para.length&&!d.copias.length)?"Guardada en el caso. No encuentro correos: la verá en el panel y en su parte."
     :`Enviada a ${d.para.length?d.para.map(x=>x.nombre).join(", "):"(sin correo del comercial)"}${d.copias.length?" · copia a "+d.copias.map(x=>x.nombre+" ("+x.papel+")").join(", "):""}.`;
+
+  // ══ Estrategias (las mismas del CRM, colección «estrategias») ═════════
+  // Formato idéntico al del CRM (arrays y mapas nativos de Firestore), para
+  // que se vean y se aprueben igual desde la pestaña Estrategias.
+  const ser=(v)=>{
+    if(v===null||v===undefined) return {nullValue:null};
+    if(typeof v==="boolean") return {booleanValue:v};
+    if(typeof v==="number") return {doubleValue:v};
+    if(typeof v==="string") return {stringValue:v};
+    if(Array.isArray(v)) return {arrayValue:{values:v.map(ser)}};
+    if(typeof v==="object") return {mapValue:{fields:Object.fromEntries(Object.entries(v).map(([k,x])=>[k,ser(x)]))}};
+    return {stringValue:String(v)};
+  };
+  const des=(f)=>{
+    if(!f) return null;
+    if(f.arrayValue) return (f.arrayValue.values||[]).map(des);
+    if(f.mapValue){ const o={}; for(const [k,x] of Object.entries(f.mapValue.fields||{})) o[k]=des(x); return o; }
+    return val(f);
+  };
+  RC.leerProfundo=async(col)=>{
+    const t=[]; let tok=null,v=0;
+    do{
+      const r=await fetch(`${RC.FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""),{cache:"no-store"});
+      if(!r.ok) break;
+      const j=await r.json();
+      for(const d of j.documents||[]){ const o={_id:decodeURIComponent(d.name.split("/").pop())};
+        for(const [k,x] of Object.entries(d.fields||{})) o[k]=des(x); t.push(o); }
+      tok=j.nextPageToken||null; v++;
+    }while(tok&&v<60);
+    return t;
+  };
+  RC.guardarEn=async(col,id,campos,parcial)=>{
+    const f={}; for(const [k,v] of Object.entries(campos)) if(k!=="_id") f[k]=ser(v);
+    const qs=parcial?"?"+Object.keys(f).map(k=>"updateMask.fieldPaths="+encodeURIComponent(k)).join("&"):"";
+    const r=await fetch(`${RC.FB}/${col}/${encodeURIComponent(id)}${qs}`,{method:"PATCH",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:f})});
+    if(!r.ok) throw new Error("HTTP "+r.status);
+  };
+  // Quién es quién alrededor de un comercial (ids del CRM)
+  RC.cadenaDe=async(agente)=>{
+    if(!RC._us) RC._us=await RC.leer("usuarios",10);
+    const us=RC._us, rol=(u)=>String(u.rol||"").toLowerCase();
+    const esDe=(u)=>[u._id,u.id,u.grupoAgente,u.catalogoVendedor,u.username].some(k=>k&&ARR(k)===ARR(agente));
+    const ag=us.find(u=>esDe(u)&&!["jefe","crm_jefe","director","crm_director","ceo","admin"].includes(rol(u)))||us.find(esDe)||null;
+    const eq=ARR(ag&&ag.equipo);
+    const P=(u)=>u?{id:u.id||u._id,nombre:u.nombre||u.id||u._id}:null;
+    return {ag:ag?Object.assign(P(ag),{equipo:ag.equipo||""}):{id:agente,nombre:agente,equipo:""},
+      resp:P(us.find(u=>["jefe","crm_jefe"].includes(rol(u))&&eq&&ARR(u.equipo)===eq)),
+      dir:P(us.find(u=>["director","crm_director"].includes(rol(u)))),
+      ceo:P(us.find(u=>rol(u)==="ceo"||ARR(u.id||u._id)==="CEO"))};
+  };
+  // Límites de descuento por nivel, los mismos que el CRM
+  RC.LIM_DTO={jefe:10,director:15,ceo:100};
+  RC.dtoDe=(pa,po)=>num(pa)>0?Math.round((num(pa)-num(po))/num(pa)*100):0;
+  // por: {nombre, nivel:"comercial"|"jefe"|"director"|"ceo"}
+  RC.crearEstrategia=async(caso,l,nota,por)=>{
+    const cad=await RC.cadenaDe(caso.agente);
+    const hoy=new Date(), hoyS=hoy.toLocaleDateString("es-ES");
+    const dto=RC.dtoDe(l.precioActual,l.precioOferta);
+    let estado="aprobada", pend=null, cadena=[];
+    const nivel=por.nivel;
+    if(nivel==="comercial"){
+      estado="pendiente_aprobacion"; pend=cad.resp||cad.dir;
+      cadena=[{rol:"responsable",id:cad.resp&&cad.resp.id,nombre:cad.resp&&cad.resp.nombre,estado:"pendiente",limiteDto:10}];
+      if(dto>10) cadena.push({rol:"jefe_ventas",id:cad.dir&&cad.dir.id,nombre:cad.dir&&cad.dir.nombre,estado:"pendiente",limiteDto:15});
+      if(dto>15) cadena.push({rol:"ceo",id:cad.ceo&&cad.ceo.id,nombre:cad.ceo&&cad.ceo.nombre,estado:"pendiente",limiteDto:100});
+    } else if(dto>(RC.LIM_DTO[nivel]||0)){
+      // El jefe puede crearla, pero si el descuento pasa de su límite la aprueba el de arriba
+      estado="pendiente_aprobacion"; pend=nivel==="jefe"?(dto>15?cad.ceo:cad.dir):cad.ceo;
+    } else cadena=[{rol:nivel,nombre:por.nombre,estado:"aprobado",fecha:hoyS}];
+    const id="est_rec_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
+    const linea={id:"l1",nombre:l.desc||l.art||"Artículo",codigo:l.art||"",calibre:l.cal||"",
+      precioActual:num(l.precioActual),precioOferta:num(l.precioOferta),precioFinal:num(l.precioOferta),
+      dto,unidad:l.unidad||"m",cantidad:num(l.cantidad)||0,aprobada:estado==="aprobada"?true:null};
+    const doc={id,cliente:caso.nombre,clienteNombre:caso.nombre,clienteId:caso.cliente,
+      agente:cad.ag.id,agenteNombre:cad.ag.nombre,equipo:cad.ag.equipo||caso.equipo||"",
+      estrategia:(nivel==="comercial"?"Solicitud precio: ":"Precio especial: ")+linea.nombre+(linea.calibre?" "+linea.calibre:"")+" a "+linea.precioOferta+" €/"+linea.unidad,
+      texto:"Recuperar "+caso.nombre+": "+linea.nombre,
+      descripcion:nota||"",notaJefe:nivel==="comercial"?"":(nota||""),
+      maxDescuento:dto,ofertas:[linea],productos:[linea],
+      estado,prioridad:"alta",pendienteDe:pend?pend.id:null,pendienteDeNombre:pend?pend.nombre:null,
+      cadenaAprobacion:cadena,escaladoA:estado==="pendiente_aprobacion"&&nivel!=="comercial"?(pend&&pend.id):null,
+      fechaCreacion:hoy.toISOString(),fechaCreacionStr:hoyS,semana:RC.semanaISO(hoy),
+      creadoPor:por.id||por.nombre,creadoPorNombre:por.nombre,solicitudAgente:nivel==="comercial",
+      origen:caso._id?"recuperacion":"cierre_equipo",casoId:caso._id||"",
+      seguimientos:[{accion:(nivel==="comercial"?"💰 Solicitud desde el plan de recuperación":"🎯 Creada desde el plan de recuperación")+" — "+linea.nombre+" a "+linea.precioOferta+" € (dto "+dto+" %)",fecha:hoyS,por:por.nombre,nota:nota||""}],
+      historialEscalado:[{accion:nivel==="comercial"?"💰 Solicitud del comercial — dto "+dto+" %":(estado==="aprobada"?"✅ Creada y aprobada por "+por.nombre:"↑ Creada por "+por.nombre+", supera su límite: la aprueba "+(pend&&pend.nombre)),por:por.nombre,fecha:hoyS}]};
+    await RC.guardarEn("estrategias",id,doc);
+    // En el caso queda anotado
+    const hist=(caso.historial||[]).concat([{sem:RC.semanaISO(hoy),fecha:hoy.toISOString(),por:por.nombre,
+      sistema:(nivel==="comercial"?"Pide estrategia: ":"Estrategia: ")+linea.nombre+" a "+linea.precioOferta+" € (dto "+dto+" %)"+(estado==="aprobada"?" · aprobada":" · pendiente de "+(pend&&pend.nombre||"aprobar"))}]);
+    const campos={historial:hist};
+    if(nivel==="comercial") campos.ultimaAccion=hoy.toISOString();
+    if(caso._id){ try{ await RC.guardar(caso._id,campos); Object.assign(caso,campos); }catch(e){} }
+    // Aviso por correo
+    try{
+      if(nivel==="comercial"&&pend){
+        await RC.avisarA(pend.id,`💰 ${cad.ag.nombre} pide estrategia: ${caso.nombre}`,
+          `<b>${RC.esc(cad.ag.nombre)}</b> pide <b>${RC.esc(linea.nombre)}${linea.calibre?" "+RC.esc(linea.calibre):""}</b> a <b>${linea.precioOferta} €/${linea.unidad}</b> (ahora ${linea.precioActual} €, descuento ${dto} %) para recuperar a <b>${RC.esc(caso.nombre)}</b>, que cae ${RC.eur(caso.perdido)}.${nota?"<br><i>“"+RC.esc(nota)+"”</i>":""}<br><br>Apruébala, elévala o recházala en el portal → 🚨 Plan de recuperación, o en el CRM → Estrategias.`);
+      } else if(nivel!=="comercial"){
+        await RC.avisarGenerico({agente:caso.agente,quienId:por.id,quien:por.nombre,titulo:caso.nombre,etiqueta:"Estrategia",
+          texto:`Precio especial: ${linea.nombre}${linea.calibre?" "+linea.calibre:""} a ${linea.precioOferta} €/${linea.unidad} (descuento ${dto} %).${nota?" "+nota:""}`,
+          detalle:estado==="aprobada"?"Está aprobada: ya puedes ofrecerla.":"Pendiente de aprobación de "+(pend&&pend.nombre||"dirección")+".",
+          pie:"La tienes en el CRM → Estrategias."});
+      }
+    }catch(e){}
+    return doc;
+  };
+  RC.esc=(t)=>String(t??"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+  RC.avisarA=async(idUsuario,asunto,cuerpo)=>{
+    if(!RC._us) RC._us=await RC.leer("usuarios",10);
+    const pu=await RC.leer("portal_users",10);
+    const u=RC._us.find(x=>ARR(x.id||x._id)===ARR(idUsuario))||pu.find(x=>ARR(x.crmId||x.id||x._id)===ARR(idUsuario));
+    let em=u&&u.email;
+    if(!em&&u){ const p=pu.find(x=>x.email&&[x.crmId,x.id,x._id].some(k=>k&&ARR(k)===ARR(u.id||u._id))); em=p&&p.email; }
+    if(!em) return false;
+    await fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({to:em,subject:asunto,
+      html:`<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;margin:0 auto;color:#14181F"><div style="background:#14181F;color:#fff;padding:16px 20px;border-radius:12px 12px 0 0;font-size:17px;font-weight:800">${RC.esc(asunto)}</div><div style="border:1px solid #DCE1E7;border-top:none;border-radius:0 0 12px 12px;padding:18px 20px;font-size:14px;line-height:1.5">${cuerpo}<br><a href="https://crmwikuk.vercel.app/" style="display:inline-block;margin-top:14px;background:#14181F;color:#fff;text-decoration:none;padding:10px 20px;border-radius:9px;font-size:13px;font-weight:700">Abrir el portal</a></div></div>`})});
+    return true;
+  };
+  // Resolver: accion "aprobar" | "rechazar" | "elevar"
+  RC.resolverEstrategia=async(e,accion,por,nota)=>{
+    const hoyS=new Date().toLocaleDateString("es-ES");
+    const cad=await RC.cadenaDe(e.agente);
+    const ofs=(e.ofertas||[]).map(o=>Object.assign({},o));
+    let campos={};
+    if(accion==="aprobar"){
+      ofs.forEach(o=>{ o.aprobada=true; o.aprobadaPor=por.nombre; });
+      campos={estado:"aprobada",ofertas:ofs,aprobadoPor:por.nombre,escaladoA:null,pendienteDe:null,
+        resolucion:{tipo:"aprobada",por:por.nombre,rol:por.nivel,fecha:hoyS,nota:nota||""}};
+    } else if(accion==="rechazar"){
+      ofs.forEach(o=>{ o.aprobada=false; o.rechazadaPor=por.nombre; });
+      campos={estado:"sin_exito",ofertas:ofs,pendienteDe:null,
+        resolucion:{tipo:"rechazada",por:por.nombre,rol:por.nivel,fecha:hoyS,nota:nota||""}};
+    } else {
+      const dest=por.nivel==="jefe"?(cad.dir||cad.ceo):cad.ceo;
+      campos={estado:"pendiente_aprobacion",escaladoA:dest&&dest.id,pendienteDe:dest&&dest.id,pendienteDeNombre:dest&&dest.nombre};
+    }
+    campos.historialEscalado=(e.historialEscalado||[]).concat([{accion:accion==="aprobar"?"✅ Aprobada por "+por.nombre
+      :accion==="rechazar"?"❌ Rechazada por "+por.nombre:"↑ Elevada a "+(campos.pendienteDeNombre||"dirección"),por:por.nombre,fecha:hoyS,nota:nota||""}]);
+    await RC.guardarEn("estrategias",e._id||e.id,campos,true);
+    Object.assign(e,campos);
+    // Oferta automática al aprobar, como hace el CRM
+    if(accion==="aprobar"){
+      try{
+        const ofId="oferta_est_"+(e._id||e.id)+"_"+Date.now(); const pl=new Date(); pl.setDate(pl.getDate()+30);
+        await RC.guardarEn("ofertas",ofId,{id:ofId,clienteNombre:e.cliente||e.clienteNombre||"",clienteId:e.clienteId||"",
+          agente:e.agente||"",agenteNombre:e.agenteNombre||"",equipo:e.equipo||"",
+          lineas:ofs.map(o=>({producto:o.nombre||"",calibre:o.calibre||"",precio:num(o.precioFinal||o.precioOferta),cantidad:num(o.cantidad),unidad:o.unidad||"m"})),
+          estado:"pendiente",desdeEstrategia:e._id||e.id,fechaCreacion:new Date().toISOString(),fechaCreacionStr:hoyS,
+          fechaPlazo:pl.toISOString(),notas:"Generada al aprobar la estrategia desde el plan de recuperación"+(nota?". "+nota:""),
+          seguimientos:[{accion:"📋 Oferta generada desde estrategia aprobada",fecha:hoyS,por:por.nombre,nota:nota||""}]});
+      }catch(x){}
+    }
+    try{
+      const txt=accion==="aprobar"?"✅ Aprobada":accion==="rechazar"?"❌ Rechazada":"↑ Elevada";
+      if(accion==="elevar"&&campos.pendienteDe) await RC.avisarA(campos.pendienteDe,`↑ ${por.nombre} te eleva una estrategia: ${e.cliente}`,
+        `${RC.esc(e.estrategia||e.texto||"")}. Descuento ${num(e.maxDescuento)} %.${nota?"<br><i>“"+RC.esc(nota)+"”</i>":""}`);
+      else await RC.avisarA(e.agente,`${txt}: tu estrategia para ${e.cliente}`,`${RC.esc(e.estrategia||"")}.${nota?"<br><i>“"+RC.esc(nota)+"”</i>":""}${accion==="aprobar"?"<br>Tienes la oferta creada en el CRM.":""}`);
+    }catch(x){}
+    return e;
+  };
+  RC.estrategiasDeCaso=(ests,c)=>ests.filter(e=>!e.eliminada&&(e.casoId===c._id||ARR(e.clienteId)===ARR(c.cliente)));
+  RC.ESTADO_EST={pendiente_aprobacion:["⏳ Pendiente","#B45309","#FFFBEB"],aprobada:["✅ Aprobada","#15803D","#F0FDF4"],
+    sin_exito:["✖ Rechazada","#B91C1C","#FEF2F2"],completada:["✔ Completada","#15803D","#F0FDF4"],pendiente:["⏳ Pendiente","#B45309","#FFFBEB"]};
+  // ¿Puede este nivel resolverla? (límite de descuento y a quién está pendiente)
+  RC.puedeResolverEst=(e,nivel,miId)=>{
+    if(e.estado!=="pendiente_aprobacion") return false;
+    if(nivel==="ceo") return true;
+    if(nivel==="director") return num(e.maxDescuento)<=RC.LIM_DTO.director;
+    if(nivel==="jefe") return num(e.maxDescuento)<=RC.LIM_DTO.jefe;
+    return false;
+  };
+  // ══ Ofertas (colección «ofertas» del CRM) ═══════════════════════════
+  // Límites de descuento del comercial en una oferta: los del CRM
+  // (configuracion/general → limites_dto; por defecto 4 / 10 / 15 %).
+  RC.limitesDto=async()=>{
+    if(RC._lim) return RC._lim;
+    RC._lim={agente:4,jefe:10,director:15};
+    try{ const r=await fetch(`${RC.FB}/configuracion/general`); if(r.ok){ const j=await r.json();
+      const l=j.fields&&j.fields.limites_dto&&j.fields.limites_dto.mapValue&&j.fields.limites_dto.mapValue.fields;
+      if(l) ["agente","jefe","director"].forEach(k=>{ const v=l[k]&&(l[k].doubleValue??l[k].integerValue); if(v!=null) RC._lim[k]=Number(v); }); } }catch(e){}
+    return RC._lim;
+  };
+  // Si el descuento entra en su límite se crea la oferta; si no, se convierte
+  // en petición de estrategia (como hace el formulario de ofertas del CRM).
+  RC.crearOferta=async(caso,l,nota,por)=>{
+    const lim=await RC.limitesDto();
+    const tope=por.nivel==="ceo"?100:por.nivel==="director"?lim.director:por.nivel==="jefe"?lim.jefe:lim.agente;
+    const dto=RC.dtoDe(l.precioActual,l.precioOferta);
+    if(num(l.precioActual)>0&&dto>tope){
+      const e=await RC.crearEstrategia(caso,l,(nota?nota+" · ":"")+"Oferta con "+dto+" % de descuento: supera el límite del "+tope+" %",
+        Object.assign({},por,{nivel:por.nivel==="comercial"?"comercial":por.nivel}));
+      return {tipo:"estrategia",doc:e,dto,tope};
+    }
+    const cad=await RC.cadenaDe(caso.agente);
+    const hoy=new Date(), hoyS=hoy.toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
+    const plazo=new Date(hoy.getTime()+5*86400000);
+    const id="oferta_rec_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
+    const doc={id,clienteNombre:caso.nombre,clienteCodigo:caso.cliente,clienteId:caso.cliente,
+      agente:cad.ag.id,agenteNombre:cad.ag.nombre,equipo:cad.ag.equipo||caso.equipo||"",
+      lineas:[{id:"l1",producto:l.desc||l.art||"",descripcion:l.desc||"",codigo:l.art||"",calibre:l.cal||"",
+        precio:num(l.precioOferta),precioBase:num(l.precioActual)||"",dto:num(l.precioActual)>0?dto:"",
+        unidad:"€/"+(l.unidad||"m"),cantidad:num(l.cantidad)||0,notas:nota||""}],
+      estado:"pendiente",fechaCreacion:hoy.toISOString(),fechaCreacionStr:hoyS,fechaPlazo:plazo.toISOString(),
+      notaInicial:"Desde el plan de recuperación",notas:nota||"",origen:"recuperacion",casoId:caso._id||"",
+      seguimientos:[{accion:"Oferta enviada",fecha:hoyS,por:por.nombre,nota:"Plan de recuperación"+(nota?" · "+nota:"")}]};
+    await RC.guardarEn("ofertas",id,doc);
+    if(caso._id){
+      const hist=(caso.historial||[]).concat([{sem:RC.semanaISO(hoy),fecha:hoy.toISOString(),por:por.nombre,
+        sistema:`Oferta enviada: ${doc.lineas[0].producto} a ${num(l.precioOferta)} €/${l.unidad||"m"}${num(l.precioActual)>0?" (dto "+dto+" %)":""}`}]);
+      try{ await RC.guardar(caso._id,{historial:hist,ultimaAccion:hoy.toISOString()}); caso.historial=hist; caso.ultimaAccion=hoy.toISOString(); }catch(e){}
+    }
+    return {tipo:"oferta",doc,dto,tope};
+  };
+  RC.htmlOferta=(o)=>{
+    const l=(o.lineas||[])[0]||{};
+    return `<div style="border:1px solid #BFDBFE;background:#EFF6FF;border-radius:12px;padding:10px 12px;margin:8px 0">
+      <b style="font-size:13.5px">📨 Oferta: ${RC.esc(l.producto||"")}${l.calibre?" · "+RC.esc(l.calibre):""}</b>
+      <div style="font-size:13px;margin-top:3px">${l.precioBase?RC.esc(l.precioBase)+" € → ":""}<b style="color:#1D4ED8">${RC.esc(l.precio)} ${RC.esc(l.unidad||"")}</b>${l.dto!==""&&l.dto!=null?" · descuento "+RC.esc(l.dto)+" %":""}</div>
+      <div style="font-size:12px;color:#475569;margin-top:2px">Registrada en el CRM → Ofertas · seguimiento en 5 días</div></div>`;
+  };
+
+  // ¿Le toca verla y decidir (aprobar si puede, si no elevar o rechazar)?
+  RC.meTocaEst=(e,nivel,miId)=>{
+    if(e.estado!=="pendiente_aprobacion") return false;
+    const dest=ARR(e.escaladoA||"");
+    if(nivel==="ceo") return true;
+    if(nivel==="director") return !dest||dest!=="CEO"&&!/^CEO/.test(dest)||ARR(e.pendienteDe)===ARR(miId);
+    if(nivel==="jefe") return !dest||dest===ARR(miId);
+    return false;
+  };
+  // Formulario (HTML) para pedir o crear una estrategia sobre un artículo
+  RC.formEstrategia=(pref,arts,texto)=>{
+    const ops=(arts||[]).map((a,i)=>`<option value="${i}">${RC.esc(a.desc||a.art)}${a.cal?" · "+RC.esc(a.cal):""} (${RC.eur(a.ant)} → ${RC.eur(a.act)})</option>`).join("");
+    return `<div style="display:grid;gap:7px;background:#F5F3FF;border:1px solid #DDD6FE;border-radius:12px;padding:12px;margin-top:8px">
+      <div style="font-weight:800;color:#5B21B6">${texto||"💶 Estrategia de precio"}</div>
+      <select id="${pref}_art" onchange="document.getElementById('${pref}_otro').style.display=this.value==='otro'?'block':'none'" style="padding:9px;border:1.5px solid #DDD6FE;border-radius:9px;font:inherit;font-size:14px">
+        ${ops}<option value="otro">➕ Otro artículo…</option></select>
+      <input id="${pref}_otro" placeholder="Artículo (nombre o código)" style="display:${ops?"none":"block"};padding:9px;border:1.5px solid #DDD6FE;border-radius:9px;font:inherit;font-size:14px">
+      <div style="display:grid;grid-template-columns:1fr 1fr 80px;gap:6px">
+        <label style="font-size:12px;color:#6B7280">Precio ahora<input id="${pref}_pa" type="number" step="0.01" style="width:100%;padding:9px;border:1.5px solid #DDD6FE;border-radius:9px;font-size:14px"></label>
+        <label style="font-size:12px;color:#6B7280">Precio que pide<input id="${pref}_po" type="number" step="0.01" style="width:100%;padding:9px;border:1.5px solid #7C3AED;border-radius:9px;font-size:14px;font-weight:700"></label>
+        <label style="font-size:12px;color:#6B7280">€ por<select id="${pref}_ud" style="width:100%;padding:9px;border:1.5px solid #DDD6FE;border-radius:9px;font-size:14px"><option>m</option><option>kg</option><option>ud</option><option>mazo</option></select></label>
+      </div>
+      <textarea id="${pref}_nota" placeholder="Por qué (qué le ofrece la competencia, volumen, plazo…)" style="min-height:52px;padding:9px;border:1.5px solid #DDD6FE;border-radius:9px;font:inherit;font-size:14px"></textarea>
+    </div>`;
+  };
+  RC.leerFormEstrategia=(pref,arts)=>{
+    const v=(k)=>{ const el=document.getElementById(pref+"_"+k); return el?String(el.value||"").trim():""; };
+    const sel=v("art"); let a=sel==="otro"||sel===""?null:(arts||[])[Number(sel)];
+    if(!a) a={art:"",desc:v("otro"),cal:""};
+    return {art:a.art,desc:a.desc,cal:a.cal,precioActual:Number(v("pa").replace(",","."))||0,
+      precioOferta:Number(v("po").replace(",","."))||0,unidad:v("ud")||"m",nota:v("nota")};
+  };
+  RC.htmlEstrategia=(e,botones)=>{
+    const [t,c,bg]=RC.ESTADO_EST[e.estado]||["📋 "+(e.estado||""),"#475569","#F8FAFC"];
+    const o=(e.ofertas||[])[0]||{};
+    return `<div style="border:1px solid #E5E7EB;border-radius:12px;padding:10px 12px;margin:8px 0;background:#fff">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
+        <b style="font-size:13.5px">💶 ${RC.esc(o.nombre||e.estrategia||"Estrategia")}${o.calibre?" · "+RC.esc(o.calibre):""}</b>
+        <span style="font-size:11.5px;font-weight:800;color:${c};background:${bg};border-radius:99px;padding:3px 9px">${t}${e.estado==="pendiente_aprobacion"&&e.pendienteDeNombre?" · "+RC.esc(e.pendienteDeNombre):""}</span></div>
+      <div style="font-size:13px;margin-top:4px">${o.precioActual?RC.esc(o.precioActual)+" € → ":""}<b style="color:#6D28D9">${RC.esc(o.precioFinal||o.precioOferta||"")} €/${RC.esc(o.unidad||"m")}</b> · descuento ${num(e.maxDescuento)} %</div>
+      <div style="font-size:12px;color:#6B7280;margin-top:2px">${e.solicitudAgente?"Lo pide "+RC.esc(e.agenteNombre||e.agente):"Creada por "+RC.esc(e.creadoPorNombre||"")} · ${RC.esc(e.fechaCreacionStr||"")}${e.descripcion?" · “"+RC.esc(e.descripcion)+"”":""}</div>
+      ${botones||""}</div>`;
+  };
 
   // Resumen para informes (jefe, CEO, comité)
   RC.resumen=(casos)=>{

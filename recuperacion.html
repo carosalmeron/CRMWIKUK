@@ -80,8 +80,19 @@ function enAmbito(c){
 }
 const nomAg=(a)=>AG[ARR(a)]?.agente||a||"(sin comercial)";
 
+let ESTS=[];
+const NIVEL=ES_CEO?"ceo":ES_DIR?"director":ES_JEFE?"jefe":"comercial";
+const YO_EST={id:ES_CEO?"ceo":AGENTE,nombre:ES_CEO?"CEO":(NOMBRE||AGENTE),nivel:NIVEL};
+function estEnAmbito(e){
+  if(RC.esFrancia(e.equipo)) return false;
+  if(ES_DIR) return true;
+  if(ES_JEFE) return !EQUIPO||ARR(e.equipo)===EQUIPO||ARR(e.equipo).includes(EQUIPO)||CASOS.some(c=>ARR(c.cliente)===ARR(e.clienteId));
+  return CASOS.some(c=>ARR(c.cliente)===ARR(e.clienteId));
+}
+const estPendMias=()=>ESTS.filter(e=>estEnAmbito(e)&&RC.meTocaEst(e,NIVEL,AGENTE));
 async function cargar(){
-  const [casos,res]=await Promise.all([RC.leerCasos(), RC.leer("pbi_resumen_agente")]);
+  const [casos,res,ests]=await Promise.all([RC.leerCasos(), RC.leer("pbi_resumen_agente"), RC.leerProfundo("estrategias").catch(()=>[])]);
+  ESTS=ests.filter(e=>!e.eliminada);
   AG={}; res.forEach(a=>AG[ARR(a._id)]=a);
   CASOS=casos.filter(enAmbito);
 }
@@ -236,7 +247,8 @@ async function pedirDiag(ids){
 // ══ Ficha del cliente: pantalla solo para él ══════════════════════════
 let FICHA=null, _scrollLista=0;
 const FICHA_ART={tab:"caen",abierto:null};
-function abrirFicha(id){ _scrollLista=window.scrollY||0; FICHA=id; FICHA_ART.tab="caen"; FICHA_ART.abierto=null; pintar(); window.scrollTo(0,0);
+async function cargarOfs(){ if(OFS) return; OFS=[]; try{ OFS=await RC.leerProfundo("ofertas"); }catch(e){} if(FICHA) pintar(); }
+function abrirFicha(id){ cargarOfs(); _scrollLista=window.scrollY||0; FICHA=id; FICHA_ART.tab="caen"; FICHA_ART.abierto=null; pintar(); window.scrollTo(0,0);
   const c=CASOS.find(x=>x._id===id); if(c){ cargarTodosArt(c); cargarProg(c); } }
 function cerrarFicha(){ FICHA=null; pintar(); window.scrollTo(0,_scrollLista); }
 async function cargarTodosArt(c,forzar){
@@ -303,7 +315,8 @@ function vistaFicha(c){
               ${eur(a.ant)} → <b style="color:${a.act<0||a.dif<0?"var(--red)":"var(--green)"}">${eur(a.act)}</b>${a.act<0?' <span class="muted">(abono)</span>':""}
               <div style="font-weight:800;color:${a.dif<0?"var(--red)":"var(--green)"}">${a.dif>0?"+":""}${eur(a.dif)}</div></div></div>
           ${FICHA_ART.tab==="caen"?`<div class="barra" style="background:#E2E8F0"><i style="width:${w}%;background:var(--red)"></i></div>`:""}
-          ${ES_JEFE&&FICHA_ART.tab==="caen"?`<div style="margin-top:6px"><a href="#" onclick="FICHA_ART.abierto=${ab?"null":i};pintar();return false" style="font-size:12px;font-weight:700;color:var(--blue)">📌 Pedir plan o estrategia de este artículo</a></div>
+          ${FICHA_ART.tab==="caen"?`<div style="margin-top:6px"><a href="#" onclick="abrirFormEst('${c._id}',${i});return false" style="font-size:12px;font-weight:700;color:#6D28D9">💶 ${NIVEL==="comercial"?"Pedir estrategia de precio":"Estrategia de precio"}</a></div>`:""}
+          ${ES_JEFE&&FICHA_ART.tab==="caen"?`<div style="margin-top:4px"><a href="#" onclick="FICHA_ART.abierto=${ab?"null":i};pintar();return false" style="font-size:12px;font-weight:700;color:var(--blue)">📌 Pedir plan de este artículo</a></div>
             ${ab?`<div style="display:grid;gap:6px;margin-top:6px">
               <textarea id="pa_txt">${esc(`Plan para recuperar ${a.desc}${a.cal?" (calibre "+a.cal+")":""}: venía de ${eur(a.ant)} y este año lleva ${eur(a.act)}. Dime qué ha pasado y qué vas a hacer (oferta, muestra, visita…).`)}</textarea>
               <div style="display:flex;gap:6px"><button class="btn ok" onclick="pedirPlanArt('${c._id}')">Enviar al comercial</button>
@@ -328,10 +341,86 @@ function vistaFicha(c){
     </div>
     <div class="card"><b>Mes a mes</b>${meses}</div>
     <div class="card"><b>Artículos</b><div class="muted" style="font-size:12px;margin-bottom:6px">Todos los que se mueven frente al año pasado, de mayor a menor.</div>${arts}</div>
+    <div class="card"><b>📨 Ofertas y 💶 estrategias de precio</b>${bloqueEstrategias(c)}</div>
     <div class="card"><b>Diagnóstico y plan</b>
       ${RC.tienePlan(c)&&RC.abierto(c)?formDiagnostico(c,false,"✏️ Cambiar el diagnóstico"):""}
       ${lineaCaso(c,true,{sinCabecera:true,sinProductos:true})}</div>`;
 }
+// ── Estrategias en la ficha ──
+let FORM_EST=null;   // {id, idx}
+function artsDe(c){ return (c._arts&&c._arts.caen)||(c.productos&&c.productos.caen)||[]; }
+function abrirFormEst(id,idx){ FORM_EST={id,idx}; pintar();
+  setTimeout(()=>{ const s=document.getElementById("fe_art"); if(s&&idx!=null) s.value=String(idx);
+    const f=document.getElementById("fe_box"); if(f) f.scrollIntoView({behavior:"smooth",block:"center"}); },30); }
+function botonesEst(e){
+  if(!RC.meTocaEst(e,NIVEL,AGENTE)) return "";
+  const puede=RC.puedeResolverEst(e,NIVEL,AGENTE);
+  return (puede?"":`<div class="muted" style="margin-top:6px">Pide un ${num(e.maxDescuento)} % de descuento: supera tu límite del ${RC.LIM_DTO[NIVEL]} %. Elévala o recházala.</div>`)
+    +`<textarea id="en_${e._id}" placeholder="Comentario (opcional)" style="margin-top:6px"></textarea>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:6px">
+      ${puede?`<button class="btn ok" onclick="resolverEst('${e._id}','aprobar')">✅ Aprobar</button>`:"<span></span>"}
+      ${NIVEL!=="ceo"?`<button class="btn gris" onclick="resolverEst('${e._id}','elevar')">⬆️ Elevar</button>`:"<span></span>"}
+      <button class="btn no" onclick="resolverEst('${e._id}','rechazar')">✖ Rechazar</button></div>`;
+}
+function bloqueEstrategias(c){
+  const l=RC.estrategiasDeCaso(ESTS,c).sort((a,b)=>String(b.fechaCreacion||"").localeCompare(String(a.fechaCreacion||"")));
+  let h=l.length?l.map(e=>{
+    const bot=botonesEst(e);
+    return RC.htmlEstrategia(e,bot);
+  }).join(""):`<p class="muted" style="margin:6px 0">Ninguna todavía.</p>`;
+  const abierto=FORM_EST&&FORM_EST.id===c._id;
+  if(RC.abierto(c)){
+    h+= abierto?`<div id="fe_box">${RC.formEstrategia("fe",artsDe(c),NIVEL==="comercial"?"💶 Pedir estrategia de precio a tu jefe":"💶 Crear estrategia para "+esc(nomAg(c.agente)))}
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
+          <button class="btn ok" style="background:#7C3AED" onclick="enviarEst('${c._id}')">${NIVEL==="comercial"?"Enviar a mi jefe":"Crear y avisar al comercial"}</button>
+          <button class="btn gris" onclick="FORM_EST=null;pintar()">Cancelar</button></div>
+        ${NIVEL!=="comercial"?`<div class="muted" style="margin-top:6px">Hasta un ${RC.LIM_DTO[NIVEL]} % de descuento queda aprobada al crearla; si pasa, va a quien corresponde.</div>`:""}</div>`
+      :FORM_OF===c._id?`<div id="fo_box">${RC.formEstrategia("fo",artsDe(c),"📨 Oferta al cliente")}
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
+          <button class="btn ok" style="background:#2563EB" onclick="enviarOF('${c._id}')">Registrar oferta</button>
+          <button class="btn gris" onclick="FORM_OF=null;pintar()">Cancelar</button></div>
+        <div class="muted" style="margin-top:6px">Si el descuento supera tu límite, se convierte en petición de estrategia.</div></div>`
+      :`<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:6px">
+          <button class="btn gris" style="border-color:#2563EB;color:#1D4ED8" onclick="FORM_OF='${c._id}';FORM_EST=null;pintar()">📨 Enviar oferta</button>
+          <button class="btn gris" style="border-color:#7C3AED;color:#6D28D9" onclick="abrirFormEst('${c._id}',null)">➕ ${NIVEL==="comercial"?"Pedir estrategia":"Crear estrategia"}</button></div>`;
+  }
+  const ofs=(OFS||[]).filter(o=>o.casoId===c._id||ARR(o.clienteId)===ARR(c.cliente)).filter(o=>(Date.now()-Date.parse(o.fechaCreacion||0))<60*86400000);
+  if(ofs.length) h+=`<div style="margin-top:8px"><b style="font-size:13px">Ofertas de los últimos 60 días</b>${ofs.map(RC.htmlOferta).join("")}</div>`;
+  return h;
+}
+let FORM_OF=null, OFS=null;
+async function enviarOF(id){
+  const c=CASOS.find(x=>x._id===id); if(!c) return;
+  const l=RC.leerFormEstrategia("fo",artsDe(c));
+  if(!l.desc&&!l.art){ alert("Elige el artículo o escribe cuál."); return; }
+  if(!(l.precioOferta>0)){ alert("Pon el precio de la oferta."); return; }
+  try{
+    const r=await RC.crearOferta(c,l,l.nota,YO_EST);
+    if(r.tipo==="oferta"){ (OFS=OFS||[]).push(r.doc); alert("Oferta registrada en el CRM."); }
+    else { r.doc._id=r.doc.id; ESTS.push(r.doc); alert(`Un ${r.dto} % de descuento supera el límite del ${r.tope} %: se ha creado como estrategia para aprobar.`); }
+    FORM_OF=null; pintar();
+  }catch(x){ alert("No se ha podido registrar: "+x.message); }
+}
+async function enviarEst(id){
+  const c=CASOS.find(x=>x._id===id); if(!c) return;
+  const l=RC.leerFormEstrategia("fe",artsDe(c));
+  if(!l.desc&&!l.art){ alert("Elige el artículo o escribe cuál."); return; }
+  if(!(l.precioOferta>0)){ alert("Pon el precio."); return; }
+  try{
+    const e=await RC.crearEstrategia(c,l,l.nota,YO_EST);
+    e._id=e.id; ESTS.push(e); FORM_EST=null; pintar();
+    alert(e.estado==="aprobada"?"Estrategia creada y aprobada. Se le ha avisado al comercial."
+      :"Estrategia enviada. La tiene que aprobar "+(e.pendienteDeNombre||"su responsable")+".");
+  }catch(x){ alert("No se ha podido crear: "+x.message); }
+}
+async function resolverEst(id,accion){
+  const e=ESTS.find(x=>x._id===id); if(!e) return;
+  const nota=(document.getElementById("en_"+id)||{}).value||"";
+  if(accion==="rechazar"&&nota.trim().length<3){ alert("Di por qué la rechazas: el comercial lo verá."); return; }
+  try{ await RC.resolverEstrategia(e,accion,YO_EST,nota.trim()); pintar(); }
+  catch(x){ alert("No se ha guardado: "+x.message); }
+}
+
 async function pedirPlanArt(id){
   const c=CASOS.find(x=>x._id===id); if(!c) return;
   const t=(document.getElementById("pa_txt")?.value||"").trim(); if(t.length<5) return;
@@ -366,7 +455,9 @@ function filaCompacta(c,conAgente){
       <span style="width:8px;height:8px;border-radius:99px;background:${RC.NIVEL_COL[nv.nivel]};flex:none" title="${RC.NIVEL_TXT[nv.nivel]}"></span>
       <div style="flex:1;min-width:0">
         <div style="font-size:13.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(c.nombre)}</div>
-        <div class="muted" style="font-size:11.5px">${conAgente?esc(nomAg(c.agente))+" · ":""}<span style="color:${ec};font-weight:700">${et}</span>${c.instruccion&&RC.abierto(c)?" · 📌":""}</div></div>
+        <div class="muted" style="font-size:11.5px">${conAgente?esc(nomAg(c.agente))+" · ":""}<span style="color:${ec};font-weight:700">${et}</span>${c.instruccion&&RC.abierto(c)?" · 📌":""}${(()=>{
+          const pe=RC.estrategiasDeCaso(ESTS,c).filter(e=>e.estado==="pendiente_aprobacion");
+          return pe.length?` · <span style="color:#6D28D9;font-weight:800">💶 ${pe.length} estrategia${pe.length===1?"":"s"} por aprobar</span>`:""; })()}</div></div>
       <div class="neg" style="font-size:13px">−${eur(c.perdido)}</div>
       <span style="color:var(--muted);font-size:16px;width:14px;text-align:center">›</span>
     </div>
@@ -440,7 +531,14 @@ function vistaAprobar(){
         <button class="btn no" onclick="decidirArchivo('${c._id}',false)">No: seguir insistiendo</button></div>`
       :`<div class="muted" style="margin-top:6px">⏳ Es de ${eur(RC.UMBRAL.nivel2)} o más: lo decide el CEO.</div>`}
     </div>`; };
-  return `<h3 style="font-size:14px;margin:4px 0 8px">Piden dejar de insistir (${pa.length}${!ES_CEO&&pa.length!==mias.length?` · ${mias.length} te tocan a ti`:""})</h3>
+  const pe=estPendMias().sort((a,b)=>String(b.fechaCreacion||"").localeCompare(String(a.fechaCreacion||"")));
+  const bloqueEst=`<h3 style="font-size:14px;margin:4px 0 8px">💶 Estrategias por aprobar (${pe.length})</h3>`
+    +(pe.length?pe.map(e=>{ const c=CASOS.find(x=>ARR(x.cliente)===ARR(e.clienteId));
+      return `<div class="card"><div class="row"><div><b>${esc(e.cliente||"")}</b><div class="muted">${esc(e.agenteNombre||e.agente||"")}${c?" · cae "+eur(c.perdido):""}</div></div>
+        ${c?`<button class="btn gris" onclick="abrirFicha('${c._id}')">Ver ficha</button>`:""}</div>
+        ${RC.htmlEstrategia(e,botonesEst(e))}</div>`; }).join("")
+      :'<div class="card muted">Nada pendiente.</div>');
+  return bloqueEst+`<h3 style="font-size:14px;margin:16px 0 8px">Piden dejar de insistir (${pa.length}${!ES_CEO&&pa.length!==mias.length?` · ${mias.length} te tocan a ti`:""})</h3>
     ${mias.length>1?`<div class="card" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;position:sticky;top:0;z-index:2">
       <button class="btn gris" onclick="document.querySelectorAll('.selA').forEach(x=>x.checked=true);contarSel()">Marcar todos (${mias.length})</button>
       <button class="btn ok" id="btnLote" onclick="archivarLote()">Archivar los marcados</button>
@@ -525,7 +623,7 @@ async function anotar(id){
   catch(e){ alert("No se ha guardado: "+e.message); }
 }
 function porDecidir(){
-  return CASOS.filter(c=>c.estado==="propuesta_archivo"&&RC.puedeArchivar(ES_CEO,ES_JEFE,c,c.archivoMotivo)).length
+  return (ES_JEFE?estPendMias().length:0)+CASOS.filter(c=>c.estado==="propuesta_archivo"&&RC.puedeArchivar(ES_CEO,ES_JEFE,c,c.archivoMotivo)).length
     +(ES_CEO?CASOS.filter(c=>RC.abierto(c)&&c.necesitaAprobacion==="margen").length:0);
 }
 const QUIEN=ES_CEO?"CEO":"Jefe ("+NOMBRE+")";
