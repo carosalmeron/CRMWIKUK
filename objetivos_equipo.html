@@ -171,7 +171,7 @@
 <main><div class="estado" id="app">Cargando…</div></main>
 
 <script src="agentes.js"></script>
-<script src="/recuperacion_comun.js"></script>
+<script src="/recuperacion_comun.js?v=20260929c"></script>
 <script>
 const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
 const P=new URLSearchParams(location.search);
@@ -263,7 +263,7 @@ const NIVEL_EST=(ROL==="ceo"||ROL==="admin")?"ceo":(ROL==="director"||ROL==="crm
 if(window.RC) RC.NIVEL_UI=NIVEL_EST;
 async function cargarEsts(){ if(ESTS||!window.RC) return; ESTS=[];
   try{ const [l,us]=await Promise.all([RC.leerProfundo("estrategias"),RC._us?Promise.resolve(RC._us):RC.leer("usuarios",10)]);
-    RC._us=us; ESTS=l.filter(e=>!e.eliminada); await RC.prepararEsts(ESTS); }catch(e){}
+    RC._us=us; ESTS=l.filter(e=>!e.eliminada); if(RC.prepararEsts) await RC.prepararEsts(ESTS); else console.warn('recuperacion_comun.js antiguo'); }catch(e){}
   pintar(); }
 // Todas las estrategias de mi gente que esperan MI decisión (aprobar, elevar o rechazar)
 function estPendientesMias(){
@@ -784,7 +784,7 @@ window.filtrar=(t)=>{
 window.abrir=(id)=>{ VISTA="detalle"; SEL=id; pintar(); };
 window.cambiarSemana=async(d)=>{
   const n=SEMANA+d; if(n<1||n>SEM_ACTUAL+1) return;
-  SEMANA=n; VISTA="lista"; SEL=null;
+  SEMANA=n; VISTA="lista"; SEL=null; PASOS_DATA=null;
   document.getElementById("app").innerHTML='<div class="estado">Cargando…</div>';
   await recargar();
 };
@@ -1845,8 +1845,90 @@ function filasVendedores(){
   }).join("");
 }
 
+// ══ Tu cierre, paso a paso (jefe de equipo, jefe de ventas y CEO) ═══════
+// Qué falta para cerrar la semana, en orden y con su botón. Cada nivel cierra
+// después del de abajo y decide lo que su rol le permite; lo demás lo sube.
+let PASOS_DATA=null;   // {jefes:{total,faltan:[]}, recup:{n,eur}}
+async function cargarPasos(){
+  if(PASOS_DATA) return; PASOS_DATA={cargando:true};
+  const out={};
+  try{
+    if(esDir||esCeo){
+      const [us,inf]=await Promise.all([leer("usuarios"),leer("informes")]);
+      const rolU=(u)=>String(u.rol||"").toLowerCase();
+      const cuenta=(u)=>!u.tipologia&&u.activo!==false&&!(u.duplicadaDe&&u.duplicadaDe!==u._id&&us.some(x=>x._id===u.duplicadaDe&&!x.duplicadaDe));
+      const quienes=us.filter(u=>cuenta(u)&&(["jefe","crm_jefe"].includes(rolU(u))||(esCeo&&["director","crm_director"].includes(rolU(u))&&!/^ceo$/i.test(u._id||u.id))));
+      const deSem=inf.filter(i=>Number(i.semana)===SEMANA&&i.estado!=="borrador"&&(!(i.anio||i.ano)||Number(i.anio||i.ano)===ANIO));
+      const cerro=(j)=>deSem.some(i=>U(i.uid)===U(j._id)||[j.grupoAgente,j.catalogoVendedor,j._id,j.username].filter(Boolean).map(U).includes(U(i.agente)));
+      out.jefes={total:quienes.length,faltan:quienes.filter(j=>!cerro(j)).map(j=>j.nombre||j._id)};
+    }
+    if(window.RC){
+      const casos=(await RC.leerCasos()).filter(c=>c.estado==="propuesta_archivo"&&!RC.esFrancia(c.equipo)
+        &&(esCeo||esDir||!EQUIPO||U(c.equipo).includes(EQUIPO)||EQUIPO.includes(U(c.equipo)))
+        &&RC.puedeArchivar(esCeo,true,c,c.archivoMotivo));
+      out.recup={n:casos.length,eur:casos.reduce((t,c)=>t+RC.num(c.perdido),0)};
+    }
+  }catch(e){ console.warn("pasos",e); }
+  PASOS_DATA=out; if(VISTA==="lista") pintar();
+}
+function filasKpis(){
+  return USUARIOS.filter(a=>!(typeof noCierra==="function"&&noCierra(a))).map(a=>({nombre:a.nombre,equipo:esJefe?"":(a.equipo||""),
+    k:window.RC?RC.parseKpis(((CIERRES[a.id]||{}).info)||{}):null}));
+}
+function urlRecup(){
+  const rol=esCeo?"ceo":esDir?"director":"jefe";
+  return "/recuperacion.html?rol="+rol+"&agente="+encodeURIComponent(esCeo?"CEO":(AGENTE||UID))+"&equipo="+encodeURIComponent(EQUIPO)+"&nombre="+encodeURIComponent(window._MI_NOMBRE_JEFE||AGENTE||"");
+}
+function pasosCierre(sinCerrar){
+  if(!(esJefe||esDir||esCeo)) return "";
+  if(PASOS_DATA===null) setTimeout(cargarPasos,0);
+  const D=PASOS_DATA||{}, eu=(n)=>Math.round(n||0).toLocaleString("es-ES")+" €";
+  const pasos=[];
+  // 1 · Que haya cerrado el nivel de abajo
+  if(esJefe) pasos.push({ok:!sinCerrar.length,t:"Cierres de tu equipo",
+    d:sinCerrar.length?`Faltan ${sinCerrar.length}: ${sinCerrar.slice(0,6).map(a=>a.nombre).join(", ")}${sinCerrar.length>6?"…":""}. Si alguien está fuera, márcalo como ausente.`:"Han cerrado todos (o están marcados como ausentes).",
+    b:sinCerrar.length?["Ver quién falta","document.getElementById('cuenta-cierres').scrollIntoView({behavior:'smooth'})"]:null});
+  else { const j=D.jefes; pasos.push({ok:j?!j.faltan.length:false,t:esCeo?"Cierres de jefes y jefe de ventas":"Cierres de los jefes de equipo",
+    d:!j?"Comprobando…":j.faltan.length?`Faltan ${j.faltan.length} de ${j.total}: ${j.faltan.join(", ")}.`:`Han cerrado los ${j.total}. Ya tienes todo lo que te han subido.`}); }
+  // 2 · Lo que te suben
+  if(MI_NIVEL){ const n=OBJETIVOS.filter(o=>o.escaladoA===MI_NIVEL).length;
+    pasos.push({ok:n?null:true,t:"Lo que te suben",d:n?`${n} asunto${n===1?"":"s"} que ${esCeo?"el jefe de ventas no ha podido resolver":"los jefes no han podido resolver"}. Resuélvelo dando una instrucción al comercial${esDir?" o súbelo al CEO si no es de tu rol":""}.`:"No te han subido nada esta semana.",
+      b:n?["Ver lo que te suben","(document.getElementById('escalado-ti')||document.body).scrollIntoView({behavior:'smooth'})"]:null}); }
+  // 3 · Estrategias de su rol
+  const pe=(typeof estPendientesMias==="function")?estPendientesMias():[];
+  pasos.push({ok:ESTS===null?false:!pe.length,t:"Estrategias de precio de tu rol",
+    d:ESTS===null?"Comprobando…":pe.length?`${pe.length} esperan tu decisión (${esCeo?"más del 15 %":esDir?"del 10 al 15 %":"hasta el 10 %"} sobre la tarifa del cliente). Apruébalas, pon otro precio, propón alternativa${esCeo?"":", elévalas"} o recházalas.`:"No tienes ninguna pendiente.",
+    b:pe.length?["Decidir estrategias","(document.getElementById('bandeja-est')||document.body).scrollIntoView({behavior:'smooth'})"]:null});
+  // 4 · Plan de recuperación: dejar de insistir
+  if(D.recup) pasos.push({ok:!D.recup.n,t:"Clientes que piden dejar de insistir",
+    d:D.recup.n?`${D.recup.n} propuesta${D.recup.n===1?"":"s"} que puedes decidir tú (${eu(D.recup.eur)}). ${esCeo?"A partir de 20.000 € solo las decides tú.":"Por debajo de 20.000 €; las de más las decide el CEO."}`:"Ninguna pendiente de tu decisión.",
+    b:D.recup.n?["Abrir Plan de recuperación","location.href=urlRecup()"]:null});
+  // 5 · Números del equipo: quien se pasa de cobros o no llega, con su plan
+  if(window.RC&&RC.parseKpis){ const fk=filasKpis().filter(f=>f.k);
+    const mal=fk.filter(f=>f.k.cobros.pasa||f.k.actividad.flojo), sinPlan=mal.filter(f=>(f.k.cobros.pasa&&!f.k.cobros.plan)||(f.k.actividad.flojo&&!f.k.actividad.plan));
+    pasos.push({ok:fk.length?!sinPlan.length:null,t:"Cobros, muestras y actividad",
+      d:!fk.length?"Aún no hay partes con estos datos.":mal.length?`${mal.length} no llega${mal.length===1?"":"n"} o se pasa${mal.length===1?"":"n"}: ${mal.slice(0,5).map(f=>f.nombre).join(", ")}. Revisa su plan y, si no te vale, dale una instrucción.`:"Todos en objetivo y dentro de cobros.",
+      b:fk.length?["Ver números del equipo","(document.getElementById('kpis-equipo')||document.body).scrollIntoView({behavior:'smooth'})"]:null}); }
+  // 6 · Cerrar
+  pasos.push({ok:CERRADA,t:"Cerrar tu semana",d:CERRADA?"Semana cerrada."
+    :esCeo?"Cuando no te quede nada por decidir. No se cierra con estrategias pendientes."
+    :`Lo que marques con «Subir» va al ${esJefe?"jefe de ventas":"CEO"}. No se cierra con estrategias pendientes${esJefe?" ni con comerciales sin cerrar":""}.`});
+  const hechos=pasos.filter(p=>p.ok===true).length;
+  return '<div class="card" style="border:1.5px solid #0F172A;margin-bottom:12px">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center"><b style="font-size:15px">🗂️ Tu cierre de la semana '+SEMANA+'</b>'
+    +'<span style="font-size:12px;font-weight:800;color:'+(hechos===pasos.length?"#15803D":"#B45309")+'">'+hechos+' de '+pasos.length+'</span></div>'
+    +'<div style="font-size:12px;color:var(--muted);margin:2px 0 6px">'+(esCeo?"Comerciales → jefes de equipo → jefe de ventas → tú.":esDir?"Comerciales → jefes de equipo → tú → CEO.":"Comerciales → tú → jefe de ventas → CEO.")+'</div>'
+    +pasos.map((p,i)=>'<div style="display:flex;gap:10px;padding:9px 0;border-top:1px solid #EEF1F5">'
+      +'<div style="flex-shrink:0;width:26px;height:26px;border-radius:99px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;'
+      +(p.ok===true?'background:#DCFCE7;color:#15803D">✓':p.ok===null?'background:#E0F2FE;color:#0369A1">'+(i+1):'background:#FEF3C7;color:#B45309">'+(i+1))+'</div>'
+      +'<div style="min-width:0;flex:1"><div style="font-weight:800;font-size:13.5px">'+p.t+'</div><div style="font-size:12.5px;color:#475569">'+p.d+'</div>'
+      +(p.b?'<button class="mini" style="margin-top:5px" onclick="'+p.b[1].replace(/"/g,"&quot;")+'">'+p.b[0]+' ›</button>':'')+'</div></div>').join("")
+    +'</div>';
+}
 function pintarLista(){
   let h=cabeceraSemana();
+  h+=pasosCierre(pendientesEquipo());
+  if(window.RC&&RC.htmlKpisEquipo) h+='<div id="kpis-equipo">'+RC.htmlKpisEquipo(filasKpis(),esJefe?"Cobros, muestras y actividad de tu equipo":"Cobros, muestras y actividad por comercial")+'</div>';
   const sinCerrar=pendientesEquipo();
   const es=escalados();
 
@@ -1878,7 +1960,7 @@ function pintarLista(){
       +'</div>';
   }
 
-  h+=bandejaEst();
+  h+='<div id="bandeja-est"></div>'+bandejaEst();
   h+='<h3 id="cuenta-cierres">'+textoCuenta()+'</h3>'
     +'<div class="buscador" style="margin-bottom:11px">'
     +'<span class="lupa">🔍</span>'
@@ -1889,7 +1971,7 @@ function pintarLista(){
 
   if(MI_NIVEL){
     const recib=OBJETIVOS.filter(o=>o.escaladoA===MI_NIVEL);
-    h+='<h3>⬆️ Escalado hasta ti ('+recib.length+')</h3><div class="card">';
+    h+='<h3 id="escalado-ti">⬆️ Escalado hasta ti ('+recib.length+')</h3><div class="card">';
     h+= recib.length ? recib.map(o=>{
       const ag=USUARIOS.find(u=>U(u.id)===U(o.agente));
       const sube=o.escaladoA===ESCALA_A;

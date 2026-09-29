@@ -1215,6 +1215,46 @@
     document.querySelectorAll(`#${pref}_tipos button`).forEach(b=>{ const on=b.getAttribute("data-k")===k; b.style.background=on?"#0284C7":"#fff"; b.style.color=on?"#fff":"#0369A1"; }); };
   RC.leerIncidencia=(pref)=>({tipo:(document.getElementById(pref+"_tipo")||{}).value||"stock",
     texto:((document.getElementById(pref+"_txt")||{}).value||"").trim(),prioridad:(document.getElementById(pref+"_pri")||{}).value||"alta"});
+  // ══ Cobros · Muestras · Actividad del equipo (de los partes) ═══════════
+  // filas: [{nombre, equipo, k}] con k = kpis del informe (o null si no cerró)
+  RC.parseKpis=(inf)=>{ try{ const k=typeof inf.kpis==="string"?JSON.parse(inf.kpis||"null"):inf.kpis; return k&&k.muestras?k:null; }catch(e){ return null; } };
+  RC.htmlKpisEquipo=(filas,titulo)=>{
+    const eu=(n)=>Math.round(num(n)).toLocaleString("es-ES")+" €";
+    const pc=(r,o)=>o?Math.round(r/o*100):null;
+    const col=(p)=>p==null?"#64748B":p>=100?"#15803D":p>=80?"#B45309":"#B91C1C";
+    const conK=filas.filter(f=>f.k), sinK=filas.filter(f=>!f.k);
+    if(!filas.length) return "";
+    const T={venc:0,lim:0,pasan:0,env:0,objEnv:0,ok:0,objOk:0,ko:0,pend:0,vis:0,objVis:0,lla:0,objLla:0,flojos:0};
+    conK.forEach(({k})=>{ T.venc+=num(k.cobros.venc); T.lim+=num(k.cobros.limite); if(k.cobros.pasa) T.pasan++;
+      T.env+=num(k.muestras.env); T.objEnv+=num(k.muestras.objEnv); T.ok+=num(k.muestras.ok); T.objOk+=num(k.muestras.objOk); T.ko+=num(k.muestras.ko); T.pend+=num(k.muestras.pend);
+      T.vis+=num(k.actividad.vis); T.objVis+=num(k.actividad.objVis); T.lla+=num(k.actividad.lla); T.objLla+=num(k.actividad.objLla); if(k.actividad.flojo) T.flojos++; });
+    const cel=(r,o)=>`<b style="color:${col(pc(r,o))}">${r}</b>${o?`<span style="color:#94A3B8">/${o}</span>`:""}`;
+    const tile=(t,v,sub,c)=>`<div style="background:#fff;border:1px solid #E5E7EB;border-radius:12px;padding:9px 10px"><div style="font-size:11px;color:#64748B;font-weight:700;text-transform:uppercase">${t}</div><div style="font-size:17px;font-weight:800;color:${c||"inherit"}">${v}</div><div style="font-size:11.5px;color:#64748B">${sub}</div></div>`;
+    let h=`<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:6px 0 10px">
+      ${tile("💰 Cobros vencidos",eu(T.venc),T.pasan?`<b style="color:#B91C1C">${T.pasan} se pasa${T.pasan===1?"":"n"}</b> del máximo`:"todos dentro",T.pasan?"#B91C1C":"#15803D")}
+      ${tile("📦 Muestras",`${T.env}${T.objEnv?"/"+T.objEnv:""}`,`OK ${T.ok}${T.objOk?"/"+T.objOk:""} · KO ${T.ko} · sin resp. ${T.pend}`,col(pc(T.env,T.objEnv)))}
+      ${tile("👋 Actividad",`${T.vis}${T.objVis?"/"+T.objVis:""} vis.`,`${T.lla}${T.objLla?"/"+T.objLla:""} llam. · ${T.flojos} no llega${T.flojos===1?"":"n"}`,col(pc(T.vis,T.objVis)))}</div>`;
+    const orden=conK.slice().sort((a,b)=>(b.k.cobros.pasa+b.k.actividad.flojo)-(a.k.cobros.pasa+a.k.actividad.flojo)||String(a.nombre).localeCompare(String(b.nombre)));
+    h+=orden.map(({nombre,equipo,k})=>{ const c=k.cobros,m=k.muestras,a=k.actividad;
+      const mal=c.pasa||a.flojo;
+      return `<details style="border:1px solid #E5E7EB;border-left:4px solid ${mal?"#DC2626":"#16A34A"};border-radius:10px;padding:8px 10px;margin:6px 0;background:#fff">
+        <summary style="cursor:pointer;list-style:none">
+          <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b style="font-size:13.5px">${RC.esc(nombre)}${equipo?` <span style="color:#94A3B8;font-weight:600">· ${RC.esc(equipo)}</span>`:""}</b>
+            <span style="font-size:12px">${c.pasa?"🔴 cobros":""} ${a.flojo?"🟠 actividad":""} ${!mal?"🟢":""}</span></div>
+          <div style="font-size:12.5px;display:flex;gap:12px;flex-wrap:wrap;margin-top:2px">
+            <span>💰 <b style="color:${c.pasa?"#B91C1C":"#15803D"}">${eu(c.venc)}</b><span style="color:#94A3B8">/${eu(c.limite)}</span></span>
+            <span>📦 ${cel(m.env,m.objEnv)} · OK ${cel(m.ok,m.objOk)} · KO ${m.ko}</span>
+            <span>👋 ${cel(a.vis,a.objVis)} vis · ${cel(a.lla,a.objLla)} llam</span></div></summary>
+        <div style="font-size:12.5px;margin-top:6px;display:grid;gap:4px">
+          ${c.plan?`<div><b>💰 Plan de cobro:</b> ${RC.esc(c.plan)}</div>`:c.pasa?`<div style="color:#B91C1C"><b>💰 Sin plan de cobro</b></div>`:""}
+          ${m.plan?`<div><b>📦 Muestras la semana que viene:</b> ${RC.esc(m.plan)}</div>`:`<div style="color:#B45309">📦 Sin plan de muestras</div>`}
+          ${a.plan?`<div><b>👋 Plan de actividad:</b> ${RC.esc(a.plan)}</div>`:a.flojo?`<div style="color:#B91C1C"><b>👋 Sin plan de actividad</b></div>`:""}
+        </div></details>`; }).join("");
+    if(sinK.length) h+=`<div style="font-size:12px;color:#64748B;margin-top:6px">Sin datos (no han cerrado o cerraron antes de este bloque): ${sinK.map(f=>RC.esc(f.nombre)).join(", ")}</div>`;
+    return `<div style="background:#F8FAFC;border:1.5px solid #0F172A;border-radius:14px;padding:12px;margin:10px 0">
+      <b style="font-size:15px">📊 ${titulo||"Cobros, muestras y actividad"}</b>
+      <div style="font-size:12px;color:#64748B">Lo que dice cada parte: cifra frente a objetivo y su plan. Toca un nombre para ver sus planes.</div>${h}</div>`;
+  };
   // Fecha de una estrategia venga de donde venga (las del CRM guardan «fecha»
   // en texto y a veces solo el id lleva la marca de tiempo)
   const deES=(t)=>{ const m=String(t||"").match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/); if(!m) return 0;
