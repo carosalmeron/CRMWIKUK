@@ -2422,71 +2422,27 @@ ${med.join(",\n")}
         }
       } catch (e) { out.avisoPurgaAgentes = e.message.slice(0, 140); }
 
-      // Índice de búsqueda
-      // (fix ago-2026) Antes usaba `docs`, la lista ya filtrada por el corte
-      // de 36 horas. Tras una sincronización incremental ahí solo quedan los
-      // clientes con movimiento reciente, así que el índice se reescribía con
-      // un puñado de ellos y pisaba al bueno: el 28-ago quedó en 782 clientes
-      // y la web mostró 15 clientes vivos de RPIEDRA donde había 223. El
-      // corte de 36 h sirve para detectar códigos muertos, no para decidir
-      // qué clientes existen: el índice se construye desde `todos`.
+      // Índice de búsqueda, con la misma lista ya leída
       try {
-        const compacta = todos
+        const compacta = docs
           .filter((d) => !d.fusionadoEn && !d.intercompany)
           .map((d) => [d._id, String(d.nombre || "").slice(0, 60), d.agente || "",
                        Math.round(d.ventasAct || 0), Math.round(d.ventasAntYTD || 0),
                        String(d.poblacion || "").slice(0, 28)]);
-
-        // Suelo de cordura: o el índice entero, o no se toca. Uno truncado no
-        // da error, no avisa, y se lee como bueno durante semanas.
-        let previoClientes = 0;
-        try {
-          for (const d of await fbLeerColeccion("pbi_indice_clientes")) {
-            previoClientes += Number(d.clientes) || 0;
-          }
-        } catch (e) { /* sin referencia previa: se escribe igual */ }
-
-        if (previoClientes && compacta.length < previoClientes * 0.8) {
-          out.indiceBusqueda = {
-            omitido: true,
-            motivo: "cartera incompleta en esta pasada",
-            leidos: compacta.length,
-            publicados: previoClientes,
-            aviso: "No se ha tocado el índice. Lanza ?full=1 y repite.",
-          };
-        } else {
-          const trozos = [];
-          let actual = [], bytes = 0;
-          for (const c of compacta) {
-            const t = JSON.stringify(c).length + 1;
-            if (bytes + t > 700000) { trozos.push(actual); actual = []; bytes = 0; }
-            actual.push(c); bytes += t;
-          }
-          if (actual.length) trozos.push(actual);
-          await fbCommit("pbi_indice_clientes", trozos.map((t, i) => ({
-            _id: `parte${i}`, parte: i, partes: trozos.length,
-            clientes: t.length, clientesTotal: compacta.length,
-            datos: JSON.stringify(t),
-            actualizado: new Date().toISOString(),
-          })));
-
-          // Si la pasada anterior dejó más partes, las sobrantes seguirían
-          // ahí con datos viejos y la web las leería como buenas.
-          try {
-            const sobranP = (await fbLeerColeccion("pbi_indice_clientes"))
-              .map((d) => String(d._id))
-              .filter((id) => {
-                const m = /^parte(\d+)$/.exec(id);
-                return m && Number(m[1]) >= trozos.length;
-              });
-            if (sobranP.length) {
-              await fbBorrar("pbi_indice_clientes", sobranP);
-              out.indicePartesBorradas = sobranP;
-            }
-          } catch (e) { out.avisoIndicePurga = e.message.slice(0, 120); }
-
-          out.indiceBusqueda = { clientes: compacta.length, partes: trozos.length };
+        const trozos = [];
+        let actual = [], bytes = 0;
+        for (const c of compacta) {
+          const t = JSON.stringify(c).length + 1;
+          if (bytes + t > 700000) { trozos.push(actual); actual = []; bytes = 0; }
+          actual.push(c); bytes += t;
         }
+        if (actual.length) trozos.push(actual);
+        await fbCommit("pbi_indice_clientes", trozos.map((t, i) => ({
+          _id: `parte${i}`, parte: i, partes: trozos.length,
+          clientes: t.length, datos: JSON.stringify(t),
+          actualizado: new Date().toISOString(),
+        })));
+        out.indiceBusqueda = { clientes: compacta.length, partes: trozos.length };
       } catch (e) { out.avisoIndice = e.message.slice(0, 140); }
 
       out.segundos = Math.round((Date.now() - t1) / 1000);
@@ -4921,12 +4877,9 @@ EVALUATE
       // El índice solo se regenera si queda margen: es un extra útil, no
       // puede ser la causa de que la sincronización entera se pase de los
       // 60 segundos de Vercel y no escriba nada.
-      // (fix ago-2026) En pasada INCREMENTAL `docs` solo trae los clientes
-      // con movimiento reciente. Escribir el índice con eso lo deja truncado
-      // sin dar error. O entero, o no se toca.
       const quedan = () => 52 - Math.round((Date.now() - t0) / 1000);
       if (!dry && quedan() < 6) {
-        log.indiceBusqueda = `omitido, quedaban ${quedan()} s · se conserva el anterior`;
+        log.indiceBusqueda = `omitido, quedaban ${quedan()} s`;
       } else if (!dry) try {
         const compacta = docs
           .filter((d) => !d.fusionadoEn && !d.intercompany)
@@ -4938,23 +4891,6 @@ EVALUATE
             Math.round(d.ventasAntYTD || 0),
             String(d.poblacion || "").slice(0, 28),
           ]);
-
-        let previoClientes = 0;
-        try {
-          for (const d of await fbLeerColeccion("pbi_indice_clientes")) {
-            previoClientes += Number(d.clientes) || 0;
-          }
-        } catch (e) { /* sin referencia previa: se escribe igual */ }
-
-        if (previoClientes && compacta.length < previoClientes * 0.8) {
-          log.indiceBusqueda = {
-            omitido: true,
-            motivo: "cartera incompleta (¿pasada incremental?)",
-            leidos: compacta.length,
-            publicados: previoClientes,
-            aviso: "No se ha tocado el índice. Lanza ?full=1 y repite.",
-          };
-        } else {
 
         // Un documento de Firestore admite 1 MB. Se trocea con margen.
         const trozos = [];
@@ -4971,27 +4907,11 @@ EVALUATE
           parte: i,
           partes: trozos.length,
           clientes: t.length,
-          clientesTotal: compacta.length,
           // [codigo, nombre, agente, ventasAct, ventasAntYTD]
           datos: JSON.stringify(t),
           actualizado: new Date().toISOString(),
         })));
-
-        try {
-          const sobranP = (await fbLeerColeccion("pbi_indice_clientes"))
-            .map((d) => String(d._id))
-            .filter((id) => {
-              const m = /^parte(\d+)$/.exec(id);
-              return m && Number(m[1]) >= trozos.length;
-            });
-          if (sobranP.length) {
-            await fbBorrar("pbi_indice_clientes", sobranP);
-            log.indicePartesBorradas = sobranP;
-          }
-        } catch (e) { log.errores.push(`indice purga: ${e.message.slice(0, 120)}`); }
-
         log.indiceBusqueda = { clientes: compacta.length, partes: trozos.length };
-        }
       } catch (e) {
         log.errores.push(`indice busqueda: ${e.message}`);
       }
@@ -5225,9 +5145,21 @@ EVALUATE
     // ── 4. Sello de sincronización (lo lee el CRM para avisar si va viejo) ──
     log.segundos = Math.round((Date.now() - t0) / 1000);
     if (!dry) {
+      // (sep 2026) El sello solo avanza si esta pasada ha escrito VENTAS. Las
+      // de solo maestro o solo pedidos tambien pasaban por aqui y lo movian:
+      // la incremental del dia siguiente creia tener las ventas al dia y solo
+      // miraba los ultimos 3 dias, asi que los clientes sin venta reciente se
+      // quedaban con cifras de hace semanas (el CRM iba un 10-20 % por debajo
+      // de Power BI).
+      const ventasEscritas = typeof log.ventas === "number";
+      let selloPrevio = null;
+      if (!ventasEscritas) {
+        try { selloPrevio = (await fbLeerDocumento("pbi_meta", "estado"))?.ultimaSync || null; } catch (e) {}
+      }
       await fbCommit("pbi_meta", [{
         _id: "estado",
-        ultimaSync: new Date().toISOString(),
+        ultimaSync: ventasEscritas ? new Date().toISOString() : (selloPrevio || new Date(0).toISOString()),
+        ultimaPasada: new Date().toISOString(),
         ventas: log.ventas,
         pendienteServir: log.pendiente,
         stock: log.stock,
