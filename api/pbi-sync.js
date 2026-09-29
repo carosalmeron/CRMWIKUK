@@ -922,7 +922,7 @@ export default async function handler(req, res) {
       // La clave lleva versión: al cambiar el formato de la respuesta, las
       // consultas guardadas con el formato viejo dejan de servirse solas y
       // no hay que acordarse de purgar.
-      const idCache = docId(`${cli}_${n}_v2`);
+      const idCache = docId(`${cli}_${n}_v3`);   // v3: última compra (fecha, unidades, precio)
       if (sello && req.query.recargar !== "1") {
         try {
           const g = await fbLeerDocumento("pbi_articulos_cliente", idCache);
@@ -977,7 +977,16 @@ EVALUATE
           ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt),
         "UniAct", CALCULATE(SUM(${T}[UNI]),
           ${T}[CLIENTE] IN {${enLista}},
-          ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy)
+          ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy),
+        "UniAnt", CALCULATE(SUM(${T}[UNI]),
+          ${T}[CLIENTE] IN {${enLista}},
+          ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt),
+
+        "UltFecha", CALCULATE(MAX(${M.vFecha}), ${T}[CLIENTE] IN {${enLista}}, ${M.vFecha} <= _hoy),
+        "UltUni", VAR _f = CALCULATE(MAX(${M.vFecha}), ${T}[CLIENTE] IN {${enLista}}, ${M.vFecha} <= _hoy)
+          RETURN CALCULATE(SUM(${T}[UNI]), ${T}[CLIENTE] IN {${enLista}}, ${M.vFecha} = _f),
+        "UltBase", VAR _f2 = CALCULATE(MAX(${M.vFecha}), ${T}[CLIENTE] IN {${enLista}}, ${M.vFecha} <= _hoy)
+          RETURN CALCULATE(SUM(${M.vBase}), ${T}[CLIENTE] IN {${enLista}}, ${M.vFecha} = _f2)
       ),
       [Ant] <> 0 || [Act] <> 0
     ),
@@ -1043,11 +1052,17 @@ EVALUATE
         if (actual !== original) traducidos++;
 
         const g = porCodigo.get(cod) || {
-          articulo: cod, ventasAct: 0, ventasAnt: 0, unidades: 0, codigosOrigen: [],
+          articulo: cod, ventasAct: 0, ventasAnt: 0, unidades: 0, unidadesAnt: 0, codigosOrigen: [],
+          ultFecha: "", ultUni: 0, ultBase: 0,
         };
         g.ventasAct += num(pick(r, "Act"));
         g.ventasAnt += num(pick(r, "Ant"));
         g.unidades  += num(pick(r, "UniAct"));
+        g.unidadesAnt += num(pick(r, "UniAnt"));
+        // Última compra: la más reciente de todos los códigos que se agrupan
+        const uf = String(pick(r, "UltFecha") || "").slice(0, 10);
+        if (uf && uf > g.ultFecha) { g.ultFecha = uf; g.ultUni = num(pick(r, "UltUni")); g.ultBase = num(pick(r, "UltBase")); }
+        else if (uf && uf === g.ultFecha) { g.ultUni += num(pick(r, "UltUni")); g.ultBase += num(pick(r, "UltBase")); }
         if (!g.codigosOrigen.includes(original)) g.codigosOrigen.push(original);
         porCodigo.set(cod, g);
       }
@@ -1072,6 +1087,11 @@ EVALUATE
           diferencia: num(act - ant),
           variacionPct: ant ? num((100 * (act - ant)) / ant) : null,
           unidades: num(g.unidades),
+          unidadesAnt: num(g.unidadesAnt),
+          ultimaCompra: g.ultFecha ? {
+            fecha: g.ultFecha, unidades: num(g.ultUni), importe: num(g.ultBase),
+            precio: g.ultUni ? Math.round((g.ultBase / g.ultUni) * 100) / 100 : null,
+          } : null,
           // Solo se informa si hubo recodificacion, para poder auditarlo
           codigoAntiguo: g.codigosOrigen.filter((o) => o !== g.articulo).join(", ") || undefined,
         };
