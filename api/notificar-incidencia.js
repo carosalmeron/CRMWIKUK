@@ -826,6 +826,12 @@ async function datosCEO(anio,sem){
     leerTodoC("pbi_objetivos"),leerTodoC("objetivos_equipo"),leerTodoC("muestras"),leerTodoC("visitas"),
     leerTodoC("pbi_semanas"),leerTodoC("objetivos_semana")]);
   const A=crearAgentes(alias);
+  // (sep 2026) Plan de recuperación: casos de clientes en caída (sin Francia)
+  let recup=[];
+  try{ recup=(await leerTodoC("recuperacion")).filter(c=>!/FRANC/i.test(String(c.equipo||""))).map(c=>{
+    try{ c.historial=JSON.parse(c.historial||"[]"); }catch(e){ c.historial=[]; }
+    try{ c.productos=c.productos?JSON.parse(c.productos):null; }catch(e){ c.productos=null; }
+    c.perdido=Number(c.perdido)||0; return c; }); }catch(e){}
 
   // Comerciales: misma regla que cargarUsuarios() de objetivos_equipo
   const NO_PERSONA=/^(interc|clientsdirect|cataluna|cataluña|tienda|telefono|sinagente|_?total|campofrio|wikuk|interkey|francia|distribuidor)/i;
@@ -1003,7 +1009,7 @@ async function datosCEO(anio,sem){
   G.peor.sort((a,b)=>b.im-a.im);
   G.sinResp=[...new Set(G.sinResp)].slice(0,6);
   return {sem,anio,mNum,G,equipos:Object.values(equipos).filter(E=>E.gente.length)
-    .sort((a,b)=>b.vSem-a.vSem),sube};
+    .sort((a,b)=>b.vSem-a.vSem),sube,recup};
 }
 
 function htmlCEO(D){
@@ -1075,6 +1081,52 @@ function htmlCEO(D){
       ${G.rechazos.slice(0,8).map(r=>`<div style="border-left:3px solid #C2263D;padding:5px 0 5px 11px;margin-bottom:7px"><div style="font-size:12.5px;font-weight:700">${e(r.cli)}${r.prod?`<span style="font-weight:400;color:#8A94A0"> · ${e(r.prod)}</span>`:""}</div><div style="font-size:12px;color:#3A424E;font-style:italic">“${e(r.motivo)}”</div><div style="font-size:11px;color:#8A94A0">${e(r.quien)} · ${e(r.eq)}</div></div>`).join("")}</div>`:""}
     ${G.sinResp.length?`<div style="margin-top:6px;font-size:12px;color:#B07908">⏳ Sin respuesta hace más de 3 semanas: ${G.sinResp.map(e).join(" · ")}</div>`:""}`:"";
 
+  // ── Plan de recuperación ──
+  const aten0=[];
+  const RCp=D.recup||[];
+  const ABR=["abierto","diagnosticado","en_accion","propuesta_archivo"];
+  const abR=RCp.filter(c=>ABR.includes(c.estado||"abierto"));
+  const diasR=(iso)=>{ const t=Date.parse(iso||""); return isNaN(t)?null:Math.floor((Date.now()-t)/86400000); };
+  const planR=(c)=>!!(c.causa&&c.accion&&c.fechaObjetivo&&Number(c.eurosObjetivo)>0);
+  const nivelR=(c)=>{ const b=c.perdido>=50000?3:c.perdido>=20000?2:1; const d=diasR(c.ultimaAccion||c.abierto);
+    return Math.min(3,b+((d!=null&&d>14&&c.estado!=="propuesta_archivo")?1:0)); };
+  const conAvR=(c)=>(c.historial||[]).some(x=>x.sem===sem&&!x.sistema);
+  const recupH=(()=>{
+    if(!RCp.length) return "";
+    const enR=abR.reduce((t,c)=>t+c.perdido,0);
+    const sinP=abR.filter(c=>!planR(c)&&c.estado!=="propuesta_archivo");
+    const sinA=abR.filter(c=>planR(c)&&!conAvR(c));
+    const par=abR.filter(c=>{ const d=diasR(c.ultimaAccion||c.abierto); return d!=null&&d>14; });
+    const rec=RCp.filter(c=>c.estado==="recuperado");
+    const recSem=rec.filter(c=>{ const d=diasR(c.recuperadoEn); return d!=null&&d<=7; });
+    const pend=abR.filter(c=>c.estado==="propuesta_archivo").length+abR.filter(c=>c.necesitaAprobacion==="margen").length;
+    const porEqR={}; abR.forEach(c=>{ const k=c.equipo||"—"; (porEqR[k]=porEqR[k]||[]).push(c); });
+    const causas={}; abR.forEach(c=>{ if(c.causa) causas[c.causa]=(causas[c.causa]||0)+c.perdido; });
+    const lc=Object.entries(causas).sort((a,b)=>b[1]-a[1]); const totCa=lc.reduce((t,x)=>t+x[1],0);
+    const ceo=abR.filter(c=>nivelR(c)>=3).sort((a,b)=>b.perdido-a.perdido).slice(0,6);
+    return h3("🚨 Plan de recuperación",`Clientes en caída con dueño, plan y plazo. ${recSem.length?recSem.length+" recuperados esta semana.":""}`)+
+      `<table style="width:100%;border-collapse:separate;border-spacing:0;margin:0 -4px 6px"><tr>
+        ${tile("En riesgo",eurC(enR),abR.length+" casos abiertos","#C2263D")}
+        ${tile("Recuperados",eurC(rec.reduce((t,c)=>t+c.perdido,0)),rec.length+" clientes","#0E7C5A")}
+        ${tile("Sin plan",String(sinP.length),par.length+" parados +14 días",sinP.length?"#C2263D":"#0E7C5A")}</tr></table>
+      <table style="width:100%;border-collapse:collapse;font-size:12.5px">${Object.entries(porEqR).sort((a,b)=>b[1].reduce((t,c)=>t+c.perdido,0)-a[1].reduce((t,c)=>t+c.perdido,0)).map(([k,l])=>{
+        const sp=l.filter(c=>!planR(c)&&c.estado!=="propuesta_archivo").length, sa=l.filter(c=>planR(c)&&!conAvR(c)).length;
+        return `<tr><td style="padding:6px 0;border-top:1px solid #EEF1F5"><b>${e(k)}</b><div style="font-size:11px;color:#8A94A0">${l.length} casos${sp?` · <span style="color:#C2263D">${sp} sin plan</span>`:""}${sa?` · <span style="color:#C2263D">${sa} sin avance</span>`:""}</div></td>
+          <td style="padding:6px 0;border-top:1px solid #EEF1F5;text-align:right;font-weight:800;color:#C2263D;white-space:nowrap">−${eurC(l.reduce((t,c)=>t+c.perdido,0))}</td></tr>`;}).join("")}</table>
+      ${lc.length?`<div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#8A94A0;font-weight:700;margin:12px 0 5px">Por qué caen</div>
+        ${lc.slice(0,6).map(([k,v])=>`<table style="width:100%;border-collapse:collapse"><tr><td style="padding:4px 0;font-size:12.5px;white-space:nowrap;width:34%">${e(k)}</td><td style="padding:4px 8px;width:45%">${barra(v,lc[0][1],"#C2263D")}</td><td style="padding:4px 0;text-align:right;font-size:12px;font-weight:800;white-space:nowrap">${eurC(v)} · ${Math.round(v/totCa*100)} %</td></tr></table>`).join("")}`:""}
+      ${ceo.length?`<div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#8A94A0;font-weight:700;margin:12px 0 5px">Nivel CEO: te toca llamar o visitar</div>
+        ${ceo.map(c=>{ const u=(c.historial||[]).filter(x=>x.sem===sem&&!x.sistema).slice(-1)[0];
+          return `<div style="border-left:3px solid #C2263D;padding:5px 0 5px 11px;margin-bottom:7px"><div style="font-size:12.5px;font-weight:700">${e(c.nombre)} · <span style="color:#C2263D">−${eurC(c.perdido)}</span> <span style="font-weight:400;color:#8A94A0">· ${e(c.agente)}</span></div>
+            ${c.productos&&c.productos.caen&&c.productos.caen.length?`<div style="font-size:11.5px;color:#6B7684">Ha dejado de comprar: ${c.productos.caen.slice(0,3).map(a=>`${e(a.desc)} (${eurC(a.ant)} → ${eurC(a.act)})`).join(" · ")}</div>`:""}
+            <div style="font-size:12px;color:#3A424E">${planR(c)?`${e(c.causa)} → ${e(c.accion)}`:`<span style="color:#C2263D">Sin diagnosticar</span>`}${u?` · esta semana: ${e(u.hecho)} — ${e(u.respuesta)}`:""}</div></div>`;}).join("")}`:""}
+      ${pend?`<div style="margin-top:8px;padding:9px 12px;border-radius:9px;background:#FFFBEB;color:#92400E;font-size:12.5px"><b>⏳ ${pend} decisiones te esperan</b> (archivos y márgenes bajo el 10 %) en el portal → 🚨 Plan de recuperación → Aprobar.</div>`:""}`;
+  })();
+  if(abR.length){
+    const sinP=abR.filter(c=>!planR(c)&&c.estado!=="propuesta_archivo");
+    if(sinP.length) aten0.push(["#C2263D",`${sinP.length} clientes en caída sin plan`,`${eurC(sinP.reduce((t,c)=>t+c.perdido,0))} sin que nadie haya dicho qué hacer`]);
+  }
+
   const totC=G.t30+G.t60+G.t90+G.t90mas;
   const fueraPol=equipos.flatMap(E=>E.gente.filter(p=>!p.ausente&&p.limite&&p.cobros>p.limite).map(p=>({p,eq:E.eq})))
     .sort((a,b)=>b.p.cobros/b.p.limite-a.p.cobros/a.p.limite);
@@ -1091,6 +1143,7 @@ function htmlCEO(D){
   if(flojosTot.length) aten.push(["#C2263D",`${flojosTot.length} comercial${flojosTot.length>1?"es":""} por debajo del 80 %`,flojosTot.map(x=>x.nombre+" ("+x.nota+" %)").join(" · ")]);
   if(fueraPol.length) aten.push(["#C2263D",`${fueraPol.length} fuera de la política de cobro (5 % de dos meses)`,fueraPol.map(x=>x.p.nombre+" "+Math.round(x.p.cobros/x.p.limite*100)+" %").join(" · ")]);
   if(G.t90mas) aten.push(["#C2263D",`${eurC(G.t90mas)} vencidos a más de 90 días`,"Ya no es un retraso: es riesgo de impago."]);
+  aten0.forEach(x=>aten.push(x));
   if(sinC.length) aten.push(["#94A3B8",`${sinC.length} sin cerrar la semana`,sinC.join(" · ")]);
   const atencion=aten.length?h3("Lo que pide atención")+aten.map(([c,t,s])=>`<div style="border-left:3px solid ${c};padding:7px 0 7px 12px;margin-bottom:9px"><div style="font-size:13.5px;font-weight:700">${e(t)}</div><div style="font-size:12px;color:#64748B">${e(s)}</div></div>`).join(""):"";
 
@@ -1106,7 +1159,7 @@ function htmlCEO(D){
         ${tile("Mes",eurC(G.mAct),pM!=null?pM+" % del objetivo":"sin objetivo",col(pM))}
         ${tile("Vencido",eurC(G.cobros),G.nFacV+" facturas","#C2263D")}</tr></table>
       ${h3("Por equipo")}${porEq}
-      ${actividad}${ranking}${muestras}${subeH}${cobros}${atencion}
+      ${actividad}${ranking}${recupH}${muestras}${subeH}${cobros}${atencion}
       <div style="margin-top:20px;text-align:center"><a href="${CRM}/objetivos_equipo.html?rol=ceo" style="display:inline-block;background:#14181F;color:#fff;text-decoration:none;padding:11px 26px;border-radius:9px;font-size:13.5px;font-weight:700">Abrir en el CRM</a></div>
       <p style="margin:18px 0 0;font-size:11px;color:#8A94A0;text-align:center">Informe automático del CRM · sale los sábados con el cierre de la semana.</p>
     </div></div>`;
