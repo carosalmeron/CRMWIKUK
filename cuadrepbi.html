@@ -105,7 +105,19 @@ async function cruzar(){
       fetch(FB+"/pbi_meta/estado").then(r=>r.ok?r.json():null).then(j=>{ if(!j) return null;
         const o={}; for(const [k,x] of Object.entries(j.fields||{})) o[k]=val(x); return o; }).catch(()=>null)]);
   }
-  est.textContent=CRM.length+" códigos de cliente en el CRM";
+  if(!CRM._limpio){
+    // Mismo cliente con dos formatos de codigo (U433559 y U4303559): solo
+    // cuenta el mas reciente. El otro es un resto de una pasada antigua.
+    const canon=c=>{ const m=/^U43(\d{4})$/.exec(U(c)); return m?"U430"+m[1]:U(c); };
+    const ts=d=>Date.parse(d.actualizado||"")||0;
+    const g={}; CRM.forEach(d=>{ if(d.obsoleto) return; (g[canon(d._id)]=g[canon(d._id)]||[]).push(d); });
+    let n=0;
+    Object.values(g).forEach(a=>{ if(a.length<2) return;
+      a.sort((x,y)=>ts(y)-ts(x)); a.slice(1).forEach(d=>{ d._viejo=a[0]._id; n++; }); });
+    CRM._limpio=true; CRM._duplicadosViejos=n;
+  }
+  est.textContent=CRM.length+" códigos de cliente en el CRM"
+    +(CRM._duplicadosViejos?" · "+CRM._duplicadosViejos+" restos antiguos descontados":"");
   const AG=U(document.getElementById("agente").value);
   if(!AG) return cruzarGlobal();
   // Todos los codigos de ese comercial segun la tabla de alias
@@ -119,9 +131,9 @@ async function cruzar(){
     const docs=porNombre[NN(f.nombre)]||[];
     const cods=docs.map(d=>{
       const ag=d.agenteFinal||d.agente||"";
-      const cuenta=d.cuenta!==undefined?d.cuenta:!(d.intercompany||d.fusionadoEn);
+      const cuenta=!d.obsoleto&&!d._viejo&&(d.cuenta!==undefined?d.cuenta:!(d.intercompany||d.fusionadoEn));
       return {cod:d._id,nombre:d.nombre,ag,act:Number(d.ventasAct)||0,ant:Number(d.ventasAntYTD)||0,
-        cuenta,fusion:d.fusionadoEn||"",inter:!!d.intercompany,
+        cuenta,fusion:d.fusionadoEn||d._viejo||"",inter:!!d.intercompany,obs:!!(d.obsoleto||d._viejo),
         tipo:!cuenta?"fuera":esMio(ag)?"yo":(!ag||/SIN/i.test(ag))?"sin":"otro"};
     });
     const crmMio=cods.filter(c=>c.tipo==="yo").reduce((t,c)=>t+c.act,0);
@@ -146,9 +158,9 @@ function cruzarGlobal(){
     const docs=porNombre[NN(f.nombre)]||[];
     const cods=docs.map(d=>{
       const ag=d.agenteFinal||d.agente||"";
-      const cuenta=d.cuenta!==undefined?d.cuenta:!(d.intercompany||d.fusionadoEn);
+      const cuenta=!d.obsoleto&&!d._viejo&&(d.cuenta!==undefined?d.cuenta:!(d.intercompany||d.fusionadoEn));
       return {cod:d._id,nombre:d.nombre,ag:(!ag||/SIN/i.test(ag))?"":U(ag),act:Number(d.ventasAct)||0,
-        ant:Number(d.ventasAntYTD)||0,cuenta,fusion:d.fusionadoEn||"",inter:!!d.intercompany,
+        ant:Number(d.ventasAntYTD)||0,cuenta,fusion:d.fusionadoEn||d._viejo||"",inter:!!d.intercompany,obs:!!(d.obsoleto||d._viejo),
         act_en:String(d.actualizado||"").slice(0,10),ult:String(d.ultimaVenta||"").slice(0,10)};
     });
     const vivos=cods.filter(c=>c.cuenta);
@@ -201,7 +213,7 @@ function pintarGlobal(res,G){
       <div class="cab"><span>${esc(x.nombre)}</span><span>${eur(x.act)} PBI · ${eur(x.crm)} CRM</span></div>
       ${x.tipo==="repartido"?`<div class="mut" style="margin-top:2px">Comerciales: <b>${x.ags.map(esc).join(" · ")}</b></div>`:""}
       ${x.cods.length?x.cods.map(c=>`<div class="cod">código <b>${esc(c.cod)}</b>
-        ${!c.cuenta?`<span class="tag t-sin">${c.fusion?"fusionado en "+esc(c.fusion):c.inter?"intercompañía":"no cuenta"}</span>`
+        ${!c.cuenta?`<span class="tag t-sin">${c.obs?"resto antiguo"+(c.fusion?" · vale "+esc(c.fusion):""):c.fusion?"fusionado en "+esc(c.fusion):c.inter?"intercompañía":"no cuenta"}</span>`
           :c.ag?`<span class="tag t-yo">${esc(c.ag)}</span>`:`<span class="tag t-sin">sin comercial</span>`}
         · ${eur(c.act)} este año · ${eur(c.ant)} año pasado
         ${c.act_en?`<span class="mut"> · actualizado ${c.act_en.split("-").reverse().join("/")}</span>`:""}
@@ -218,7 +230,7 @@ function pintar(res,T){
   const tag=c=>c.tipo==="yo"?`<span class="tag t-yo">${esc(T.AG)}</span>`
     :c.tipo==="otro"?`<span class="tag t-otro">asignado a ${esc(c.ag)}</span>`
     :c.tipo==="sin"?`<span class="tag t-sin">sin comercial</span>`
-    :`<span class="tag t-sin">${c.fusion?"fusionado en "+esc(c.fusion):c.inter?"intercompañía":"no cuenta"}</span>`;
+    :`<span class="tag t-sin">${c.obs?"resto antiguo"+(c.fusion?" · vale "+esc(c.fusion):""):c.fusion?"fusionado en "+esc(c.fusion):c.inter?"intercompañía":"no cuenta"}</span>`;
   document.getElementById("res").innerHTML=`
     <div class="tiles">
       <div class="tile"><span>Power BI ${FILAS.anioAct||""}</span><b>${eur(T.tPbi)}</b></div>
