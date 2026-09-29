@@ -424,6 +424,28 @@
       historial:(c.historial||[]).concat([{sem:RC.semanaISO(new Date()),fecha:ahora,por,sistema:`Diagnóstico: ${r.causa} · plan: ${r.accion}`}])};
     await RC.guardar(c._id,campos); Object.assign(c,campos); return c;
   };
+  // Aviso genérico de una instrucción del jefe o del CEO (partes, objetivos)
+  RC.avisarGenerico=async(o)=>{
+    const d=await RC.destinatarios(o.agente,o.quienId);
+    const to=[...d.para,...d.copias].map(x=>x.email);
+    if(!to.length) return d;
+    const esc=(t)=>String(t||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+    const html=`<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;margin:0 auto;color:#14181F">
+      <div style="background:#14181F;color:#fff;padding:16px 20px;border-radius:12px 12px 0 0">
+        <div style="font-size:11px;letter-spacing:.08em;opacity:.7;text-transform:uppercase">${esc(o.etiqueta||"Instrucción")}</div>
+        <div style="font-size:19px;font-weight:800;margin-top:2px">${esc(o.titulo)}</div></div>
+      <div style="border:1px solid #DCE1E7;border-top:none;border-radius:0 0 12px 12px;padding:18px 20px">
+        <div style="font-size:12px;color:#6B7684"><b>${esc(o.quien)}</b> pide a <b>${esc(d.nombreComercial)}</b>:</div>
+        <div style="font-size:15px;font-weight:700;margin:4px 0 12px;white-space:pre-wrap">${esc(o.texto)}</div>
+        ${o.detalle?`<div style="font-size:12.5px;color:#3A424E">${esc(o.detalle)}</div>`:""}
+        <div style="font-size:12px;color:#8A94A0;margin-top:10px">${esc(o.pie||"Queda como objetivo de la semana en el CRM y se revisa en el comité del viernes.")}
+          ${d.copias.length?`<br>Copia a: ${d.copias.map(x=>esc(x.nombre)+" ("+x.papel+")").join(", ")}.`:""}</div>
+        <a href="https://crmwikuk.vercel.app/" style="display:inline-block;margin-top:14px;background:#14181F;color:#fff;text-decoration:none;padding:10px 20px;border-radius:9px;font-size:13px;font-weight:700">Abrir el portal</a>
+      </div></div>`;
+    try{ await fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({to,subject:`📌 ${o.quien} → ${d.nombreComercial}: ${o.titulo}`,html})}); d.enviado=true; }catch(e){}
+    return d;
+  };
   RC.textoAviso=(d)=>!d||(!d.para.length&&!d.copias.length)?"Guardada en el caso. No encuentro correos: la verá en el panel y en su parte."
     :`Enviada a ${d.para.length?d.para.map(x=>x.nombre).join(", "):"(sin correo del comercial)"}${d.copias.length?" · copia a "+d.copias.map(x=>x.nombre+" ("+x.papel+")").join(", "):""}.`;
 

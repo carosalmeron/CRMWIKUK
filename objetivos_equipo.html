@@ -228,6 +228,7 @@ async function escribir(col,id,doc){
 }
 
 let USUARIOS=[], OBJETIVOS=[], CIERRES={}, VISTA="lista", SEL=null, CERRADA=false;
+let INSTRUCCIONES=[];   // instrucciones del jefe sobre lineas del cierre (semana siguiente)
 let FILTRO="";   // buscador de vendedores de la lista
 // Catálogos para los buscadores. Se cargan una vez y se reutilizan.
 let CLIENTES=[], PRODUCTOS=[];
@@ -1805,12 +1806,102 @@ function filaItem(x,a,es){
       +';font-weight:600">'+(est.hecho===null?"— ":(est.hecho?"✓ ":"○ "))
       +est.txt+'</small>':"")
     +(x.texto?'<small class="dicho">“'+x.texto+'”</small>':"")+'</div>'
+    +'<button class="mini" title="Dar una instrucción al comercial" onclick="abrirInstr(\''+esc2(x.clave)+'\')">📌</button>'
     +(ESCALA_A?'<button class="mini '+(sube?"on":"")+'" '
       +(!sube&&es.length>=MAX?"disabled":"")
       +' onclick="escalarItem(\''+esc2(a.id)+'\',\''+esc2(x.clave)+'\',\''
       +esc2(txt)+'\',\''+esc2(x.tipo)+'\',\''+esc2(nom)+'\')">'
       +(sube?"✓ Sube":"Subir")+'</button>':"")
-    +'</div></div>';
+    +'</div>'
+    +instrDeItem(x,a,nom)
+    +'</div>';
+}
+// (sep 2026) Instrucción sobre una línea del cierre, sin tener que subirla:
+// el jefe le dice al comercial qué hacer con esa oferta, muestra, estrategia o
+// cliente. Queda como objetivo de la semana siguiente (lo ve en el CRM y se
+// mide con su semáforo) y le llega por correo con copia a jefe de ventas y CEO.
+let INSTR_ABIERTA=null;
+window.abrirInstr=(clave)=>{ INSTR_ABIERTA=INSTR_ABIERTA===clave?null:clave; pintar(); };
+const INSTR_RAPIDAS={
+  ofertas:["Llámale y ciérrala esta semana","Visítale con la oferta en mano","Plantea una estrategia de precio","Dala por perdida y dime por qué"],
+  muestras:["Pídele resultado de la prueba esta semana","Visítale y recoge la valoración","Mándale otra referencia"],
+  estrategias:["Ejecútala esta semana","Replantéala y enséñamela","Ciérrala y dime el resultado"],
+  cliente:["Visítale esta semana","Llámale y dime qué pasa","Prepara una oferta de vuelta","Vamos juntos a verle"],
+};
+function instrDeItem(x,a,nom){
+  const hechas=INSTRUCCIONES.filter(o=>o.claveOrigen===x.clave+"|instr"&&U(o.agente)===U(a.id));
+  let h=hechas.map(o=>'<small style="display:block;color:var(--blue);font-weight:600;margin:4px 0 0 18px">📌 '
+    +esc2(o.texto)+' · semana '+o.semana+'</small>').join("");
+  if(INSTR_ABIERTA!==x.clave) return h;
+  const rap=INSTR_RAPIDAS[x.tipo]||INSTR_RAPIDAS.cliente;
+  return h+'<div style="margin:8px 0 4px 18px;display:grid;gap:6px">'
+    +'<div style="display:flex;gap:5px;flex-wrap:wrap">'+rap.map(r=>'<button class="mini" onclick="document.getElementById(\'instr_txt\').value=\''+esc2(r)+'\'">'+r+'</button>').join("")+'</div>'
+    +'<textarea id="instr_txt" style="width:100%;min-height:58px;padding:8px 10px;border:1.5px solid var(--border);border-radius:8px;font:inherit;font-size:13px" placeholder="Qué tiene que hacer con '+esc2(nom||"esto")+'"></textarea>'
+    +'<div style="display:flex;gap:6px"><button class="mini on" onclick="enviarInstr(\''+esc2(a.id)+'\',\''+esc2(x.clave)+'\',\''+esc2(x.tipo)+'\',\''+esc2(nom)+'\')">Enviar instrucción</button>'
+    +'<button class="mini" onclick="abrirInstr(null)">Cancelar</button></div></div>';
+}
+window.enviarInstr=async(agId,clave,tipo,nom)=>{
+  const t=(document.getElementById("instr_txt")||{}).value||"";
+  if(t.trim().length<4){ alert("Escribe la instrucción o elige una."); return; }
+  const sem=SEMANA+1;
+  let hsh=0; for(let i=0;i<clave.length;i++){ hsh=((hsh<<5)-hsh)+clave.charCodeAt(i); hsh|=0; }
+  const id="obj_"+agId+"_"+ANIO+"_s"+sem+"_i"+Math.abs(hsh)+"_"+Date.now();
+  const docRef=String(clave).split(/:(.+)/)[1]||"";
+  const doc={id,agente:agId,semana:sem,anio:ANIO,texto:(nom?nom+" — ":"")+t.trim(),tipo:(tipo==="ofertas"||tipo==="muestras"||tipo==="estrategias")?tipo.slice(0,-1)||tipo:tipo,
+    origen:"jefe",claveOrigen:clave+"|instr",refNombre:nom||"",docId:tipo==="cliente"?"":docRef,
+    creadoPor:UID,creadoPorNombre:AGENTE,equipo:EQUIPO,fechaCreacion:new Date().toISOString()};
+  try{
+    await escribir("objetivos_semana",id,doc);
+    INSTRUCCIONES.push(doc); INSTR_ABIERTA=null; pintar();
+    if(window.RC&&RC.avisarGenerico){
+      let quien=window._MI_NOMBRE_JEFE||"";
+      if(!quien){
+        for(const col of ["usuarios","portal_users"]){
+          try{ const r=await fetch(`${FB}/${col}/${encodeURIComponent(UID)}`); if(!r.ok) continue;
+            const j=await r.json(); const n=j.fields&&j.fields.nombre&&j.fields.nombre.stringValue;
+            if(n){ quien=n; break; } }catch(e){}
+        }
+        window._MI_NOMBRE_JEFE=quien=quien||AGENTE||"Tu jefe";
+      }
+      const d=await RC.avisarGenerico({agente:agId,quienId:UID,quien,titulo:nom||"Instrucción",
+        etiqueta:"Instrucción · semana "+sem,texto:t.trim(),
+        detalle:"Sobre lo que dejaste en tu cierre de la semana "+SEMANA+"."});
+      alert(RC.textoAviso(d));
+    }
+  }catch(e){ alert("No se ha podido guardar: "+e.message); }
+};
+
+// El correo del cierre: el guardado al cerrar o, si es antiguo, se rehace
+// abriendo cierre_semanal en modo «solo ver» (igual que hace el CRM).
+window._CORREOS=window._CORREOS||{};
+function correoDelCierre(a,c){
+  const cod=U(c.info.agente||a.cod||a.id), k=cod+"_"+SEMANA;
+  const guardado=c.info.htmlEmailOrigen==="cierre"?c.info.htmlEmail:null;
+  const st=window._CORREOS[k];
+  const real=guardado||(st&&st!=="cargando"&&!String(st).startsWith("error:")?st:null);
+  if(!real&&!st) setTimeout(()=>pedirCorreoCierre(cod,k),0);
+  const aviso=real?"":(st&&String(st).startsWith("error:")
+    ?'<p style="font-size:11.5px;color:var(--muted);margin:0 0 6px">No se han podido rehacer las cifras de esa semana ('+String(st).slice(6)+').</p>'
+    :'<p style="font-size:11.5px;color:var(--muted);margin:0 0 6px">⏳ Preparando su parte con las cifras de la semana…</p>');
+  return '<div style="margin:0 0 14px">'+aviso+(real?'<div style="background:#fff;border-radius:12px">'+real+'</div>':"")+'</div>'
+    +'<h3 style="margin-top:6px">Qué hacer con lo que dejó pendiente</h3>'
+    +'<p style="font-size:11.5px;color:var(--muted);margin:-4px 0 8px">📌 para darle una instrucción · «Subir» para llevarlo al comité de dirección</p>';
+}
+function pedirCorreoCierre(cod,k){
+  if(window._CORREOS[k]) return;
+  window._CORREOS[k]="cargando";
+  const fr=document.createElement("iframe");
+  fr.style.cssText="position:fixed;left:-9999px;top:0;width:600px;height:800px;border:0;visibility:hidden";
+  let hecho=false;
+  const fin=(v)=>{ if(hecho) return; hecho=true; window.removeEventListener("message",oir);
+    try{ fr.remove(); }catch(e){} window._CORREOS[k]=v; if(VISTA==="detalle"||SEL) pintar(); };
+  const oir=(e)=>{ const d=e.data||{};
+    if(d.type!=="CIERRE_HTML"||U(d.agente)!==U(cod)||Number(d.semana)!==Number(SEMANA)) return;
+    fin(d.html||("error:"+(d.error||"sin respuesta"))); };
+  window.addEventListener("message",oir);
+  setTimeout(()=>fin("error:tiempo agotado"),45000);
+  fr.src="/cierre_semanal.html?agente="+encodeURIComponent(cod)+"&semana="+SEMANA+"&solover=1";
+  document.body.appendChild(fr);
 }
 
 function pintarDetalle(){
@@ -1826,6 +1917,11 @@ function pintarDetalle(){
     +'Semana '+SEMANA+' · '
     +(c?("cerrada"+(c.fecha?" el "+new Date(c.fecha).toLocaleString("es-ES"):"")):"sin cerrar")
     +'</small></div>';
+
+  // (sep 2026) Lo primero, su parte tal como llega por correo: ventas contra
+  // objetivo, actividad, muestras, cobros, plan de recuperación… Así se ve
+  // igual aquí, en el CRM y en el email. Debajo, lo que hay que hacer.
+  if(c&&c.info&&!c.ausente) h+=correoDelCierre(a,c);
 
   if(!c){
     h+='<div class="card" style="border-color:var(--amber);background:var(--amberL)">'
@@ -2029,7 +2125,10 @@ function pintar(){
 
 async function recargar(){
   const objs=await leer("objetivos_semana");
-  OBJETIVOS=objs.filter(o=>!o.eliminado&&Number(o.semana)===SEMANA&&Number(o.anio)===ANIO);
+  OBJETIVOS=objs.filter(o=>!o.eliminado&&Number(o.semana)===SEMANA&&Number(o.anio)===ANIO
+    &&!String(o.claveOrigen||"").endsWith("|instr"));
+  INSTRUCCIONES=objs.filter(o=>!o.eliminado&&String(o.claveOrigen||"").endsWith("|instr")
+    &&Number(o.anio)===ANIO&&Number(o.semana)===SEMANA+1);
   CIERRES=await cargarCierres();
   await comprobarCerrada();
   pintar();                       // ya se ve algo aquí
