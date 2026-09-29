@@ -780,6 +780,62 @@ async function cargarReglas() {
 // Normaliza el nombre comercial para poder emparejar el mismo cliente
 // dado de alta con codigos distintos en varias sociedades del grupo.
 // Quita acentos, formas juridicas y puntuacion.
+// (sep 2026) Caidas falsas por cambio de codigo. Un mismo cliente tiene un
+// codigo por sociedad (B43…, R43…, U43…) y a veces cada uno lo lleva un
+// comercial. Si deja de comprar por un codigo y crece por otro, el cliente no
+// se ha perdido: la venta se ha ido al otro codigo. EUROTRIPAS: U439331 de
+// ANTONIO 0 € frente a 75.480 €, pero B431058 de JOSEPMARIA compra.
+// No se mueve venta entre comerciales (eso cuadra con Power BI); solo se
+// corrige la caida del cliente y se deja escrito a donde fue la venta:
+//   traspaso: "B431058 · JOSEPMARIA"
+//   caida: lo que de verdad cae el cliente en conjunto (o nada)
+//   caidaSinTraspaso: la caida del codigo tal cual, para auditar
+function marcarTraspasos(docs, previos, log) {
+  const vivos = new Map();
+  for (const [id, d] of previos) vivos.set(id, d);
+  for (const d of docs) vivos.set(String(d._id), d);   // lo recien calculado manda
+  const grupos = new Map();
+  for (const [id, d] of vivos) {
+    if (d.intercompany || d.fusionadoEn || d.obsoleto) continue;
+    const n = normNombre(d.nombre);
+    if (!n || n.length < 4 || n === String(id).toUpperCase()) continue;
+    const k = n + "|" + String(d.poblacion || "").toUpperCase().trim();
+    if (!grupos.has(k)) grupos.set(k, []);
+    grupos.get(k).push(d);
+  }
+  const deEsta = new Set(docs.map((d) => String(d._id)));
+  const dif = (d) => num(d.ventasAct) - num(d.ventasAntYTD);
+  let marcados = 0, euros = 0;
+  const ejemplos = [];
+  for (const d of docs) { delete d.traspaso; delete d.caidaSinTraspaso; }
+  for (const g of grupos.values()) {
+    if (g.length < 2) continue;
+    const suben = g.filter((d) => dif(d) > 0);
+    if (!suben.length) continue;
+    let bolsa = suben.reduce((t, d) => t + dif(d), 0);
+    // Primero las caidas mas grandes
+    const caen = g.filter((d) => dif(d) < 0).sort((a, b) => dif(a) - dif(b));
+    for (const d of caen) {
+      if (bolsa <= 0) break;
+      const baja = dif(d);
+      const cubre = Math.min(bolsa, -baja);
+      bolsa -= cubre;
+      if (!deEsta.has(String(d._id))) continue;           // no se reescribe en esta pasada
+      const destino = suben.filter((x) => x !== d)
+        .map((x) => `${x._id} · ${x.agente || x.agenteFinal || "sin comercial"}`).join(", ");
+      d.traspaso = destino;
+      d.caidaSinTraspaso = num(baja);
+      const neta = num(baja + cubre);
+      if (neta < -0.5) d.caida = neta; else delete d.caida;
+      marcados++; euros += cubre;
+      if (ejemplos.length < 8) ejemplos.push(`${d._id} ${d.nombre || ""}: ${Math.round(baja)} € → ${destino}`);
+    }
+  }
+  log.traspasosMarcados = marcados;
+  log.traspasosEuros = Math.round(euros);
+  if (ejemplos.length) log.ejemplosTraspaso = ejemplos;
+}
+
 function normNombre(n) {
   return String(n || "")
     .toUpperCase()
@@ -4963,12 +5019,15 @@ EVALUATE
           for (const d of await fbLeerColeccion("pbi_ventas_cliente")) {
             previos.set(String(d._id), d);
           }
+          try { marcarTraspasos(docs, previos, log); }
+          catch (e) { log.errores.push(`traspasos: ${e.message}`); }
           // Campos que deciden si algo cambio. "actualizado" no cuenta: cambia
           // siempre y haria que se reescribiera todo.
           const CLAVE = ["ventasAct", "ventasAntYTD", "ventasAntFull", "margenAct",
                          "margenAntYTD", "ventasMes", "ventasSem", "ventasMesAnt",
                          "agente", "agenteFinal", "cuenta", "nombre", "poblacion",
-                         "intercompany", "fusionadoEn", "ultimaVenta"];
+                         "intercompany", "fusionadoEn", "ultimaVenta",
+                         "caida", "traspaso", "caidaSinTraspaso"];
           aEscribir = docs.filter((d) => {
             const a = previos.get(String(d._id));
             if (!a) return true;                       // nuevo
