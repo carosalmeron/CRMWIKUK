@@ -4830,8 +4830,17 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
   function visIcon(r){return r==="pedido"||r==="visita_pedido"?"✅":r==="llamada"||r==="llamada_contactada"||r==="llamada_pedido"?"📞":r==="no_contesta"||r==="llamada_no_contesta"?"📵":r==="primera_visita"?"🆕":r==="comentario_op"?"💼":r==="cierre_op_ganada"?"🏆":r==="cierre_op_perdida"?"💔":r==="cierre_op"?"🔚":r==="feedback_op"?"💼":r==="vamos_caros"?"💸":r==="oferta"?"📄":"👋";}
   // (sep 2026) Algunas visitas se guardaron sin el nombre del cliente y salían
   // como "—". Si tienen su id o su código, se recupera de la ficha del cliente.
+  // (sep 2026) Cuando llega el nombre de un cliente buscado por código, se repinta
+  var _nomCliTick=React.useState(0), _setNomCliTick=_nomCliTick[1];
+  React.useEffect(function(){ var f=function(){ _setNomCliTick(function(x){return x+1;}); };
+    window.addEventListener("nomcli",f); return function(){ window.removeEventListener("nomcli",f); }; },[]);
   function clienteDeVisita(v){
     var n=v.clienteNombre||v.cliente||v.nombreCliente||"";
+    // Algunas visitas guardan el CÓDIGO (U4309524) en vez del nombre
+    if(n&&esCodigoCliente(n)){
+      var nom=nombreClientePorCodigo(n,(clientesFB||[]).concat(typeof todosClientesFB!=="undefined"?(todosClientesFB||[]):[]));
+      return nom?nom+" · "+n:n;
+    }
     if(n) return n;
     var id=v.clienteId||v.clienteCodigo||v.codigoCliente||"";
     if(id){
@@ -26800,6 +26809,29 @@ function serializeToFirestore(datos){
 
 // Escritura genérica — crea o sobreescribe documento
 // (v3.22.23) Añadido parámetro `parcial` para usar updateMask y NO borrar campos no enviados
+// (sep 2026) Nombre de un cliente a partir de su código: primero en las fichas
+// cargadas, si no en Power BI (pbi_ventas_cliente/{CODIGO}). Asíncrono: cuando
+// llega, avisa con el evento "nomcli" para que la pantalla se repinte.
+function esCodigoCliente(t){ return /^[A-Z]{1,4}[0-9]{4,}[A-Z0-9]*$/i.test(String(t||"").trim()); }
+window._NOMCLI=window._NOMCLI||{};
+function nombreClientePorCodigo(cod, lista){
+  var k=String(cod||"").toUpperCase().trim(); if(!k) return null;
+  var vars=[k], m=/^U430(\d{4})$/.exec(k), m2=/^U43(\d{4})$/.exec(k);
+  if(m) vars.push("U43"+m[1]); if(m2) vars.push("U430"+m2[1]);
+  var c=(lista||[]).find(function(x){ return vars.indexOf(String(x.codigo||x.CODIGO||"").toUpperCase())>=0||vars.indexOf(String(x.id||"").toUpperCase())>=0; });
+  if(c&&(c.nombre||c.NOMBRE)&&!esCodigoCliente(c.nombre||c.NOMBRE)) return c.nombre||c.NOMBRE;
+  if(k in window._NOMCLI) return window._NOMCLI[k];
+  window._NOMCLI[k]=null;
+  (async function(){
+    for(var i=0;i<vars.length;i++){
+      try{ var r=await fetch(FB_BASE+"/pbi_ventas_cliente/"+encodeURIComponent(vars[i]));
+        if(!r.ok) continue; var j=await r.json();
+        var n=j.fields&&j.fields.nombre&&j.fields.nombre.stringValue;
+        if(n){ window._NOMCLI[k]=n; try{ window.dispatchEvent(new Event("nomcli")); }catch(e){} return; } }catch(e){}
+    }
+  })();
+  return null;
+}
 async function fbEscribir(coleccion, id, datos, parcial){
   // (sep 2026) Incidencias de pérdida de venta (plan de recuperación): cada
   // respuesta del departamento se reenvía por correo al comercial, su jefe y
