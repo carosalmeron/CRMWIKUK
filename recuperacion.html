@@ -254,7 +254,7 @@ async function pedirDiag(ids){
 // ══ Ficha del cliente: pantalla solo para él ══════════════════════════
 let FICHA=null, _scrollLista=0;
 const FICHA_ART={tab:"caen",abierto:null};
-async function cargarOfs(){ if(OFS) return; OFS=[]; try{ OFS=await RC.leerProfundo("ofertas"); }catch(e){} if(FICHA) pintar(); }
+async function cargarOfs(){ if(OFS) return; OFS=[]; try{ OFS=await RC.leerProfundo("ofertas"); }catch(e){} if(FICHA||TAB==="acciones") pintar(); }
 function abrirFicha(id){ cargarOfs(); _scrollLista=window.scrollY||0; FICHA=id; FICHA_ART.tab="caen"; FICHA_ART.abierto=null; FICHA_ART.acc=null; FICHA_ART.fams=null; pintar(); window.scrollTo(0,0);
   const c=CASOS.find(x=>x._id===id); if(c){ cargarTodosArt(c); cargarProg(c); } }
 function cerrarFicha(){ FICHA=null; pintar(); window.scrollTo(0,_scrollLista); }
@@ -680,6 +680,99 @@ function vistaAprobar(){
         <button class="btn no" onclick="decidirMargen('${c._id}',false)">No lo apruebo</button></div>
     </div>`).join(""):'<div class="card muted">Nada pendiente.</div>'}`:""}`;
 }
+// ══ Acciones: todo lo que se ha mandado hacer para recuperar clientes ═══
+// Planes, instrucciones, estrategias, ofertas y alternativas, ordenados por
+// la fecha en que se asignaron. Cada fila abre la ficha del cliente.
+const FA={tipo:"",agente:"",estado:"",orden:"desc",q:""};
+function setFA(k,v){ FA[k]=v; pintar(); }
+function fechaCorta(ms){ return ms?new Date(ms).toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"}):"—"; }
+function accionesDe(){
+  const hoy=Date.now(), out=[];
+  const casoDeCli=(cli)=>CASOS.find(c=>ARR(c.cliente)===ARR(cli));
+  CASOS.forEach(c=>{
+    if(c.accion||c.causa){
+      const hd=(c.historial||[]).find(x=>/^Diagn/.test(x.sistema||"")||x.causa);
+      const f=Date.parse(c.diagnosticadoEn||"")||Date.parse((hd&&hd.fecha)||"")||Date.parse(c.abierto||"")||0;
+      const venc=RC.abierto(c)&&c.fechaObjetivo&&Date.parse(c.fechaObjetivo)<hoy;
+      out.push({t:"plan",f,c,ico:"🎯",tit:"Plan: "+(c.accion||"—"),det:(c.causa?"Causa: "+c.causa:"")+(num(c.eurosObjetivo)?" · recuperar "+eur(c.eurosObjetivo):""),
+        plazo:c.fechaObjetivo?Date.parse(c.fechaObjetivo):0,
+        est:c.estado==="recuperado"?["✅ Recuperado","ok"]:!RC.abierto(c)?["Archivado","gris"]:venc?["⚠️ Plazo vencido","mal"]:c.estado==="en_accion"?["En marcha","azul"]:["Diagnosticado","gris"],
+        pend:RC.abierto(c)});
+    }
+    if(c.instruccion){
+      const f=Date.parse(c.instruccionEn||"")||0;
+      out.push({t:"instr",f,c,ico:"📌",tit:"Instrucción de "+(c.instruccionPor||"dirección"),det:c.instruccion,
+        est:c.instruccionLeida===true?["✓ Recibida","ok"]:["Sin confirmar","mal"],pend:c.instruccionLeida!==true&&RC.abierto(c)});
+    }
+  });
+  ESTS.filter(e=>estEnAmbito(e)).forEach(e=>{
+    const c=(e.casoId&&CASOS.find(x=>x._id===e.casoId))||casoDeCli(e.clienteId); if(!c) return;
+    const o=(e.ofertas||[])[0]||{}, cf=e.cierreFinal, rz=e.resolucion||{};
+    const est=e.estado==="pendiente_aprobacion"?["⏳ Pendiente · "+RC.quienLaTiene(e).nombre,"aviso"]
+      :cf?(cf.resultado==="pedido"?["✅ Pedido","ok"]:["❌ Sin pedido","mal"])
+      :rz.tipo==="alternativa"?["🔄 Cambiada por alternativa","gris"]
+      :e.estado==="aprobada"?(e.seguimientoSemanal&&e.seguimientoSemanal.estado==="pendiente"?["⏳ Aprobada · sin pedido aún","aviso"]:["✅ Aprobada · esperando pedido","azul"])
+      :e.estado==="sin_exito"?["✖ Rechazada","mal"]:[e.estado||"","gris"];
+    out.push({t:"est",f:RC.fechaEst(e),c,ico:"💶",tit:"Estrategia: "+(o.nombre||"")+(o.calibre?" "+o.calibre:""),
+      det:`${o.precioActual?o.precioActual+" € → ":""}${o.precioFinal||o.precioOferta||""} €/${o.unidad||"m"} · ${RC.dtoEf(e)} % · ${e.solicitudAgente?"la pide "+(e.agenteNombre||e.agente):"creada por "+(e.creadoPorNombre||"")}`,
+      est,pend:e.estado==="pendiente_aprobacion"||RC.estAbierta(e)});
+  });
+  (OFS||[]).forEach(o=>{
+    if(o.origen!=="recuperacion"&&!o.casoId&&!o.desdeEstrategia) return;
+    const c=(o.casoId&&CASOS.find(x=>x._id===o.casoId))||casoDeCli(o.clienteId||o.clienteCodigo); if(!c) return;
+    if(o.desdeEstrategia) return;   // ya sale como estrategia
+    let ls=o.lineas; if(typeof ls==="string"){ try{ ls=JSON.parse(ls); }catch(x){ ls=[]; } }
+    const l=(ls||[])[0]||{}, f=Date.parse(o.fechaCreacion||"")||0, pl=Date.parse(o.fechaPlazo||"")||0;
+    const e=String(o.estado||"pendiente");
+    out.push({t:o.alternativaDe?"alt":"oferta",f,c,ico:o.alternativaDe?"🔄":"📨",
+      tit:(o.alternativaDe?"Alternativa: ":"Oferta: ")+(l.producto||"")+(l.calibre?" "+l.calibre:""),
+      det:`${l.precio||""} ${l.unidad||""}${o.alternativaDe?" · en lugar de "+(o.alternativaDe.nombre||o.alternativaDe.codigo||""):""}`,plazo:pl,
+      est:e==="pedido"?["✅ Pedido","ok"]:e==="ko"||e==="caro"?["❌ "+(e==="caro"?"Caro":"KO"),"mal"]:pl&&pl<hoy?["⚠️ Sin respuesta","mal"]:["⏳ Esperando respuesta","azul"],
+      pend:e==="pendiente"});
+  });
+  return out;
+}
+function vistaAcciones(){
+  if(OFS===null) setTimeout(cargarOfs,0);
+  let l=accionesDe();
+  const ags=[...new Set(l.map(x=>ARR(x.c.agente)))].sort((a,b)=>nomAg(a).localeCompare(nomAg(b)));
+  const cuenta={}; l.forEach(x=>cuenta[x.t]=(cuenta[x.t]||0)+1);
+  if(FA.tipo) l=l.filter(x=>x.t===FA.tipo);
+  if(FA.agente) l=l.filter(x=>ARR(x.c.agente)===FA.agente);
+  if(FA.estado==="pend") l=l.filter(x=>x.pend);
+  if(FA.estado==="mal") l=l.filter(x=>x.est[1]==="mal");
+  if(FA.q){ const q=ARR(FA.q); l=l.filter(x=>ARR(x.c.nombre+" "+x.c.cliente+" "+x.tit).includes(q)); }
+  l.sort((a,b)=>FA.orden==="asc"?(a.f||9e15)-(b.f||9e15):(b.f||0)-(a.f||0));
+  const col={ok:"#15803D",mal:"#B91C1C",aviso:"#B45309",azul:"#1D4ED8",gris:"#64748B"};
+  const chip=(k,v,t)=>`<button class="${FA[k]===v?"on":""}" onclick="setFA('${k}','${v}')">${t}</button>`;
+  const tipos=[["","Todo",l.length],["plan","🎯 Planes"],["instr","📌 Instrucciones"],["est","💶 Estrategias"],["oferta","📨 Ofertas"],["alt","🔄 Alternativas"]];
+  let h=`<div class="card" style="display:grid;gap:8px">
+    <div class="tabs" style="margin:0;flex-wrap:wrap">${tipos.map(([k,t])=>chip("tipo",k,t+(k?` (${cuenta[k]||0})`:""))).join("")}</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      ${ES_JEFE?`<select onchange="setFA('agente',this.value)" style="padding:8px;border-radius:9px;border:1.5px solid #CBD5E1;font:inherit">
+        <option value="">Todos los comerciales</option>${ags.map(a=>`<option value="${esc(a)}" ${FA.agente===a?"selected":""}>${esc(nomAg(a))}</option>`).join("")}</select>`:""}
+      <div class="tabs" style="margin:0">${chip("estado","","Todas")}${chip("estado","pend","Abiertas")}${chip("estado","mal","⚠️ Atascadas")}</div>
+      <div class="tabs" style="margin:0">${chip("orden","desc","Más nuevas")}${chip("orden","asc","Más antiguas")}</div>
+      <input placeholder="🔍 Cliente" value="${esc(FA.q)}" onchange="setFA('q',this.value)" style="flex:1;min-width:120px;padding:8px;border-radius:9px;border:1.5px solid #CBD5E1;font:inherit">
+    </div>
+    <div class="muted" style="font-size:12.5px">${l.length} acci${l.length===1?"ón":"ones"}${OFS===null||(OFS&&!OFS.length&&!FA.tipo)?" · cargando ofertas…":""}. Toca una para abrir el cliente.</div></div>`;
+  if(!l.length) return h+`<div class="card muted">No hay nada con estos filtros.</div>`;
+  let semAnt=null;
+  l.forEach(x=>{
+    const sem=x.f?"Semana "+RC.semanaISO(new Date(x.f))+" · "+new Date(x.f).getFullYear():"Sin fecha";
+    if(sem!==semAnt){ h+=`<div style="font-size:12px;font-weight:800;color:#64748B;margin:14px 2px 4px;text-transform:uppercase">${sem}</div>`; semAnt=sem; }
+    h+=`<div class="card" onclick="abrirFicha('${x.c._id}')" style="cursor:pointer;padding:10px 12px;margin-bottom:6px">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start">
+        <div style="min-width:0"><div style="font-size:12px" class="muted">${fechaCorta(x.f)} · ${esc(nomAg(x.c.agente))}</div>
+          <div style="font-weight:800;font-size:14px">${esc(x.c.nombre||x.c.cliente)}</div>
+          <div style="font-size:13.5px;font-weight:700;margin-top:2px">${x.ico} ${esc(x.tit)}</div>
+          ${x.det?`<div class="muted" style="font-size:12.5px">${esc(x.det)}</div>`:""}
+          ${x.plazo?`<div class="muted" style="font-size:12px">Plazo: ${fechaCorta(x.plazo)}</div>`:""}</div>
+        <div style="text-align:right;flex-shrink:0"><div class="neg" style="font-weight:800;font-size:13px">−${eur(x.c.perdido)}</div>
+          <div style="font-size:11.5px;font-weight:800;color:${col[x.est[1]]};margin-top:4px">${esc(x.est[0])}</div></div></div></div>`;
+  });
+  return h;
+}
 // Causas navegables: cada causa se abre y enseña sus clientes (con su
 // comercial, lo que se pierde y el plan); sin diagnosticar, por comercial.
 const CAUSA_AB=new Set();
@@ -732,14 +825,14 @@ function pintar0(){
     if(c){ document.getElementById("app").innerHTML=vistaFicha(c); RC.activarForms(); return; } FICHA=null; }
   const pend=porDecidir();
   const tabs=[["comite","Comité del viernes",ES_JEFE],["casos","Casos",true],
-    ["aprobar",`Aprobar${pend?" ("+pend+")":""}`,ES_JEFE],["causas","Causas",ES_JEFE]].filter(t=>t[2]);
+    ["acciones","Acciones",true],["aprobar",`Aprobar${pend?" ("+pend+")":""}`,ES_JEFE],["causas","Causas",ES_JEFE]].filter(t=>t[2]);
   document.getElementById("app").innerHTML=`
     ${tiles(CASOS)}
     <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap">
       <div class="tabs" style="margin:0">${tabs.map(([k,t])=>`<button class="${TAB===k?"on":""}" onclick="TAB='${k}';pintar()">${t}</button>`).join("")}</div>
       ${ES_JEFE?`<button class="btn gris" onclick="detectarTodo(this)">🔎 Detectar ahora</button>`:""}
     </div>
-    ${TAB==="comite"?vistaComite():TAB==="aprobar"?vistaAprobar():TAB==="causas"?vistaCausas():vistaCasos()}`;
+    ${TAB==="comite"?vistaComite():TAB==="acciones"?vistaAcciones():TAB==="aprobar"?vistaAprobar():TAB==="causas"?vistaCausas():vistaCasos()}`;
   // Los productos se buscan en el orden en que salen en pantalla, solo los
   // 12 primeros de golpe; el resto, al pulsar «Ver qué ha dejado de comprar».
   const orden=[...document.querySelectorAll('[id^="arts_"]')].map(el=>el.id.slice(5));
