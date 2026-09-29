@@ -260,7 +260,8 @@
     .filter(Boolean).join(" · ");
   RC.cargarProductos=async(caso,forzar)=>{
     if(!caso||!caso.cliente) return null;
-    if(!forzar&&caso.productos&&!caso.productos.error){
+    // v2: 8 artículos en vez de 5; lo guardado con la versión anterior se renueva
+    if(!forzar&&caso.productos&&!caso.productos.error&&caso.productos.v===2){
       const d=RC.dias(caso.productosEn);
       if(d!=null&&d<RC.PROD_DIAS) return caso.productos;
     }
@@ -268,13 +269,13 @@
     const ctl=typeof AbortController!=="undefined"?new AbortController():null;
     const tope=setTimeout(()=>{ try{ ctl&&ctl.abort(); }catch(e){} },55000);
     try{
-      const r=await fetch(`/api/pbi-sync?articulosCliente=${encodeURIComponent(caso.cliente)}&top=6`,ctl?{signal:ctl.signal}:{});
+      const r=await fetch(`/api/pbi-sync?articulosCliente=${encodeURIComponent(caso.cliente)}&top=10`,ctl?{signal:ctl.signal}:{});
       if(!r.ok) throw new Error("Power BI respondió "+r.status);
       const j=await r.json();
       if(j&&j.ok===false) throw new Error(j.error||"sin respuesta");
       const m=(a)=>({art:a.articulo,desc:RC.prodTexto(a),act:Math.round(num(a.ventasAct)),ant:Math.round(num(a.ventasAnt))});
-      const p={caen:(j.articulos||[]).filter(a=>num(a.diferencia)<0).slice(0,5).map(m),
-               suben:(j.suben||[]).filter(a=>num(a.diferencia)>0).slice(0,2).map(m)};
+      const p={caen:(j.articulos||[]).filter(a=>num(a.diferencia)<0).slice(0,8).map(m),
+               suben:(j.suben||[]).filter(a=>num(a.diferencia)>0).slice(0,3).map(m),v:2};
       caso.productos=p; caso.productosEn=new Date().toISOString();
       try{ await RC.guardar(caso._id,{productos:p,productosEn:caso.productosEn}); }catch(e){}
       return p;
@@ -291,13 +292,30 @@
     const esc=(t)=>String(t??"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
     const max=opts.max||5;
     if(!p.caen||!p.caen.length) return `<div style="font-size:12px;color:#8A94A0">No hay un producto concreto que caiga: baja un poco en todo.</div>`;
+    const caen=p.caen.slice(0,max), suben=opts.sinSuben?[]:(p.suben||[]);
+    // Un importe negativo este año es un abono o una devolución, no una venta
+    const imp=(v,col)=>v<0?`<b style="color:#C2263D">${RC.eur(v)}</b> <span style="color:#8A94A0">(abono)</span>`:`<b style="color:${col}">${RC.eur(v)}</b>`;
     const fila=(a,col)=>`<tr><td style="padding:3px 8px 3px 0;font-size:12px;line-height:1.35">${esc(a.desc)}${a.art&&a.desc!==a.art?`<span style="color:#8A94A0"> · ${esc(a.art)}</span>`:""}</td>
-      <td style="padding:3px 0;font-size:12px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums">${RC.eur(a.ant)} → <b style="color:${col}">${RC.eur(a.act)}</b></td></tr>`;
+      <td style="padding:3px 0;font-size:12px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums">${RC.eur(a.ant)} → ${imp(a.act,a.act?"#B45309":"#C2263D")}</td></tr>`;
+    // Cuadre con la cabecera: la lista es solo lo más grande
+    const pierde=caen.reduce((t,a)=>t+(num(a.ant)-num(a.act)),0);
+    const gana=suben.reduce((t,a)=>t+(num(a.act)-num(a.ant)),0);
+    const tot=num(opts.perdido);
+    let cuadre="";
+    if(tot>0){
+      const resto=Math.round(tot-pierde+gana);
+      cuadre=`<div style="font-size:11.5px;color:#6B7684;margin-top:5px;line-height:1.4">
+        ${caen.length===1?"Este artículo explica":"Estos "+caen.length+" artículos explican"} <b>${RC.eur(pierde)}</b> de los <b>${RC.eur(tot)}</b> que cae el cliente${gana?`, y lo que compra más compensa ${RC.eur(gana)}`:""}.
+        ${Math.abs(resto)>Math.max(50,tot*0.02)?(resto>0?`Los otros <b>${RC.eur(resto)}</b> vienen de artículos más pequeños o de abonos.`
+          :`El resto de artículos compensa ${RC.eur(-resto)}.`):""}</div>`;
+    }
     return `<div style="margin:6px 0 2px">
-      <div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#8A94A0">Ha dejado de comprar · año pasado → este año</div>
-      <table style="width:100%;border-collapse:collapse">${p.caen.slice(0,max).map(a=>fila(a,a.act?"#B45309":"#C2263D")).join("")}</table>
-      ${!opts.sinSuben&&p.suben&&p.suben.length?`<div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#8A94A0;margin-top:5px">En cambio compra más</div>
-      <table style="width:100%;border-collapse:collapse">${p.suben.map(a=>fila(a,"#0E7C5A")).join("")}</table>`:""}
+      <div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#8A94A0">Lo que más cae · año pasado → este año</div>
+      <table style="width:100%;border-collapse:collapse">${caen.map(a=>fila(a,"#B45309")).join("")}</table>
+      ${suben.length?`<div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#8A94A0;margin-top:5px">En cambio compra más</div>
+      <table style="width:100%;border-collapse:collapse">${suben.map(a=>`<tr><td style="padding:3px 8px 3px 0;font-size:12px;line-height:1.35">${esc(a.desc)}${a.art&&a.desc!==a.art?`<span style="color:#8A94A0"> · ${esc(a.art)}</span>`:""}</td>
+        <td style="padding:3px 0;font-size:12px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums">${RC.eur(a.ant)} → <b style="color:#0E7C5A">${RC.eur(a.act)}</b></td></tr>`).join("")}</table>`:""}
+      ${cuadre}
     </div>`;
   };
   // Carga en paralelo (de 3 en 3) y avisa al terminar cada uno
@@ -355,6 +373,56 @@
       body:JSON.stringify({to,subject:`📌 ${quien} → ${d.nombreComercial}: ${caso.nombre}`,html})}); d.enviado=true; }
     catch(e){ d.enviado=false; }
     return d;
+  };
+  // Pedir el diagnóstico de varios casos de un comercial en un solo correo
+  RC.pedirDiagnosticos=async(agente,casos,quien,quienId,horas)=>{
+    horas=horas||48;
+    const d=await RC.destinatarios(agente,quienId);
+    const ahora=new Date(); const limite=new Date(ahora.getTime()+horas*3600000);
+    const fl=limite.toLocaleDateString("es-ES",{weekday:"long",day:"numeric",month:"long"});
+    const sem=RC.semanaISO(ahora);
+    const txt=`Diagnostica antes del ${fl}: por qué cae, qué vas a hacer, para cuándo y cuánto vas a recuperar.`;
+    for(const c of casos){
+      const hist=(c.historial||[]).concat([{sem,fecha:ahora.toISOString(),por:quien,sistema:"Pide diagnóstico en "+horas+" h"}]);
+      const campos={historial:hist,instruccion:txt,instruccionPor:quien,instruccionEn:ahora.toISOString(),instruccionLeida:false,
+        diagnosticoPedidoEn:ahora.toISOString(),diagnosticoPedidoPor:quien,diagnosticoLimite:limite.toISOString()};
+      try{ await RC.guardar(c._id,campos); Object.assign(c,campos); }catch(e){}
+    }
+    const to=[...d.para,...d.copias].map(x=>x.email);
+    if(to.length){
+      const esc=(t)=>String(t||"").replace(/[<>&]/g,x=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[x]));
+      const tot=casos.reduce((t,c)=>t+num(c.perdido),0);
+      const html=`<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:600px;margin:0 auto;color:#14181F">
+        <div style="background:#14181F;color:#fff;padding:16px 20px;border-radius:12px 12px 0 0">
+          <div style="font-size:11px;letter-spacing:.08em;opacity:.7;text-transform:uppercase">Plan de recuperación · diagnóstico</div>
+          <div style="font-size:19px;font-weight:800;margin-top:2px">${casos.length} cliente${casos.length===1?"":"s"} · ${RC.eur(tot)} en juego</div></div>
+        <div style="border:1px solid #DCE1E7;border-top:none;border-radius:0 0 12px 12px;padding:18px 20px">
+          <div style="font-size:14px;margin-bottom:10px"><b>${esc(quien)}</b> pide a <b>${esc(d.nombreComercial)}</b> el diagnóstico de estos clientes
+            <b>antes del ${esc(fl)}</b>: por qué cae, qué vas a hacer, para cuándo y cuánto vas a recuperar.</div>
+          ${casos.slice().sort((a,b)=>num(b.perdido)-num(a.perdido)).map(c=>`<div style="border:1px solid #EEF1F5;border-left:3px solid ${RC.NIVEL_COL[RC.nivelDe(c).nivel]};border-radius:6px;padding:8px 10px;margin:6px 0">
+            <div style="display:flex;justify-content:space-between;gap:8px"><b style="font-size:13px">${esc(c.nombre)}</b>
+              <span style="font-size:12.5px;font-weight:800;color:#C2263D;white-space:nowrap">−${RC.eur(c.perdido)}</span></div>
+            <div style="font-size:11.5px;color:#6B7684">${esc(c.motivo||"")}</div>
+            ${RC.htmlProductos(RC.prodDe(c),{max:3,sinSuben:true})}</div>`).join("")}
+          <div style="font-size:12.5px;margin-top:12px">Se hace en el portal → <b>🚨 Plan de recuperación</b> → cada cliente → <b>Diagnosticar ahora</b>. Tarda un minuto por cliente.</div>
+          ${d.copias.length?`<div style="font-size:11.5px;color:#8A94A0;margin-top:8px">Copia a: ${d.copias.map(x=>esc(x.nombre)+" ("+x.papel+")").join(", ")}.</div>`:""}
+          <a href="https://crmwikuk.vercel.app/" style="display:inline-block;margin-top:14px;background:#14181F;color:#fff;text-decoration:none;padding:10px 20px;border-radius:9px;font-size:13px;font-weight:700">Abrir el portal</a>
+        </div></div>`;
+      try{ await fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({to,subject:`📨 ${quien} → ${d.nombreComercial}: diagnóstico de ${casos.length} cliente${casos.length===1?"":"s"} antes del ${fl}`,html})}); }catch(e){}
+    }
+    return d;
+  };
+  // Guarda el diagnóstico (mismos campos que el parte semanal)
+  RC.guardarDiagnostico=async(c,r,por)=>{
+    const ahora=new Date().toISOString();
+    const mg=r.accion==="Oferta de vuelta"&&r.margenOferta!==""&&r.margenOferta!=null?Number(String(r.margenOferta).replace(",",".")):null;
+    const campos={causa:r.causa,causaNota:r.causaNota||"",accion:r.accion,accionNota:r.accionNota||"",
+      fechaObjetivo:r.fechaObjetivo,eurosObjetivo:Number(r.eurosObjetivo)||0,margenOferta:mg,
+      necesitaAprobacion:(mg!=null&&mg<RC.UMBRAL.margenMin)?"margen":"",margenAprobado:"",
+      estado:"diagnosticado",diagnosticadoEn:ahora,diagnosticadoPor:por,actualizado:ahora,
+      historial:(c.historial||[]).concat([{sem:RC.semanaISO(new Date()),fecha:ahora,por,sistema:`Diagnóstico: ${r.causa} · plan: ${r.accion}`}])};
+    await RC.guardar(c._id,campos); Object.assign(c,campos); return c;
   };
   RC.textoAviso=(d)=>!d||(!d.para.length&&!d.copias.length)?"Guardada en el caso. No encuentro correos: la verá en el panel y en su parte."
     :`Enviada a ${d.para.length?d.para.map(x=>x.nombre).join(", "):"(sin correo del comercial)"}${d.copias.length?" · copia a "+d.copias.map(x=>x.nombre+" ("+x.papel+")").join(", "):""}.`;

@@ -119,31 +119,36 @@ async function detectarTodo(btn){
 // ── Pintar ────────────────────────────────────────────────────────────
 function pill(n){ return `<span class="pill" style="background:${RC.NIVEL_COL[n]}">${RC.NIVEL_TXT[n]}</span>`; }
 function ultimaDeSemana(c){ return (c.historial||[]).filter(x=>x.sem===SEM&&!x.sistema).slice(-1)[0]||null; }
-function lineaCaso(c,conAcciones){
+// Diagnosticado esta misma semana cuenta como avance: no se le pide más hasta la siguiente
+function diagEstaSemana(c){ return (c.historial||[]).some(x=>x.sem===SEM&&/^Diagn/.test(x.sistema||"")); }
+function lineaCaso(c,conAcciones,opts){
+  opts=opts||{};
   const nv=RC.nivelDe(c);
   const u=ultimaDeSemana(c);
   const dAcc=RC.dias(c.ultimaAccion||c.abierto);
   const sinPlan=!RC.tienePlan(c);
-  let h=`<div class="caso">
-    <div class="row"><div><b style="font-size:14px">${esc(c.nombre)}</b>
+  let h=`<div class="caso"${opts.sinCabecera?' style="border:none;padding:4px 0 8px"':""}>
+    ${opts.sinCabecera?`<div class="muted">${esc(c.motivo||"")}</div>`:`<div class="row"><div><b style="font-size:14px">${esc(c.nombre)}</b>
       <div class="muted">${esc(nomAg(c.agente))} · ${esc(c.motivo||"")}</div></div>
-      <div class="neg">−${eur(c.perdido)}</div></div>
+      <div class="neg">−${eur(c.perdido)}</div></div>`}
     <div style="margin:5px 0 2px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">${pill(nv.nivel)}
       <span class="muted">${c.estado==="recuperado"?"✅ recuperado el "+fch(c.recuperadoEn)
         :c.estado==="archivado"?"🗄 archivado · "+esc(c.archivoMotivo||"")
         :c.estado==="propuesta_archivo"?"⏳ pide archivarlo"
         :dAcc!=null?`${dAcc} días desde la última acción`:""}${nv.motivo&&nv.nivel>RC.nivelBase(c.perdido)?" · ⬆ "+esc(nv.motivo):""}</span></div>`;
-  if(RC.abierto(c)||c.productos){
-    const tiene=c.productos&&!c.productos.error;
+  if(!opts.sinProductos&&(RC.abierto(c)||c.productos)){
+    const tiene=c.productos&&!c.productos.error&&c.productos.v===2;
     h+=`<div id="arts_${c._id}" style="background:#F8FAFC;border-radius:8px;padding:5px 9px;margin:6px 0">${
-      tiene?RC.htmlProductos(c.productos)
+      tiene?RC.htmlProductos(c.productos,{max:8,perdido:c.perdido})
       :c.productos&&c.productos.error?RC.htmlProductos(c.productos,{reintentar:`verProductos('${c._id}')`})
       :`<a href="#" onclick="verProductos('${c._id}');return false" style="font-size:12.5px;font-weight:700;color:#2563EB">📦 Ver qué ha dejado de comprar</a>`}</div>`;
   }
   if(RC.abierto(c)){
     h+= sinPlan ? (c.estado==="propuesta_archivo"
         ? `<div class="q"><b>Pide archivarlo:</b> ${esc(c.archivoMotivo||"")} — ${esc(c.archivoNota||"")}</div>`
-        : `<div class="q falta">Sin diagnosticar todavía</div>`)
+        : `<div class="q falta">Sin diagnosticar todavía${c.diagnosticoLimite?` · pedido por ${esc(c.diagnosticoPedidoPor||"")} para el ${fch(c.diagnosticoLimite)}${c.diagnosticoLimite<new Date().toISOString()?" · ⏰ fuera de plazo":""}`:""}</div>
+          ${formDiagnostico(c)}
+          ${ES_JEFE&&conAcciones?`<button class="btn gris" style="margin-top:6px" onclick="pedirDiag(['${c._id}'])">📨 Pedir diagnóstico en 48 h</button>`:""}`)
       : `<div class="q"><b>Causa:</b> ${esc(c.causa)}${c.causaNota?" — "+esc(c.causaNota):""}</div>
          <div class="q"><b>Plan:</b> ${esc(c.accion)}${c.margenOferta!=null&&c.margenOferta!==""?" ("+esc(c.margenOferta)+" % margen)":""}${c.accionNota?" — "+esc(c.accionNota):""}
            · <b>${eur(c.eurosObjetivo)}</b> antes del ${fch(c.fechaObjetivo)}${
@@ -152,6 +157,7 @@ function lineaCaso(c,conAcciones){
       h+= u ? `<div class="q"><b>¿Qué hiciste?</b> ${esc(u.hecho)}</div>
                <div class="q"><b>¿Qué dijo el cliente?</b> ${esc(u.respuesta)}</div>
                <div class="q"><b>¿Qué harás?</b> ${esc(u.siguiente)}</div>`
+            : diagEstaSemana(c)?`<div class="q" style="color:var(--green)">Diagnosticado esta semana</div>`
             : `<div class="q falta">Sin avance esta semana</div>`;
     }
   }
@@ -187,25 +193,212 @@ function tiles(l){
     <div class="tile"><span>${ES_JEFE?"Te toca decidir":"Esperan decisión"}</span><b style="color:${(ES_JEFE?porDecidir():r.propuestas)?"var(--amber)":"var(--navy)"}">${ES_JEFE?porDecidir():r.propuestas}</b></div>
   </div>`;
 }
+// ── Diagnóstico desde el panel (sin esperar al parte) ──
+function formDiagnostico(c,abierto,titulo){
+  const id=c._id;
+  const sel=(k,ops,ph)=>`<select id="dg_${k}_${id}"><option value="">${ph}</option>${ops.map(o=>`<option${c[k]===o?" selected":""}>${esc(o)}</option>`).join("")}</select>`;
+  const v=(k)=>esc(c[k]??"");
+  return `<details style="margin-top:6px"${(abierto||!ES_JEFE)?" open":""}><summary style="font-weight:700;color:var(--blue);cursor:pointer">${titulo||"✍️ Diagnosticar ahora"}</summary>
+    <div style="display:grid;gap:6px;margin-top:6px">
+      ${sel("causa",RC.CAUSAS,"¿Por qué cae?")}
+      <textarea id="dg_causaNota_${id}" placeholder="Qué te ha dicho, a quién compra ahora…">${v("causaNota")}</textarea>
+      ${sel("accion",RC.ACCIONES,"¿Qué vas a hacer?")}
+      <input id="dg_margenOferta_${id}" type="number" step="0.5" value="${v("margenOferta")}" placeholder="Margen de la oferta % (solo si es oferta de vuelta)">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+        <label class="muted">Fecha objetivo<input id="dg_fechaObjetivo_${id}" type="date" value="${v("fechaObjetivo")}"></label>
+        <label class="muted">€ a recuperar<input id="dg_eurosObjetivo_${id}" type="number" min="0" step="100" value="${num(c.eurosObjetivo)||""}" placeholder="${Math.round(num(c.perdido)/2)}"></label>
+      </div>
+      <button class="btn ok" onclick="guardarDiag('${id}')">Guardar diagnóstico</button>
+    </div></details>`;
+}
+async function guardarDiag(id){
+  const c=CASOS.find(x=>x._id===id); if(!c) return;
+  const v=(k)=>(document.getElementById(`dg_${k}_${id}`)?.value||"").trim();
+  const r={causa:v("causa"),causaNota:v("causaNota"),accion:v("accion"),margenOferta:v("margenOferta"),
+    fechaObjetivo:v("fechaObjetivo"),eurosObjetivo:v("eurosObjetivo")};
+  if(!r.causa||!r.accion||!r.fechaObjetivo||!(Number(r.eurosObjetivo)>0)){ alert("Falta la causa, la acción, la fecha o los euros a recuperar."); return; }
+  if(r.accion==="Oferta de vuelta"&&r.margenOferta===""){ alert("Pon el margen de la oferta."); return; }
+  try{ await RC.guardarDiagnostico(c,r,ES_JEFE?QUIEN:(NOMBRE||AGENTE)); pintar(); }
+  catch(e){ alert("No se ha guardado: "+e.message); }
+}
+async function pedirDiag(ids){
+  const casos=ids.map(id=>CASOS.find(x=>x._id===id)).filter(Boolean);
+  if(!casos.length) return;
+  const g={}; casos.forEach(c=>(g[ARR(c.agente)]=g[ARR(c.agente)]||[]).push(c));
+  const avisos=[];
+  for(const [a,l] of Object.entries(g)){
+    const d=await RC.pedirDiagnosticos(a,l,QUIEN,ES_CEO?"ceo":AGENTE,48);
+    avisos.push(`${nomAg(a)}: ${l.length} caso${l.length===1?"":"s"} · ${RC.textoAviso(d)}`);
+  }
+  pintar(); alert(avisos.join("\n"));
+}
+
+// ══ Ficha del cliente: pantalla solo para él ══════════════════════════
+let FICHA=null, _scrollLista=0;
+const FICHA_ART={tab:"caen",abierto:null};
+function abrirFicha(id){ _scrollLista=window.scrollY||0; FICHA=id; FICHA_ART.tab="caen"; FICHA_ART.abierto=null; pintar(); window.scrollTo(0,0);
+  const c=CASOS.find(x=>x._id===id); if(c){ cargarTodosArt(c); cargarProg(c); } }
+function cerrarFicha(){ FICHA=null; pintar(); window.scrollTo(0,_scrollLista); }
+async function cargarTodosArt(c,forzar){
+  if(c._arts&&!forzar) return;
+  c._arts="cargando"; if(FICHA===c._id) pintar();
+  try{
+    const r=await fetch(`/api/pbi-sync?articulosCliente=${encodeURIComponent(c.cliente)}&top=30`);
+    const j=await r.json();
+    if(j.ok===false) throw new Error(j.error||"sin respuesta");
+    const m=(a)=>({art:a.articulo,desc:a.descripcion||a.articulo,cal:a.calibre||"",metros:a.metros||"",
+      act:Math.round(num(a.ventasAct)),ant:Math.round(num(a.ventasAnt)),dif:Math.round(num(a.diferencia))});
+    c._arts={caen:(j.articulos||[]).map(m),suben:(j.suben||[]).map(m)};
+  }catch(e){ c._arts={error:e.message}; }
+  if(FICHA===c._id) pintar();
+}
+async function cargarProg(c){
+  if(c._prog) return;
+  c._prog="cargando";
+  try{ const r=await fetch(`/api/pbi-sync?progresionCliente=${encodeURIComponent(c.cliente)}`); const j=await r.json();
+    c._prog=j.ok?j:{error:j.error||"sin respuesta"}; }catch(e){ c._prog={error:e.message}; }
+  if(FICHA===c._id) pintar();
+}
+function vistaFicha(c){
+  const nv=RC.nivelDe(c); const [et,ec]=estadoCorto(c);
+  const ant=num(c.ventasAnt), act=num(c.ventasAct);
+  const pct=ant?Math.round((act-ant)/ant*100):null;
+  const tile=(t,v,col,sub)=>`<div class="tile"><span>${t}</span><b style="color:${col||"var(--navy)"}">${v}</b>${sub?`<div class="muted" style="font-size:11px">${sub}</div>`:""}</div>`;
+  // Mes a mes
+  let meses="";
+  const P=c._prog;
+  if(P==="cargando"||!P) meses=`<p class="muted">Cargando mes a mes…</p>`;
+  else if(P.error) meses=`<p class="muted">No se ha podido cargar el mes a mes (${esc(P.error)}).</p>`;
+  else{
+    const ms=(P.meses||[]).filter(m=>!m.futuro);
+    const mx=Math.max(1,...ms.map(m=>Math.max(num(m.actual),num(m.anterior))));
+    meses=`<div style="display:flex;gap:4px;align-items:flex-end;height:120px;padding-top:6px;overflow-x:auto">
+      ${ms.map(m=>`<div style="flex:1;min-width:24px;display:flex;flex-direction:column;align-items:center;gap:3px">
+        <div style="display:flex;gap:2px;align-items:flex-end;height:90px">
+          <div title="${P.anoAnterior}: ${eur(m.anterior)}" style="width:9px;height:${Math.max(1,Math.round(num(m.anterior)/mx*90))}px;background:#CBD5E1;border-radius:2px"></div>
+          <div title="${P.anoActual}: ${eur(m.actual)}" style="width:9px;height:${Math.max(1,Math.round(Math.max(0,num(m.actual))/mx*90))}px;background:${num(m.actual)<num(m.anterior)*0.7?"var(--red)":"var(--green)"};border-radius:2px;${m.enCurso?"opacity:.5":""}"></div>
+        </div>
+        <div style="font-size:10px;color:var(--muted)">${esc(String(m.mes).slice(0,3))}${m.enCurso?"*":""}</div></div>`).join("")}
+    </div>
+    <div class="muted" style="font-size:11px;margin-top:4px">Gris: ${P.anoAnterior}. Color: ${P.anoActual} (rojo si cae más del 30 %). * mes en curso.${P.caeDesde?` <b style="color:var(--red)">Cae desde ${esc(P.caeDesde)}.</b>`:""}</div>`;
+  }
+  // Artículos
+  const A=c._arts;
+  let arts="";
+  if(A==="cargando"||!A) arts=`<p class="muted">Buscando todos los artículos… (la primera vez tarda unos segundos)</p>`;
+  else if(A.error) arts=`<p class="muted">No se han podido consultar (${esc(A.error)}). <a href="#" onclick="cargarTodosArt(CASOS.find(x=>x._id==='${c._id}'),true);return false">Reintentar</a></p>`;
+  else{
+    const l=FICHA_ART.tab==="caen"?A.caen:A.suben;
+    const sumC=A.caen.reduce((t,a)=>t-a.dif,0), sumS=A.suben.reduce((t,a)=>t+a.dif,0);
+    arts=`<div class="tabs" style="margin-bottom:6px">
+        <button class="${FICHA_ART.tab==="caen"?"on":""}" onclick="FICHA_ART.tab='caen';FICHA_ART.abierto=null;pintar()">Caen (${A.caen.length}) · −${eur(sumC)}</button>
+        <button class="${FICHA_ART.tab==="suben"?"on":""}" onclick="FICHA_ART.tab='suben';FICHA_ART.abierto=null;pintar()">Crecen (${A.suben.length}) · +${eur(sumS)}</button></div>
+      ${!l.length?`<p class="muted">Ninguno.</p>`:l.map((a,i)=>{
+        const w=a.ant?Math.max(0,Math.min(100,Math.round(a.act/a.ant*100))):100;
+        const ab=FICHA_ART.abierto===i;
+        return `<div style="border-top:1px solid #F1F5F9;padding:9px 0">
+          <div class="row"><div style="min-width:0"><b style="font-size:13px">${esc(a.desc)}</b>
+            <div class="muted" style="font-size:11.5px">${esc(a.art)}${a.cal?" · calibre "+esc(a.cal):""}${a.metros?" · "+esc(a.metros)+" m":""}</div></div>
+            <div style="text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;font-size:12.5px">
+              ${eur(a.ant)} → <b style="color:${a.act<0||a.dif<0?"var(--red)":"var(--green)"}">${eur(a.act)}</b>${a.act<0?' <span class="muted">(abono)</span>':""}
+              <div style="font-weight:800;color:${a.dif<0?"var(--red)":"var(--green)"}">${a.dif>0?"+":""}${eur(a.dif)}</div></div></div>
+          ${FICHA_ART.tab==="caen"?`<div class="barra" style="background:#E2E8F0"><i style="width:${w}%;background:var(--red)"></i></div>`:""}
+          ${ES_JEFE&&FICHA_ART.tab==="caen"?`<div style="margin-top:6px"><a href="#" onclick="FICHA_ART.abierto=${ab?"null":i};pintar();return false" style="font-size:12px;font-weight:700;color:var(--blue)">📌 Pedir plan o estrategia de este artículo</a></div>
+            ${ab?`<div style="display:grid;gap:6px;margin-top:6px">
+              <textarea id="pa_txt">${esc(`Plan para recuperar ${a.desc}${a.cal?" (calibre "+a.cal+")":""}: venía de ${eur(a.ant)} y este año lleva ${eur(a.act)}. Dime qué ha pasado y qué vas a hacer (oferta, muestra, visita…).`)}</textarea>
+              <div style="display:flex;gap:6px"><button class="btn ok" onclick="pedirPlanArt('${c._id}')">Enviar al comercial</button>
+                <button class="btn gris" onclick="FICHA_ART.abierto=null;pintar()">Cancelar</button></div></div>`:""}`:""}
+        </div>`;}).join("")}`;
+  }
+  return `<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+      <button class="btn gris" onclick="cerrarFicha()">← Volver a la lista</button></div>
+    <div class="card">
+      <div class="row"><div style="min-width:0"><div style="font-size:19px;font-weight:800;line-height:1.2">${esc(c.nombre)}</div>
+        <div class="muted">${esc(nomAg(c.agente))}${c.equipo?" · "+esc(c.equipo):""}${c.poblacion?" · "+esc(c.poblacion):""} · código ${esc(c.cliente)}</div></div>
+        <div class="neg" style="font-size:18px">−${eur(c.perdido)}</div></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${pill(nv.nivel)}
+        <span class="pill" style="background:${ec}">${et}</span>
+        ${nv.motivo&&nv.nivel>RC.nivelBase(c.perdido)?`<span class="muted">⬆ ${esc(nv.motivo)}</span>`:""}</div>
+      <div class="muted" style="margin-top:6px">${esc(c.motivo||"")}</div>
+    </div>
+    <div class="tiles">
+      ${tile("Este año",eur(act),act<ant?"var(--red)":"var(--green)")}
+      ${tile("Año pasado",eur(ant),null,"mismo periodo")}
+      ${tile("Variación",pct!=null?pct+" %":"—","var(--red)")}
+    </div>
+    <div class="card"><b>Mes a mes</b>${meses}</div>
+    <div class="card"><b>Artículos</b><div class="muted" style="font-size:12px;margin-bottom:6px">Todos los que se mueven frente al año pasado, de mayor a menor.</div>${arts}</div>
+    <div class="card"><b>Diagnóstico y plan</b>
+      ${RC.tienePlan(c)&&RC.abierto(c)?formDiagnostico(c,false,"✏️ Cambiar el diagnóstico"):""}
+      ${lineaCaso(c,true,{sinCabecera:true,sinProductos:true})}</div>`;
+}
+async function pedirPlanArt(id){
+  const c=CASOS.find(x=>x._id===id); if(!c) return;
+  const t=(document.getElementById("pa_txt")?.value||"").trim(); if(t.length<5) return;
+  const ahora=new Date().toISOString();
+  const hist=(c.historial||[]).concat([{sem:SEM,fecha:ahora,por:QUIEN,sistema:"Instrucción: "+t}]);
+  try{
+    await RC.guardar(id,{historial:hist,instruccion:t,instruccionPor:QUIEN,instruccionEn:ahora,instruccionLeida:false});
+    Object.assign(c,{historial:hist,instruccion:t,instruccionPor:QUIEN,instruccionEn:ahora,instruccionLeida:false});
+    FICHA_ART.abierto=null; pintar();
+    const d=await RC.avisarInstruccion(c,t,QUIEN,ES_CEO?"ceo":AGENTE); alert(RC.textoAviso(d));
+  }catch(e){ alert("No se ha guardado: "+e.message); }
+}
+
+// Navegación: comerciales y casos se abren y se cierran al pulsar
+const ABRE_AG=new Set(), ABRE_CASO=new Set();
+function toggleAg(a){ ABRE_AG.has(a)?ABRE_AG.delete(a):ABRE_AG.add(a); pintar(); }
+function toggleCaso(id){ ABRE_CASO.has(id)?ABRE_CASO.delete(id):ABRE_CASO.add(id); pintar(); }
+function todosAg(abrir,lista){ lista.forEach(a=>abrir?ABRE_AG.add(a):ABRE_AG.delete(a)); if(!abrir) ABRE_CASO.clear(); pintar(); }
+function estadoCorto(c){
+  if(c.estado==="recuperado") return ["✅ recuperado","var(--green)"];
+  if(c.estado==="archivado") return ["🗄 archivado","var(--muted)"];
+  if(c.estado==="propuesta_archivo") return ["⏳ pide archivo","var(--amber)"];
+  if(!RC.tienePlan(c)) return ["sin plan","var(--red)"];
+  if(!ultimaDeSemana(c)&&!diagEstaSemana(c)) return ["sin avance","var(--red)"];
+  return ["al día","var(--green)"];
+}
+function filaCompacta(c,conAgente){
+  const abierto=ABRE_CASO.has(c._id);
+  const nv=RC.nivelDe(c); const [et,ec]=estadoCorto(c);
+  return `<div style="border-top:1px solid #F1F5F9">
+    <div onclick="abrirFicha('${c._id}')" style="display:flex;gap:10px;align-items:center;padding:10px 0;cursor:pointer">
+      <span style="width:8px;height:8px;border-radius:99px;background:${RC.NIVEL_COL[nv.nivel]};flex:none" title="${RC.NIVEL_TXT[nv.nivel]}"></span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(c.nombre)}</div>
+        <div class="muted" style="font-size:11.5px">${conAgente?esc(nomAg(c.agente))+" · ":""}<span style="color:${ec};font-weight:700">${et}</span>${c.instruccion&&RC.abierto(c)?" · 📌":""}</div></div>
+      <div class="neg" style="font-size:13px">−${eur(c.perdido)}</div>
+      <span style="color:var(--muted);font-size:16px;width:14px;text-align:center">›</span>
+    </div>
+  </div>`;
+}
 function vistaComite(){
   const ab=CASOS.filter(RC.abierto);
   if(!ab.length) return `<div class="card muted">No hay casos abiertos. Pulsa <b>Detectar ahora</b> para revisar la cartera.</div>`;
   const g={}; ab.forEach(c=>(g[ARR(c.agente)]=g[ARR(c.agente)]||[]).push(c));
   const orden=Object.entries(g).sort((a,b)=>b[1].reduce((t,c)=>t+num(c.perdido),0)-a[1].reduce((t,c)=>t+num(c.perdido),0));
   return `<div class="card" style="background:var(--blueL);border-color:#BFDBFE;font-size:13px;line-height:1.5">
-      <b>Comité del viernes.</b> Por comercial, sus 10 casos más grandes y las tres preguntas:
-      qué hiciste, qué dijo el cliente y qué harás. En rojo lo que no ha contestado.
-      Escribe la instrucción del comité en cada caso: le saldrá al comercial en su próximo parte.</div>`
+      <b>Comité del viernes.</b> Pulsa un comercial para ver sus clientes y un cliente para ver qué ha dejado de comprar,
+      el plan y las tres respuestas de la semana. En rojo lo que falta.</div>`
+   +`<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+      <button class="btn gris" onclick='todosAg(true,${JSON.stringify(orden.map(x=>x[0]))})'>Abrir todos</button>
+      <button class="btn gris" onclick='todosAg(false,${JSON.stringify(orden.map(x=>x[0]))})'>Cerrar todos</button></div>`
    +orden.map(([a,l])=>{
     const r=RC.resumen(l);
-    const sinAv=l.filter(c=>RC.tienePlan(c)&&!ultimaDeSemana(c)).length;
+    const sinAv=l.filter(c=>RC.tienePlan(c)&&!ultimaDeSemana(c)&&!diagEstaSemana(c)).length;
     l.sort((x,y)=>num(y.nivel)-num(x.nivel)||num(y.perdido)-num(x.perdido));
-    return `<div class="card">
-      <div class="row"><div><b style="font-size:15.5px">${esc(nomAg(a))}</b>
-        <div class="muted">${l.length} casos · ${r.sinPlan} sin plan · ${sinAv} sin avance esta semana · ${r.parados} parados</div></div>
-        <div class="neg">−${eur(r.enRiesgo)}</div></div>
-      ${l.slice(0,10).map(c=>lineaCaso(c,true)).join("")}
-      ${l.length>10?`<details><summary class="muted">Y ${l.length-10} más</summary>${l.slice(10).map(c=>lineaCaso(c,true)).join("")}</details>`:""}
+    const ab=ABRE_AG.has(a);
+    return `<div class="card" style="padding:0">
+      <div onclick="toggleAg('${esc(a)}')" style="display:flex;gap:10px;align-items:center;padding:13px 15px;cursor:pointer">
+        <div style="flex:1;min-width:0"><b style="font-size:15.5px">${esc(nomAg(a))}</b>
+          <div class="muted">${l.length} casos · <span style="color:${r.sinPlan?"var(--red)":"inherit"}">${r.sinPlan} sin plan</span> · <span style="color:${sinAv?"var(--red)":"inherit"}">${sinAv} sin avance</span> · ${r.parados} parados</div></div>
+        <div class="neg">−${eur(r.enRiesgo)}</div>
+        <span style="color:var(--muted);font-size:18px;width:16px;text-align:center">${ab?"▾":"›"}</span>
+      </div>
+      ${ab?`<div style="padding:0 15px 8px">
+        ${(()=>{ const sp=l.filter(c=>!RC.tienePlan(c)&&c.estado!=="propuesta_archivo");
+          return sp.length?`<button class="btn gris" style="margin:0 0 6px" onclick='pedirDiag(${JSON.stringify(sp.map(c=>c._id))})'>📨 Pedir diagnóstico de los ${sp.length} sin plan (48 h)</button>`:""; })()}
+        ${l.map(c=>filaCompacta(c,false)).join("")}</div>`:""}
     </div>`;}).join("");
 }
 function vistaCasos(){
@@ -226,7 +419,7 @@ function vistaCasos(){
     ${ES_JEFE?sel("agente",[["","Todos los comerciales"],...ags.map(a=>[a,nomAg(a)])]):""}
     ${ES_DIR&&eqs.length>1?sel("equipo",[["","Todos los equipos"],...eqs.map(e=>[e,e])]):""}
   </div>
-  <div class="card">${l.length?l.map(c=>lineaCaso(c,true)).join(""):'<p class="muted">Ningún caso con este filtro.</p>'}</div>`;
+  <div class="card" style="padding:4px 15px">${l.length?l.map(c=>filaCompacta(c,true)).join(""):'<p class="muted">Ningún caso con este filtro.</p>'}</div>`;
 }
 function vistaAprobar(){
   const pa=CASOS.filter(c=>c.estado==="propuesta_archivo")
@@ -278,6 +471,8 @@ function vistaCausas(){
       es la decisión que tiene que tomar dirección, no el comercial.</div>`;
 }
 function pintar(){
+  if(FICHA){ const c=CASOS.find(x=>x._id===FICHA);
+    if(c){ document.getElementById("app").innerHTML=vistaFicha(c); return; } FICHA=null; }
   const pend=porDecidir();
   const tabs=[["comite","Comité del viernes",ES_JEFE],["casos","Casos",true],
     ["aprobar",`Aprobar${pend?" ("+pend+")":""}`,ES_JEFE],["causas","Causas",ES_JEFE]].filter(t=>t[2]);
@@ -292,7 +487,7 @@ function pintar(){
   // 12 primeros de golpe; el resto, al pulsar «Ver qué ha dejado de comprar».
   const orden=[...document.querySelectorAll('[id^="arts_"]')].map(el=>el.id.slice(5));
   const pendP=orden.map(id=>CASOS.find(c=>c._id===id)).filter(c=>c&&RC.abierto(c)
-    &&!(c.productos&&!c.productos.error&&RC.dias(c.productosEn)<RC.PROD_DIAS)).slice(0,12);
+    &&!(c.productos&&!c.productos.error&&c.productos.v===2&&RC.dias(c.productosEn)<RC.PROD_DIAS)).slice(0,12);
   pendP.forEach(c=>verProductos(c._id));
 }
 // Cola propia: lo que pulsa el usuario pasa delante
@@ -312,7 +507,7 @@ function _siguienteProd(){
     RC.cargarProductos(c,!!(c.productos&&c.productos.error)).then(p=>{
       if(p&&p.error) c.productos=p;
       const el=document.getElementById("arts_"+id);
-      if(el) el.innerHTML=RC.htmlProductos(p,{reintentar:`verProductos('${id}')`});
+      if(el) el.innerHTML=RC.htmlProductos(p,{max:8,perdido:c.perdido,reintentar:`verProductos('${id}')`});
     }).finally(()=>{ c._cargando=false; _activos--; _siguienteProd(); });
   }
 }
