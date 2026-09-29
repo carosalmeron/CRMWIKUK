@@ -93,6 +93,8 @@
     }while(tok&&v<(max||60));
     return t;
   };
+  RC.leerUno=async(id)=>{ const r=await fetch(`${RC.FB}/${RC.COL}/${encodeURIComponent(id)}`,{cache:"no-store"});
+    if(!r.ok) return null; return RC.normaliza(RC.desdeFB(await r.json())); };
   RC.leerCasos=()=>RC.leer(RC.COL).then(l=>l.map(RC.normaliza));
   // Guarda solo los campos indicados (no pisa lo demás)
   RC.guardar=async(id,campos)=>{
@@ -504,7 +506,7 @@
   };
   // Límites de descuento por nivel, los mismos que el CRM
   RC.LIM_DTO={jefe:10,director:15,ceo:100};
-  RC.dtoDe=(pa,po)=>num(pa)>0?Math.round((num(pa)-num(po))/num(pa)*100):0;
+  RC.dtoDe=(pa,po)=>num(pa)>0?Math.round((num(pa)-num(po))/num(pa)*1000)/10:0;
   // por: {nombre, nivel:"comercial"|"jefe"|"director"|"ceo"}
   RC.crearEstrategia=async(caso,l,nota,por)=>{
     const cad=await RC.cadenaDe(caso.agente);
@@ -524,7 +526,9 @@
     const id="est_rec_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
     const linea={id:"l1",nombre:l.desc||l.art||"Artículo",codigo:l.art||"",calibre:l.cal||"",
       precioActual:num(l.precioActual),precioOferta:num(l.precioOferta),precioFinal:num(l.precioOferta),
-      dto,unidad:l.unidad||"m",cantidad:num(l.cantidad)||0,aprobada:estado==="aprobada"?true:null};
+      dto,unidad:l.unidad||"m",cantidad:num(l.cantidad)||0,aprobada:estado==="aprobada"?true:null,
+      precioBase:num(l.precioBase)||"",dtoTarifaCliente:l.dtoCliente!=null?l.dtoCliente:"",
+      dtoTotal:num(l.precioBase)>0?RC.dtoDe(l.precioBase,l.precioOferta):""};
     const doc={id,cliente:caso.nombre,clienteNombre:caso.nombre,clienteId:caso.cliente,
       agente:cad.ag.id,agenteNombre:cad.ag.nombre,equipo:cad.ag.equipo||caso.equipo||"",
       estrategia:(nivel==="comercial"?"Solicitud precio: ":"Precio especial: ")+linea.nombre+(linea.calibre?" "+linea.calibre:"")+" a "+linea.precioOferta+" €/"+linea.unidad,
@@ -538,7 +542,9 @@
       origen:caso._id?"recuperacion":"cierre_equipo",casoId:caso._id||"",
       seguimientos:[{accion:(nivel==="comercial"?"💰 Solicitud desde el plan de recuperación":"🎯 Creada desde el plan de recuperación")+" — "+linea.nombre+" a "+linea.precioOferta+" € (dto "+dto+" %)",fecha:hoyS,por:por.nombre,nota:nota||""}],
       historialEscalado:[{accion:nivel==="comercial"?"💰 Solicitud del comercial — dto "+dto+" %":(estado==="aprobada"?"✅ Creada y aprobada por "+por.nombre:"↑ Creada por "+por.nombre+", supera su límite: la aprueba "+(pend&&pend.nombre)),por:por.nombre,fecha:hoyS}]};
+    if(estado==="aprobada") doc.fechaAprobacion=hoy.toISOString();
     await RC.guardarEn("estrategias",id,doc);
+    if(estado==="aprobada") await RC.ofertaDeEstrategia(doc,por,nota);
     // En el caso queda anotado
     const hist=(caso.historial||[]).concat([{sem:RC.semanaISO(hoy),fecha:hoy.toISOString(),por:por.nombre,
       sistema:(nivel==="comercial"?"Pide estrategia: ":"Estrategia: ")+linea.nombre+" a "+linea.precioOferta+" € (dto "+dto+" %)"+(estado==="aprobada"?" · aprobada":" · pendiente de "+(pend&&pend.nombre||"aprobar"))}]);
@@ -558,6 +564,65 @@
       }
     }catch(e){}
     return doc;
+  };
+  // Oferta en el CRM cuando una estrategia queda aprobada (igual que el CRM)
+  RC.ofertaDeEstrategia=async(e,por,nota)=>{
+    try{
+      const hoyS=new Date().toLocaleDateString("es-ES");
+      const ofId="oferta_est_"+(e._id||e.id)+"_"+Date.now(); const pl=new Date(); pl.setDate(pl.getDate()+30);
+      await RC.guardarEn("ofertas",ofId,{id:ofId,clienteNombre:e.cliente||e.clienteNombre||"",clienteId:e.clienteId||"",clienteCodigo:e.clienteId||"",
+        agente:e.agente||"",agenteNombre:e.agenteNombre||"",equipo:e.equipo||"",
+        lineas:(e.ofertas||[]).map(o=>({producto:o.nombre||"",codigo:o.codigo||"",calibre:o.calibre||"",precio:num(o.precioFinal||o.precioOferta),
+          precioBase:num(o.precioActual)||"",dto:num(o.dto)||"",cantidad:num(o.cantidad),unidad:o.unidad||"m"})),
+        estado:"pendiente",desdeEstrategia:e._id||e.id,casoId:e.casoId||"",origen:"recuperacion",
+        fechaCreacion:new Date().toISOString(),fechaCreacionStr:hoyS,fechaPlazo:pl.toISOString(),
+        notas:"Generada al aprobar la estrategia desde el plan de recuperación"+(nota?". "+nota:""),
+        seguimientos:[{accion:"📋 Oferta generada desde estrategia aprobada",fecha:hoyS,por:por.nombre,nota:nota||""}]});
+      e.ofertaGenerada=ofId;
+      await RC.guardarEn("estrategias",e._id||e.id,{ofertaGenerada:ofId},true);
+    }catch(x){}
+  };
+  // ── La semana siguiente: ¿la estrategia aprobada ha acabado en pedido? ──
+  // "pedido" y "ko" la cierran como en el CRM (completada / sin_exito);
+  // "pendiente" deja constancia de que sigue viva esa semana.
+  RC.MOTIVOS_KO=[["sigue_caro","💸 Sigue caro"],["no_interesa","🚫 No le interesa"],["compro_otro","🏁 Compró a otro"],["otro","📋 Otro motivo"]];
+  RC.estAbierta=(e)=>e.estado==="aprobada"&&!e.cierreFinal&&!e.eliminada;
+  RC.lunesDe=(d)=>{ const x=new Date(d); x.setHours(0,0,0,0); x.setDate(x.getDate()-((x.getDay()+6)%7)); return x; };
+  // Aprobada antes de esta semana → toca decir qué ha pasado
+  RC.tocaResultado=(e,hoy)=>{
+    if(!RC.estAbierta(e)) return false;
+    const f=Date.parse(e.fechaAprobacion||e.fechaCreacion||0)||0;
+    if(f>=RC.lunesDe(hoy||new Date()).getTime()) return false;
+    const s=e.seguimientoSemanal; return !(s&&s.semana===RC.semanaISO(hoy||new Date()));
+  };
+  RC.resultadoEstrategia=async(e,res,por,nota,subTipo)=>{
+    const hoy=new Date(), hoyS=hoy.toLocaleDateString("es-ES"), sem=RC.semanaISO(hoy);
+    const lbl=res==="pedido"?"✅ PEDIDO confirmado":res==="ko"?"❌ KO — "+((RC.MOTIVOS_KO.find(m=>m[0]===subTipo)||[,"sin éxito"])[1]):"⏳ Sigue pendiente (semana "+sem+")";
+    const seg={accion:lbl,fecha:hoyS,por:por.nombre,nota:nota||""};
+    let campos={seguimientos:(e.seguimientos||[]).concat([seg]),seguimientoSemanal:{semana:sem,estado:res,fecha:hoy.toISOString(),nota:nota||"",por:por.nombre}};
+    if(res==="pedido") Object.assign(campos,{estado:"completada",resultado:"exito",fechaCierre:hoy.toISOString(),
+      cierreFinal:{por:por.nombre,fecha:hoyS,resultado:"pedido",nota:nota||""},resolucion:Object.assign({},e.resolucion||{},{tipo:"pedido",fecha:hoyS,por:por.nombre,nota:nota||""})});
+    if(res==="ko") Object.assign(campos,{estado:"sin_exito",resultado:"sin_exito",fechaCierre:hoy.toISOString(),
+      cierreFinal:{por:por.nombre,fecha:hoyS,resultado:"ko",subTipo:subTipo||"otro",nota:nota||""},resolucion:Object.assign({},e.resolucion||{},{tipo:"ko",subTipo:subTipo||"otro",fecha:hoyS,por:por.nombre,nota:nota||""})});
+    if(res!=="pendiente") campos.historialEscalado=(e.historialEscalado||[]).concat([{accion:lbl,por:por.nombre,fecha:hoyS,nota:nota||""}]);
+    await RC.guardarEn("estrategias",e._id||e.id,campos,true);
+    Object.assign(e,campos);
+    const ofId=e.ofertaGenerada||e.desdeOferta;
+    if(ofId&&res!=="pendiente"){
+      try{ await RC.guardarEn("ofertas",ofId,{estrategiaResultado:res==="pedido"?"pedido":subTipo==="sigue_caro"?"sigue_caro":"ko",estrategiaCierre:hoyS,estrategiaNota:nota||"",
+        estado:res==="pedido"?"pedido":subTipo==="sigue_caro"?"caro":"ko"},true); }catch(x){}
+    }
+    if(e.casoId){
+      try{ const c=await RC.leerUno(e.casoId);
+        const hist=((c&&c.historial)||[]).concat([{sem,fecha:hoy.toISOString(),por:por.nombre,sistema:"Estrategia "+((e.ofertas||[])[0]||{}).nombre+": "+lbl+(nota?" · "+nota:"")}]);
+        await RC.guardar(e.casoId,{historial:hist,ultimaAccion:hoy.toISOString()}); }catch(x){}
+    }
+    if(res!=="pendiente"){
+      try{ const cad=await RC.cadenaDe(e.agente);
+        const cuerpo=`<b>${RC.esc(cad.ag.nombre)}</b>: ${RC.esc(e.estrategia||"")}<br>${lbl}${nota?"<br><i>“"+RC.esc(nota)+"”</i>":""}`;
+        if(cad.resp) await RC.avisarA(cad.resp.id,`${res==="pedido"?"✅ Pedido":"❌ Sin éxito"}: ${e.cliente}`,cuerpo); }catch(x){}
+    }
+    return e;
   };
   RC.esc=(t)=>String(t??"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
   RC.avisarA=async(idUsuario,asunto,cuerpo)=>{
@@ -579,7 +644,7 @@
     let campos={};
     if(accion==="aprobar"){
       ofs.forEach(o=>{ o.aprobada=true; o.aprobadaPor=por.nombre; });
-      campos={estado:"aprobada",ofertas:ofs,aprobadoPor:por.nombre,escaladoA:null,pendienteDe:null,
+      campos={estado:"aprobada",ofertas:ofs,aprobadoPor:por.nombre,escaladoA:null,pendienteDe:null,fechaAprobacion:new Date().toISOString(),
         resolucion:{tipo:"aprobada",por:por.nombre,rol:por.nivel,fecha:hoyS,nota:nota||""}};
     } else if(accion==="rechazar"){
       ofs.forEach(o=>{ o.aprobada=false; o.rechazadaPor=por.nombre; });
@@ -594,28 +659,24 @@
     await RC.guardarEn("estrategias",e._id||e.id,campos,true);
     Object.assign(e,campos);
     // Oferta automática al aprobar, como hace el CRM
-    if(accion==="aprobar"){
-      try{
-        const ofId="oferta_est_"+(e._id||e.id)+"_"+Date.now(); const pl=new Date(); pl.setDate(pl.getDate()+30);
-        await RC.guardarEn("ofertas",ofId,{id:ofId,clienteNombre:e.cliente||e.clienteNombre||"",clienteId:e.clienteId||"",
-          agente:e.agente||"",agenteNombre:e.agenteNombre||"",equipo:e.equipo||"",
-          lineas:ofs.map(o=>({producto:o.nombre||"",calibre:o.calibre||"",precio:num(o.precioFinal||o.precioOferta),cantidad:num(o.cantidad),unidad:o.unidad||"m"})),
-          estado:"pendiente",desdeEstrategia:e._id||e.id,fechaCreacion:new Date().toISOString(),fechaCreacionStr:hoyS,
-          fechaPlazo:pl.toISOString(),notas:"Generada al aprobar la estrategia desde el plan de recuperación"+(nota?". "+nota:""),
-          seguimientos:[{accion:"📋 Oferta generada desde estrategia aprobada",fecha:hoyS,por:por.nombre,nota:nota||""}]});
-      }catch(x){}
-    }
+    if(accion==="aprobar") await RC.ofertaDeEstrategia(e,por,nota);
     try{
       const txt=accion==="aprobar"?"✅ Aprobada":accion==="rechazar"?"❌ Rechazada":"↑ Elevada";
       if(accion==="elevar"&&campos.pendienteDe) await RC.avisarA(campos.pendienteDe,`↑ ${por.nombre} te eleva una estrategia: ${e.cliente}`,
         `${RC.esc(e.estrategia||e.texto||"")}. Descuento ${num(e.maxDescuento)} %.${nota?"<br><i>“"+RC.esc(nota)+"”</i>":""}`);
-      else await RC.avisarA(e.agente,`${txt}: tu estrategia para ${e.cliente}`,`${RC.esc(e.estrategia||"")}.${nota?"<br><i>“"+RC.esc(nota)+"”</i>":""}${accion==="aprobar"?"<br>Tienes la oferta creada en el CRM.":""}`);
+      else {
+        const cuerpo=`${RC.esc(e.estrategia||"")} · descuento ${num(e.maxDescuento)} %. Lo ha decidido <b>${RC.esc(por.nombre)}</b>.${nota?"<br><i>“"+RC.esc(nota)+"”</i>":""}`
+          +(accion==="aprobar"?"<br>Tiene la oferta creada en el CRM. <b>La semana que viene, en el parte, dirá si ha entrado pedido.</b>":"");
+        await RC.avisarA(e.agente,`${txt}: tu estrategia para ${e.cliente}`,cuerpo);
+        // Copia al jefe de equipo si no ha sido él quien la ha decidido
+        if(cad.resp&&ARR(cad.resp.id)!==ARR(por.id)) await RC.avisarA(cad.resp.id,`${txt}: estrategia de ${cad.ag.nombre} para ${e.cliente}`,cuerpo);
+      }
     }catch(x){}
     return e;
   };
   RC.estrategiasDeCaso=(ests,c)=>ests.filter(e=>!e.eliminada&&(e.casoId===c._id||ARR(e.clienteId)===ARR(c.cliente)));
   RC.ESTADO_EST={pendiente_aprobacion:["⏳ Pendiente","#B45309","#FFFBEB"],aprobada:["✅ Aprobada","#15803D","#F0FDF4"],
-    sin_exito:["✖ Rechazada","#B91C1C","#FEF2F2"],completada:["✔ Completada","#15803D","#F0FDF4"],pendiente:["⏳ Pendiente","#B45309","#FFFBEB"]};
+    sin_exito:["✖ Rechazada","#B91C1C","#FEF2F2"],completada:["✅ Pedido","#15803D","#F0FDF4"],pendiente:["⏳ Pendiente","#B45309","#FFFBEB"]};
   // ¿Puede este nivel resolverla? (límite de descuento y a quién está pendiente)
   RC.puedeResolverEst=(e,nivel,miId)=>{
     if(e.estado!=="pendiente_aprobacion") return false;
@@ -653,7 +714,9 @@
     const doc={id,clienteNombre:caso.nombre,clienteCodigo:caso.cliente,clienteId:caso.cliente,
       agente:cad.ag.id,agenteNombre:cad.ag.nombre,equipo:cad.ag.equipo||caso.equipo||"",
       lineas:[{id:"l1",producto:l.desc||l.art||"",descripcion:l.desc||"",codigo:l.art||"",calibre:l.cal||"",
-        precio:num(l.precioOferta),precioBase:num(l.precioActual)||"",dto:num(l.precioActual)>0?dto:"",
+        precio:num(l.precioOferta),precioBase:num(l.precioBase)||num(l.precioActual)||"",
+        dto:num(l.precioBase)>0?RC.dtoDe(l.precioBase,l.precioOferta):(num(l.precioActual)>0?dto:""),
+        precioTarifaCliente:num(l.precioActual)||"",dtoTarifaCliente:l.dtoCliente!=null?l.dtoCliente:"",dtoExtra:num(l.precioActual)>0?dto:"",
         unidad:"€/"+(l.unidad||"m"),cantidad:num(l.cantidad)||0,notas:nota||""}],
       estado:"pendiente",fechaCreacion:hoy.toISOString(),fechaCreacionStr:hoyS,fechaPlazo:plazo.toISOString(),
       notaInicial:"Desde el plan de recuperación",notas:nota||"",origen:"recuperacion",casoId:caso._id||"",
@@ -666,10 +729,65 @@
     }
     return {tipo:"oferta",doc,dto,tope};
   };
+  // ── Alternativa: otro producto del catálogo en lugar del que ha dejado ──
+  RC.formAlternativa=(pref,a,caso)=>RC.formEstrategia(pref,[],`🔄 Ofrecer alternativa${a?` a ${RC.esc(a.desc||a.art)}${a.art?" ("+RC.esc(a.art)+")":""}`:""}`,
+      {fondo:"#FFF7ED",borde:"#FED7AA",fuerte:"#EA580C",titulo:"#C2410C"},caso)
+    .replace("Por qué (qué le ofrece la competencia, volumen, plazo…)","Por qué le encaja (mismo rendimiento, más barato, disponible ya…)");
+  RC.leerAlternativa=(pref)=>{ const l=RC.leerFormEstrategia(pref,[]);
+    return {art:l.art,desc:l.desc,cal:l.cal,deCatalogo:l.deCatalogo,precioActual:l.precioActual,precioBase:l.precioBase,dtoCliente:l.dtoCliente,catCliente:l.catCliente,precio:l.precioOferta,precioOferta:l.precioOferta,unidad:l.unidad,nota:l.nota}; };
+  // Se registra como oferta del CRM, marcada como alternativa del artículo perdido
+  RC.crearAlternativa=async(caso,orig,alt,por)=>{
+    // Mismo proceso que cualquier oferta: descuento contra la tarifa del
+    // catálogo y límite de quien la hace. Si se pasa, va como estrategia.
+    const lim=await RC.limitesDto();
+    const tope=por.nivel==="ceo"?100:por.nivel==="director"?lim.director:por.nivel==="jefe"?lim.jefe:lim.agente;
+    const dto=RC.dtoDe(alt.precioActual,alt.precio);
+    const txtO=(orig.desc||orig.art||"")+(orig.art&&orig.desc?" ("+orig.art+")":"");
+    if(num(alt.precioActual)>0&&dto>tope){
+      const e=await RC.crearEstrategia(caso,{art:alt.art,desc:alt.desc,cal:alt.cal,precioActual:alt.precioActual,precioBase:alt.precioBase,dtoCliente:alt.dtoCliente,precioOferta:alt.precio,unidad:alt.unidad},
+        "Alternativa a "+txtO+(alt.nota?" · "+alt.nota:"")+" · "+dto+" % sobre tarifa, supera el límite del "+tope+" %",por);
+      e.alternativaDe={codigo:orig.art||"",nombre:orig.desc||""};
+      try{ await RC.guardarEn("estrategias",e.id,{alternativaDe:e.alternativaDe},true); }catch(x){}
+      e._esEstrategia=true; e.dto=dto; e.tope=tope;
+      return e;
+    }
+    const cad=await RC.cadenaDe(caso.agente);
+    const hoy=new Date(), hoyS=hoy.toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"2-digit"});
+    const plazo=new Date(hoy.getTime()+5*86400000);
+    const id="oferta_alt_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
+    const txtOrig=(orig.desc||orig.art||"")+(orig.art&&orig.desc?" ("+orig.art+")":"");
+    const doc={id,clienteNombre:caso.nombre,clienteCodigo:caso.cliente,clienteId:caso.cliente,
+      agente:cad.ag.id,agenteNombre:cad.ag.nombre,equipo:cad.ag.equipo||caso.equipo||"",
+      lineas:[{id:"l1",producto:alt.desc,descripcion:alt.desc,codigo:alt.art||"",calibre:alt.cal||"",precio:num(alt.precio),
+        precioBase:num(alt.precioBase)||num(alt.precioActual)||"",
+        dto:num(alt.precioBase)>0?RC.dtoDe(alt.precioBase,alt.precio):(num(alt.precioActual)>0?dto:""),
+        precioTarifaCliente:num(alt.precioActual)||"",dtoTarifaCliente:alt.dtoCliente!=null?alt.dtoCliente:"",dtoExtra:num(alt.precioActual)>0?dto:"",
+        unidad:"€/"+(alt.unidad||"m"),cantidad:0,notas:"Alternativa a "+txtOrig+(alt.nota?" · "+alt.nota:"")}],
+      alternativaDe:{codigo:orig.art||"",nombre:orig.desc||""},
+      estado:"pendiente",fechaCreacion:hoy.toISOString(),fechaCreacionStr:hoyS,fechaPlazo:plazo.toISOString(),
+      notaInicial:"Alternativa desde el plan de recuperación",notas:"Alternativa a "+txtOrig+(alt.nota?" · "+alt.nota:""),
+      origen:"recuperacion",casoId:caso._id||"",
+      seguimientos:[{accion:"🔄 Alternativa ofrecida en lugar de "+txtOrig,fecha:hoyS,por:por.nombre,nota:alt.nota||""}]};
+    await RC.guardarEn("ofertas",id,doc);
+    if(caso._id){
+      const hist=(caso.historial||[]).concat([{sem:RC.semanaISO(hoy),fecha:hoy.toISOString(),por:por.nombre,
+        sistema:`Alternativa: ${alt.desc}${alt.cal?" "+alt.cal:""} a ${num(alt.precio)} €/${alt.unidad||"m"} en lugar de ${txtOrig}`}]);
+      const campos={historial:hist}; if(por.nivel==="comercial") campos.ultimaAccion=hoy.toISOString();
+      try{ await RC.guardar(caso._id,campos); Object.assign(caso,campos); }catch(e){}
+    }
+    // Si la propone el jefe, el comercial se entera en el momento
+    if(por.nivel!=="comercial"){
+      try{ await RC.avisarGenerico({agente:caso.agente,quienId:por.id,quien:por.nombre,titulo:caso.nombre,etiqueta:"Alternativa para el cliente",
+        texto:`Ofrécele ${alt.desc}${alt.cal?" "+alt.cal:""} a ${num(alt.precio)} €/${alt.unidad||"m"} en lugar de ${txtOrig}.${alt.nota?" "+alt.nota:""}`,
+        pie:"La tienes como oferta en el CRM → Ofertas."}); }catch(e){}
+    }
+    return doc;
+  };
   RC.htmlOferta=(o)=>{
     const l=(o.lineas||[])[0]||{};
     return `<div style="border:1px solid #BFDBFE;background:#EFF6FF;border-radius:12px;padding:10px 12px;margin:8px 0">
-      <b style="font-size:13.5px">📨 Oferta: ${RC.esc(l.producto||"")}${l.calibre?" · "+RC.esc(l.calibre):""}</b>
+      <b style="font-size:13.5px">${o.alternativaDe?"🔄 Alternativa":"📨 Oferta"}: ${RC.esc(l.producto||"")}${l.calibre?" · "+RC.esc(l.calibre):""}</b>
+      ${o.alternativaDe?`<div style="font-size:12px;color:#C2410C">en lugar de ${RC.esc(o.alternativaDe.nombre||"")} ${o.alternativaDe.codigo?"("+RC.esc(o.alternativaDe.codigo)+")":""}</div>`:""}
       <div style="font-size:13px;margin-top:3px">${l.precioBase?RC.esc(l.precioBase)+" € → ":""}<b style="color:#1D4ED8">${RC.esc(l.precio)} ${RC.esc(l.unidad||"")}</b>${l.dto!==""&&l.dto!=null?" · descuento "+RC.esc(l.dto)+" %":""}</div>
       <div style="font-size:12px;color:#475569;margin-top:2px">Registrada en el CRM → Ofertas · seguimiento en 5 días</div></div>`;
   };
@@ -683,31 +801,165 @@
     if(nivel==="jefe") return !dest||dest===ARR(miId);
     return false;
   };
-  // Formulario (HTML) para pedir o crear una estrategia sobre un artículo
-  RC.formEstrategia=(pref,arts,texto)=>{
-    const ops=(arts||[]).map((a,i)=>`<option value="${i}">${RC.esc(a.desc||a.art)}${a.cal?" · "+RC.esc(a.cal):""} (${RC.eur(a.ant)} → ${RC.eur(a.act)})</option>`).join("");
-    return `<div style="display:grid;gap:7px;background:#F5F3FF;border:1px solid #DDD6FE;border-radius:12px;padding:12px;margin-top:8px">
-      <div style="font-weight:800;color:#5B21B6">${texto||"💶 Estrategia de precio"}</div>
-      <select id="${pref}_art" onchange="document.getElementById('${pref}_otro').style.display=this.value==='otro'?'block':'none'" style="padding:9px;border:1.5px solid #DDD6FE;border-radius:9px;font:inherit;font-size:14px">
-        ${ops}<option value="otro">➕ Otro artículo…</option></select>
-      <input id="${pref}_otro" placeholder="Artículo (nombre o código)" style="display:${ops?"none":"block"};padding:9px;border:1.5px solid #DDD6FE;border-radius:9px;font:inherit;font-size:14px">
+  // ══ Catálogo (colección «productos», la misma del CRM) ═══════════════
+  // El precio del catálogo es la tarifa base: el descuento se calcula contra
+  // él, igual que en el formulario de ofertas del CRM.
+  RC.catalogo=async()=>{
+    if(RC._cat) return RC._cat;
+    if(!RC._catProm) RC._catProm=(async()=>{
+      const out=[]; let tok=null,v=0;
+      do{ const r=await fetch(`${RC.FB}/productos?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
+        if(!r.ok) break; const j=await r.json();
+        for(const d of j.documents||[]){ const f=d.fields||{}; const g=(k)=>f[k]?(f[k].stringValue??f[k].doubleValue??f[k].integerValue??""):"";
+          out.push({codigo:String(g("codigo")),nombre:String(g("nombre")),formato:String(g("formato")),
+            calibre:String(g("calibre")||g("ca")),metros:String(g("medida")||g("metros")||g("me")),
+            precio:Number(String(g("precio")).replace(",","."))||0,cat:String(g("categoria")||g("cat"))}); }
+        tok=j.nextPageToken||null; v++; }while(tok&&v<60);
+      RC._cat=out; return out; })();
+    return RC._catProm;
+  };
+  // ══ Tarifa del cliente (colección «clientes», como el CRM) ═══════════
+  // Precio de tarifa del cliente = precio base del catálogo − su descuento de
+  // tarifa (el asignado; si no tiene, el estándar de su categoría). Los
+  // descuentos de oferta/estrategia se miden contra ESE precio.
+  RC.DTO_CAT={"Carnicero":0,"Fabricante":10,"Distribuidor":18,"Gran cuenta":25};
+  RC._tc={};
+  RC.tarifaCliente=async(cod,nombre)=>{
+    const k=ARR(cod)||ARR(nombre); if(!k) return {dto:0,cat:"",hay:false};
+    if(RC._tc[k]) return RC._tc[k];
+    RC._tc[k]=(async()=>{
+      const out=(f)=>{ const g=(x)=>f[x]?(f[x].stringValue??f[x].doubleValue??f[x].integerValue??null):null;
+        const cat=String(g("categoriaCliente")||""); let d=g("dtoTarifa");
+        d=(d!=null&&d!==""&&!isNaN(parseFloat(d)))?parseFloat(d):(RC.DTO_CAT[cat]!=null?RC.DTO_CAT[cat]:null);
+        return {dto:d==null?0:d,cat,hay:d!=null,sinDato:d==null}; };
+      try{ if(cod){ const r=await fetch(`${RC.FB}/clientes/${encodeURIComponent(cod)}`); if(r.ok){ const j=await r.json(); if(j.fields) return out(j.fields); } } }catch(e){}
+      const base=RC.FB.replace(/\/documents$/,"")+"/documents:runQuery";
+      const q=async(campo,v)=>{ try{ const r=await fetch(base,{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({structuredQuery:{from:[{collectionId:"clientes"}],where:{fieldFilter:{field:{fieldPath:campo},op:"EQUAL",value:{stringValue:v}}},limit:1}})});
+        if(!r.ok) return null; const j=await r.json(); const d=(j||[]).find(x=>x.document); return d?d.document.fields:null; }catch(e){ return null; } };
+      let f=null;
+      if(cod) f=await q("codigo",String(cod))||await q("CODIGO",String(cod));
+      if(!f&&nombre) f=await q("nombre",String(nombre));
+      return f?out(f):{dto:0,cat:"",hay:false,sinDato:true};
+    })();
+    return RC._tc[k];
+  };
+  RC._cliPref={};
+  RC._sel={}; RC._res={};
+  const txtCat=(p)=>[p.codigo,p.nombre,p.calibre?"cal. "+p.calibre:"",p.metros?p.metros+" m":"",p.formato].filter(Boolean).join(" · ");
+  RC.buscarUI=async(pref)=>{
+    const q=ARR((document.getElementById(pref+"_q")||{}).value||"");
+    const box=document.getElementById(pref+"_res"); if(!box) return;
+    if(q.length<2){ box.innerHTML=""; return; }
+    box.innerHTML=`<div style="font-size:12px;color:#6B7280;padding:4px">Buscando…</div>`;
+    const cat=await RC.catalogo();
+    const tk=q.split(/\s+/).filter(Boolean);
+    const r=cat.filter(p=>{ const h=ARR([p.codigo,p.nombre,p.calibre,p.formato,p.metros].join(" ")); return tk.every(t=>h.includes(t)); }).slice(0,8);
+    RC._res[pref]=r;
+    box.innerHTML=r.length?r.map((p,i)=>`<div onclick="RC.elegirCat('${pref}',${i})" style="padding:8px 10px;border-bottom:1px solid #EEF2F7;cursor:pointer;font-size:13px;background:#fff">
+        <b>${RC.esc(p.codigo)}</b> · ${RC.esc(p.nombre)}${p.calibre?" · cal. "+RC.esc(p.calibre):""}${p.metros?" · "+RC.esc(p.metros)+" m":""}
+        <span style="float:right;font-weight:700">${p.precio?RC.esc(p.precio.toFixed(2))+" €":"sin precio"}</span></div>`).join("")
+      :`<div style="font-size:12.5px;color:#B45309;padding:6px">No hay nada en el catálogo con «${RC.esc(q)}».</div>`;
+  };
+  const r2=(n)=>Math.round(n*100)/100, f2=(n)=>num(n).toFixed(2).replace(".",",");
+  const pintaSel=async(pref)=>{
+    const p=RC._sel[pref], el=document.getElementById(pref+"_sel"), pa=document.getElementById(pref+"_pa");
+    const q=document.getElementById(pref+"_q"); if(q&&p) q.value="";
+    const r=document.getElementById(pref+"_res"); if(r) r.innerHTML="";
+    if(!p){ if(el) el.innerHTML=""; if(pa){ pa.readOnly=false; pa.style.background="#fff"; } return; }
+    if(p.precio&&p.dtoCli==null){
+      if(el) el.innerHTML=`<div style="font-size:12.5px;color:#6B7280;padding:6px">Buscando la tarifa del cliente…</div>`;
+      const cli=RC._cliPref[pref]||{};
+      const t=await RC.tarifaCliente(cli.cliente,cli.nombre);
+      if(RC._sel[pref]!==p) return;       // ha cambiado mientras tanto
+      p.dtoCli=t.dto; p.catCli=t.cat; p.sinTarifa=!!t.sinDato;
+      p.tarifaCli=r2(p.precio*(1-t.dto/100));
+    }
+    const elx=document.getElementById(pref+"_sel"), pax=document.getElementById(pref+"_pa");
+    if(elx) elx.innerHTML=`<div style="background:#fff;border:1.5px solid #16A34A;border-radius:9px;padding:8px 10px;font-size:13px">✔ <b>${RC.esc(txtCat(p))}</b>
+      ${p.precio?`<div style="font-size:12.5px;color:#374151;margin-top:3px">Catálogo ${f2(p.precio)} € − ${p.dtoCli} % ${p.catCli?"("+RC.esc(p.catCli)+")":"de su tarifa"} = <b>tarifa del cliente ${f2(p.tarifaCli)} €</b></div>
+        ${p.sinTarifa?`<div style="font-size:12px;color:#B45309">Este cliente no tiene tarifa ni categoría en el CRM: se toma el precio de catálogo.</div>`:""}`
+      :`<div style="font-size:12.5px;color:#B45309;margin-top:3px">No tiene precio en el catálogo: pon a mano el precio de tarifa del cliente.</div>`}</div>`;
+    if(pax&&p.precio){ pax.value=p.tarifaCli.toFixed(2); pax.readOnly=true; pax.style.background="#F1F5F9"; }
+    else if(pax){ pax.readOnly=false; pax.style.background="#fff"; }
+    RC.dtoUI(pref);
+  };
+  RC.elegirCat=(pref,i)=>{ const p=(RC._res[pref]||[])[i]; if(!p) return; RC._sel[pref]=Object.assign({deCatalogo:true},p); pintaSel(pref); };
+  RC.elegirPorCodigo=async(pref,cod,nombre)=>{
+    const cat=await RC.catalogo();
+    const p=cod?cat.find(x=>ARR(x.codigo)===ARR(cod)):null;
+    RC._sel[pref]=p?Object.assign({deCatalogo:true},p):{codigo:cod||"",nombre:nombre||cod||"",calibre:"",metros:"",precio:0,deCatalogo:false};
+    pintaSel(pref);
+  };
+  // Tras pintar un formulario: deja elegido el artículo de la fila (si lo hay)
+  RC.prepararForm=(pref,a)=>{ RC._sel[pref]=null; if(a&&(a.art||a.desc)) RC.elegirPorCodigo(pref,a.art,a.desc); else RC.catalogo(); };
+  // Llamar después de pintar: activa los formularios nuevos (deja elegido el
+  // artículo de la fila) y, si la pantalla se ha repintado, recupera lo elegido.
+  RC._key={};
+  RC.activarForms=()=>{
+    document.querySelectorAll("[data-rcpref]").forEach(el=>{
+      const pref=el.getAttribute("data-rcpref"), key=el.getAttribute("data-rckey")||"";
+      RC._cliPref[pref]={cliente:el.getAttribute("data-rccli")||"",nombre:el.getAttribute("data-rcnom")||""};
+      if(RC._key[pref]!==key){ RC._key[pref]=key;
+        RC.prepararForm(pref,{art:el.getAttribute("data-rcart")||"",desc:el.getAttribute("data-rcdesc")||""}); }
+      else if(RC._sel[pref]) pintaSel(pref);
+    });
+  };
+  RC.olvidarForm=(pref)=>{ delete RC._key[pref]; RC._sel[pref]=null; };
+  RC.htmlBuscador=(pref,sugeridos,titulo)=>`
+      <div style="font-size:12px;color:#6B7280">${titulo||"Artículo del catálogo"}</div>
+      <input id="${pref}_q" oninput="RC.buscarUI('${pref}')" autocomplete="off" placeholder="🔍 Busca: código, nombre o calibre" style="padding:9px;border:1.5px solid #CBD5E1;border-radius:9px;font:inherit;font-size:14px">
+      <div id="${pref}_res" style="border-radius:9px;overflow:hidden;box-shadow:0 1px 0 #E5E7EB;max-height:260px;overflow-y:auto"></div>
+      ${(sugeridos||[]).length?`<div style="display:flex;gap:5px;flex-wrap:wrap">${sugeridos.slice(0,6).map(a=>`<button type="button" onclick="RC.elegirPorCodigo('${pref}','${RC.esc(a.art).replace(/'/g,"")}','${RC.esc(a.desc).replace(/'/g,"")}')" style="border:1px solid #CBD5E1;background:#fff;border-radius:99px;padding:5px 10px;font-size:12px;cursor:pointer">${RC.esc(a.art||a.desc)}</button>`).join("")}</div>`:""}
+      <div id="${pref}_sel"></div>`;
+  // Formulario de estrategia u oferta: artículo del catálogo, tarifa, precio
+  const attr=(t)=>RC.esc(t).replace(/"/g,"&quot;");
+  RC.formEstrategia=(pref,arts,texto,colores,caso)=>{
+    const c=Object.assign({fondo:"#F5F3FF",borde:"#DDD6FE",fuerte:"#7C3AED",titulo:"#5B21B6"},colores||{});
+    const uno=(arts||[]).length===1, a0=uno?arts[0]:{};
+    const cl=caso||{};
+    const key=(texto||"")+"|"+(a0.art||"")+"|"+(a0.desc||"")+"|"+(cl.cliente||cl.nombre||"");
+    return `<div data-rcpref="${pref}" data-rckey="${attr(key)}" data-rcart="${attr(a0.art)}" data-rcdesc="${attr(a0.desc)}" data-rccli="${attr(cl.cliente)}" data-rcnom="${attr(cl.nombre)}" style="display:grid;gap:7px;background:${c.fondo};border:1px solid ${c.borde};border-radius:12px;padding:12px;margin-top:8px">
+      <div style="font-weight:800;color:${c.titulo}">${texto||"💶 Estrategia de precio"}</div>
+      ${RC.htmlBuscador(pref,uno?[]:arts,uno?"Artículo (puedes cambiarlo buscando en el catálogo)":"Artículo del catálogo · o toca uno de los que ha dejado")}
       <div style="display:grid;grid-template-columns:1fr 1fr 80px;gap:6px">
-        <label style="font-size:12px;color:#6B7280">Precio ahora<input id="${pref}_pa" type="number" step="0.01" style="width:100%;padding:9px;border:1.5px solid #DDD6FE;border-radius:9px;font-size:14px"></label>
-        <label style="font-size:12px;color:#6B7280">Precio que pide<input id="${pref}_po" type="number" step="0.01" style="width:100%;padding:9px;border:1.5px solid #7C3AED;border-radius:9px;font-size:14px;font-weight:700"></label>
-        <label style="font-size:12px;color:#6B7280">€ por<select id="${pref}_ud" style="width:100%;padding:9px;border:1.5px solid #DDD6FE;border-radius:9px;font-size:14px"><option>m</option><option>kg</option><option>ud</option><option>mazo</option></select></label>
+        <label style="font-size:12px;color:#6B7280">Tarifa del cliente<input id="${pref}_pa" type="number" step="0.01" oninput="RC.dtoUI('${pref}')" style="width:100%;padding:9px;border:1.5px solid ${c.borde};border-radius:9px;font-size:14px"></label>
+        <label style="font-size:12px;color:#6B7280">Precio nuevo<input id="${pref}_po" type="number" step="0.01" oninput="RC.dtoUI('${pref}')" style="width:100%;padding:9px;border:1.5px solid ${c.fuerte};border-radius:9px;font-size:14px;font-weight:700"></label>
+        <label style="font-size:12px;color:#6B7280">€ por<select id="${pref}_ud" style="width:100%;padding:9px;border:1.5px solid ${c.borde};border-radius:9px;font-size:14px"><option>m</option><option>kg</option><option>ud</option><option>mazo</option></select></label>
       </div>
-      <textarea id="${pref}_nota" placeholder="Por qué (qué le ofrece la competencia, volumen, plazo…)" style="min-height:52px;padding:9px;border:1.5px solid #DDD6FE;border-radius:9px;font:inherit;font-size:14px"></textarea>
+      <div id="${pref}_dto" style="font-size:12.5px;font-weight:700"></div>
+      <textarea id="${pref}_nota" placeholder="Por qué (qué le ofrece la competencia, volumen, plazo…)" style="min-height:52px;padding:9px;border:1.5px solid ${c.borde};border-radius:9px;font:inherit;font-size:14px"></textarea>
     </div>`;
+  };
+  // Muestra el descuento al teclear y si entra en el límite de quien lo hace
+  RC.NIVEL_UI="comercial";
+  RC.dtoUI=async(pref)=>{
+    const pa=Number(((document.getElementById(pref+"_pa")||{}).value||"").replace(",","."));
+    const po=Number(((document.getElementById(pref+"_po")||{}).value||"").replace(",","."));
+    const el=document.getElementById(pref+"_dto"); if(!el) return;
+    if(!(pa>0&&po>0)){ el.innerHTML=""; return; }
+    const lim=await RC.limitesDto(); const n=RC.NIVEL_UI;
+    const tope=n==="ceo"?100:n==="director"?lim.director:n==="jefe"?lim.jefe:lim.agente;
+    const d=Math.round((1-po/pa)*1000)/10;
+    el.innerHTML=d<=0?`<span style="color:#15803D">Sin descuento sobre tarifa</span>`
+      :d<=tope?`<span style="color:#15803D">Descuento ${d} %: dentro de tu límite (${tope} %)</span>`
+      :`<span style="color:#B45309">Descuento ${d} %: supera tu límite del ${tope} % → irá a aprobación</span>`;
   };
   RC.leerFormEstrategia=(pref,arts)=>{
     const v=(k)=>{ const el=document.getElementById(pref+"_"+k); return el?String(el.value||"").trim():""; };
-    const sel=v("art"); let a=sel==="otro"||sel===""?null:(arts||[])[Number(sel)];
-    if(!a) a={art:"",desc:v("otro"),cal:""};
-    return {art:a.art,desc:a.desc,cal:a.cal,precioActual:Number(v("pa").replace(",","."))||0,
-      precioOferta:Number(v("po").replace(",","."))||0,unidad:v("ud")||"m",nota:v("nota")};
+    let p=RC._sel[pref];
+    if(!p&&(arts||[]).length===1) p={codigo:arts[0].art,nombre:arts[0].desc,calibre:arts[0].cal||""};
+    p=p||{};
+    return {art:p.codigo||"",desc:p.nombre||"",cal:p.calibre||"",metros:p.metros||"",deCatalogo:!!p.deCatalogo,
+      precioBase:num(p.precio)||0,dtoCliente:p.dtoCli!=null?p.dtoCli:null,catCliente:p.catCli||"",
+      precioActual:Number(v("pa").replace(",","."))||0,precioOferta:Number(v("po").replace(",","."))||0,unidad:v("ud")||"m",nota:v("nota")};
   };
   RC.htmlEstrategia=(e,botones)=>{
-    const [t,c,bg]=RC.ESTADO_EST[e.estado]||["📋 "+(e.estado||""),"#475569","#F8FAFC"];
+    let [t,c,bg]=RC.ESTADO_EST[e.estado]||["📋 "+(e.estado||""),"#475569","#F8FAFC"];
+    const cf=e.cierreFinal, ss=e.seguimientoSemanal;
+    if(cf&&cf.resultado==="ko") t="❌ Sin pedido";
+    const res=cf?`<div style="font-size:12.5px;font-weight:700;margin-top:4px;color:${cf.resultado==="pedido"?"#15803D":"#B91C1C"}">${cf.resultado==="pedido"?"✅ Ha entrado pedido":"❌ No ha salido"}${cf.subTipo?" · "+RC.esc((RC.MOTIVOS_KO.find(m=>m[0]===cf.subTipo)||[,cf.subTipo])[1]):""} · ${RC.esc(cf.fecha||"")}${cf.nota?" — “"+RC.esc(cf.nota)+"”":""}</div>`
+      :ss&&ss.estado==="pendiente"&&e.estado==="aprobada"?`<div style="font-size:12.5px;font-weight:700;margin-top:4px;color:#B45309">⏳ Sin pedido todavía (semana ${RC.esc(ss.semana)})${ss.nota?" — “"+RC.esc(ss.nota)+"”":""}</div>`:"";
     const o=(e.ofertas||[])[0]||{};
     return `<div style="border:1px solid #E5E7EB;border-radius:12px;padding:10px 12px;margin:8px 0;background:#fff">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
@@ -715,7 +967,7 @@
         <span style="font-size:11.5px;font-weight:800;color:${c};background:${bg};border-radius:99px;padding:3px 9px">${t}${e.estado==="pendiente_aprobacion"&&e.pendienteDeNombre?" · "+RC.esc(e.pendienteDeNombre):""}</span></div>
       <div style="font-size:13px;margin-top:4px">${o.precioActual?RC.esc(o.precioActual)+" € → ":""}<b style="color:#6D28D9">${RC.esc(o.precioFinal||o.precioOferta||"")} €/${RC.esc(o.unidad||"m")}</b> · descuento ${num(e.maxDescuento)} %</div>
       <div style="font-size:12px;color:#6B7280;margin-top:2px">${e.solicitudAgente?"Lo pide "+RC.esc(e.agenteNombre||e.agente):"Creada por "+RC.esc(e.creadoPorNombre||"")} · ${RC.esc(e.fechaCreacionStr||"")}${e.descripcion?" · “"+RC.esc(e.descripcion)+"”":""}</div>
-      ${botones||""}</div>`;
+      ${res}${botones||""}</div>`;
   };
 
   // Resumen para informes (jefe, CEO, comité)
