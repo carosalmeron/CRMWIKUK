@@ -1194,6 +1194,83 @@ async function informeCEO(o){
   return {ok:env.every(Boolean),semana:sem,to,subject,equipos:D.equipos.length};
 }
 
+// ═══ Hilo de incidencias de pérdida de venta ═══════════════════════════
+function _valFS(v){
+  if(!v) return null;
+  if(v.stringValue!==undefined) return v.stringValue;
+  if(v.integerValue!==undefined) return Number(v.integerValue);
+  if(v.doubleValue!==undefined) return Number(v.doubleValue);
+  if(v.booleanValue!==undefined) return v.booleanValue;
+  if(v.mapValue){ const o={}; const f=v.mapValue.fields||{}; for(const k in f) o[k]=_valFS(f[k]); return o; }
+  if(v.arrayValue) return (v.arrayValue.values||[]).map(_valFS);
+  return null;
+}
+async function historialDe(id){
+  const r=await fetch(FB+"/incidencias/"+encodeURIComponent(id)); if(!r.ok) return [];
+  const j=await r.json(); const h=j.fields&&j.fields.historial;
+  let l=_valFS(h)||[];
+  if(typeof l==="string"){ try{ l=JSON.parse(l); }catch(e){ l=[]; } }
+  return Array.isArray(l)?l.filter(Boolean):[];
+}
+// Personas de ventas del hilo: comercial, su jefe de equipo y quien la abrió
+function ventasDe(datos, inc){
+  const U=x=>String(x||"").toUpperCase().trim();
+  const todas=[...datos.usuarios,...datos.portal];
+  const deAg=todas.filter(u=>[u.id,u._id,u.crmId,u.username,u.grupoAgente,u.catalogoVendedor].some(k=>k&&U(k)===U(inc.agente)));
+  const out=[];
+  const add=(u,papel)=>{ if(!u) return; const e=u.email||emailDeCuenta(datos,u.id||u._id); if(e&&e.indexOf("@")>0) out.push({email:String(e).trim(),nombre:u.nombre||u.id||u._id,papel}); };
+  const com=deAg.find(u=>u.email)||deAg[0]; add(com,"comercial");
+  const eq=U(inc.equipo||(deAg.find(u=>u.equipo)||{}).equipo);
+  if(eq) datos.usuarios.filter(u=>["jefe","crm_jefe"].includes(String(u.rol||"").toLowerCase())&&U(u.equipo)===eq&&cuentaValida(u)).forEach(u=>add(u,"jefe de equipo"));
+  if(inc.autor){ const a=todas.find(u=>[u.id,u._id,u.crmId,u.username].some(k=>k&&U(k)===U(inc.autor)))
+      ||todas.find(u=>U(u.nombre)===U(inc.autorNombre)); add(a,"quien la abrió"); }
+  return out;
+}
+function textoHist(h){ return "• "+(h.por||"—")+" ("+(h.fecha||"")+") — "+(h.accion||"")+(h.nota?"\n  "+String(h.nota).replace(/\n/g,"\n  "):""); }
+async function avisarVentasNueva(inc, datos, id){
+  const excl=String(inc.autor||"").toUpperCase();
+  const l=ventasDe(datos,inc).filter(x=>x.papel!=="quien la abrió");
+  const autorEmails=new Set([...datos.usuarios,...datos.portal].filter(u=>[u.id,u._id,u.username].some(k=>k&&String(k).toUpperCase()===excl)).map(u=>String(u.email||"").toLowerCase()));
+  const to=[...new Set(l.map(x=>x.email.toLowerCase()))].filter(e=>!autorEmails.has(e));
+  if(!to.length) return {ok:true,destinatarios:[]};
+  const tipo=LABEL_TIPO[TIPO_A_TIPOLOGIA[String(inc.tipo||"").toLowerCase()]]||inc.tipo||"—";
+  const subject="🧩 Pérdida de venta: incidencia abierta a "+tipo+" — "+(inc.clienteNombre||inc.cliente||"");
+  const body=(inc.autorNombre||"Dirección")+" ha implicado a "+tipo+" en la recuperación de este cliente.\n\n"
+    +(inc.descripcion||"")+"\n\nCuando respondan te llegará por correo y lo verás en la ficha del cliente (Plan de recuperación).\n\nhttps://crmwikuk.vercel.app/\n\n—\nCRM Grupo Consolidado · Aviso automático";
+  return await enviarEmail(to, subject, body, {sinCopia:true});
+}
+async function avisarHilo(inc, id){
+  if(inc.origen!=="recuperacion"&&!inc.casoId) return {ok:true,skipped:"no es de pérdida de venta"};
+  const hist=await historialDe(id);
+  // Cuántas entradas ya se avisaron: en otra colección, para que el CRM no lo pise al guardar
+  const ctl=await getDoc("avisos_incidencias", id);
+  const ya=Number(ctl&&ctl.enviados)||0;
+  const nuevas=hist.slice(ya).filter(h=>h&&(h.nota||h.accion));
+  if(!nuevas.length) return {ok:true,skipped:"nada nuevo"};
+  const datos=await cargarDatos();
+  const tipoLc=String(inc.tipo||"").toLowerCase(), tipologia=TIPO_A_TIPOLOGIA[tipoLc]||tipoLc;
+  const dept=destinatariosDe(datos,tipologia).directos.map(e=>({email:e,papel:"departamento"}));
+  const lista=[...dept,...ventasDe(datos,inc)];
+  // Fuera quien acaba de escribir
+  const quien=nuevas.map(h=>String(h.por||"").toUpperCase().trim()).filter(Boolean);
+  const suyos=new Set([...datos.usuarios,...datos.portal].filter(u=>quien.includes(String(u.nombre||"").toUpperCase().trim())).map(u=>String(u.email||"").toLowerCase()));
+  const to=[...new Set(lista.map(x=>x.email.toLowerCase()))].filter(e=>!suyos.has(e));
+  const tipo=LABEL_TIPO[tipologia]||inc.tipo||"—";
+  const subject="💬 "+(nuevas[nuevas.length-1].por||"Respuesta")+" en la incidencia de "+tipo+" — "+(inc.clienteNombre||inc.cliente||"")+" (pérdida de venta)";
+  const body="Novedades en la incidencia por pérdida de venta de "+(inc.clienteNombre||inc.cliente||"")+":\n\n"
+    +nuevas.map(textoHist).join("\n\n")
+    +"\n\nEstado: "+(inc.estado||"abierta")+"\n\nAsunto original:\n"+String(inc.descripcion||"").split("\n\n").slice(0,2).join("\n\n")
+    +"\n\nResponde desde Incidencias del CRM o desde la ficha del cliente en el Plan de recuperación:\nhttps://crmwikuk.vercel.app/\n\n—\nCRM Grupo Consolidado · Aviso automático";
+  let r={ok:true,destinatarios:[]};
+  if(to.length) r=await enviarEmail(to, subject, body, {sinCopia:true});
+  if(r.ok){
+    await fetch(FB+"/avisos_incidencias/"+encodeURIComponent(id)+"?updateMask.fieldPaths=enviados&updateMask.fieldPaths=fecha",{
+      method:"PATCH",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({fields:{enviados:{integerValue:hist.length},fecha:{stringValue:new Date().toISOString()}}})});
+  }
+  return {ok:r.ok,nuevas:nuevas.length,to:r.destinatarios||[]};
+}
+
 module.exports = async function handler(req, res){
   try{
     // ─────── Informe semanal de dirección, por URL ───────
@@ -1247,10 +1324,14 @@ module.exports = async function handler(req, res){
 
     // ─────── MODO 1: POST inmediato al crear una incidencia ───────
     if(req.method==="POST"){
-      const {incidenciaId} = req.body||{};
+      const {incidenciaId, evento} = req.body||{};
       if(!incidenciaId){ res.status(400).json({error:"Falta incidenciaId"}); return; }
       const inc = await getDoc("incidencias", incidenciaId);
       if(!inc){ res.status(404).json({error:"Incidencia no encontrada"}); return; }
+      // (sep 2026) Hilo de incidencias de PÉRDIDA DE VENTA (plan de recuperación):
+      // cada respuesta o comentario llega a todos los del hilo (departamento,
+      // comercial, su jefe y quien la abrió), menos a quien la escribe.
+      if(evento==="hilo"){ res.status(200).json(await avisarHilo(inc, incidenciaId)); return; }
       // (v5.5) Tipos no clásicos (departamentos nuevos) pasan tal cual
       const tipoLc = String(inc.tipo||"").toLowerCase();
       const tipologia = TIPO_A_TIPOLOGIA[tipoLc] || tipoLc;
@@ -1273,6 +1354,11 @@ module.exports = async function handler(req, res){
         const {subject, body} = construirEmail(inc, 0, true);
         sendE = await enviarEmail(dest.escalado, subject, body);
       }
+      // Pérdida de venta: también se enteran el comercial y su jefe
+      let sendV={ok:true};
+      if(inc.origen==="recuperacion"){
+        try{ sendV=await avisarVentasNueva(inc, datos, incidenciaId); }catch(e){ sendV={ok:false,error:e.message}; }
+      }
       if(sendD.ok){
         await setCampo("incidencias", incidenciaId, "ultimoAvisoFecha", new Date().toISOString());
         await setCampo("incidencias", incidenciaId, "ultimoAvisoTipo", "creacion");
@@ -1281,6 +1367,7 @@ module.exports = async function handler(req, res){
         ok:sendD.ok,
         to:sendD.destinatarios||[],
         escaladoA:sendE.destinatarios||[],
+        ventas:sendV.destinatarios||[],
         status:sendD.status,
         response: sendD.response ? String(sendD.response).substring(0,200) : null
       });
