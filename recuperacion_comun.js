@@ -986,21 +986,29 @@
     return `<div data-rcpref="${pref}" data-rckey="${attr(key)}" data-rcart="${attr(a0.art)}" data-rcdesc="${attr(a0.desc)}" data-rccli="${attr(cl.cliente)}" data-rcnom="${attr(cl.nombre)}" style="display:grid;gap:7px;background:${c.fondo};border:1px solid ${c.borde};border-radius:12px;padding:12px;margin-top:8px">
       <div style="font-weight:800;color:${c.titulo}">${texto||"💶 Estrategia de precio"}</div>
       ${RC.htmlBuscador(pref,uno?[]:arts,uno?"Artículo (puedes cambiarlo buscando en el catálogo)":"Artículo del catálogo · o toca uno de los que ha dejado")}
-      <div style="display:grid;grid-template-columns:1fr 1fr 80px;gap:6px">
-        <label style="font-size:12px;color:#6B7280">Tarifa del cliente<input id="${pref}_pa" type="number" step="0.01" oninput="RC.dtoUI('${pref}')" style="width:100%;padding:9px;border:1.5px solid ${c.borde};border-radius:9px;font-size:14px"></label>
-        <label style="font-size:12px;color:#6B7280">Precio nuevo<input id="${pref}_po" type="number" step="0.01" oninput="RC.dtoUI('${pref}')" style="width:100%;padding:9px;border:1.5px solid ${c.fuerte};border-radius:9px;font-size:14px;font-weight:700"></label>
-        <label style="font-size:12px;color:#6B7280">€ por<select id="${pref}_ud" style="width:100%;padding:9px;border:1.5px solid ${c.borde};border-radius:9px;font-size:14px"><option>m</option><option>kg</option><option>ud</option><option>mazo</option></select></label>
-      </div>
+      ${RC.htmlPrecios(pref,c.borde,c.fuerte)}
       <div id="${pref}_dto" style="font-size:12.5px;font-weight:700"></div>
       <textarea id="${pref}_nota" placeholder="Por qué (qué le ofrece la competencia, volumen, plazo…)" style="min-height:52px;padding:9px;border:1.5px solid ${c.borde};border-radius:9px;font:inherit;font-size:14px"></textarea>
     </div>`;
   };
   // Muestra el descuento al teclear y si entra en el límite de quien lo hace
   RC.NIVEL_UI="comercial";
-  RC.dtoUI=async(pref)=>{
-    const pa=Number(((document.getElementById(pref+"_pa")||{}).value||"").replace(",","."));
-    const po=Number(((document.getElementById(pref+"_po")||{}).value||"").replace(",","."));
-    const el=document.getElementById(pref+"_dto"); if(!el) return;
+  // Tarifa · Descuento % · Precio: se rellena uno u otro y se calcula el otro
+  RC.htmlPrecios=(pref,borde,fuerte,tarifa)=>`<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px">
+        <label style="font-size:12px;color:#6B7280">Tarifa cliente €<input id="${pref}_pa" type="number" step="0.01" value="${tarifa||""}" oninput="RC.dtoUI('${pref}','pa')" style="width:100%;padding:9px;border:1.5px solid ${borde};border-radius:9px;font-size:14px"></label>
+        <label style="font-size:12px;color:#6B7280">Descuento %<input id="${pref}_pd" type="number" step="0.1" oninput="RC.dtoUI('${pref}','pd')" style="width:100%;padding:9px;border:1.5px solid ${fuerte};border-radius:9px;font-size:14px;font-weight:700"></label>
+        <label style="font-size:12px;color:#6B7280">Precio nuevo €<input id="${pref}_po" type="number" step="0.01" oninput="RC.dtoUI('${pref}','po')" style="width:100%;padding:9px;border:1.5px solid ${fuerte};border-radius:9px;font-size:14px;font-weight:700"></label>
+      </div><input type="hidden" id="${pref}_ud" value="m">`;
+  RC.dtoUI=async(pref,origen)=>{
+    const g=(k)=>document.getElementById(pref+"_"+k);
+    const nv=(k)=>Number(((g(k)||{}).value||"").replace(",","."));
+    // Si se escribe el descuento, se calcula el precio; si se escribe el precio, el descuento
+    if(origen==="pd"||(origen==="pa"&&nv("pd")>0&&!(nv("po")>0))){ const pa0=nv("pa"), d0=nv("pd");
+      if(pa0>0&&(g("pd").value!=="")&&g("po")) g("po").value=(Math.round(pa0*(1-d0/100)*100)/100).toFixed(2); }
+    else if((origen==="po"||origen==="pa"||!origen)&&g("pd")){ const pa0=nv("pa"), po0=nv("po");
+      if(pa0>0&&po0>0) g("pd").value=String(Math.round((1-po0/pa0)*1000)/10); else if(origen==="po") g("pd").value=""; }
+    const pa=nv("pa"), po=nv("po");
+    const el=g("dto"); if(!el) return;
     if(!(pa>0&&po>0)){ el.innerHTML=""; return; }
     const lim=await RC.limitesDto(); const n=RC.NIVEL_UI;
     const tope=n==="ceo"?100:n==="director"?lim.director:n==="jefe"?lim.jefe:lim.agente;
@@ -1042,9 +1050,7 @@
       h+=`<div style="display:grid;gap:6px;background:#EFF6FF;border:1px solid #BFDBFE;border-radius:12px;padding:10px;margin-top:6px">
         <div style="font-weight:800;color:#1D4ED8">💬 Otro precio para ${RC.esc(o.nombre||"el artículo")}</div>
         <div style="font-size:12.5px;color:#374151">Pide <b>${RC.esc(o.precioFinal||o.precioOferta||"")} €/${RC.esc(o.unidad||"m")}</b>. Pon el precio que sí le das.</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
-          <label style="font-size:12px;color:#6B7280">Tarifa del cliente<input id="${pref}_pa" type="number" step="0.01" value="${ref}" readonly style="width:100%;padding:9px;border:1.5px solid #BFDBFE;border-radius:9px;font-size:14px;background:#F1F5F9"></label>
-          <label style="font-size:12px;color:#6B7280">Tu precio<input id="${pref}_po" type="number" step="0.01" oninput="RC.dtoUI('${pref}')" style="width:100%;padding:9px;border:1.5px solid #2563EB;border-radius:9px;font-size:14px;font-weight:700"></label></div>
+        ${RC.htmlPrecios(pref,"#BFDBFE","#2563EB",ref).replace(`oninput="RC.dtoUI('${pref}','pa')"`,"readonly").replace('border:1.5px solid #BFDBFE;border-radius:9px;font-size:14px">','border:1.5px solid #BFDBFE;border-radius:9px;font-size:14px;background:#F1F5F9">')}
         <div id="${pref}_dto" style="font-size:12.5px;font-weight:700"></div>
         <button type="button" onclick="extraEstEnviar('${id}','precio')" style="padding:11px;border-radius:10px;border:none;background:#2563EB;color:#fff;font-weight:800;font-size:14px;cursor:pointer">Enviar este precio</button>
         <div style="font-size:12px;color:#6B7280">Si entra en tu límite queda aprobada a ese precio; si no, sube a tu superior con el precio nuevo. Al comercial le llega el aviso.</div></div>`;
