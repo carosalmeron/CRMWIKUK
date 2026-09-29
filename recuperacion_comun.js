@@ -951,7 +951,8 @@
     const elx=document.getElementById(pref+"_sel"), pax=document.getElementById(pref+"_pa");
     if(elx) elx.innerHTML=`<div style="background:#fff;border:1.5px solid #16A34A;border-radius:9px;padding:8px 10px;font-size:13px">✔ <b>${RC.esc(txtCat(p))}</b>
       ${p.precio?`<div style="font-size:12.5px;color:#374151;margin-top:3px">Catálogo ${f2(p.precio)} € − ${p.dtoCli} % ${p.catCli?"("+RC.esc(p.catCli)+")":"de su tarifa"} = <b>tarifa del cliente ${f2(p.tarifaCli)} €</b></div>
-        ${p.sinTarifa?`<div style="font-size:12px;color:#B45309">Este cliente no tiene tarifa ni categoría en el CRM: se toma el precio de catálogo.</div>`:""}`
+        ${p.sinTarifa?`<div style="font-size:12px;color:#B45309">Este cliente no tiene tarifa ni categoría en el CRM: se toma el precio de catálogo.</div>`:""}${(()=>{ const cli=(RC._cliPref[pref]||{}).cliente, u=RC._ult&&cli&&RC._ult[ARR(cli)+"|"+ARR(p.codigo)];
+          return u&&u.precio?`<div style="font-size:12.5px;color:#374151;margin-top:2px">🧾 Última compra: <b>${f2(u.precio)} €/ud</b> · ${num(u.unidades).toLocaleString("es-ES")} ud · ${String(u.fecha).slice(0,10).split("-").reverse().join("/")}</div>`:""; })()}`
       :`<div style="font-size:12.5px;color:#B45309;margin-top:3px">No tiene precio en el catálogo: pon a mano el precio de tarifa del cliente.</div>`}</div>`;
     if(pax&&p.precio){ pax.value=p.tarifaCli.toFixed(2); pax.readOnly=true; pax.style.background="#F1F5F9"; }
     else if(pax){ pax.readOnly=false; pax.style.background="#fff"; }
@@ -1110,8 +1111,38 @@
   RC.ESTADO_INC={abierta:["🔴 Abierta","#B91C1C"],en_gestion:["🟠 En gestión","#B45309"],en_proceso:["🟠 En gestión","#B45309"],escalada:["🟣 Escalada","#6D28D9"],
     informada:["🔵 Informada","#1D4ED8"],resuelta:["✅ Resuelta","#15803D"],cerrada:["✅ Cerrada","#15803D"]};
   RC.tipoIncDeCausa=(causa)=>{ const c=ARR(causa);
-    return /PLAZO|ENTREGA|STOCK|SERVICIO/.test(c)?"stock":/CALIDAD/.test(c)?"calidad":/CALIBRE|FORMATO/.test(c)?"produccion":/IMPAGO|COBRO|RIESGO|CR[EÉ]DITO/.test(c)?"administracion":"stock"; };
-  RC.nombreTipoInc=(k)=>(RC.TIPOS_INC.find(t=>t[0]===k)||[,k])[1];
+    return /PLAZO|ENTREGA|STOCK|SERVICIO|ROTURA/.test(c)?"stock":/CALIDAD/.test(c)?"calidad":/CALIBRE|FORMATO/.test(c)?"produccion":/IMPAGO|COBRO|RIESGO|CR[EÉ]DITO/.test(c)?"administracion":"stock"; };
+  // Departamentos del organigrama (los mismos que usa el CRM para las
+  // incidencias): base + colección «departamentos», con sus subdepartamentos.
+  // El «tipo» de la incidencia es su primera tipología o, si no tiene, su id.
+  const DEP_BASE=[["direccion","Dirección",null,[]],["ventas","Ventas","direccion",[]],["customer","Customer Service","ventas",[]],
+    ["compras","Compras","direccion",["stock"]],["logistica","Logística","compras",["logistica"]],["operaciones","Operaciones","direccion",[]],
+    ["produccion","Producción","operaciones",["produccion"]],["coordinacion","Coordinación","operaciones",["coordinacion"]],["id","I+D","direccion",["id"]],
+    ["ingredientes","Ingredientes","id",[]],["envolturas","Envolturas","id",[]],["calidad","Calidad","direccion",["calidad"]],
+    ["administracion","Administración","direccion",["administracion"]],["it","IT","direccion",["it"]]];
+  RC._deptos=null;
+  RC.cargarDeptos=async()=>{
+    if(RC._deptos) return RC._deptos;
+    const porId={};
+    DEP_BASE.forEach(([id,nombre,padre,tip])=>porId[id]={id,nombre,padre,tipologias:tip,activo:true});
+    try{ (await RC.leerProfundo("departamentos")).forEach(d=>{ const id=d._id||d.id; porId[id]=Object.assign({},porId[id]||{},d,{id}); }); }catch(e){}
+    const l=Object.values(porId).filter(d=>d.activo!==false&&!d.equipo&&!["direccion","ventas"].includes(d.id));
+    l.forEach(d=>{ if(typeof d.tipologias==="string"){ try{ d.tipologias=JSON.parse(d.tipologias); }catch(e){ d.tipologias=[]; } }
+      if(!Array.isArray(d.tipologias)) d.tipologias=[];
+      d.tipo=d.tipologias[0]||d.id; });
+    // Orden de árbol: cada departamento seguido de sus hijos
+    const hijos=(p)=>l.filter(d=>(d.padre||null)===p&&l.includes(d)).sort((a,b)=>(a.orden||0)-(b.orden||0)||String(a.nombre).localeCompare(String(b.nombre)));
+    const out=[], vistos=new Set();
+    const rec=(d,niv)=>{ if(vistos.has(d.id)) return; vistos.add(d.id); d.nivel=niv; out.push(d); hijos(d.id).forEach(h=>rec(h,niv+1)); };
+    l.filter(d=>!d.padre||!l.some(x=>x.id===d.padre)).sort((a,b)=>(a.orden||0)-(b.orden||0)||String(a.nombre).localeCompare(String(b.nombre))).forEach(d=>rec(d,0));
+    l.forEach(d=>{ if(!vistos.has(d.id)){ d.nivel=0; out.push(d); } });
+    RC._deptos=out; return out;
+  };
+  const ICO_DEP={compras:"📦",logistica:"🚚",operaciones:"⚙️",produccion:"🏭",coordinacion:"🧭",id:"🔬",calidad:"⚠️",administracion:"📄",it:"💻",customer:"🎧",ingredientes:"🧂",envolturas:"🌀",stock:"📦"};
+  RC.nombreTipoInc=(k)=>{
+    const d=(RC._deptos||[]).find(x=>x.tipo===k)||(RC._deptos||[]).find(x=>x.id===k);
+    if(d) return (d.icon||ICO_DEP[d.id]||"🏢")+" "+d.nombre;
+    return (RC.TIPOS_INC.find(t=>t[0]===k)||[,k])[1]; };
   RC.crearIncidencia=async(caso,d,por)=>{
     const hoy=new Date(), hoyS=hoy.toLocaleDateString("es-ES");
     const id="inc_rec_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
@@ -1164,12 +1195,22 @@
   RC.formIncidencia=(pref,caso,art)=>`<div style="display:grid;gap:7px;background:#F0F9FF;border:1px solid #BAE6FD;border-radius:12px;padding:12px;margin-top:8px">
       <div style="font-weight:800;color:#0369A1">🧩 Implicar a otro departamento${art?" · "+RC.esc(art.desc||art.art):""}</div>
       <div style="font-size:12.5px;color:#374151">Se le manda como incidencia de <b>pérdida de venta</b> (${Math.round(num(caso.perdido)).toLocaleString("es-ES")} €). Su respuesta queda aquí, en el hilo del cliente.</div>
-      <div id="${pref}_tipos" style="display:flex;gap:6px;flex-wrap:wrap">${RC.TIPOS_INC.map(([k,l])=>`<button type="button" data-k="${k}" onclick="RC.elegirTipoInc('${pref}','${k}')" style="padding:7px 11px;border-radius:99px;border:1.5px solid #0284C7;background:${k===RC.tipoIncDeCausa(caso.causa)?"#0284C7":"#fff"};color:${k===RC.tipoIncDeCausa(caso.causa)?"#fff":"#0369A1"};font-weight:700;font-size:12.5px;cursor:pointer">${l}</button>`).join("")}</div>
+      <div id="${pref}_tipos" style="display:grid;gap:5px">${RC.htmlDeptos(pref,RC.tipoIncDeCausa(caso.causa))}</div>
       <input type="hidden" id="${pref}_tipo" value="${RC.tipoIncDeCausa(caso.causa)}">
       <textarea id="${pref}_txt" placeholder="Qué pasa y qué necesitas (p. ej. «espera 2 barriles de CX60 desde hace 2 semanas, ¿cuándo hay stock?»)" style="min-height:64px;padding:9px;border:1.5px solid #BAE6FD;border-radius:9px;font:inherit;font-size:14px">${caso.causaNota?RC.esc(caso.causaNota):""}</textarea>
       <div style="display:flex;gap:6px;align-items:center;font-size:12.5px;color:#374151">Prioridad
         <select id="${pref}_pri" style="padding:7px;border:1.5px solid #BAE6FD;border-radius:9px;font:inherit"><option value="alta">Alta</option><option value="urgente">Urgente</option><option value="media">Media</option></select></div>
     </div>`;
+  // Botones de departamento en árbol: los principales y, debajo, sus subdepartamentos
+  RC.htmlDeptos=(pref,sel)=>{
+    const deps=RC._deptos;
+    const bot=(k,l,sub)=>`<button type="button" data-k="${k}" onclick="RC.elegirTipoInc('${pref}','${k}')" style="padding:${sub?"6px 10px":"7px 11px"};border-radius:99px;border:1.5px solid #0284C7;background:${k===sel?"#0284C7":"#fff"};color:${k===sel?"#fff":"#0369A1"};font-weight:${sub?600:800};font-size:${sub?12:12.5}px;cursor:pointer">${l}</button>`;
+    if(!deps||!deps.length) return `<div style="display:flex;gap:6px;flex-wrap:wrap">${RC.TIPOS_INC.map(([k,l])=>bot(k,l,false)).join("")}</div>`;
+    const raiz=deps.filter(d=>!d.nivel);
+    return raiz.map(r=>{ const desc=[]; let i=deps.indexOf(r)+1; while(i<deps.length&&deps[i].nivel>0){ desc.push(deps[i]); i++; }
+      return `<div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">${bot(r.tipo,(r.icon||ICO_DEP[r.id]||"🏢")+" "+RC.esc(r.nombre),false)}
+        ${desc.map(d=>bot(d.tipo,"↳ "+(d.nivel>1?"· ".repeat(d.nivel-1):"")+RC.esc(d.nombre),true)).join("")}</div>`; }).join("");
+  };
   RC.elegirTipoInc=(pref,k)=>{ const h=document.getElementById(pref+"_tipo"); if(h) h.value=k;
     document.querySelectorAll(`#${pref}_tipos button`).forEach(b=>{ const on=b.getAttribute("data-k")===k; b.style.background=on?"#0284C7":"#fff"; b.style.color=on?"#fff":"#0369A1"; }); };
   RC.leerIncidencia=(pref)=>({tipo:(document.getElementById(pref+"_tipo")||{}).value||"stock",
