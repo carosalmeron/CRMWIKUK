@@ -1941,50 +1941,73 @@ const euT=(n)=>Math.round(Number(n)||0).toLocaleString("es-ES")+" €";
 const cifra=(r,o)=>'<b style="color:'+colP(pcT(r,o))+'">'+r+'</b>'+(o?'<span style="color:#94A3B8">/'+o+'</span> <b style="color:'+colP(pcT(r,o))+'">'+pcT(r,o)+' %</b>':'');
 
 // Cabecera: ventas del mes, facturado de la semana y actividad, consolidado
+// Tarjeta de cifras (misma para consolidado, equipo y comercial)
+function tarjetaCifras(g,compacta){
+  const S=(k)=>g.reduce((t,p)=>t+(Number(p[k])||0),0), SO=(k)=>g.reduce((t,p)=>t+(Number((p.obj||{})[k])||0),0);
+  const MES=["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"][((PANEL&&PANEL.mNum)||1)-1];
+  const mAct=S("mAct"), mObj=S("mObj"), vSem=S("vSem"), objSem=S("objSem");
+  const tile=(t,o,v,p)=>'<div style="flex:1;min-width:130px;background:#F8FAFC;border-radius:12px;padding:10px 12px">'
+    +'<div style="font-size:11px;color:#64748B;font-weight:700;text-transform:uppercase">'+t+'</div>'
+    +'<div style="font-size:11.5px;color:#64748B">objetivo '+euT(o)+'</div>'
+    +'<div style="font-size:'+(compacta?18:21)+'px;font-weight:800">'+euT(v)+'</div>'
+    +'<div style="font-size:12.5px;font-weight:800;color:'+colP(p)+'">'+(p==null?"sin objetivo":p+" % del objetivo")+'</div></div>';
+  const barra=(ic,l,r,o)=>{ const p=pcT(r,o), w=Math.min(100,p||0);
+    return '<tr><td style="padding:5px 0;font-size:12.5px;white-space:nowrap">'+ic+' '+l+'</td>'
+      +'<td style="padding:5px 8px;width:55%"><div style="background:#EEF1F5;border-radius:99px;height:7px;overflow:hidden"><div style="background:'+colP(p)+';width:'+w+'%;height:7px"></div></div></td>'
+      +'<td style="padding:5px 0;text-align:right;white-space:nowrap;font-size:13px">'+cifra(r,o)+'</td></tr>'; };
+  return '<div style="display:flex;gap:8px;flex-wrap:wrap">'+tile("Ventas de "+MES,mObj,mAct,pcT(mAct,mObj))+tile("Facturado esta semana",objSem,vSem,pcT(vSem,objSem))+'</div>'
+    +'<div style="font-size:11px;color:#64748B;font-weight:800;text-transform:uppercase;margin:10px 0 2px">Actividad esta semana</div>'
+    +'<table style="width:100%;border-collapse:collapse">'+barra("👋","Visitas",S("vis"),SO("visitas"))+barra("📞","Llamadas",S("lla"),SO("llamadas"))
+    +barra("📦","Muestras env.",S("mEnv"),SO("muestras"))+barra("✅","Muestras ok",S("mOk"),SO("muestrasOk"))+'</table>';
+}
+// Fila limpia: nombre y % del mes; al tocar se abre aparte
+const pillP=(p)=>'<span style="display:inline-block;min-width:52px;text-align:center;padding:3px 9px;border-radius:99px;font-weight:800;font-size:12.5px;background:'+(p==null?"#F1F5F9":p>=100?"#DCFCE7":p>=80?"#FEF3C7":"#FEE2E2")+';color:'+colP(p)+'">'+(p==null?"—":p+" %")+'</span>';
+const filaLimpia=(onclick,titulo,sub,p,activa)=>'<div onclick="'+onclick+'" style="display:flex;align-items:center;gap:10px;padding:10px 4px;border-top:1px solid #EEF1F5;cursor:pointer;'+(activa?'background:#F1F5F9;border-radius:8px':'')+'">'
+  +'<div style="flex:1;min-width:0"><div style="font-weight:800;font-size:14px">'+titulo+'</div>'+(sub?'<div style="font-size:12px;color:#64748B">'+sub+'</div>':'')+'</div>'
+  +'<div style="text-align:right"><div style="font-size:10.5px;color:#94A3B8;font-weight:700">MES</div>'+pillP(p)+'</div><div style="color:#94A3B8;font-size:18px">'+(activa?"▾":"›")+'</div></div>';
+let EQ_VISTA=null, COM_VISTA=null;
+window.verEq=(eq)=>{ EQ_VISTA=EQ_VISTA===eq?null:eq; COM_VISTA=null; pintar();
+  setTimeout(()=>{ const el=document.getElementById("vista-eq"); if(el&&EQ_VISTA) el.scrollIntoView({behavior:"smooth",block:"start"}); },50); };
+window.verCom=(cod)=>{ COM_VISTA=COM_VISTA===cod?null:cod; pintar(); };
+// Cabecera: CONSOLIDADO arriba; debajo la lista de equipos (o comerciales) limpia.
+// Al tocar un equipo se abre su propia tarjeta aparte, con sus comerciales.
 function cabeceraConsolidada(){
   if(!(esJefe||esDir||esCeo)) return "";
   if(PANEL===null) setTimeout(cargarPanel,0);
-  if(!PANEL||PANEL.cargando) return '<div class="card"><p class="vacio" style="margin:0">Calculando ventas y actividad del equipo…</p></div>';
+  if(!PANEL||PANEL.cargando) return '<div class="card"><p class="vacio" style="margin:0">Calculando ventas y actividad…</p></div>';
   if(PANEL.error) return '<div class="card"><p class="vacio" style="margin:0">No se han podido leer las cifras ('+escT(PANEL.error)+').</p></div>';
-  // (sep 2026) Jefe de ventas y CEO: TODAS las ventas (todos los equipos).
-  // El jefe de equipo, las de su equipo.
+  // Jefe de ventas y CEO: TODAS las ventas. El jefe de equipo, las de su equipo.
   const eqsV=(esDir||esCeo)?PANEL.equipos:panelEquipos();
-  const g=eqsV.flatMap(E=>E.gente.filter(p=>!p.ausente).map(p=>Object.assign({eqNom:E.eq},p)));
-  const S=(k)=>g.reduce((t,p)=>t+(Number(p[k])||0),0), SO=(k)=>g.reduce((t,p)=>t+(Number((p.obj||{})[k])||0),0);
-  const MES=["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"][(PANEL.mNum||1)-1];
-  const mAct=S("mAct"), mObj=S("mObj"), vSem=S("vSem"), objSem=S("objSem");
-  const tile=(t,o,v,p)=>'<div style="flex:1;min-width:140px;background:#F8FAFC;border-radius:12px;padding:10px 12px">'
-    +'<div style="font-size:11px;color:#64748B;font-weight:700;text-transform:uppercase">'+t+'</div>'
-    +'<div style="font-size:11.5px;color:#64748B">objetivo '+euT(o)+'</div>'
-    +'<div style="font-size:21px;font-weight:800">'+euT(v)+'</div>'
-    +'<div style="font-size:12.5px;font-weight:800;color:'+colP(p)+'">'+(p==null?"sin objetivo":p+" % del objetivo")+'</div></div>';
-  const barra=(ic,l,r,o)=>{ const p=pcT(r,o), w=Math.min(100,p||0);
-    return '<tr><td style="padding:6px 0;font-size:12.5px;white-space:nowrap">'+ic+' '+l+'</td>'
-      +'<td style="padding:6px 8px;width:55%"><div style="background:#EEF1F5;border-radius:99px;height:7px;overflow:hidden"><div style="background:'+colP(p)+';width:'+w+'%;height:7px"></div></div></td>'
-      +'<td style="padding:6px 0;text-align:right;white-space:nowrap;font-size:13px">'+cifra(r,o)+'</td></tr>'; };
-  const ambito=esJefe?(EQUIPO||"tu equipo"):"todos los equipos";
-  // Desglose navegable: equipo → comerciales
-  const lineaCif=(x,Sx,SOx)=>'<span style="font-size:12.5px;white-space:nowrap">Mes '+'<b style="color:'+colP(pcT(Sx("mAct"),Sx("mObj")))+'">'+euT(Sx("mAct"))+'</b>'
-    +(Sx("mObj")?'<span style="color:#94A3B8">/'+euT(Sx("mObj"))+'</span> <b style="color:'+colP(pcT(Sx("mAct"),Sx("mObj")))+'">'+pcT(Sx("mAct"),Sx("mObj"))+' %</b>':'')
-    +' · Semana <b style="color:'+colP(pcT(Sx("vSem"),Sx("objSem")))+'">'+euT(Sx("vSem"))+'</b>'+(Sx("objSem")?' <b style="color:'+colP(pcT(Sx("vSem"),Sx("objSem")))+'">'+pcT(Sx("vSem"),Sx("objSem"))+' %</b>':'')+'</span>';
-  const sumaDe=(l)=>[(k)=>l.reduce((t,p)=>t+(Number(p[k])||0),0),(k)=>l.reduce((t,p)=>t+(Number((p.obj||{})[k])||0),0)];
-  const filaCom=(p)=>{ const [Sx,SOx]=sumaDe([p]);
-    return '<div style="border-top:1px solid #F1F5F9;padding:6px 0"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b style="font-size:13px">'+escT(p.nombre)+'</b>'+lineaCif(p,Sx,SOx)+'</div>'
-      +'<div style="font-size:12px;color:#64748B">👋 '+cifra(p.vis,(p.obj||{}).visitas)+' · 📞 '+cifra(p.lla,(p.obj||{}).llamadas)+' · 📦 '+cifra(p.mEnv,(p.obj||{}).muestras)+' · ✅ '+cifra(p.mOk,(p.obj||{}).muestrasOk)+'</div></div>'; };
-  const desglose=eqsV.map(E=>{ const l=E.gente.filter(p=>!p.ausente); if(!l.length) return "";
-    const [Sx,SOx]=sumaDe(l);
-    return det("vq_"+E.eq,'<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b>👥 '+escT(E.eq)+' <span style="color:#94A3B8;font-weight:600">· '+l.length+'</span></b>'+lineaCif(null,Sx,SOx)+'</div>'
-      +'<div style="font-size:12px;color:#64748B">👋 '+cifra(Sx("vis"),SOx("visitas"))+' · 📞 '+cifra(Sx("lla"),SOx("llamadas"))+' · 📦 '+cifra(Sx("mEnv"),SOx("muestras"))+' · ✅ '+cifra(Sx("mOk"),SOx("muestrasOk"))+'</div>',
-      l.slice().sort((a,b)=>(pcT(a.mAct,a.mObj)||0)-(pcT(b.mAct,b.mObj)||0)).map(filaCom).join(""),
-      pcT(Sx("mAct"),Sx("mObj"))!=null&&pcT(Sx("mAct"),Sx("mObj"))<80?"#FCA5A5":"#E5E7EB"); }).join("");
-  return '<div class="card" style="border:1.5px solid #0F172A">'
-    +'<div style="font-size:12px;color:#64748B;margin-bottom:6px">Consolidado · '+escT(ambito)+' · '+g.length+' comerciales</div>'
-    +'<div style="display:flex;gap:8px;flex-wrap:wrap">'+tile("Ventas de "+MES,mObj,mAct,pcT(mAct,mObj))+tile("Facturado esta semana",objSem,vSem,pcT(vSem,objSem))+'</div>'
-    +'<div style="font-size:11px;color:#64748B;font-weight:800;text-transform:uppercase;margin:10px 0 2px">Actividad esta semana</div>'
-    +'<table style="width:100%;border-collapse:collapse">'+barra("👋","Visitas",S("vis"),SO("visitas"))+barra("📞","Llamadas",S("lla"),SO("llamadas"))
-    +barra("📦","Muestras env.",S("mEnv"),SO("muestras"))+barra("✅","Muestras ok",S("mOk"),SO("muestrasOk"))+'</table>'
-    +'<div style="font-size:11px;color:#64748B;font-weight:800;text-transform:uppercase;margin:10px 0 2px">'+(esJefe?"Por comercial":"Por equipo · toca uno para ver sus comerciales")+'</div>'
-    +(esJefe?eqsV.flatMap(E=>E.gente.filter(p=>!p.ausente)).map(filaCom).join(""):desglose)+'</div>';
+  const act=(E)=>E.gente.filter(p=>!p.ausente);
+  const g=eqsV.flatMap(E=>act(E).map(p=>Object.assign({eqNom:E.eq},p)));
+  const mesP=(l)=>{ const a=l.reduce((t,p)=>t+(Number(p.mAct)||0),0), o=l.reduce((t,p)=>t+(Number(p.mObj)||0),0); return pcT(a,o); };
+  const semP=(l)=>{ const a=l.reduce((t,p)=>t+(Number(p.vSem)||0),0), o=l.reduce((t,p)=>t+(Number(p.objSem)||0),0); return pcT(a,o); };
+  const filaComL=(p)=>{ const ab=COM_VISTA===(p.cod||p.id);
+    return filaLimpia("verCom('"+esc2(p.cod||p.id)+"')",escT(p.nombre),"Semana "+(semP([p])==null?"—":semP([p])+" %")+" · "+euT(p.mAct)+" en el mes",mesP([p]),ab)
+      +(ab?'<div style="margin:4px 0 10px;padding:10px;border:1.5px solid #CBD5E1;border-radius:12px;background:#fff">'
+        +'<div style="font-size:11px;font-weight:800;color:#475569;text-transform:uppercase;margin-bottom:6px">👤 Individual · '+escT(p.nombre)+'</div>'+tarjetaCifras([p],true)+'</div>':''); };
+  let h='<div class="card" style="border:1.5px solid #0F172A">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><b style="font-size:12px;letter-spacing:.06em;text-transform:uppercase">📊 Consolidado</b>'
+    +'<span style="font-size:12px;color:#64748B">'+(esJefe?escT(EQUIPO||"tu equipo"):"todos los equipos")+' · '+g.length+' comerciales</span></div>'
+    +tarjetaCifras(g,false)+'</div>';
+  if(esJefe){
+    h+='<div class="card"><b style="font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#475569">👤 Por comercial</b>'
+      +g.slice().sort((a,b)=>(mesP([a])||0)-(mesP([b])||0)).map(filaComL).join("")+'</div>';
+    return h;
+  }
+  h+='<div class="card"><b style="font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#475569">👥 Por equipo</b>'
+    +'<div style="font-size:12px;color:#64748B">Toca un equipo para verlo aparte.</div>'
+    +eqsV.filter(E=>act(E).length).map(E=>filaLimpia("verEq('"+esc2(E.eq)+"')",'👥 '+escT(E.eq),act(E).length+" comerciales · semana "+(semP(act(E))==null?"—":semP(act(E))+" %"),mesP(act(E)),EQ_VISTA===E.eq)).join("")
+    +'</div>';
+  const E=EQ_VISTA&&eqsV.find(x=>x.eq===EQ_VISTA);
+  if(E){ const l=act(E).map(p=>Object.assign({eqNom:E.eq},p));
+    h+='<div id="vista-eq" class="card" style="border:1.5px solid #1D4ED8;background:#F8FBFF">'
+      +'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><b style="font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#1D4ED8">👥 Equipo '+escT(E.eq)+'</b>'
+      +'<button class="mini" onclick="verEq(null)">✕ Cerrar</button></div>'
+      +tarjetaCifras(l,false)
+      +'<div style="font-size:11px;font-weight:800;color:#475569;text-transform:uppercase;margin:12px 0 0">👤 Sus comerciales</div>'
+      +l.slice().sort((a,b)=>(mesP([a])||0)-(mesP([b])||0)).map(filaComL).join("")+'</div>'; }
+  return h;
 }
 
 // Plan que escribió en su parte (kpis del informe) o el que trae el panel
