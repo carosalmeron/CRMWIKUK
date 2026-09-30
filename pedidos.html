@@ -198,6 +198,11 @@ const BASE=`https://firestore.googleapis.com/v1/projects/${PROY}/databases/(defa
 const $=(id)=>document.getElementById(id);
 const eur=(n)=>Math.round(n||0).toLocaleString("es-ES")+" €";
 const norm=(s)=>String(s||"").toUpperCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+// (sep 2026) Clave de comercial sin espacios ni signos, como en agentes.js
+const nk=(s)=>norm(s).replace(/[^A-Z0-9]/g,"");
+const MIS_RAW=new Set(); // los mismos códigos tal como se escribieron
+let MIS_CLAVES=null;   // todos los códigos del comercial que mira (alias incluidos)
+let BUSCADO="";        // para explicar qué se ha buscado si no sale nada
 // Firestore devuelve cada campo con su tipo. Faltaba booleanValue, y por eso
 // "intercompany" llegaba como nulo y el filtro no quitaba nada.
 const val=(f)=>{
@@ -398,10 +403,29 @@ async function cargar(){
         clave=null; // sin filtro en la propia consulta; se filtra en cliente por equipo
         CLAVE = null;
         EQUIPO_CLAVES = equipoClaves; // también lo necesita el Diario, que lee otra colección aparte
+      } else if(!(f&&(f.grupoAgente||f.catalogoVendedor))
+             || /operacion|almacen|logistic|log[ií]stica|administraci|compras|produccion|calidad/i
+                  .test([rol,f.departamentoId,f.tipologia,f.departamento,f.puesto,f.cargo].filter(Boolean).join(" "))){
+        // (sep 2026) Quien no vende (Operaciones, Almacén, Administración…) no
+        // tiene código de comercial: antes se le buscaba por su usuario, no
+        // salía ningún pedido y la pantalla decía "No tienes pedidos". Ve todos,
+        // con el filtro por comercial, como Dirección.
+        clave=null; CLAVE=null;
+        titulo=((f&&f.nombre)||u.nombre||"")+" · todos los comerciales";
       } else {
         clave = norm((f&&(f.grupoAgente||f.catalogoVendedor))||u.username)||null;
         if(clave) titulo = (f&&f.nombre)||clave;
         CLAVE = clave;
+        // (sep 2026) Un comercial puede figurar en los pedidos con otro código
+        // (el GRUPOAGENTE de Power BI no siempre es el del CRM). Se buscan todos
+        // sus identificadores y los alias de la tabla agentes_alias, en agente
+        // y en vendedor. Antes solo se buscaba uno y, si no coincidía, la
+        // pantalla decía "no tienes pedidos" aunque los hubiera.
+        MIS_CLAVES=new Set();
+        [clave, f&&f.grupoAgente, f&&f.catalogoVendedor, f&&f.username, f&&f.id, f&&f._id, u.username, u.crmId]
+          .filter(Boolean).forEach(k=>{ MIS_CLAVES.add(nk(k)); MIS_RAW.add(norm(k)); MIS_RAW.add(String(k).trim());
+            try{ if(window.Agentes) window.Agentes.alias(k).forEach(a=>MIS_CLAVES.add(nk(a))); }catch(e){} });
+        MIS_CLAVES.delete("");
       }
     }
     $("quien").textContent = titulo;
@@ -413,14 +437,34 @@ async function cargar(){
                  value:{stringValue:clave}}}, limit:2000}}
       : {structuredQuery:{from:[{collectionId:"pbi_pedidos"}], limit:2000}};
 
-    const r=await fetch(`${BASE}:runQuery`,{method:"POST",
-      headers:{"Content-Type":"application/json"}, body:JSON.stringify(cuerpo)});
-    const j=await r.json();
-    TODOS=(Array.isArray(j)?j:[]).filter(x=>x.document).map(x=>{
-      const o={};
-      for(const [k,v] of Object.entries(x.document.fields||{})) o[k]=val(v);
-      return o;
-    }).filter(p=>p.fecha);
+    const leerQ=async(body)=>{
+      const r=await fetch(`${BASE}:runQuery`,{method:"POST",
+        headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+      const j=await r.json();
+      if(!Array.isArray(j)) throw new Error((j&&j.error&&j.error.message)||"respuesta inesperada");
+      return j.filter(x=>x.document).map(x=>{
+        const o={_doc:x.document.name};
+        for(const [k,v] of Object.entries(x.document.fields||{})) o[k]=val(v);
+        return o; });
+    };
+    if(clave && MIS_CLAVES && MIS_CLAVES.size){
+      // Todas las formas en que puede venir escrito cada código
+      const vals=new Set();
+      MIS_CLAVES.forEach(k=>{ vals.add(k); });
+      MIS_RAW.forEach(k=>{ if(k) vals.add(k); });
+      [clave].forEach(k=>vals.add(k));
+      const lista=[...vals].slice(0,30);
+      BUSCADO=[...MIS_CLAVES].join(", ");
+      const qIn=(campo)=>({structuredQuery:{from:[{collectionId:"pbi_pedidos"}],
+        where:{fieldFilter:{field:{fieldPath:campo},op:"IN",
+          value:{arrayValue:{values:lista.map(v=>({stringValue:v}))}}}}, limit:3000}});
+      const [a1,a2]=await Promise.all([leerQ(qIn("agente")), leerQ(qIn("vendedor")).catch(()=>[])]);
+      const vistos=new Set();
+      TODOS=[...a1,...a2].filter(p=>{ if(vistos.has(p._doc)) return false; vistos.add(p._doc); return true; })
+        .filter(p=>p.fecha);
+    } else {
+      TODOS=(await leerQ(cuerpo)).filter(p=>p.fecha);
+    }
 
     // Responsable de equipo: quedarnos solo con los pedidos de los comerciales de su equipo
     if(equipoClaves){
@@ -657,7 +701,8 @@ async function pintarServidos(){
     const num=(v)=>{ const n=Number(v); return isNaN(n)?0:n; };
     const mio=(m)=>(!F_AGENTE||norm(m.agente)===norm(F_AGENTE))
       && (!SIN_INTER||!m.intercompany)
-      && (!EQUIPO_CLAVES||EQUIPO_CLAVES.has(norm(m.agente)));
+      && (!EQUIPO_CLAVES||EQUIPO_CLAVES.has(norm(m.agente)))
+      && (!MIS_CLAVES||MIS_CLAVES.has(nk(m.agente))||MIS_CLAVES.has(nk(m.vendedor)));
 
     // Movimientos del periodo, dia a dia
     let total=0, lineas=[];
@@ -900,7 +945,7 @@ async function pintarDiario(){
     // La lista de pedidos ya venia filtrada por la consulta, pero el diario
     // se lee entero de pbi_pedidos_cambios: si no se limita aqui, un
     // comercial ve los movimientos de todo el grupo.
-    const mio=(m)=>(!CLAVE||m.agente===CLAVE)
+    const mio=(m)=>(!CLAVE||m.agente===CLAVE||(MIS_CLAVES&&(MIS_CLAVES.has(nk(m.agente))||MIS_CLAVES.has(nk(m.vendedor)))))
       && (!EQUIPO_CLAVES||EQUIPO_CLAVES.has(norm(m.agente)))
       && (!F_AGENTE||m.agente===F_AGENTE)
       && (!SIN_INTER || !/INTERCO|WIKUK EASY|DISCOB/i.test(m.nombre||""));
@@ -1042,7 +1087,12 @@ async function pintarDiario(){
       // Unidades y precio dicen mas que el importe de cada linea: el total
       // ya esta en la cabecera del pedido, repetirlo por linea es ruido.
       const detArt=(m)=>{
-        const uu=udsDe(m), p=preDe(m);
+        const uu=udsDe(m);
+        let p=preDe(m);
+        // (sep 2026) Sin precio guardado se enseñaba el importe total de la
+        // linea, mezclado con los €/u de las demas. Si hay unidades e importe
+        // reales, el precio unitario sale de dividirlos: no es una estimacion.
+        if(p==null&&uu&&num(m.importe)) p=num(m.importe)/uu;
         return {
           uds: uu!=null ? uu.toLocaleString("es-ES")+" uds" : "",
           pre: p!=null ? p.toLocaleString("es-ES",
@@ -1089,7 +1139,8 @@ async function pintarDiario(){
               const d=detArt(x);
               return `<span class="n" title="${(x.descripcion||x.articulo||"").replace(/"/g,"&quot;")}">${x.descripcion||x.articulo||"—"}</span>`
                 +`<span class="u">${d.uds}</span>`
-                +`<span class="p">${d.pre||eur(x.importe)}</span>`;
+                // Solo precio unitario: el total ya esta en la cabecera
+                +`<span class="p">${d.pre||"—"}</span>`;
               }).join("")}</div>`
           : ""}
         ${m.pedido?notasBox(m.pedido,m.nombre||m.cliente||""):""}
@@ -1175,8 +1226,13 @@ function pintar(){
   if(MODO==="diario"){ pintarDiario(); return; }
   if(MODO==="servidos"){ pintarServidos(); return; }
   if(!PEDIDOS.length){
+    const ocultos=TODOS.filter(p=>p.intercompany).length;
     $("app").innerHTML=`<div class="grupo"><p class="vacio">
-      No tienes pedidos con fecha de entrega pendiente.</p></div>`;
+      No tienes pedidos con fecha de entrega pendiente.</p>
+      ${SIN_INTER&&ocultos?`<p class="vacio" style="padding-top:0">Hay <b>${ocultos}</b> líneas de intercompañía ocultas.
+        <a href="#" onclick="alternarInter();return false">Mostrarlas</a></p>`:""}
+      ${!TODOS.length&&BUSCADO?`<p class="vacio" style="padding-top:0;font-size:12px">Buscado como: ${BUSCADO}.<br>
+        Si vendes con otro código, IT tiene que añadirlo a tu ficha (tabla de alias).</p>`:""}</div>`;
     return;
   }
 
