@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20260929c";
+  RC.VERSION="20260930a";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -449,6 +449,7 @@
         <div style="font-size:12px;color:#6B7684"><b>${esc(o.quien)}</b> pide a <b>${esc(d.nombreComercial)}</b>:</div>
         <div style="font-size:15px;font-weight:700;margin:4px 0 12px;white-space:pre-wrap">${esc(o.texto)}</div>
         ${o.detalle?`<div style="font-size:12.5px;color:#3A424E">${esc(o.detalle)}</div>`:""}
+        ${o.detalleHtml||""}
         <div style="font-size:12px;color:#8A94A0;margin-top:10px">${esc(o.pie||"Queda como objetivo de la semana en el CRM y se revisa en el comité del viernes.")}
           ${d.copias.length?`<br>Copia a: ${d.copias.map(x=>esc(x.nombre)+" ("+x.papel+")").join(", ")}.`:""}</div>
         <a href="https://crmwikuk.vercel.app/" style="display:inline-block;margin-top:14px;background:#14181F;color:#fff;text-decoration:none;padding:10px 20px;border-radius:9px;font-size:13px;font-weight:700">Abrir el portal</a>
