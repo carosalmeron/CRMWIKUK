@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20260930a";
+  RC.VERSION="20260930b";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -1321,5 +1321,74 @@
     return r;
   };
 
+
+  /* ═══ RC.UI · Bloque común de Recuperación, Muestras y Cobros (sep 2026) ═══
+     UNA sola estructura para el parte del comercial, el comité del viernes y
+     el cierre de jefe / director / CEO. Si se cambia aquí, cambia en todas.
+       1 Esta semana (4 casillas) · 2 Acumulado (4 casillas)
+       3 Árbol según quién mira:  comercial → sus casos
+                                  jefe      → comercial → casos
+                                  director  → equipo → comercial → casos
+       4 En cada comercial: su plan del parte o «Pedir plan»
+       5 En cada caso: la misma tarjeta y el mismo «📌 Pedir acción»
+     La página pone los datos (cfg.filas) y el nombre de sus funciones de
+     acción (cfg.fn.pedirPlan, cfg.fn.abrir, cfg.fn.enviar). */
+  RC.UI={AB:new Set(), RA:null};
+  g.RC_togD=(k,el)=>{ el.open?RC.UI.AB.add(k):RC.UI.AB.delete(k); };
+  const e_=(t)=>String(t??"").replace(/[<>&"]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]));
+  const q_=(t)=>String(t??"").replace(/\\/g,"\\\\").replace(/'/g,"\\'").replace(/"/g,"&quot;").replace(/\n/g," ");
+  RC.UI.det=(k,sum,cuerpo,borde)=>'<details '+(RC.UI.AB.has(k)?"open":"")+' ontoggle="RC_togD(\''+q_(k)+'\',this)" style="margin:6px 0;border:1px solid '+(borde||"#E5E7EB")+';border-radius:10px;background:#fff;padding:7px 10px">'
+    +'<summary style="cursor:pointer;list-style:none;font-size:13.5px">'+sum+'</summary><div style="margin-top:6px">'+cuerpo+'</div></details>';
+  RC.UI.cajas=(t,l)=>'<div style="font-size:10.5px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.3px;margin:8px 0 4px">'+t+'</div>'
+    +'<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">'+l.map(([v,lab,col])=>'<div style="border:1px solid #E2E8F0;border-radius:9px;padding:7px 4px;text-align:center;background:#fff"><b style="display:block;font-size:15px;color:'+(col||'#0F172A')+'">'+v+'</b><span style="font-size:10px;color:#64748B;line-height:1.2;display:block">'+lab+'</span></div>').join("")+'</div>';
+  RC.UI.pill=(txt,nivel)=>{ const c={rojo:["#FEF2F2","#B91C1C"],ambar:["#FFFBEB","#B45309"],verde:["#F0FDF4","#15803D"],gris:["#F1F5F9","#475569"]}[nivel]||["#F1F5F9","#475569"];
+    return '<span style="font-size:11px;font-weight:800;padding:2px 8px;border-radius:99px;background:'+c[0]+';color:'+c[1]+';white-space:nowrap">'+txt+'</span>'; };
+  RC.UI.CHIPS={recup:["Visítale esta semana","Llámale y dime qué pasa","Prepara una oferta de vuelta","Vamos juntos a verle"],
+    mues:["Llama y pide el resultado","Ciérrala: OK o KO","Pasa a recogerla y pregunta","Manda otra muestra"],
+    cob:["Llama hoy y pide fecha de pago","Pasa a cobrar esta semana","Revisa con Administración si está pagada","Vamos juntos a verle"]};
+  // Tarjeta de un caso. x: {id,tipo,titulo,pill,detalle,ficha}; fn: nombres de funciones de la página
+  RC.UI.caso=(x,fn)=>{ fn=fn||{}; const ab=RC.UI.RA===x.id;
+    return '<div style="border:1px solid '+(ab?"#93C5FD":"#E2E8F0")+';border-radius:10px;padding:8px 10px;margin-top:6px;background:#fff">'
+      +'<div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start"><b style="font-size:13px">'+x.titulo+'</b>'+(x.pill||"")+'</div>'
+      +'<div style="font-size:12px;color:#475569;margin-top:2px">'+x.detalle+'</div>'
+      +((fn.abrir||x.ficha)?'<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">'
+        +(fn.abrir?'<button class="mini'+(ab?" on":"")+'" onclick="'+fn.abrir+'(\''+q_(x.id)+'\')">📌 Pedir acción</button>':'')
+        +(x.ficha?'<button class="mini" onclick="'+x.ficha+'">Ver ficha ›</button>':'')+'</div>':'')
+      +(ab&&fn.enviar?'<div style="margin-top:6px"><div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:5px">'
+        +(RC.UI.CHIPS[x.tipo]||[]).map(r=>'<button class="mini" onclick="document.getElementById(\'ra_txt\').value=\''+q_(r)+'\'">'+e_(r)+'</button>').join("")+'</div>'
+        +'<textarea id="ra_txt" placeholder="Qué tiene que hacer la semana que viene" style="width:100%;min-height:54px;padding:8px 10px;border:1.5px solid #E2E8F0;border-radius:9px;font:inherit;font-size:13px"></textarea>'
+        +'<button class="mini on" style="margin-top:5px" onclick="'+fn.enviar+'(\''+q_(x.id)+'\',this)">Enviar y fijar objetivo de la semana siguiente</button></div>':'')
+      +'</div>'; };
+  /* cfg: {k, modo:"comercial"|"jefe"|"dir", tema, unidad, listaTit, sem:[[v,lab,col]], anio, anioTit, nota,
+           fn:{pedirPlan,abrir,enviar},
+           filas:[{p:{nombre,cod,eqNom}, mal, plan, peso, cifra, peticion, pedir, casos:[{id,tipo,titulo,pill,detalle,ficha}]}]} */
+  RC.UI.bloque=(cfg)=>{
+    const fn=cfg.fn||{}, det=RC.UI.det, pill=RC.UI.pill;
+    const casosH=(f)=>'<div style="font-size:10.5px;font-weight:800;color:#64748B;text-transform:uppercase;margin-top:6px">'+cfg.listaTit+' ('+f.casos.length+')</div>'
+      +(f.casos.length?f.casos.map(x=>RC.UI.caso(x,fn)).join(""):'<p style="margin:4px 0 0;font-size:12.5px;color:#94A3B8">Ninguno.</p>');
+    const planH=(f)=>(f.mal||f.plan)?'<div style="background:#F8FAFC;border-left:3px solid '+(f.plan?'#2563EB':'#DC2626')+';border-radius:0 8px 8px 0;padding:6px 9px;font-size:12.5px;margin-bottom:4px">'
+        +(f.plan?'<b style="font-size:10.5px;color:#2563EB;text-transform:uppercase">Su plan en el parte</b><br>'+e_(f.plan)
+          :'<b style="color:#B91C1C">Sin plan en su parte</b>'+(fn.pedirPlan||f.pedir?' <button class="mini" style="margin-left:6px" onclick="'+(f.pedir||(fn.pedirPlan+"('"+q_(f.agId||f.p.cod||"")+"','"+q_(cfg.tema)+"','"+q_(f.peticion||"")+"',this)"))+'">Pedir plan</button>':''))+'</div>':'';
+    const filaCom=(f)=>{ const cod=f.p.cod||f.p.id||f.p.nombre;
+      const est=!f.mal?pill("✓ En objetivo","verde"):f.plan?pill("Con plan","ambar"):pill("Sin plan","rojo");
+      const sum='<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b style="font-size:13px">'+e_(f.p.nombre)+'</b><span style="font-size:12.5px">'+f.cifra+'</span></div>'
+        +'<div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-top:2px"><span style="font-size:12px;color:#64748B">'+f.casos.length+' '+cfg.unidad+'</span>'+est+'</div>';
+      return det(cfg.k+"_"+cod,sum,planH(f)+casosH(f),f.mal&&!f.plan?"#FCA5A5":f.mal?"#FCD34D":"#E5E7EB"); };
+    const filas=(cfg.filas||[]).filter(f=>cfg.modo==="comercial"||f.mal||f.casos.length)
+      .sort((a,b)=>((b.mal&&!b.plan)-(a.mal&&!a.plan))||(b.mal-a.mal)||((b.peso||0)-(a.peso||0)));
+    let arbol, titA;
+    if(cfg.modo==="comercial"){ titA="Tus casos"; arbol=filas.map(f=>planH(f)+casosH(f)).join(""); }
+    else if(cfg.modo==="jefe"){ titA="Por comercial · primero los que no llegan"; arbol=filas.map(filaCom).join(""); }
+    else { titA="Por equipo y comercial · primero los que no llegan";
+      const eqs={}; filas.forEach(f=>{ const q=f.p.eqNom||"Sin equipo"; (eqs[q]=eqs[q]||[]).push(f); });
+      arbol=Object.entries(eqs).sort((a,b)=>b[1].filter(f=>f.mal&&!f.plan).length-a[1].filter(f=>f.mal&&!f.plan).length)
+        .map(([eq,l])=>{ const sp=l.filter(f=>f.mal&&!f.plan).length;
+          return det(cfg.k+"_eq_"+eq,'<div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><b style="font-size:13px">👥 '+e_(eq)+'</b><span style="display:flex;gap:6px;align-items:center"><span style="font-size:12px;color:#64748B">'+l.length+' comerciales</span>'+(sp?pill(sp+" sin plan","rojo"):pill("✓","verde"))+'</span></div>',
+            l.map(filaCom).join(""),sp?"#FCA5A5":"#E5E7EB"); }).join(""); }
+    return RC.UI.cajas("Esta semana",cfg.sem||[])+RC.UI.cajas(cfg.anioTit||"Acumulado del año",cfg.anio||[])
+      +(cfg.nota?'<div style="font-size:11.5px;color:#64748B;margin-top:6px">'+cfg.nota+'</div>':'')
+      +'<div style="font-size:10.5px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.3px;margin:12px 0 2px">'+titA+'</div>'
+      +(arbol||'<p style="margin:0;font-size:12.5px;color:#94A3B8">Nada que revisar.</p>');
+  };
   g.RC=RC;
 })(typeof window!=="undefined"?window:globalThis);

@@ -171,7 +171,7 @@
 <main><div class="estado" id="app">Cargando…</div></main>
 
 <script src="agentes.js"></script>
-<script src="/recuperacion_comun.js?v=20260930a"></script>
+<script src="/recuperacion_comun.js?v=20260930b"></script>
 <script>
 const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
 const P=new URLSearchParams(location.search);
@@ -1906,6 +1906,10 @@ async function cargarPasos(){
       const todos=(await RC.leerCasos()).filter(c=>!RC.esFrancia(c.equipo)&&!/DISTRIB/i.test(c.equipo||"")
         &&(esCeo||esDir||!EQUIPO||U(c.equipo).includes(EQUIPO)||EQUIPO.includes(U(c.equipo))));
       out.casos=todos.filter(c=>RC.abierto(c)&&c.estado!=="propuesta_archivo");
+      // Acumulado del año: recuperados y archivados
+      const delAnio=(f)=>String(f||"").slice(0,4)===String(ANIO);
+      out.recAnio=todos.filter(c=>c.estado==="recuperado"&&delAnio(c.recuperadoEn||c.actualizado));
+      out.archAnio=todos.filter(c=>/archiv/.test(c.estado||"")&&c.estado!=="propuesta_archivo"&&delAnio(c.archivadoEn||c.archivoDecididoEn||c.actualizado));
       try{ if(RC.cargarDeptos) await RC.cargarDeptos(); if(!RC._us) RC._us=await RC.leer("usuarios",10); }catch(e){}
       try{ out.proyectos=(await RC.leerProfundo("proyectos")).filter(p=>!p.eliminada&&!/cerrad|finaliz|complet|cancel/i.test(p.estado||"")); }catch(e){ out.proyectos=[]; }
       const casos=todos.filter(c=>c.estado==="propuesta_archivo"&&!RC.esFrancia(c.equipo)
@@ -2039,23 +2043,48 @@ const filaPlan=(nombre,eq,cif,plan,agId,tema,peticion)=>'<div style="border-top:
     :'<div style="font-size:12.5px;color:#B91C1C;margin-top:2px">↳ Sin plan <button class="mini" style="margin-left:6px" onclick="pedirPlan(\''+esc2(agId)+'\',\''+esc2(tema)+'\',\''+esc2(peticion)+'\',this)">Pedir plan</button></div>')
   +'</div>';
 
+// ═══ Bloque común de Recuperación, Muestras y Cobros (sep 2026) ═══
+// Los tres se navegan y se trabajan igual:
+//   1 Esta semana (4 casillas) · 2 Acumulado (4 casillas)
+//   3 Árbol: equipo → comercial → sus casos (primero los que no llegan)
+//   4 En cada comercial: su plan del parte o «Pedir plan»
+//   5 En cada caso: la misma tarjeta y el mismo «📌 Pedir acción», que llega
+//     al comercial por correo y queda como objetivo de su semana siguiente.
+// La estructura vive en recuperacion_comun.js (RC.UI): la misma para el parte,
+// el comité del viernes y este cierre. Aquí solo se ponen los datos.
+const CASOS_REG={};   // id de caso → {tipo, ag, nombre, cliente, contexto}
+const pillC=(t,n)=>RC.UI.pill(t,n);
+const tarjCaso=(x)=>x;   // los casos se pasan como datos; RC.UI.caso los pinta
+function bloqueComun(cfg){
+  RC.UI.RA=RA&&RA.id||null;
+  return RC.UI.bloque(Object.assign({modo:esJefe?"jefe":"dir",fn:{pedirPlan:"pedirPlan",abrir:"abrirCaso",enviar:"enviarCaso"}},cfg,
+    {filas:cfg.filas.map(f=>Object.assign({agId:agDe(f.p).id},f))}));
+}
+window.abrirCaso=(id)=>{ RA=(RA&&RA.id===id)?null:{id,tipo:"acc"}; pintar(); };
+// Fecha dd/mm
+const fxC=(f)=>{ f=String(f||""); return f.includes("-")?f.slice(0,10).split("-").reverse().slice(0,2).join("/"):f; };
+
 // ── Muestras («cambio de cartera») ──
 function seccionMuestras(){
   const g=panelGente(); if(!g.length) return {d:"Sin datos todavía.",c:""};
   const S=(k)=>g.reduce((t,p)=>t+(Number(p[k])||0),0), SO=(k)=>g.reduce((t,p)=>t+(Number((p.obj||{})[k])||0),0);
-  const ex=(ok,env)=>env?Math.round(ok/env*100)+" %":"—";   // % de éxito = aceptadas sobre enviadas
-  const bloque=(t,env,obj,ok,ko)=>'<div style="flex:1;min-width:140px;background:#F8FAFC;border-radius:10px;padding:8px 10px;font-size:12.5px">'
-    +'<b style="font-size:12px;color:#64748B;text-transform:uppercase">'+t+'</b><div>Enviadas: '+cifra(env,obj)+'</div><div>Aceptadas: <b>'+ok+'</b> · KO: <b>'+ko+'</b></div><div>% de éxito: <b>'+ex(ok,env)+'</b> <span style="color:#94A3B8">(aceptadas / enviadas)</span></div></div>';
-  const noCumplen=g.filter(p=>p.obj&&p.obj.muestras&&p.mEnv<p.obj.muestras*0.8);
-  const m60=g.filter(p=>(p.m60||[]).length);
-  const n60=m60.reduce((t,p)=>t+p.m60.length,0);
-  const c='<div style="display:flex;gap:6px;flex-wrap:wrap">'+bloque("Esta semana",S("mEnv"),SO("muestras"),S("mOk"),S("mKo"))+bloque("Acumulado del año",S("mEnvA"),0,S("mOkA"),S("mKoA"))+'</div>'
-    +det("mu_no","<b>Comerciales que no llegan</b> · "+noCumplen.length,noCumplen.length?noCumplen.map(p=>{ const k=kpisDe(p)||{}, ag=agDe(p);
-      return filaPlan(p.nombre,esJefe?"":p.eqNom,"📦 "+cifra(p.mEnv,p.obj.muestras)+" · ok "+p.mOk,(k.muestras||{}).plan,ag.id,"Muestras","No llegas a tu objetivo de muestras ("+p.mEnv+" de "+p.obj.muestras+"). ¿Qué vas a enviar la semana que viene y a qué clientes?"); }).join(""):'<p class="vacio" style="margin:0">Todos llegan.</p>',noCumplen.length?"#FCA5A5":"#BBF7D0")
-    +det("mu_60","<b>Sin cerrar con más de 60 días</b> · "+n60,m60.length?m60.map(p=>det("mu60_"+p.cod,escT(p.nombre)+(esJefe?"":' <span style="color:#94A3B8">· '+escT(p.eqNom)+'</span>')+' · <b>'+p.m60.length+'</b>',
-      p.m60.slice().sort((a,b)=>b.dias-a.dias).map(m=>'<div style="font-size:12.5px;padding:3px 0;border-top:1px solid #F1F5F9">'+escT(m.cli)+(m.prod?' · '+escT(m.prod):'')+' <span style="color:#B91C1C">· '+m.dias+' días</span></div>').join("")
-      +'<button class="mini" style="margin-top:5px" onclick="pedirPlan(\''+esc2(agDe(p).id)+'\',\'Muestras sin cerrar\',\''+esc2("Tienes "+p.m60.length+" muestras enviadas hace más de 60 días sin respuesta del cliente. Ciérralas (ok o ko) o dime qué vas a hacer con cada una.")+'\',this)">Pedir que las cierre</button>')).join(""):'<p class="vacio" style="margin:0">Ninguna.</p>',n60?"#FCD34D":"#BBF7D0");
-  return {d:"Semana: "+S("mEnv")+(SO("muestras")?"/"+SO("muestras"):"")+" enviadas, "+S("mOk")+" ok · "+noCumplen.length+" no llega"+(noCumplen.length===1?"":"n")+" · "+n60+" sin cerrar +60 días",c,ok:!noCumplen.some(p=>!((kpisDe(p)||{}).muestras||{}).plan)};
+  const abiertas=(p)=>(p.mAb&&p.mAb.length?p.mAb:(p.m60||[]));
+  const nAb=g.reduce((t,p)=>t+abiertas(p).length,0), n60=g.reduce((t,p)=>t+abiertas(p).filter(m=>m.dias>60).length,0);
+  const ex=S("mEnvA")?Math.round(S("mOkA")/S("mEnvA")*100):0;
+  const noLlega=(p)=>!!(p.obj&&p.obj.muestras&&p.mEnv<p.obj.muestras*0.8);
+  const filas=g.map(p=>{ const k=kpisDe(p)||{}, ag=agDe(p);
+    return {p, mal:noLlega(p), plan:(k.muestras||{}).plan, peso:abiertas(p).filter(m=>m.dias>60).length,
+      cifra:"📦 "+cifra(p.mEnv,(p.obj||{}).muestras)+" · ok "+(p.mOk||0),
+      peticion:"No llegas a tu objetivo de muestras ("+p.mEnv+" de "+((p.obj||{}).muestras||0)+"). ¿Qué vas a enviar la semana que viene y a qué clientes?",
+      casos:abiertas(p).slice().sort((a,b)=>b.dias-a.dias).map((m,i)=>{ const id="mu_"+(p.cod||p.id)+"_"+(m.id||i);
+        CASOS_REG[id]={tipo:"mues",ag,nombre:m.cli,cliente:m.cli,contexto:"Muestra de "+(m.prod||"producto")+" a "+m.cli+", enviada el "+fxC(m.fecha)+" ("+m.dias+" días sin cerrar)"};
+        return tarjCaso({id,tipo:"mues",titulo:escT(m.cli),pill:pillC(m.dias+" días",m.dias>60?"rojo":m.dias>14?"ambar":"gris"),
+          detalle:escT(m.prod||"")+" · enviada el "+fxC(m.fecha)+(m.est?' · <span style="color:#64748B">'+escT(m.est)+'</span>':'')}); })}; });
+  const c=bloqueComun({k:"mu",tema:"Muestras",unidad:"sin cerrar",listaTit:"Muestras sin cerrar",filas,
+    sem:[[S("mEnv")+(SO("muestras")?"/"+SO("muestras"):""),"Enviadas",colP(pcT(S("mEnv"),SO("muestras")))],[S("mOk"),"Aceptadas","#15803D"],[S("mKo"),"KO",S("mKo")?"#B91C1C":""],[n60,"Sin cerrar +60 días",n60?"#B91C1C":""]],
+    anio:[[S("mEnvA"),"Enviadas"],[S("mOkA"),"Aceptadas","#15803D"],[S("mKoA"),"KO","#B91C1C"],[ex+" %","Éxito s/ enviadas",ex>=30?"#15803D":"#B45309"]]});
+  const no=filas.filter(f=>f.mal);
+  return {d:"Semana: "+S("mEnv")+(SO("muestras")?"/"+SO("muestras"):"")+" enviadas, "+S("mOk")+" ok · "+no.length+" no llega"+(no.length===1?"":"n")+" · "+nAb+" sin cerrar ("+n60+" +60 días)",c,ok:!no.some(f=>!f.plan)};
 }
 // ── Actividad ──
 function seccionActividad(){
@@ -2072,7 +2101,7 @@ function seccionActividad(){
 // Una factura y su abono del mismo importe (mismo cliente) se anulan: no se muestran
 function facturasDe(p){
   // (sep 2026) Carga de TODOS: ya viene una línea por cliente y empresa
-  if((p.facV||[]).some(f=>f.saldo)) return (p.facV||[]).slice().sort((a,b)=>(b.v70||0)-(a.v70||0)||(b.im||0)-(a.im||0));
+  if((p.facV||[]).length&&(p.facV||[]).every(f=>f.saldo)) return (p.facV||[]).slice().sort((a,b)=>(b.v70||0)-(a.v70||0)||(b.im||0)-(a.im||0));
   // La misma factura puede venir repetida (exacta) o partida en varios plazos:
   // se deja una sola línea por cliente + nº de factura, con el importe sumado
   // y el plazo más antiguo.
@@ -2116,7 +2145,7 @@ function tablaSaldos(l,paraCorreo){
     +'<td style="padding:6px 5px;text-align:right;font-weight:800;font-size:12.5px;border-top:2px solid #CBD5E1">'+eu(sum("v70"))+'</td></tr></table>';
 }
 function tablaFacturas(l,paraCorreo){
-  if(l.length&&l[0].saldo) return tablaSaldos(l,paraCorreo);
+  if(l.length&&l.every(f=>f.saldo)) return tablaSaldos(l,paraCorreo);
   // (sep 2026) Agrupada por cliente. Si el cliente debe a más de una empresa
   // (WIKUK y UC), cada empresa va separada dentro del cliente con su importe.
   const e=(t)=>String(t??"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
@@ -2129,8 +2158,8 @@ function tablaFacturas(l,paraCorreo){
   const clis={};
   l.forEach(f=>{ const k=String(f.cli||"").trim().toUpperCase(); (clis[k]=clis[k]||{cli:f.cli,l:[]}).l.push(f); });
   const grupos=Object.values(clis).sort((a,b)=>Math.max(...b.l.map(f=>f.dias||0))-Math.max(...a.l.map(f=>f.dias||0)));
-  const filaF=(f,sang)=>'<tr><td style="'+td+(sang?';padding-left:18px':'')+'">'+e(f.n)+(f.plazos>1?' <span style="color:#64748B">('+f.plazos+' plazos)</span>':'')
-      +'<div style="font-size:11.5px;color:#64748B">'+fx(f.fv)+' · <b style="color:'+col(f.dias)+'">'+f.dias+' días</b></div></td>'
+  const filaF=(f,sang)=>'<tr><td style="'+td+(sang?';padding-left:18px':'')+'">'+(f.saldo?'Saldo sin detalle':e(f.n))+(f.plazos>1?' <span style="color:#64748B">('+f.plazos+' plazos)</span>':'')
+      +'<div style="font-size:11.5px;color:#64748B">'+(f.saldo?e(f.tramo||''):(f.ff?'Factura '+fx(f.ff)+' · ':'')+'vence '+fx(f.fv)+' · <b style="color:'+col(f.dias)+'">'+f.dias+' días</b>')+'</div></td>'
     +'<td style="'+td+';text-align:right;color:#64748B">'+eu(f.tot!=null?f.tot:f.im)+'</td>'
     +'<td style="'+td+';text-align:right;font-weight:800">'+eu(f.im)+'</td></tr>';
   const cuerpo=grupos.map(G=>{
@@ -2161,7 +2190,7 @@ window.pedirPlanCobros=async(cod,btn)=>{
   if(btn){ btn.disabled=true; btn.textContent="Enviando…"; }
   try{ const d=await RC.avisarGenerico({agente:ag.id,quienId:UID,quien:window._MI_NOMBRE_JEFE||AGENTE,titulo:"Cobros",etiqueta:"Te piden un plan",
       texto:"Tienes "+euT(p.cobros)+" fuera de plazo y tu máximo es "+euT(p.limite)+". ¿Qué vas a cobrar, a qué clientes y cuándo?",
-      detalleHtml:l.length?'<div style="font-size:12px;color:#6B7684;margin-top:4px">'+(l[0].saldo?l.length+' clientes con importe fuera de plazo (datos de Administración):':l.length+' facturas vencidas, de la más antigua a la más reciente:')+'</div>'+tablaFacturas(l,true):"",
+      detalleHtml:l.length?'<div style="font-size:12px;color:#6B7684;margin-top:4px">'+(l.every(f=>f.saldo)?l.length+' clientes con importe fuera de plazo (datos de Administración):':l.length+' facturas vencidas, de la más antigua a la más reciente:')+'</div>'+tablaFacturas(l,true):"",
       pie:"Responde en tu parte de la semana (o contesta a este correo)."});
     if(btn) btn.textContent="✓ Pedido"; alert(RC.textoAviso(d)); }
   catch(e){ if(btn){ btn.disabled=false; btn.textContent="Pedir plan"; } alert("No se ha enviado: "+e.message); }
@@ -2169,21 +2198,28 @@ window.pedirPlanCobros=async(cod,btn)=>{
 // ── Cobros ──
 function seccionCobros(){
   const g=panelGente(); if(!g.length) return {d:"Sin datos todavía.",c:""};
-  const fuera=g.filter(p=>p.limite&&p.cobros>p.limite);
-  const tot=g.reduce((t,p)=>t+(Number(p.cobros)||0),0);
-  const c=fuera.length?fuera.map(p=>{ const k=kpisDe(p)||{}, plan=(k.cobros||{}).plan, l=facturasDe(p), cod=p.cod||p.id;
-      return det("cb_"+cod,'<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b style="font-size:13px">'+escT(p.nombre)+(esJefe?'':' <span style="color:#94A3B8;font-weight:600">· '+escT(p.eqNom)+'</span>')+'</b>'
-          +'<span style="font-size:12.5px">💰 <b style="color:#B91C1C">'+euT(p.cobros)+'</b><span style="color:#94A3B8">/'+euT(p.limite)+'</span> · '+l.length+(l.length&&l[0].saldo?' clientes':' facturas')+'</span></div>'
-          +(plan?'<div style="font-size:12.5px;color:#334155">↳ <b>Plan:</b> '+escT(plan)+'</div>':'<div style="font-size:12.5px;color:#B91C1C">↳ Sin plan</div>'),
-        (l.length?tablaFacturas(l,false):'<p class="vacio" style="margin:0">Sin detalle de facturas.</p>')
-          +(plan?'':'<button class="mini" style="margin-top:6px" onclick="pedirPlanCobros(\''+esc2(cod)+'\',this)">Pedir plan (con este listado)</button>'),
-        "#FCA5A5"); }).join("")
-    :'<p class="vacio" style="margin:0">Todos dentro de la política de cobro.</p>';
-  // Fecha de los datos de cobros (última importación del Excel de Administración)
+  const tot=g.reduce((t,p)=>t+(Number(p.cobros)||0),0), lim=g.reduce((t,p)=>t+(Number(p.limite)||0),0);
+  const fueraMax=(p)=>!!(p.limite&&p.cobros>p.limite);
+  const todas=g.flatMap(p=>facturasDe(p));
+  const tramo=(a,b)=>euT(todas.filter(f=>(f.dias||0)>a&&(b==null||(f.dias||0)<=b)).reduce((t,f)=>t+(Number(f.im)||0),0));
+  const v70=todas.reduce((t,f)=>t+(f.saldo?(Number(f.v70)||0):((f.dias||0)>70?(Number(f.im)||0):0)),0);
+  const filas=g.filter(p=>(Number(p.cobros)||0)>=1||fueraMax(p)).map(p=>{ const k=kpisDe(p)||{}, ag=agDe(p), l=facturasDe(p), cod=p.cod||p.id;
+    return {p, mal:fueraMax(p), plan:(k.cobros||{}).plan, peso:Number(p.cobros)||0,
+      cifra:'💰 <b style="color:'+(fueraMax(p)?"#B91C1C":"#0F172A")+'">'+euT(p.cobros)+'</b>'+(p.limite?'<span style="color:#94A3B8">/'+euT(p.limite)+'</span>':''),
+      pedir:"pedirPlanCobros('"+esc2(cod)+"',this)",
+      casos:l.map((f,i)=>{ const id="cb_"+cod+"_"+i;
+        CASOS_REG[id]={tipo:"cob",ag,nombre:f.cli,cliente:f.cli,contexto:f.saldo?("Saldo fuera de plazo de "+f.cli+" ("+f.g+"): "+euT(f.im)):("Factura "+f.n+" de "+f.cli+" ("+f.g+"), vencida el "+fxC(f.fv)+", "+euT(f.im)+" ("+f.dias+" días)")};
+        return tarjCaso({id,tipo:"cob",titulo:escT(f.cli),pill:pillC(f.saldo?(f.tramo||"fuera de plazo"):f.dias+" días",(f.saldo?(f.v70>=1):(f.dias>70))?"rojo":(f.saldo?(f.v20>=1):(f.dias>20))?"ambar":"gris"),
+          detalle:(f.saldo?"Saldo sin detalle · "+escT(f.g||"")+" · pendiente "+euT(f.tot):escT(f.n)+" · "+escT(f.g||"")+(f.ff?" · factura "+fxC(f.ff):"")+" · vence "+fxC(f.fv))+' · <b style="color:#0F172A">'+euT(f.im)+'</b>'}); })}; });
+  const fueraL=filas.filter(f=>f.mal);
   const fechas=[...new Set(g.map(p=>p.cobFecha).filter(Boolean))].sort();
   const fData=fechas.length?fechas[fechas.length-1].split("-").reverse().join("/"):"";
-  return {d:euT(tot)+" vencidos · "+(fuera.length?fuera.length+" fuera del máximo":"todos dentro")+(fData?" · datos del "+fData:""),
-    c:(fData?'<div style="font-size:12px;color:#64748B;margin-bottom:6px">Datos del Excel de cobros importado el <b>'+fData+'</b>. Si el Excel ha cambiado después, hay que volver a importarlo (Administración → Importar cobros).</div>':'')+c,ok:!fuera.some(p=>!((kpisDe(p)||{}).cobros||{}).plan)};
+  const c=bloqueComun({k:"cb",tema:"Cobros",unidad:"facturas / clientes",listaTit:"Fuera de plazo",filas,
+    sem:[[euT(tot),"Fuera de plazo",tot>lim&&lim?"#B91C1C":"#0F172A"],[euT(lim),"Máximo (5 % de 2 meses)"],[fueraL.length,"Fuera del máximo",fueraL.length?"#B91C1C":"#15803D"],[euT(v70),"Más de 70 días",v70?"#B91C1C":""]],
+    anioTit:"Antigüedad de lo vencido",
+    anio:[[tramo(-1,30),"Hasta 30 días"],[tramo(30,60),"31–60 días","#B45309"],[tramo(60,90),"61–90 días","#C2410C"],[tramo(90,null),"Más de 90","#B91C1C"]],
+    nota:fData?"Datos del Excel de cobros importado el <b>"+fData+"</b> (pestaña TODOS). Si ha cambiado, hay que volver a importarlo (Administración → Importar cobros).":""});
+  return {d:euT(tot)+" fuera de plazo · "+(fueraL.length?fueraL.length+" fuera del máximo":"todos dentro")+(fData?" · datos del "+fData:""),c,ok:!fueraL.some(f=>!f.plan)};
 }
 // ── Recuperación y clientes en riesgo: con acción / sin acción ──
 let RA=null;   // formulario abierto {id,tipo}
@@ -2204,26 +2240,46 @@ function seccionRiesgo(){
   const D=PASOS_DATA||{}; if(!D.casos) return {d:"Comprobando…",c:""};
   const l=D.casos.map(c=>({c,acc:accionDeCaso(c)}));
   const con=l.filter(x=>x.acc.length), sin=l.filter(x=>!x.acc.length);
-  const tot=(a)=>euT(a.reduce((t,x)=>t+(Number(x.c.perdido)||0),0));
-  const cab=(c)=>'<div style="display:flex;justify-content:space-between;gap:8px"><b style="font-size:13px">'+escT(c.nombre||c.cliente)+'</b><b style="color:#B91C1C;font-size:13px;white-space:nowrap">−'+euT(c.perdido)+'</b></div>'
-    +'<div style="font-size:12px;color:#64748B">'+escT(c.agente)+(c.causa?' · '+escT(c.causa):' · sin diagnosticar')+'</div>';
-  // Al tocar un cliente se abre su ficha del Plan de recuperación
-  const filaCon=({c,acc})=>'<div onclick="abrirFichaR(\''+esc2(c.cliente)+'\')" style="border-top:1px solid #EEF1F5;padding:7px 0;cursor:pointer">'+cab(c)
-    +acc.slice(0,3).map(a=>'<div style="font-size:12.5px;color:#334155">↳ '+escT(a)+'</div>').join("")
-    +'<div style="font-size:12px;color:#1D4ED8;font-weight:700;margin-top:3px">Ver ficha y acción ›</div></div>';
-  const filaSin=({c})=>{ const ab=RA&&RA.id===c._id;
-    return '<div style="border-top:1px solid #EEF1F5;padding:7px 0"><div onclick="abrirFichaR(\''+esc2(c.cliente)+'\')" style="cursor:pointer">'+cab(c)+'</div>'
-      +'<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:5px"><button class="mini'+(ab&&RA.tipo==="acc"?" on":"")+'" onclick="abrirRA(\''+c._id+'\',\'acc\')">📌 Pedir acción / objetivo</button>'
-      +'<button class="mini" onclick="abrirFichaR(\''+esc2(c.cliente)+'\')">💶 Ver ficha · estrategia por producto</button></div>'
-      +(ab&&RA.tipo==="acc"?'<div style="margin-top:6px"><div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:5px">'
-        +["Visítale esta semana","Llámale y dime qué pasa","Prepara una oferta de vuelta","Vamos juntos a verle"].map(r=>'<button class="mini" onclick="document.getElementById(\'ra_txt\').value=\''+r+'\'">'+r+'</button>').join("")+'</div>'
-        +'<textarea id="ra_txt" placeholder="Qué tiene que hacer con este cliente la semana que viene" style="width:100%;min-height:54px;padding:8px 10px;border:1.5px solid var(--border);border-radius:9px;font:inherit;font-size:13px"></textarea>'
-        +'<button class="mini on" style="margin-top:5px" onclick="enviarRA(\''+c._id+'\',this)">Enviar y fijar objetivo semana '+(SEMANA+1)+'</button></div>':'')
-      +'</div>'; };
-  const c=det("rg_con","<b>✅ Con acción para la semana</b> · "+con.length+" · "+tot(con),con.length?con.sort((a,b)=>b.c.perdido-a.c.perdido).map(filaCon).join(""):'<p class="vacio" style="margin:0">Ninguno.</p>',"#BBF7D0")
-    +det("rg_sin","<b>⚠️ Sin acción</b> · "+sin.length+" · "+tot(sin),sin.length?sin.sort((a,b)=>b.c.perdido-a.c.perdido).map(filaSin).join(""):'<p class="vacio" style="margin:0">Todos tienen acción.</p>',sin.length?"#FCA5A5":"#BBF7D0");
-  return {d:con.length+" con acción · "+sin.length+" sin acción ("+tot(sin)+")",c,ok:!sin.length};
+  const sumP=(a)=>a.reduce((t,x)=>t+(Number(x.c.perdido)||0),0);
+  const g=panelGente(), porCom=new Map();
+  const deQuien=(ag)=>g.find(p=>[p.cod,p.id].filter(Boolean).map(U).includes(U(ag))||U(agDe(p).id)===U(ag))||null;
+  l.forEach(x=>{ const p=deQuien(x.c.agente)||{nombre:x.c.agenteNombre||x.c.agente||"Sin comercial",cod:x.c.agente||"?",eqNom:x.c.equipo||""};
+    const k=p.cod||p.id||p.nombre; if(!porCom.has(k)) porCom.set(k,{p,l:[]}); porCom.get(k).l.push(x); });
+  const nuevos=l.filter(x=>{ const t=Date.parse(x.c.creadoEn||x.c.detectadoEn||""); return t&&t>=lunesSem().getTime()-2*86400000; }).length;
+  const filas=[...porCom.values()].map(({p,l:ls})=>{ const s0=ls.filter(x=>!x.acc.length), ag=agDe(p);
+    return {p, mal:s0.length>0, plan:s0.length?"":"Todos sus clientes tienen acción esta semana.", peso:sumP(ls),
+      cifra:'🚨 <b style="color:#B91C1C">−'+euT(sumP(ls))+'</b> · '+(ls.length-s0.length)+'/'+ls.length+' con acción',
+      peticion:"Tienes "+s0.length+" cliente"+(s0.length===1?"":"s")+" en recuperación sin acción ("+s0.map(x=>x.c.nombre||x.c.cliente).slice(0,5).join(", ")+"). ¿Qué vas a hacer con cada uno la semana que viene?",
+      casos:ls.slice().sort((a,b)=>(!a.acc.length?0:1)-(!b.acc.length?0:1)||b.c.perdido-a.c.perdido).map(({c,acc})=>{
+        CASOS_REG[c._id]={tipo:"recup",ag,nombre:c.nombre||c.cliente,cliente:c.cliente};
+        return tarjCaso({id:c._id,tipo:"recup",titulo:escT(c.nombre||c.cliente),pill:pillC("−"+euT(c.perdido),acc.length?"ambar":"rojo"),
+          detalle:(c.causa?escT(c.causa):"Sin diagnosticar")+"<br>"+(acc.length?acc.slice(0,2).map(a=>"↳ "+escT(a)).join("<br>"):'<b style="color:#B91C1C">Sin acción esta semana</b>'),
+          ficha:"abrirFichaR('"+esc2(c.cliente)+"')"}); })}; });
+  const rec=D.recAnio||[], arch=D.archAnio||[];
+  const c=bloqueComun({k:"rg",tema:"Recuperación",unidad:"clientes",listaTit:"Clientes en recuperación",filas,
+    sem:[[l.length,"En recuperación"],["−"+euT(sumP(l)),"Perdido vs año ant.","#B91C1C"],[con.length,"Con acción","#15803D"],[sin.length,"Sin acción",sin.length?"#B91C1C":""]],
+    anio:[[rec.length,"Recuperados","#15803D"],[euT(rec.reduce((t,c)=>t+(Number(c.perdido)||0),0)),"Venta recuperada","#15803D"],[arch.length,"Dejados de insistir"],[nuevos,"Nuevos esta semana"]]});
+  return {d:con.length+" con acción · "+sin.length+" sin acción ("+euT(sumP(sin))+")",c,ok:!sin.length};
 }
+// Pedir acción sobre un caso de muestras o cobros: correo al comercial y
+// objetivo para su semana siguiente (sale en su parte y en el seguimiento).
+window.enviarCaso=async(id,btn)=>{
+  const r=CASOS_REG[id]; if(!r) return;
+  if(r.tipo==="recup") return enviarRA(id,btn);
+  const t=((document.getElementById("ra_txt")||{}).value||"").trim();
+  if(t.length<5){ alert("Escribe qué tiene que hacer."); return; }
+  btn.disabled=true; btn.textContent="Enviando…";
+  const quien=window._MI_NOMBRE_JEFE||AGENTE, ahora=new Date().toISOString(), sem=SEMANA+1;
+  try{
+    const oid="obj_"+r.ag.id+"_"+ANIO+"_s"+sem+"_"+r.tipo+Date.now();
+    const doc={id:oid,agente:r.ag.id,semana:sem,anio:ANIO,texto:r.nombre+" — "+t,tipo:"cliente",origen:"jefe",
+      claveOrigen:r.tipo+":"+id+"|instr",refNombre:r.nombre||"",refCodigo:r.cliente||"",creadoPor:UID,creadoPorNombre:quien,equipo:EQUIPO,fechaCreacion:ahora};
+    await escribir("objetivos_semana",oid,doc); INSTRUCCIONES.push(doc);
+    const d=await RC.avisarGenerico({agente:r.ag.id,quienId:UID,quien,titulo:r.tipo==="cob"?"Cobros":"Muestras",
+      etiqueta:"Acción para la semana "+sem,texto:r.contexto+". "+t,pie:"Queda como objetivo de tu semana "+sem+"."});
+    RA=null; pintar(); alert(RC.textoAviso(d));
+  }catch(e){ btn.disabled=false; btn.textContent="Enviar"; alert("No se ha enviado: "+e.message); }
+};
 window.enviarRA=async(id,btn)=>{
   const c=((PASOS_DATA||{}).casos||[]).find(x=>x._id===id); if(!c) return;
   const t=((document.getElementById("ra_txt")||{}).value||"").trim();
