@@ -30859,7 +30859,9 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
   const [formOpen,setFormOpen]=useState(false);
   // (v5.0) ambito: "cliente" | "interno". Los internos llevan departamento,
   // prioridad y nacen en backlog salvo que el creador pueda aprobarlos.
-  const [form,setForm]=useState({nombre:"",tipo:"lanzamiento",desc:"",fin:"",ambito:"cliente",departamentoId:"",prioridad:"media"});
+  const FORM0={nombre:"",tipo:"lanzamiento",desc:"",fin:"",ambito:"cliente",departamentoId:"",prioridad:"media",
+    prodCodigo:"",prodDesc:"",prodCalibre:"",prodMetros:"",proveedor:"",busqProd:""};
+  const [form,setForm]=useState(FORM0);
   const [nuevoHito,setNuevoHito]=useState({nombre:"",fecha:"",responsable:"",nota:"",horas:""});
   // (v6.10) 📄 INFORME imprimible del proyecto: todos los datos bien ordenados
   function informeProyecto(){
@@ -30961,6 +30963,8 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
   // (v6.10.1) Filtro cliente/interno de la lista
   const [filtroAmbito,setFiltroAmbito]=useState("todos");
   const esInternoP=function(p){return p.ambito==="interno"||(!p.ambito&&p.departamentoId);};
+  // (sep 2026) Proyectos de seguimiento de muestras que envían los proveedores
+  const esMuestraP=function(p){return p.ambito==="muestra"||p.tipo==="muestra";};
   function registrarTiempo(realIdx){
     if(!regForm.texto.trim()||!Number(regForm.horas)){alert("Indica la tarea y las horas.");return;}
     // (v6.10) Persona del selector unificado (id del organigrama; ""=yo)
@@ -31166,6 +31170,7 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
     recuperacion:{icon:"🔄",label:"Recuperación", color:T.amber},
     expansion:  {icon:"📈",label:"Expansión",     color:T.green},
     interno:    {icon:"🏢",label:"Interno",       color:"#334155"}, // (v5.0)
+    muestra:    {icon:"🧪",label:"Muestra de proveedor",color:"#0891B2"}, // (sep 2026)
     otro:       {icon:"📌",label:"Otro",          color:T.muted},
   };
 
@@ -31392,7 +31397,42 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
     if(sel?.id===proyId){const up=updProy(sel);setSel(up);fbEscribir("proyectos",proyId,up);}
   };
 
+  // (sep 2026) Proyecto de seguimiento de una muestra de proveedor. Nace activo
+  // y se avisa por correo a los responsables del departamento para que creen
+  // los hitos de seguimiento (los mismos hitos que cualquier proyecto).
+  const crearMuestraProveedor=()=>{
+    if(!form.departamentoId){alert("Elige el departamento que hará el seguimiento");return;}
+    if(!form.proveedor.trim()){alert("Indica el proveedor");return;}
+    if(!(form.prodDesc||form.prodCodigo)){alert("Indica el producto (del catálogo o a mano)");return;}
+    const prod={codigo:form.prodCodigo.trim(),descripcion:form.prodDesc.trim(),calibre:form.prodCalibre.trim(),metros:form.prodMetros.trim()};
+    const nombre=form.nombre.trim()||("Muestra · "+form.proveedor.trim()+" · "+(prod.descripcion||prod.codigo));
+    const hoyStr=new Date().toLocaleDateString("es-ES");
+    const d=deptoDe(form.departamentoId)||{};
+    const nuevo={id:`pr${Date.now()}`,nombre,tipo:"muestra",estado:"activo",ambito:"muestra",
+      inicio:new Date().toISOString().slice(0,10),fin:form.fin||"",
+      responsable:usuario.id,responsableNombre:usuario.nombre,agente:idCanonico(usuario),equipo:[usuario.id],
+      desc:form.desc,progreso:0,hitos:[],departamentoId:form.departamentoId,prioridad:form.prioridad||"media",
+      producto:prod,proveedor:form.proveedor.trim(),
+      propuestoPor:usuario.id,propuestoPorNombre:usuario.nombre,aprobadoBacklog:true,
+      historial:[{accion:"🧪 Muestra de proveedor registrada",por:usuario.nombre,fecha:hoyStr,
+        nota:[form.proveedor.trim(),prod.codigo,prod.descripcion,prod.calibre,prod.metros].filter(Boolean).join(" · ")+(form.desc?" — "+form.desc:"")}]};
+    setProyectos(pp=>[nuevo,...pp]);
+    fbEscribir("proyectos",nuevo.id,nuevo);
+    const resp=responsablesDeDepto(form.departamentoId);
+    const det=[["Proveedor",nuevo.proveedor],["Código",prod.codigo],["Producto",prod.descripcion],["Calibre",prod.calibre],["Metros",prod.metros],["Prioridad",nuevo.prioridad],["Descripción",form.desc]]
+      .filter(x=>x[1]).map(x=>x[0]+": "+String(x[1]).replace(/[<>&]/g,"")).join(" · ");
+    resp.forEach(function(r){
+      despacharNotificacion({tipo:"proyecto",categoria:"proyectos_muestra",fase:"crear",
+        titulo:"🧪 Nueva muestra de proveedor: "+nombre,
+        mensaje:usuario.nombre+" ha registrado una muestra de proveedor para "+(d.nombre||"tu departamento")+". "+det
+          +". Crea los hitos de seguimiento en CRM → Proyectos → «"+nombre+"».",
+        destinatarioId:r.id,prioridad:nuevo.prioridad==="alta"?"alta":"normal",creadoPor:usuario.id});
+    });
+    if(!resp.length) alert("Creada. Ojo: el departamento no tiene responsable con usuario en el CRM, así que no se ha avisado a nadie.");
+    setForm(FORM0); setFormOpen(false); setFiltro("activo"); setSel(nuevo);
+  };
   const crearProyecto=()=>{
+    if(form.ambito==="muestra") return crearMuestraProveedor();
     if(!form.nombre)return;
     const esInterno=form.ambito==="interno";
     if(esInterno&&!form.departamentoId){alert("Selecciona el departamento del proyecto interno");return;}
@@ -31426,7 +31466,7 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
           destinatarioId:r.id,prioridad:"normal",creadoPor:usuario.id});
       });
     }
-    setForm({nombre:"",tipo:"lanzamiento",desc:"",fin:"",ambito:"cliente",departamentoId:"",prioridad:"media"});
+    setForm(FORM0);
     setFormOpen(false);
     if(esInterno&&!puedeAprobar) setFiltro("backlog");
   };
@@ -31563,8 +31603,27 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
           );
         })()}
 
+        {/* (sep 2026) Cabecera de las muestras de proveedor */}
+        {esMuestraP(sel)&&(()=>{
+          const d=deptoDe(sel.departamentoId)||{icon:"🏢",nombre:sel.departamentoId||"—"};
+          const pr=sel.producto||{};
+          const sinHitos=!(sel.hitos||[]).some(h=>h&&(h.nombre||h.titulo));
+          return(
+            <Card style={{marginBottom:14,padding:"14px 16px",border:"1.5px solid #A5F3FC",background:"#F5FEFF"}}>
+              <p style={{margin:"0 0 6px",fontSize:13,fontWeight:800,color:"#0E7490"}}>🧪 Muestra de proveedor · {d.icon} {d.nombre}</p>
+              <div style={{display:"grid",gridTemplateColumns:"auto 1fr",gap:"3px 10px",fontSize:12.5}}>
+                {[["Proveedor",sel.proveedor],["Código",pr.codigo],["Producto",pr.descripcion],["Calibre",pr.calibre],["Metros",pr.metros],["Prioridad",sel.prioridad],["Registrada por",sel.propuestoPorNombre]].filter(x=>x[1]).map(x=>(
+                  <React.Fragment key={x[0]}><span style={{color:T.muted}}>{x[0]}</span><b style={{color:T.text}}>{x[1]}</b></React.Fragment>
+                ))}
+              </div>
+              {sinHitos&&<p style={{margin:"10px 0 0",fontSize:12,fontWeight:700,color:esResponsableDeDepto(usuario,sel.departamentoId)?"#B45309":T.muted}}>
+                {esResponsableDeDepto(usuario,sel.departamentoId)?"⏳ Te toca crear los hitos de seguimiento (más abajo, «+ Hito»)":"⏳ Pendiente de que "+(d.nombre||"el departamento")+" cree los hitos de seguimiento"}</p>}
+            </Card>
+          );
+        })()}
+
         {/* (v3.23.90) Sistema de seguimiento bidireccional — responsables + enviar al cliente */}
-        {sel.ambito!=="interno"&&<Card style={{marginBottom:14,padding:"14px 16px",border:"1.5px solid "+T.border}}>
+        {sel.ambito!=="interno"&&!esMuestraP(sel)&&<Card style={{marginBottom:14,padding:"14px 16px",border:"1.5px solid "+T.border}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
             <div style={{flex:1,minWidth:0}}>
               <p style={{margin:0,fontSize:13,fontWeight:800,color:T.text}}>🔗 Seguimiento con el cliente</p>
@@ -32522,7 +32581,7 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
           <p style={{margin:"0 0 12px",fontSize:14,fontWeight:800}}>Nuevo proyecto</p>
           {/* (v5.0) Ámbito: cliente o interno */}
           <div style={{display:"flex",gap:6,marginBottom:12,background:T.bg,borderRadius:10,padding:4}}>
-            {[["cliente","🤝 De cliente"],["interno","🏢 Interno"]].map(([k,l])=>(
+            {[["cliente","🤝 De cliente"],["interno","🏢 Interno"],["muestra","🧪 Muestra proveedor"]].map(([k,l])=>(
               <button key={k} onClick={()=>setForm(x=>({...x,ambito:k}))}
                 style={{flex:1,padding:"9px",borderRadius:8,border:"none",
                   background:form.ambito===k?"#fff":"transparent",
@@ -32532,9 +32591,9 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
               </button>
             ))}
           </div>
-          {form.ambito==="interno"&&(
+          {(form.ambito==="interno"||form.ambito==="muestra")&&(
             <div style={{marginBottom:10}}>
-              <p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Departamento</p>
+              <p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Departamento{form.ambito==="muestra"?" que hace el seguimiento":""}</p>
               <select value={form.departamentoId} onChange={e=>setForm(x=>({...x,departamentoId:e.target.value}))}
                 style={{width:"100%",border:`1.5px solid ${T.border}`,borderRadius:9,padding:"10px 12px",fontSize:13,outline:"none",boxSizing:"border-box",background:"#fff"}}>
                 <option value="">— Selecciona departamento —</option>
@@ -32551,19 +32610,47 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
                   </button>
                 ))}
               </div>
-              {form.departamentoId&&!esResponsableDeDepto(usuario,form.departamentoId)&&(
+              {form.ambito==="muestra"&&form.departamentoId&&(
+                <p style={{margin:"8px 0 0",fontSize:11,color:"#0E7490",fontWeight:600}}>
+                  ✉️ Al crearla se avisa a {responsablesDeDepto(form.departamentoId).map(r=>r.nombre).join(" y ")||"el responsable del departamento"} para que cree los hitos de seguimiento
+                </p>
+              )}
+              {form.ambito==="interno"&&form.departamentoId&&!esResponsableDeDepto(usuario,form.departamentoId)&&(
                 <p style={{margin:"8px 0 0",fontSize:11,color:T.amber,fontWeight:600}}>
                   📋 Irá al backlog — {responsablesDeDepto(form.departamentoId).map(r=>r.nombre).join(" o ")||"el responsable"} deberá aprobarlo
                 </p>
               )}
             </div>
           )}
+          {form.ambito==="muestra"&&(
+            <div style={{marginBottom:10,padding:"10px 12px",borderRadius:10,background:"#ECFEFF",border:"1px solid #A5F3FC"}}>
+              <p style={{margin:"0 0 6px",fontSize:11,fontWeight:800,color:"#0E7490",textTransform:"uppercase"}}>🧪 Producto de la muestra</p>
+              <SearchInput value={form.busqProd} onChange={v=>setForm(x=>({...x,busqProd:v}))}
+                placeholder="🔍 Buscar en catálogo (o rellena a mano abajo)"
+                suggestions={PRODUCTOS_LOCAL.filter(function(q){var b=(form.busqProd||"").toLowerCase();return b.length>=2&&(((q.nombre||"").toLowerCase().includes(b))||((q.codigo||"").toLowerCase().includes(b)));})
+                  .slice(0,8).map(function(q){return {label:q.nombre,sub:q.codigo+(q.calibre||q.formato?" · "+(q.calibre||q.formato):""),tipo:"producto",obj:q};})}
+                onSelect={function(sg){var o=(sg&&sg.obj)||{};setForm(x=>({...x,busqProd:"",prodCodigo:o.codigo||"",prodDesc:o.nombre||sg.label||"",prodCalibre:o.calibre||o.formato||"",prodMetros:o.metros||""}));}}
+                onPick={function(pk){var o=PRODUCTOS_LOCAL.find(function(z){return (z.codigo||"")===(pk.codigo||"");})||{};setForm(x=>({...x,busqProd:"",prodCodigo:pk.codigo||"",prodDesc:pk.nombre||o.nombre||"",prodCalibre:o.calibre||o.formato||pk.formato||"",prodMetros:o.metros||""}));}}/>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 2fr",gap:6,marginTop:8}}>
+                {[["prodCodigo","Código","Ej. TN3234"],["prodDesc","Descripción","Tripa natural cerdo…"],["prodCalibre","Calibre","32/34"],["prodMetros","Metros","90 m"]].map(([k,l,ph])=>(
+                  <div key={k}>
+                    <p style={{margin:"0 0 3px",fontSize:10.5,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>{l}</p>
+                    <input value={form[k]} onChange={e=>setForm(x=>({...x,[k]:e.target.value}))} placeholder={ph}
+                      style={{width:"100%",border:`1.5px solid ${T.border}`,borderRadius:8,padding:"8px 10px",fontSize:13,outline:"none",boxSizing:"border-box",background:"#fff"}}/>
+                  </div>
+                ))}
+              </div>
+              <p style={{margin:"8px 0 3px",fontSize:10.5,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Proveedor *</p>
+              <input value={form.proveedor} onChange={e=>setForm(x=>({...x,proveedor:e.target.value}))} placeholder="Quién envía la muestra"
+                style={{width:"100%",border:`1.5px solid ${T.border}`,borderRadius:8,padding:"8px 10px",fontSize:13,outline:"none",boxSizing:"border-box",background:"#fff"}}/>
+            </div>
+          )}
           <div style={{marginBottom:10}}>
-            <p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Nombre</p>
-            <input value={form.nombre} onChange={e=>setForm(x=>({...x,nombre:e.target.value}))} placeholder="Nombre del proyecto"
+            <p style={{margin:"0 0 4px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Nombre{form.ambito==="muestra"?" (opcional)":""}</p>
+            <input value={form.nombre} onChange={e=>setForm(x=>({...x,nombre:e.target.value}))} placeholder={form.ambito==="muestra"?"Si lo dejas vacío: Muestra · proveedor · producto":"Nombre del proyecto"}
               style={{width:"100%",border:`1.5px solid ${T.border}`,borderRadius:9,padding:"10px 12px",fontSize:13,outline:"none",boxSizing:"border-box"}}/>
           </div>
-          {form.ambito!=="interno"&&<div style={{marginBottom:10}}>
+          {form.ambito==="cliente"&&<div style={{marginBottom:10}}>
             <p style={{margin:"0 0 6px",fontSize:11,fontWeight:700,color:T.muted,textTransform:"uppercase"}}>Tipo</p>
             <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
               {Object.entries(TIPOS).map(([k,v])=>(
@@ -32584,7 +32671,7 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
           </div>
           <div style={{display:"flex",gap:8}}>
             <Btn small outline color={T.muted} onClick={()=>setFormOpen(false)}>Cancelar</Btn>
-            <Btn small full color={T.purple} onClick={crearProyecto} disabled={!form.nombre}>✓ Crear</Btn>
+            <Btn small full color={T.purple} onClick={crearProyecto} disabled={form.ambito==="muestra"?!((form.nombre||form.prodDesc||form.prodCodigo)&&form.proveedor&&form.departamentoId):!form.nombre}>✓ Crear</Btn>
           </div>
         </Card>
       )}
@@ -32674,11 +32761,12 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
 
       {/* (v6.10.1) ¿De cliente o interno? Filtro a la vista */}
       {filtro!=="backlog"&&(function(){
-        var nC=visibles.filter(function(p){return !esInternoP(p);}).length;
+        var nC=visibles.filter(function(p){return !esInternoP(p)&&!esMuestraP(p);}).length;
         var nI=visibles.filter(esInternoP).length;
+        var nM=visibles.filter(esMuestraP).length;
         return (
           <div style={{display:"flex",gap:6,marginBottom:10}}>
-            {[["todos","Todos ("+visibles.length+")"],["cliente","🤝 Cliente ("+nC+")"],["interno","🏢 Internos ("+nI+")"]].map(function(par){
+            {[["todos","Todos ("+visibles.length+")"],["cliente","🤝 Cliente ("+nC+")"],["interno","🏢 Internos ("+nI+")"],["muestra","🧪 Muestras ("+nM+")"]].map(function(par){
               var k=par[0],l=par[1],on=filtroAmbito===k;
               return (
                 <button key={k} onClick={function(){setFiltroAmbito(k);}}
@@ -32691,8 +32779,9 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
         );
       })()}
       {filtro!=="backlog"&&visibles.filter(p=>{
-        if(filtroAmbito==="cliente"&&esInternoP(p)) return false;
+        if(filtroAmbito==="cliente"&&(esInternoP(p)||esMuestraP(p))) return false;
         if(filtroAmbito==="interno"&&!esInternoP(p)) return false;
+        if(filtroAmbito==="muestra"&&!esMuestraP(p)) return false;
         if(filtroDep==="todos") return true;
         return (p.deptos||[]).includes(filtroDep)||p.responsableComercial===usuario.id;
       }).map(p=>{
@@ -32711,7 +32800,10 @@ function Proyectos({usuario, onAbrirCliente, onIrASeccion, proyectoDirecto, onPr
                   <Badge label={tipo.label} color={tipo.color}/>
                   <Badge label={p.estado==="activo"?"● Activo":p.estado==="backlog"?"● Backlog":"● Cerrado"}
                     color={p.estado==="activo"?T.green:p.estado==="backlog"?T.amber:T.muted}/>
-                  {esInternoP(p)?(()=>{
+                  {esMuestraP(p)?(<>
+                    <Badge label={"🏭 "+String(p.proveedor||"Proveedor").slice(0,22)} color="#0891B2"/>
+                    {p.departamentoId&&(()=>{const d=deptoDe(p.departamentoId);return d?<Badge label={d.icon+" "+d.nombre} color={d.color||T.muted}/>:null;})()}
+                  </>):esInternoP(p)?(()=>{
                     const d=p.departamentoId?deptoDe(p.departamentoId):null;
                     return <Badge label={d?(d.icon+" "+d.nombre):"🏢 Interno"} color={(d&&d.color)||T.muted}/>;
                   })():(
