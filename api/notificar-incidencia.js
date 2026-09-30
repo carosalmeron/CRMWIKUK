@@ -927,6 +927,7 @@ async function datosCEO(anio,sem){
         if(!f.fv||f.fv>hoyISO) continue;
         const im=numC(f.im); p.cobros+=im; p.nFacV++;
         const dias=Math.round((Date.now()-new Date(f.fv).getTime())/86400000);
+        (p.facV=p.facV||[]).push({cli:cli.c||"",n:f.n||"",ff:f.ff||"",fv:f.fv,im,dias});
         if(dias<=30) G.t30+=im; else if(dias<=60) G.t60+=im; else if(dias<=90) G.t90+=im; else G.t90mas+=im;
         G.peor.push({cli:cli.c||"",im,dias,quien:g.nombre});
       }
@@ -1316,7 +1317,7 @@ module.exports = async function handler(req, res){
       const anioP=Number(req.query.anio)||hoyP.anio, semP=Number(req.query.semana)||hoyP.sem;
       const D=await datosCEO(anioP,semP);
       const campos=["id","cod","nombre","equipo","ausente","motivo","vSem","objSem","mAct","mObj","vis","lla","mEnv","mOk","mKo",
-        "mEnvA","mOkA","mKoA","m60","obj","cobros","nFacV","limite","k","nota"];
+        "mEnvA","mOkA","mKoA","m60","obj","cobros","nFacV","limite","k","nota","facV"];
       res.setHeader("Cache-Control","no-store");
       res.status(200).json({ok:true,sem:D.sem,anio:D.anio,mNum:D.mNum,
         equipos:D.equipos.map(E=>({eq:E.eq,jefe:E.jefe,obj:E.obj,cerr:E.cerr,aus:E.aus,sinCerrar:E.sinCerrar,
