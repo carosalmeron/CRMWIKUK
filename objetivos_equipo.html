@@ -2065,7 +2065,9 @@ function facturasDe(p){
   // La misma factura puede venir repetida (exacta) o partida en varios plazos:
   // se deja una sola línea por cliente + nº de factura, con el importe sumado
   // y el plazo más antiguo.
-  const K=(f)=>String(f.cli||"").trim().toUpperCase()+"|"+String(f.n||"").trim().toUpperCase();
+  // (sep 2026) La empresa (WIKUK / UC) forma parte de la clave: el mismo nº en dos
+  // empresas son dos facturas distintas, y un abono de una no anula una factura de la otra.
+  const K=(f)=>String(f.cli||"").trim().toUpperCase()+"|"+String(f.g||"")+"|"+String(f.n||"").trim().toUpperCase();
   const vistos=new Set(), una={};
   (p.facV||[]).forEach(f=>{
     const exacta=K(f)+"|"+f.fv+"|"+Math.round((Number(f.im)||0)*100);
@@ -2079,26 +2081,47 @@ function facturasDe(p){
   const l=Object.values(una), fuera=new Set();
   const cent=(x)=>Math.round(Math.abs(Number(x)||0)*100);
   l.forEach((neg,i)=>{ if(!(Number(neg.im)<0)||fuera.has(i)) return;
-    const j=l.findIndex((pos,k)=>k!==i&&!fuera.has(k)&&Number(pos.im)>0&&Math.abs(cent(pos.im)-cent(neg.im))<=1&&String(pos.cli).trim().toUpperCase()===String(neg.cli).trim().toUpperCase());
+    const j=l.findIndex((pos,k)=>k!==i&&!fuera.has(k)&&Number(pos.im)>0&&Math.abs(cent(pos.im)-cent(neg.im))<=1&&String(pos.cli).trim().toUpperCase()===String(neg.cli).trim().toUpperCase()&&String(pos.g||"")===String(neg.g||""));
     if(j>=0){ fuera.add(i); fuera.add(j); } });
   return l.filter((_,i)=>!fuera.has(i)).sort((a,b)=>b.dias-a.dias);
 }
 function tablaFacturas(l,paraCorreo){
+  // (sep 2026) Agrupada por cliente. Si el cliente debe a más de una empresa
+  // (WIKUK y UC), cada empresa va separada dentro del cliente con su importe.
   const e=(t)=>String(t??"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
   const fx=(f)=>String(f||"").slice(0,10).split("-").reverse().join("/");
   const col=(d)=>d>90?"#8B1230":d>60?"#C2263D":d>30?"#E0803C":"#B07908";
   const eu=(n)=>Math.round(Number(n)||0).toLocaleString("es-ES")+" €";
+  const sum=(a)=>a.reduce((t,f)=>t+(Number(f.im)||0),0);
+  const nomE=(g)=>({WIKUK:"WIKUK",UC:"UC"}[String(g||"").toUpperCase()]||String(g||"Sin empresa"));
   const td='padding:6px 5px;border-top:1px solid #EEF1F5;font-size:12.5px;vertical-align:top';
+  const clis={};
+  l.forEach(f=>{ const k=String(f.cli||"").trim().toUpperCase(); (clis[k]=clis[k]||{cli:f.cli,l:[]}).l.push(f); });
+  const grupos=Object.values(clis).sort((a,b)=>Math.max(...b.l.map(f=>f.dias||0))-Math.max(...a.l.map(f=>f.dias||0)));
+  const filaF=(f,sang)=>'<tr><td style="'+td+(sang?';padding-left:18px':'')+'">'+e(f.n)+(f.plazos>1?' <span style="color:#64748B">('+f.plazos+' plazos)</span>':'')
+      +'<div style="font-size:11.5px;color:#64748B">'+fx(f.fv)+' · <b style="color:'+col(f.dias)+'">'+f.dias+' días</b></div></td>'
+    +'<td style="'+td+';text-align:right;color:#64748B">'+eu(f.tot!=null?f.tot:f.im)+'</td>'
+    +'<td style="'+td+';text-align:right;font-weight:800">'+eu(f.im)+'</td></tr>';
+  const cuerpo=grupos.map(G=>{
+    const emps={}; G.l.forEach(f=>{ (emps[nomE(f.g)]=emps[nomE(f.g)]||[]).push(f); });
+    const ks=Object.keys(emps).sort(), varias=ks.length>1;
+    let h='<tr><td colspan="2" style="padding:8px 5px 4px;border-top:2px solid #E2E8F0;font-size:12.5px;font-weight:800;word-break:break-word">'+e(G.cli)
+      +(varias?'<div style="font-size:11.5px;font-weight:600;color:#64748B">'+ks.map(k=>k+' '+eu(sum(emps[k]))).join(' · ')+'</div>'
+              :'<div style="font-size:11.5px;font-weight:600;color:#64748B">'+ks[0]+'</div>')
+      +'</td><td style="padding:8px 5px 4px;border-top:2px solid #E2E8F0;text-align:right;font-size:12.5px;font-weight:800">'+eu(sum(G.l))+'</td></tr>';
+    ks.forEach(k=>{
+      if(varias) h+='<tr><td colspan="2" style="padding:5px 5px 2px 10px;font-size:11.5px;font-weight:800;color:#1E40AF;background:#F1F5FF">🏢 '+e(k)+'</td>'
+        +'<td style="padding:5px 5px 2px;font-size:11.5px;font-weight:800;color:#1E40AF;background:#F1F5FF;text-align:right">'+eu(sum(emps[k]))+'</td></tr>';
+      h+=emps[k].sort((a,b)=>(b.dias||0)-(a.dias||0)).map(f=>filaF(f,varias)).join("");
+    });
+    return h;
+  }).join("");
   return '<table style="width:100%;border-collapse:collapse;table-layout:fixed'+(paraCorreo?';margin-top:10px':'')+'">'
-    +'<colgroup><col><col style="width:31%"><col style="width:19%"><col style="width:19%"></colgroup><tr>'
-    +['Cliente','Factura · vence','Total','Vencido'].map((t,i)=>'<th style="text-align:'+(i>1?"right":"left")+';font-size:11px;color:#64748B;padding:4px 5px">'+t+'</th>').join("")+'</tr>'
-    +l.map(f=>'<tr><td style="'+td+';word-break:break-word">'+e(f.cli)+'</td>'
-      +'<td style="'+td+'">'+e(f.n)+(f.plazos>1?' <span style="color:#64748B">('+f.plazos+' plazos)</span>':'')
-        +'<div style="font-size:11.5px;color:#64748B">'+fx(f.fv)+' · <b style="color:'+col(f.dias)+'">'+f.dias+' días</b></div></td>'
-      +'<td style="'+td+';text-align:right;color:#64748B">'+eu(f.tot!=null?f.tot:f.im)+'</td>'
-      +'<td style="'+td+';text-align:right;font-weight:800">'+eu(f.im)+'</td></tr>').join("")
-    +'<tr><td colspan="3" style="padding:6px 5px;font-weight:800;font-size:12.5px;border-top:2px solid #CBD5E1">Total vencido</td><td style="padding:6px 5px;text-align:right;font-weight:800;font-size:12.5px;border-top:2px solid #CBD5E1">'
-    +eu(l.reduce((t,f)=>t+(Number(f.im)||0),0))+'</td></tr></table>';
+    +'<colgroup><col><col style="width:24%"><col style="width:24%"></colgroup><tr>'
+    +['Factura · vence','Total','Vencido'].map((t,i)=>'<th style="text-align:'+(i?"right":"left")+';font-size:11px;color:#64748B;padding:4px 5px">'+t+'</th>').join("")+'</tr>'
+    +cuerpo
+    +'<tr><td colspan="2" style="padding:6px 5px;font-weight:800;font-size:12.5px;border-top:2px solid #CBD5E1">Total vencido</td><td style="padding:6px 5px;text-align:right;font-weight:800;font-size:12.5px;border-top:2px solid #CBD5E1">'
+    +eu(sum(l))+'</td></tr></table>';
 }
 // Pedir plan de cobro con el listado de facturas vencidas en el correo
 window.pedirPlanCobros=async(cod,btn)=>{
@@ -2125,7 +2148,11 @@ function seccionCobros(){
           +(plan?'':'<button class="mini" style="margin-top:6px" onclick="pedirPlanCobros(\''+esc2(cod)+'\',this)">Pedir plan (con estas facturas)</button>'),
         "#FCA5A5"); }).join("")
     :'<p class="vacio" style="margin:0">Todos dentro de la política de cobro.</p>';
-  return {d:euT(tot)+" vencidos · "+(fuera.length?fuera.length+" fuera del máximo":"todos dentro"),c,ok:!fuera.some(p=>!((kpisDe(p)||{}).cobros||{}).plan)};
+  // Fecha de los datos de cobros (última importación del Excel de Administración)
+  const fechas=[...new Set(g.map(p=>p.cobFecha).filter(Boolean))].sort();
+  const fData=fechas.length?fechas[fechas.length-1].split("-").reverse().join("/"):"";
+  return {d:euT(tot)+" vencidos · "+(fuera.length?fuera.length+" fuera del máximo":"todos dentro")+(fData?" · datos del "+fData:""),
+    c:(fData?'<div style="font-size:12px;color:#64748B;margin-bottom:6px">Datos del Excel de cobros importado el <b>'+fData+'</b>. Si el Excel ha cambiado después, hay que volver a importarlo (Administración → Importar cobros).</div>':'')+c,ok:!fuera.some(p=>!((kpisDe(p)||{}).cobros||{}).plan)};
 }
 // ── Recuperación y clientes en riesgo: con acción / sin acción ──
 let RA=null;   // formulario abierto {id,tipo}
