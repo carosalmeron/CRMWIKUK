@@ -336,9 +336,9 @@ function preparados(){
   const q = ST.buscar.trim().toUpperCase();
   const lista=[];
   for(const c of clientes()){
-    let facs=(c.f||[]);
+    let facs=lineasDe(c);
     if(ST.empresa) facs=facs.filter(f=>f.g===ST.empresa);
-    if(ST.vista==="vencidos") facs=facs.filter(f=>f.fv && f.fv<CORTE);
+    if(ST.vista==="vencidos") facs=facs.filter(f=>f._saldo ? Math.abs(f.ven)>=1 : (f.fv && f.fv<CORTE));
     // (sep 2026) Importes oficiales (pestaña TODOS), por empresa si hay filtro
     const O = oficial(c);
     if(!facs.length && !(O && Math.abs(ST.vista==="vencidos"?O.ven:O.p)>=1)) continue;
@@ -372,6 +372,8 @@ function preparados(){
       _pares:pares, _comp:pares.reduce((s,x)=>s+x.importe,0), _marcados:marcados}));
   }
   if(ST.compensar)              lista.sort((a,b)=> b._comp-a._comp);
+  else if(ST.orden==="antiguedad" && soloSaldos()) lista.sort((a,b)=>{ const A=oficial(a)||{}, B=oficial(b)||{};
+      return (B.v70||0)-(A.v70||0) || (B.v20||0)-(A.v20||0) || b._v-a._v; });
   else if(ST.orden==="antiguedad") lista.sort((a,b)=> a._ant.localeCompare(b._ant) || b._v-a._v);
   else if(ST.orden==="nombre")  lista.sort((a,b)=> String(a.c).localeCompare(String(b.c),"es"));
   else                          lista.sort((a,b)=> (ST.vista==="vencidos"? b._v-a._v : b._p-a._p));
@@ -406,7 +408,25 @@ function metricas(base){
   return {plazo, tramos, pend, grave};
 }
 
+function panelSaldos(base){
+  let p=0,v=0,v20=0,v70=0;
+  base.forEach(c=>{ const O=oficial(c); if(!O) return; p+=O.p; v+=O.ven; v20+=O.v20; v70+=O.v70; });
+  if(!p&&!v) return "";
+  const pc=(x)=>p>0?Math.round(x/p*100)+" %":"—";
+  const caja=(l,x,col,sub)=>`<div style="flex:1;min-width:0"><b style="display:block;font-size:17px;font-weight:900;color:${col}">${eur(x)}</b>
+      <span style="display:block;font-size:10px;color:#94A3B8;line-height:1.3">${l}${sub?"<br>"+sub:""}</span></div>`;
+  return `<div class="dias">
+    <p class="dl">⏱ Antigüedad de lo fuera de plazo</p>
+    <div style="display:flex;gap:12px;margin-top:8px;text-align:left">
+      ${caja("Fuera de plazo",v,"#DC2626",pc(v)+" del pendiente")}
+      ${caja("+20 días",v20,"#C2410C",pc(v20))}
+      ${caja("Más de 70 días",v70,"#7F1D1D",pc(v70))}
+    </div>
+    <p class="ds" style="margin-top:8px">Cifras de la pestaña TODOS de Administración.</p>
+  </div>`;
+}
 function panelDias(base){
+  if(soloSaldos()) return panelSaldos(base);
   const m = metricas(base);
   if(!m.pend) return "";
   const T=m.tramos, tot=m.pend;
@@ -442,7 +462,7 @@ function render(){
   const totP = todosCli.reduce((s,c)=>{ const O=oficial(c); return s+(O?O.p:(c.f||[]).filter(f=>!ST.empresa||f.g===ST.empresa).reduce((t,f)=>t+(f.im||0),0)); },0);
   const totV = todosCli.reduce((s,c)=>{ const O=oficial(c); return s+(O?O.ven:(c.f||[]).filter(f=>(!ST.empresa||f.g===ST.empresa)&&f.fv&&f.fv<CORTE).reduce((t,f)=>t+(f.im||0),0)); },0);
   const nFacV= todosCli.reduce((s,c)=>s+(c.f||[]).filter(f=>f.fv&&f.fv<CORTE).length,0);
-  const nCliV= todosCli.filter(c=>(c.f||[]).some(f=>f.fv&&f.fv<CORTE)).length;
+  const nCliV= todosCli.filter(c=>{ const O=oficial(c); return O?O.ven>=1:(c.f||[]).some(f=>f.fv&&f.fv<CORTE); }).length;
   const sumP = lista.reduce((s,c)=>s+c._p,0);
 
   const comerciales = VE_TODO
@@ -461,7 +481,7 @@ function render(){
       <div class="kpi venc ${ST.vista==="vencidos"?"on":""}" onclick="setVista('vencidos')">
         <p class="l" style="color:#DC2626">Fuera de plazo a ${fecha(CORTE)}</p>
         <p class="v" style="color:#DC2626">${eur(totV)}</p>
-        <p class="s">${nCliV} clientes · ${nFacV} facturas</p>
+        <p class="s">${nCliV} clientes${soloSaldos()?"":" · "+nFacV+" facturas"}</p>
       </div>
     </div>
 
@@ -490,9 +510,9 @@ function render(){
         <option value="">Todos los vendedores</option>
         ${comerciales.map(c=>`<option value="${esc(c.id)}" ${ST.comercial===c.id?"selected":""}>${esc(c.n)}</option>`).join("")}
       </select>`:""}
-      <button class="mini" onclick="ST.compensar=!ST.compensar;ST.abiertos={};render()"
+      ${soloSaldos()?"":`<button class="mini" onclick="ST.compensar=!ST.compensar;ST.abiertos={};render()"
         style="${ST.compensar?"border-color:#0891B2;background:#ECFEFF;color:#0E7490;font-weight:800":""}">
-        🔄 Compensables</button>
+        🔄 Compensables</button>`}
       <button class="mini" onclick="exportar()">⬇︎ Excel</button>
     </div>
 
@@ -528,6 +548,7 @@ function render(){
 function tarjeta(c,ci){
   const k = normCom(c.c);
   const ab = ST.compensar ? (ST.abiertos[k]!==false) : !!ST.abiertos[k];
+  const saldo = c._f.length && c._f[0]._saldo;
   const vencidas = c._f.filter(f=>f.fv&&f.fv<CORTE);
   const antig = vencidas.length ? dias(c._ant) : 0;
   return `
@@ -535,7 +556,7 @@ function tarjeta(c,ci){
     <div class="cli-h" onclick="toggle('${k}')">
       <div class="cli-n">
         <b>${esc(c.c)}</b>
-        <span>${c._f.length} ${c._f.length===1?"factura":"facturas"}
+        <span>${saldo ? esc(c.c70||c.cat||"") : `${c._f.length} ${c._f.length===1?"factura":"facturas"}`}
           ${vencidas.length?` · <b style="color:#DC2626">${vencidas.length} vencida${vencidas.length>1?"s":""}</b>`:""}
           ${antig>0?` · ${c._apunte?"apuntes de "+fecha(c._ant):antig+" días de retraso"}`:""}
           ${VE_TODO&&c._com?` · ${esc(c._com)}`:""}
@@ -554,7 +575,8 @@ function tarjeta(c,ci){
       </div>
       <span class="chev">${ab?"▲":"▼"}</span>
     </div>
-    ${ab?`<div class="det">${(()=>{ const E=porEmpresa(c._f,c);
+    ${ab&&saldo?`<div class="det">${c._f.map((f,fi)=>filaSaldo(c,f,ci,fi)).join("")}</div>`:""}
+    ${ab&&!saldo?`<div class="det">${(()=>{ const E=porEmpresa(c._f,c);
         if(E.length<2) return c._f.map((f,fi)=>fila(c,f,ci,fi)).join("");
         return E.map(e=>`<div class="emp-h"><b>🏢 ${esc(e.g)}</b>
             <span>${eur(e.p)} pendiente${e.v?` · <b style="color:#DC2626">${eur(e.v)} vencido</b>`:""}</span></div>`
@@ -562,7 +584,17 @@ function tarjeta(c,ci){
   </div>`;
 }
 
-// (sep 2026) Importes oficiales del cliente (pestaña TODOS del Excel de
+// (sep 2026) Con la carga de la pestaña TODOS no hay facturas: cada cliente
+// trae su saldo por empresa. Se representa como una línea por empresa.
+function lineasDe(c){
+  if(c&&c._of&&!(c.f||[]).length&&c.emp)
+    return Object.entries(c.emp).map(([g,e])=>({_saldo:true,g,t:"Saldo",n:g,fv:"",ff:"",
+      im:e.p||0,ven:e.ven||0,v20:e.v20||0,v70:e.v70||0}))
+      .filter(f=>Math.abs(f.im)>=0.01||Math.abs(f.ven)>=0.01).sort((a,b)=>a.g.localeCompare(b.g));
+  return c.f||[];
+}
+function soloSaldos(){ return ST.docs.some(d=>d.fuente==="TODOS"); }
+// Importes oficiales del cliente (pestaña TODOS del Excel de
 // Administración). Con filtro de empresa, los de esa empresa. null si la carga
 // es antigua y no los trae: entonces se suman las facturas.
 function oficial(c){
@@ -579,6 +611,18 @@ function porEmpresa(facs,c){
     if(ST.empresa&&g!==ST.empresa) return;
     const e=(E[g]=E[g]||{g,p:0,v:0,idx:[]}); e.p=o.p||0; e.v=o.ven||0; });
   return Object.values(E).filter(e=>e.idx.length||Math.abs(e.p)>=1).sort((a,b)=>String(a.g).localeCompare(String(b.g)));
+}
+function filaSaldo(c,f,ci,fi){
+  return `
+  <div class="fila">
+    <div class="fi">
+      <b>🏢 ${esc(f.g)}</b>
+      <span>Pendiente ${eur(f.im)} · <b style="display:inline;color:${f.ven>0?"#DC2626":"#64748B"}">${eur(f.ven)} fuera de plazo</b></span>
+      ${(Math.abs(f.v20)>=1||Math.abs(f.v70)>=1)?`<span style="color:#B91C1C">+20 días ${eur(f.v20)} · más de 70 días ${eur(f.v70)}</span>`:""}
+    </div>
+    <div class="fim" style="color:${f.ven>0?"#DC2626":"#0F172A"}">${eur(ST.vista==="vencidos"?f.ven:f.im)}</div>
+    <button class="binc" onclick="abrirModal(${ci},${fi})">⚑</button>
+  </div>`;
 }
 function fila(c,f,ci,fi){
   const venc = f.fv && f.fv<CORTE;
@@ -634,8 +678,9 @@ function pintarModal(){
   el.innerHTML = `
    <div class="modal">
      <h3>⚑ Abrir incidencia</h3>
+     ${f._saldo?`<p class="msub">${esc(M.cliente)} · saldo ${esc(f.g)}: <b>${eur(f.im)}</b> pendiente · <b style="color:#DC2626">${eur(f.ven)}</b> fuera de plazo</p>`:`
      <p class="msub">${esc(M.cliente)} · ${esc(f.t||"")} ${esc(f.n||"")} ·
-        <b>${eur(f.im)}</b> · vence ${fecha(f.fv)}${venc?` · <b style="color:#DC2626">${dias(f.fv)} días</b>`:""}</p>
+        <b>${eur(f.im)}</b> · vence ${fecha(f.fv)}${venc?` · <b style="color:#DC2626">${dias(f.fv)} días</b>`:""}</p>`}
 
      <span class="lab">¿A qué departamento va?</span>
      <div class="chips">
@@ -672,8 +717,10 @@ async function enviarIncidencia(){
   const f=M.f, venc=f.fv&&f.fv<CORTE;
   const id="inc"+Date.now();
   const autor = P.uid || normCom(P.agente) || "cobros";
-  const desc =
-    `[COBROS] ${M.cliente} · ${f.t||""} ${f.n||""} · ${eur(f.im)} · vence ${fecha(f.fv)}`+
+  const desc = f._saldo
+    ? `[COBROS] ${M.cliente} · saldo ${f.g}: ${eur(f.im)} pendiente · ${eur(f.ven)} fuera de plazo`+
+      ` (+20 días ${eur(f.v20)} · más de 70 días ${eur(f.v70)})\n\n${M.texto.trim()}`
+    : `[COBROS] ${M.cliente} · ${f.t||""} ${f.n||""} · ${eur(f.im)} · vence ${fecha(f.fv)}`+
     (venc?` (${dias(f.fv)} días vencida)`:"")+` · ${f.g||""}\n\n${M.texto.trim()}`;
 
   const inc={
@@ -730,6 +777,12 @@ function exportar(){
   if(typeof XLSX==="undefined"){ alert("Aún se está cargando el exportador. Espera un segundo."); return; }
   const filas=[];
   for(const c of preparados()){
+    if(c._f.length&&c._f[0]._saldo){
+      for(const f of c._f) filas.push({ Cliente:c.c, Vendedor:c._com||P.nombre||P.agente, Empresa:f.g,
+        "Total pendiente":f.im, "Fuera de plazo":f.ven, "Fuera de plazo +20":f.v20, "Más de 70 días":f.v70,
+        Categoría:c.c70||c.cat||"", Región:c.r||"" });
+      continue;
+    }
     for(const f of c._f){
       const venc=f.fv&&f.fv<CORTE;
       filas.push({

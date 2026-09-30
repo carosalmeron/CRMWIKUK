@@ -1254,6 +1254,15 @@ async function datosDelEquipo(){
         }
       }
     }catch(err){ p.cobros=num(c.totalVencido); p.nFacV=num(c.nFacturas); }
+    // (sep 2026) Carga de la pestaña TODOS: saldos por cliente, sin facturas
+    if(c.fuente==="TODOS"){
+      p.cobros=num(c.totalVencido); p.nFacV=0; T.todos=true;
+      try{ for(const cli of JSON.parse(c.datos||"[]")){
+        const v=num(cli.ven); if(v<1) continue; p.nFacV++;
+        T.tV=(T.tV||0)+v; T.t20=(T.t20||0)+num(cli.v20); T.t70=(T.t70||0)+num(cli.v70);
+        if(v>T.peor.imp) T.peor={cli:cli.c||"",imp:v,tramo:num(cli.v70)>=1?"más de 70 días":num(cli.v20)>=1?"+20 días":"menos de 20 días"};
+      } }catch(e){}
+    }
 
     // --- Actividad ---------------------------------------------------------
     for(const v of vis){
@@ -1350,7 +1359,7 @@ async function enviarConsolidado(es){
     return `<table style="width:100%;border-collapse:separate;border-spacing:0;margin:0 -4px 4px"><tr>
       ${tar("Semana",eur(T.vSem),pS!=null?pS+" % del objetivo":"sin objetivo",colT(pS))}
       ${tar("Mes",eur(T.mAct),pM!=null?pM+" % del objetivo":"sin objetivo",colT(pM))}
-      ${tar("Vencido",eur(T.cobros),T.nFacV+" facturas","#C2263D")}
+      ${tar("Fuera de plazo",eur(T.cobros),T.nFacV+(T.todos?" clientes":" facturas"),"#C2263D")}
     </tr></table>`;
   };
 
@@ -1427,7 +1436,7 @@ async function enviarConsolidado(es){
 
   const blqCobros=()=>{
     if(!T||!T.cobros) return "";
-    const tot=T.t30+T.t60+T.t90+T.t90mas;
+    const tot=T.todos?(T.tV||0):T.t30+T.t60+T.t90+T.t90mas;
     if(!tot) return "";
     const tr=(l,v,c)=>`<tr>
       <td style="padding:6px 0;font-size:12.5px;white-space:nowrap">${l}</td>
@@ -1444,11 +1453,11 @@ async function enviarConsolidado(es){
         ${fuera.length?`<div style="margin-top:4px;color:#334155">Fuera: ${fuera.map(x=>escH(x.a.nombre)+" "+Math.round(x.p.cobros/x.p.limite*100)+" %").join(" · ")}</div>`:""}
       </div>`:"";
     return `<h3 style="margin:22px 0 4px;font-size:14px">Cobros pendientes</h3>${pol}
-      <div style="font-size:11.5px;color:#8A94A0;margin-bottom:6px">${eur(tot)} vencidos ·
-        ${T.nFacV} facturas${T.peor.imp?` · la mayor: ${escH(T.peor.cli)} ${eur(T.peor.imp)} (${T.peor.dias} días)`:""}</div>
+      <div style="font-size:11.5px;color:#8A94A0;margin-bottom:6px">${eur(tot)} fuera de plazo ·
+        ${T.nFacV} ${T.todos?"clientes":"facturas"}${T.peor.imp?` · la mayor: ${escH(T.peor.cli)} ${eur(T.peor.imp)} (${T.peor.tramo||T.peor.dias+" días"})`:""}</div>
       <table style="width:100%;border-collapse:collapse">
-        ${tr("1–30 d",T.t30,"#B07908")}${tr("31–60 d",T.t60,"#E0803C")}
-        ${tr("61–90 d",T.t90,"#C2263D")}${tr("+90 d",T.t90mas,"#8B1230")}
+        ${T.todos?tr("Fuera de plazo",T.tV||0,"#B07908")+tr("+20 días",T.t20||0,"#E0803C")+tr("Más de 70 días",T.t70||0,"#8B1230")
+          :tr("1–30 d",T.t30,"#B07908")+tr("31–60 d",T.t60,"#E0803C")+tr("61–90 d",T.t90,"#C2263D")+tr("+90 d",T.t90mas,"#8B1230")}
       </table>`;
   };
 
@@ -1520,7 +1529,7 @@ async function enviarConsolidado(es){
       out.push("💸 fuera de política de cobro: "+eur(p.cobros)+" vencidos, "+Math.round(p.cobros/p.limite*100)
         +" % de lo permitido ("+eur(p.limite)+")");
     else if(!p.limite&&p.cobros>=5000&&p.vMes&&p.cobros/p.vMes>0.2)
-      out.push("💸 cobra tarde: "+eur(p.cobros)+" vencidos, "+p.nFacV+" facturas");
+      out.push("💸 cobra tarde: "+eur(p.cobros)+" fuera de plazo, "+p.nFacV+(T.todos?" clientes":" facturas"));
     if(p.mg!=null&&p.mgObj&&p.mg<p.mgObj-3)
       out.push("📉 vende barato: margen "+p.mg.toFixed(1).replace(".",",")+" % con objetivo "
         +p.mgObj.toFixed(1).replace(".",",")+" %");
@@ -2062,6 +2071,8 @@ function seccionActividad(){
 // Facturas vencidas de un comercial (del panel), de la más antigua a la más nueva
 // Una factura y su abono del mismo importe (mismo cliente) se anulan: no se muestran
 function facturasDe(p){
+  // (sep 2026) Carga de TODOS: ya viene una línea por cliente y empresa
+  if((p.facV||[]).some(f=>f.saldo)) return (p.facV||[]).slice().sort((a,b)=>(b.v70||0)-(a.v70||0)||(b.im||0)-(a.im||0));
   // La misma factura puede venir repetida (exacta) o partida en varios plazos:
   // se deja una sola línea por cliente + nº de factura, con el importe sumado
   // y el plazo más antiguo.
@@ -2085,7 +2096,27 @@ function facturasDe(p){
     if(j>=0){ fuera.add(i); fuera.add(j); } });
   return l.filter((_,i)=>!fuera.has(i)).sort((a,b)=>b.dias-a.dias);
 }
+function tablaSaldos(l,paraCorreo){
+  const e=(t)=>String(t??"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+  const eu=(n)=>Math.round(Number(n)||0).toLocaleString("es-ES")+" €";
+  const td='padding:6px 5px;border-top:1px solid #EEF1F5;font-size:12.5px;vertical-align:top';
+  const th=(t,r)=>'<th style="text-align:'+(r?"right":"left")+';font-size:11px;color:#64748B;padding:4px 5px">'+t+'</th>';
+  const sum=(k)=>l.reduce((t,f)=>t+(Number(f[k])||0),0);
+  return '<table style="width:100%;border-collapse:collapse;table-layout:fixed'+(paraCorreo?';margin-top:10px':'')+'">'
+    +'<colgroup><col><col style="width:20%"><col style="width:20%"><col style="width:20%"></colgroup><tr>'
+    +th('Cliente · empresa')+th('Pendiente',1)+th('Fuera de plazo',1)+th('+70 días',1)+'</tr>'
+    +l.map(f=>'<tr><td style="'+td+';word-break:break-word">'+e(f.cli)+'<div style="font-size:11px;color:#64748B">'+e(f.g)
+        +(f.v20>=1?' · +20 días '+eu(f.v20):'')+'</div></td>'
+      +'<td style="'+td+';text-align:right;color:#64748B">'+eu(f.tot)+'</td>'
+      +'<td style="'+td+';text-align:right;font-weight:800">'+eu(f.im)+'</td>'
+      +'<td style="'+td+';text-align:right;font-weight:800;color:'+((f.v70||0)>=1?'#8B1230':'#94A3B8')+'">'+eu(f.v70)+'</td></tr>').join("")
+    +'<tr><td style="padding:6px 5px;font-weight:800;font-size:12.5px;border-top:2px solid #CBD5E1">Total</td>'
+    +'<td style="padding:6px 5px;text-align:right;font-size:12.5px;border-top:2px solid #CBD5E1;color:#64748B">'+eu(sum("tot"))+'</td>'
+    +'<td style="padding:6px 5px;text-align:right;font-weight:800;font-size:12.5px;border-top:2px solid #CBD5E1">'+eu(sum("im"))+'</td>'
+    +'<td style="padding:6px 5px;text-align:right;font-weight:800;font-size:12.5px;border-top:2px solid #CBD5E1">'+eu(sum("v70"))+'</td></tr></table>';
+}
 function tablaFacturas(l,paraCorreo){
+  if(l.length&&l[0].saldo) return tablaSaldos(l,paraCorreo);
   // (sep 2026) Agrupada por cliente. Si el cliente debe a más de una empresa
   // (WIKUK y UC), cada empresa va separada dentro del cliente con su importe.
   const e=(t)=>String(t??"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
@@ -2129,8 +2160,8 @@ window.pedirPlanCobros=async(cod,btn)=>{
   const ag=agDe(p), l=facturasDe(p);
   if(btn){ btn.disabled=true; btn.textContent="Enviando…"; }
   try{ const d=await RC.avisarGenerico({agente:ag.id,quienId:UID,quien:window._MI_NOMBRE_JEFE||AGENTE,titulo:"Cobros",etiqueta:"Te piden un plan",
-      texto:"Tienes "+euT(p.cobros)+" vencidos y tu máximo es "+euT(p.limite)+". ¿Qué facturas vas a cobrar y cuándo?",
-      detalleHtml:l.length?'<div style="font-size:12px;color:#6B7684;margin-top:4px">'+l.length+' facturas vencidas, de la más antigua a la más reciente:</div>'+tablaFacturas(l,true):"",
+      texto:"Tienes "+euT(p.cobros)+" fuera de plazo y tu máximo es "+euT(p.limite)+". ¿Qué vas a cobrar, a qué clientes y cuándo?",
+      detalleHtml:l.length?'<div style="font-size:12px;color:#6B7684;margin-top:4px">'+(l[0].saldo?l.length+' clientes con importe fuera de plazo (datos de Administración):':l.length+' facturas vencidas, de la más antigua a la más reciente:')+'</div>'+tablaFacturas(l,true):"",
       pie:"Responde en tu parte de la semana (o contesta a este correo)."});
     if(btn) btn.textContent="✓ Pedido"; alert(RC.textoAviso(d)); }
   catch(e){ if(btn){ btn.disabled=false; btn.textContent="Pedir plan"; } alert("No se ha enviado: "+e.message); }
@@ -2142,10 +2173,10 @@ function seccionCobros(){
   const tot=g.reduce((t,p)=>t+(Number(p.cobros)||0),0);
   const c=fuera.length?fuera.map(p=>{ const k=kpisDe(p)||{}, plan=(k.cobros||{}).plan, l=facturasDe(p), cod=p.cod||p.id;
       return det("cb_"+cod,'<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b style="font-size:13px">'+escT(p.nombre)+(esJefe?'':' <span style="color:#94A3B8;font-weight:600">· '+escT(p.eqNom)+'</span>')+'</b>'
-          +'<span style="font-size:12.5px">💰 <b style="color:#B91C1C">'+euT(p.cobros)+'</b><span style="color:#94A3B8">/'+euT(p.limite)+'</span> · '+l.length+' facturas</span></div>'
+          +'<span style="font-size:12.5px">💰 <b style="color:#B91C1C">'+euT(p.cobros)+'</b><span style="color:#94A3B8">/'+euT(p.limite)+'</span> · '+l.length+(l.length&&l[0].saldo?' clientes':' facturas')+'</span></div>'
           +(plan?'<div style="font-size:12.5px;color:#334155">↳ <b>Plan:</b> '+escT(plan)+'</div>':'<div style="font-size:12.5px;color:#B91C1C">↳ Sin plan</div>'),
         (l.length?tablaFacturas(l,false):'<p class="vacio" style="margin:0">Sin detalle de facturas.</p>')
-          +(plan?'':'<button class="mini" style="margin-top:6px" onclick="pedirPlanCobros(\''+esc2(cod)+'\',this)">Pedir plan (con estas facturas)</button>'),
+          +(plan?'':'<button class="mini" style="margin-top:6px" onclick="pedirPlanCobros(\''+esc2(cod)+'\',this)">Pedir plan (con este listado)</button>'),
         "#FCA5A5"); }).join("")
     :'<p class="vacio" style="margin:0">Todos dentro de la política de cobro.</p>';
   // Fecha de los datos de cobros (última importación del Excel de Administración)

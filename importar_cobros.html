@@ -324,7 +324,86 @@ async function procesar(file){
 }
 
 // ── Construcción del modelo de datos ────────────────────────────
+// (sep 2026) Solo la pestaña TODOS. Es la que usa Administración: una fila por
+// cliente y empresa, con comercial, total pendiente, fuera de plazo, +20 y
+// > 70 días ya calculados. No se lee ninguna otra pestaña ni el detalle de
+// facturas. La empresa de cada fila se deduce de VENTAS 12M: las filas de
+// WIKUK traen un número; las de UC, «Sin Datos».
 function construir(wb, nombreFichero){
+  const avisos=[];
+  const hT=buscarHoja(wb,["TODOS"]);
+  if(!hT) throw new Error("El Excel no tiene la pestaña TODOS.");
+  const rows=leerHoja(wb,hT);
+  const h=filaCabecera(rows,["CLIENTE","COMERCIAL","PENDIENTE"]);
+  if(h<0) throw new Error("La pestaña «"+hT+"» no tiene las columnas CLIENTE, COMERCIAL y TOTAL IMPORTE PENDIENTE.");
+  const cab=rows[h];
+  const iCli=indiceCol(cab,["CLIENTE"]), iCom=indiceCol(cab,["COMERCIAL"]),
+        iP  =indiceCol(cab,["TOTAL IMPORTE PENDIENTE","IMPORTE PENDIENTE"]),
+        iV  =indiceCol(cab,["IMPORTE FUERA DE PLAZO"]),
+        i20 =indiceCol(cab,["IMPORTE FUERA DE PLAZO +20"]),
+        i70 =indiceCol(cab,["IMPORTE > 70 DIAS","IMPORTE >70 DIAS"]),
+        iC70=indiceCol(cab,["CATEGORIA 70 DIAS"]),
+        iCat=indiceCol(cab,["CATEGORIA","CATEGORIZACION"]),
+        iReg=indiceCol(cab,["REGION"]), iV12=indiceCol(cab,["VENTAS 12M"]),
+        iMg =indiceCol(cab,["MG%","MG"]), iDp=indiceCol(cab,["DIAS PAGO REAL"]),
+        iFec=indiceCol(cab,["FECHA"]);
+  if(iV<0) avisos.push("No se encuentra la columna IMPORTE FUERA DE PLAZO: el vencido saldrá a 0.");
+  let fechaDatos="";
+  const PC={}, nombres={};
+  let nFilas=0;
+  for(let r=h+1;r<rows.length;r++){
+    const f=rows[r]; if(!f||!f[iCli]) continue;
+    const k=normCli(f[iCli]); if(!k) continue;
+    const g=(iV12>=0&&typeof f[iV12]==="number")?"WIKUK":"UC";
+    const nomC=String(f[iCom]||"").trim()||"Sin Comercial", cod=normCom(nomC)||"SINCOMERCIAL";
+    nombres[cod]=nombres[cod]||nomC;
+    if(iFec>=0){ const fe=iso(f[iFec]); if(fe&&fe>fechaDatos) fechaDatos=fe; }
+    const cs=((PC[cod]=PC[cod]||{}));
+    if(!cs[k]) cs[k]={ c:String(f[iCli]).trim(), cod:"", r:"", cat:"", c70:"",
+      v12:0, mg:0, dp:0, p:0, ven:0, v20:0, v70:0, emp:{}, f:[] };
+    const c=cs[k], txt=(i)=>i>=0?String(f[i]==null?"":f[i]).trim():"";
+    if(!c.r   && txt(iReg) && !/sin datos/i.test(txt(iReg))) c.r=txt(iReg);
+    if(!c.cat && txt(iCat)) c.cat=txt(iCat);
+    if(!c.c70 && txt(iC70)) c.c70=txt(iC70);
+    if(iV12>=0) c.v12+=num(f[iV12]);
+    if(!c.mg&&iMg>=0) c.mg=num(f[iMg]); if(!c.dp&&iDp>=0) c.dp=num(f[iDp]);
+    const pp=num(f[iP]), vv=iV>=0?num(f[iV]):0, v2=i20>=0?num(f[i20]):0, v7=i70>=0?num(f[i70]):0;
+    c.p+=pp; c.ven+=vv; c.v20+=v2; c.v70+=v7;
+    const e=(c.emp[g]=c.emp[g]||{p:0,ven:0,v20:0,v70:0});
+    e.p+=pp; e.ven+=vv; e.v20+=v2; e.v70+=v7;
+    nFilas++;
+  }
+  if(!nFilas) throw new Error("La pestaña TODOS no tiene filas de clientes.");
+  if(!fechaDatos) fechaDatos=hoyISO();
+  const r2=(x)=>Math.round(x*100)/100;
+  const docs=[]; let totalP=0, totalV=0;
+  for(const cod of Object.keys(PC)){
+    const clientes=Object.values(PC[cod]).map(c=>{
+      ["p","ven","v20","v70","v12"].forEach(q=>c[q]=r2(c[q]));
+      Object.values(c.emp).forEach(e=>["p","ven","v20","v70"].forEach(q=>e[q]=r2(e[q])));
+      return c; }).filter(c=>Math.abs(c.p)>=0.01||Math.abs(c.ven)>=0.01)
+      .sort((a,b)=>b.ven-a.ven||b.p-a.p);
+    const p=clientes.reduce((t,c)=>t+c.p,0), v=clientes.reduce((t,c)=>t+c.ven,0);
+    totalP+=p; totalV+=v;
+    docs.push({ id:cod, comercial:cod, comercialNombre:nombres[cod]||cod,
+      fechaDatos, actualizado:new Date().toISOString(), ficheroOrigen:nombreFichero,
+      fuente:"TODOS",
+      totalPendiente:r2(p), totalVencido:r2(v),
+      totalV20:r2(clientes.reduce((t,c)=>t+c.v20,0)), totalV70:r2(clientes.reduce((t,c)=>t+c.v70,0)),
+      nClientes:clientes.length, nFacturas:0,
+      nVencidas:clientes.filter(c=>c.ven>=1).length,        // clientes con importe fuera de plazo
+      datos:JSON.stringify(clientes) });
+  }
+  docs.sort((a,b)=>b.totalVencido-a.totalVencido);
+  const pesado=docs.filter(d=>d.datos.length>900000);
+  if(pesado.length) avisos.push("Los vendedores "+pesado.map(d=>d.comercial).join(", ")+" superan el tamaño máximo por documento. Avisa a IT.");
+  return {docs, fechaDatos, avisos, totalP, totalV, totalF:nFilas,
+          nComerciales:docs.length, nFacturas:nFilas, nombreFichero};
+}
+
+// Lectura antigua, desde el detalle de facturas. Ya no se usa: se deja por si
+// hay que volver a consultarla.
+function construirDetalle(wb, nombreFichero){
   const avisos = [];
 
   // 1 · Mapa cliente → comercial, a partir de las plantillas
@@ -435,11 +514,17 @@ function construir(wb, nombreFichero){
             iDoc=indiceCol(cab,["NUMERO DE DOCUMENTO"]),
             iFc =indiceCol(cab,["FECHA DE CONTABILIZACION"]),
             iFv =indiceCol(cab,["FECHA DE VENCIMIENTO"]),
-            iImp=indiceCol(cab,["SALDO VENCIDO","SALDO","IMPORTE PENDIENTE"]);
+            iImp=indiceCol(cab,["SALDO VENCIDO","SALDO","IMPORTE PENDIENTE"]),
+            iRef=indiceCol(cab,["NUMERO DE REFERENCIA DEL IC","REFERENCIA"]);
       for(let r=h+1;r<rows.length;r++){
         const f=rows[r]; if(!f||!f[iCli]) continue;
         const im=num(f[iImp]); if(!im) continue;
         facturas.push({
+          // (sep 2026) Las filas marcadas «CORRECCIONES» en la primera columna son
+          // contrapartidas de Administración que anulan facturas antiguas que no
+          // se deben (duplicadas en el traspaso, etc.). Se cruzan más abajo.
+          corr: /CORRECCION/i.test(String(f[0]||"")),
+          ref: iRef>=0?String(f[iRef]||"").trim():"",
           cli:String(f[iCli]).trim(), g:"UC",
           n:String(f[iDoc]==null?"":f[iDoc]).trim(),
           t:iTip>=0?String(f[iTip]||"").trim():"",
@@ -453,6 +538,35 @@ function construir(wb, nombreFichero){
   } else avisos.push("No se ha encontrado la pestaña de detalle de UC («CARGA UC PAGO PENDIENTE»).");
 
   if(facturas.length===0) throw new Error("No se ha encontrado ninguna factura pendiente en el fichero.");
+
+  // 2 bis · (sep 2026) Correcciones de Administración. Cada fila CORRECCIONES
+  // anula una factura del mismo cliente por el importe contrario: primero la del
+  // mismo número, si no la de la misma referencia (N/FAC.), y si no cualquiera
+  // del mismo importe. Las dos desaparecen del listado, igual que en la pestaña
+  // TODOS. Si una corrección no encuentra pareja se queda (Administración
+  // también la cuenta).
+  {
+    const numDoc=(n)=>String(n||"").replace(/[^0-9]/g,"");
+    const cent=(x)=>Math.round(x*100);
+    const quitar=new Set();
+    const porCli={};
+    facturas.forEach((f,i)=>{ (porCli[f.g+"|"+normCli(f.cli)]=porCli[f.g+"|"+normCli(f.cli)]||[]).push(i); });
+    let nCorr=0;
+    facturas.forEach((c,i)=>{
+      if(!c.corr) return;
+      const cands=(porCli[c.g+"|"+normCli(c.cli)]||[]).filter(j=>j!==i&&!quitar.has(j)&&!facturas[j].corr
+        && Math.abs(cent(facturas[j].im)+cent(c.im))<=1);
+      const j = cands.find(j=>numDoc(facturas[j].n)&&numDoc(facturas[j].n)===numDoc(c.n))
+             ?? cands.find(j=>c.ref&&facturas[j].ref===c.ref)
+             ?? cands[0];
+      if(j!=null){ quitar.add(i); quitar.add(j); nCorr++; }
+    });
+    if(quitar.size){
+      const quedan=facturas.filter((_,i)=>!quitar.has(i));
+      facturas.length=0; quedan.forEach(f=>facturas.push(f));
+      avisos.push(nCorr+" facturas anuladas por CORRECCIONES de Administración no se muestran (con su contrapartida).");
+    }
+  }
 
   // 3 · Agrupar por comercial → cliente → facturas
   // (sep 2026) El corte es la FECHA DEL EXCEL, no el día de importación, y
@@ -565,6 +679,13 @@ function construir(wb, nombreFichero){
         if(!c.cod && x.cod) c.cod=x.cod;
         const e=(c.emp[x.g||"?"]=c.emp[x.g||"?"]||{p:0,ven:0,v20:0,v70:0,n:0}); e.n++;
       }
+      // Si en TODOS el cliente no debe nada a esa empresa, sus facturas sueltas
+      // no se listan: Administración ya las ha dado por saldadas.
+      for(const cod of Object.keys(PC)) for(const c of Object.values(PC[cod].clientes)){
+        for(const [g,e] of Object.entries(c.emp)){
+          if(Math.abs(e.p)<1 && c.f.some(x=>x.g===g)){ c.f=c.f.filter(x=>x.g!==g); e.n=0; }
+        }
+      }
       if(nFuera) avisos.push(nFuera+" facturas de "+Object.keys(fuera).length+" clientes que no están en la pestaña TODOS no cuentan (p. ej. "
         +Object.keys(fuera).slice(0,4).join(", ")+").");
       if(nFilas){ porComercial=PC; usaTodos=true; sinComercial=0; }
@@ -621,7 +742,7 @@ function pintar(R){
   const hoy=R.fechaDatos||hoyISO();
   document.getElementById("stats").innerHTML = [
     ["Fecha de los datos", R.fechaDatos.split("-").reverse().join("/")],
-    ["Facturas", R.nFacturas.toLocaleString("es-ES")],
+    ["Filas de TODOS", R.nFacturas.toLocaleString("es-ES")],
     ["Vendedores", R.nComerciales],
     ["Total pendiente", eur(R.totalP)],
     ["Fuera de plazo a "+hoy.split("-").reverse().join("/"), eur(R.totalV)],
@@ -632,12 +753,12 @@ function pintar(R){
                     : `<div class="ok">Sin incidencias en la lectura. Todos los cobros tienen vendedor asignado.</div>`;
 
   document.getElementById("tabla").innerHTML =
-    `<thead><tr><th>Vendedor</th><th class="num">Clientes</th><th class="num">Facturas</th>
+    `<thead><tr><th>Vendedor</th><th class="num">Clientes</th><th class="num">Con vencido</th>
      <th class="num">Pendiente</th><th class="num">Vencido</th></tr></thead><tbody>`+
     R.docs.map(d=>`<tr>
       <td><b>${d.comercialNombre}</b><br><span style="color:#94A3B8;font-size:10.5px">${d.comercial}</span></td>
       <td class="num">${d.nClientes}</td>
-      <td class="num">${d.nFacturas}</td>
+      <td class="num">${d.nVencidas}</td>
       <td class="num">${eur(d.totalPendiente)}</td>
       <td class="num" style="color:${d.totalVencido>0?"#DC2626":"#94A3B8"};font-weight:700">${eur(d.totalVencido)}</td>
     </tr>`).join("")+`</tbody>`;
@@ -698,7 +819,7 @@ async function publicar(){
   btn.disabled=true; btn.textContent="Publicando…";
   document.getElementById("log").innerHTML="";
   try{
-    log("▶ Publicando "+RESULTADO.docs.length+" vendedores · "+RESULTADO.nFacturas+" facturas");
+    log("▶ Publicando "+RESULTADO.docs.length+" vendedores · "+RESULTADO.nFacturas+" filas de TODOS");
 
     const nuevos = new Set(RESULTADO.docs.map(d=>d.id));
     const previos = await listarIds(COL_COBROS);
