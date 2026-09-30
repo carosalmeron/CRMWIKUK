@@ -923,11 +923,20 @@ async function datosCEO(anio,sem){
     }
     const c=suyo(cob,g);
     try{
-      for(const cli of JSON.parse(c.datos||"[]")) for(const f of (cli.f||[])){
+      const vistasF=new Set();   // (sep 2026) la misma factura repetida solo cuenta una vez
+      const datosC=JSON.parse(c.datos||"[]");
+      // Total de cada factura (todos sus plazos, vencidos o no), para mostrarlo junto a lo vencido
+      const totFac={};
+      for(const cli of datosC){ const vis=new Set(); for(const f of (cli.f||[])){ if(!f.n) continue;
+        const kk=(cli.c||"")+"|"+f.n+"|"+f.fv+"|"+f.im; if(vis.has(kk)) continue; vis.add(kk);
+        const kt=(cli.c||"")+"|"+f.n; totFac[kt]=(totFac[kt]||0)+numC(f.im); } }
+      for(const cli of datosC) for(const f of (cli.f||[])){
         if(!f.fv||f.fv>hoyISO) continue;
+        const kf=(cli.c||"")+"|"+(f.n||"")+"|"+f.fv+"|"+f.im;
+        if(f.n&&vistasF.has(kf)) continue; vistasF.add(kf);
         const im=numC(f.im); p.cobros+=im; p.nFacV++;
         const dias=Math.round((Date.now()-new Date(f.fv).getTime())/86400000);
-        (p.facV=p.facV||[]).push({cli:cli.c||"",n:f.n||"",ff:f.ff||"",fv:f.fv,im,dias});
+        (p.facV=p.facV||[]).push({cli:cli.c||"",n:f.n||"",ff:f.ff||"",fv:f.fv,im,dias,tot:f.n?totFac[(cli.c||"")+"|"+f.n]:im});
         if(dias<=30) G.t30+=im; else if(dias<=60) G.t60+=im; else if(dias<=90) G.t90+=im; else G.t90mas+=im;
         G.peor.push({cli:cli.c||"",im,dias,quien:g.nombre});
       }
