@@ -261,10 +261,14 @@ let INSTRUCCIONES=[];   // instrucciones del jefe sobre lineas del cierre (seman
 let ESTS=null;          // estrategias (colección del CRM), se cargan al abrir un comercial
 const NIVEL_EST=(ROL==="ceo"||ROL==="admin")?"ceo":(ROL==="director"||ROL==="crm_director")?"director":"jefe";
 if(window.RC) RC.NIVEL_UI=NIVEL_EST;
-async function cargarEsts(){ if(ESTS||!window.RC) return; ESTS=[];
-  try{ const [l,us]=await Promise.all([RC.leerProfundo("estrategias"),RC._us?Promise.resolve(RC._us):RC.leer("usuarios",10)]);
-    RC._us=us; ESTS=l.filter(e=>!e.eliminada); if(RC.prepararEsts) await RC.prepararEsts(ESTS); else console.warn('recuperacion_comun.js antiguo'); }catch(e){}
-  pintar(); }
+let ESTS_CARGANDO=false;
+async function cargarEsts(){ if(ESTS||ESTS_CARGANDO||!window.RC) return; ESTS_CARGANDO=true;
+  let l=[];
+  try{ const [ll,us]=await Promise.all([RC.leerProfundo("estrategias"),RC._us?Promise.resolve(RC._us):RC.leer("usuarios",10)]);
+    RC._us=us; l=ll.filter(e=>!e.eliminada);
+    // La tarifa del cliente se calcula como mucho 8 s; si tarda, se sigue sin ella
+    if(RC.prepararEsts) await Promise.race([RC.prepararEsts(l),new Promise(r=>setTimeout(r,8000))]); }catch(e){ console.warn("estrategias",e); }
+  ESTS=l; ESTS_CARGANDO=false; pintar(); }
 // Todas las estrategias de mi gente que esperan MI decisión (aprobar, elevar o rechazar)
 function estPendientesMias(){
   if(!ESTS||!window.RC) return [];
@@ -643,6 +647,15 @@ async function cargarUsuarios(){
     porNom[k]=base;
   });
   let l=Object.values(porNom).filter(u=>!/^u_\d+$/i.test(u.nombre));
+  // (sep 2026) Equipo de Power BI para quien no lo tenga en su ficha
+  try{
+    const res=await leer("pbi_resumen_agente"), eqDe={};
+    res.forEach(r=>{ if(r.equipo) eqDe[U(r.agente||r._id)]=U(r.equipo); });
+    l.forEach(u=>{ if(!u.equipo){ const k=[u.cod,u.id,...(u.alias||[])].map(U).find(x=>eqDe[x]); if(k) u.equipo=eqDe[k]; } });
+  }catch(e){}
+  // (sep 2026) Fuera Francia y Distribuidores (no entran en el cierre) y quien no tiene que
+  // entregar parte (marcado «no entrega» o sin usuario en el portal)
+  l=l.filter(u=>!/FRANC|DISTRIB/.test(U(u.equipo))&&!(u.entrega==="no"||(u.entrega!=="si"&&!u.cuenta)));
   if(esJefe&&EQUIPO) l=l.filter(u=>u.equipo===EQUIPO);
   l.sort((a,b)=>a.nombre.localeCompare(b.nombre));
   return l;
@@ -1703,7 +1716,7 @@ window.cerrarSemana=async()=>{
   const es=escalados();
   // (sep 2026) Las estrategias que dependen de mí se deciden antes de cerrar
   if(window.RC){
-    if(ESTS===null){ await cargarEsts(); }
+    if(ESTS===null){ await cargarEsts(); let w=0; while(ESTS===null&&w<40){ await new Promise(r=>setTimeout(r,300)); w++; } }
     const pe=estPendientesMias();
     if(pe.length){
       alert("Antes de cerrar decide "+pe.length+" estrategia"+(pe.length===1?"":"s")+" de precio:\n\n"
@@ -1727,7 +1740,7 @@ window.cerrarSemana=async()=>{
     try{
       const [us,inf]=await Promise.all([leer("usuarios"),leer("informes")]);
       const jefes=us.filter(u=>{ const r=String(u.rol||"").toLowerCase();
-        return (r==="jefe"||r==="crm_jefe")&&!u.tipologia&&u.activo!==false
+        return (r==="jefe"||r==="crm_jefe")&&!u.tipologia&&u.activo!==false&&!/FRANC|DISTRIB/i.test(u.equipo||"")
         &&!(u.duplicadaDe&&u.duplicadaDe!==u._id&&us.some(x=>x._id===u.duplicadaDe&&!x.duplicadaDe)); });
       const deSem=inf.filter(i=>Number(i.semana)===SEMANA&&i.estado!=="borrador"
         &&(!(i.anio||i.ano)||Number(i.anio||i.ano)===ANIO));
@@ -1857,7 +1870,7 @@ async function cargarPasos(){
       const [us,inf]=await Promise.all([leer("usuarios"),leer("informes")]);
       const rolU=(u)=>String(u.rol||"").toLowerCase();
       const cuenta=(u)=>!u.tipologia&&u.activo!==false&&!(u.duplicadaDe&&u.duplicadaDe!==u._id&&us.some(x=>x._id===u.duplicadaDe&&!x.duplicadaDe));
-      const quienes=us.filter(u=>cuenta(u)&&(["jefe","crm_jefe"].includes(rolU(u))||(esCeo&&["director","crm_director"].includes(rolU(u))&&!/^ceo$/i.test(u._id||u.id))));
+      const quienes=us.filter(u=>cuenta(u)&&!/FRANC|DISTRIB/i.test(u.equipo||"")&&(["jefe","crm_jefe"].includes(rolU(u))||(esCeo&&["director","crm_director"].includes(rolU(u))&&!/^ceo$/i.test(u._id||u.id))));
       const deSem=inf.filter(i=>Number(i.semana)===SEMANA&&i.estado!=="borrador"&&(!(i.anio||i.ano)||Number(i.anio||i.ano)===ANIO));
       const cerro=(j)=>deSem.some(i=>U(i.uid)===U(j._id)||[j.grupoAgente,j.catalogoVendedor,j._id,j.username].filter(Boolean).map(U).includes(U(i.agente)));
       out.jefes={total:quienes.length,faltan:quienes.filter(j=>!cerro(j)).map(j=>j.nombre||j._id)};
@@ -1897,6 +1910,8 @@ function htmlEscaladoTi(){
 function pasosCierre(sinCerrar){
   if(!(esJefe||esDir||esCeo)) return "";
   if(PASOS_DATA===null) setTimeout(cargarPasos,0);
+  // Las estrategias se cargan aunque el paso esté cerrado (antes solo al abrirlo)
+  if(ESTS===null&&window.RC) setTimeout(cargarEsts,0);
   const D=PASOS_DATA||{}, eu=(n)=>Math.round(n||0).toLocaleString("es-ES")+" €";
   const pasos=[];
   // 1 · Que haya cerrado el nivel de abajo
@@ -1915,7 +1930,7 @@ function pasosCierre(sinCerrar){
   // 3 · Estrategias de su rol
   const pe=(typeof estPendientesMias==="function")?estPendientesMias():[];
   pasos.push({k:"est",ok:ESTS===null?false:!pe.length,t:"Estrategias de precio de tu rol",
-    d:ESTS===null?"Comprobando…":pe.length?`${pe.length} esperan tu decisión (${esCeo?"más del 15 %":esDir?"del 10 al 15 %":"hasta el 10 %"} sobre la tarifa del cliente).`:"No tienes ninguna pendiente.",
+    d:!window.RC?"No se puede leer (falta subir recuperacion_comun.js).":ESTS===null?"Comprobando…":pe.length?`${pe.length} esperan tu decisión (${esCeo?"más del 15 %":esDir?"del 10 al 15 %":"hasta el 10 %"} sobre la tarifa del cliente).`:"No tienes ninguna pendiente.",
     c:()=>bandejaEst()});
   // 4 · Plan de recuperación: dejar de insistir
   pasos.push({k:"recup",ok:D.recup?!D.recup.n:false,t:"Clientes que piden dejar de insistir",
