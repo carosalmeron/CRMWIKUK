@@ -894,7 +894,7 @@ async function datosCEO(anio,sem){
     if(suInf.length) E.cerr++; else if(g.entrega!=="no") E.sinCerrar.push(g.nombre);
 
     const p={...g,vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,nFacV:0,vis:0,lla:0,mEnv:0,mOk:0,semMal:0,
-      mKo:0,mEnvA:0,mOkA:0,mKoA:0,m60:[]};
+      mKo:0,mEnvA:0,mOkA:0,mKoA:0,m60:[],mAb:[]};
     // (sep 2026) Sus planes del parte: cobro, muestras de la semana que viene y actividad
     try{ const ki=suInf.find(i=>i.kpis); p.k=ki?JSON.parse(ki.kpis):null; }catch(err){ p.k=null; }
     const r=suyo(res,g), e2=suyo(estac,g), o2=suyo(objs,g);
@@ -951,11 +951,17 @@ async function datosCEO(anio,sem){
       // empresa con importe fuera de plazo.
       p.cobros=numC(c.totalVencido); p.nFacV=0; p.facV=[]; G.todos=true;
       let dC=[]; try{ dC=JSON.parse(c.datos||"[]"); }catch(e){}
+      const corteT=p.cobFecha||hoyISO;
       for(const cli of dC) for(const [gE,eE] of Object.entries(cli.emp||{})){
         const v=numC(eE.ven), v2=numC(eE.v20), v7=numC(eE.v70); if(v<1) continue;
         const dias=v7>=1?71:v2>=1?21:0, tramo=v7>=1?"más de 70 días":v2>=1?"+20 días":"menos de 20 días";
-        p.nFacV++;
-        p.facV.push({cli:cli.c||"",n:gE,g:gE,saldo:true,fv:"",ff:"",im:v,tot:numC(eE.p),v20:v2,v70:v7,dias,tramo});
+        // Con facturas: las vencidas de ese cliente y empresa (nº, fecha, vencimiento)
+        const L=(cli.f||[]).filter(f=>f.g===gE&&f.fv&&f.fv<corteT);
+        if(L.length) L.forEach(f=>{ p.nFacV++;
+          p.facV.push({cli:cli.c||"",n:f.n||"",g:gE,ff:f.ff||"",fv:f.fv,im:numC(f.im),tot:numC(f.tf)||numC(f.im),
+            dias:Math.round((new Date(corteT+"T12:00:00Z")-new Date(f.fv+"T12:00:00Z"))/86400000)}); });
+        else { p.nFacV++;
+          p.facV.push({cli:cli.c||"",n:gE,g:gE,saldo:true,fv:"",ff:"",im:v,tot:numC(eE.p),v20:v2,v70:v7,dias,tramo}); }
         G.tV=(G.tV||0)+v; G.t20=(G.t20||0)+v2; G.t70=(G.t70||0)+v7;
         G.peor.push({cli:cli.c||"",im:v,dias,tramo,quien:g.nombre});
       }
@@ -973,6 +979,9 @@ async function datosCEO(anio,sem){
         if(fe&&fe>=iniAnio&&fe<=domingo) p.mEnvA++;
         if(fFb&&fFb>=iniAnio&&fFb<=domingo){ if(/pedido|positiv|aceptada|proyecto/.test(est)) p.mOkA++; else if(/ko|negativ|rechaz/.test(est)) p.mKoA++; }
         if(enSem(fFb)&&/ko|negativ|rechaz/.test(est)) p.mKo++;
+        // (sep 2026) Todas las muestras sin cerrar (para el desplegable del cierre)
+        if(!fFb&&!/pedido|positiv|aceptada|proyecto|ko|negativ|rechaz|cerrad/.test(est)&&fe&&fe<=domingo&&p.mAb.length<60)
+          p.mAb.push({id:m._id||m.id||"",cli:m.cliente||m.clienteNombre||"(sin cliente)",prod:m.prod||m.prodNombre||m.producto||"",fecha:fe.toISOString().slice(0,10),dias:Math.round((domingo-fe)/86400000),est:String(m.estado||"")});
         if(!fFb&&!/pedido|positiv|aceptada|proyecto|ko|negativ|rechaz|cerrad/.test(est)&&fe&&(domingo-fe)/86400000>60)
           p.m60.push({cli:m.cliente||m.clienteNombre||"(sin cliente)",prod:m.prod||m.prodNombre||m.producto||"",fecha:fe.toISOString().slice(0,10),dias:Math.round((domingo-fe)/86400000)}); }
       if(enSem(fechaDocC(m))){ p.mEnv++; }
@@ -1347,7 +1356,7 @@ module.exports = async function handler(req, res){
       const anioP=Number(req.query.anio)||hoyP.anio, semP=Number(req.query.semana)||hoyP.sem;
       const D=await datosCEO(anioP,semP);
       const campos=["id","cod","nombre","equipo","ausente","motivo","vSem","objSem","mAct","mObj","vis","lla","mEnv","mOk","mKo",
-        "mEnvA","mOkA","mKoA","m60","obj","cobros","nFacV","limite","k","nota","facV","cobFecha"];
+        "mEnvA","mOkA","mKoA","m60","mAb","obj","cobros","nFacV","limite","k","nota","facV","cobFecha"];
       res.setHeader("Cache-Control","no-store");
       res.status(200).json({ok:true,sem:D.sem,anio:D.anio,mNum:D.mNum,
         equipos:D.equipos.map(E=>({eq:E.eq,jefe:E.jefe,obj:E.obj,cerr:E.cerr,aus:E.aus,sinCerrar:E.sinCerrar,
