@@ -694,24 +694,35 @@ async function comprobarRetrasos(){
     // (sep 2026) Solo se exige a quien gestiona pedidos: Customer Service,
     // Operaciones, Logistica y Produccion. Bloquear el cierre de un comercial
     // o de Calidad por un retraso de fabrica no tiene sentido.
+    // (sep 2026) Solo el equipo de OPERACIONES (operaciones, producción,
+    // logística, almacén y sus subdepartamentos). Customer Service es de
+    // ventas y los comerciales nunca. Se mira su propia ficha, no la de otros
+    // que compartan código de grupo.
     let meToca=false;
     try{
-      const ru=await fetch(`${FB}/usuarios?pageSize=300`);
+      const [ru,rd]=await Promise.all([fetch(`${FB}/usuarios?pageSize=300`),fetch(`${FB}/departamentos?pageSize=300`)]);
+      const deps={};
+      if(rd.ok) ((await rd.json()).documents||[]).forEach(d=>{ const f=d.fields||{};
+        deps[decodeURIComponent(d.name.split("/").pop()).toLowerCase()]={padre:String(f.padre?.stringValue||"").toLowerCase(),nombre:String(f.nombre?.stringValue||"").toLowerCase()}; });
+      const BASE_PADRE={produccion:"operaciones",coordinacion:"operaciones",logistica:"compras",almacen:"operaciones"};
+      const OPS=/operacion|produccion|logistica|almacen/;
+      const enOps=(dep)=>{ let cur=String(dep||"").toLowerCase(), g=0;
+        while(cur&&g<15){ const d=deps[cur]||{}; if(OPS.test(cur)||OPS.test(d.nombre||"")) return true; cur=d.padre||BASE_PADRE[cur]||""; g++; }
+        return false; };
       if(ru.ok){
         const ju=await ru.json();
-        const DE_PEDIDOS=["customer","operaciones","logistica","produccion"];
         (ju.documents||[]).forEach(d=>{
           const f=d.fields||{};
           const id=ARR(f.id?.stringValue||decodeURIComponent(d.name.split("/").pop()));
-          const gr=ARR(f.grupoAgente?.stringValue||f.catalogoVendedor?.stringValue||"");
-          if(id!==AGENTE&&gr!==AGENTE) return;
+          const did=ARR(decodeURIComponent(d.name.split("/").pop()));
+          if(![id,did].includes(AGENTE)&&![id,did].includes(ARR(UID))) return;
+          const rol=String(f.rol?.stringValue||"").toLowerCase();
           const dep=String(f.departamentoId?.stringValue||"").toLowerCase();
           const tip=String(f.tipologia?.stringValue||"").toLowerCase();
-          if(DE_PEDIDOS.includes(dep)||DE_PEDIDOS.includes(tip)) meToca=true;
-          // Los responsables de esos departamentos tambien
-          const resp=(f.responsableDe?.arrayValue?.values||[])
-            .map(v=>String(v.stringValue||"").toLowerCase());
-          if(resp.some(r=>DE_PEDIDOS.includes(r))) meToca=true;
+          if(/agente|comercial|vendedor/.test(rol)&&!dep) return;
+          if(enOps(dep)||(tip&&OPS.test(tip))) meToca=true;
+          const resp=(f.responsableDe?.arrayValue?.values||[]).map(v=>String(v.stringValue||"").toLowerCase());
+          if(resp.some(enOps)) meToca=true;
         });
       }
     }catch(e){}

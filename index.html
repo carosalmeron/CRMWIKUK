@@ -1060,7 +1060,8 @@ function pnchPerfilDe(u){
 function almPerfilDe(u){
   if(!u) return null;
   var rol=String(u.rol||'').toLowerCase();
-  if(rol==='admin'||rol==='ceo'||rol==='direccion'||rol==='crm_director'||rol==='director') return 'direccion';
+  // (sep 2026) El jefe de ventas es del equipo comercial: el almacén no es suyo
+  if(rol==='admin'||rol==='ceo'||rol==='direccion'||String(u.id||'').toLowerCase()==='ceo') return 'direccion';
   var ids=[u.crmId,u.id].filter(Boolean).map(function(x){return String(x).toLowerCase();});
   var f=ORG_FICHAS[u.crmId||u.id]||{};
   var tip=String(f.tipologia||u.tipologia||'').toLowerCase();
@@ -1087,6 +1088,30 @@ function almPerfilDe(u){
   return res;
 }
 
+// (sep 2026) ¿Es del equipo comercial? (comerciales, jefes de equipo, jefe de
+// ventas y CEO). Quien es de un departamento que no cuelga de Ventas, o de
+// planta/almacén/calidad, no. Customer Service tampoco: es soporte.
+function deptoEnVentas(dep){
+  var norm=function(x){return String(x||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');};
+  var porId={}; DEPTOS.forEach(function(d){porId[d.id]=d;});
+  var cur=dep, g=0;
+  if(/customer/.test(norm(dep)+' '+norm((porId[dep]||{}).nombre))) return false;
+  while(cur&&g<15){ var d=porId[cur]||{}; if(/ventas|comercial/.test(norm(cur)+' '+norm(d.nombre))) return true; cur=d.padre; g++; }
+  return false;
+}
+function esEquipoComercial(u){
+  if(!u) return false;
+  var rolU=String(u.rol||'').toLowerCase();
+  if(String(u.id||'').toLowerCase()==='ceo'||rolU==='admin'||rolU==='ceo') return true;
+  var f=ORG_FICHAS[u.crmId||u.id]||{};
+  try{ var pp=pnchPerfilDe(u); if(pp&&pp!=='direccion') return false;
+    var ap=almPerfilDe(u); if(ap&&ap!=='direccion') return false; }catch(e){}
+  if(f.tipologia||u.tipologia) return false;
+  var dep=f.departamentoId||u.departamentoId||'';
+  if(dep&&!deptoEnVentas(dep)) return false;
+  var rol=String(f.rol||u.rol||'').toLowerCase();
+  return ['agente','crm_agente','comercial','vendedor','jefe','crm_jefe','director','crm_director'].indexOf(rol)>=0;
+}
 function renderHub(){
   // Sin organigrama no se sabe quien es de planta: se carga y se repinta
   if(!orgCargado&&currentUser){ loadOrgData().then(function(){ if(document.getElementById('hub').classList.contains('active')) renderHub(); }).catch(function(){}); }
@@ -1099,6 +1124,10 @@ function renderHub(){
   if(currentUser&&currentUser.rol==='admin'&&!accesos.includes('radar')) accesos.push('radar');
   var almP=almPerfilDe(currentUser);
   if(almP&&!accesos.includes('almacen')) accesos.push('almacen');
+  // (sep 2026) El plan de almacén es de Operaciones: el equipo comercial no lo ve
+  // (aunque tenga el acceso marcado a mano), salvo el CEO.
+  var esCeoH=currentUser&&(String(currentUser.id||'').toLowerCase()==='ceo'||currentUser.rol==='admin'||currentUser.rol==='ceo');
+  if(!esCeoH&&esEquipoComercial(currentUser)){ accesos=accesos.filter(function(a){return a!=='almacen'&&a!=='llegadas';}); almP=null; }
   // La hoja de llegadas es de Compras (y Direccion); almacen la ve dentro de su plan
   if((almP==='compras'||almP==='direccion')&&!accesos.includes('llegadas')) accesos.push('llegadas');
   var pnchP=pnchPerfilDe(currentUser);
@@ -1109,6 +1138,27 @@ function renderHub(){
     var stockExpreso=(currentUser.accesos||[]).indexOf('stock')>=0;
     if(pnchP!=='direccion') accesos=accesos.filter(function(a){return a!=='planificador'&&(a!=='stock'||stockExpreso);});
   }
+  // (sep 2026) Quién ve cada módulo, por encima de los accesos marcados a mano:
+  //  · Zona Empleado → solo el administrador
+  //  · Planificador de rutas → solo CEO y director comercial (jefe de ventas)
+  //  · PNCH → Almacén, Producción y Calidad
+  //  · Llegadas de mercancía y Plan de almacén → solo el equipo de Operaciones
+  //  El administrador lo ve todo.
+  (function(){
+    var u=currentUser||{}, rol=String(u.rol||'').toLowerCase();
+    var esAdmin=rol==='admin';
+    var esCeoM=String(u.id||'').toLowerCase()==='ceo'||rol==='ceo';
+    var esDirCom=rol==='crm_director'||rol==='director';
+    var alm=null, pn=null; try{ alm=almPerfilDe(u); }catch(e){} try{ pn=pnchPerfilDe(u); }catch(e){}
+    var deOps=alm==='almacen'||alm==='compras'||pn==='planta';
+    var deAlmacenOCalidad=alm==='almacen'||pn==='calidad'||pn==='planta';   // almacén, calidad y producción
+    var ve={rrhh:esAdmin, planificador:esAdmin||esCeoM||esDirCom, pnch:esAdmin||deAlmacenOCalidad,
+      llegadas:esAdmin||deOps, almacen:esAdmin||deOps};
+    accesos=accesos.filter(function(a){ return ve[a]===undefined||ve[a]; });
+    window._VE_MOD=ve;
+    // Si tiene derecho y no lo tenía marcado, se le añade
+    ['pnch','llegadas','almacen'].forEach(function(a){ if(ve[a]&&!esAdmin&&accesos.indexOf(a)<0&&((a==='pnch'&&pn)||(a!=='pnch'&&alm&&alm!=='direccion'))) accesos.push(a); });
+  })();
   MODULE_DEF.filter(function(m){return accesos.includes(m.id);}).forEach(function(m){
     var div=document.createElement('div');
     div.className='hub-item';
@@ -1127,6 +1177,8 @@ function renderHub(){
     var esCeoR=currentUser.id==='ceo'||currentUser.rol==='admin';
     var prR=null; try{ prR=perfilCierre(currentUser); }catch(e){}
     var rolR=esCeoR?'ceo':(prR&&prR.tipo!=='depto'?prR.tipo:'');
+    // (sep 2026) Solo el equipo comercial (no Operaciones, Calidad, Customer…)
+    if(rolR&&!esCeoR&&!esEquipoComercial(currentUser)) rolR='';
     if(rolR&&!(prR&&/FRANC/i.test(prR.equipo||''))){
       var rcI=document.createElement('div');
       rcI.className='hub-item';
@@ -1222,6 +1274,7 @@ function renderHub(){
   list.appendChild(man);
 }
 function openModule(id){
+  if(window._VE_MOD&&window._VE_MOD[id]===false){ alert('Este módulo no está disponible para tu perfil.'); return; }
   if(id==='admin'){showAdmin();return;}
   currentModule=id;
   var m=MODULE_DEF.find(function(x){return x.id===id;});
