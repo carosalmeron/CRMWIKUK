@@ -327,7 +327,7 @@ function clientes(){
     if(ST.interco==="solo" && !esG) continue;
     let arr=[];
     try{ arr=JSON.parse(d.datos); }catch(e){ continue; }
-    for(const c of arr) out.push(Object.assign({},c,{_com:d.comercialNombre||d.comercial||""}));
+    for(const c of arr) out.push(Object.assign({},c,{_com:d.comercialNombre||d.comercial||"",_of:d.fuente==="TODOS"}));
   }
   return out;
 }
@@ -339,10 +339,13 @@ function preparados(){
     let facs=(c.f||[]);
     if(ST.empresa) facs=facs.filter(f=>f.g===ST.empresa);
     if(ST.vista==="vencidos") facs=facs.filter(f=>f.fv && f.fv<CORTE);
-    if(!facs.length) continue;
+    // (sep 2026) Importes oficiales (pestaña TODOS), por empresa si hay filtro
+    const O = oficial(c);
+    if(!facs.length && !(O && Math.abs(ST.vista==="vencidos"?O.ven:O.p)>=1)) continue;
     if(q && !String(c.c||"").toUpperCase().includes(q)) continue;
-    const p   = facs.reduce((s,f)=>s+(f.im||0),0);
-    const v   = facs.filter(f=>f.fv&&f.fv<CORTE).reduce((s,f)=>s+(f.im||0),0);
+    let p   = facs.reduce((s,f)=>s+(f.im||0),0);
+    let v   = facs.filter(f=>f.fv&&f.fv<CORTE).reduce((s,f)=>s+(f.im||0),0);
+    if(O){ v=O.ven; p=(ST.vista==="vencidos")?O.ven:O.p; }
     // Modo compensación: solo los clientes donde hay algo que cuadrar.
     let pares=[];
     if(ST.compensar){
@@ -436,8 +439,8 @@ function render(){
   const lista = preparados();
   ST._lista = lista;              // referencia por índice para los botones
   const todosCli = clientes();
-  const totP = todosCli.reduce((s,c)=>s+(c.f||[]).reduce((t,f)=>t+(f.im||0),0),0);
-  const totV = todosCli.reduce((s,c)=>s+(c.f||[]).filter(f=>f.fv&&f.fv<CORTE).reduce((t,f)=>t+(f.im||0),0),0);
+  const totP = todosCli.reduce((s,c)=>{ const O=oficial(c); return s+(O?O.p:(c.f||[]).filter(f=>!ST.empresa||f.g===ST.empresa).reduce((t,f)=>t+(f.im||0),0)); },0);
+  const totV = todosCli.reduce((s,c)=>{ const O=oficial(c); return s+(O?O.ven:(c.f||[]).filter(f=>(!ST.empresa||f.g===ST.empresa)&&f.fv&&f.fv<CORTE).reduce((t,f)=>t+(f.im||0),0)); },0);
   const nFacV= todosCli.reduce((s,c)=>s+(c.f||[]).filter(f=>f.fv&&f.fv<CORTE).length,0);
   const nCliV= todosCli.filter(c=>(c.f||[]).some(f=>f.fv&&f.fv<CORTE)).length;
   const sumP = lista.reduce((s,c)=>s+c._p,0);
@@ -537,7 +540,9 @@ function tarjeta(c,ci){
           ${antig>0?` · ${c._apunte?"apuntes de "+fecha(c._ant):antig+" días de retraso"}`:""}
           ${VE_TODO&&c._com?` · ${esc(c._com)}`:""}
           ${c.r?` · ${esc(c.r)}`:""}</span>
-        ${(()=>{ const E=porEmpresa(c._f); return E.length>1
+        ${(()=>{ const O=oficial(c); return O&&(Math.abs(O.v20)>=1||Math.abs(O.v70)>=1)
+          ? `<div style="font-size:11px;color:#B91C1C;margin-top:2px">+20 días <strong style="font-weight:800">${eur(O.v20)}</strong> · más de 70 días <strong style="font-weight:800">${eur(O.v70)}</strong></div>` : ""; })()}
+        ${(()=>{ const E=porEmpresa(c._f,c); return E.length>1
           ? `<div class="emps">${E.map(e=>`<span class="tag t-emp">${esc(e.g)} ${eur(ST.vista==="vencidos"?e.v:e.p)}</span>`).join("")}</div>`
           : ""; })()}
       </div>
@@ -549,7 +554,7 @@ function tarjeta(c,ci){
       </div>
       <span class="chev">${ab?"▲":"▼"}</span>
     </div>
-    ${ab?`<div class="det">${(()=>{ const E=porEmpresa(c._f);
+    ${ab?`<div class="det">${(()=>{ const E=porEmpresa(c._f,c);
         if(E.length<2) return c._f.map((f,fi)=>fila(c,f,ci,fi)).join("");
         return E.map(e=>`<div class="emp-h"><b>🏢 ${esc(e.g)}</b>
             <span>${eur(e.p)} pendiente${e.v?` · <b style="color:#DC2626">${eur(e.v)} vencido</b>`:""}</span></div>`
@@ -557,12 +562,23 @@ function tarjeta(c,ci){
   </div>`;
 }
 
-// (sep 2026) Importe por empresa (WIKUK / UC) de un cliente
-function porEmpresa(facs){
+// (sep 2026) Importes oficiales del cliente (pestaña TODOS del Excel de
+// Administración). Con filtro de empresa, los de esa empresa. null si la carga
+// es antigua y no los trae: entonces se suman las facturas.
+function oficial(c){
+  if(!c||!c._of) return null;
+  if(ST.empresa){ const e=(c.emp||{})[ST.empresa]; return e?{p:e.p||0,ven:e.ven||0,v20:e.v20||0,v70:e.v70||0}:{p:0,ven:0,v20:0,v70:0}; }
+  return {p:c.p||0,ven:c.ven||0,v20:c.v20||0,v70:c.v70||0};
+}
+// Importe por empresa (WIKUK / UC) de un cliente
+function porEmpresa(facs,c){
   const E={};
   facs.forEach((f,fi)=>{ const g=f.g||"Sin empresa"; const e=(E[g]=E[g]||{g,p:0,v:0,idx:[]});
     e.p+=(f.im||0); if(f.fv&&f.fv<CORTE) e.v+=(f.im||0); e.idx.push(fi); });
-  return Object.values(E).sort((a,b)=>String(a.g).localeCompare(String(b.g)));
+  if(c&&c._of&&c.emp) Object.entries(c.emp).forEach(([g,o])=>{
+    if(ST.empresa&&g!==ST.empresa) return;
+    const e=(E[g]=E[g]||{g,p:0,v:0,idx:[]}); e.p=o.p||0; e.v=o.ven||0; });
+  return Object.values(E).filter(e=>e.idx.length||Math.abs(e.p)>=1).sort((a,b)=>String(a.g).localeCompare(String(b.g)));
 }
 function fila(c,f,ci,fi){
   const venc = f.fv && f.fv<CORTE;

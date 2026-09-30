@@ -461,9 +461,9 @@ function construir(wb, nombreFichero){
   const hoy = fechaDatos || hoyISO();
   const menos = (iso,d)=>{ const x=new Date(iso+"T12:00:00Z"); x.setUTCDate(x.getUTCDate()-d); return x.toISOString().slice(0,10); };
   const h20 = menos(hoy,20), h70 = menos(hoy,70);
-  const porComercial = {};      // código → {nombre, clientes:{claveCliente:obj}}
+  let porComercial = {};        // código → {nombre, clientes:{claveCliente:obj}}
   let sinComercial = 0;
-  const nombresComercial = {};  // código → nombre tal cual viene en el Excel
+  let nombresComercial = {};    // código → nombre tal cual viene en el Excel
 
   for(const f of facturas){
     const k = normCli(f.cli);
@@ -498,6 +498,79 @@ function construir(wb, nombreFichero){
     if(f.fv && f.fv < hoy && (f.ff||f.fv) < h70) cs[k].v70 += f.im;
   }
 
+  // 3 bis · (sep 2026) La pestaña TODOS manda. Son las cifras reales que usa
+  // Administración: una fila por cliente y empresa, con comercial, pendiente,
+  // fuera de plazo, +20 y >70 días ya calculados. Los importes del CRM salen de
+  // ahí; el detalle de facturas (pestañas CARGA) solo sirve para listarlas.
+  const hTodos = buscarHoja(wb,["TODOS"]);
+  let usaTodos = false;
+  if(hTodos){
+    const rows = leerHoja(wb,hTodos);
+    const h = filaCabecera(rows,["CLIENTE","COMERCIAL","PENDIENTE"]);
+    if(h<0) avisos.push("La pestaña «"+hTodos+"» no tiene las columnas CLIENTE, COMERCIAL y TOTAL IMPORTE PENDIENTE. Se calcula desde el detalle de facturas.");
+    else{
+      const cab=rows[h];
+      const iCli=indiceCol(cab,["CLIENTE"]), iCom=indiceCol(cab,["COMERCIAL"]),
+            iP  =indiceCol(cab,["TOTAL IMPORTE PENDIENTE","IMPORTE PENDIENTE"]),
+            iV  =indiceCol(cab,["IMPORTE FUERA DE PLAZO"]),
+            i20 =indiceCol(cab,["IMPORTE FUERA DE PLAZO +20"]),
+            i70 =indiceCol(cab,["IMPORTE > 70 DIAS","IMPORTE >70 DIAS"]),
+            iC70=indiceCol(cab,["CATEGORIA 70 DIAS"]),
+            iCat=indiceCol(cab,["CATEGORIA","CATEGORIZACION"]),
+            iReg=indiceCol(cab,["REGION"]), iV12=indiceCol(cab,["VENTAS 12M"]),
+            iMg =indiceCol(cab,["MG%","MG"]), iDp=indiceCol(cab,["DIAS PAGO REAL"]),
+            iFec=indiceCol(cab,["FECHA"]);
+      // ¿De qué empresa es cada fila? TODOS no lo dice: se busca la misma fila
+      // (cliente + pendiente) en PLANTILLA WIKUK / PLANTILLA UC.
+      const firmas=(hoja)=>{ const S=new Set(); if(!hoja) return S;
+        const rr=leerHoja(wb,hoja), hh=filaCabecera(rr,["CLIENTE","PENDIENTE"]); if(hh<0) return S;
+        const ic=indiceCol(rr[hh],["CLIENTE"]), ip=indiceCol(rr[hh],["TOTAL IMPORTE PENDIENTE","IMPORTE PENDIENTE"]);
+        for(let r=hh+1;r<rr.length;r++){ const f=rr[r]; if(f&&f[ic]) S.add(normCli(f[ic])+"|"+Math.round(num(f[ip])*100)); }
+        return S; };
+      const FW=firmas(hPlantW), FU=firmas(hPlantU);
+      const PC={}, comDe={};
+      nombresComercial = {};
+      let nFilas=0;
+      for(let r=h+1;r<rows.length;r++){
+        const f=rows[r]; if(!f||!f[iCli]) continue;
+        const k=normCli(f[iCli]); if(!k) continue;
+        const pp=num(f[iP]), firma=k+"|"+Math.round(pp*100);
+        const g = FW.has(firma)?"WIKUK" : FU.has(firma)?"UC"
+                : (/sin datos/i.test(String(f[iV12]==null?"":f[iV12]))?"UC":"WIKUK");
+        const nomC=String(f[iCom]||"").trim()||"Sin Comercial", cod=normCom(nomC)||"SINCOMERCIAL";
+        nombresComercial[cod]=nombresComercial[cod]||nomC;
+        comDe[k+"|"+g]=cod; if(!comDe[k]) comDe[k]=cod;
+        if(iFec>=0){ const fe=iso(f[iFec]); if(fe) fechaDatos=fe; }
+        const cs=((PC[cod]=PC[cod]||{clientes:{}}).clientes);
+        if(!cs[k]) cs[k]={ c:String(f[iCli]).trim(), cod:(codigoCli[k]&&codigoCli[k].cod)||"",
+          r:"", cat:"", c70:"", v12:0, mg:0, dp:0, p:0, ven:0, v20:0, v70:0, emp:{}, f:[] };
+        const c=cs[k], txt=(i)=>i>=0?String(f[i]==null?"":f[i]).trim():"";
+        if(!c.r   && txt(iReg) && !/sin datos/i.test(txt(iReg))) c.r=txt(iReg);
+        if(!c.cat && txt(iCat)) c.cat=txt(iCat);
+        if(!c.c70 && txt(iC70)) c.c70=txt(iC70);
+        c.v12+=iV12>=0?num(f[iV12]):0; if(!c.mg&&iMg>=0) c.mg=num(f[iMg]); if(!c.dp&&iDp>=0) c.dp=num(f[iDp]);
+        const vv=num(f[iV]), v2=i20>=0?num(f[i20]):0, v7=i70>=0?num(f[i70]):0;
+        c.p+=pp; c.ven+=vv; c.v20+=v2; c.v70+=v7;
+        const e=(c.emp[g]=c.emp[g]||{p:0,ven:0,v20:0,v70:0,n:0});
+        e.p+=pp; e.ven+=vv; e.v20+=v2; e.v70+=v7;
+        nFilas++;
+      }
+      // Las facturas se cuelgan del cliente (y del comercial) que marca TODOS
+      const fuera={}; let nFuera=0;
+      for(const x of facturas){
+        const k=normCli(x.cli), cod=comDe[k+"|"+x.g]||comDe[k];
+        if(!cod){ fuera[x.cli]=(fuera[x.cli]||0)+x.im; nFuera++; continue; }
+        const c=PC[cod].clientes[k];
+        c.f.push({n:x.n,t:x.t,ff:x.ff,fv:x.fv,im:x.im,tf:x.tf,em:x.em,g:x.g});
+        if(!c.cod && x.cod) c.cod=x.cod;
+        const e=(c.emp[x.g||"?"]=c.emp[x.g||"?"]||{p:0,ven:0,v20:0,v70:0,n:0}); e.n++;
+      }
+      if(nFuera) avisos.push(nFuera+" facturas de "+Object.keys(fuera).length+" clientes que no están en la pestaña TODOS no cuentan (p. ej. "
+        +Object.keys(fuera).slice(0,4).join(", ")+").");
+      if(nFilas){ porComercial=PC; usaTodos=true; sinComercial=0; }
+    }
+  } else avisos.push("No hay pestaña TODOS: los importes se calculan desde el detalle de facturas y pueden no cuadrar con Administración.");
+
   // 4 · Documentos finales
   const docs=[];
   let totalP=0, totalV=0, totalF=0;
@@ -527,6 +600,7 @@ function construir(wb, nombreFichero){
       totalPendiente: Math.round(p*100)/100,
       totalVencido:   Math.round(v*100)/100,
       nClientes: clientes.length, nFacturas:nF, nVencidas:nV,
+      fuente: usaTodos?"TODOS":"detalle",   // de dónde salen los importes
       datos: JSON.stringify(clientes),
     });
   }
