@@ -943,6 +943,9 @@ async function datosCEO(anio,sem){
         G.peor.push({cli:cli.c||"",im,dias,quien:g.nombre});
       }
     }catch(err){ p.cobros=numC(c.totalVencido); }
+    // (sep 2026) Con la pestaña TODOS el vencido oficial es el de Administración;
+    // las facturas siguen sirviendo para el listado.
+    if(c.fuente==="TODOS") p.cobros=numC(c.totalVencido);
     for(const v of vis){
       if(v.eliminada||!enSem(fechaDocC(v))||!deQuien(v,g)) continue;
       if(/llamada|no_contesta/i.test(String(v.resultado||v.tipo||""))) p.lla++; else p.vis++;
