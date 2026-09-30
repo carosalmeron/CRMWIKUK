@@ -893,7 +893,8 @@ async function datosCEO(anio,sem){
     if(ausente){ E.aus++; E.gente.push({...g,ausente:true,motivo:(suInf.find(i=>i.ausenteMotivo)||{}).ausenteMotivo||"Ausente"}); continue; }
     if(suInf.length) E.cerr++; else if(g.entrega!=="no") E.sinCerrar.push(g.nombre);
 
-    const p={...g,vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,nFacV:0,vis:0,lla:0,mEnv:0,mOk:0,semMal:0};
+    const p={...g,vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,nFacV:0,vis:0,lla:0,mEnv:0,mOk:0,semMal:0,
+      mKo:0,mEnvA:0,mOkA:0,mKoA:0,m60:[]};
     // (sep 2026) Sus planes del parte: cobro, muestras de la semana que viene y actividad
     try{ const ki=suInf.find(i=>i.kpis); p.k=ki?JSON.parse(ki.kpis):null; }catch(err){ p.k=null; }
     const r=suyo(res,g), e2=suyo(estac,g), o2=suyo(objs,g);
@@ -934,9 +935,17 @@ async function datosCEO(anio,sem){
       if(v.eliminada||!enSem(fechaDocC(v))||!deQuien(v,g)) continue;
       if(/llamada|no_contesta/i.test(String(v.resultado||v.tipo||""))) p.lla++; else p.vis++;
     }
+    const iniAnio=new Date(anio,0,1);
     for(const m of mues){
       if(m.eliminada||!deQuien(m,g)) continue;
       const est=String(m.estado||"").toLowerCase(), fFb=fechaC(m.fechaFeedback);
+      // (sep 2026) Acumulado del año y muestras sin cerrar de más de 60 días
+      { const fe=fechaDocC(m);
+        if(fe&&fe>=iniAnio&&fe<=domingo) p.mEnvA++;
+        if(fFb&&fFb>=iniAnio&&fFb<=domingo){ if(/pedido|positiv|aceptada|proyecto/.test(est)) p.mOkA++; else if(/ko|negativ|rechaz/.test(est)) p.mKoA++; }
+        if(enSem(fFb)&&/ko|negativ|rechaz/.test(est)) p.mKo++;
+        if(!fFb&&!/pedido|positiv|aceptada|proyecto|ko|negativ|rechaz|cerrad/.test(est)&&fe&&(domingo-fe)/86400000>60)
+          p.m60.push({cli:m.cliente||m.clienteNombre||"(sin cliente)",prod:m.prod||m.prodNombre||m.producto||"",fecha:fe.toISOString().slice(0,10),dias:Math.round((domingo-fe)/86400000)}); }
       if(enSem(fechaDocC(m))){ p.mEnv++; }
       if(enSem(fFb)){
         if(/pedido|positiv|aceptada|proyecto/.test(est)){ p.mOk++; }
@@ -969,6 +978,7 @@ async function datosCEO(anio,sem){
       return Math.max(0,Math.round(numC(oe[k])*7/30/activos));
     };
     const suma=k=>E.gente.filter(x=>!x.ausente).reduce((t,p)=>t+porCabezaDe(p,k),0);
+    E.gente.forEach(p=>{ if(!p.ausente) p.obj={visitas:porCabezaDe(p,"visitas"),llamadas:porCabezaDe(p,"llamadas"),muestras:porCabezaDe(p,"muestras"),muestrasOk:porCabezaDe(p,"muestrasOk")}; });
     E.obj={visitas:suma("visitas"),llamadas:suma("llamadas"),muestras:suma("muestras"),muestrasOk:suma("muestrasOk")};
     G.objVis+=E.obj.visitas; G.objLla+=E.obj.llamadas; G.objMue+=E.obj.muestras; G.objMueOk+=E.obj.muestrasOk;
     const tope=x=>Math.max(0,Math.min(150,x));
@@ -1296,6 +1306,22 @@ module.exports = async function handler(req, res){
       const r=await informeCEO({to:req.query.to, probar:req.query.probar==="1", semana:req.query.semana});
       if(req.query.probar==="1"&&req.query.ver==="1"){ res.setHeader("Content-Type","text/html; charset=utf-8"); res.status(200).send(r.html); return; }
       res.status(200).json(req.query.probar==="1"?{...r,html:undefined,htmlLength:(r.html||"").length}:r); return;
+    }
+
+    // ─────── (sep 2026) Datos del cierre de los jefes, en JSON ───────
+    // ?panel=semana&semana=39&anio=2026 → mismas cifras que el informe del CEO,
+    // por equipo y por comercial (ventas, objetivo, actividad, muestras, cobros)
+    if(req.method==="GET" && req.query && req.query.panel==="semana"){
+      const hoyP=isoSemanaC(new Date());
+      const anioP=Number(req.query.anio)||hoyP.anio, semP=Number(req.query.semana)||hoyP.sem;
+      const D=await datosCEO(anioP,semP);
+      const campos=["id","cod","nombre","equipo","ausente","motivo","vSem","objSem","mAct","mObj","vis","lla","mEnv","mOk","mKo",
+        "mEnvA","mOkA","mKoA","m60","obj","cobros","nFacV","limite","k","nota"];
+      res.setHeader("Cache-Control","no-store");
+      res.status(200).json({ok:true,sem:D.sem,anio:D.anio,mNum:D.mNum,
+        equipos:D.equipos.map(E=>({eq:E.eq,jefe:E.jefe,obj:E.obj,cerr:E.cerr,aus:E.aus,sinCerrar:E.sinCerrar,
+          gente:E.gente.map(p=>{ const o={}; campos.forEach(k=>{ if(p[k]!==undefined) o[k]=p[k]; }); return o; })}))});
+      return;
     }
 
     // ─────── Avisos de retrasos de pedido, por URL ───────
