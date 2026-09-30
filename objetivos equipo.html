@@ -2062,10 +2062,24 @@ function seccionActividad(){
 // Facturas vencidas de un comercial (del panel), de la más antigua a la más nueva
 // Una factura y su abono del mismo importe (mismo cliente) se anulan: no se muestran
 function facturasDe(p){
-  const l=(p.facV||[]).map(f=>Object.assign({},f)), fuera=new Set();
+  // La misma factura puede venir repetida (exacta) o partida en varios plazos:
+  // se deja una sola línea por cliente + nº de factura, con el importe sumado
+  // y el plazo más antiguo.
+  const K=(f)=>String(f.cli||"").trim().toUpperCase()+"|"+String(f.n||"").trim().toUpperCase();
+  const vistos=new Set(), una={};
+  (p.facV||[]).forEach(f=>{
+    const exacta=K(f)+"|"+f.fv+"|"+Math.round((Number(f.im)||0)*100);
+    if(vistos.has(exacta)) return; vistos.add(exacta);
+    if(!f.n){ una[exacta]=Object.assign({},f); return; }
+    const k=K(f)+"|"+(Number(f.im)<0?"-":"+");
+    if(!una[k]) una[k]=Object.assign({},f,{plazos:1,tot:f.tot!=null?f.tot:f.im});
+    else { const u=una[k]; u.im=(Number(u.im)||0)+(Number(f.im)||0); u.plazos++;
+      if(String(f.fv)<String(u.fv)){ u.fv=f.fv; u.dias=f.dias; } }
+  });
+  const l=Object.values(una), fuera=new Set();
   const cent=(x)=>Math.round(Math.abs(Number(x)||0)*100);
   l.forEach((neg,i)=>{ if(!(Number(neg.im)<0)||fuera.has(i)) return;
-    const j=l.findIndex((pos,k)=>k!==i&&!fuera.has(k)&&Number(pos.im)>0&&cent(pos.im)===cent(neg.im)&&String(pos.cli).trim().toUpperCase()===String(neg.cli).trim().toUpperCase());
+    const j=l.findIndex((pos,k)=>k!==i&&!fuera.has(k)&&Number(pos.im)>0&&Math.abs(cent(pos.im)-cent(neg.im))<=1&&String(pos.cli).trim().toUpperCase()===String(neg.cli).trim().toUpperCase());
     if(j>=0){ fuera.add(i); fuera.add(j); } });
   return l.filter((_,i)=>!fuera.has(i)).sort((a,b)=>b.dias-a.dias);
 }
@@ -2073,14 +2087,18 @@ function tablaFacturas(l,paraCorreo){
   const e=(t)=>String(t??"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
   const fx=(f)=>String(f||"").slice(0,10).split("-").reverse().join("/");
   const col=(d)=>d>90?"#8B1230":d>60?"#C2263D":d>30?"#E0803C":"#B07908";
-  const td='style="padding:5px 6px;border-top:1px solid #EEF1F5;font-size:12.5px"';
-  return '<table style="width:100%;border-collapse:collapse'+(paraCorreo?';margin-top:10px':'')+'"><tr>'
-    +["Cliente","Factura","Vence","Días","Importe"].map((t,i)=>'<th style="text-align:'+(i>2?"right":"left")+';font-size:11px;color:#64748B;padding:4px 6px">'+t+'</th>').join("")+'</tr>'
-    +l.map(f=>'<tr><td '+td+'>'+e(f.cli)+'</td><td '+td+'>'+e(f.n)+'</td><td '+td+'>'+fx(f.fv)+'</td>'
-      +'<td '+td.replace('"','"text-align:right;font-weight:800;color:'+col(f.dias)+';')+'>'+f.dias+'</td>'
-      +'<td '+td.replace('"','"text-align:right;font-weight:700;')+'>'+Math.round(f.im).toLocaleString("es-ES")+' €</td></tr>').join("")
-    +'<tr><td colspan="4" style="padding:6px;font-weight:800;font-size:12.5px;border-top:2px solid #CBD5E1">Total vencido</td><td style="padding:6px;text-align:right;font-weight:800;font-size:12.5px;border-top:2px solid #CBD5E1">'
-    +Math.round(l.reduce((t,f)=>t+f.im,0)).toLocaleString("es-ES")+' €</td></tr></table>';
+  const eu=(n)=>Math.round(Number(n)||0).toLocaleString("es-ES")+" €";
+  const td='padding:6px 5px;border-top:1px solid #EEF1F5;font-size:12.5px;vertical-align:top';
+  return '<table style="width:100%;border-collapse:collapse;table-layout:fixed'+(paraCorreo?';margin-top:10px':'')+'">'
+    +'<colgroup><col><col style="width:31%"><col style="width:19%"><col style="width:19%"></colgroup><tr>'
+    +['Cliente','Factura · vence','Total','Vencido'].map((t,i)=>'<th style="text-align:'+(i>1?"right":"left")+';font-size:11px;color:#64748B;padding:4px 5px">'+t+'</th>').join("")+'</tr>'
+    +l.map(f=>'<tr><td style="'+td+';word-break:break-word">'+e(f.cli)+'</td>'
+      +'<td style="'+td+'">'+e(f.n)+(f.plazos>1?' <span style="color:#64748B">('+f.plazos+' plazos)</span>':'')
+        +'<div style="font-size:11.5px;color:#64748B">'+fx(f.fv)+' · <b style="color:'+col(f.dias)+'">'+f.dias+' días</b></div></td>'
+      +'<td style="'+td+';text-align:right;color:#64748B">'+eu(f.tot!=null?f.tot:f.im)+'</td>'
+      +'<td style="'+td+';text-align:right;font-weight:800">'+eu(f.im)+'</td></tr>').join("")
+    +'<tr><td colspan="3" style="padding:6px 5px;font-weight:800;font-size:12.5px;border-top:2px solid #CBD5E1">Total vencido</td><td style="padding:6px 5px;text-align:right;font-weight:800;font-size:12.5px;border-top:2px solid #CBD5E1">'
+    +eu(l.reduce((t,f)=>t+(Number(f.im)||0),0))+'</td></tr></table>';
 }
 // Pedir plan de cobro con el listado de facturas vencidas en el correo
 window.pedirPlanCobros=async(cod,btn)=>{
