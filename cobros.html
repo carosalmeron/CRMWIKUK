@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Mis cobros — CRM Grupo Consolidado</title>
 <script async src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="/recuperacion_comun.js?v=20261001b"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;padding:0;background:#F1F5F9;color:#0F172A;
@@ -90,7 +91,7 @@ select,button.mini{padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:11
 .chip{padding:9px 12px;border-radius:10px;border:2px solid #E2E8F0;background:#fff;
   font-size:12.5px;cursor:pointer;font-weight:600;color:#64748B;font-family:inherit}
 .chip.on{border-color:#0F1E2E;background:#0F1E2E;color:#fff;font-weight:800}
-textarea,select.full{width:100%;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:11px;
+textarea,select.full,input.full{width:100%;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:11px;
   font-size:14px;font-family:inherit;outline:none;margin-bottom:14px;background:#fff}
 textarea{min-height:96px;resize:vertical}
 .bprim{width:100%;padding:15px;border:none;border-radius:12px;background:#0F1E2E;color:#fff;
@@ -327,7 +328,7 @@ function clientes(){
     if(ST.interco==="solo" && !esG) continue;
     let arr=[];
     try{ arr=JSON.parse(d.datos); }catch(e){ continue; }
-    for(const c of arr) out.push(Object.assign({},c,{_com:d.comercialNombre||d.comercial||"",_of:d.fuente==="TODOS"}));
+    for(const c of arr) out.push(Object.assign({},c,{_com:d.comercialNombre||d.comercial||"",_cod:d.comercial||"",_of:d.fuente==="TODOS"}));
   }
   return out;
 }
@@ -563,6 +564,7 @@ function tarjeta(c,ci){
           ${c.r?` · ${esc(c.r)}`:""}</span>
         ${(()=>{ const O=oficial(c); return O&&(Math.abs(O.v20)>=1||Math.abs(O.v70)>=1)
           ? `<div style="font-size:11px;color:#B91C1C;margin-top:2px">+20 días <strong style="font-weight:800">${eur(O.v20)}</strong> · más de 70 días <strong style="font-weight:800">${eur(O.v70)}</strong></div>` : ""; })()}
+        ${compDe(c).map(i=>`<div style="font-size:11.5px;margin-top:3px;color:${(RC.ESTADO_COBRO[i.estadoCobro]||[])[1]||"#475569"}">📅 <strong style="font-weight:800">${esc(i.accionCobro)}</strong> · paga el ${esc(RC.fechaES(i.fechaCompromiso))} · ${esc((RC.ESTADO_COBRO[i.estadoCobro]||[""])[0])}</div>`).join("")}
         ${(()=>{ const E=porEmpresa(c._f,c); return E.length>1
           ? `<div class="emps">${E.map(e=>`<span class="tag t-emp">${esc(e.g)} ${eur(ST.vista==="vencidos"?e.v:e.p)}</span>`).join("")}</div>`
           : ""; })()}
@@ -575,6 +577,7 @@ function tarjeta(c,ci){
       </div>
       <span class="chev">${ab?"▲":"▼"}</span>
     </div>
+    ${ab&&window.RC&&RC.crearCompromiso?`<div style="padding:8px 14px 0"><button class="binc" style="width:100%;padding:9px;font-size:12.5px;font-weight:800" onclick="abrirCompromiso(${ci})">📅 Apuntar compromiso de pago</button></div>`:""}
     ${ab&&saldo?`<div class="det">${c._f.map((f,fi)=>filaSaldo(c,f,ci,fi)).join("")}</div>`:""}
     ${ab&&!saldo?`<div class="det">${(()=>{ const E=porEmpresa(c._f,c);
         if(E.length<2) return c._f.map((f,fi)=>fila(c,f,ci,fi)).join("");
@@ -636,7 +639,7 @@ function fila(c,f,ci,fi){
       <span>
         <span class="tag ${esApunte(f)?"t-ap":venc?"t-venc":"t-ok"}">${
           esApunte(f) ? "apunte a cuenta "+fecha(f.fv)
-                      : venc ? d+" días vencida" : "vence "+fecha(f.fv)}</span>
+                      : venc ? d+" días vencida" : f.fv ? "vence "+fecha(f.fv) : "sin vencimiento"}</span>
         <span class="tag t-emp">${esc(f.g||"")}${f.em&&f.em!==f.g?" · "+esc(f.em):""}</span>
         ${nInc?`<span class="tag t-inc">⚑ ${nInc} incidencia${nInc>1?"s":""}</span>`:""}
         ${ST.compensar&&c._marcados&&c._marcados.has(claveDoc(f))
@@ -658,6 +661,51 @@ function setVista(v){
   ST.orden = (v==="vencidos") ? "antiguedad" : "importe";
   ST.abiertos={};
   render();
+}
+
+// ── (oct 2026) Compromiso de pago: qué va a hacer el comercial y para cuándo ──
+// Administración lo comprueba ese día; si no ha pagado, lo reclama en el mismo hilo.
+function compDe(c){ return (ST.comp||[]).filter(i=>i.estadoCobro!=="pagado"&&!/resuelta|cerrada/.test(i.estado||"")
+  &&String(i.clienteNombre||"").toUpperCase()===String(c.c||"").toUpperCase()); }
+function abrirCompromiso(ci){
+  const c=(ST._lista||[])[ci]; if(!c) return;
+  const E=porEmpresa(c._f,c), O=oficial(c);
+  const d=new Date(); d.setDate(d.getDate()+3);
+  ST.modal={comp:true,c,emps:E.map(e=>e.g),empresa:E.length===1?E[0].g:"",accion:"Transferencia",fecha:d.toISOString().slice(0,10),
+    importe:Math.round(((O?O.ven:c._v)||c._p||0)*100)/100,nota:"",enviando:false};
+  pintarCompromiso();
+}
+function pintarCompromiso(){
+  const M=ST.modal; if(!M||!M.comp) return;
+  let el=document.getElementById("mask");
+  if(!el){ el=document.createElement("div"); el.id="mask"; el.className="mask"; el.onclick=e=>{ if(e.target===el) cerrarModal(); }; document.body.appendChild(el); }
+  const hoyI=new Date().toISOString().slice(0,10);
+  el.innerHTML=`<div class="modal"><h3>📅 Compromiso de pago</h3>
+    <p class="msub">${esc(M.c.c)} · ${eur(M.c._p)} pendiente${M.c._v?` · <b style="color:#DC2626">${eur(M.c._v)} vencido</b>`:""}</p>
+    <span class="lab">¿Cómo va a pagar / qué vas a hacer?</span>
+    <div class="chips">${RC.ACC_COBRO.map(a=>`<button class="chip ${M.accion===a?"on":""}" onclick="ST.modal.accion='${a}';pintarCompromiso()">${a}</button>`).join("")}</div>
+    <span class="lab">¿Qué día? (Administración lo comprueba ese día)</span>
+    <input type="date" class="full" min="${hoyI}" value="${M.fecha}" onchange="ST.modal.fecha=this.value">
+    ${M.emps.length>1?`<span class="lab">Empresa</span><select class="full" onchange="ST.modal.empresa=this.value"><option value="">Las dos</option>${M.emps.map(g=>`<option ${M.empresa===g?"selected":""}>${esc(g)}</option>`).join("")}</select>`:""}
+    <span class="lab">Importe (€)</span>
+    <input type="number" step="0.01" class="full" value="${M.importe}" oninput="ST.modal.importe=this.value">
+    <span class="lab">Nota (opcional)</span>
+    <textarea id="ctxt" placeholder="Ej.: me lo confirma el jefe de compras; paga las dos facturas de agosto" oninput="ST.modal.nota=this.value">${esc(M.nota)}</textarea>
+    <button class="bprim" onclick="guardarCompromiso()" ${M.enviando?"disabled":""}>${M.enviando?"Guardando…":"Guardar compromiso"}</button>
+    <button class="bsec" onclick="cerrarModal()">Cancelar</button></div>`;
+}
+async function guardarCompromiso(){
+  const M=ST.modal; if(!M||!M.comp) return;
+  if(!M.fecha){ alert("Pon el día"); return; }
+  M.enviando=true; pintarCompromiso();
+  try{
+    const doc=await RC.crearCompromiso({cliente:M.c.c,codigo:M.c.cod||"",empresa:M.empresa,importe:Number(M.importe)||0,
+      accion:M.accion,fecha:M.fecha,nota:(M.nota||"").trim(),agente:M.c._cod||normCom(P.agente)||P.uid,equipo:P.equipo||""},
+      {id:P.uid||normCom(P.agente),nombre:P.nombre||P.agente||"Comercial"});
+    ST.comp=(ST.comp||[]).concat([doc]);
+    cerrarModal(); render();
+    alert("Compromiso apuntado: Administración lo comprueba el "+RC.fechaES(M.fecha)+".");
+  }catch(e){ M.enviando=false; pintarCompromiso(); alert("No se ha guardado: "+e.message); }
 }
 
 // ── Modal de incidencia ─────────────────────────────────────────
@@ -804,8 +852,9 @@ function exportar(){
 // ── Arranque ────────────────────────────────────────────────────
 (async function(){
   try{
-    const [docs, meta, incid] = await Promise.all([cargarDocs(), cargarMeta(), cargarIncidencias()]);
-    ST.docs=docs.filter(Boolean); ST.meta=meta; ST.incid=incid;
+    const [docs, meta, incid, comp] = await Promise.all([cargarDocs(), cargarMeta(), cargarIncidencias(),
+      (window.RC&&RC.leerCompromisos?RC.leerCompromisos().catch(()=>[]):Promise.resolve([]))]);
+    ST.docs=docs.filter(Boolean); ST.meta=meta; ST.incid=incid; ST.comp=comp||[];
     { const fs=[meta&&meta.fechaDatos, ...ST.docs.map(d=>d.fechaDatos)].map(x=>String(x||"").slice(0,10)).filter(x=>/^\d{4}-\d\d-\d\d$/.test(x)).sort();
       if(fs.length) CORTE=fs[fs.length-1]; }
     if(ST.docs.length===0){

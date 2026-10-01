@@ -95,7 +95,7 @@
 <div id="capa" hidden><div class="fbar"><button onclick="cerrarCapa()" aria-label="Volver">‹</button><b id="capaT"></b></div><div id="capaC"></div></div>
 
 <script src="agentes.js"></script>
-<script src="recuperacion_comun.js?v=20261001a"></script>
+<script src="recuperacion_comun.js?v=20261001b"></script>
 <script>
 // ══ Parámetros ════════════════════════════════════════════════════════
 const Q=new URLSearchParams(location.search);
@@ -169,12 +169,16 @@ function listaComerciales(us,pu,res){
   const A=window.Agentes||{conocido:()=>false,id:x=>x,nombre:x=>x,equipo:()=>"",alias:()=>[]};
   const NO_PERSONA=/^(interc|clientsdirect|cataluna|cataluña|tienda|telefono|sinagente|_?total|campofrio|wikuk|interkey|francia|distribuidor)/i;
   const esCanal=(x)=>NO_PERSONA.test(String(x||"").replace(/[.\s_-]/g,""));
+  const NO_COM=new Set(), NO_IDS=new Set();
+  const A_conoce=(l)=>l.some(k=>A.conocido(k));
   const map={}, PU_IDS=new Set(pu.map(p=>p._id)), PORTAL_FIJOS=new Set(["wk1","wk2","wk3","ik1","ik2"]);
   const pareceCodigo=(n)=>!n||/^u_\d+$/i.test(n)||/^[a-z0-9_.]+$/.test(n);
   [...us,...pu].forEach(u=>{
     const rol=String(u.rol||"").toLowerCase();
     if(!ROL_COM.includes(rol)) return;
     if(u.activo===false||String(u.activo)==="false") return;
+    // (oct 2026) Quien es de otro departamento (Customer, Administración…) no es comercial aunque su rol lo diga
+    if(u.tipologia||(u.departamentoId&&!/^(eq_|ventas$|comercial)/i.test(u.departamentoId))) NO_COM.add(String(u.nombre||"").toUpperCase().trim()), [u._id,u.crmId,u.id,u.grupoAgente].map(U).filter(Boolean).forEach(x=>NO_IDS.add(x));
     const esCuenta=PU_IDS.has(u._id)||PORTAL_FIJOS.has(String(u._id||"").toLowerCase())||PORTAL_FIJOS.has(String(u.crmId||"").toLowerCase());
     const posibles=[u.id,u._id,u.crmId,u.grupoAgente,u.catalogoVendedor,u.username,u.nombre].filter(Boolean);
     let canon=null, ficha=null;
@@ -186,11 +190,12 @@ function listaComerciales(us,pu,res){
     if(esCanal(nombre)||esCanal(canon)||esCanal(u.catalogoVendedor)) return;
     if(!map[canon]) map[canon]={id:canon,nombre,equipo:U(A.equipo(ficha)||u.equipo||""),
       cod:U(u.grupoAgente||u.catalogoVendedor||canon),alias:A.alias(ficha),
-      entrega:String(u.entregaParte||"").toLowerCase(),cuenta:esCuenta};
+      entrega:String(u.entregaParte||"").toLowerCase(),cuenta:esCuenta,codigo:!!(u.grupoAgente||u.catalogoVendedor)||A_conoce(posibles)};
     else{ const m=map[canon];
       if(pareceCodigo(m.nombre)&&!pareceCodigo(nombre)) m.nombre=nombre;
       else if(nombre.length>m.nombre.length&&!pareceCodigo(nombre)) m.nombre=nombre;
       if(esCuenta) m.cuenta=true;
+      if(u.grupoAgente||u.catalogoVendedor||A_conoce(posibles)) m.codigo=true;
       if(!m.equipo&&u.equipo) m.equipo=U(u.equipo);
       if(!m.entrega&&u.entregaParte) m.entrega=String(u.entregaParte).toLowerCase(); }
   });
@@ -200,7 +205,7 @@ function listaComerciales(us,pu,res){
     if(!m){ porNom[k]=u; return; }
     const [base,otro]=(u.cuenta&&!m.cuenta)?[u,m]:[m,u];
     base.alias=[...new Set([...(base.alias||[]),...(otro.alias||[]),U(otro.id),U(otro.cod)])];
-    base.cuenta=base.cuenta||otro.cuenta; base.entrega=base.entrega||otro.entrega; base.equipo=base.equipo||otro.equipo;
+    base.cuenta=base.cuenta||otro.cuenta; base.codigo=base.codigo||otro.codigo; base.entrega=base.entrega||otro.entrega; base.equipo=base.equipo||otro.equipo;
     if(pareceCodigo(base.nombre)&&!pareceCodigo(otro.nombre)) base.nombre=otro.nombre;
     porNom[k]=base; });
   let l=Object.values(porNom).filter(u=>!/^u_\d+$/i.test(u.nombre));
@@ -208,6 +213,10 @@ function listaComerciales(us,pu,res){
   l.forEach(u=>{ if(!u.equipo){ const k=[u.cod,u.id,...(u.alias||[])].map(U).find(x=>eqDe[x]); if(k) u.equipo=eqDe[k]; } });
   // Fuera quien no tiene que entregar parte («no entrega» o sin usuario en el portal)
   l=l.filter(u=>!(u.entrega==="no"||(u.entrega!=="si"&&!u.cuenta)));
+  // (oct 2026) Sin equipo y sin código de vendedor no vende: es una cuenta del portal con el
+  // rol «comercial» por defecto (p. ej. yhosselin). Salvo que esté marcado «sí entrega».
+  l=l.filter(u=>u.entrega==="si"||u.equipo||u.codigo);
+  l=l.filter(u=>!NO_IDS.has(U(u.id))&&!(u.alias||[]).some(x=>NO_IDS.has(U(x)))&&!NO_COM.has(String(u.nombre||"").toUpperCase().trim()));
   return l.sort((a,b)=>a.nombre.localeCompare(b.nombre));
 }
 async function cargar(){
@@ -389,7 +398,7 @@ function tarjetaEquipo(){
         return `<div class="grupo"><div class="cab" onclick="togEq('${esc(eq)}')">
           <div style="flex:1">${esc(eq)}${op?' <span class="tag t-fut">opcional</span>':""}<small>${j?esc(j.nombre)+" · "+(j.inf?"✓ cerrado "+esc(cuando(j.inf.fechaEnvio)):"sin cerrar"):"Sin jefe de equipo"}</small></div>
           <span class="tag ${pc===cs.length?"t-ok":op?"t-fut":"t-pend"}">Partes ${pc}/${cs.length}</span>
-          ${j?`<span class="tag ${cc===cs.length?"t-ok":op?"t-fut":"t-pend"}">Comités ${cc}/${cs.length}</span>`:""}<span class="chev">${ab?"▾":"›"}</span></div>
+          ${j&&flujoNuevo()?`<span class="tag ${cc===cs.length?"t-ok":op?"t-fut":"t-pend"}">Comités ${cc}/${cs.length}</span>`:""}<span class="chev">${ab?"▾":"›"}</span></div>
           ${ab?`<div style="padding-bottom:6px">${cs.map(p=>filaCom(p,"ver")).join("")||'<p class="cs">Sin comerciales</p>'}</div>`:""}</div>`; }).join("")}</div>`;
   }
   return "";

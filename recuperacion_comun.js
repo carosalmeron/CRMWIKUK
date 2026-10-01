@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20260930b";
+  RC.VERSION="20261001b";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -1322,73 +1322,170 @@
   };
 
 
-  /* ═══ RC.UI · Bloque común de Recuperación, Muestras y Cobros (sep 2026) ═══
-     UNA sola estructura para el parte del comercial, el comité del viernes y
-     el cierre de jefe / director / CEO. Si se cambia aquí, cambia en todas.
-       1 Esta semana (4 casillas) · 2 Acumulado (4 casillas)
-       3 Árbol según quién mira:  comercial → sus casos
-                                  jefe      → comercial → casos
-                                  director  → equipo → comercial → casos
-       4 En cada comercial: su plan del parte o «Pedir plan»
-       5 En cada caso: la misma tarjeta y el mismo «📌 Pedir acción»
-     La página pone los datos (cfg.filas) y el nombre de sus funciones de
-     acción (cfg.fn.pedirPlan, cfg.fn.abrir, cfg.fn.enviar). */
+  /* ═══ RC.UI · Bloque común de Recuperación, Muestras y Cobros (oct 2026) ═══
+     UNA sola visualización y operativa, LA DEL PLAN DE RECUPERACIÓN (pestaña
+     Comité de recuperacion.html), para el cierre de jefe/director/CEO, el
+     comité del viernes y el parte. Si se cambia aquí, cambia en todas.
+       · Casillas (tiles) como las de recuperación
+       · Una tarjeta por comercial: nombre, recuento (en rojo lo que falta),
+         importe a la derecha y ›. Director/CEO: equipo → comercial.
+       · Dentro: su plan del parte (o «📨 Pedir plan») y una fila compacta por
+         caso: punto de color, nombre, estado corto, importe y ›.
+       · Al tocar un caso se abre su ficha: en recuperación la ficha real del
+         Plan de recuperación; en muestras y cobros, la misma ficha resumida
+         con «Instrucción para el comercial» + Enviar (igual que recuperación).
+     La página pone los datos (cfg) y el nombre de sus funciones (cfg.fn). */
   RC.UI={AB:new Set(), RA:null};
-  g.RC_togD=(k,el)=>{ el.open?RC.UI.AB.add(k):RC.UI.AB.delete(k); };
   const e_=(t)=>String(t??"").replace(/[<>&"]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]));
   const q_=(t)=>String(t??"").replace(/\\/g,"\\\\").replace(/'/g,"\\'").replace(/"/g,"&quot;").replace(/\n/g," ");
-  RC.UI.det=(k,sum,cuerpo,borde)=>'<details '+(RC.UI.AB.has(k)?"open":"")+' ontoggle="RC_togD(\''+q_(k)+'\',this)" style="margin:6px 0;border:1px solid '+(borde||"#E5E7EB")+';border-radius:10px;background:#fff;padding:7px 10px">'
-    +'<summary style="cursor:pointer;list-style:none;font-size:13.5px">'+sum+'</summary><div style="margin-top:6px">'+cuerpo+'</div></details>';
-  RC.UI.cajas=(t,l)=>'<div style="font-size:10.5px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.3px;margin:8px 0 4px">'+t+'</div>'
-    +'<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">'+l.map(([v,lab,col])=>'<div style="border:1px solid #E2E8F0;border-radius:9px;padding:7px 4px;text-align:center;background:#fff"><b style="display:block;font-size:15px;color:'+(col||'#0F172A')+'">'+v+'</b><span style="font-size:10px;color:#64748B;line-height:1.2;display:block">'+lab+'</span></div>').join("")+'</div>';
-  RC.UI.pill=(txt,nivel)=>{ const c={rojo:["#FEF2F2","#B91C1C"],ambar:["#FFFBEB","#B45309"],verde:["#F0FDF4","#15803D"],gris:["#F1F5F9","#475569"]}[nivel]||["#F1F5F9","#475569"];
-    return '<span style="font-size:11px;font-weight:800;padding:2px 8px;border-radius:99px;background:'+c[0]+';color:'+c[1]+';white-space:nowrap">'+txt+'</span>'; };
-  RC.UI.CHIPS={recup:["Visítale esta semana","Llámale y dime qué pasa","Prepara una oferta de vuelta","Vamos juntos a verle"],
-    mues:["Llama y pide el resultado","Ciérrala: OK o KO","Pasa a recogerla y pregunta","Manda otra muestra"],
-    cob:["Llama hoy y pide fecha de pago","Pasa a cobrar esta semana","Revisa con Administración si está pagada","Vamos juntos a verle"]};
-  // Tarjeta de un caso. x: {id,tipo,titulo,pill,detalle,ficha}; fn: nombres de funciones de la página
-  RC.UI.caso=(x,fn)=>{ fn=fn||{}; const ab=RC.UI.RA===x.id;
-    return '<div style="border:1px solid '+(ab?"#93C5FD":"#E2E8F0")+';border-radius:10px;padding:8px 10px;margin-top:6px;background:#fff">'
-      +'<div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start"><b style="font-size:13px">'+x.titulo+'</b>'+(x.pill||"")+'</div>'
-      +'<div style="font-size:12px;color:#475569;margin-top:2px">'+x.detalle+'</div>'
-      +((fn.abrir||x.ficha)?'<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">'
-        +(fn.abrir?'<button class="mini'+(ab?" on":"")+'" onclick="'+fn.abrir+'(\''+q_(x.id)+'\')">📌 Pedir acción</button>':'')
-        +(x.ficha?'<button class="mini" onclick="'+x.ficha+'">Ver ficha ›</button>':'')+'</div>':'')
-      +(ab&&fn.enviar?'<div style="margin-top:6px"><div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:5px">'
-        +(RC.UI.CHIPS[x.tipo]||[]).map(r=>'<button class="mini" onclick="document.getElementById(\'ra_txt\').value=\''+q_(r)+'\'">'+e_(r)+'</button>').join("")+'</div>'
-        +'<textarea id="ra_txt" placeholder="Qué tiene que hacer la semana que viene" style="width:100%;min-height:54px;padding:8px 10px;border:1.5px solid #E2E8F0;border-radius:9px;font:inherit;font-size:13px"></textarea>'
-        +'<button class="mini on" style="margin-top:5px" onclick="'+fn.enviar+'(\''+q_(x.id)+'\',this)">Enviar y fijar objetivo de la semana siguiente</button></div>':'')
-      +'</div>'; };
-  /* cfg: {k, modo:"comercial"|"jefe"|"dir", tema, unidad, listaTit, sem:[[v,lab,col]], anio, anioTit, nota,
-           fn:{pedirPlan,abrir,enviar},
-           filas:[{p:{nombre,cod,eqNom}, mal, plan, peso, cifra, peticion, pedir, casos:[{id,tipo,titulo,pill,detalle,ficha}]}]} */
+  RC.UI.css=()=>{ if(typeof document==="undefined"||document.getElementById("rcui-css")) return;
+    const st=document.createElement("style"); st.id="rcui-css";
+    st.textContent=`.rcu-tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px}
+.rcu-tile{background:#fff;border:1px solid #E2E8F0;border-radius:12px;padding:10px 12px}
+.rcu-tile span{display:block;font-size:10.5px;color:#64748B;text-transform:uppercase;letter-spacing:.04em}
+.rcu-tile b{display:block;font-size:18px;font-weight:800;margin-top:2px;font-variant-numeric:tabular-nums}
+@media(max-width:520px){.rcu-tiles{grid-template-columns:repeat(2,1fr)}}
+.rcu-card{background:#fff;border:1px solid #E2E8F0;border-radius:14px;margin-bottom:10px}
+.rcu-cab{display:flex;gap:10px;align-items:center;padding:13px 15px;cursor:pointer}
+.rcu-muted{color:#64748B;font-size:12px}
+.rcu-neg{color:#DC2626;font-weight:800;white-space:nowrap;font-variant-numeric:tabular-nums}
+.rcu-q{font-size:12.5px;margin-top:3px;line-height:1.45}.rcu-q b{color:#0F172A}
+.rcu-falta{color:#DC2626;font-weight:700}
+.rcu-btn{border:1.5px solid #E2E8F0;background:#fff;color:#0F172A;border-radius:9px;padding:9px 14px;font-weight:800;font-size:13px;cursor:pointer;font-family:inherit}
+.rcu-chip{border:1.5px solid var(--c);background:#fff;color:var(--c);border-radius:99px;padding:7px 12px;font-weight:800;font-size:12.5px;cursor:pointer;font-family:inherit}
+.rcu-chip.on{background:var(--c);color:#fff}
+.rcu-in{font:inherit;font-size:14px;border:1.5px solid #E2E8F0;border-radius:8px;padding:8px 10px;width:100%;box-sizing:border-box}
+.rcu-ficha{background:#F8FAFC;border-radius:10px;padding:9px 11px;margin:0 0 10px}`;
+    document.head.appendChild(st); };
+  RC.UI.tog=(k)=>{ RC.UI.AB.has(k)?RC.UI.AB.delete(k):RC.UI.AB.add(k); };
+  // Línea de avance real/objetivo (se usa en Actividad)
+  RC.UI.linea=(lab,r,o,inv,txt)=>{ const p=o?Math.round(r/o*100):null;
+    const c=p==null?"#94A3B8":inv?(p>100?"#B91C1C":p>=80?"#B45309":"#15803D"):(p>=100?"#15803D":p>=80?"#B45309":"#B91C1C");
+    return '<div style="display:grid;grid-template-columns:92px 1fr auto;gap:8px;align-items:center;font-size:12.5px;padding:4px 0"><span>'+lab+'</span>'
+      +'<div style="height:9px;border-radius:99px;background:#F1F5F9;overflow:hidden"><i style="display:block;height:100%;width:'+Math.min(100,p||0)+'%;background:'+c+';border-radius:99px"></i></div>'
+      +'<span style="text-align:right;font-weight:800;white-space:nowrap">'+(txt||r)+(o?' <span style="color:'+c+'">'+p+' %</span>':'')+'</span></div>'; };
+  RC.UI.tiles=(l)=>'<div class="rcu-tiles">'+l.map(([v,lab,col])=>'<div class="rcu-tile"><span>'+lab+'</span><b style="color:'+(col||'#0F172A')+'">'+v+'</b></div>').join("")+'</div>';
+  RC.UI.TONO={ok:"#16A34A",am:"#D97706",sube:"#7C3AED",ko:"#DC2626"};
+  // Fila compacta de un caso, como en recuperación; al tocarla se abre su ficha
+  RC.UI.fila=(x,fn)=>{ fn=fn||{}; const k="caso_"+x.id, ab=RC.UI.AB.has(k);
+    const dec=(x.decisiones||[]).find(d=>d.r===x.decision);
+    const click=x.ficha?x.ficha:"RC.UI.tog('"+q_(k)+"');"+(fn.repintar||"")+"()";
+    let h='<div style="border-top:1px solid #F1F5F9"><div onclick="'+click+'" style="display:flex;gap:10px;align-items:center;padding:10px 0;cursor:pointer">'
+      +'<span style="width:8px;height:8px;border-radius:99px;background:'+(x.dot||"#94A3B8")+';flex:none"></span>'
+      +'<div style="flex:1;min-width:0"><div style="font-size:13.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+x.titulo+'</div>'
+      +'<div class="rcu-muted" style="font-size:11.5px">'+(x.sub?x.sub+" · ":"")+'<span style="color:'+((x.estado||[])[1]||"#64748B")+';font-weight:700">'+((x.estado||[])[0]||"")+'</span>'
+      +(dec?' · <span style="color:'+RC.UI.TONO[dec.tono]+';font-weight:800">'+dec.txt+'</span>':'')+(x.instr?' · 📌':'')+'</div></div>'
+      +'<div class="rcu-neg" style="font-size:13px;color:'+(x.importeCol||"#DC2626")+'">'+(x.importe||"")+'</div>'
+      +'<span style="color:#64748B;font-size:16px;width:14px;text-align:center">'+(x.ficha?"›":ab?"▾":"›")+'</span></div>';
+    if(ab&&!x.ficha){
+      h+='<div class="rcu-ficha">'+(x.lineas||[]).map(l=>'<div class="rcu-q">'+l+'</div>').join("")
+        +(x.decisiones&&fn.decidir?'<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">'+x.decisiones.map(d=>{ const on=x.decision===d.r;
+            return '<button class="rcu-chip'+(on?" on":"")+'" style="--c:'+RC.UI.TONO[d.tono]+'" onclick="'+fn.decidir+'(\''+q_(x.id)+'\',\''+q_(on?"":d.r)+'\')">'+d.txt+'</button>'; }).join("")+'</div>':'')
+        +(x.campos||'')
+        +(fn.instruccion?'<div style="display:flex;gap:6px;margin-top:8px"><input class="rcu-in" id="ins_'+e_(x.id)+'" placeholder="Instrucción para el comercial (le llega por correo ahora)">'
+          +'<button class="rcu-btn" onclick="'+fn.instruccion+'(\''+q_(x.id)+'\',this)">Enviar</button></div>':'')
+        +'</div>';
+    }
+    return h+'</div>'; };
+  /* cfg: {k, modo:"comercial"|"jefe"|"dir", tema, unidad, tiles:[[v,lab,col]], nota, pie, aviso,
+           fn:{pedirPlan, decidir, instruccion, repintar},
+           filas:[{p:{nombre,cod,eqNom}, importe, mal, plan, sub, peticion, pedir, casos:[...]}]} */
   RC.UI.bloque=(cfg)=>{
-    const fn=cfg.fn||{}, det=RC.UI.det, pill=RC.UI.pill;
-    const casosH=(f)=>'<div style="font-size:10.5px;font-weight:800;color:#64748B;text-transform:uppercase;margin-top:6px">'+cfg.listaTit+' ('+f.casos.length+')</div>'
-      +(f.casos.length?f.casos.map(x=>RC.UI.caso(x,fn)).join(""):'<p style="margin:4px 0 0;font-size:12.5px;color:#94A3B8">Ninguno.</p>');
-    const planH=(f)=>(f.mal||f.plan)?'<div style="background:#F8FAFC;border-left:3px solid '+(f.plan?'#2563EB':'#DC2626')+';border-radius:0 8px 8px 0;padding:6px 9px;font-size:12.5px;margin-bottom:4px">'
-        +(f.plan?'<b style="font-size:10.5px;color:#2563EB;text-transform:uppercase">Su plan en el parte</b><br>'+e_(f.plan)
-          :'<b style="color:#B91C1C">Sin plan en su parte</b>'+(fn.pedirPlan||f.pedir?' <button class="mini" style="margin-left:6px" onclick="'+(f.pedir||(fn.pedirPlan+"('"+q_(f.agId||f.p.cod||"")+"','"+q_(cfg.tema)+"','"+q_(f.peticion||"")+"',this)"))+'">Pedir plan</button>':''))+'</div>':'';
-    const filaCom=(f)=>{ const cod=f.p.cod||f.p.id||f.p.nombre;
-      const est=!f.mal?pill("✓ En objetivo","verde"):f.plan?pill("Con plan","ambar"):pill("Sin plan","rojo");
-      const sum='<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b style="font-size:13px">'+e_(f.p.nombre)+'</b><span style="font-size:12.5px">'+f.cifra+'</span></div>'
-        +'<div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-top:2px"><span style="font-size:12px;color:#64748B">'+f.casos.length+' '+cfg.unidad+'</span>'+est+'</div>';
-      return det(cfg.k+"_"+cod,sum,planH(f)+casosH(f),f.mal&&!f.plan?"#FCA5A5":f.mal?"#FCD34D":"#E5E7EB"); };
+    RC.UI.css(); const fn=cfg.fn||{};
+    const planH=(f)=>f.plan?'<div class="rcu-q" style="margin:2px 0 6px"><b>Su plan:</b> '+e_(f.plan)+'</div>'
+      :f.mal?'<div class="rcu-q rcu-falta" style="margin:2px 0 6px">Sin plan en su parte</div>'
+        +((f.pedir||fn.pedirPlan)?'<button class="rcu-btn" style="margin:0 0 6px" onclick="'+(f.pedir||(fn.pedirPlan+"('"+q_(f.agId||f.p.cod||"")+"','"+q_(cfg.tema)+"','"+q_(f.peticion||"")+"',this)"))+'">📨 Pedir plan</button>':''):'';
     const filas=(cfg.filas||[]).filter(f=>cfg.modo==="comercial"||f.mal||f.casos.length)
       .sort((a,b)=>((b.mal&&!b.plan)-(a.mal&&!a.plan))||(b.mal-a.mal)||((b.peso||0)-(a.peso||0)));
-    let arbol, titA;
-    if(cfg.modo==="comercial"){ titA="Tus casos"; arbol=filas.map(f=>planH(f)+casosH(f)).join(""); }
-    else if(cfg.modo==="jefe"){ titA="Por comercial · primero los que no llegan"; arbol=filas.map(filaCom).join(""); }
-    else { titA="Por equipo y comercial · primero los que no llegan";
-      const eqs={}; filas.forEach(f=>{ const q=f.p.eqNom||"Sin equipo"; (eqs[q]=eqs[q]||[]).push(f); });
+    const tarjeta=(k,titulo,sub,importe,cuerpo,grande)=>{ const ab=RC.UI.AB.has(k);
+      return '<div class="rcu-card"><div class="rcu-cab" onclick="RC.UI.tog(\''+q_(k)+'\');'+(fn.repintar||"")+'()">'
+        +'<div style="flex:1;min-width:0"><b style="font-size:'+(grande?15.5:14.5)+'px">'+titulo+'</b><div class="rcu-muted">'+sub+'</div></div>'
+        +'<div class="rcu-neg">'+(importe||"")+'</div><span style="color:#64748B;font-size:18px;width:16px;text-align:center">'+(ab?"▾":"›")+'</span></div>'
+        +(ab?'<div style="padding:0 15px 8px">'+cuerpo+'</div>':'')+'</div>'; };
+    const subCom=(f)=>f.casos.length+' '+cfg.unidad+(f.sub?' · '+f.sub:'')+' · '
+      +(!f.mal?'<span style="color:#16A34A;font-weight:700">en objetivo</span>':f.plan?'<span style="color:#D97706;font-weight:700">con plan</span>':'<span style="color:#DC2626;font-weight:700">sin plan</span>');
+    const cuerpoCom=(f)=>planH(f)+(f.casos.length?f.casos.map(x=>RC.UI.fila(x,fn)).join(""):'<p class="rcu-muted">Ninguno.</p>');
+    const tarjCom=(f)=>tarjeta(cfg.k+"_"+(f.p.cod||f.p.id||f.p.nombre),e_(f.p.nombre),subCom(f),f.importe,cuerpoCom(f),true);
+    let arbol;
+    if(cfg.modo==="comercial") arbol=filas.map(f=>'<div class="rcu-card" style="padding:4px 15px 8px">'+cuerpoCom(f)+'</div>').join("");
+    else if(cfg.modo==="jefe") arbol=filas.map(tarjCom).join("");
+    else { const eqs={}; filas.forEach(f=>{ const q=f.p.eqNom||"Sin equipo"; (eqs[q]=eqs[q]||[]).push(f); });
       arbol=Object.entries(eqs).sort((a,b)=>b[1].filter(f=>f.mal&&!f.plan).length-a[1].filter(f=>f.mal&&!f.plan).length)
         .map(([eq,l])=>{ const sp=l.filter(f=>f.mal&&!f.plan).length;
-          return det(cfg.k+"_eq_"+eq,'<div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><b style="font-size:13px">👥 '+e_(eq)+'</b><span style="display:flex;gap:6px;align-items:center"><span style="font-size:12px;color:#64748B">'+l.length+' comerciales</span>'+(sp?pill(sp+" sin plan","rojo"):pill("✓","verde"))+'</span></div>',
-            l.map(filaCom).join(""),sp?"#FCA5A5":"#E5E7EB"); }).join(""); }
-    return RC.UI.cajas("Esta semana",cfg.sem||[])+RC.UI.cajas(cfg.anioTit||"Acumulado del año",cfg.anio||[])
-      +(cfg.nota?'<div style="font-size:11.5px;color:#64748B;margin-top:6px">'+cfg.nota+'</div>':'')
-      +'<div style="font-size:10.5px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.3px;margin:12px 0 2px">'+titA+'</div>'
-      +(arbol||'<p style="margin:0;font-size:12.5px;color:#94A3B8">Nada que revisar.</p>');
+          return tarjeta(cfg.k+"_eq_"+eq,"👥 "+e_(eq),l.length+" comerciales · "+(sp?'<span style="color:#DC2626;font-weight:700">'+sp+' sin plan</span>':'<span style="color:#16A34A;font-weight:700">todos con plan</span>'),"",
+            '<div style="padding-top:2px">'+l.map(tarjCom).join("")+'</div>',false); }).join(""); }
+    return (cfg.aviso||'')+RC.UI.tiles(cfg.tiles||[])
+      +(cfg.nota?'<div class="rcu-muted" style="margin:-4px 0 10px">'+cfg.nota+'</div>':'')
+      +(arbol||'<div class="rcu-card rcu-muted" style="padding:13px 15px">Nada que revisar.</div>')
+      +(cfg.pie||'');
   };
+
+
+  // ══ Compromisos de cobro (oct 2026) ══════════════════════════════════
+  // El comercial dice qué va a hacer con el cobro de un cliente y para qué
+  // fecha (desde Cobros o desde su cierre). Administración de clientes lo ve
+  // ese día al entrar; si no ha pagado lo reclama y al comercial le llega un
+  // correo con el enlace al hilo, donde contesta. Todo queda en la misma
+  // incidencia (colección «incidencias», origen «cobros», compromiso:true), así
+  // que también se ve en Incidencias del CRM.
+  RC.ACC_COBRO=["Transferencia","Pagaré","Confirming","Cheque","Recibo domiciliado","Compensar con abono","Visita para cobrar","Llamada al cliente","Otro"];
+  RC.ESTADO_COBRO={pendiente:["Pendiente de comprobar","#B45309"],no_pagado:["No ha pagado · reclamado","#B91C1C"],
+    respondido:["El comercial ha respondido","#1D4ED8"],pagado:["Pagado","#15803D"]};
+  RC.hoyISO=()=>{ const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); };
+  RC.fechaES=(iso)=>{ const m=String(iso||"").match(/^(\d{4})-(\d{2})-(\d{2})/); return m?m[3]+"/"+m[2]+"/"+m[1]:String(iso||""); };
+  const _incNotif=(id)=>{ try{ fetch("/api/notificar-incidencia",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({incidenciaId:id,evento:"hilo"})}).catch(()=>{}); }catch(e){} };
+  const _leerInc=async(id)=>{ const r=await fetch(`${RC.FB}/incidencias/${encodeURIComponent(id)}`,{cache:"no-store"});
+    if(!r.ok) return null; const d=await r.json(); const o={_id:id}; for(const [k,x] of Object.entries(d.fields||{})) o[k]=des(x); return o; };
+  RC.leerCompromiso=_leerInc;
+  // Todos los compromisos (consulta por el campo compromiso, no se lee la colección entera)
+  RC.leerCompromisos=async()=>{
+    const r=await fetch(RC.FB+":runQuery",{method:"POST",headers:{"Content-Type":"application/json"},cache:"no-store",
+      body:JSON.stringify({structuredQuery:{from:[{collectionId:"incidencias"}],
+        where:{fieldFilter:{field:{fieldPath:"compromiso"},op:"EQUAL",value:{booleanValue:true}}}}})});
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    return ((await r.json())||[]).filter(x=>x.document).map(x=>{ const d=x.document, o={_id:decodeURIComponent(d.name.split("/").pop())};
+      for(const [k,v] of Object.entries(d.fields||{})) o[k]=des(v); return o; }).filter(i=>!i.eliminada);
+  };
+  // Lo que Administración tiene que mirar hoy: compromisos que vencen hoy o antes sin comprobar,
+  // y respuestas del comercial pendientes de leer
+  RC.avisosCobroHoy=(lista)=>{ const hoy=RC.hoyISO();
+    return (lista||[]).filter(i=>i.estadoCobro!=="pagado"&&!/resuelta|cerrada/.test(i.estado||"")
+      &&((i.estadoCobro==="pendiente"&&String(i.fechaCompromiso||"")<=hoy)||i.estadoCobro==="respondido"))
+      .sort((a,b)=>String(a.fechaCompromiso||"").localeCompare(String(b.fechaCompromiso||""))); };
+  RC.crearCompromiso=async(o,por)=>{
+    const hoy=new Date(), hoyS=hoy.toLocaleDateString("es-ES");
+    const id="inc_cob_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
+    const imp=Math.round(num(o.importe)*100)/100;
+    const titulo=`${o.accion} · paga el ${RC.fechaES(o.fecha)}`;
+    const doc={id,tipo:"administracion",subtipo:"Compromiso de pago",compromiso:true,origen:"cobros",
+      clienteNombre:String(o.cliente||"").toUpperCase(),cliente:o.cliente||"",clienteCodigo:o.codigo||"",clienteId:o.codigo||"",
+      empresa:o.empresa||"",facturaNum:o.factura||"",importeCompromiso:imp,accionCobro:o.accion,fechaCompromiso:o.fecha,
+      estadoCobro:"pendiente",estado:"abierta",prioridad:"media",
+      titulo:"Compromiso de pago: "+(o.cliente||""),
+      descripcion:`📅 COMPROMISO DE PAGO · ${o.cliente}${o.empresa?" ("+o.empresa+")":""}\n${titulo}${imp?" · "+RC.eur(imp):""}${o.factura?" · factura "+o.factura:""}`+(o.nota?`\n\n${o.nota}`:""),
+      autor:por.id||por.nombre,autorNombre:por.nombre,agente:o.agente||por.id||"",equipo:o.equipo||"",
+      fecha:hoyS,fechaCreacion:hoy.toISOString(),semana:RC.semanaISO(hoy),
+      historialEscalado:[],
+      historial:[{accion:"📅 Compromiso: "+titulo+(imp?" · "+RC.eur(imp):""),fecha:hoyS,por:por.nombre,nota:o.nota||""}]};
+    await RC.guardarEn("incidencias",id,doc);
+    doc._id=id; return doc;
+  };
+  const _apunta=async(inc,campos,entrada)=>{
+    const hist=(inc.historial||[]).concat([Object.assign({fecha:new Date().toLocaleDateString("es-ES")},entrada)]);
+    const c=Object.assign({},campos,{historial:hist,fechaUltimoCambio:new Date().toISOString(),ultimoCambioPor:entrada.por});
+    await RC.guardarEn("incidencias",inc._id||inc.id,c,true);
+    Object.assign(inc,c); _incNotif(inc._id||inc.id); return inc;
+  };
+  RC.cobroPagado=(inc,por,nota)=>_apunta(inc,{estadoCobro:"pagado",estado:"resuelta",fechaResolucion:new Date().toLocaleDateString("es-ES")},
+    {accion:"✅ Cobrado",por:por.nombre,nota:nota||""});
+  RC.cobroReclamar=(inc,por,texto)=>_apunta(inc,{estadoCobro:"no_pagado",reclamadoEn:new Date().toISOString(),prioridad:"alta"},
+    {accion:"❌ No ha pagado",por:por.nombre,nota:texto||"No ha pagado."});
+  // El comercial contesta; con nueva fecha vuelve a quedar pendiente para ese día
+  RC.cobroResponder=(inc,por,texto,nuevaFecha,accion)=>_apunta(inc,
+    nuevaFecha?{estadoCobro:"pendiente",fechaCompromiso:nuevaFecha,accionCobro:accion||inc.accionCobro}:{estadoCobro:"respondido"},
+    {accion:nuevaFecha?"📅 Nueva fecha: "+(accion||inc.accionCobro||"")+" · paga el "+RC.fechaES(nuevaFecha):"💬 Respuesta",por:por.nombre,nota:texto||""});
+  // Administración lee la respuesta sin cambiar nada: vuelve a «no ha pagado» (sigue abierta)
+  RC.cobroComentar=(inc,por,texto)=>_apunta(inc,{},{accion:"💬 Comentario",por:por.nombre,nota:texto});
   g.RC=RC;
 })(typeof window!=="undefined"?window:globalThis);

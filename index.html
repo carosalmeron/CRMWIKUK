@@ -696,7 +696,14 @@ var MENU_ROL_P={
 (function(){ try{ var q=new URLSearchParams(location.search), pid=q.get('proyecto');
   if(pid){ sessionStorage.setItem('abrirProyecto',JSON.stringify({id:pid})); sessionStorage.setItem('deepCRM','1');
     history.replaceState(null,'',location.pathname+location.hash); } }catch(e){} })();
+// (oct 2026) Enlace del correo de cobros: /?cobro=ID abre el hilo del compromiso tras entrar
+(function(){ try{ var q=new URLSearchParams(location.search), cid=q.get('cobro');
+  if(cid){ sessionStorage.setItem('abrirCobro',cid); history.replaceState(null,'',location.pathname+location.hash); } }catch(e){} })();
 function abrirEnlacePendiente(){
+  try{ var cid=sessionStorage.getItem('abrirCobro');
+    if(cid) setTimeout(function(){ var h=document.getElementById('hub');
+      if(!h||!h.classList.contains('active')) return;
+      sessionStorage.removeItem('abrirCobro'); abrirCompromisos(cid); },900); }catch(e){}
   try{ if(!sessionStorage.getItem('deepCRM')) return;
     setTimeout(function(){ var h=document.getElementById('hub');
       if(!h||!h.classList.contains('active')) return;   // candado u otra pantalla: se espera
@@ -1144,8 +1151,11 @@ function perfilCierreHub(u){
   if(id==='ceo'||rol==='admin'||rol==='ceo'||String(f.rol||'').toLowerCase()==='ceo')
     return {rol:'ceo',cod:'CEO',uid:u.crmId||u.id||'ceo',equipo:''};
   // Administración de clientes: el responsable del departamento o quien tenga su tipología
-  var crmId=u.crmId||u.id, dA=orgDeptoDe('administracion');
-  var esAdm=(dA&&(dA.responsableIds||[]).indexOf(crmId)>=0)
+  var crmId=u.crmId||u.id;
+  // Responsable o persona de Administración / Administración clientes (mismos departamentos que cobros en el CRM)
+  var esAdm=['administracion','administracion_clientes'].some(function(k){ var d=orgDeptoDe(k);
+      return d&&(d.responsableIds||[]).indexOf(crmId)>=0; })
+    ||['administracion','administracion_clientes'].indexOf(String(f.departamentoId||u.departamentoId||'').toLowerCase())>=0
     ||String(f.tipologia||u.tipologia||'').toLowerCase()==='administracion';
   if(esAdm) return {rol:'admin',cod:_up(crmId),uid:crmId,equipo:''};
   if((u.accesos||[]).indexOf('crm')<0) return null;
@@ -1153,6 +1163,89 @@ function perfilCierreHub(u){
   if(!P||P.tipo==='depto'||!esEquipoComercial(u)) return null;
   if(/FRANC/.test(P.equipo||'')) return null;   // Francia no entra en los cierres
   return {opcional:/DISTRIB/.test(P.equipo||''),rol:P.tipo,cod:P.cod,uid:P.crmId,equipo:P.equipo,claves:P.claves};
+}
+// ══════════════════════════════════════════════════════════════════
+// (oct 2026) COMPROMISOS DE COBRO (compromisos.html)
+// El comercial apunta qué va a hacer con un cobro y para cuándo. Administración
+// de clientes lo ve el día que toca nada más entrar (aviso emergente + botón);
+// el comercial ve sus reclamaciones. Mismo hilo, con correo en cada paso.
+// ══════════════════════════════════════════════════════════════════
+function perfilCobros(u){
+  var pc=perfilCierreHub(u);
+  if(pc&&pc.rol==='admin') return pc;
+  if(pc) return pc;
+  return null;
+}
+function abrirCompromisos(id){
+  var pc=perfilCobros(currentUser)||{rol:'comercial',cod:_up(currentUser.crmId||currentUser.id),uid:currentUser.crmId||currentUser.id};
+  var q='rol='+encodeURIComponent(pc.rol==='admin'?'admin':pc.rol)+'&agente='+encodeURIComponent(pc.cod||'')
+    +'&uid='+encodeURIComponent(pc.uid||'')+'&nombre='+encodeURIComponent(currentUser.nombre||'')+(id?'&id='+encodeURIComponent(id):'');
+  currentModule='compromisos';
+  document.getElementById('frame-title').textContent='💶 Compromisos de cobro';
+  document.getElementById('frame-sub').textContent=currentUser.nombre||'';
+  document.getElementById('module-iframe').src='compromisos.html?'+q;
+  showScreen('module-frame');
+}
+function _hoyISO(){ var d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function leerCompromisosHub(){
+  return fetch(PORTAL_FB+':runQuery',{method:'POST',headers:{'Content-Type':'application/json'},cache:'no-store',
+    body:JSON.stringify({structuredQuery:{from:[{collectionId:'incidencias'}],
+      where:{fieldFilter:{field:{fieldPath:'compromiso'},op:'EQUAL',value:{booleanValue:true}}}}})})
+    .then(function(r){ return r.ok?r.json():[]; })
+    .then(function(rows){ return (rows||[]).filter(function(x){return x.document;}).map(function(x){
+      var f=x.document.fields||{}, g=function(k){ var v=f[k]; return v?(v.stringValue!==undefined?v.stringValue:v.booleanValue!==undefined?v.booleanValue:v.doubleValue!==undefined?Number(v.doubleValue):v.integerValue!==undefined?Number(v.integerValue):null):null; };
+      return {id:decodeURIComponent(x.document.name.split('/').pop()),estadoCobro:g('estadoCobro'),estado:g('estado'),fecha:g('fechaCompromiso'),
+        cliente:g('clienteNombre'),agente:g('agente'),autor:g('autor'),eliminada:g('eliminada')}; })
+      .filter(function(i){ return !i.eliminada&&i.estadoCobro!=='pagado'&&!/resuelta|cerrada/.test(i.estado||''); }); });
+}
+// Botón en el hub y, para Administración, aviso emergente una vez al día
+function hubCompromisos(list){
+  var pc=perfilCobros(currentUser); if(!pc) return;
+  leerCompromisosHub().then(function(L){
+    var hoy=_hoyISO(), item=null, n=0, txt='';
+    if(pc.rol==='admin'){
+      var H=L.filter(function(i){ return (i.estadoCobro==='pendiente'&&String(i.fecha||'')<=hoy)||i.estadoCobro==='respondido'; });
+      n=H.length; txt=n?'<span style="color:#B91C1C;font-weight:700">'+n+' para comprobar hoy</span>':'Nada que comprobar hoy';
+      if(n){ var marca='avisoCobros_'+hoy;
+        var ya=false; try{ ya=!!localStorage.getItem(marca); }catch(e){}
+        if(!ya){ try{ localStorage.setItem(marca,'1'); }catch(e){} mostrarAvisoCobros(H); } }
+    } else {
+      var cl=(pc.claves||[pc.cod,pc.uid]).map(_up);
+      var M=L.filter(function(i){ return cl.indexOf(_up(i.agente))>=0||cl.indexOf(_up(i.autor))>=0; });
+      if(!M.length) return;
+      var R=M.filter(function(i){ return i.estadoCobro==='no_pagado'; });
+      n=M.length; txt=R.length?'<span style="color:#B91C1C;font-weight:700">'+R.length+' reclamado'+(R.length===1?'':'s')+' por Administración</span>':n+' abierto'+(n===1?'':'s');
+    }
+    item=document.createElement('div');
+    item.className='hub-item';
+    item.style.setProperty('--item-color','#B45309');
+    item.innerHTML='<div class="hub-icon" style="background:#FFFBEB">💶</div>'
+      +'<div><div class="hub-item-title">Compromisos de cobro</div><div class="hub-item-sub">'+txt+'</div></div>'
+      +'<svg class="hub-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg>';
+    item.onclick=function(){ abrirCompromisos(); };
+    if(list&&document.getElementById('hub').classList.contains('active')){
+      var prev=document.getElementById('hub-compromisos'); if(prev) prev.remove();
+      item.id='hub-compromisos';
+      if(pc.rol==='admin'||(txt.indexOf('reclamado')>=0)) list.insertBefore(item,list.firstChild); else list.appendChild(item);
+    }
+  }).catch(function(){});
+}
+function mostrarAvisoCobros(H){
+  var m=document.createElement('div');
+  m.style.cssText='position:fixed;inset:0;z-index:999;background:rgba(15,23,42,.55);display:flex;align-items:center;justify-content:center;padding:16px';
+  var esc=function(t){ return String(t||'').replace(/[<>&]/g,function(c){return {'<':'&lt;','>':'&gt;','&':'&amp;'}[c];}); };
+  m.innerHTML='<div style="background:#fff;border-radius:16px;max-width:420px;width:100%;padding:18px 18px 14px;font-family:inherit">'
+    +'<div style="font-size:28px;line-height:1">🔔</div>'
+    +'<div style="font-size:17px;font-weight:800;margin-top:6px">'+H.length+' cobro'+(H.length===1?'':'s')+' para comprobar hoy</div>'
+    +'<div style="font-size:12.5px;color:#64748B;margin:4px 0 10px">Lo que los comerciales dijeron que pagaba hoy (o antes), y sus respuestas.</div>'
+    +H.slice(0,6).map(function(i){ return '<div style="font-size:13px;padding:6px 0;border-top:1px solid #EEF1F5"><b>'+esc(i.cliente)+'</b>'
+      +'<span style="color:#64748B"> · '+(i.estadoCobro==='respondido'?'ha respondido el comercial':String(i.fecha||'').split('-').reverse().join('/'))+'</span></div>'; }).join('')
+    +(H.length>6?'<div style="font-size:12px;color:#64748B;padding-top:4px">y '+(H.length-6)+' más</div>':'')
+    +'<button id="avc-ir" style="margin-top:12px;width:100%;padding:13px;border:none;border-radius:12px;background:#0F172A;color:#fff;font-size:14px;font-weight:800;cursor:pointer">Comprobar ahora</button>'
+    +'<button id="avc-luego" style="margin-top:6px;width:100%;padding:10px;border:none;background:none;color:#64748B;font-size:13px;font-weight:700;cursor:pointer">Más tarde</button></div>';
+  document.body.appendChild(m);
+  document.getElementById('avc-ir').onclick=function(){ m.remove(); abrirCompromisos(); };
+  document.getElementById('avc-luego').onclick=function(){ m.remove(); };
 }
 function abrirCierres(sem){
   var pc=perfilCierreHub(currentUser); if(!pc){ alert('Tu perfil no tiene cierre semanal.'); return; }
@@ -1291,6 +1384,7 @@ function renderHub(){
     list.insertBefore(ci,list.firstChild);
     estadoCierreHub(pc).then(function(t){ var el=document.getElementById('hub-cierre-sub'); if(el&&t) el.innerHTML=t; }).catch(function(){});
   })();
+  try{ hubCompromisos(list); }catch(e){}
 
   // El análisis vive ahora dentro del CRM, en la pestaña Análisis, así que
   // ya no se accede desde aquí.
