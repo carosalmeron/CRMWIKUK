@@ -130,7 +130,7 @@ const ROL=(()=>{ const r=(Q.get("rol")||"comercial").toLowerCase();
 const AGENTE=U(Q.get("agente")), UID=(Q.get("uid")||"").trim(), EQUIPO=U(Q.get("equipo")), NOMBRE=(Q.get("nombre")||"").trim();
 // Mientras se valida el sistema el CEO recibe copia de todas las actas. Para quitarlo: false
 const CC_CEO_VALIDACION=true;
-const VERSION_CIERRES="1-oct 15:10";
+const VERSION_CIERRES="1-oct 15:20";
 const EQUIPOS_NO_AGENTE=["WIKUK","INTERKEY","FRANCIA","DISTRIBUIDOR"];
 const ROL_COM=["agente","crm_agente","comercial","vendedor"];
 // Francia no entra en los cierres. Distribuidor puede cerrar, pero es opcional:
@@ -468,6 +468,8 @@ window.abrirCobros=()=>abrirCapa("💶 Cobros",marco("cobros.html?agente=__ALL__
 
 // ── El parte de un comercial: el correo que se guardó al cerrar ──
 const comPorId=(id)=>D.coms.find(p=>p.id===id);
+// Código con el que el comercial cierra su parte (el de ventas, no el id interno u_…)
+const codCom=(p)=>U((p.inf&&p.inf.agente)||p.cod);
 function htmlParte(p,dest){
   const inf=p.inf;
   if(!inf) return `<p class="cs">${esc(p.nombre)} no ha cerrado su parte de la semana ${W.sem}.</p>`;
@@ -576,7 +578,7 @@ window.compromisoComite=async(k,id,btn)=>{
   try{
     const doc=await RC.crearCompromiso({cliente:it.nom,codigo:it.cod||"",empresa:"",importe:it.ven||0,
       accion:CC_SEL[k],fecha,nota:((document.getElementById("cn_"+id).value||"")+" (acordado en el comité de la semana "+W.sem+")").trim(),
-      agente:p.cod,equipo:p.equipo},{id:UID||AGENTE,nombre:NOMBRE||AGENTE});
+      agente:codCom(p),equipo:p.equipo},{id:UID||AGENTE,nombre:NOMBRE||AGENTE});
     Object.assign(it,{sinPlan:false,compId:doc._id,accion:doc.accionCobro,fecha:doc.fechaCompromiso,nota:document.getElementById("cn_"+id).value||"",adm:"Pendiente de comprobar",
       acc:`${doc.accionCobro} · para el ${RC.fechaES(doc.fechaCompromiso)}`,
       hist:[{f:doc.fecha,por:NOMBRE||AGENTE,t:doc.historial[0].accion}]});
@@ -585,15 +587,17 @@ window.compromisoComite=async(k,id,btn)=>{
   }catch(e){ btn.disabled=false; btn.textContent="Guardar compromiso"; alert("No se ha guardado: "+e.message); }
 };
 window.cobrosDesdeComite=()=>{ const id=AC.id, p=comPorId(id); guardarBorrador();
-  abrirCapa("💶 Cobros de "+p.nombre,marco("cobros.html?agente="+encodeURIComponent(p.cod)+"&nombre="+encodeURIComponent(p.nombre)+"&vista=vencidos"),()=>abrirComite(id)); };
+  abrirCapa("💶 Cobros de "+p.nombre,marco("cobros.html?agente="+encodeURIComponent((COMX[id]||{}).cobCod||codCom(p))+"&nombre="+encodeURIComponent(p.nombre)+"&vista=vencidos"),()=>abrirComite(id)); };
 // Recuperación (casos abiertos) y cobros (cliente a cliente + compromisos) del comercial
 const COMX={};
 async function extrasDe(p){
   const cl=new Set(p.claves.map(U));
   const [casos,comp]=await Promise.all([RC.leerCasos().catch(()=>[]),RC.leerCompromisos().catch(()=>[])]);
   let cobDoc=null;
-  for(const c of [p.cod,...p.claves]){ try{ const r=await fetch(`${FB}/cobros_comercial/${encodeURIComponent(U(c))}`,{cache:"no-store"});
-    if(r.ok){ cobDoc=RC.desdeFB(await r.json()); break; } }catch(e){} }
+  let cobCod="";
+  const pruebas=[p.inf&&p.inf.agente,p.cod,...p.claves].map(U).filter((c,i,l)=>c&&l.indexOf(c)===i&&!/^U\d{8,}$/.test(c));
+  for(const c of pruebas){ try{ const r=await fetch(`${FB}/cobros_comercial/${encodeURIComponent(c)}`,{cache:"no-store"});
+    if(r.ok){ cobDoc=RC.desdeFB(await r.json()); cobCod=c; break; } }catch(e){} }
   const hist=(c)=>(c.historial||[]).slice(-6).reverse().map(h=>({f:String(h.fecha||"").slice(0,10),por:h.por||"",t:h.sistema||h.texto||h.nota||""}));
   const rec=casos.filter(c=>RC.abierto(c)&&cl.has(U(c.agente))).sort((a,b)=>b.perdido-a.perdido).map(c=>({
     k:"rec:"+c._id,caso:c._id,nom:c.nombre||c.cliente,desc:`Cae ${RC.eur(c.perdido)} · ${({abierto:"sin diagnosticar",diagnosticado:"diagnosticado",en_accion:"en acción",propuesta_archivo:"propuesta de archivo"})[c.estado]||c.estado}`,
@@ -611,7 +615,7 @@ async function extrasDe(p){
       txt:"",sinPlan:!ab,compId:ab?ab._id:"",
       hist:(ab?ab.historial||[]:[]).slice(-6).reverse().map(h=>({f:h.fecha||"",por:h.por||"",t:(h.accion||"")+(h.nota?" — "+h.nota:"")}))};
   });
-  return {rec,cob};
+  return {rec,cob,cobCod};
 }
 function sinContestar(it){ return !it.soloTxt&&!it.sinPlan&&it.sinPlan!==false&&!it.acc&&!it.txt; }
 // Opciones de decisión: las mismas que en la plantilla del parte
@@ -754,14 +758,14 @@ window.cerrarComite=async()=>{
     const sig=semSig();
     for(const [i,x] of accs.entries()){
       if(!["Comercial","Los dos"].includes(x.quien)) continue;
-      const oid="obj_"+p.cod+"_"+sig.anio+"_s"+sig.sem+"_comite"+Date.now()+"_"+i;
-      await escribir("objetivos_semana",oid,{id:oid,agente:p.cod,semana:sig.sem,anio:sig.anio,
+      const oid="obj_"+codCom(p)+"_"+sig.anio+"_s"+sig.sem+"_comite"+Date.now()+"_"+i;
+      await escribir("objetivos_semana",oid,{id:oid,agente:codCom(p),semana:sig.sem,anio:sig.anio,
         texto:(x.ref?x.ref+" — ":"")+x.que+(x.quien==="Los dos"?" (con tu jefe)":"")+(x.cuando?" · para el "+x.cuando.split("-").reverse().join("/"):""),
         tipo:"general",origen:"jefe",claveOrigen:"comite:"+W.sem+":"+p.cod+"|instr",refNombre:x.ref||"Comité semana "+W.sem,
         creadoPor:UID||AGENTE,creadoPorNombre:porNombre,equipo:p.equipo,fechaCreacion:ahora});
     }
     let d=null;
-    try{ d=await RC.destinatarios(p.cod,""); if(!CC_CEO_VALIDACION) d.copias=d.copias.filter(x=>x.papel!=="CEO"); }catch(e){ d=null; }
+    try{ d=await RC.destinatarios(codCom(p),""); if(!CC_CEO_VALIDACION) d.copias=d.copias.filter(x=>x.papel!=="CEO"); }catch(e){ d=null; }
     const to=d?[...d.para,...d.copias].map(x=>x.email):[];
     let enviado=false;
     if(to.length){ try{ const r=await fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},
