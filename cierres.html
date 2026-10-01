@@ -94,6 +94,7 @@
 <main id="app"><p class="estado">Cargando…</p></main>
 <div id="capa" hidden><div class="fbar"><button onclick="cerrarCapa()" aria-label="Volver">‹</button><b id="capaT"></b></div><div id="capaC"></div></div>
 
+<script src="agentes.js"></script>
 <script src="recuperacion_comun.js?v=20261001a"></script>
 <script>
 // ══ Parámetros ════════════════════════════════════════════════════════
@@ -163,8 +164,56 @@ const codDe=(f)=>[f.grupoAgente,f.catalogoVendedor].map(U).filter(c=>c&&EQUIPOS_
 const nombreDe=(f)=>f.nombre||f.username||f._id;
 const iniciales=(n)=>String(n||"?").split(/\s+/).filter(Boolean).slice(0,2).map(x=>x[0]).join("").toUpperCase();
 
+// ── Lista de comerciales: copia fiel de cargarUsuarios() de objetivos_equipo.html ──
+function listaComerciales(us,pu,res){
+  const A=window.Agentes||{conocido:()=>false,id:x=>x,nombre:x=>x,equipo:()=>"",alias:()=>[]};
+  const NO_PERSONA=/^(interc|clientsdirect|cataluna|cataluña|tienda|telefono|sinagente|_?total|campofrio|wikuk|interkey|francia|distribuidor)/i;
+  const esCanal=(x)=>NO_PERSONA.test(String(x||"").replace(/[.\s_-]/g,""));
+  const map={}, PU_IDS=new Set(pu.map(p=>p._id)), PORTAL_FIJOS=new Set(["wk1","wk2","wk3","ik1","ik2"]);
+  const pareceCodigo=(n)=>!n||/^u_\d+$/i.test(n)||/^[a-z0-9_.]+$/.test(n);
+  [...us,...pu].forEach(u=>{
+    const rol=String(u.rol||"").toLowerCase();
+    if(!ROL_COM.includes(rol)) return;
+    if(u.activo===false||String(u.activo)==="false") return;
+    const esCuenta=PU_IDS.has(u._id)||PORTAL_FIJOS.has(String(u._id||"").toLowerCase())||PORTAL_FIJOS.has(String(u.crmId||"").toLowerCase());
+    const posibles=[u.id,u._id,u.crmId,u.grupoAgente,u.catalogoVendedor,u.username,u.nombre].filter(Boolean);
+    let canon=null, ficha=null;
+    for(const k of posibles){ if(A.conocido(k)){ canon=A.id(k); ficha=k; break; } }
+    if(!canon){ canon=u.id||u._id||u.username; ficha=canon; }
+    if(!canon) return;
+    const cands=[u.nombre,A.nombre(ficha),u.username,canon].map(x=>String(x||"").trim()).filter(Boolean);
+    const nombre=cands.find(n=>!pareceCodigo(n))||cands[0]||canon;
+    if(esCanal(nombre)||esCanal(canon)||esCanal(u.catalogoVendedor)) return;
+    if(!map[canon]) map[canon]={id:canon,nombre,equipo:U(A.equipo(ficha)||u.equipo||""),
+      cod:U(u.grupoAgente||u.catalogoVendedor||canon),alias:A.alias(ficha),
+      entrega:String(u.entregaParte||"").toLowerCase(),cuenta:esCuenta};
+    else{ const m=map[canon];
+      if(pareceCodigo(m.nombre)&&!pareceCodigo(nombre)) m.nombre=nombre;
+      else if(nombre.length>m.nombre.length&&!pareceCodigo(nombre)) m.nombre=nombre;
+      if(esCuenta) m.cuenta=true;
+      if(!m.equipo&&u.equipo) m.equipo=U(u.equipo);
+      if(!m.entrega&&u.entregaParte) m.entrega=String(u.entregaParte).toLowerCase(); }
+  });
+  const nomN=(x)=>String(x||"").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^A-Z0-9]/g,"");
+  const porNom={};
+  Object.values(map).forEach(u=>{ const k=nomN(u.nombre); if(!k) return; const m=porNom[k];
+    if(!m){ porNom[k]=u; return; }
+    const [base,otro]=(u.cuenta&&!m.cuenta)?[u,m]:[m,u];
+    base.alias=[...new Set([...(base.alias||[]),...(otro.alias||[]),U(otro.id),U(otro.cod)])];
+    base.cuenta=base.cuenta||otro.cuenta; base.entrega=base.entrega||otro.entrega; base.equipo=base.equipo||otro.equipo;
+    if(pareceCodigo(base.nombre)&&!pareceCodigo(otro.nombre)) base.nombre=otro.nombre;
+    porNom[k]=base; });
+  let l=Object.values(porNom).filter(u=>!/^u_\d+$/i.test(u.nombre));
+  const eqDe={}; (res||[]).forEach(r=>{ if(r.equipo) eqDe[U(r.agente||r._id)]=U(r.equipo); });
+  l.forEach(u=>{ if(!u.equipo){ const k=[u.cod,u.id,...(u.alias||[])].map(U).find(x=>eqDe[x]); if(k) u.equipo=eqDe[k]; } });
+  // Fuera quien no tiene que entregar parte («no entrega» o sin usuario en el portal)
+  l=l.filter(u=>!(u.entrega==="no"||(u.entrega!=="si"&&!u.cuenta)));
+  return l.sort((a,b)=>a.nombre.localeCompare(b.nombre));
+}
 async function cargar(){
-  const [us,inf,flu]=await Promise.all([RC.leer("usuarios",10),consultaSemana("informes"),consultaSemana("cierres_flujo").catch(()=>[])]);
+  const [us,pu,res,inf,flu]=await Promise.all([RC.leer("usuarios",10),RC.leer("portal_users",10),
+    RC.leer("pbi_resumen_agente",10).catch(()=>[]),consultaSemana("informes"),consultaSemana("cierres_flujo").catch(()=>[]),
+    (window.Agentes?Agentes.cargar():Promise.resolve())]);
   const porId={}; us.forEach(f=>porId[f._id]=f);
   const dup=(f)=>f.duplicadaDe&&f.duplicadaDe!==f._id&&porId[f.duplicadaDe]&&!porId[f.duplicadaDe].duplicadaDe;
   const activos=us.filter(f=>f.activo!==false&&String(f.activo)!=="false"&&!dup(f)&&String(f.entregaParte||"").toLowerCase()!=="no");
@@ -175,7 +224,14 @@ async function cargar(){
   const flujo=flu.filter(d=>Number(d.anio)===W.anio);
   const informeDe=(f)=>{ const cl=clavesDe(f); return informes.find(d=>cl.includes(U(d.agente))||[f._id,f.id].includes(String(d.uid||""))); };
   const persona=(f,papel)=>({f,papel,id:f._id,cod:codDe(f),claves:clavesDe(f),nombre:nombreDe(f),equipo:U(f.equipo),inf:informeDe(f),opc:OPCIONAL(f.equipo)});
-  const coms=activos.filter(f=>!FUERA(f.equipo)).filter(f=>(ROL_COM.includes(rolDe(f))||(String(f.entregaParte||"").toLowerCase()==="si"&&!rolDe(f)))&&!f.tipologia).map(f=>persona(f,"comercial"));
+  // Comerciales: la MISMA lista que el cierre del director (objetivos_equipo.html,
+  // cargarUsuarios): se unen las fichas de la misma persona, fuera canales e
+  // intercompañía, y fuera quien tiene «no entrega parte» o no tiene usuario.
+  const coms=listaComerciales(us,pu,res).filter(c=>!FUERA(c.equipo)).map(c=>{
+    const cl=[...new Set([...(window.Agentes?Agentes.alias(c.id):[]),...(c.alias||[]),U(c.cod),U(c.id)].map(U).filter(Boolean))];
+    return {f:c,papel:"comercial",id:c.id,cod:c.cod,claves:cl,nombre:c.nombre,equipo:c.equipo,opc:OPCIONAL(c.equipo),
+      inf:informes.find(d=>cl.includes(U(d.agente))||cl.includes(U(d.uid)))};
+  });
   const jefes=activos.filter(f=>!FUERA(f.equipo)).filter(f=>["jefe","crm_jefe"].includes(rolDe(f))&&!f.tipologia).map(f=>persona(f,"jefe"));
   const dirs=activos.filter(f=>["director","crm_director"].includes(rolDe(f))).map(f=>persona(f,"director"));
   // Comité y acta de cada comercial
