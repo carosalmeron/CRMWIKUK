@@ -76,6 +76,8 @@
   .chip:disabled.on{opacity:1}
   .peart .chip{margin:0 4px 4px 0}
   .prueba{background:#FEF3C7;color:#92400E;font-size:11.5px;font-weight:700;text-align:center;padding:6px}
+.paso .paso.anidado{border:0!important;padding:0!important;margin:0 0 6px!important;box-shadow:none!important;background:none!important}
+.mover{margin-top:12px}
 </style></head><body>
 
 <div class="prueba" id="avisoPrueba" style="display:none">MODO PRUEBA · puedes rellenarlo todo, pero «Cerrar semana» no guarda nada</div>
@@ -134,7 +136,8 @@ function val(f){
 }
 // pbi_pedidos son LINEAS de pedido, decenas de miles. Leer la coleccion
 // entera se corta por paginacion, asi que se pregunta solo por las suyas.
-async function pedidosDe(ag){
+async function pedidosDe(ag){ return conCache("ped:"+ag,30,()=>pedidosFB(ag)); }
+async function pedidosFB(ag){
   const t=[]; let tok=null,v=0;
   do{
     const body={ structuredQuery:{
@@ -157,7 +160,36 @@ async function pedidosDe(ag){
   return t;
 }
 
-async function leer(col){
+// (oct 2026) Caché local de lecturas. La primera vez se lee todo de Firebase;
+// si se vuelve atrás y se entra otra vez (o se abre el comité del mismo
+// comercial) se usa lo ya leído y la pantalla sale al momento. Las tablas del
+// PBI cambian una vez al día (30 min de vida); lo que se toca a mano (muestras,
+// ofertas, estrategias, visitas) solo 10 min y se borra al guardar algo nuestro.
+const CACHE_VIDA={muestras:10,ofertas:10,estrategias:10,visitas:10};
+const _cdb=(()=>{ let p=null; return ()=>p||(p=new Promise((ok,ko)=>{ try{
+  const r=indexedDB.open("cierre_cache",1);
+  r.onupgradeneeded=()=>r.result.createObjectStore("t");
+  r.onsuccess=()=>ok(r.result); r.onerror=()=>ko(r.error); }catch(e){ ko(e); } })); })();
+async function cacheLee(k,min){ try{ const db=await _cdb();
+  const o=await new Promise((ok,ko)=>{ const q=db.transaction("t").objectStore("t").get(k); q.onsuccess=()=>ok(q.result); q.onerror=()=>ko(q.error); });
+  return o&&Date.now()-o.t<min*60000?o.d:null; }catch(e){ return null; } }
+async function cacheGuarda(k,d){ try{ const db=await _cdb();
+  db.transaction("t","readwrite").objectStore("t").put({t:Date.now(),d},k); }catch(e){} }
+window.cacheBorra=async(k)=>{ try{ const db=await _cdb(); const st=db.transaction("t","readwrite").objectStore("t");
+  k?st.delete(k):st.clear(); }catch(e){} };
+window.CACHE_USADA=0;
+async function conCache(k,min,fn){
+  if(!window._SIN_CACHE){ const c=await cacheLee(k,min); if(c){ window.CACHE_USADA++; return c; } }
+  const d=await fn(); if(d&&d.length) cacheGuarda(k,d); return d; }
+// Las tablas maestras que lee el módulo común (usuarios, clientes, departamentos)
+// también se guardan; lo que se edita en las fichas (recuperación…) no.
+const CACHE_RC=new Set(["usuarios","clientes","departamentos","portal_users"]);
+if(window.RC&&!RC._conCache){ RC._conCache=1;
+  const _l=RC.leer, _lp=RC.leerProfundo;
+  RC.leer=(col,max)=>CACHE_RC.has(col)?conCache("rc:"+col+":"+(max||""),30,()=>_l(col,max)):_l(col,max);
+  if(_lp) RC.leerProfundo=(col)=>CACHE_RC.has(col)?conCache("rcp:"+col,30,()=>_lp(col)):_lp(col); }
+async function leer(col){ return conCache("col:"+col,CACHE_VIDA[col]||30,()=>leerFB(col)); }
+async function leerFB(col){
   const t=[]; let tok=null,v=0;
   do{
     const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""));
@@ -794,6 +826,19 @@ function tarjetaSemana(){
 function claveAp(t){ const x=ORDEN_AP.find(([k,re])=>re.test(t)); return x?x[0]:"z_"+t; }
 function arbolizar(){
   const app=document.getElementById("app"); if(!app) return;
+  // (oct 2026) Estrategias y muestras paradas van dentro de SU apartado, no en «Lo que se está enfriando»
+  app.querySelectorAll(".mover[data-a]").forEach(mv=>{
+    if(!mv.querySelector(".item")){ mv.remove(); return; }       // «nada pendiente»: no se mueve
+    let dest=app.querySelector(`:scope > .paso[data-k="${mv.dataset.a}"]`);
+    if(!dest&&mv.dataset.a==="est"){
+      dest=document.createElement("div"); dest.className="paso"; dest.dataset.k="est";
+      dest.innerHTML=`<p class="tit">Estrategias</p><p class="sub">Las que llevan más de ${REGLAS.estrategias.dias} días sin moverse: sigues, la cierras o la replanteas.</p>`;
+      const er=document.getElementById("bloqueEstRes");
+      if(er&&er.parentNode===app&&er.classList.contains("paso")){ app.insertBefore(dest,er); er.classList.add("anidado"); dest.appendChild(er); }
+      else app.appendChild(dest);
+    }
+    if(dest) dest.appendChild(mv);
+  });
   const pasos=[...app.querySelectorAll(":scope > .paso")];
   const filas=pasos.map(p=>{
     const tit=p.querySelector(".tit"); const titulo=tit?tit.textContent.replace(/^\s*[\d✓+!⭐💶📊]+\s*/u,"").trim():"Apartado";
@@ -919,23 +964,70 @@ function muestrasAnioH(){
           <div style="flex:1;min-width:0">${_escR(x.prod||"(sin producto)")}<small style="display:block;color:#64748B">${x.d!=null?x.d+" días · ":""}<span class="mest">${_escR(x.est)}</span></small></div>
           <button type="button" class="chip abreficha" style="font-size:11.5px;white-space:nowrap" onclick="fichaMuestra('${_escR(x.id)}')">Abrir ›</button></div>`).join("")}</details>`).join("")}</details>`; })():""}`;
 }
-window.fichaMuestra=(id)=>{
+// La muestra, aquí mismo: los mismos resultados y campos que en Muestras del CRM
+// (estado, nota, motivo, fecha de revisión, historial), así que es la misma muestra.
+const _desM=(f)=>{ if(!f) return null; if(f.arrayValue) return (f.arrayValue.values||[]).map(_desM);
+  if(f.mapValue){ const o={}; for(const [k,x] of Object.entries(f.mapValue.fields||{})) o[k]=_desM(x); return o; }
+  if(f.stringValue!==undefined) return f.stringValue; if(f.integerValue!==undefined) return Number(f.integerValue);
+  if(f.doubleValue!==undefined) return Number(f.doubleValue); if(f.booleanValue!==undefined) return f.booleanValue; return null; };
+const FB_MUE=[["positivo","✅","Le gusta","#16A34A"],["pedido","🛒","Ha pedido","#2563EB"],["ko","❌","No le gusta","#DC2626"],["seguimiento","🕓","En seguimiento largo","#D97706"]];
+const MOT_KO=["Calidad insuficiente","Precio no competitivo","Plazo de entrega","Calibre o formato no disponible","No encaja con su proceso","Competencia ofrece mejor","Cliente sin interés real","Otro"];
+const MOT_OK=["Calidad superior a competencia","Precio competitivo","Buen rendimiento en producción","Innovación / producto único","Servicio y atención comercial","Otro"];
+let MUE_SEL=null;
+window.fichaMuestra=async(id)=>{
   const d=document.createElement("div"); d.id="capaMue"; d.dataset.id=id;
-  d.style.cssText="position:fixed;inset:0;z-index:90;background:#fff;display:flex;flex-direction:column";
+  d.style.cssText="position:fixed;inset:0;z-index:90;background:#F8FAFC;display:flex;flex-direction:column";
   d.innerHTML=`<div style="padding:10px 14px;background:#0F172A"><button onclick="cerrarFichaMuestra()" style="background:none;border:none;color:#fff;font-size:15px;font-weight:800;cursor:pointer">‹ Volver ${MODO_COMITE?"al comité":"al cierre"}</button></div>
-    <iframe src="/crm.html?muestra=${encodeURIComponent(id)}#${encodeURIComponent((MODO_COMITE?JEFE.id:(UID||AGENTE))+(MODO_COMITE?"":"|"+AGENTE))}" style="flex:1;border:0;width:100%"></iframe>`;
+    <div id="mueBox" style="flex:1;overflow-y:auto;padding:14px 16px 40px;max-width:640px;width:100%;margin:0 auto"><p class="estado">Abriendo la muestra…</p></div>`;
   document.body.appendChild(d); document.body.style.overflow="hidden";
+  try{ const r=await fetch(`${FB}/muestras/${encodeURIComponent(id)}`,{cache:"no-store"}); if(!r.ok) throw new Error("HTTP "+r.status);
+    const f=(await r.json()).fields||{}, m={id}; for(const [k,x] of Object.entries(f)) m[k]=_desM(x);
+    MUE_SEL={m,fb:"",motivo:"",nota:"",rev:""}; pintarMuestra();
+  }catch(e){ document.getElementById("mueBox").innerHTML=`<p class="estado">No se ha podido abrir la muestra: ${_escR(e.message)}</p>`; }
 };
-window.addEventListener("message",ev=>{ if(ev.data&&ev.data.type==="MUESTRA_GUARDADA"&&document.getElementById("capaMue")) setTimeout(cerrarFichaMuestra,700); });
-window.cerrarFichaMuestra=async()=>{
+function pintarMuestra(){
+  const S=MUE_SEL, m=S.m, box=document.getElementById("mueBox"); if(!box) return;
+  const e=String(m.estado||"").toLowerCase(), cerrada=!!m.fechaFeedback&&e!=="seguimiento";
+  const f=m.fecha||m.fechaCreacion||"", hist=[...(m.historial||[])].filter(Boolean);
+  box.innerHTML=`<div class="card"><p class="ctit">📦 ${_escR(m.clienteNombre||m.cliente||"")}</p>
+      <p class="csub">${_escR(m.prodNombre||m.descripcion||m.producto||m.prod||"")}${m.prodCodigo?" · "+_escR(m.prodCodigo):""}${m.uds?" · "+_escR(m.uds)+" uds":""}</p>
+      <p style="font-size:13px;margin:4px 0 0">Enviada ${_escR(String(f).slice(0,10).split("-").reverse().join("/"))} · estado <b>${_escR(m.estado||"enviada")}</b>${m.fechaFeedback?" · respuesta "+_escR(m.fechaFeedback):""}</p>
+      ${m.nota?`<p style="font-size:13px;color:#475569;margin:4px 0 0">📝 ${_escR(m.nota)}</p>`:""}</div>
+    ${hist.length?`<div class="card"><p class="ctit">Comentarios</p>${hist.map(h=>`<div style="font-size:13px;border-top:1px solid #EEF1F5;padding:5px 0"><b>${_escR(h.por||"")}</b> <span style="color:#64748B">${_escR(h.fecha||"")}</span><br>${_escR(h.texto||"")}</div>`).join("")}</div>`:""}
+    ${cerrada?`<div class="card" style="background:#F0FDF4;color:#166534">✓ Esta muestra ya tiene resultado.</div>`:`
+    <div class="card"><p class="ctit">¿Qué dice el cliente?</p>
+      ${FB_MUE.map(([k,ic,t,col])=>`<button type="button" onclick="MUE_SEL.fb='${k}';MUE_SEL.motivo='';pintarMuestra()" style="width:100%;display:flex;gap:10px;align-items:center;padding:12px;border-radius:12px;border:2px solid ${S.fb===k?col:"#E2E8F0"};background:${S.fb===k?col+"12":"#fff"};margin-top:8px;cursor:pointer;font:inherit;font-size:15px;font-weight:${S.fb===k?800:500};color:${S.fb===k?col:"#0F172A"}"><span style="font-size:22px">${ic}</span>${t}</button>`).join("")}
+      ${S.fb==="ko"||S.fb==="positivo"||S.fb==="pedido"?`<label class="lbl2" style="margin-top:10px">${S.fb==="ko"?"Motivo del rechazo *":"¿Qué le ha gustado?"}</label>
+        <select class="rvt" onchange="MUE_SEL.motivo=this.value"><option value="">— Seleccionar —</option>${(S.fb==="ko"?MOT_KO:MOT_OK).map(x=>`<option${S.motivo===x?" selected":""}>${x}</option>`).join("")}</select>`:""}
+      ${S.fb==="seguimiento"?`<label class="lbl2" style="margin-top:10px">Volver a avisarme el…</label><input class="rvt" type="date" value="${S.rev}" onchange="MUE_SEL.rev=this.value">`:""}
+      ${S.fb?`<textarea class="rvt" placeholder="Nota (qué ha dicho, próximos pasos)" oninput="MUE_SEL.nota=this.value">${_escR(S.nota)}</textarea>
+        <button class="env" style="background:#0F172A;color:#fff" onclick="guardarMuestra(this)">Guardar resultado</button>`:""}
+      <p class="csub" style="margin-top:8px">Para enviarla a proyecto, hazlo desde Muestras en el CRM.</p></div>`}
+    <div class="card"><p class="ctit">Añadir comentario</p><textarea class="rvt" id="mueCom" placeholder="Comentario"></textarea>
+      <button class="env" style="background:#fff;border:1.5px solid #E2E8F0" onclick="comentarMuestra(this)">Añadir</button></div>`;
+}
+const _quienSoy=()=>MODO_COMITE?JEFE.nombre:((window._CIERRE_DATOS&&window._CIERRE_DATOS.yo&&window._CIERRE_DATOS.yo.nombre)||NOMBRE_COM||AGENTE);
+window.guardarMuestra=async(b)=>{
+  const S=MUE_SEL; if(!S||!S.fb) return; if(S.fb==="ko"&&!S.motivo){ alert("Elige el motivo del rechazo"); return; }
+  b.disabled=true; b.textContent="Guardando…";
+  let rev=""; if(S.fb==="seguimiento"){ if(S.rev) rev=S.rev; else { const d=new Date(); d.setDate(d.getDate()+60); rev=d.toISOString().slice(0,10); } }
+  const hist=(Array.isArray(S.m.historialEstado)?S.m.historialEstado.slice():[]).concat([{estado:S.fb,fecha:new Date().toISOString(),por:_quienSoy(),fuente:MODO_COMITE?"comite":"cierre"}]);
+  const c={estado:S.fb,nota:S.nota||"",motivo:S.motivo||"",revisarEl:rev,fechaFeedback:new Date().toLocaleDateString("es-ES"),historialEstado:hist};
+  try{ await RC.guardarEn("muestras",S.m.id,c,true); cacheBorra("col:muestras"); Object.assign(S.m,c); cerrarFichaMuestra(true); }
+  catch(e){ b.disabled=false; b.textContent="Guardar resultado"; alert("No se ha guardado: "+e.message); }
+};
+window.comentarMuestra=async(b)=>{
+  const t=(document.getElementById("mueCom").value||"").trim(); if(!t) return; const S=MUE_SEL;
+  const h=[...(S.m.historial||[]),{texto:t,por:_quienSoy(),fecha:new Date().toLocaleDateString("es-ES")}];
+  b.disabled=true; try{ await RC.guardarEn("muestras",S.m.id,{historial:h},true); cacheBorra("col:muestras"); S.m.historial=h; pintarMuestra(); }catch(e){ alert(e.message); b.disabled=false; }
+};
+window.cerrarFichaMuestra=(guardada)=>{
   const d=document.getElementById("capaMue"); if(!d) return; const id=d.dataset.id; d.remove(); document.body.style.overflow="";
-  try{ const r=await fetch(`${FB}/muestras/${encodeURIComponent(id)}`,{cache:"no-store"}); if(!r.ok) return;
-    const f=(await r.json()).fields||{}, est=(f.estado&&f.estado.stringValue)||"", fb=f.fechaFeedback&&f.fechaFeedback.stringValue;
-    const row=document.getElementById("mr_"+id); if(!row) return;
-    const cerrada=fb||/pedido|positiv|aceptada|proyecto|ko|rechaz|negativ|cerrad/.test(est.toLowerCase());
-    const e=row.querySelector(".mest"); if(e) e.textContent=est||"enviada";
-    if(cerrada){ row.style.background="#F0FDF4"; if(e) e.innerHTML=`<b style="color:#15803D">✓ ${_escR(est)}</b>`; }
-  }catch(e){}
+  const m=MUE_SEL&&MUE_SEL.m; MUE_SEL=null; if(!m||m.id!==id) return;
+  const row=document.getElementById("mr_"+id); if(!row) return;
+  const e=row.querySelector(".mest"), est=m.estado||"enviada";
+  if(m.fechaFeedback&&est!=="seguimiento"){ row.style.background="#F0FDF4"; if(e) e.innerHTML=`<b style="color:#15803D">✓ ${_escR(est)}${m.motivo?" · "+_escR(m.motivo):""}</b>`; }
+  else if(e) e.textContent=est;
 };
 window.cobFecha=(k,v)=>{ R[k]=R[k]||{}; R[k].fecha=v; refrescar(); };
 
@@ -961,6 +1053,8 @@ async function guardarCompromisosCobro(){
 // 💬 comentario y ➕ acción. Al final, el acta. Igual que la plantilla.
 // ══════════════════════════════════════════════════════════════════════
 const MODO_COMITE=P.get("modo")==="comite";
+window.addEventListener("error",(ev)=>{ try{ if(window._MONTADO) return; const el=document.getElementById("app");
+  if(el) el.innerHTML=`<div class="estado" style="color:#B91C1C">No se ha podido montar el cierre: ${String((ev.error&&ev.error.message)||ev.message||"error").replace(/[<>&]/g,"")}<br><small>${String(ev.filename||"").split("/").pop()} ${ev.lineno||""}</small><br><button class="env" style="max-width:260px;background:#0F172A;color:#fff" onclick="location.reload()">Volver a intentar</button></div>`; }catch(e){} });
 let NOMBRE_COM="";
 const JEFE={id:P.get("jefe")||"",nombre:P.get("jefeNombre")||"Jefe"};
 const CC_CEO_VALIDACION=true;
@@ -1898,7 +1992,7 @@ async function avisarDelCierre(nCerradas, opts){
 
 async function enviar(){
   if(P.get("prueba")==="1"){ alert("Modo prueba: no se ha guardado nada. Con la página definitiva, aquí se cerraría tu semana."); return; }
-  const b=document.getElementById("btn"); b.disabled=true; b.textContent="Guardando…";
+  const b=document.getElementById("btn"); b.disabled=true; b.textContent="Guardando…"; cacheBorra();
   const doc={
     id:`informe_${AGENTE}_s${SEMANA}`, agente:AGENTE, semana:SEMANA,
     // El portal comprueba con esto si ya ha cerrado (candado del sabado)
@@ -2055,7 +2149,16 @@ async function enviar(){
     '<p class="estado">Falta indicar el comercial: añade <b>?agente=CARLOSG</b> a la dirección.</p>';
     _svErr("falta el comercial"); return; }
   try{
-    const [res,cli,mesesRaw,mu,of,es,estac,objs,peds,perf,portal,usus,vis,objAct]=await Promise.all([
+    // (oct 2026) Progreso visible: qué se está leyendo y cuánto falta (antes solo ponía «Leyendo…»)
+    const _NOMS=["ventas","clientes","meses","muestras","ofertas","estrategias","estacionalidad","objetivos","pedidos","perfiles","usuarios del portal","usuarios","visitas","objetivos del equipo"];
+    let _hechas=0; const _t0=Date.now(), _faltan=new Set(_NOMS);
+    const _pinta=()=>{ const el=document.getElementById("app"); if(!el||window._MONTADO) return;
+      el.innerHTML=`<div class="estado">Leyendo tus datos… <b>${_hechas} de ${_NOMS.length}</b> · ${Math.round((Date.now()-_t0)/1000)} s
+        <div style="height:6px;background:#E2E8F0;border-radius:99px;margin:10px 0;overflow:hidden"><i style="display:block;height:6px;width:${Math.round(_hechas/_NOMS.length*100)}%;background:#0F172A"></i></div>
+        <small>Falta: ${[..._faltan].join(", ")}</small></div>`; };
+    const _tick=setInterval(_pinta,1000); _pinta();
+    const _p=(pr,i)=>Promise.resolve(pr).then(v=>{ _hechas++; _faltan.delete(_NOMS[i]); _pinta(); return v; });
+    const _lista=[
       leer("pbi_resumen_agente"), leer("pbi_ventas_cliente"),
       leer("pbi_meses_cliente"), leer("muestras"), leer("ofertas"), leer("estrategias"),
       leer("pbi_estacionalidad"), leer("pbi_objetivos"), pedidosDe(AGENTE),
@@ -2064,7 +2167,14 @@ async function enviar(){
       // (sep 2026) Objetivos de actividad del equipo, para poder decirle al
       // comercial cuantas visitas y llamadas le tocaban, no solo cuantas hizo.
       leer("objetivos_equipo"),
-    ]);
+    ];
+    const [res,cli,mesesRaw,mu,of,es,estac,objs,peds,perf,portal,usus,vis,objAct]=await Promise.all(_lista.map(_p));
+    clearInterval(_tick);
+    if(window.CACHE_USADA){ const sp=document.getElementById("salir"); if(sp&&sp.parentNode&&!document.getElementById("refrescar")){
+      const a=document.createElement("a"); a.id="refrescar"; a.href="#"; a.textContent="🔄 Actualizar datos";
+      a.style.cssText="color:#A7B2BE;font-size:12.5px;margin-left:14px";
+      a.onclick=async(e)=>{ e.preventDefault(); a.textContent="Actualizando…"; await cacheBorra(); location.reload(); };
+      sp.parentNode.appendChild(a); } }
     const yo=res.find(a=>ARR(a._id)===AGENTE);
     if(!yo){ document.getElementById("app").innerHTML=
       `<p class="estado">No encuentro a ${AGENTE} en el resumen.</p>`; _svErr("no está en el resumen de ventas"); return; }
@@ -2244,9 +2354,13 @@ async function enviar(){
         fch:String(o.fecha||o.fechaCreacion||"").slice(0,10)}))
         .sort((a,b)=> tipo==="ofertas" ? b.imp-a.imp : b.d-a.d);
     }
-    const vOf=abiertas(of,"ofertas",["pedido","perdida","aceptada","rechazada"]);
-    const vEs=abiertas(es,"estrategias",["completada","ko","cerrada"]);
-    const vMu=abiertas(mu,"muestras",["positivo","pedido","ko","negativo"]);
+    // (oct 2026) Sin duplicados: lo que ya se ve en otro apartado no se repite aquí.
+    // · Ofertas y estrategias de un plan de recuperación → apartado Recuperación.
+    // · Estrategias aprobadas / pendientes de aprobar → «Tus estrategias de precio».
+    // · Muestras sin resultado → árbol del apartado Muestras (se abren y se cierran allí).
+    const deRecup=(o)=>!!(o.casoId||o.origen==="recuperacion"||/recuper/i.test(String(o.tipo||"")));
+    const vOf=abiertas(of.filter(o=>!deRecup(o)),"ofertas",["pedido","perdida","aceptada","rechazada"]);
+    const vEs=abiertas(es.filter(e=>!deRecup(e)&&!(RC.estAbierta&&RC.estAbierta(e))&&e.estado!=="pendiente_aprobacion"),"estrategias",["completada","ko","cerrada"]);
 
     const bloque=(tit,l,tipo,opciones,pide)=>{
       const g=REGLAS[tipo], v=l.slice(0,g.tope);
@@ -2654,7 +2768,7 @@ async function enviar(){
 
     document.getElementById("hs").textContent=
       `${yo.agente||AGENTE} · ${yo.equipo||""} · semana ${SEMANA} · ${MESES[mNum-1]}`;
-    window._MI_EQUIPO=yo.equipo||"";
+    window._MI_EQUIPO=yo.equipo||""; window._MONTADO=true;
     NOMBRE_COM=(window._CIERRE_DATOS&&window._CIERRE_DATOS.yo&&window._CIERRE_DATOS.yo.nombre)||P.get("nombre")||yo.agente||AGENTE;
     if(MODO_COMITE){ document.querySelector("header h1").textContent="Comité con "+NOMBRE_COM;
       document.getElementById("hs").textContent=(P.get("jefeNombre")||"")+" con "+NOMBRE_COM+" · se revisa su parte delante de él · semana "+SEMANA;
@@ -2771,16 +2885,13 @@ async function enviar(){
         }).join("") : '<p class="sub" style="margin:0">Ninguno da señales por ahora.</p>'}
       </div>
 
-      <div class="paso">
-        <p class="tit"><span class="num">3</span>Lo que se está enfriando</p>
-        <p class="sub">Cerrar o descartar, pero no dejar.
-          <b>Lo que marques como perdido o cerrado se cierra en el CRM</b>, así
-          que no volverá a salir la semana que viene.</p>
+      ${vOf.length?`<div class="paso" data-k="frio">
+        <p class="tit"><span class="num">3</span>Ofertas sin respuesta</p>
+        <p class="sub">${vOf.length} oferta${vOf.length===1?"":"s"} enviada${vOf.length===1?"":"s"} hace más de ${REGLAS.ofertas.dias} días. Lo que marques como perdido se cierra en el CRM.</p>
         ${bloque("Ofertas",vOf,"ofertas",["Insisto","La doy por perdida","Sigue viva"],
           "Si sigue viva, ¿qué falta para cerrarla?")}
-        ${bloque("Estrategias",vEs,"estrategias",["Sigo con ella","La doy por cerrada","La replanteo"],"")}
-        ${bloque("Muestras",vMu,"muestras",["Insisto","La cierro como perdida","Sigue viva"],"")}
-      </div>
+      </div>`:""}
+      ${vEs.length?`<div class="mover" data-a="est">${bloque("Estrategias sin moverse",vEs,"estrategias",["Sigo con ella","La doy por cerrada","La replanteo"],"")}</div>`:""}
 
       ${duplicados.length?`<div class="paso">
         <p class="tit"><span class="num">+</span>¿Son el mismo cliente?</p>
