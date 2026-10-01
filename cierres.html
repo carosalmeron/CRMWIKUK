@@ -86,7 +86,7 @@
   .parte iframe{width:100%;border:0;display:block;min-height:420px}
 </style></head><body>
 <header>
-  <a id="volver" href="#" hidden style="display:inline-block;color:#CBD5E1;font-size:13px;font-weight:700;text-decoration:none;margin-bottom:6px">‹ Volver al CRM</a>
+  <a id="volver" href="#" style="display:none;color:#CBD5E1;font-size:13px;font-weight:700;text-decoration:none;margin-bottom:6px">‹ Volver al CRM</a>
   <h1 id="h1">📋 Cierre de la semana</h1>
   <p class="hs" id="hs"></p>
   <div class="semnav"><button onclick="cambiarSemana(-1)" aria-label="Semana anterior">‹</button><span id="semTxt"></span><button onclick="cambiarSemana(1)" aria-label="Semana siguiente">›</button></div>
@@ -111,6 +111,9 @@ const AGENTE=U(Q.get("agente")), UID=(Q.get("uid")||"").trim(), EQUIPO=U(Q.get("
 const CC_CEO_VALIDACION=true;
 const EQUIPOS_NO_AGENTE=["WIKUK","INTERKEY","FRANCIA","DISTRIBUIDOR"];
 const ROL_COM=["agente","crm_agente","comercial","vendedor"];
+// Francia no entra en los cierres. Distribuidor puede cerrar, pero es opcional:
+// no cuenta como pendiente, ni fuera de plazo, ni para que cierre el siguiente.
+const FUERA=(eq)=>/FRANC/i.test(eq||""), OPCIONAL=(eq)=>/DISTRIB/i.test(eq||"");
 const PAPEL_TXT={comercial:"Comercial",jefe:"Jefe de equipo",director:"Director comercial",ceo:"CEO",admin:"Administración de clientes"};
 
 // ══ Semanas y plazos ══════════════════════════════════════════════════
@@ -171,9 +174,9 @@ async function cargar(){
     return !y||y===W.anio; });
   const flujo=flu.filter(d=>Number(d.anio)===W.anio);
   const informeDe=(f)=>{ const cl=clavesDe(f); return informes.find(d=>cl.includes(U(d.agente))||[f._id,f.id].includes(String(d.uid||""))); };
-  const persona=(f,papel)=>({f,papel,id:f._id,cod:codDe(f),claves:clavesDe(f),nombre:nombreDe(f),equipo:U(f.equipo),inf:informeDe(f)});
-  const coms=activos.filter(f=>(ROL_COM.includes(rolDe(f))||(String(f.entregaParte||"").toLowerCase()==="si"&&!rolDe(f)))&&!f.tipologia).map(f=>persona(f,"comercial"));
-  const jefes=activos.filter(f=>["jefe","crm_jefe"].includes(rolDe(f))&&!f.tipologia).map(f=>persona(f,"jefe"));
+  const persona=(f,papel)=>({f,papel,id:f._id,cod:codDe(f),claves:clavesDe(f),nombre:nombreDe(f),equipo:U(f.equipo),inf:informeDe(f),opc:OPCIONAL(f.equipo)});
+  const coms=activos.filter(f=>!FUERA(f.equipo)).filter(f=>(ROL_COM.includes(rolDe(f))||(String(f.entregaParte||"").toLowerCase()==="si"&&!rolDe(f)))&&!f.tipologia).map(f=>persona(f,"comercial"));
+  const jefes=activos.filter(f=>!FUERA(f.equipo)).filter(f=>["jefe","crm_jefe"].includes(rolDe(f))&&!f.tipologia).map(f=>persona(f,"jefe"));
   const dirs=activos.filter(f=>["director","crm_director"].includes(rolDe(f))).map(f=>persona(f,"director"));
   // Comité y acta de cada comercial
   coms.forEach(p=>{ p.comite=flujo.find(x=>x.paso==="comite"&&p.claves.includes(U(x.agente)))||null;
@@ -187,16 +190,19 @@ async function cargar(){
 
 // ══ Flujo de la semana ════════════════════════════════════════════════
 function pasos(){
-  const conJefe=D.coms.filter(p=>p.jefe);
+  // Solo cuentan los obligatorios (Distribuidor es opcional)
+  const OB=D.coms.filter(p=>!p.opc), JO=D.jefes.filter(j=>!j.opc), conJefe=OB.filter(p=>p.jefe);
+  const opc=D.coms.filter(p=>p.opc);
   const L=[
-    {k:"com",t:"Comerciales cierran su parte",tot:D.coms.length,hechos:D.coms.filter(p=>p.inf).length,
-      faltan:D.coms.filter(p=>!p.inf).map(p=>p.nombre)},
+    {k:"com",t:"Comerciales cierran su parte",tot:OB.length,hechos:OB.filter(p=>p.inf).length,
+      faltan:OB.filter(p=>!p.inf).map(p=>p.nombre),
+      det:opc.length?"Distribuidor (opcional): "+opc.filter(p=>p.inf).length+"/"+opc.length:""},
     {k:"comite",t:"Comités del viernes (jefe con cada comercial)",tot:conJefe.length,hechos:conJefe.filter(p=>p.comite).length,
       faltan:conJefe.filter(p=>!p.comite).map(p=>p.nombre)},
     {k:"admin",t:"Administración revisa los cobros",tot:1,hechos:D.admin?1:0,faltan:D.admin?[]:["Administración de clientes"],
       det:D.admin?"Cerrado "+cuando(D.admin.fecha)+(D.admin.porNombre?" · "+D.admin.porNombre:""):""},
-    {k:"jefe",t:"Jefes de equipo cierran",tot:D.jefes.length,hechos:D.jefes.filter(p=>p.inf).length,
-      faltan:D.jefes.filter(p=>!p.inf).map(p=>p.nombre)},
+    {k:"jefe",t:"Jefes de equipo cierran",tot:JO.length,hechos:JO.filter(p=>p.inf).length,
+      faltan:JO.filter(p=>!p.inf).map(p=>p.nombre)},
     {k:"director",t:"Director comercial cierra",tot:D.dirs.length,hechos:D.dirs.filter(p=>p.inf).length,
       faltan:D.dirs.filter(p=>!p.inf).map(p=>p.nombre)},
     {k:"ceo",t:"CEO cierra la semana del grupo",tot:1,hechos:D.ceo?1:0,faltan:D.ceo?[]:["CEO"],
@@ -226,6 +232,9 @@ function tarjetaYo(){
   const yo=D.yo;
   if(ROL==="comercial"){
     const inf=yo&&yo.inf, ac=yo&&yo.comite;
+    if(yo&&yo.opc&&!inf) return `<div class="yo"><p class="ct">Cierre de la semana (opcional)</p>
+      <p>En Distribuidor el cierre es opcional: si lo haces, lo revisa tu jefe en el comité.</p>
+      <button class="env" onclick="abrirMiCierre()">Cerrar mi semana</button></div>`;
     return `<div class="yo"><p class="ct">${inf?"✓ Tu semana está cerrada":"Te falta cerrar tu semana"}</p>
       <p>${inf?`<span class="ok">Cerrado ${esc(cuando(inf.fechaEnvio))}</span>${tarde("com",inf.fechaEnvio)?' · <span class="mal">fuera de plazo</span>':""}. El viernes lo revisas con tu jefe en el comité.`
         :`Plazo: <b>${PLAZO.com[3]}</b>. El viernes lo revisas con tu jefe en el comité.`}</p>
@@ -235,7 +244,7 @@ function tarjetaYo(){
       ${inf?`<button class="env sec" onclick="abrirMiCierre()">Volver a abrir mi cierre</button>`:""}</div>`;
   }
   if(ROL==="jefe"){
-    const mios=D.coms.filter(p=>p.equipo===EQUIPO), pend=mios.filter(p=>!p.comite), sinParte=mios.filter(p=>!p.inf);
+    const mios=D.coms.filter(p=>p.equipo===EQUIPO&&!p.opc), pend=mios.filter(p=>!p.comite&&p.inf), sinParte=mios.filter(p=>!p.inf);
     const inf=yo&&yo.inf;
     return `<div class="yo"><p class="ct">${inf?"✓ Tu cierre está hecho":pend.length?`Te faltan ${pend.length} comité${pend.length===1?"":"s"}`:"Comités hechos · te falta tu cierre"}</p>
       <p>${inf?`<span class="ok">Cerrado ${esc(cuando(inf.fechaEnvio))}</span>${tarde("jefe",inf.fechaEnvio)?' · <span class="mal">fuera de plazo</span>':""}.`
@@ -246,7 +255,7 @@ function tarjetaYo(){
       <button class="env sec" onclick="abrirRecuperacion()">🚨 Comité de recuperación de clientes</button></div>`;
   }
   if(ROL==="director"){
-    const jp=D.jefes.filter(j=>!j.inf), inf=yo&&yo.inf;
+    const jp=D.jefes.filter(j=>!j.inf&&!j.opc), inf=yo&&yo.inf;
     return `<div class="yo"><p class="ct">${inf?"✓ Tu cierre está hecho":jp.length?`Faltan ${jp.length} jefe${jp.length===1?"":"s"} por cerrar`:"Jefes cerrados · te toca a ti"}</p>
       <p>${inf?`<span class="ok">Cerrado ${esc(cuando(inf.fechaEnvio))}</span>.`:`Cierras cuando hayan cerrado los jefes. Plazo: <b>${PLAZO.director[3]}</b>.`}
         ${jp.length?`<br><span class="mal">Sin cerrar: ${jp.map(p=>esc(p.nombre)).join(" · ")}</span>`:""}</p>
@@ -270,13 +279,14 @@ function tarjetaYo(){
 
 // ══ Equipo ════════════════════════════════════════════════════════════
 function estadoCom(p){
+  if(p.opc&&!p.inf) return `<span class="tag t-fut">Opcional</span>`;
   if(p.comite) return `<span class="tag t-ok">Comité ✓</span>`;
   if(p.inf) return `<span class="tag ${pasado("comite")?"t-mal":"t-pend"}">${p.inf.ausente?"Ausente":"Parte ✓ · sin comité"}</span>`;
   return `<span class="tag ${pasado("com")?"t-mal":"t-fut"}">Sin parte</span>`;
 }
 function filaCom(p,modo){
   const sub=p.inf?(p.inf.ausente?"Ausente":"Parte "+cuando(p.inf.fechaEnvio)+(tarde("com",p.inf.fechaEnvio)?" · fuera de plazo":""))
-    :"Sin parte cerrado"+(pasado("com")?" · fuera de plazo":"");
+    :p.opc?"Opcional · sin parte":"Sin parte cerrado"+(pasado("com")?" · fuera de plazo":"");
   return `<div class="fila" onclick="${modo==="jefe"?`abrirComite('${esc(p.id)}')`:p.comite?`verActa('${esc(p.id)}')`:p.inf?`verParte('${esc(p.id)}')`:""}">
     <div class="av">${esc(iniciales(p.nombre))}</div>
     <div class="n"><b>${esc(p.nombre)}</b><small>${esc(sub)}${p.comite?" · comité "+esc(cuando(p.comite.fecha)):""}</small></div>
@@ -293,12 +303,12 @@ function tarjetaEquipo(){
   }
   if(ROL==="director"||ROL==="ceo"){
     return `<div class="card"><p class="ct">Equipos</p><p class="cs">Pulsa un comercial para ver el acta de su comité o su parte.</p>
-      ${D.equipos.map(eq=>{ const cs=D.coms.filter(p=>p.equipo===eq), j=D.jefes.find(x=>x.equipo===eq);
+      ${D.equipos.map(eq=>{ const cs=D.coms.filter(p=>p.equipo===eq), j=D.jefes.find(x=>x.equipo===eq), op=OPCIONAL(eq);
         const pc=cs.filter(p=>p.inf).length, cc=cs.filter(p=>p.comite).length, ab=ABIERTO.has(eq);
         return `<div class="grupo"><div class="cab" onclick="togEq('${esc(eq)}')">
-          <div style="flex:1">${esc(eq)}<small>${j?esc(j.nombre)+" · "+(j.inf?"✓ cerrado "+esc(cuando(j.inf.fechaEnvio)):"sin cerrar"):"Sin jefe de equipo"}</small></div>
-          <span class="tag ${pc===cs.length?"t-ok":"t-pend"}">Partes ${pc}/${cs.length}</span>
-          ${j?`<span class="tag ${cc===cs.length?"t-ok":"t-pend"}">Comités ${cc}/${cs.length}</span>`:""}<span class="chev">${ab?"▾":"›"}</span></div>
+          <div style="flex:1">${esc(eq)}${op?' <span class="tag t-fut">opcional</span>':""}<small>${j?esc(j.nombre)+" · "+(j.inf?"✓ cerrado "+esc(cuando(j.inf.fechaEnvio)):"sin cerrar"):"Sin jefe de equipo"}</small></div>
+          <span class="tag ${pc===cs.length?"t-ok":op?"t-fut":"t-pend"}">Partes ${pc}/${cs.length}</span>
+          ${j?`<span class="tag ${cc===cs.length?"t-ok":op?"t-fut":"t-pend"}">Comités ${cc}/${cs.length}</span>`:""}<span class="chev">${ab?"▾":"›"}</span></div>
           ${ab?`<div style="padding-bottom:6px">${cs.map(p=>filaCom(p,"ver")).join("")||'<p class="cs">Sin comerciales</p>'}</div>`:""}</div>`; }).join("")}</div>`;
   }
   return "";
@@ -309,6 +319,7 @@ function pintar(){
   document.getElementById("hs").textContent=(NOMBRE||AGENTE||"")+" · "+PAPEL_TXT[ROL];
   const l=lunes(W.anio,W.sem), s=new Date(l); s.setDate(s.getDate()+5);
   document.getElementById("semTxt").textContent=`Semana ${W.sem} · ${l.getDate()}/${l.getMonth()+1} – ${s.getDate()}/${s.getMonth()+1}`;
+  if(FUERA(EQUIPO)){ document.getElementById("app").innerHTML=`<p class="estado">Francia no entra en los cierres de la semana.</p>`; return; }
   if(!D) return;
   document.getElementById("app").innerHTML=tarjetaYo()+tarjetaEquipo()+tarjetaFlujo()
     +`<p class="cs" style="text-align:center">Fase 1 · las pantallas de cierre de cada uno son todavía las de siempre y se abren desde aquí.</p>`;
@@ -503,7 +514,7 @@ window.cerrarCEO=()=>{
 };
 
 // Desde el CRM se llega con ?vuelve=: botón para volver (con el historial, que es instantáneo)
-(()=>{ const v=Q.get("vuelve"); if(!v) return; const a=document.getElementById("volver"); a.hidden=false; a.href=v;
+(()=>{ const v=Q.get("vuelve"); if(!v) return; const a=document.getElementById("volver"); a.style.display="inline-block"; a.href=v;
   a.onclick=(e)=>{ e.preventDefault(); if(history.length>1) history.back(); else location.href=v; }; })();
 recargar();
 </script>
