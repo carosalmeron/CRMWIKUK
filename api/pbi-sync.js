@@ -4124,6 +4124,19 @@ EVALUATE
           });
         }
         log.fichasCliente = fichas.size;
+        // (oct 2026) Directorio código → nombre de TODOS los clientes del maestro,
+        // tengan ventas o no. Los clientes nuevos del ERP (p. ej. R439966) no
+        // estaban en ninguna colección y el CRM los enseñaba solo con el código.
+        try {
+          const ent = [...fichas.entries()].filter(([k, f]) => k && f && f.nombre)
+            .map(([k, f]) => [k, String(f.nombre).trim() + (f.poblacion ? "|" + String(f.poblacion).trim() : "")]);
+          const TROZO = 3000, docsDir = [];
+          for (let i = 0; i < ent.length; i += TROZO)
+            docsDir.push({ _id: "clientes_" + (i / TROZO), nombres: JSON.stringify(Object.fromEntries(ent.slice(i, i + TROZO))) });
+          docsDir.push({ _id: "clientes", trozos: docsDir.length, total: ent.length, actualizado: new Date().toISOString() });
+          await fbCommit("pbi_directorio", docsDir);
+          log.directorioClientes = ent.length;
+        } catch (e) { log.errores.push(`directorio clientes: ${e.message}`); }
       } catch (e) {
         log.errores.push(`clientes: ${e.message}`);
       }
