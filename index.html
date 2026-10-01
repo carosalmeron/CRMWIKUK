@@ -880,6 +880,8 @@ function pintarCandado(lk){
   document.getElementById('btn-candado-re').onclick=function(){ showHub(); };
   document.getElementById('btn-candado').onclick=function(){
     if(P.tipo==="depto"){ openModule('crm'); return; }
+    // (oct 2026) Comerciales, jefes y directores cierran desde la puerta única
+    if(perfilCierreHub(u)){ abrirCierres(w); return; }
     var q="agente="+encodeURIComponent(P.cod)+"&uid="+encodeURIComponent(P.crmId)+"&semana="+w.sem;
     var url=P.tipo==="comercial"?"cierre_semanal.html?"+q
       :"objetivos_equipo.html?"+q+"&rol="+encodeURIComponent(P.rol)+"&equipo="+encodeURIComponent(P.equipo)+"&embed=1";
@@ -1125,6 +1127,57 @@ function esEquipoComercial(u){
   var rol=String(f.rol||u.rol||'').toLowerCase();
   return ['agente','crm_agente','comercial','vendedor','jefe','crm_jefe','director','crm_director'].indexOf(rol)>=0;
 }
+// ══════════════════════════════════════════════════════════════════
+// (oct 2026) CIERRE DE LA SEMANA · puerta única (cierres.html)
+// Flujo: comercial jueves 23:59 → comité viernes → Administración (cobros)
+// viernes 14:00 → jefe viernes 20:00 → director sábado 9:00 → CEO sábado 13:00
+// ══════════════════════════════════════════════════════════════════
+var PLAZO_HUB={comercial:"Plazo: jueves 23:59",jefe:"Comités el viernes · tu cierre viernes 20:00",
+  director:"Plazo: sábado 9:00",ceo:"Resumen y cierre del grupo · sábado 13:00",admin:"Revisión de cobros · viernes 14:00"};
+function perfilCierreHub(u){
+  if(!u) return null;
+  var rol=String(u.rol||'').toLowerCase(), id=String(u.id||'').toLowerCase();
+  var f=ORG_FICHAS[u.crmId||u.id]||{};
+  if(id==='ceo'||rol==='admin'||rol==='ceo'||String(f.rol||'').toLowerCase()==='ceo')
+    return {rol:'ceo',cod:'CEO',uid:u.crmId||u.id||'ceo',equipo:''};
+  // Administración de clientes: el responsable del departamento o quien tenga su tipología
+  var crmId=u.crmId||u.id, dA=orgDeptoDe('administracion');
+  var esAdm=(dA&&(dA.responsableIds||[]).indexOf(crmId)>=0)
+    ||String(f.tipologia||u.tipologia||'').toLowerCase()==='administracion';
+  if(esAdm) return {rol:'admin',cod:_up(crmId),uid:crmId,equipo:''};
+  if((u.accesos||[]).indexOf('crm')<0) return null;
+  var P=null; try{ P=perfilCierre(u); }catch(e){}
+  if(!P||P.tipo==='depto'||!esEquipoComercial(u)) return null;
+  return {rol:P.tipo,cod:P.cod,uid:P.crmId,equipo:P.equipo,claves:P.claves};
+}
+function abrirCierres(sem){
+  var pc=perfilCierreHub(currentUser); if(!pc){ alert('Tu perfil no tiene cierre semanal.'); return; }
+  var q='rol='+encodeURIComponent(pc.rol)+'&agente='+encodeURIComponent(pc.cod)+'&uid='+encodeURIComponent(pc.uid)
+    +'&equipo='+encodeURIComponent(pc.equipo||'')+'&nombre='+encodeURIComponent(currentUser.nombre||'')
+    +(sem?'&semana='+sem.sem+'&anio='+sem.ano:'');
+  currentModule='cierres';
+  document.getElementById('frame-title').textContent='📋 Cierre de la semana';
+  document.getElementById('frame-sub').textContent=currentUser.nombre||'';
+  document.getElementById('module-iframe').src='cierres.html?'+q;
+  showScreen('module-frame');
+}
+// Lo que se ve debajo del título en el hub: si ya ha cerrado esta semana
+function estadoCierreHub(pc){
+  var w=_isoSemP(new Date());
+  if(pc.rol==='ceo'||pc.rol==='admin'){
+    return fetch(PORTAL_FB+'/cierres_flujo/'+w.ano+'_s'+w.sem+'_'+pc.rol,{cache:'no-store'}).then(function(r){
+      if(r.ok) return '<span style="color:#15803D;font-weight:700">✓ Semana '+w.sem+' cerrada</span>';
+      return 'Semana '+w.sem+' · '+PLAZO_HUB[pc.rol].replace(/^Plazo: /,'');
+    });
+  }
+  return informesSemana(w).then(function(lista){
+    if(informeDe(lista,pc.claves||[pc.cod],[pc.uid,String(currentUser.id)]))
+      return '<span style="color:#15803D;font-weight:700">✓ Semana '+w.sem+' cerrada</span>'+(pc.rol==='jefe'?' · revisa las actas':'');
+    var dia=new Date().getDay(), tarde=(pc.rol==='comercial'&&(dia===5||dia===6))||(pc.rol==='jefe'&&dia===6);
+    return (tarde?'<span style="color:#B91C1C;font-weight:700">Semana '+w.sem+' sin cerrar · fuera de plazo</span>'
+      :'<span style="color:#B45309;font-weight:700">Semana '+w.sem+' sin cerrar</span> · '+PLAZO_HUB[pc.rol].replace(/^Plazo: /,''));
+  });
+}
 function renderHub(){
   // Sin organigrama no se sabe quien es de planta: se carga y se repinta
   if(!orgCargado&&currentUser){ loadOrgData().then(function(){ if(document.getElementById('hub').classList.contains('active')) renderHub(); }).catch(function(){}); }
@@ -1214,6 +1267,25 @@ function renderHub(){
       list.insertBefore(rcI,list.firstChild);
     }
   }
+
+  // (oct 2026) 📋 CIERRE DE LA SEMANA: puerta única de los cierres (cierres.html).
+  // Arriba del todo. Cada uno ve lo que le toca y el plazo: comercial, jefe,
+  // director comercial y CEO. (Administración entra desde cobros, en el CRM.)
+  (function(){
+    // Botón solo para comerciales, jefes, director comercial y CEO. Administración
+    // entra desde su panel de cobros del CRM (revisión de cobros del viernes).
+    var pc=perfilCierreHub(currentUser); if(!pc||pc.rol==='admin') return;
+    var ci=document.createElement('div');
+    ci.className='hub-item';
+    ci.style.setProperty('--item-color','#0F172A');
+    ci.innerHTML='<div class="hub-icon" style="background:#E2E8F0">📋</div>'
+      +'<div><div class="hub-item-title">Cierre de la semana</div>'
+      +'<div class="hub-item-sub" id="hub-cierre-sub">'+PLAZO_HUB[pc.rol]+'</div></div>'
+      +'<svg class="hub-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg>';
+    ci.onclick=function(){ abrirCierres(); };
+    list.insertBefore(ci,list.firstChild);
+    estadoCierreHub(pc).then(function(t){ var el=document.getElementById('hub-cierre-sub'); if(el&&t) el.innerHTML=t; }).catch(function(){});
+  })();
 
   // El análisis vive ahora dentro del CRM, en la pestaña Análisis, así que
   // ya no se accede desde aquí.
