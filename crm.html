@@ -4840,7 +4840,10 @@ function MiSemana({usuario,clientesFB,todosClientesFB,onBack,onNav,estrategiasDB
     var n=v.clienteNombre||v.cliente||v.nombreCliente||"";
     // Algunas visitas guardan el CÓDIGO (U4309524) en vez del nombre
     if(n&&esCodigoCliente(n)){
-      var nom=nombreClientePorCodigo(n,(clientesFB||[]).concat(typeof todosClientesFB!=="undefined"?(todosClientesFB||[]):[]));
+      var lc=(clientesFB||[]).concat(typeof todosClientesFB!=="undefined"?(todosClientesFB||[]):[]);
+      var nom=nombreClientePorCodigo(n,lc);
+      // La visita a veces trae también el id de la ficha: de ahí sale el nombre
+      if(!nom){ var id2=v.clienteId||v.clienteCodigo||v.codigoCliente||""; if(id2&&id2!==n){ var c2=lc.find(function(x){ return String(x.id)===String(id2); }); if(c2&&!esCodigoCliente(c2.nombre||c2.NOMBRE||"")) nom=c2.nombre||c2.NOMBRE; } }
       return nom?nom+" · "+n:n;
     }
     if(n) return n;
@@ -26877,16 +26880,27 @@ function nombreClientePorCodigo(cod, lista){
   var k=String(cod||"").toUpperCase().trim(); if(!k) return null;
   var vars=[k], m=/^U430(\d{4})$/.exec(k), m2=/^U43(\d{4})$/.exec(k);
   if(m) vars.push("U43"+m[1]); if(m2) vars.push("U430"+m2[1]);
-  var c=(lista||[]).find(function(x){ return vars.indexOf(String(x.codigo||x.CODIGO||"").toUpperCase())>=0||vars.indexOf(String(x.id||"").toUpperCase())>=0; });
+  var c=(lista||[]).find(function(x){ return [x.codigo,x.CODIGO,x.id,x.cod,x.codigoCliente,x.codCliente,x.codigoPBI,x.codigoErp].some(function(y){ return y&&vars.indexOf(String(y).toUpperCase())>=0; }); });
   if(c&&(c.nombre||c.NOMBRE)&&!esCodigoCliente(c.nombre||c.NOMBRE)) return c.nombre||c.NOMBRE;
   if(k in window._NOMCLI) return window._NOMCLI[k];
   window._NOMCLI[k]=null;
   (async function(){
+    var ok=function(n){ window._NOMCLI[k]=n; try{ window.dispatchEvent(new Event("nomcli")); }catch(e){} };
+    var nomDe=function(f){ f=f||{}; var n=(f.nombre||f.NOMBRE||f.razonSocial||f.clienteNombre||{}).stringValue; return n&&!esCodigoCliente(n)?n:null; };
+    // (oct 2026) Además de pbi_ventas_cliente, la ficha del CRM (clientes) por id y por campo de código:
+    // los códigos que no son U43… (p. ej. R439966) no estaban en el PBI y salía el código sin nombre.
     for(var i=0;i<vars.length;i++){
-      try{ var r=await fetch(FB_BASE+"/pbi_ventas_cliente/"+encodeURIComponent(vars[i]));
-        if(!r.ok) continue; var j=await r.json();
-        var n=j.fields&&j.fields.nombre&&j.fields.nombre.stringValue;
-        if(n){ window._NOMCLI[k]=n; try{ window.dispatchEvent(new Event("nomcli")); }catch(e){} return; } }catch(e){}
+      for(var col of ["pbi_ventas_cliente","clientes"]){
+        try{ var r=await fetch(FB_BASE+"/"+col+"/"+encodeURIComponent(vars[i]));
+          if(!r.ok) continue; var j=await r.json(); var n=nomDe(j.fields);
+          if(n){ ok(n); return; } }catch(e){}
+      }
+    }
+    for(var col2 of ["clientes","pbi_ventas_cliente"]) for(var campo of ["codigo","CODIGO","cod","codigoCliente"]){
+      try{ var rq=await fetch(FB_BASE+":runQuery",{method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({structuredQuery:{from:[{collectionId:col2}],where:{fieldFilter:{field:{fieldPath:campo},op:"EQUAL",value:{stringValue:k}}},limit:1}})});
+        if(!rq.ok) continue; var jq=await rq.json(); var d=(jq||[]).find(function(x){ return x.document; });
+        var n2=d&&nomDe(d.document.fields); if(n2){ ok(n2); return; } }catch(e){}
     }
   })();
   return null;
