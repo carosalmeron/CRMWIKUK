@@ -1305,7 +1305,9 @@ async function avisarVentasNueva(inc, datos, id){
   return await enviarEmail(to, subject, body, {sinCopia:true});
 }
 async function avisarHilo(inc, id){
-  if(inc.origen!=="recuperacion"&&!inc.casoId) return {ok:true,skipped:"no es de pérdida de venta"};
+  // (oct 2026) También los compromisos de cobro: Administración ↔ comercial
+  const esCobro=inc.compromiso===true||inc.compromiso==="true";
+  if(inc.origen!=="recuperacion"&&!inc.casoId&&!esCobro) return {ok:true,skipped:"no es de pérdida de venta ni de cobro"};
   const hist=await historialDe(id);
   // Cuántas entradas ya se avisaron: en otra colección, para que el CRM no lo pise al guardar
   const ctl=await getDoc("avisos_incidencias", id);
@@ -1321,6 +1323,25 @@ async function avisarHilo(inc, id){
   const suyos=new Set([...datos.usuarios,...datos.portal].filter(u=>quien.includes(String(u.nombre||"").toUpperCase().trim())).map(u=>String(u.email||"").toLowerCase()));
   const to=[...new Set(lista.map(x=>x.email.toLowerCase()))].filter(e=>!suyos.has(e));
   const tipo=LABEL_TIPO[tipologia]||inc.tipo||"—";
+  if(esCobro){
+    const ult=nuevas[nuevas.length-1]||{};
+    const enlace="https://crmwikuk.vercel.app/?cobro="+encodeURIComponent(id);
+    const urgente=/No ha pagado/.test(ult.accion||"");
+    const subjectC=(urgente?"❌ ":"💬 ")+(ult.por||"Cobros")+": "+(urgente?"no ha pagado ":"")+(inc.clienteNombre||inc.cliente||"")
+      +(urgente?" — necesito respuesta urgente":"");
+    const bodyC="Cobro de "+(inc.clienteNombre||inc.cliente||"")+(inc.empresa?" ("+inc.empresa+")":"")
+      +"\nCompromiso: "+(inc.accionCobro||"")+" · fecha "+String(inc.fechaCompromiso||"").split("-").reverse().join("/")
+      +(Number(inc.importeCompromiso)?" · "+Math.round(Number(inc.importeCompromiso)).toLocaleString("es-ES")+" €":"")
+      +"\n\n"+nuevas.map(textoHist).join("\n\n")
+      +"\n\nContesta en el mismo hilo desde este enlace (di qué pasa, pon la nueva fecha de pago o marca que ya ha pagado):\n"+enlace
+      +"\n\n—\nCRM Grupo Consolidado · Aviso automático";
+    let rc={ok:true,destinatarios:[]};
+    if(to.length) rc=await enviarEmail(to, subjectC, bodyC, {sinCopia:true});
+    if(rc.ok) await fetch(FB+"/avisos_incidencias/"+encodeURIComponent(id)+"?updateMask.fieldPaths=enviados&updateMask.fieldPaths=fecha",{
+      method:"PATCH",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({fields:{enviados:{integerValue:hist.length},fecha:{stringValue:new Date().toISOString()}}})});
+    return {ok:rc.ok,nuevas:nuevas.length,to:rc.destinatarios||[]};
+  }
   const subject="💬 "+(nuevas[nuevas.length-1].por||"Respuesta")+" en la incidencia de "+tipo+" — "+(inc.clienteNombre||inc.cliente||"")+" (pérdida de venta)";
   const body="Novedades en la incidencia por pérdida de venta de "+(inc.clienteNombre||inc.cliente||"")+":\n\n"
     +nuevas.map(textoHist).join("\n\n")
