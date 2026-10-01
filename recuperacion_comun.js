@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20261001b";
+  RC.VERSION="20261001c";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -1428,7 +1428,8 @@
   // correo con el enlace al hilo, donde contesta. Todo queda en la misma
   // incidencia (colección «incidencias», origen «cobros», compromiso:true), así
   // que también se ve en Incidencias del CRM.
-  RC.ACC_COBRO=["Transferencia","Pagaré","Confirming","Cheque","Recibo domiciliado","Compensar con abono","Visita para cobrar","Llamada al cliente","Otro"];
+  // Las mismas acciones que en el parte del comercial
+  RC.ACC_COBRO=["📞 Le llamo","🚗 Paso a cobrar","📄 Dice que está pagado","🤝 Pide aplazamiento","⚑ Error de factura"];
   RC.ESTADO_COBRO={pendiente:["Pendiente de comprobar","#B45309"],no_pagado:["No ha pagado · reclamado","#B91C1C"],
     respondido:["El comercial ha respondido","#1D4ED8"],pagado:["Pagado","#15803D"]};
   RC.hoyISO=()=>{ const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); };
@@ -1457,7 +1458,7 @@
     const hoy=new Date(), hoyS=hoy.toLocaleDateString("es-ES");
     const id="inc_cob_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
     const imp=Math.round(num(o.importe)*100)/100;
-    const titulo=`${o.accion} · paga el ${RC.fechaES(o.fecha)}`;
+    const titulo=`${o.accion} · para el ${RC.fechaES(o.fecha)}`;
     const doc={id,tipo:"administracion",subtipo:"Compromiso de pago",compromiso:true,origen:"cobros",
       clienteNombre:String(o.cliente||"").toUpperCase(),cliente:o.cliente||"",clienteCodigo:o.codigo||"",clienteId:o.codigo||"",
       empresa:o.empresa||"",facturaNum:o.factura||"",importeCompromiso:imp,accionCobro:o.accion,fechaCompromiso:o.fecha,
@@ -1484,7 +1485,7 @@
   // El comercial contesta; con nueva fecha vuelve a quedar pendiente para ese día
   RC.cobroResponder=(inc,por,texto,nuevaFecha,accion)=>_apunta(inc,
     nuevaFecha?{estadoCobro:"pendiente",fechaCompromiso:nuevaFecha,accionCobro:accion||inc.accionCobro}:{estadoCobro:"respondido"},
-    {accion:nuevaFecha?"📅 Nueva fecha: "+(accion||inc.accionCobro||"")+" · paga el "+RC.fechaES(nuevaFecha):"💬 Respuesta",por:por.nombre,nota:texto||""});
+    {accion:nuevaFecha?"📅 Nueva fecha: "+(accion||inc.accionCobro||"")+" · para el "+RC.fechaES(nuevaFecha):"💬 Respuesta",por:por.nombre,nota:texto||""});
   // Administración lee la respuesta sin cambiar nada: vuelve a «no ha pagado» (sigue abierta)
   RC.cobroComentar=(inc,por,texto)=>_apunta(inc,{},{accion:"💬 Comentario",por:por.nombre,nota:texto});
   g.RC=RC;

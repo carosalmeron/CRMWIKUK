@@ -96,6 +96,12 @@
   .hist{font-size:12px;color:#475569;background:#F8FAFC;border-radius:8px;padding:6px 9px;margin-top:6px;line-height:1.5}
   .hist .q{display:block;font-size:10.5px;font-weight:800;color:#64748B;text-transform:uppercase}
   .prev{border-top:1px dashed #E2E8F0;margin-top:8px;padding-top:6px}
+  .rev{border-left:3px solid #E2E8F0;padding:2px 0 2px 10px;margin:10px 0 4px}
+  .rev.t-ok{border-left-color:#16A34A}.rev.t-am{border-left-color:#D97706}.rev.t-sube{border-left-color:#7C3AED}
+  .rev textarea{margin-top:6px}
+  .chip.on.t-ok{background:#F0FDF4;border-color:#16A34A;color:#15803D}.chip.on.t-am{background:#FFFBEB;border-color:#D97706;color:#B45309}.chip.on.t-sube{background:#F5F3FF;border-color:#7C3AED;color:#6D28D9}
+  .chip.on{background:#0F172A;border-color:#0F172A;color:#fff}
+  .chip:disabled{opacity:.45}
   .dg{display:flex;gap:8px;margin-top:8px}.dg>div{flex:1;background:#F8FAFC;border-radius:10px;padding:8px 10px}
   .dg b{display:block;font-size:18px}.dg span{font-size:11px;color:#64748B}
 </style></head><body>
@@ -109,7 +115,7 @@
 <div id="capa" hidden><div class="fbar"><button onclick="cerrarCapa()" aria-label="Volver">‹</button><b id="capaT"></b></div><div id="capaC"></div></div>
 
 <script src="agentes.js"></script>
-<script src="recuperacion_comun.js?v=20261001b"></script>
+<script src="recuperacion_comun.js?v=20261001c"></script>
 <script>
 // ══ Parámetros ════════════════════════════════════════════════════════
 const Q=new URLSearchParams(location.search);
@@ -124,7 +130,7 @@ const ROL=(()=>{ const r=(Q.get("rol")||"comercial").toLowerCase();
 const AGENTE=U(Q.get("agente")), UID=(Q.get("uid")||"").trim(), EQUIPO=U(Q.get("equipo")), NOMBRE=(Q.get("nombre")||"").trim();
 // Mientras se valida el sistema el CEO recibe copia de todas las actas. Para quitarlo: false
 const CC_CEO_VALIDACION=true;
-const VERSION_CIERRES="1-oct 14:40";
+const VERSION_CIERRES="1-oct 15:10";
 const EQUIPOS_NO_AGENTE=["WIKUK","INTERKEY","FRANCIA","DISTRIBUIDOR"];
 const ROL_COM=["agente","crm_agente","comercial","vendedor"];
 // Francia no entra en los cierres. Distribuidor puede cerrar, pero es opcional:
@@ -549,6 +555,37 @@ window.fichaRecDesdeComite=(casoId)=>{ const id=AC.id; guardarBorrador();
   abrirCapa("🚨 Ficha del cliente",marco("recuperacion.html?rol="+encodeURIComponent(ROL)+"&agente="+encodeURIComponent(AGENTE)
     +"&equipo="+encodeURIComponent(EQUIPO)+"&nombre="+encodeURIComponent(NOMBRE)+"&embed=1&ficha="+encodeURIComponent(casoId||"")),()=>abrirComite(id)); };
 window.addEventListener("message",(ev)=>{ if(ev.data&&ev.data.type==="RC_CERRAR"&&!document.getElementById("capa").hidden) cerrarCapa(); });
+// Cobros en el comité: si no hay compromiso de pago, se apunta aquí mismo con el comercial delante
+function formCompromiso(it){
+  const kk=esc(it.k).replace(/'/g,"&#39;"), id=btoa(unescape(encodeURIComponent(it.k))).replace(/[^a-z0-9]/gi,"");
+  const sel=(CC_SEL[it.k]||"");
+  return `<div style="margin-top:8px;background:#FFFBEB;border:1px solid #FCD34D;border-radius:10px;padding:9px 10px">
+    <span class="lbl" style="margin-top:0">${it.sinPlan?"Acción con este cliente (la apunta el comercial ahora)":"Cambiar la acción con este cliente"}</span>
+    <div class="acc">${RC.ACC_COBRO.map(o=>`<button class="chip${sel===o?" on t-am":""}" onclick="CC_SEL['${kk}']='${o}';pintarComite()">${o}</button>`).join("")}</div>
+    <div class="campos"><div><span class="lbl">Fecha compromiso</span><input class="c" type="date" id="cf_${id}" value="${new Date(Date.now()+86400000*3).toISOString().slice(0,10)}"></div>
+      <div><span class="lbl">Detalle</span><input class="c" id="cn_${id}" placeholder="Con quién habla, qué le dicen"></div></div>
+    <div class="acc"><button class="chip on" ${sel?"":"disabled"} onclick="compromisoComite('${kk}','${id}',this)">Guardar acción</button>
+      <button class="chip" onclick="cobrosDesdeComite()">Ver sus cobros</button></div>
+    <div style="font-size:11.5px;color:#92400E">Administración lo comprueba ese día y, si no se cumple, se lo reclama al comercial en el mismo hilo.</div></div>`;
+}
+const CC_SEL={};
+window.compromisoComite=async(k,id,btn)=>{
+  const p=comPorId(AC.id), it=((COMX[p.id]||{}).cob||[]).find(x=>x.k===k); if(!it) return;
+  const fecha=document.getElementById("cf_"+id).value; if(!fecha){ alert("Pon el día"); return; }
+  btn.disabled=true; btn.textContent="Guardando…";
+  try{
+    const doc=await RC.crearCompromiso({cliente:it.nom,codigo:it.cod||"",empresa:"",importe:it.ven||0,
+      accion:CC_SEL[k],fecha,nota:((document.getElementById("cn_"+id).value||"")+" (acordado en el comité de la semana "+W.sem+")").trim(),
+      agente:p.cod,equipo:p.equipo},{id:UID||AGENTE,nombre:NOMBRE||AGENTE});
+    Object.assign(it,{sinPlan:false,compId:doc._id,accion:doc.accionCobro,fecha:doc.fechaCompromiso,nota:document.getElementById("cn_"+id).value||"",adm:"Pendiente de comprobar",
+      acc:`${doc.accionCobro} · para el ${RC.fechaES(doc.fechaCompromiso)}`,
+      hist:[{f:doc.fecha,por:NOMBRE||AGENTE,t:doc.historial[0].accion}]});
+    const d=AC.p[k]=AC.p[k]||{}; if(!d.r) d.r="ok"; delete CC_SEL[k];
+    guardarBorrador(); pintarComite();
+  }catch(e){ btn.disabled=false; btn.textContent="Guardar compromiso"; alert("No se ha guardado: "+e.message); }
+};
+window.cobrosDesdeComite=()=>{ const id=AC.id, p=comPorId(id); guardarBorrador();
+  abrirCapa("💶 Cobros de "+p.nombre,marco("cobros.html?agente="+encodeURIComponent(p.cod)+"&nombre="+encodeURIComponent(p.nombre)+"&vista=vencidos"),()=>abrirComite(id)); };
 // Recuperación (casos abiertos) y cobros (cliente a cliente + compromisos) del comercial
 const COMX={};
 async function extrasDe(p){
@@ -566,42 +603,63 @@ async function extrasDe(p){
   const compDe=(n)=>comp.filter(i=>U(i.clienteNombre)===U(n)).sort((a,b)=>String(b.fechaCreacion||"").localeCompare(String(a.fechaCreacion||"")));
   const cob=cli.filter(c=>Number(c.ven)>=1).sort((a,b)=>b.ven-a.ven).slice(0,20).map(c=>{
     const ci=compDe(c.c), ab=ci.find(i=>i.estadoCobro!=="pagado");
-    return {k:"cob:"+(c.cod||c.c),nom:c.c,desc:`Fuera de plazo ${RC.eur(c.ven)}${Number(c.v70)>=1?" · más de 70 días "+RC.eur(c.v70):""}`,
-      acc:ab?`📅 ${ab.accionCobro} · paga el ${RC.fechaES(ab.fechaCompromiso)} · ${(RC.ESTADO_COBRO[ab.estadoCobro]||[""])[0]}`:"",
+    return {k:"cob:"+(c.cod||c.c),nom:c.c,ven:Number(c.ven)||0,cod:c.cod||"",desc:`Fuera de plazo ${RC.eur(c.ven)}${Number(c.v70)>=1?" · más de 70 días "+RC.eur(c.v70):""}`,
+      acc:ab?`${ab.accionCobro} · para el ${RC.fechaES(ab.fechaCompromiso)}`:"",accion:ab?ab.accionCobro:"",fecha:ab?ab.fechaCompromiso:"",
+      nota:ab?(((ab.historial||[]).find(h=>h&&h.nota&&/Compromiso|Nueva fecha/.test(h.accion||""))||{}).nota||""):"",
+      adm:ab?(()=>{ const est=(RC.ESTADO_COBRO[ab.estadoCobro]||[""])[0]; const u=(ab.historial||[]).slice().reverse().find(h=>h&&/No ha pagado|Cobrado|Comentario/.test(h.accion||""));
+        return est+(u&&u.nota?" — "+u.nota:""); })():"",
       txt:"",sinPlan:!ab,compId:ab?ab._id:"",
       hist:(ab?ab.historial||[]:[]).slice(-6).reverse().map(h=>({f:h.fecha||"",por:h.por||"",t:(h.accion||"")+(h.nota?" — "+h.nota:"")}))};
   });
   return {rec,cob};
 }
 function sinContestar(it){ return !it.soloTxt&&!it.sinPlan&&it.sinPlan!==false&&!it.acc&&!it.txt; }
+// Opciones de decisión: las mismas que en la plantilla del parte
+const OPS_DEF=[["ok","✓ De acuerdo"],["cambia","✎ Lo cambiamos"],["sube","📤 Superior"]];
+const OPS_COB=[["ok","✓ Compromiso de pago"],["cambia","✎ Otra acción"],["sube","📤 Superior"]];
+const opsDe=(k)=>String(k).startsWith("cob:")?OPS_COB:OPS_DEF;
+const etiquetaDec=(k,r)=>((opsDe(k).find(o=>o[0]===r)||[,""])[1]);
 function filaPunto(it,num){
-  const d=AC.p[it.k]||{}, ab=ABP.has(it.k), dc=DEC[d.r];
-  const sinP=it.sinPlan?`<div class="dijo falta">⚠️ ${it.k.startsWith("cob:")?"Sin compromiso de pago":"Sin diagnosticar: no hay causa ni plan"}</div>`:"";
-  const dijo=it.sinPlan?sinP+(it.acc||it.txt?`<div class="dijo">${esc([it.acc,it.txt].filter(Boolean).join(" · "))}</div>`:""):it.soloTxt?(it.txt?`<div class="dijo"><span class="q">Escribió</span>${esc(it.txt)}</div>`:(it.alerta?`<div class="dijo falta">⚠️ No ha escrito su plan</div>`:""))
-    :sinContestar(it)?`<div class="dijo falta">⚠️ No contestó</div>`
-    :`<div class="dijo"><span class="q">Contestó</span>${it.acc?`<b>${esc(it.acc)}</b>`:""}${it.acc&&it.txt?" · ":""}${esc(it.txt)}</div>`;
+  const d=AC.p[it.k]||{}, ab=ABP.has(it.k), dc=DEC[d.r], esCob=it.k.startsWith("cob:");
   const kk=esc(it.k).replace(/'/g,"&#39;");
+  let dijo;
+  if(esCob){
+    // Igual que en el parte: la acción del comercial con el cliente y lo que dice Administración
+    dijo=it.sinPlan?`<div class="dijo falta">Sin acción del comercial</div>`
+      :`<div class="dijo"><span class="q">Acción del comercial</span>${esc(it.accion||"")}${it.fecha?" · para el "+esc(RC.fechaES(it.fecha)):""}${it.nota?" — "+esc(it.nota):""}</div>`;
+    if(it.adm) dijo+=`<div class="dijo" style="background:#EFF6FF"><span class="q">💬 Administración</span>${esc(it.adm)}</div>`;
+  } else if(it.sinPlan) dijo=`<div class="dijo falta">⚠️ Sin diagnosticar: no hay causa ni plan</div>`+(it.acc||it.txt?`<div class="dijo">${esc([it.acc,it.txt].filter(Boolean).join(" · "))}</div>`:"");
+  else if(it.soloTxt) dijo=it.txt?`<div class="dijo"><span class="q">Escribió</span>${esc(it.txt)}</div>`:(it.alerta?`<div class="dijo falta">⚠️ No ha escrito su plan</div>`:"");
+  else dijo=sinContestar(it)?`<div class="dijo falta">⚠️ No contestó</div>`
+    :`<div class="dijo"><span class="q">Contestó</span>${it.acc?`<b>${esc(it.acc)}</b>`:""}${it.acc&&it.txt?" · ":""}${esc(it.txt)}</div>`;
+  const tono={ok:"t-ok",cambia:"t-am",sube:"t-sube"};
   return `<div class="punto" style="border-left:4px solid ${dc?dc[1]:(sinContestar(it)||it.alerta||it.sinPlan?"#DC2626":"#CBD5E1")}">
     <div class="pcab" onclick="togPunto('${kk}')"><div style="flex:1;min-width:0"><b>${num?`<span style="color:#64748B">${num}</span> `:""}${esc(it.nom)}</b>${it.desc?`<small>${esc(it.desc)}</small>`:""}</div>
-      ${dc?`<span class="tag" style="background:${dc[1]}1A;color:${dc[1]}">${dc[0]}</span>`:`<span class="tag t-fut">Sin revisar</span>`}<span class="chev">${ab?"▾":"›"}</span></div>
+      ${dc?`<span class="tag" style="background:${dc[1]}1A;color:${dc[1]}">${esc(etiquetaDec(it.k,d.r))}</span>`:`<span class="tag t-fut">Sin revisar</span>`}<span class="chev">${ab?"▾":"›"}</span></div>
     ${dijo}
-    ${(d.com||(d.accs||[]).length)&&!ab?`<div class="pres">${d.com?"💬 "+esc(d.com):""}${(d.accs||[]).map(a=>`<div>➕ ${esc(a.que)} · ${esc(a.quien)}</div>`).join("")}</div>`:""}
+    ${!ab&&(d.t||d.com||(d.accs||[]).length)?`<div class="pres">${d.t?"✎ "+esc(d.t)+"<br>":""}${d.com?"💬 "+esc(d.com):""}${(d.accs||[]).map(a=>`<div>➕ ${esc(a.que)} · ${esc(a.quien)}</div>`).join("")}</div>`:""}
     ${ab&&(it.hist||[]).length?`<div class="hist"><span class="q">Lo que se ha hecho</span>${it.hist.map(h=>`<div>${esc(h.f)} · <b>${esc(h.por)}</b> · ${esc(h.t)}</div>`).join("")}</div>`:""}
     ${ab&&it.caso?`<button class="btn" style="margin-top:6px;font-size:12px;padding:7px 10px" onclick="fichaRecDesdeComite('${esc(it.caso)}')">Abrir la ficha completa del cliente</button>`:""}
-    ${ab?`<div class="prev">
-      <div class="acc">${Object.entries(DEC).map(([k,[t,c]])=>`<button class="chip${d.r===k?" on":""}" style="${d.r===k?`background:${c};border-color:${c}`:""}" onclick="decP('${kk}','${k}')">${t}</button>`).join("")}</div>
-      <textarea placeholder="💬 Comentario sobre este punto (le llega en el acta)" oninput="comP('${kk}',this.value)">${esc(d.com||"")}</textarea>
-      ${(d.accs||[]).map((a,i)=>`<div class="li"><span>➕</span><span><b>${esc(a.que)}</b><br><small style="color:#64748B">${esc(a.quien)}${a.cuando?" · para el "+esc(a.cuando.split("-").reverse().join("/")):""}</small></span><button class="x" onclick="quitaAcc('${kk}',${i})" aria-label="Quitar">×</button></div>`).join("")}
-      ${formAcc(it.k)}</div>`:""}
+    ${ab&&esCob?formCompromiso(it):""}
+    ${ab?`<div class="rev ${d.r?tono[d.r]:""}"><span class="lbl">Comité</span>
+      <div class="acc">${opsDe(it.k).map(([k,t])=>`<button class="chip${d.r===k?" on "+tono[k]:""}" onclick="decP('${kk}','${k}')">${t}</button>`).join("")}
+        <button class="chip${d.com!=null?" on":""}" onclick="togCampo('${kk}','com')">💬 Comentario</button>
+        <button class="chip${d.nueva?" on":""}" onclick="togCampo('${kk}','nueva')">➕ Acción</button></div>
+      ${d.r&&d.r!=="ok"?`<textarea placeholder="${d.r==="sube"?"Qué se pide al superior":"Lo que acordamos"}" oninput="campoP('${kk}','t',this.value)">${esc(d.t||"")}</textarea>`:""}
+      ${d.com!=null?`<textarea placeholder="Comentario del jefe (queda en el acta y lo ve el comercial)" oninput="campoP('${kk}','com',this.value)">${esc(d.com||"")}</textarea>`:""}
+      ${(d.accs||[]).map((a,i)=>`<div class="dijo" style="background:#EFF6FF;display:flex;gap:8px;align-items:baseline"><span style="flex:1">➕ <b>${esc(a.que)}</b> · ${esc(a.quien)}${a.cuando?" · para el "+esc(a.cuando.split("-").reverse().join("/")):""}</span><a href="#" style="font-size:11.5px;color:#64748B" onclick="quitaAcc('${kk}',${i});return false">quitar</a></div>`).join("")}
+      ${d.nueva?formAcc(it.k):""}</div>`:""}
   </div>`;
 }
+window.togCampo=(k,c)=>{ const d=AC.p[k]=AC.p[k]||{}; if(c==="com") d.com=d.com!=null?null:""; else d.nueva=!d.nueva; guardarBorrador(); pintarComite(); };
+window.campoP=(k,c,v)=>{ (AC.p[k]=AC.p[k]||{})[c]=v; guardarBorrador(); };
 function formAcc(k){
   const f=new Date(Date.now()+86400000*4).toISOString().slice(0,10), kk=esc(k).replace(/'/g,"&#39;"), id=btoa(unescape(encodeURIComponent(k))).replace(/[^a-z0-9]/gi,"");
   return `<div class="campos" style="margin-top:6px">
-    <div class="full"><input class="c" id="q_${id}" placeholder="➕ Acción nueva: qué hay que hacer"></div>
-    <div><select class="c" id="w_${id}">${QUIEN.map(q=>`<option>${q}</option>`).join("")}</select></div>
-    <div><input class="c" id="d_${id}" type="date" value="${f}"></div></div>
-    <button class="btn" style="margin-top:6px" onclick="addAcc('${kk}','${id}')">Añadir acción</button>`;
+    <div class="full"><span class="lbl">Acción nueva</span><input class="c" id="q_${id}" placeholder="Qué hay que hacer"></div>
+    <div><span class="lbl">Quién</span><select class="c" id="w_${id}">${QUIEN.map(q=>`<option>${q}</option>`).join("")}</select></div>
+    <div><span class="lbl">Para cuándo</span><input class="c" id="d_${id}" type="date" value="${f}"></div></div>
+    <div class="acc"><button class="chip on" onclick="addAcc('${kk}','${id}')">Añadir</button>${k!=="__gen"?`<button class="chip" onclick="togCampo('${kk}','nueva')">Cancelar</button>`:""}</div>`;
 }
 function pintarComite(){
   const p=comPorId(AC.id), box=document.getElementById("comBox"); if(!p||!box) return;
@@ -641,11 +699,11 @@ window.verParteCompleto=()=>{ const p=comPorId(AC.id); if(!p) return;
   const prev=alCerrarCapa; abrirCapa("Parte de "+p.nombre,`<div class="in"><div id="parteBox">${htmlParte(p,"parteBox")}</div></div>`,()=>{ abrirCapa("Comité con "+p.nombre,`<div class="in" id="comBox"></div>`,prev); pintarComite(); }); };
 window.togPunto=(k)=>{ ABP.has(k)?ABP.delete(k):ABP.add(k); pintarComite(); };
 window.decP=(k,r)=>{ const d=AC.p[k]=AC.p[k]||{}; d.r=d.r===r?"":r; guardarBorrador();
-  if(d.r==="ok"&&!d.com&&!(d.accs||[]).length) ABP.delete(k); pintarComite(); };
+  pintarComite(); };
 window.comP=(k,v)=>{ (AC.p[k]=AC.p[k]||{}).com=v; guardarBorrador(); };
 window.addAcc=(k,id)=>{ const q=(document.getElementById("q_"+id)||{}).value||""; if(q.trim().length<4){ alert("Escribe qué hay que hacer"); return; }
   const a={que:q.trim(),quien:document.getElementById("w_"+id).value,cuando:document.getElementById("d_"+id).value};
-  if(k==="__gen") AC.gen.accs.push(a); else { const d=AC.p[k]=AC.p[k]||{}; (d.accs=d.accs||[]).push(a); if(!d.r) d.r="cambia"; }
+  if(k==="__gen") AC.gen.accs.push(a); else { const d=AC.p[k]=AC.p[k]||{}; (d.accs=d.accs||[]).push(a); d.nueva=false; if(!d.r) d.r="cambia"; }
   guardarBorrador(); pintarComite(); };
 window.quitaAcc=(k,i)=>{ if(k==="__gen") AC.gen.accs.splice(i,1); else (AC.p[k].accs||[]).splice(i,1); guardarBorrador(); pintarComite(); };
 window.okSeccion=(sk)=>{ const p=comPorId(AC.id), S=puntosDe(p.inf,COMX[p.id]), sx=S.find(x=>x.k===sk); if(!sx) return;
@@ -654,12 +712,13 @@ window.okSeccion=(sk)=>{ const p=comPorId(AC.id), S=puntosDe(p.inf,COMX[p.id]), 
 // El acta (correo y consulta): solo lo que importa — lo cambiado, lo que sube, comentarios y acciones
 function htmlActa(p,a,d){
   const S=a.secciones||[], dec=(r)=>(DEC[r]||[""])[0];
-  const lineas=S.map(sx=>{ const it=sx.items.filter(x=>{ const q=(a.p||{})[x.k]||{}; return q.r&&q.r!=="ok"||q.com||(q.accs||[]).length; });
+  const lineas=S.map(sx=>{ const it=sx.items.filter(x=>{ const q=(a.p||{})[x.k]||{}; return q.r&&q.r!=="ok"||q.com||q.t||(q.accs||[]).length; });
     if(!it.length) return "";
     return `<div style="font-size:12px;font-weight:800;color:#6B7684;text-transform:uppercase;margin:14px 0 4px">${esc(sx.t)}</div>`
       +it.map(x=>{ const q=a.p[x.k]||{}, c=(DEC[q.r]||["","#94A3B8"])[1];
         return `<div style="border-left:3px solid ${c};padding:5px 10px;margin:6px 0;background:#F7F9FB;border-radius:0 8px 8px 0">
-          <div style="font-size:13.5px"><b>${esc(x.nom)}</b> <span style="color:${c};font-size:12px;font-weight:700">${esc(dec(q.r))}</span></div>
+          <div style="font-size:13.5px"><b>${esc(x.nom)}</b> <span style="color:${c};font-size:12px;font-weight:700">${esc(etiquetaDec(x.k,q.r))}</span></div>
+          ${q.t?`<div style="font-size:13px;margin-top:3px">✎ ${esc(q.t)}</div>`:""}
           ${x.acc||x.txt?`<div style="font-size:12px;color:#6B7684">Dijo: ${esc([x.acc,x.txt].filter(Boolean).join(" · "))}</div>`:""}
           ${q.com?`<div style="font-size:13px;margin-top:3px">💬 ${esc(q.com)}</div>`:""}
           ${(q.accs||[]).map(y=>`<div style="font-size:13px;margin-top:3px">➕ <b>${esc(y.que)}</b> · ${esc(y.quien)}${y.cuando?" · para el "+esc(y.cuando.split("-").reverse().join("/")):""}</div>`).join("")}</div>`; }).join(""); }).join("");
@@ -689,7 +748,7 @@ window.cerrarComite=async()=>{
   const ahora=new Date().toISOString(), porNombre=NOMBRE||AGENTE;
   const a={p:AC.p,gen:AC.gen,secciones:S,porNombre};
   const accs=[...P.flatMap(x=>((AC.p[x.k]||{}).accs||[]).map(y=>Object.assign({ref:x.nom},y))),...AC.gen.accs];
-  const coms=[...P.filter(x=>(AC.p[x.k]||{}).com).map(x=>x.nom+": "+AC.p[x.k].com),...(AC.gen.com?[AC.gen.com]:[])];
+  const coms=[...P.filter(x=>(AC.p[x.k]||{}).com||(AC.p[x.k]||{}).t).map(x=>x.nom+": "+[AC.p[x.k].t,AC.p[x.k].com].filter(Boolean).join(" · ")),...(AC.gen.com?[AC.gen.com]:[])];
   const decision=P.some(x=>AC.p[x.k].r==="sube")?"sube":P.some(x=>AC.p[x.k].r==="cambia")||accs.length?"cambia":"ok";
   try{
     const sig=semSig();
@@ -713,11 +772,11 @@ window.cerrarComite=async()=>{
     // Lo decidido queda también en el historial de cada caso de recuperación y en el hilo de cada cobro
     const porO={id:UID||AGENTE,nombre:porNombre};
     for(const x of P){ const q=AC.p[x.k]||{};
-      const nota=["Comité s"+W.sem+": "+((DEC[q.r]||[""])[0]),q.com||"",...(q.accs||[]).map(y=>"➕ "+y.que+" ("+y.quien+")")].filter(Boolean).join(" · ");
+      const nota=["Comité s"+W.sem+": "+etiquetaDec(x.k,q.r),q.t||"",q.com||"",...(q.accs||[]).map(y=>"➕ "+y.que+" ("+y.quien+")")].filter(Boolean).join(" · ");
       try{
         if(x.caso){ const c=(await RC.leerCasos()).find(z=>z._id===x.caso); if(c){ const h=(c.historial||[]).concat([{sem:W.sem,fecha:ahora,por:porNombre,sistema:"📝 "+nota}]);
           await RC.guardar(c._id,{historial:h}); } }
-        if(x.compId&&(q.com||(q.accs||[]).length||q.r!=="ok")){ const inc=await RC.leerCompromiso(x.compId); if(inc) await RC.cobroComentar(inc,porO,"📝 "+nota); }
+        if(x.compId&&(q.com||q.t||(q.accs||[]).length||q.r!=="ok")){ const inc=await RC.leerCompromiso(x.compId); if(inc) await RC.cobroComentar(inc,porO,"📝 "+nota); }
       }catch(e){}
     }
     try{ localStorage.removeItem(claveBorrador(p.id)); }catch(e){}
