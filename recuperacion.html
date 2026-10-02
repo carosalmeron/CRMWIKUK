@@ -57,7 +57,7 @@
 </header>
 <main id="app"><p class="estado">Leyendo casos…</p></main>
 
-<script src="/recuperacion_comun.js?v=20261001c"></script>
+<script src="/recuperacion_comun.js?v=20261002a"></script>
 <script>
 const P=new URLSearchParams(location.search);
 const EMBED=P.get("embed")==="1", FICHA_URL=P.get("ficha")||"", ART_URL=P.get("art")||"";
@@ -100,10 +100,10 @@ const estDeOtros=()=>ESTS.filter(e=>e.estado==="pendiente_aprobacion"&&estEnAmbi
 async function cargar(){
   const [casos,res,ests,us]=await Promise.all([RC.leerCasos(), RC.leer("pbi_resumen_agente"), RC.leerProfundo("estrategias").catch(()=>[]), RC.leer("usuarios",10).catch(()=>[])]);
   RC._us=us;
-  if(RC.VERSION!=="20261001c"){
+  if(RC.VERSION!=="20261002a"){
     // Se vuelve a pedir sin caché antes de rendirse
     await new Promise(ok=>{ const sc=document.createElement("script"); sc.src="/recuperacion_comun.js?t="+Date.now(); sc.onload=sc.onerror=ok; document.head.appendChild(sc); });
-    if(RC.VERSION!=="20261001c") throw new Error("en el servidor está la versión «"+(RC.VERSION||"antigua, sin número")+"» de recuperacion_comun.js y hace falta la 20261001c. "
+    if(RC.VERSION!=="20261002a") throw new Error("en el servidor está la versión «"+(RC.VERSION||"antigua, sin número")+"» de recuperacion_comun.js y hace falta la 20261002a. "
       +"Sube recuperacion_comun.js a la MISMA carpeta que recuperacion.html (la raíz, no api/), espera a que Vercel termine y recarga.");
   }
   await RC.prepararEsts(ests.filter(e=>!e.eliminada&&!RC.esFrancia(e.equipo)));
@@ -160,6 +160,7 @@ function lineaCaso(c,conAcciones,opts){
     <div style="margin:5px 0 2px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">${pill(nv.nivel)}
       <span class="muted">${c.estado==="recuperado"?"✅ recuperado el "+fch(c.recuperadoEn)
         :c.estado==="archivado"?"🗄 archivado · "+esc(c.archivoMotivo||"")
+        :(c.estado==="aplazado"||c.estado==="bloqueado")?esc(RC.txtEstadoCerrado(c))
         :c.estado==="propuesta_archivo"?"⏳ pide archivarlo"
         :dAcc!=null?`${dAcc} días desde la última acción`:""}${nv.motivo&&nv.nivel>RC.nivelBase(c.perdido)?" · ⬆ "+esc(nv.motivo):""}</span></div>`;
   if(!opts.sinProductos&&(RC.abierto(c)||c.productos)){
@@ -196,7 +197,7 @@ function lineaCaso(c,conAcciones,opts){
       <button class="btn gris" onclick="anotar('${c._id}')">Enviar</button></div>`;
     if(c.estado!=="propuesta_archivo"){
       const mots=RC.motivosPara(ES_CEO,ES_JEFE,c);
-      h+=`<details style="margin-top:6px"><summary class="muted">🗄 Dejar de insistir en este cliente</summary>
+      h+=`<details style="margin-top:6px"><summary class="muted">🗄 Aparcar 60 días, bloquear o dejar de insistir</summary>
         <div style="display:grid;gap:6px;margin-top:6px">
           <select id="am_${c._id}">${RC.MOTIVOS_ARCHIVO.map(m=>`<option value="${esc(m)}">${esc(m)}${mots.includes(m)?"":" · lo decide el CEO"}</option>`).join("")}</select>
           <textarea id="an_${c._id}" placeholder="Por qué (obligatorio)"></textarea>
@@ -624,6 +625,8 @@ function todosAg(abrir,lista){ lista.forEach(a=>abrir?ABRE_AG.add(a):ABRE_AG.del
 function estadoCorto(c){
   if(c.estado==="recuperado") return ["✅ recuperado","var(--green)"];
   if(c.estado==="archivado") return ["🗄 archivado","var(--muted)"];
+  if(c.estado==="aplazado") return [RC.txtEstadoCerrado(c),"var(--muted)"];
+  if(c.estado==="bloqueado") return ["⛔ bloqueado","var(--red)"];
   if(c.estado==="propuesta_archivo") return ["⏳ pide archivo","var(--amber)"];
   if(!RC.tienePlan(c)) return ["sin plan","var(--red)"];
   if(!ultimaDeSemana(c)&&!diagEstaSemana(c)) return ["sin avance","var(--red)"];
@@ -713,7 +716,7 @@ function vistaCasos(){
   }).sort((a,b)=>num(b.perdido)-num(a.perdido));
   const sel=(k,ops)=>`<select onchange="FIL.${k}=this.value;pintar()">${ops.map(([v,t])=>`<option value="${esc(v)}"${FIL[k]===v?" selected":""}>${esc(t)}</option>`).join("")}</select>`;
   return `<div class="filtros">
-    ${sel("estado",[["abiertos","Abiertos"],["recuperado","Recuperados"],["archivado","Archivados"],["propuesta_archivo","Piden archivo"],["","Todos"]])}
+    ${sel("estado",[["abiertos","Abiertos"],["recuperado","Recuperados"],["archivado","Archivados"],["aplazado","Aparcados (60 días)"],["bloqueado","Bloqueados"],["propuesta_archivo","Piden archivo"],["","Todos"]])}
     ${sel("nivel",[["","Todos los niveles"],["3","CEO"],["2","Jefe de ventas"],["1","Comercial"]])}
     ${ES_JEFE?sel("agente",[["","Todos los comerciales"],...ags.map(a=>[a,nomAg(a)])]):""}
     ${ES_DIR&&eqs.length>1?sel("equipo",[["","Todos los equipos"],...eqs.map(e=>[e,e])]):""}
@@ -980,7 +983,7 @@ async function archivarLote(){
   const ahora=new Date().toISOString(); let ok=0;
   for(const id of ids){
     const c=CASOS.find(x=>x._id===id); if(!c||!RC.puedeArchivar(ES_CEO,ES_JEFE,c,c.archivoMotivo)) continue;
-    const campos={estado:"archivado",archivoDecision:"aprobado",archivoRespuesta:"",archivadoPor:QUIEN,archivadoEn:ahora,
+    const campos={...RC.camposAprobar(c.archivoMotivo,ahora),archivoDecision:"aprobado",archivoRespuesta:"",archivadoPor:QUIEN,archivadoEn:ahora,
       historial:(c.historial||[]).concat([{sem:SEM,fecha:ahora,por:QUIEN,sistema:`${QUIEN} aprueba archivarlo (${c.archivoMotivo})`}])};
     try{ await RC.guardar(id,campos); Object.assign(c,campos); ok++; }catch(e){}
   }
@@ -995,7 +998,7 @@ async function archivarDirecto(id){
   const ahora=new Date().toISOString();
   const directo=RC.puedeArchivar(ES_CEO,ES_JEFE,c,m);
   const campos=directo
-    ? {estado:"archivado",archivoMotivo:m,archivoNota:t,archivoDecision:"aprobado",archivadoPor:QUIEN,archivadoEn:ahora}
+    ? {...RC.camposAprobar(m,ahora),archivoMotivo:m,archivoNota:t,archivoDecision:"aprobado",archivadoPor:QUIEN,archivadoEn:ahora}
     : {estado:"propuesta_archivo",archivoMotivo:m,archivoNota:t,archivoPropuestoPor:QUIEN,archivoPropuestoEn:ahora,
        archivoDecision:"",archivoRespuesta:""};
   campos.historial=(c.historial||[]).concat([{sem:SEM,fecha:ahora,por:QUIEN,
@@ -1009,7 +1012,7 @@ async function decidirArchivo(id,ok){
   if(!ok&&t.length<5){ alert("Escribe por qué hay que seguir insistiendo: el comercial lo verá en su parte."); return; }
   const ahora=new Date().toISOString();
   const campos=ok
-    ? {estado:"archivado",archivoDecision:"aprobado",archivoRespuesta:t,archivadoPor:QUIEN,archivadoEn:ahora}
+    ? {...RC.camposAprobar(c.archivoMotivo,ahora),archivoDecision:"aprobado",archivoRespuesta:t,archivadoPor:QUIEN,archivadoEn:ahora}
     : {estado:RC.tienePlan(c)?"diagnosticado":"abierto",archivoDecision:"rechazado",archivoRespuesta:t,
        ultimaAccion:c.ultimaAccion||""};
   if(!RC.puedeArchivar(ES_CEO,ES_JEFE,c,c.archivoMotivo)){ alert("Este lo decide el CEO."); return; }

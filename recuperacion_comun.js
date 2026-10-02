@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20261001c";
+  RC.VERSION="20261002a";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -30,8 +30,26 @@
     "Llamada o visita del CEO","Otra"];
   RC.HECHO=["Visitado","Llamado","Oferta enviada","Muestra enviada",
     "Reunión con jefe/CEO","No he podido"];
-  RC.MOTIVOS_ARCHIVO=["Impago","Cierre del negocio","No es rentable",
+  // (oct 2026) Dos etiquetas nuevas, las dos las valida el JEFE (sin pasar por el CEO):
+  //   · Aparcar: ahora no hay nada que hacer → desaparece y vuelve sola a los 60 días.
+  //   · Bloquear: no paga o ha cerrado → deja de salir para siempre (hasta que alguien lo desbloquee).
+  RC.MOT_PAUSA="🕓 Nada que hacer ahora · recordar en 60 días";
+  RC.MOT_BLOQ_IMPAGO="⛔ Bloquear: no paga";
+  RC.MOT_BLOQ_CIERRE="⛔ Bloquear: ha cerrado";
+  RC.DIAS_PAUSA=60;
+  RC.MOTIVOS_ARCHIVO=[RC.MOT_PAUSA,RC.MOT_BLOQ_IMPAGO,RC.MOT_BLOQ_CIERRE,"No es rentable",
     "Decisión estratégica","El dato está mal","Otro"];
+  RC.esPausa=(m)=>m===RC.MOT_PAUSA;
+  RC.esBloqueo=(m)=>[RC.MOT_BLOQ_IMPAGO,RC.MOT_BLOQ_CIERRE,"Impago","Cierre del negocio"].includes(m);
+  // Qué estado queda al aprobar la propuesta, según el motivo
+  RC.camposAprobar=(motivo,ahora)=>{
+    if(RC.esPausa(motivo)){ const d=new Date(Date.parse(ahora)||Date.now()); d.setDate(d.getDate()+RC.DIAS_PAUSA);
+      return {estado:"aplazado",recordarEl:d.toISOString().slice(0,10)}; }
+    if(RC.esBloqueo(motivo)) return {estado:"bloqueado",bloqueoMotivo:/cerr/i.test(motivo)?"ha cerrado":"no paga"};
+    return {estado:"archivado"};
+  };
+  RC.txtEstadoCerrado=(c)=>c.estado==="aplazado"?"🕓 aparcado · vuelve el "+String(c.recordarEl||"").split("-").reverse().join("/")
+    :c.estado==="bloqueado"?"⛔ bloqueado · "+(c.bloqueoMotivo||c.archivoMotivo||""):"";
   RC.DATO_MAL="El dato está mal";
   // Quién puede archivar (dejar de insistir). Aprobado por el CEO el 29/09/2026:
   //   · CEO: cualquier caso.
@@ -41,6 +59,7 @@
     if(esCeo) return true;
     if(!esJefe) return false;
     if(motivo===RC.DATO_MAL) return true;
+    if(RC.esPausa(motivo)||RC.esBloqueo(motivo)) return true;   // aparcar y bloquear: siempre el jefe
     return num(caso&&caso.perdido)<RC.UMBRAL.nivel2;
   };
   RC.motivosPara=(esCeo,esJefe,caso)=>RC.MOTIVOS_ARCHIVO.filter(m=>RC.puedeArchivar(esCeo,esJefe,caso,m));
@@ -206,6 +225,14 @@
       const ev=RC.evaluar(cli,fila,ultimo);
       if(prev){
         const c=Object.assign({},prev);
+        if(!RC.abierto(c)&&c.estado==="aplazado"&&c.recordarEl&&c.recordarEl<=ahora.slice(0,10)){
+          // (oct 2026) Aparcado: pasados los 60 días vuelve solo. Si ya no cae, se da por recuperado.
+          const hist=(c.historial||[]).concat([{sem:semana,fecha:ahora,sistema:ev?`Vuelve tras aparcarlo ${RC.DIAS_PAUSA} días: ${ev.motivo}`:`Aparcado ${RC.DIAS_PAUSA} días: ya no cae, se da por recuperado`}]);
+          if(ev) Object.assign(c,{estado:"abierto",abierto:ahora,semanaApertura:semana,tipo:ev.tipo,motivo:ev.motivo,perdido:ev.perdido,
+            ritmoRef:ev.ritmoRef,causa:"",accion:"",fechaObjetivo:"",eurosObjetivo:0,archivoMotivo:"",archivoDecision:"",historial:hist,ultimaAccion:"",agente,equipo,vueltaDePausa:ahora});
+          else Object.assign(c,{estado:"recuperado",recuperadoEn:ahora,historial:hist});
+          escribir.push(c); out.push(c); continue;
+        }
         if(!RC.abierto(c)){
           // Cerrado. Si era recuperado y vuelve a caer pasados 60 días, se reabre.
           const d=RC.dias(c.recuperadoEn);
@@ -1315,6 +1342,8 @@
       recuperadosEur:casos.filter(c=>c.estado==="recuperado").reduce((t,c)=>t+num(c.perdido),0),
       recuperadosMes:casos.filter(c=>c.estado==="recuperado"&&new Date(c.recuperadoEn).getMonth()===hoyMes).length,
       archivados:casos.filter(c=>c.estado==="archivado").length,
+      aplazados:casos.filter(c=>c.estado==="aplazado").length,
+      bloqueados:casos.filter(c=>c.estado==="bloqueado").length,
       nuevosSemana:casos.filter(c=>num(c.semanaApertura)===sem).length,
       causas:{}};
     ab.forEach(c=>{ if(c.causa) r.causas[c.causa]=(r.causas[c.causa]||0)+num(c.perdido); });
