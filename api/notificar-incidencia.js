@@ -849,17 +849,26 @@ async function datosCEO(anio,sem){
     const nombre=A.nombre(ficha)||u.nombre||u.username||canon;
     if(esCanal(nombre)||esCanal(canon)||esCanal(u.catalogoVendedor)) return;
     if(/^u_\d+$/i.test(String(nombre))) return;
+    const ep=String(u.entregaParte||"").toLowerCase();
+    const tipDep=String(u.tipologia||"")||(u.departamentoId&&!/^(eq_|ventas$|comercial)/i.test(String(u.departamentoId))?String(u.departamentoId):"");
+    const conCodigo=!!(u.grupoAgente||u.catalogoVendedor);
     if(!map[canon]) map[canon]={id:canon,nombre,equipo:UC(A.equipo(ficha)||u.equipo||""),
       cod:UC(u.grupoAgente||u.catalogoVendedor||canon),
       perfil:String(u.perfilComercial||"").toLowerCase(),
-      entrega:String(u.entregaParte||"").toLowerCase()};
+      entrega:ep, noEntrega:ep==="no", siEntrega:ep==="si", tipDep, conCodigo};
     else{ const m=map[canon];
+      // (oct 2026) Si en cualquiera de sus fichas pone que NO entrega parte, no entrega
+      if(ep==="no") m.noEntrega=true; if(ep==="si") m.siEntrega=true;
+      if(tipDep) m.tipDep=tipDep; if(conCodigo) m.conCodigo=true;
       if(nombre.length>m.nombre.length&&!/^[a-z]+$/.test(nombre)) m.nombre=nombre;
       if(!m.equipo&&u.equipo) m.equipo=UC(u.equipo);
       if(!m.perfil&&u.perfilComercial) m.perfil=String(u.perfilComercial).toLowerCase();
       if(!m.entrega&&u.entregaParte) m.entrega=String(u.entregaParte).toLowerCase(); }
   });
-  const gente=Object.values(map).filter(g=>g.equipo);
+  // (oct 2026) Misma regla que el portal «Cierre de la semana»: fuera quien NO entrega parte
+  // («no reporta»), el personal de departamento y quien no tiene código de vendedor (salvo que
+  // esté marcado que sí entrega). Antes aparecían en «Comerciales que no llegan» con 0/56.
+  const gente=Object.values(map).filter(g=>g.equipo&&!(g.noEntrega&&!g.siEntrega)&&!g.tipDep&&(g.conCodigo||g.siEntrega));
 
   // Jefes por equipo, para el nombre en la tarjeta
   const jefes={};
