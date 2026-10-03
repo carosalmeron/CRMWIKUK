@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20261003a";
+  RC.VERSION="20261003b";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -33,13 +33,14 @@
   // (oct 2026) Dos etiquetas nuevas, las dos las valida el JEFE (sin pasar por el CEO):
   //   · Aparcar: ahora no hay nada que hacer → desaparece y vuelve sola a los 60 días.
   //   · Bloquear: no paga o ha cerrado → deja de salir para siempre (hasta que alguien lo desbloquee).
-  RC.MOT_PAUSA="🕓 Nada que hacer ahora · recordar en 60 días";
+  RC.MOT_PAUSA="😴 Dormido 60 días";
+  RC._PAUSA_ANT=["🕓 Nada que hacer ahora · recordar en 60 días"];
   RC.MOT_BLOQ_IMPAGO="⛔ Bloquear: no paga";
   RC.MOT_BLOQ_CIERRE="⛔ Bloquear: ha cerrado";
   RC.DIAS_PAUSA=60;
   RC.MOTIVOS_ARCHIVO=[RC.MOT_PAUSA,RC.MOT_BLOQ_IMPAGO,RC.MOT_BLOQ_CIERRE,"No es rentable",
     "Decisión estratégica","El dato está mal","Otro"];
-  RC.esPausa=(m)=>m===RC.MOT_PAUSA;
+  RC.esPausa=(m)=>m===RC.MOT_PAUSA||RC._PAUSA_ANT.includes(m);
   RC.esBloqueo=(m)=>[RC.MOT_BLOQ_IMPAGO,RC.MOT_BLOQ_CIERRE,"Impago","Cierre del negocio"].includes(m);
   // Qué estado queda al aprobar la propuesta, según el motivo
   RC.camposAprobar=(motivo,ahora)=>{
@@ -48,7 +49,7 @@
     if(RC.esBloqueo(motivo)) return {estado:"bloqueado",bloqueoMotivo:/cerr/i.test(motivo)?"ha cerrado":"no paga"};
     return {estado:"archivado"};
   };
-  RC.txtEstadoCerrado=(c)=>c.estado==="aplazado"?"🕓 aparcado · vuelve el "+String(c.recordarEl||"").split("-").reverse().join("/")
+  RC.txtEstadoCerrado=(c)=>c.estado==="aplazado"?"😴 dormido · vuelve el "+String(c.recordarEl||"").split("-").reverse().join("/")
     :c.estado==="bloqueado"?"⛔ bloqueado · "+(c.bloqueoMotivo||c.archivoMotivo||""):"";
   RC.DATO_MAL="El dato está mal";
   // Quién puede archivar (dejar de insistir). Aprobado por el CEO el 29/09/2026:
