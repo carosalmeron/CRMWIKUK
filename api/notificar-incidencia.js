@@ -962,7 +962,8 @@ async function datosCEO(anio,sem){
       let dC=[]; try{ dC=JSON.parse(c.datos||"[]"); }catch(e){}
       const corteT=p.cobFecha||hoyISO;
       for(const cli of dC) for(const [gE,eE] of Object.entries(cli.emp||{})){
-        const v=numC(eE.ven), v2=numC(eE.v20), v7=numC(eE.v70); if(v<1) continue;
+        const v=numC(eE.ven), v2=numC(eE.v20), v7=numC(eE.v70);
+        if(v<1){ if(v<=-1) p.saldoNeg=(p.saldoNeg||0)+v; continue; }   // (oct 2026) saldos a favor: no salen en la lista pero restan del total
         const dias=v7>=1?71:v2>=1?21:0, tramo=v7>=1?"más de 70 días":v2>=1?"+20 días":"menos de 20 días";
         // Con facturas: las vencidas de ese cliente y empresa (nº, fecha, vencimiento)
         const L=(cli.f||[]).filter(f=>f.g===gE&&f.fv&&f.fv<corteT);
