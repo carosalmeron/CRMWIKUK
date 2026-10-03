@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20261002a";
+  RC.VERSION="20261003a";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -1421,9 +1421,21 @@
            filas:[{p:{nombre,cod,eqNom}, importe, mal, plan, sub, peticion, pedir, casos:[...]}]} */
   RC.UI.bloque=(cfg)=>{
     RC.UI.css(); const fn=cfg.fn||{};
-    const planH=(f)=>f.plan?'<div class="rcu-q" style="margin:2px 0 6px"><b>Su plan:</b> '+e_(f.plan)+'</div>'
-      :f.mal?'<div class="rcu-q rcu-falta" style="margin:2px 0 6px">Sin plan en su parte</div>'
-        +((f.pedir||fn.pedirPlan)?'<button class="rcu-btn" style="margin:0 0 6px" onclick="'+(f.pedir||(fn.pedirPlan+"('"+q_(f.agId||f.p.cod||"")+"','"+q_(cfg.tema)+"','"+q_(f.peticion||"")+"',this)"))+'">📨 Pedir plan</button>':''):'';
+    // (oct 2026) El plan, bien visible y gráfico: caja verde con el plan, o caja roja «sin plan» con el botón
+    const pedirB=(f)=>(f.pedir||fn.pedirPlan)?'<button class="rcu-btn" style="margin-top:8px;border-color:#DC2626;color:#B91C1C" onclick="'+(f.pedir||(fn.pedirPlan+"('"+q_(f.agId||f.p.cod||"")+"','"+q_(cfg.tema)+"','"+q_(f.peticion||"")+"',this)"))+'">📨 Pedir plan</button>':'';
+    const planH=(f)=>f.plan?'<div style="background:#F0FDF4;border:1.5px solid #86EFAC;border-left:6px solid #16A34A;border-radius:12px;padding:10px 12px;margin:4px 0 10px">'
+        +'<div style="font-size:10.5px;font-weight:800;color:#15803D;letter-spacing:.05em">📝 SU PLAN</div><div style="font-size:14.5px;font-weight:700;color:#14532D;margin-top:3px;line-height:1.4">'+e_(f.plan)+'</div></div>'
+      :f.mal?'<div style="background:#FEF2F2;border:1.5px solid #FCA5A5;border-left:6px solid #DC2626;border-radius:12px;padding:10px 12px;margin:4px 0 10px">'
+        +'<div style="font-size:10.5px;font-weight:800;color:#B91C1C;letter-spacing:.05em">⚠️ SIN PLAN</div><div style="font-size:13.5px;color:#7F1D1D;margin-top:3px">No ha puesto plan en su parte.</div>'+pedirB(f)+'</div>':'';
+    // Casos partidos en dos: con acción / sin acción (los sin acción, con su botón para poner una)
+    const grupos=(f)=>{ const L=f.casos||[]; if(!L.some(x=>x.conAccion!=null)) return L.map(x=>RC.UI.fila(x,fn)).join("");
+      const con=L.filter(x=>x.conAccion), sin=L.filter(x=>!x.conAccion);
+      const cab=(t,n,col,bg)=>'<div style="display:flex;align-items:center;gap:8px;margin:10px 0 2px;padding:6px 10px;border-radius:9px;background:'+bg+';color:'+col+';font-size:12px;font-weight:800;letter-spacing:.03em"><span style="flex:1">'+t+'</span><span style="background:'+col+';color:#fff;border-radius:99px;padding:1px 9px">'+n+'</span></div>';
+      return (sin.length?cab("⚠️ SIN ACCIÓN · ponle una",sin.length,"#B91C1C","#FEF2F2")
+          +sin.map(x=>'<div style="border-left:4px solid #DC2626;padding-left:8px">'+RC.UI.fila(x,fn)
+            +(!RC.UI.AB.has("caso_"+x.id)?'<div style="margin:-4px 0 8px"><button class="rcu-btn" style="padding:6px 11px;font-size:12px;border-color:#DC2626;color:#B91C1C" onclick="'
+              +(x.ficha?x.ficha:"RC.UI.AB.add('caso_"+q_(x.id)+"');"+(fn.repintar||"")+"()")+'">📌 Poner acción</button></div>':'')+'</div>').join(""):"")
+        +(con.length?cab("✅ CON ACCIÓN",con.length,"#15803D","#F0FDF4")+con.map(x=>'<div style="border-left:4px solid #16A34A;padding-left:8px">'+RC.UI.fila(x,fn)+'</div>').join(""):""); };
     const filas=(cfg.filas||[]).filter(f=>cfg.modo==="comercial"||f.mal||f.casos.length)
       .sort((a,b)=>((b.mal&&!b.plan)-(a.mal&&!a.plan))||(b.mal-a.mal)||((b.peso||0)-(a.peso||0)));
     const tarjeta=(k,titulo,sub,importe,cuerpo,grande)=>{ const ab=RC.UI.AB.has(k);
@@ -1433,8 +1445,13 @@
         +(ab?'<div style="padding:0 15px 8px">'+cuerpo+'</div>':'')+'</div>'; };
     const subCom=(f)=>f.casos.length+' '+cfg.unidad+(f.sub?' · '+f.sub:'')+' · '
       +(!f.mal?'<span style="color:#16A34A;font-weight:700">en objetivo</span>':f.plan?'<span style="color:#D97706;font-weight:700">con plan</span>':'<span style="color:#DC2626;font-weight:700">sin plan</span>');
-    const cuerpoCom=(f)=>planH(f)+(f.casos.length?f.casos.map(x=>RC.UI.fila(x,fn)).join(""):'<p class="rcu-muted">Ninguno.</p>');
-    const tarjCom=(f)=>tarjeta(cfg.k+"_"+(f.p.cod||f.p.id||f.p.nombre),e_(f.p.nombre),subCom(f),f.importe,cuerpoCom(f),true);
+    const cuerpoCom=(f)=>planH(f)+(f.casos.length?grupos(f):'<p class="rcu-muted">Ninguno.</p>');
+    const chipPlan=(f)=>{ const sinA=(f.casos||[]).filter(x=>x.conAccion===false).length;
+      return '<div style="margin-top:5px;display:flex;gap:6px;flex-wrap:wrap">'
+        +(f.plan?'<span style="background:#DCFCE7;color:#14532D;border-radius:8px;padding:3px 8px;font-size:12px;font-weight:700;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">📝 '+e_(String(f.plan).slice(0,90))+'</span>'
+          :f.mal?'<span style="background:#FEE2E2;color:#B91C1C;border-radius:8px;padding:3px 8px;font-size:12px;font-weight:800">⚠️ sin plan</span>':'')
+        +(sinA?'<span style="background:#FEE2E2;color:#B91C1C;border-radius:8px;padding:3px 8px;font-size:12px;font-weight:800">'+sinA+' sin acción</span>':'')+'</div>'; };
+    const tarjCom=(f)=>tarjeta(cfg.k+"_"+(f.p.cod||f.p.id||f.p.nombre),e_(f.p.nombre),subCom(f)+chipPlan(f),f.importe,cuerpoCom(f),true);
     let arbol;
     if(cfg.modo==="comercial") arbol=filas.map(f=>'<div class="rcu-card" style="padding:4px 15px 8px">'+cuerpoCom(f)+'</div>').join("");
     else if(cfg.modo==="jefe") arbol=filas.map(tarjCom).join("");
