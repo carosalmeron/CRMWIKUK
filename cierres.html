@@ -121,6 +121,7 @@
 <script src="agentes.js"></script>
 <script src="recuperacion_comun.js?v=20261004f"></script>
 <script src="seguimiento_comun.js?v=20261004a"></script>
+<script src="firma_comun.js?v=20261004a"></script>
 <script>
 // ══ Parámetros ════════════════════════════════════════════════════════
 const Q=new URLSearchParams(location.search);
@@ -357,7 +358,8 @@ function tarjetaYo(){
         :`Plazo: <b>${PLAZO.com[3]}</b>. El viernes lo revisas con tu jefe en el comité.`}</p>
       ${ac?`<p>📝 Comité hecho ${esc(cuando(ac.fecha))} con ${esc(ac.porNombre||"tu jefe")}.</p>`:""}
       ${inf?`<button class="env" onclick="verParte('${esc(yo.id)}')">Ver mi parte</button>`:`<button class="env" onclick="abrirMiCierre()">Cerrar mi semana</button>`}
-      ${ac?`<button class="env sec" onclick="verActa('${esc(yo.id)}')">Ver el acta del comité</button>`:""}
+      ${ac&&window.FIRMA&&ac.firmaJefe&&!ac.firmaComercial?`<p style="color:#FCD34D;font-weight:800">✍️ Tu jefe ha firmado el acta del comité. Falta tu firma.</p><button class="env" style="background:#FEF3C7" onclick="verActa('${esc(yo.id)}')">✍️ Firmar el acta del comité</button>`
+        :ac?`<button class="env sec" onclick="verActa('${esc(yo.id)}')">Ver el acta del comité${ac.firmaDirector?" (firmada ✓)":""}</button>`:""}
       ${inf?`<button class="env sec" onclick="abrirMiCierre()">Volver a abrir mi cierre</button>`:""}</div>`;
   }
   if(ROL==="jefe"){
@@ -378,7 +380,8 @@ function tarjetaYo(){
       <p>${inf?`<span class="ok">Cerrado ${esc(cuando(inf.fechaEnvio))}</span>.`:`Cierras cuando hayan cerrado los jefes. Plazo: <b>${PLAZO.director[3]}</b>.`}
         ${jp.length?`<br><span class="mal">Sin cerrar: ${jp.map(p=>esc(p.nombre)).join(" · ")}</span>`:""}</p>
       ${!inf&&SG&&segFaltan()?`<p style="color:#FCD34D">🔁 Antes de cerrar marca ${segFaltan()} punto${segFaltan()===1?"":"s"} de la semana pasada (más abajo).</p>`:""}
-      <button class="env" onclick="abrirMiCierre()">${inf?"Ver mi cierre":"Hacer mi cierre"}</button></div>`;
+      ${actasSinFirma().length?`<button class="env" style="background:#FEF3C7" onclick="verActasSinFirma()">✍️ Firmar actas de comité (${actasSinFirma().length})</button>`:""}
+      <button class="env${actasSinFirma().length?" sec":""}" onclick="abrirMiCierre()">${inf?"Ver mi cierre":"Hacer mi cierre"}</button></div>`;
   }
   if(ROL==="ceo"){
     const dp=D.dirs.filter(d=>!d.inf);
@@ -399,7 +402,11 @@ function tarjetaYo(){
 // ══ Equipo ════════════════════════════════════════════════════════════
 function estadoCom(p){
   if(p.opc&&!p.inf) return `<span class="tag t-fut">Opcional</span>`;
-  if(p.comite) return `<span class="tag t-ok">Comité ✓</span>`;
+  if(p.comite){ const c=p.comite;
+    if(c.firmaDirector) return `<span class="tag t-ok">Acta firmada ✓</span>`;
+    if(c.firmaJefe&&!c.firmaComercial) return `<span class="tag t-pend">✍️ Falta firma comercial</span>`;
+    if(c.firmaJefe&&c.firmaComercial) return `<span class="tag t-pend">✍️ Falta firma jefe comercial</span>`;
+    return `<span class="tag t-ok">Comité ✓</span>`; }
   if(p.inf) return `<span class="tag ${pasado("comite")?"t-mal":"t-pend"}">${p.inf.ausente?"Ausente":"Parte ✓ · sin comité"}</span>`;
   return `<span class="tag ${pasado("com")?"t-mal":"t-fut"}">Sin parte</span>`;
 }
@@ -1018,11 +1025,48 @@ window.verActa=(id)=>{
   const a=pu?{p:pu.p||{},gen:pu.gen||{com:"",accs:[]},secciones:pu.secciones||puntosDe(p.inf),porNombre:c.porNombre||""}
     :{p:{},gen:{com:deJSON(c.comentarios,[]).join("\n"),accs:deJSON(c.acciones,[])},secciones:[],porNombre:c.porNombre||""};
   const env=deJSON(c.enviadoA,[]);
+  // Cada uno firma en su propio móvil, según su papel: primero el jefe (al cerrar), luego el comercial, luego el jefe comercial
+  const papelF=!window.FIRMA?"":(ROL==="comercial"&&D.yo&&D.yo.id===p.id&&c.firmaJefe&&!c.firmaComercial)?"comercial"
+    :(ROL==="director"&&c.firmaJefe&&c.firmaComercial&&!c.firmaDirector)?"director":"";
+  const firmable=!!papelF;
   abrirCapa("Acta · "+p.nombre,`<div class="in">
     <p class="cs">Comité del ${esc(cuando(c.fecha))} con ${esc(c.porNombre||"")}${env.length?" · enviada a "+env.map(x=>esc(x.nombre)).join(", "):""}</p>
     <div class="parte"><iframe sandbox="allow-same-origin allow-popups" srcdoc="${esc(htmlActa(p,a,null))}" onload="try{this.style.height=(this.contentDocument.body.scrollHeight+30)+'px'}catch(e){}"></iframe></div>
+    ${window.FIRMA?`<div class="card" style="margin-top:10px">${c.firmaComercial||c.firmaJefe?FIRMA.bloque(c):`<p class="cs" style="margin:0">✍️ Acta cerrada antes de la firma digital: sin firmas.</p>`}
+      ${firmable?`<div id="firmaDir"></div><button class="btn prim" id="btnFirmaDir" style="width:100%;margin-top:8px" disabled onclick="firmarActa('${esc(p.id)}','${papelF}')">✍️ Firmar el acta${papelF==="director"?" como jefe comercial":""}</button>`:""}
+      ${ROL==="director"&&c.firmaJefe&&!c.firmaComercial&&!c.firmaDirector?`<p class="cs" style="margin:8px 0 0">⏳ Primero tiene que firmarla ${esc(p.nombre)} en su móvil; después te sale para firmar.</p>`:""}</div>`:""}
     <p class="ct" style="margin-top:16px">Su parte</p><div id="parteBox">${htmlParte(p,"parteBox")}</div></div>`);
+  if(firmable){ window._PAD_DIR=FIRMA.pad(document.getElementById("firmaDir"),"Tu firma ("+(NOMBRE||p.nombre)+(papelF==="director"?", jefe comercial":", comercial")+")",(v)=>{ const b=document.getElementById("btnFirmaDir"); if(b) b.disabled=v; }); }
 };
+// Firma el comercial (después del jefe) o el jefe comercial (el último); se avisa al siguiente
+window.firmarActa=async(id,papel)=>{
+  const p=comPorId(id)||(D.yo&&D.yo.id===id?D.yo:null); if(!p||!p.comite||!window._PAD_DIR||window._PAD_DIR.vacia()) return;
+  const b=document.getElementById("btnFirmaDir"); b.disabled=true; b.textContent="Guardando…";
+  const c=p.comite, ahora=new Date().toISOString();
+  const f=papel==="comercial"?{firmaComercial:window._PAD_DIR.imagen(),firmaComercialNombre:NOMBRE||p.nombre,firmaComercialEn:ahora,firmaEstado:"falta_director"}
+    :{firmaDirector:window._PAD_DIR.imagen(),firmaDirectorNombre:NOMBRE||AGENTE,firmaDirectorEn:ahora,firmaEstado:"completa"};
+  try{
+    await escribir("cierres_flujo",c._id,f); Object.assign(c,f);
+    if(papel==="comercial"){
+      try{ const us=D.us.filter(u=>["director","crm_director"].includes(String(u.rol||"").toLowerCase())&&u.email);
+        if(us.length) await fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({to:us.map(u=>u.email),
+          subject:`✍️ Acta por firmar · ${p.nombre} · semana ${W.sem}`,
+          html:`<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;margin:0 auto"><p style="font-size:14px">El acta del comité de <b>${esc(p.nombre)}</b> (semana ${W.sem}) ya la han firmado su jefe y el comercial. Falta tu firma.</p>${FIRMA.lineaCorreo(c)}<p style="font-size:13px">Entra en el portal → «Cierre de la semana» → «✍️ Firmar actas de comité».</p></div>`})}); }catch(e){}
+      alert("Acta firmada. Ahora la firma el jefe comercial."); verActa(p.id); recargarSuave(); return;
+    }
+    try{ const d=await RC.destinatarios(codCom(p),UID||AGENTE); const to=[...d.para,...d.copias].map(x=>x.email);
+      if(to.length) await fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({to,
+        subject:`✍️ Acta firmada · ${p.nombre} · semana ${W.sem}`,
+        html:`<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;margin:0 auto;color:#14181F"><div style="background:#14181F;color:#fff;padding:16px 20px;border-radius:12px 12px 0 0"><div style="font-size:11px;letter-spacing:.08em;opacity:.7;text-transform:uppercase">Acta del comité · semana ${W.sem}</div><div style="font-size:19px;font-weight:800">✍️ Firmada por todas las partes</div></div><div style="border:1px solid #DCE1E7;border-top:none;border-radius:0 0 12px 12px;padding:18px 20px"><p style="font-size:14px;margin:0">El acta del comité de <b>${esc(p.nombre)}</b> de la semana ${W.sem} ya está firmada por el comercial, el jefe de equipo y el jefe comercial.</p>${FIRMA.lineaCorreo(c)}<a href="https://crmwikuk.vercel.app/" style="display:inline-block;margin-top:14px;background:#14181F;color:#fff;text-decoration:none;padding:10px 20px;border-radius:9px;font-size:13px;font-weight:700">Ver el acta en el portal</a></div></div>`})}); }catch(e){}
+    verActa(id); recargarSuave();
+  }catch(e){ b.disabled=false; b.textContent="✍️ Firmar el acta como jefe comercial"; alert(e.message); }
+};
+const recargarSuave=()=>cargar().then(()=>{ if(document.getElementById("capa").hidden) pintar(); }).catch(()=>{});
+// Actas que faltan por firmar el jefe comercial
+const actasSinFirma=()=>D?D.coms.filter(p=>p.comite&&p.comite.firmaJefe&&p.comite.firmaComercial&&!p.comite.firmaDirector):[];
+window.verActasSinFirma=()=>{ const l=actasSinFirma();
+  abrirCapa("✍️ Actas por firmar · semana "+W.sem,`<div class="in"><div class="card"><p class="cs">Ya las han firmado el jefe de equipo y el comercial, cada uno en su móvil. Ábrela, revísala y fírmala.</p>
+    ${l.map(p=>`<div class="fila" onclick="verActa('${esc(p.id)}')"><div class="n"><b>${esc(p.nombre)}</b><small>${esc(p.equipo||"")} · comité ${esc(cuando(p.comite.fecha))} con ${esc(p.comite.porNombre||"")}</small></div><span class="tag t-pend">Falta tu firma</span><span class="chev">›</span></div>`).join("")||'<p class="cs">No hay actas pendientes de tu firma.</p>'}</div></div>`,recargar); };
 
 // ══ Cierres de Administración y del CEO ═══════════════════════════════
 async function cerrarPaso(paso,txt){
