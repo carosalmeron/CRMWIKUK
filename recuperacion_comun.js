@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20261004d";
+  RC.VERSION="20261004e";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -548,7 +548,30 @@
   RC.LIM_DTO={jefe:10,director:15,ceo:100};
   RC.dtoDe=(pa,po)=>num(pa)>0?Math.round((num(pa)-num(po))/num(pa)*1000)/10:0;
   // por: {nombre, nivel:"comercial"|"jefe"|"director"|"ceo"}
+  // (oct 2026) No repetir: si ya hay una pendiente del mismo artículo para el mismo cliente, no se crea otra.
+  // Pasaba al pulsar dos veces (el botón no se bloqueaba) o al volver a pedirla porque no se veía la anterior.
+  RC._estEnCurso=RC._estEnCurso||new Set();
+  RC.estPendienteIgual=async(caso,l)=>{
+    const cli=String(caso.cliente||"").trim(); if(!cli) return null;
+    try{
+      const r=await fetch(RC.FB+":runQuery",{method:"POST",headers:{"Content-Type":"application/json"},cache:"no-store",
+        body:JSON.stringify({structuredQuery:{from:[{collectionId:"estrategias"}],where:{fieldFilter:{field:{fieldPath:"clienteId"},op:"EQUAL",value:{stringValue:cli}}},limit:200}})});
+      if(!r.ok) return null;
+      const l0=((await r.json())||[]).filter(x=>x.document).map(x=>RC.desdeFB(x.document));
+      const k=ARR(l.art||l.desc);
+      return l0.find(e=>!e.eliminada&&/pendiente/.test(e.estado||"")&&(e.ofertas||e.productos||[]).some(o=>ARR(o.codigo||o.nombre)===k||ARR(o.nombre)===ARR(l.desc)))||null;
+    }catch(e){ return null; }
+  };
+  RC.txtYaExiste=(e)=>"Ya estaba pedida"+(e.fechaCreacionStr?" el "+e.fechaCreacionStr:"")+" ("+((e.ofertas||[])[0]||{}).nombre+" a "+(((e.ofertas||[])[0]||{}).precioOferta||"")+" €) y sigue pendiente de "+(e.pendienteDeNombre||"aprobar")+". No se ha creado otra.\n\nEl resultado te llega por correo y queda en la ficha del cliente.";
   RC.crearEstrategia=async(caso,l,nota,por)=>{
+    const llave=ARR(caso.cliente||caso.nombre)+"|"+ARR(l.art||l.desc);
+    if(RC._estEnCurso.has(llave)) throw new Error("ya se está enviando, espera un momento");
+    const ya=await RC.estPendienteIgual(caso,l);
+    if(ya){ ya._id=ya._id||ya.id; ya._yaExistia=true; return ya; }
+    RC._estEnCurso.add(llave);
+    try{ return await RC._crearEstrategia(caso,l,nota,por); } finally{ RC._estEnCurso.delete(llave); }
+  };
+  RC._crearEstrategia=async(caso,l,nota,por)=>{
     const cad=await RC.cadenaDe(caso.agente);
     const hoy=new Date(), hoyS=hoy.toLocaleDateString("es-ES");
     const dto=RC.dtoDe(l.precioActual,l.precioOferta);
@@ -707,6 +730,11 @@
       :accion==="rechazar"?"❌ Rechazada por "+por.nombre:"↑ Elevada a "+(campos.pendienteDeNombre||"dirección"),por:por.nombre,fecha:hoyS,nota:nota||""}]);
     await RC.guardarEn("estrategias",e._id||e.id,campos,true);
     Object.assign(e,campos);
+    // (oct 2026) El resultado queda también en el historial del caso (lo ve el acta de recuperación)
+    if(e.casoId){ try{ const c=await RC.leerUno(e.casoId); if(c){ const o=(e.ofertas||[])[0]||{}, hoy=new Date();
+      const t=(accion==="aprobar"?"✅ Aprobada":accion==="rechazar"?"❌ Rechazada":"↑ Elevada a "+(campos.pendienteDeNombre||"dirección"))+" por "+por.nombre;
+      await RC.guardar(e.casoId,{historial:(c.historial||[]).concat([{sem:RC.semanaISO(hoy),fecha:hoy.toISOString(),por:por.nombre,
+        sistema:"Resultado estrategia: "+(o.nombre||e.estrategia||"")+(o.precioOferta?" a "+o.precioOferta+" €":"")+" · "+t+(nota?" — "+nota:"")}])}); } }catch(x){} }
     // Oferta automática al aprobar, como hace el CRM
     if(accion==="aprobar") await RC.ofertaDeEstrategia(e,por,nota);
     try{
