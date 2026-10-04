@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20261004b";
+  RC.VERSION="20261004c";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -1227,7 +1227,11 @@
   };
   // (oct 2026) Con uno, varios o todos los artículos que caen (p. ej. a Compras: qué solución se le ha dado al cliente)
   RC._artsInc={};
-  RC.htmlArtsInc=(pref,lista,art)=>{ lista=(lista||[]).filter(a=>a&&(a.art||a.desc)); RC._artsInc[pref]=lista; if(!lista.length) return "";
+  RC.htmlArtsInc=(pref,lista,art,fijo)=>{ lista=(lista||[]).filter(a=>a&&(a.art||a.desc)); RC._artsInc[pref]=lista;
+    if(fijo){ if(!lista.length) return `<div style="font-size:12.5px;color:#475569">Para todo el cliente. <span class="muted">(Si es de artículos concretos, márcalos arriba en «Artículos» y pulsa «🧩 Otro depto».)</span></div>`;
+      return `<div style="background:#fff;border:1px solid #BAE6FD;border-radius:10px;padding:8px 10px"><b style="font-size:12.5px;color:#0369A1">${lista.length===1?"Artículo":"Artículos ("+lista.length+")"}</b>
+        ${lista.map((a,i)=>`<input type="checkbox" class="${pref}_ca" data-i="${i}" checked hidden><div style="font-size:12.5px;padding:3px 0;border-top:1px solid #EEF6FB">${RC.esc(a.desc||a.art)}${a.art?` <span style="color:#64748B">${RC.esc(a.art)}</span>`:""}${a.cal?` · ${RC.esc(a.cal)}`:""}${a.ant!=null?`<span style="color:#B91C1C"> · ${Math.round(num(a.ant)).toLocaleString("es-ES")} → ${Math.round(num(a.act)).toLocaleString("es-ES")} €</span>`:""}</div>`).join("")}</div>`; }
+    if(!lista.length) return "";
     const sel=(a)=>art&&((art.art&&a.art===art.art)||(!art.art&&a.desc===art.desc));
     return `<div style="background:#fff;border:1px solid #BAE6FD;border-radius:10px;padding:8px 10px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><b style="font-size:12.5px;color:#0369A1">Artículos (uno, varios o todos)</b>
@@ -1235,9 +1239,9 @@
       <div style="max-height:180px;overflow-y:auto;margin-top:4px">${lista.map((a,i)=>`<label style="display:flex;gap:7px;align-items:flex-start;padding:4px 0;border-top:1px solid #EEF6FB;font-size:12.5px;cursor:pointer">
         <input type="checkbox" class="${pref}_ca" data-i="${i}"${sel(a)?" checked":""} style="margin-top:2px">
         <span style="flex:1">${RC.esc(a.desc||a.art)}${a.art?` <span style="color:#64748B">${RC.esc(a.art)}</span>`:""}${a.cal?` · ${RC.esc(a.cal)}`:""}${a.ant!=null?`<span style="color:#B91C1C"> · ${Math.round(num(a.ant)).toLocaleString("es-ES")} → ${Math.round(num(a.act)).toLocaleString("es-ES")} €</span>`:""}</span></label>`).join("")}</div></div>`; };
-  RC.formIncidencia=(pref,caso,art,lista)=>`<div style="display:grid;gap:7px;background:#F0F9FF;border:1px solid #BAE6FD;border-radius:12px;padding:12px;margin-top:8px">
+  RC.formIncidencia=(pref,caso,art,lista,op)=>`<div style="display:grid;gap:7px;background:#F0F9FF;border:1px solid #BAE6FD;border-radius:12px;padding:12px;margin-top:8px">
       <div style="font-weight:800;color:#0369A1">🧩 Implicar a otro departamento</div>
-      ${RC.htmlArtsInc(pref,lista&&lista.length?lista:(art?[art]:[]),art)}
+      ${RC.htmlArtsInc(pref,lista&&lista.length?lista:(art?[art]:[]),art,op&&op.fijo)}
       <div style="font-size:12.5px;color:#374151">Se le manda como incidencia de <b>pérdida de venta</b> (${Math.round(num(caso.perdido)).toLocaleString("es-ES")} €). Su respuesta queda aquí, en el hilo del cliente.</div>
       <div id="${pref}_tipos" style="display:grid;gap:5px">${RC.htmlDeptos(pref,RC.tipoIncDeCausa(caso.causa))}</div>
       <input type="hidden" id="${pref}_tipo" value="${RC.tipoIncDeCausa(caso.causa)}">
@@ -1250,15 +1254,25 @@
     const deps=RC._deptos;
     const bot=(k,l,sub)=>`<button type="button" data-k="${k}" onclick="RC.elegirTipoInc('${pref}','${k}')" style="padding:${sub?"6px 10px":"7px 11px"};border-radius:99px;border:1.5px solid #0284C7;background:${k===sel?"#0284C7":"#fff"};color:${k===sel?"#fff":"#0369A1"};font-weight:${sub?600:800};font-size:${sub?12:12.5}px;cursor:pointer">${l}</button>`;
     if(!deps||!deps.length) return `<div style="display:flex;gap:6px;flex-wrap:wrap">${RC.TIPOS_INC.map(([k,l])=>bot(k,l,false)).join("")}</div>`;
-    // (oct 2026) En árbol plegado: solo los departamentos; al elegir uno se despliegan sus subdepartamentos
+    // (oct 2026) Árbol de verdad: arriba los departamentos; al tocar uno, debajo solo SUS hijos directos;
+    // si un hijo tiene a su vez hijos (Operaciones › Compras › Logística), se despliegan al tocarlo.
+    const porId={}; deps.forEach(d=>porId[d.id]=d);
+    const hijos=(id)=>deps.filter(d=>(d.padre||null)===id&&d.nivel>0);
     const raiz=deps.filter(d=>!d.nivel);
-    const hijosDe=(r)=>{ const desc=[]; let i=deps.indexOf(r)+1; while(i<deps.length&&deps[i].nivel>0){ desc.push(deps[i]); i++; } return desc; };
-    const abierto=raiz.find(r=>r.tipo===sel||hijosDe(r).some(d=>d.tipo===sel));
-    return `<div style="display:flex;gap:5px;flex-wrap:wrap">${raiz.map(r=>bot(r.tipo,(r.icon||ICO_DEP[r.id]||"🏢")+" "+RC.esc(r.nombre)+(hijosDe(r).length?(r===abierto?" ▴":" ▾"):""),false)).join("")}</div>`
-      +(abierto&&hijosDe(abierto).length?`<div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:4px;padding:6px 8px;border-left:3px solid #0284C7;background:#F0F9FF;border-radius:6px">
-          <span style="font-size:11.5px;color:#0369A1;font-weight:700;align-self:center">${RC.esc(abierto.nombre)} ›</span>
-          ${hijosDe(abierto).map(d=>bot(d.tipo,"↳ "+(d.nivel>1?"· ".repeat(d.nivel-1):"")+RC.esc(d.nombre),true)).join("")}</div>`:"");
+    const dSel=(RC._depSel&&RC._depSel[pref]&&deps.find(d=>d.id===RC._depSel[pref]))||(sel?(raiz.find(d=>d.tipo===sel)||deps.find(d=>d.tipo===sel)):null)||null;
+    const camino=[]; let x=dSel; let g=0; while(x&&g<10){ camino.unshift(x); x=x.padre?porId[x.padre]:null; g++; }
+    const fila=(l,nivel)=>`<div style="display:flex;gap:5px;flex-wrap:wrap;${nivel?`margin-top:4px;margin-left:${nivel*10}px;padding:6px 8px;border-left:3px solid #0284C7;background:#F0F9FF;border-radius:6px`:""}">`
+      +l.map(d=>{ const on=dSel&&dSel.id===d.id, enCam=camino.some(c=>c.id===d.id), h=hijos(d.id).length;
+        return `<button type="button" data-k="${d.tipo}" onclick="RC.elegirDep('${pref}','${d.id}')" style="padding:${nivel?"6px 10px":"7px 11px"};border-radius:99px;border:1.5px solid #0284C7;background:${on?"#0284C7":enCam?"#E0F2FE":"#fff"};color:${on?"#fff":"#0369A1"};font-weight:${nivel?600:800};font-size:${nivel?12:12.5}px;cursor:pointer">${nivel?"":(d.icon||ICO_DEP[d.id]||"🏢")+" "}${RC.esc(d.nombre)}${h?(enCam?" ▴":" ▾"):""}</button>`; }).join("")+`</div>`;
+    let out=fila(raiz,0);
+    camino.forEach((c,k)=>{ const hs=hijos(c.id); if(hs.length) out+=fila(hs,k+1); });
+    return out;
   };
+  RC._depSel={};
+  RC.elegirDep=(pref,id)=>{ const d=(RC._deptos||[]).find(x=>x.id===id); if(!d) return;
+    // tocar otra vez el elegido lo pliega (vuelve a su padre)
+    if(RC._depSel[pref]===id&&(RC._deptos||[]).some(x=>x.padre===id)){ RC._depSel[pref]=d.padre||null; const p=(RC._deptos||[]).find(x=>x.id===d.padre); RC.elegirTipoInc(pref,p?p.tipo:""); return; }
+    RC._depSel[pref]=id; RC.elegirTipoInc(pref,d.tipo); };
   RC.elegirTipoInc=(pref,k)=>{ const h=document.getElementById(pref+"_tipo"); if(h) h.value=k;
     const box=document.getElementById(pref+"_tipos"); if(box&&RC._deptos&&RC._deptos.length){ box.innerHTML=RC.htmlDeptos(pref,k); return; }
     document.querySelectorAll(`#${pref}_tipos button`).forEach(b=>{ const on=b.getAttribute("data-k")===k; b.style.background=on?"#0284C7":"#fff"; b.style.color=on?"#fff":"#0369A1"; }); };
