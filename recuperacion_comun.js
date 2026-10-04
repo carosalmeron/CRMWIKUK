@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20261004c";
+  RC.VERSION="20261004d";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -40,6 +40,11 @@
   RC.DIAS_PAUSA=60;
   RC.MOTIVOS_ARCHIVO=[RC.MOT_PAUSA,RC.MOT_BLOQ_IMPAGO,RC.MOT_BLOQ_CIERRE,"No es rentable",
     "Decisión estratégica","El dato está mal","Otro"];
+  // (oct 2026) Ventas puntuales (spot): artículos que no eran compra recurrente. Se apartan línea a línea
+  // y dejan de contar en lo que «cae» el cliente.
+  RC.spotDe=(c)=>{ try{ const l=typeof c.spotJSON==="string"?JSON.parse(c.spotJSON||"[]"):(c.spotJSON||[]); return Array.isArray(l)?l:[]; }catch(e){ return []; } };
+  RC.esSpot=(c,a)=>{ const k=String(a&&(a.art||a.articulo||a.desc)||"").toUpperCase().trim(); return !!k&&RC.spotDe(c).some(x=>String(x.art||x.desc||"").toUpperCase().trim()===k); };
+  RC.spotEur=(c)=>RC.spotDe(c).reduce((t,x)=>t+Math.abs(Number(x.dif)||0),0);
   RC.esPausa=(m)=>m===RC.MOT_PAUSA||RC._PAUSA_ANT.includes(m);
   RC.esBloqueo=(m)=>[RC.MOT_BLOQ_IMPAGO,RC.MOT_BLOQ_CIERRE,"Impago","Cierre del negocio"].includes(m);
   // Qué estado queda al aprobar la propuesta, según el motivo
@@ -253,7 +258,7 @@
           escribir.push(c); out.push(c); continue;
         }
         // Cifras al día (el caso sigue aunque la regla deje de saltar)
-        if(ev){ c.perdido=ev.perdido; c.motivo=ev.motivo; c.tipo=ev.tipo; }
+        if(ev){ c.perdido=Math.max(0,ev.perdido-RC.spotEur(c)); c.motivo=ev.motivo; c.tipo=ev.tipo; }
         c.ventasAct=Math.round(num(cli.ventasAct)); c.ventasAnt=Math.round(num(cli.ventasAntYTD));
         c.agente=agente; c.equipo=equipo; c.nombre=cli.nombre||c.nombre||cli._id;
         const nv=RC.nivelDe(c); c.nivel=nv.nivel; c.nivelMotivo=nv.motivo;
