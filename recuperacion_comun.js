@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20261004f";
+  RC.VERSION="20261005a";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -44,7 +44,13 @@
   // y dejan de contar en lo que «cae» el cliente.
   RC.spotDe=(c)=>{ try{ const l=typeof c.spotJSON==="string"?JSON.parse(c.spotJSON||"[]"):(c.spotJSON||[]); return Array.isArray(l)?l:[]; }catch(e){ return []; } };
   RC.esSpot=(c,a)=>{ const k=String(a&&(a.art||a.articulo||a.desc)||"").toUpperCase().trim(); return !!k&&RC.spotDe(c).some(x=>String(x.art||x.desc||"").toUpperCase().trim()===k); };
-  RC.spotEur=(c)=>RC.spotDe(c).reduce((t,x)=>t+Math.abs(Number(x.dif)||0),0);
+  // (oct 2026) Tres clases de pérdida por artículo:
+  //   🎯 Venta estratégica (en riesgo, lo que se trabaja) · 🪝 Gancho · 🚫 Fuera de estrategia (antes «venta puntual»)
+  // Gancho y fuera de estrategia se apartan de lo que cae (spotJSON, con tipo). Sin tipo = fuera de estrategia.
+  RC.CLASIF={estrategica:["🎯","Venta estratégica","#B91C1C"],gancho:["🪝","Gancho","#B45309"],fuera:["🚫","Fuera de estrategia","#64748B"]};
+  RC.tipoClasif=(x)=>x&&x.tipo==="gancho"?"gancho":"fuera";
+  RC.clasifDe=(c,a)=>{ const k=String(a&&(a.art||a.articulo||a.desc)||"").toUpperCase().trim(); const x=k&&RC.spotDe(c).find(z=>String(z.art||z.desc||"").toUpperCase().trim()===k); return x?RC.tipoClasif(x):"estrategica"; };
+  RC.spotEur=(c,tipo)=>RC.spotDe(c).filter(x=>!tipo||RC.tipoClasif(x)===tipo).reduce((t,x)=>t+Math.abs(Number(x.dif)||0),0);
   RC.esPausa=(m)=>m===RC.MOT_PAUSA||RC._PAUSA_ANT.includes(m);
   RC.esBloqueo=(m)=>[RC.MOT_BLOQ_IMPAGO,RC.MOT_BLOQ_CIERRE,"Impago","Cierre del negocio"].includes(m);
   // Qué estado queda al aprobar la propuesta, según el motivo
