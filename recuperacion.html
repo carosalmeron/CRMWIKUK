@@ -57,7 +57,7 @@
 </header>
 <main id="app"><p class="estado">Leyendo casos…</p></main>
 
-<script src="/recuperacion_comun.js?v=20261004d"></script>
+<script src="/recuperacion_comun.js?v=20261004e"></script>
 <script>
 const P=new URLSearchParams(location.search);
 const EMBED=P.get("embed")==="1", FICHA_URL=P.get("ficha")||"", ART_URL=P.get("art")||"";
@@ -101,10 +101,10 @@ const estDeOtros=()=>ESTS.filter(e=>e.estado==="pendiente_aprobacion"&&estEnAmbi
 async function cargar(){
   const [casos,res,ests,us]=await Promise.all([RC.leerCasos(), RC.leer("pbi_resumen_agente"), RC.leerProfundo("estrategias").catch(()=>[]), RC.leer("usuarios",10).catch(()=>[])]);
   RC._us=us;
-  if(RC.VERSION!=="20261004d"){
+  if(RC.VERSION!=="20261004e"){
     // Se vuelve a pedir sin caché antes de rendirse
     await new Promise(ok=>{ const sc=document.createElement("script"); sc.src="/recuperacion_comun.js?t="+Date.now(); sc.onload=sc.onerror=ok; document.head.appendChild(sc); });
-    if(RC.VERSION!=="20261004d") throw new Error("en el servidor está la versión «"+(RC.VERSION||"antigua, sin número")+"» de recuperacion_comun.js y hace falta la 20261004d. "
+    if(RC.VERSION!=="20261004e") throw new Error("en el servidor está la versión «"+(RC.VERSION||"antigua, sin número")+"» de recuperacion_comun.js y hace falta la 20261004e. "
       +"Sube recuperacion_comun.js a la MISMA carpeta que recuperacion.html (la raíz, no api/), espera a que Vercel termine y recarga.");
   }
   await RC.prepararEsts(ests.filter(e=>!e.eliminada&&!RC.esFrancia(e.equipo)));
@@ -540,7 +540,8 @@ async function enviarArt(id,i,tipo){
       if(r.tipo==="oferta"){ (OFS=OFS||[]).push(r.doc); alert("Oferta registrada en el CRM."); }
       else { r.doc._id=r.doc.id; ESTS.push(r.doc); alert(`Un ${r.dto} % de descuento supera el límite del ${r.tope} %: se ha creado como estrategia para aprobar.`); }
     } else {
-      const e=await RC.crearEstrategia(c,l,l.nota,YO_EST); e._id=e.id; ESTS.push(e);
+      const e=await RC.crearEstrategia(c,l,l.nota,YO_EST); e._id=e._id||e.id; if(!ESTS.some(x=>x._id===e._id)) ESTS.push(e);
+      if(e._yaExistia) alert(RC.txtYaExiste(e)); else
       alert(e.estado==="aprobada"?"Estrategia creada y aprobada. Se le ha avisado al comercial."
         :"Estrategia enviada. La tiene que aprobar "+(e.pendienteDeNombre||"su responsable")+".");
     }
@@ -663,7 +664,8 @@ async function enviarEst(id){
   if(!(l.precioOferta>0)){ alert("Pon el precio."); return; }
   try{
     const e=await RC.crearEstrategia(c,l,l.nota,YO_EST);
-    e._id=e.id; ESTS.push(e); FORM_EST=null; RC.olvidarForm("fe"); pintar();
+    e._id=e._id||e.id; if(!ESTS.some(x=>x._id===e._id)) ESTS.push(e); FORM_EST=null; RC.olvidarForm("fe"); pintar();
+    if(e._yaExistia) alert(RC.txtYaExiste(e)); else
     alert(e.estado==="aprobada"?"Estrategia creada y aprobada. Se le ha avisado al comercial."
       :"Estrategia enviada. La tiene que aprobar "+(e.pendienteDeNombre||"su responsable")+".");
   }catch(x){ alert("No se ha podido crear: "+x.message); }
@@ -776,7 +778,10 @@ function textoActa(h){
 function datosActa(sem){
   const L=[];
   CASOS.forEach(c=>{ const h=(c.historial||[]).filter(x=>Number(x.sem)===sem&&(x.sistema||x.hecho||x.respuesta||x.texto));
-    if(h.length) L.push({c,h:h.map(x=>({...x,_t:tipoActa(x)}))}); });
+    // Líneas idénticas (mismo texto) se juntan: «×3»
+    const m=new Map(); h.forEach(x=>{ const k=(x.sistema||"")+"|"+(x.hecho||"")+"|"+(x.respuesta||x.texto||"");
+      if(m.has(k)){ const y=m.get(k); y._n++; y._fechas.push(x.fecha); } else m.set(k,{...x,_t:tipoActa(x),_n:1,_fechas:[x.fecha]}); });
+    if(h.length) L.push({c,h:[...m.values()]}); });
   const acuerdos=L.reduce((t,x)=>t+x.h.filter(h=>h.sistema).length,0);
   const cuenta=(lab)=>L.filter(x=>x.h.some(h=>h._t[1]===lab)).length;
   const recEur=L.filter(x=>x.h.some(h=>h._t[1]==="Recuperado")).reduce((t,x)=>t+num(x.c.recuperadoEur||x.c.eurosObjetivo||0),0);
@@ -800,6 +805,38 @@ function resumenActa(){
       ${CHIPS_ACTA.filter(x=>A[x[2]]).map(x=>`<span onclick="event.stopPropagation();irActa('${x[1]}')" style="background:#F1F5F9;border-radius:99px;padding:3px 9px;font-weight:700;cursor:pointer">${x[0]} ${A[x[2]]} ${x[3]}</span>`).join("")||'<span class="muted">Todavía no hay acuerdos esta semana.</span>'}
       ${A.sinTratar.length?`<span style="background:#FEF2F2;color:#B91C1C;border-radius:99px;padding:3px 9px;font-weight:800">${A.sinTratar.length} abiertos sin tratar · ${eur(A.sinTratar.reduce((t,c)=>t+num(c.perdido),0))}</span>`:""}</div></div>`;
 }
+// Estado actual de las estrategias del cliente (el resultado), juntando las repetidas
+function gruposEst(c){
+  const g=new Map();
+  RC.estrategiasDeCaso(ESTS||[],c).forEach(e=>{ const o=(e.ofertas||e.productos||[])[0]||{};
+    const k=ARR(o.codigo||o.nombre)+"|"+num(o.precioOferta)+"|"+(e.estado||"");
+    if(!g.has(k)) g.set(k,{o,e,l:[]}); g.get(k).l.push(e); });
+  return [...g.values()].sort((a,b)=>String(a.e.estado).localeCompare(String(b.e.estado)));
+}
+function estadoEstActa(c){
+  if(!ACTA_TIPO||ACTA_TIPO==="Estrategia de precio"){
+    const G=gruposEst(c); if(!G.length) return "";
+    const rep=G.filter(x=>x.l.length>1&&/pendiente/.test(x.e.estado||""));
+    return `<div style="background:#F5F3FF;border-radius:10px;padding:8px 10px;margin-top:8px">
+      <div style="font-size:11px;font-weight:800;color:#6D28D9;text-transform:uppercase;letter-spacing:.03em">💶 Cómo están sus estrategias</div>
+      ${G.map(x=>{ const st=(RC.ESTADO_EST||{})[x.e.estado]||[x.e.estado||"",'#64748B'], rz=x.e.resolucion||{};
+        return `<div style="display:flex;gap:8px;align-items:baseline;font-size:13px;padding:3px 0"><span style="color:${st[1]};font-weight:800;white-space:nowrap">${esc(st[0])}</span>
+          <span style="flex:1;min-width:0">${esc(x.o.nombre||x.e.estrategia||"")}${x.o.precioOferta?" a "+x.o.precioOferta+" €":""}${x.o.dto!=null?" (dto "+x.o.dto+" %)":""}
+          <span style="color:#64748B;font-size:12px">${/pendiente/.test(x.e.estado||"")?" · la tiene "+esc(x.e.pendienteDeNombre||"quien aprueba"):rz.por?" · "+esc(rz.por)+(rz.fecha?" el "+esc(rz.fecha):"")+(rz.nota?" — "+esc(rz.nota):""):""}</span>
+          ${x.l.length>1?` <span style="background:#FEF3C7;color:#92400E;border-radius:99px;padding:1px 7px;font-weight:800;font-size:11px">pedida ${x.l.length} veces</span>`:""}</span></div>`; }).join("")}
+      ${rep.length&&ES_JEFE?`<button class="btn gris" style="margin-top:6px;font-size:12px;padding:6px 10px" onclick="event.stopPropagation();quitarEstRepetidas('${c._id}')">🧹 Dejar solo una de cada repetida</button>`:""}</div>`;
+  }
+  return "";
+}
+async function quitarEstRepetidas(id){
+  const c=CASOS_TODOS.find(x=>x._id===id); if(!c) return;
+  const rep=gruposEst(c).filter(x=>x.l.length>1&&/pendiente/.test(x.e.estado||""));
+  const sobran=rep.flatMap(x=>x.l.slice().sort((a,b)=>String(a.fechaCreacion||"").localeCompare(String(b.fechaCreacion||""))).slice(1));
+  if(!sobran.length||!confirm(`Se quedan las primeras y se quitan ${sobran.length} repetidas de ${c.nombre||c.cliente}. ¿Seguro?`)) return;
+  let ok=0; const ahora=new Date().toISOString();
+  for(const e of sobran){ try{ await RC.guardarEn("estrategias",e._id||e.id,{eliminada:true,motivoEliminada:"Repetida",eliminadaPor:NOMBRE,fechaEliminacion:ahora},true); e.eliminada=true; ok++; }catch(x){} }
+  pintar(); alert(`Quitadas ${ok} repetidas. Queda una de cada para aprobar.`);
+}
 function vistaActa(){
   const sem=ACTA_SEM, A=datosActa(sem);
   // Filtro por tipo: solo los clientes con ese tipo de acuerdo y solo esas líneas
@@ -815,7 +852,8 @@ function vistaActa(){
       <div style="flex-shrink:0;width:28px;height:28px;border-radius:8px;background:${col}14;display:flex;align-items:center;justify-content:center;font-size:14px">${ic}</div>
       <div style="min-width:0;flex:1"><div style="font-size:11px;font-weight:800;color:${col};text-transform:uppercase;letter-spacing:.03em">${tt}</div>
         <div style="font-size:13.5px;color:#0F172A;line-height:1.4">${esc(textoActa(h))}</div>
-        <div style="font-size:11.5px;color:#94A3B8">${esc(h.por||"")}${h.fecha?" · "+fch(h.fecha):""}</div></div></div>`; };
+        <div style="font-size:11.5px;color:#94A3B8">${esc(h.por||"")}${h.fecha?" · "+[...new Set(h._fechas.map(fch))].join(", "):""}
+          ${h._n>1?` <span style="background:#FEF3C7;color:#92400E;border-radius:99px;padding:1px 7px;font-weight:800">×${h._n} repetida</span>`:""}</div></div></div>`; };
   return `<div class="card" style="padding:0;overflow:hidden">
       <div style="background:#0F172A;color:#fff;padding:16px 18px">
         <div style="display:flex;align-items:center;gap:8px">
@@ -844,7 +882,7 @@ function vistaActa(){
       ${ACTA_CERR.has(a)?"":l.sort((x,y)=>num(y.c.perdido)-num(x.c.perdido)).map(x=>`<div style="padding:10px 15px;border-bottom:1px solid #F1F5F9">
         <div style="display:flex;gap:8px;align-items:center;cursor:pointer" onclick="abrirFicha('${x.c._id}')"><b style="flex:1;font-size:14px">${esc(x.c.nombre||x.c.cliente)}</b>${estadoTag(x.c)}<span style="color:#94A3B8">›</span></div>
         ${x.c.causa?`<div style="font-size:12px;color:#64748B;margin-top:2px">Causa: ${esc(x.c.causa)}${x.c.accion?" · plan: "+esc(x.c.accion):""}${x.c.fechaObjetivo?" · para el "+fch(x.c.fechaObjetivo):""}</div>`:""}
-        ${x.h.map(h=>linea(h,x.c)).join("")}</div>`).join("")}</div>`).join("")
+        ${x.h.map(h=>linea(h,x.c)).join("")}${estadoEstActa(x.c)}</div>`).join("")}</div>`).join("")
       :`<div class="card muted">${ACTA_TIPO?"Nada de este tipo":"No hay acuerdos registrados"} en la semana ${sem}.</div>`}
     ${sem===SEM&&!ACTA_TIPO&&orden.length?`<div class="card" style="background:#0F172A;color:#fff">
       <b>📧 Enviar el acta</b><div style="font-size:12.5px;opacity:.8;margin:3px 0 8px">A cada comercial le llega lo suyo, con copia a su jefe y al director.</div>
