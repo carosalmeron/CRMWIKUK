@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20261004a";
+  RC.VERSION="20261004b";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -1175,16 +1175,20 @@
   RC.crearIncidencia=async(caso,d,por)=>{
     const hoy=new Date(), hoyS=hoy.toLocaleDateString("es-ES");
     const id="inc_rec_"+Date.now()+"_"+Math.random().toString(36).slice(2,5);
-    const art=d.art?`${d.art.desc||""}${d.art.cal?" "+d.art.cal:""}${d.art.art?" ("+d.art.art+")":""}`:"";
+    const L=(d.arts&&d.arts.length?d.arts:(d.art?[d.art]:[]));
+    const unA=(x)=>`${x.desc||""}${x.cal?" "+x.cal:""}${x.art?" ("+x.art+")":""}`;
+    const art=L.length===1?unA(L[0]):L.length?L.length+" artículos":"";
+    if(L.length===1) d.art=L[0];
     const desc=`💸 PÉRDIDA DE VENTA · ${caso.nombre}\n`
       +`El cliente ha dejado de comprar ${Math.round(num(caso.perdido)).toLocaleString("es-ES")} € frente al año pasado.`
-      +(art?`\nArtículo: ${art}${d.art.ant?" · venía de "+Math.round(num(d.art.ant)).toLocaleString("es-ES")+" €":""}`:"")
+      +(L.length===1?`\nArtículo: ${art}${L[0].ant?" · venía de "+Math.round(num(L[0].ant)).toLocaleString("es-ES")+" €":""}`
+        :L.length?`\nArtículos (${L.length}):\n`+L.map(x=>"· "+unA(x)+(x.ant?" · venía de "+Math.round(num(x.ant)).toLocaleString("es-ES")+" €":"")).join("\n"):"")
       +`\n\n${d.texto}\n\n(Desde el plan de recuperación. Responde en la incidencia: la respuesta se ve en el seguimiento del cliente.)`;
     const doc={id,tipo:d.tipo,clienteNombre:caso.nombre,cliente:caso.nombre,clienteCodigo:caso.cliente,clienteId:caso.cliente,
       titulo:"Pérdida de venta: "+caso.nombre+(art?" · "+art:""),descripcion:desc,prioridad:d.prioridad||"alta",
       estado:"abierta",autor:por.id||por.nombre,agente:caso.agente,autorNombre:por.nombre,equipo:caso.equipo||"",
       fecha:hoyS,fechaCreacion:hoy.toISOString(),semana:RC.semanaISO(hoy),
-      origen:"recuperacion",casoId:caso._id||"",perdidaVenta:Math.round(num(caso.perdido)),articulo:art,
+      origen:"recuperacion",casoId:caso._id||"",perdidaVenta:Math.round(num(caso.perdido)),articulo:art,articulos:JSON.stringify(L),
       historialEscalado:[{accion:"Creada desde el plan de recuperación",por:por.nombre,fecha:hoyS}],historial:[]};
     await RC.guardarEn("incidencias",id,doc);
     try{ await fetch("/api/notificar-incidencia",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({incidenciaId:id})}); }catch(e){}
@@ -1221,8 +1225,19 @@
         <button type="button" onclick="comentarInc('${id}')" style="padding:8px 12px;border-radius:9px;border:none;background:#0F172A;color:#fff;font-weight:700;cursor:pointer">Enviar</button></div>`:""}
     </div>`;
   };
-  RC.formIncidencia=(pref,caso,art)=>`<div style="display:grid;gap:7px;background:#F0F9FF;border:1px solid #BAE6FD;border-radius:12px;padding:12px;margin-top:8px">
-      <div style="font-weight:800;color:#0369A1">🧩 Implicar a otro departamento${art?" · "+RC.esc(art.desc||art.art):""}</div>
+  // (oct 2026) Con uno, varios o todos los artículos que caen (p. ej. a Compras: qué solución se le ha dado al cliente)
+  RC._artsInc={};
+  RC.htmlArtsInc=(pref,lista,art)=>{ lista=(lista||[]).filter(a=>a&&(a.art||a.desc)); RC._artsInc[pref]=lista; if(!lista.length) return "";
+    const sel=(a)=>art&&((art.art&&a.art===art.art)||(!art.art&&a.desc===art.desc));
+    return `<div style="background:#fff;border:1px solid #BAE6FD;border-radius:10px;padding:8px 10px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><b style="font-size:12.5px;color:#0369A1">Artículos (uno, varios o todos)</b>
+        <label style="font-size:12px;font-weight:700;color:#0369A1;cursor:pointer"><input type="checkbox" onchange="document.querySelectorAll('.${pref}_ca').forEach(x=>x.checked=this.checked)"> Todos</label></div>
+      <div style="max-height:180px;overflow-y:auto;margin-top:4px">${lista.map((a,i)=>`<label style="display:flex;gap:7px;align-items:flex-start;padding:4px 0;border-top:1px solid #EEF6FB;font-size:12.5px;cursor:pointer">
+        <input type="checkbox" class="${pref}_ca" data-i="${i}"${sel(a)?" checked":""} style="margin-top:2px">
+        <span style="flex:1">${RC.esc(a.desc||a.art)}${a.art?` <span style="color:#64748B">${RC.esc(a.art)}</span>`:""}${a.cal?` · ${RC.esc(a.cal)}`:""}${a.ant!=null?`<span style="color:#B91C1C"> · ${Math.round(num(a.ant)).toLocaleString("es-ES")} → ${Math.round(num(a.act)).toLocaleString("es-ES")} €</span>`:""}</span></label>`).join("")}</div></div>`; };
+  RC.formIncidencia=(pref,caso,art,lista)=>`<div style="display:grid;gap:7px;background:#F0F9FF;border:1px solid #BAE6FD;border-radius:12px;padding:12px;margin-top:8px">
+      <div style="font-weight:800;color:#0369A1">🧩 Implicar a otro departamento</div>
+      ${RC.htmlArtsInc(pref,lista&&lista.length?lista:(art?[art]:[]),art)}
       <div style="font-size:12.5px;color:#374151">Se le manda como incidencia de <b>pérdida de venta</b> (${Math.round(num(caso.perdido)).toLocaleString("es-ES")} €). Su respuesta queda aquí, en el hilo del cliente.</div>
       <div id="${pref}_tipos" style="display:grid;gap:5px">${RC.htmlDeptos(pref,RC.tipoIncDeCausa(caso.causa))}</div>
       <input type="hidden" id="${pref}_tipo" value="${RC.tipoIncDeCausa(caso.causa)}">
@@ -1235,14 +1250,21 @@
     const deps=RC._deptos;
     const bot=(k,l,sub)=>`<button type="button" data-k="${k}" onclick="RC.elegirTipoInc('${pref}','${k}')" style="padding:${sub?"6px 10px":"7px 11px"};border-radius:99px;border:1.5px solid #0284C7;background:${k===sel?"#0284C7":"#fff"};color:${k===sel?"#fff":"#0369A1"};font-weight:${sub?600:800};font-size:${sub?12:12.5}px;cursor:pointer">${l}</button>`;
     if(!deps||!deps.length) return `<div style="display:flex;gap:6px;flex-wrap:wrap">${RC.TIPOS_INC.map(([k,l])=>bot(k,l,false)).join("")}</div>`;
+    // (oct 2026) En árbol plegado: solo los departamentos; al elegir uno se despliegan sus subdepartamentos
     const raiz=deps.filter(d=>!d.nivel);
-    return raiz.map(r=>{ const desc=[]; let i=deps.indexOf(r)+1; while(i<deps.length&&deps[i].nivel>0){ desc.push(deps[i]); i++; }
-      return `<div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">${bot(r.tipo,(r.icon||ICO_DEP[r.id]||"🏢")+" "+RC.esc(r.nombre),false)}
-        ${desc.map(d=>bot(d.tipo,"↳ "+(d.nivel>1?"· ".repeat(d.nivel-1):"")+RC.esc(d.nombre),true)).join("")}</div>`; }).join("");
+    const hijosDe=(r)=>{ const desc=[]; let i=deps.indexOf(r)+1; while(i<deps.length&&deps[i].nivel>0){ desc.push(deps[i]); i++; } return desc; };
+    const abierto=raiz.find(r=>r.tipo===sel||hijosDe(r).some(d=>d.tipo===sel));
+    return `<div style="display:flex;gap:5px;flex-wrap:wrap">${raiz.map(r=>bot(r.tipo,(r.icon||ICO_DEP[r.id]||"🏢")+" "+RC.esc(r.nombre)+(hijosDe(r).length?(r===abierto?" ▴":" ▾"):""),false)).join("")}</div>`
+      +(abierto&&hijosDe(abierto).length?`<div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:4px;padding:6px 8px;border-left:3px solid #0284C7;background:#F0F9FF;border-radius:6px">
+          <span style="font-size:11.5px;color:#0369A1;font-weight:700;align-self:center">${RC.esc(abierto.nombre)} ›</span>
+          ${hijosDe(abierto).map(d=>bot(d.tipo,"↳ "+(d.nivel>1?"· ".repeat(d.nivel-1):"")+RC.esc(d.nombre),true)).join("")}</div>`:"");
   };
   RC.elegirTipoInc=(pref,k)=>{ const h=document.getElementById(pref+"_tipo"); if(h) h.value=k;
+    const box=document.getElementById(pref+"_tipos"); if(box&&RC._deptos&&RC._deptos.length){ box.innerHTML=RC.htmlDeptos(pref,k); return; }
     document.querySelectorAll(`#${pref}_tipos button`).forEach(b=>{ const on=b.getAttribute("data-k")===k; b.style.background=on?"#0284C7":"#fff"; b.style.color=on?"#fff":"#0369A1"; }); };
-  RC.leerIncidencia=(pref)=>({tipo:(document.getElementById(pref+"_tipo")||{}).value||"stock",
+  RC.leerIncidencia=(pref)=>({arts:[...document.querySelectorAll("."+pref+"_ca:checked")].map(x=>(RC._artsInc[pref]||[])[Number(x.dataset.i)]).filter(Boolean)
+      .map(a=>({art:a.art,desc:a.desc,cal:a.cal,ant:a.ant,act:a.act})),
+    tipo:(document.getElementById(pref+"_tipo")||{}).value||"stock",
     texto:((document.getElementById(pref+"_txt")||{}).value||"").trim(),prioridad:(document.getElementById(pref+"_pri")||{}).value||"alta"});
   // ══ Cobros · Muestras · Actividad del equipo (de los partes) ═══════════
   // filas: [{nombre, equipo, k}] con k = kpis del informe (o null si no cerró)
