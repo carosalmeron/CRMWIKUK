@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20261005a";
+  RC.VERSION="20261005b";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -61,7 +61,13 @@
     return {estado:"archivado"};
   };
   RC.txtEstadoCerrado=(c)=>c.estado==="aplazado"?"😴 dormido · vuelve el "+String(c.recordarEl||"").split("-").reverse().join("/")
-    :c.estado==="bloqueado"?"⛔ bloqueado · "+(c.bloqueoMotivo||c.archivoMotivo||""):"";
+    :c.estado==="bloqueado"?"⛔ bloqueado · "+(c.bloqueoMotivo||c.archivoMotivo||"")
+    :c.estado==="fuera_estrategia"?"🚫 cliente fuera de estrategia"+(c.fueraMotivo?" · "+c.fueraMotivo:""):"";
+  // (oct 2026) Cliente entero fuera de estrategia (no es estratégico ni gancho aunque tenga artículos estratégicos).
+  // Sale del trabajo diario (parte, comité, sin plan…) pero su pérdida sigue contando como 🚫 fuera de estrategia.
+  RC.MOT_FUERA_CLI=["No es nuestro tipo de cliente","No es rentable (margen / coste de servir)","Solo compra por precio","Cliente de otro canal","Otro motivo"];
+  RC.esFueraCli=(c)=>c&&c.estado==="fuera_estrategia";
+  RC.perdidaFueraCli=(c)=>RC.esFueraCli(c)?num(c.perdido):0;
   RC.DATO_MAL="El dato está mal";
   // Quién puede archivar (dejar de insistir). Aprobado por el CEO el 29/09/2026:
   //   · CEO: cualquier caso.
@@ -244,6 +250,11 @@
             ritmoRef:ev.ritmoRef,causa:"",accion:"",fechaObjetivo:"",eurosObjetivo:0,archivoMotivo:"",archivoDecision:"",historial:hist,ultimaAccion:"",agente,equipo,vueltaDePausa:ahora});
           else Object.assign(c,{estado:"recuperado",recuperadoEn:ahora,historial:hist});
           escribir.push(c); out.push(c); continue;
+        }
+        if(RC.esFueraCli(c)){
+          // Cliente fuera de estrategia: no se reabre, pero su pérdida se mantiene al día
+          if(ev){ const p=Math.max(0,ev.perdido-RC.spotEur(c)); if(p!==num(c.perdido)){ c.perdido=p; escribir.push(c); } }
+          out.push(c); continue;
         }
         if(!RC.abierto(c)){
           // Cerrado. Si era recuperado y vuelve a caer pasados 60 días, se reabre.
