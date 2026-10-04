@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20261003b";
+  RC.VERSION="20261004a";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -1477,6 +1477,14 @@
   // que también se ve en Incidencias del CRM.
   // Las mismas acciones que en el parte del comercial
   RC.ACC_COBRO=["📞 Le llamo","🚗 Paso a cobrar","📄 Dice que está pagado","🤝 Pide aplazamiento","⚑ Error de factura"];
+  // (oct 2026) Seguro de crédito: con más de 90 días una factura está en riesgo de ir al seguro;
+  // con más de 110 días ya va al seguro. Se marca igual en todas las pantallas.
+  RC.SEGURO_RIESGO=90; RC.SEGURO_VA=110;
+  RC.seguroNivel=(dias)=>{ const d=Number(dias)||0; return d>RC.SEGURO_VA?"va":d>RC.SEGURO_RIESGO?"riesgo":""; };
+  RC.seguroTag=(dias,compacto)=>{ const n=RC.seguroNivel(dias); if(!n) return "";
+    return n==="va"?`<span style="display:inline-block;background:#7F1D1D;color:#fff;border-radius:6px;padding:1px 7px;font-size:11px;font-weight:800;white-space:nowrap">🛡️ ${compacto?"seguro":"VA AL SEGURO (+"+RC.SEGURO_VA+" días)"}</span>`
+      :`<span style="display:inline-block;background:#FEE2E2;color:#B91C1C;border:1px solid #FCA5A5;border-radius:6px;padding:1px 7px;font-size:11px;font-weight:800;white-space:nowrap">⚠️ ${compacto?"riesgo seguro":"RIESGO DE SEGURO (+"+RC.SEGURO_RIESGO+" días)"}</span>`; };
+  RC.seguroTxt=(dias)=>{ const n=RC.seguroNivel(dias); return n==="va"?"🛡️ va al seguro":n==="riesgo"?"⚠️ riesgo de seguro":""; };
   RC.ESTADO_COBRO={pendiente:["Pendiente de comprobar","#B45309"],no_pagado:["No ha pagado · reclamado","#B91C1C"],
     respondido:["El comercial ha respondido","#1D4ED8"],pagado:["Pagado","#15803D"]};
   RC.hoyISO=()=>{ const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); };
