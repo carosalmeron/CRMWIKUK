@@ -120,6 +120,7 @@
 
 <script src="agentes.js"></script>
 <script src="recuperacion_comun.js?v=20261004d"></script>
+<script src="seguimiento_comun.js?v=20261004a"></script>
 <script>
 // ══ Parámetros ════════════════════════════════════════════════════════
 const Q=new URLSearchParams(location.search);
@@ -134,7 +135,7 @@ const ROL=(()=>{ const r=(Q.get("rol")||"comercial").toLowerCase();
 const AGENTE=U(Q.get("agente")), UID=(Q.get("uid")||"").trim(), EQUIPO=U(Q.get("equipo")), NOMBRE=(Q.get("nombre")||"").trim();
 // Mientras se valida el sistema el CEO recibe copia de todas las actas. Para quitarlo: false
 const CC_CEO_VALIDACION=true;
-const VERSION_CIERRES="1-oct 16:40";
+const VERSION_CIERRES="4-oct 22:30";
 const EQUIPOS_NO_AGENTE=["WIKUK","INTERKEY","FRANCIA","DISTRIBUIDOR"];
 const ROL_COM=["agente","crm_agente","comercial","vendedor"];
 // Francia no entra en los cierres. Distribuidor puede cerrar, pero es opcional:
@@ -365,6 +366,7 @@ function tarjetaYo(){
         :`Primero los comités del viernes con cada comercial; después tu cierre (<b>${PLAZO.jefe[3]}</b>).`}
         ${sinParte.length?`<br><span class="mal">Sin parte cerrado: ${sinParte.map(p=>esc(p.nombre)).join(" · ")}</span>`:""}</p>
       ${!inf&&pend.length?`<p style="color:#FCD34D">Puedes cerrar igual, pero lo que no pase por el comité llega sin revisar al director.</p>`:""}
+      ${!inf&&SG&&segFaltan()?`<p style="color:#FCD34D">🔁 Antes de cerrar marca ${segFaltan()} punto${segFaltan()===1?"":"s"} de la semana pasada (más abajo).</p>`:""}
       <button class="env" onclick="abrirMiCierre()">${inf?"Ver mi cierre":"Hacer mi cierre"}</button>
       <button class="env sec" onclick="abrirRecuperacion()">🚨 Comité de recuperación de clientes</button></div>`;
   }
@@ -373,6 +375,7 @@ function tarjetaYo(){
     return `<div class="yo"><p class="ct">${inf?"✓ Tu cierre está hecho":jp.length?`Faltan ${jp.length} jefe${jp.length===1?"":"s"} por cerrar`:"Jefes cerrados · te toca a ti"}</p>
       <p>${inf?`<span class="ok">Cerrado ${esc(cuando(inf.fechaEnvio))}</span>.`:`Cierras cuando hayan cerrado los jefes. Plazo: <b>${PLAZO.director[3]}</b>.`}
         ${jp.length?`<br><span class="mal">Sin cerrar: ${jp.map(p=>esc(p.nombre)).join(" · ")}</span>`:""}</p>
+      ${!inf&&SG&&segFaltan()?`<p style="color:#FCD34D">🔁 Antes de cerrar marca ${segFaltan()} punto${segFaltan()===1?"":"s"} de la semana pasada (más abajo).</p>`:""}
       <button class="env" onclick="abrirMiCierre()">${inf?"Ver mi cierre":"Hacer mi cierre"}</button></div>`;
   }
   if(ROL==="ceo"){
@@ -381,7 +384,7 @@ function tarjetaYo(){
       <p>${D.ceo?`<span class="ok">Cerrada ${esc(cuando(D.ceo.fecha))}</span>${D.ceo.nota?" · "+esc(D.ceo.nota):""}`
         :`Revisa el resumen y lo que te suben. Plazo: <b>${PLAZO.ceo[3]}</b>.`}</p>
       <button class="env" onclick="abrirMiCierre()">Ver el resumen de la semana</button>
-      ${D.ceo?"":`<button class="env sec" onclick="cerrarCEO()">✓ Cerrar la semana del grupo</button>`}</div>`;
+      <button class="env sec" onclick="abrirCierreCEO()">${D.ceo?"Ver el cierre del grupo":"⭐ Cerrar la semana del grupo"}</button></div>`;
   }
   // Administración de clientes
   return `<div class="yo"><p class="ct">${D.admin?"✓ Revisión de cobros cerrada":"Revisión de cobros de la semana"}</p>
@@ -428,6 +431,172 @@ function tarjetaEquipo(){
   return "";
 }
 
+// ══ (oct 2026) Lo de la semana pasada ═════════════════════════════════
+// Jefe, director y CEO: cumplimiento de los comerciales, lo pedido a otros
+// departamentos y lo que subió/se decidió la semana pasada (a marcar).
+let SG=null;   // {cu:[], incs:[], items:[], marcas:{}, dirM:[]}
+const PAPEL_SEG=()=>({jefe:"jefe",director:"director",ceo:"ceo"})[ROL]||"";
+const quienSeg=()=>UID||AGENTE||ROL;
+async function cargarSeg(){
+  const papel=PAPEL_SEG(); if(!papel||!window.SEG||!D||!flujoNuevo()){ SG=null; return; }
+  const cl=new Set(D.coms.filter(p=>ROL!=="jefe"||p.equipo===EQUIPO).flatMap(p=>p.claves.map(U)));
+  const [cu,incs,items,marcas,dirM]=await Promise.all([
+    SEG.cumplimiento(W.anio,W.sem).catch(()=>[]),
+    SEG.incsComite().then(SEG.vigentes).catch(()=>[]),
+    SEG.pendientes(papel,W.anio,W.sem,{claves:cl,equipo:EQUIPO}).catch(()=>[]),
+    SEG.leerMarcas(W.anio,W.sem,papel,quienSeg()).catch(()=>({})),
+    papel==="ceo"?SEG.marcasDe(W.anio,W.sem,"director").catch(()=>[]):Promise.resolve([])]);
+  SG={cu,incs:incs.filter(i=>ROL!=="jefe"||cl.has(i.agente)||i.equipo===EQUIPO),items,marcas,dirM};
+}
+// Cumplimiento por comercial (jefe) o por equipo (director, CEO)
+function filasCumpl(){
+  if(!SG) return [];
+  if(ROL==="jefe") return D.coms.filter(p=>p.equipo===EQUIPO).map(p=>({nom:p.nombre,r:SEG.resumen(SG.cu,p.claves)})).filter(f=>f.r.tot).sort((a,b)=>a.r.pct-b.r.pct);
+  return D.equipos.filter(eq=>!FUERA(eq)).map(eq=>({nom:eq,r:SEG.resumen(SG.cu,D.coms.filter(p=>p.equipo===eq).flatMap(p=>p.claves))})).filter(f=>f.r.tot);
+}
+function totalCumpl(){ if(!SG) return null; const cl=D.coms.filter(p=>ROL!=="jefe"||p.equipo===EQUIPO).flatMap(p=>p.claves); return SEG.resumen(SG.cu,cl); }
+const segFaltan=()=>SG?SG.items.filter(x=>!(SG.marcas[x.id]||{}).e).length:0;
+function segItemsH(){
+  if(!SG||!SG.items.length) return `<p class="cs" style="margin:6px 0 0">Nada pendiente de la semana ${SEG.semAnt(W.anio,W.sem).sem}.</p>`;
+  return SG.items.map((x,k)=>{ const m=SG.marcas[x.id]||{}, col=(SEG.MARCA[m.e]||[,"#CBD5E1"])[1];
+    return `<div class="punto" style="border-left:4px solid ${col}">
+      <b style="font-size:13.5px">${esc(x.texto)}</b><small style="display:block;font-size:12px;color:#64748B">${esc(x.origen)}${x.de?" · "+esc(x.de):""}</small>
+      <div class="acc">${Object.entries(SEG.MARCA).map(([e,[t,c]])=>`<button class="chip${m.e===e?" on":""}" style="${m.e===e?`background:${c};border-color:${c}`:""}" onclick="marcaSeg(${k},'${e}')">${t}</button>`).join("")}</div>
+      ${m.e&&m.e!=="hecho"?`<input class="c" placeholder="${m.e==="curso"?"Qué falta y para cuándo":"Por qué no"}" value="${esc(m.n||"")}" onchange="notaSeg(${k},this.value)">`:""}</div>`; }).join("");
+}
+let _segT=null;
+const guardaSeg=()=>{ clearTimeout(_segT); _segT=setTimeout(()=>SEG.guardarMarcas(W.anio,W.sem,PAPEL_SEG(),quienSeg(),NOMBRE||AGENTE,SG.marcas,SG.items).catch(e=>alert(e.message)),300); };
+window.marcaSeg=(i,e)=>{ const id=SG.items[i].id; const m=SG.marcas[id]=SG.marcas[id]||{}; m.e=m.e===e?"":e; guardaSeg(); pintarSegDonde(); };
+window.notaSeg=(i,v)=>{ const id=SG.items[i].id; (SG.marcas[id]=SG.marcas[id]||{}).n=v.trim(); guardaSeg(); };
+// Se pinta en el portal y, si está abierto, en el panel del cierre del CEO
+function pintarSegDonde(){ if(document.getElementById("ceoBox")) pintarCEO(); pintar(); }
+function tarjetaSeg(){
+  if(!PAPEL_SEG()||!flujoNuevo()) return "";
+  if(!SG) return `<div class="card"><p class="ct">🔁 Lo de la semana pasada</p><p class="cs">Cargando…</p></div>`;
+  const tot=totalCumpl(), fs=filasCumpl(), pend=SG.incs.filter(i=>i.estado==="sin"), sube=SG.incs.filter(i=>i.sube), falta=segFaltan();
+  const incsV=ROL==="jefe"?SG.incs:SG.incs.filter(i=>i.estado==="sin");
+  return `<div class="card" style="border:1.5px solid #1D4ED8"><p class="ct">🔁 Lo de la semana pasada</p>
+    <p class="cs">${ROL==="jefe"?"Cómo ha cumplido tu equipo lo que acordasteis en los comités, lo que pediste a otros departamentos y lo que subiste.":ROL==="director"?"Cómo cumplen los equipos, lo pedido a otros departamentos y lo que te subieron o decidió el CEO.":"Cómo cumplen los equipos, lo pedido a otros departamentos y lo que te subió el director o decidiste tú."}</p>
+    ${tot&&tot.tot?`<div style="display:flex;align-items:baseline;gap:8px"><b style="font-size:24px;color:${SEG.colPct(tot.pct)}">${tot.hecho}/${tot.tot}</b><span style="font-size:13px;color:#475569">compromisos de comerciales cumplidos · <b style="color:${SEG.colPct(tot.pct)}">${tot.pct} %</b></span></div>
+      ${fs.map(f=>`<div style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:12.5px"><span style="flex:0 0 40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(f.nom)}</span>
+        <span style="flex:1;background:#E5E7EB;border-radius:99px;height:7px;overflow:hidden"><span style="display:block;height:7px;width:${f.r.pct||0}%;background:${SEG.colPct(f.r.pct)}"></span></span>
+        <b style="color:${SEG.colPct(f.r.pct)};white-space:nowrap;min-width:64px;text-align:right">${f.r.hecho}/${f.r.tot}${f.r.sin?` <span style="color:#B91C1C;font-weight:600">· ${f.r.sin} sin resp.</span>`:""}</b></div>`).join("")}`
+      :`<p class="cs" style="margin:0">Sin compromisos de comerciales de la semana pasada.</p>`}
+    ${incsV.length?`<p class="ct" style="margin-top:12px;font-size:13.5px">🧩 Lo pedido a otros departamentos${pend.length?` · <span style="color:#B91C1C">${pend.length} sin contestar</span>`:""}${sube.length?` · <span style="color:#6D28D9">${sube.length} más de 7 días</span>`:""}</p>
+      ${incsV.slice(0,ROL==="jefe"?30:15).map(i=>{ const st=SEG.ESTADO_INC[i.estado];
+        return `<div class="li" style="border-left:3px solid ${st[1]};display:block"><b>${esc(i.depNom)}</b>${i.cliente?" · "+esc(i.cliente):""} <span style="color:${st[1]};font-weight:700;font-size:12px">${st[0]}${i.estado==="sin"?" · "+i.dias+" días":""}</span>${i.sube?` <span class="tag" style="background:#F5F3FF;color:#6D28D9">📤 sube</span>`:""}
+          <div style="color:#334155">${esc(i.que)}</div><small style="color:#64748B">${esc(i.por)}${i.semana?" · comité s"+i.semana:""}${i.ultima?" · ↳ "+esc(i.ultima):""}</small></div>`; }).join("")}`:""}
+    <p class="ct" style="margin-top:12px;font-size:13.5px">Qué pasó con lo de la semana pasada${falta?` · <span style="color:#B45309">${falta} por marcar</span>`:SG.items.length?' · <span style="color:#15803D">✓ todo marcado</span>':""}</p>
+    ${segItemsH()}
+    ${ROL==="ceo"&&SG.dirM.length?`<p class="ct" style="margin-top:12px;font-size:13.5px">Lo que ha marcado el director</p>${SG.dirM.map(d=>d.items.map(x=>{ const m=d.marcas[x.id]||{}, st=SEG.MARCA[m.e]||["Sin marcar","#94A3B8"];
+      return `<div class="li" style="border-left:3px solid ${st[1]};display:block"><b style="color:${st[1]}">${st[0]}</b> ${esc(x.texto)}<small style="display:block;color:#64748B">${esc(x.origen)}${m.n?" · 💬 "+esc(m.n):""}</small></div>`; }).join("")).join("")}`:""}
+  </div>`;
+}
+
+// ══ (oct 2026) Cierre del CEO: acta de la semana del grupo ═════════════
+const claveCEO=()=>"cierre_ceo_"+W.anio+"_"+W.sem;
+let CEOD=null;   // {dec:[{texto,para,cuando}], nota}
+window.abrirCierreCEO=()=>{
+  try{ CEOD=JSON.parse(localStorage.getItem(claveCEO())||"null"); }catch(e){}
+  if(D.ceo) CEOD={dec:deJSON(D.ceo.decisiones,[])||[],nota:D.ceo.nota||""};
+  CEOD=CEOD||{dec:[],nota:""};
+  abrirCapa("⭐ Cierre de la semana "+W.sem,`<div class="in" id="ceoBox"><p class="estado">Cargando…</p></div>`,recargar);
+  (SG?Promise.resolve():cargarSeg()).then(pintarCEO).catch(()=>pintarCEO());
+};
+const guardaCEO=()=>{ try{ localStorage.setItem(claveCEO(),JSON.stringify(CEOD)); }catch(e){} };
+function tablaEquipos(){
+  return D.equipos.filter(eq=>!FUERA(eq)).map(eq=>{ const cs=D.coms.filter(p=>p.equipo===eq), j=D.jefes.find(x=>x.equipo===eq);
+    const cl=cs.flatMap(p=>p.claves), r=SG?SEG.resumen(SG.cu,cl):{tot:0}, inc=SG?SG.incs.filter(i=>i.estado==="sin"&&(i.equipo===eq||cs.some(p=>p.claves.includes(i.agente)))).length:0;
+    return {eq,opc:OPCIONAL(eq),partes:cs.filter(p=>p.inf).length,comites:cs.filter(p=>p.comite).length,n:cs.length,jefe:j?(j.inf?"✓":"✗"):"—",r,inc}; });
+}
+function resumenAdmin(){ return D.admin?deJSON(D.admin.resumen,null):null; }
+function pintarCEO(){
+  const box=document.getElementById("ceoBox"); if(!box||!D) return;
+  const L=pasos().filter(p=>p.k!=="ceo"), T=tablaEquipos(), A=resumenAdmin(), falta=segFaltan(), tot=totalCumpl();
+  const eur=(n)=>RC.eur?RC.eur(n):Math.round(n||0)+" €";
+  box.innerHTML=`<div class="card"><p class="ct">✔️ Cumplimiento del cierre</p>
+      ${L.map(p=>`<div class="li"><span>${p.ok?"✅":p.vacio?"·":"⚠️"}</span><span style="flex:1"><b>${esc(p.t)}</b>${p.tot>1?" · "+p.hechos+"/"+p.tot:""}${p.faltan.length&&!p.ok?`<br><small style="color:#B91C1C">Falta: ${esc(p.faltan.join(", "))}</small>`:""}</span></div>`).join("")}</div>
+    <div class="card"><p class="ct">👥 Por equipo</p>
+      <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px">
+        <tr style="color:#64748B;font-size:11px;text-transform:uppercase"><th style="text-align:left;padding:5px">Equipo</th><th>Partes</th><th>Comités</th><th>Jefe</th><th>Cumple</th><th>Deptos</th></tr>
+        ${T.map(t=>`<tr style="border-top:1px solid #EEF1F5"><td style="padding:6px 5px;font-weight:700">${esc(t.eq)}${t.opc?' <small style="color:#94A3B8">opc.</small>':""}</td>
+          <td style="text-align:center">${t.partes}/${t.n}</td><td style="text-align:center">${t.comites}/${t.n}</td><td style="text-align:center">${t.jefe}</td>
+          <td style="text-align:center;font-weight:800;color:${SEG.colPct(t.r.pct)}">${t.r.tot?t.r.pct+" %":"—"}</td><td style="text-align:center;color:${t.inc?"#B91C1C":"#64748B"}">${t.inc||"—"}</td></tr>`).join("")}
+      </table></div>
+      <p class="cs" style="margin:6px 0 0">Cumple = compromisos de la semana pasada cumplidos · Deptos = peticiones a otros departamentos sin contestar.</p></div>
+    <div class="card"><p class="ct">💳 Cobros · cierre de Administración</p>
+      ${A?`<div class="dg"><div><b style="color:#B91C1C">${A.noHecho||0}</b><span>compromisos no cumplidos · ${eur(A.noHechoEur)}</span></div><div><b style="color:#B91C1C">${A.segVa||0}</b><span>van al seguro (+110 d) · ${eur(A.segVaEur)}</span></div></div>
+        <div class="dg"><div><b style="color:#B45309">${A.segR||0}</b><span>en riesgo (90–110 d) · ${eur(A.segREur)}</span></div><div><b>${A.grandes||0}</b><span>+2.000 € sin compromiso · ${eur(A.grandesEur)}</span></div></div>
+        ${D.admin.nota?`<div class="nota az">💬 ${esc(D.admin.nota)}</div>`:""}`
+        :`<div class="nota am">Administración todavía no ha cerrado los cobros de la semana.</div>`}
+      <button class="btn" style="margin-top:8px;width:100%" onclick="abrirCapa('💳 Cierre de cobros · semana '+W.sem,marco('cierre_admin.html?semana='+W.sem+'&anio='+W.anio+'&solover=1'),abrirCierreCEO)">Ver el cierre de cobros</button></div>
+    <div class="card"><p class="ct">🔁 Qué pasó con lo de la semana pasada${falta?` · <span style="color:#B45309">${falta} por marcar</span>`:""}</p>${segItemsH()}</div>
+    <div class="card"><p class="ct">⚖️ Tus decisiones</p><p class="cs">Llegan por correo al director y a los jefes, y la semana que viene te salen para comprobar si se han hecho.</p>
+      ${CEOD.dec.map((d,i)=>`<div class="li"><span>⚖️</span><span style="flex:1"><b>${esc(d.texto)}</b><br><small style="color:#64748B">Para ${esc(d.para)}${d.cuando?" · para el "+esc(d.cuando.split("-").reverse().join("/")):""}</small></span><button class="x" onclick="CEOD.dec.splice(${i},1);guardaCEO();pintarCEO()">×</button></div>`).join("")}
+      <div class="campos"><div class="full"><span class="lbl">Decisión</span><input class="c" id="ceoQ" placeholder="Qué se decide"></div>
+        <div><span class="lbl">Para</span><select class="c" id="ceoP">${["Todos","Director","Jefes","Administración"].map(x=>`<option>${x}</option>`).join("")}</select></div>
+        <div><span class="lbl">Para cuándo</span><input class="c" type="date" id="ceoD"></div></div>
+      <div class="acc"><button class="chip on" onclick="addDecCEO()">Añadir decisión</button></div>
+      <span class="lbl">Nota de la semana</span><textarea placeholder="Lo que quieres que se lleve todo el grupo" oninput="CEOD.nota=this.value;guardaCEO()">${esc(CEOD.nota||"")}</textarea></div>
+    <div class="yo"><p class="ct">⭐ Cerrar la semana ${W.sem} del grupo</p>
+      <p>${tot&&tot.tot?`Compromisos de comerciales: <b>${tot.hecho}/${tot.tot} (${tot.pct} %)</b> · `:""}${CEOD.dec.length} decisión${CEOD.dec.length===1?"":"es"}</p>
+      <p>📧 El acta llega al director y a los jefes de equipo, con copia para ti.</p>
+      ${D.ceo?`<p class="ok">Cerrada ${esc(cuando(D.ceo.fecha))}.</p>`:`<button class="env" id="btnCEO" ${falta?"disabled":""} onclick="cerrarCEO2()">${falta?"Marca antes "+falta+" punto"+(falta===1?"":"s")+" de la semana pasada":"✓ Cerrar la semana y enviar el acta"}</button>`}</div>`;
+}
+window.addDecCEO=()=>{ const t=(document.getElementById("ceoQ").value||"").trim(); if(t.length<4){ alert("Escribe la decisión"); return; }
+  CEOD.dec.push({texto:t,para:document.getElementById("ceoP").value,cuando:document.getElementById("ceoD").value||""}); guardaCEO(); pintarCEO(); };
+function htmlActaCEO(){
+  const L=pasos().filter(p=>p.k!=="ceo"), T=tablaEquipos(), A=resumenAdmin(), tot=totalCumpl();
+  const eur=(n)=>RC.eur?RC.eur(n):Math.round(n||0)+" €";
+  const h3=(t)=>`<div style="font-size:12px;font-weight:800;color:#6B7684;text-transform:uppercase;letter-spacing:.04em;margin:18px 0 6px">${t}</div>`;
+  return `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:600px;margin:0 auto;color:#14181F">
+    <div style="background:#14181F;color:#fff;padding:16px 20px;border-radius:12px 12px 0 0">
+      <div style="font-size:11px;letter-spacing:.08em;opacity:.7;text-transform:uppercase">Cierre del grupo · semana ${W.sem}</div>
+      <div style="font-size:19px;font-weight:800;margin-top:2px">⭐ ${esc(NOMBRE||"CEO")}</div></div>
+    <div style="border:1px solid #DCE1E7;border-top:none;border-radius:0 0 12px 12px;padding:18px 20px">
+      ${h3("✔️ Cumplimiento del cierre")}
+      ${L.map(p=>`<div style="font-size:13px;margin:3px 0">${p.ok?"✅":"⚠️"} ${esc(p.t)}${p.tot>1?" · <b>"+p.hechos+"/"+p.tot+"</b>":""}${!p.ok&&p.faltan.length?` <span style="color:#C2263D">· falta ${esc(p.faltan.join(", "))}</span>`:""}</div>`).join("")}
+      ${h3("👥 Por equipo")}
+      <table style="width:100%;border-collapse:collapse;font-size:12.5px"><tr style="color:#6B7684;font-size:11px"><td style="padding:4px">EQUIPO</td><td align="center">PARTES</td><td align="center">COMITÉS</td><td align="center">CUMPLE</td></tr>
+        ${T.map(t=>`<tr style="border-top:1px solid #EEF1F5"><td style="padding:6px 4px;font-weight:700">${esc(t.eq)}</td><td align="center">${t.partes}/${t.n}</td><td align="center">${t.comites}/${t.n}</td><td align="center" style="font-weight:800;color:${SEG.colPct(t.r.pct)}">${t.r.tot?t.r.pct+" %":"—"}</td></tr>`).join("")}</table>
+      ${tot&&tot.tot?`<div style="font-size:12.5px;color:#6B7684;margin-top:4px">Grupo: ${tot.hecho} de ${tot.tot} compromisos de la semana pasada cumplidos (${tot.pct} %).</div>`:""}
+      ${A?h3("💳 Cobros · Administración")+`<div style="font-size:13px;line-height:1.7">❌ ${A.noHecho||0} compromisos no cumplidos · ${eur(A.noHechoEur)}<br>
+        <span style="background:#FEE2E2;color:#B91C1C;border-radius:99px;padding:1px 8px;font-weight:700">+110 d · ${A.segVa||0} van al seguro · ${eur(A.segVaEur)}</span>
+        <span style="background:#FEF3C7;color:#B45309;border-radius:99px;padding:1px 8px;font-weight:700">90–110 d · ${A.segR||0} · ${eur(A.segREur)}</span><br>
+        ${A.grandes||0} clientes con +2.000 € sin compromiso · ${eur(A.grandesEur)}</div>`:""}
+      ${SG?SEG.htmlIncs(SG.incs.filter(i=>i.estado==="sin"),"🧩 Pedido a otros departamentos y sin contestar"):""}
+      ${SG?SEG.htmlPend(SG.items,SG.marcas):""}
+      ${CEOD.dec.length?h3("⚖️ Decisiones del CEO")+CEOD.dec.map(d=>`<div style="border-left:3px solid #7C3AED;background:#F5F3FF;border-radius:0 8px 8px 0;padding:6px 10px;margin:5px 0;font-size:13.5px"><b>${esc(d.texto)}</b><div style="font-size:12px;color:#6B7684">Para ${esc(d.para)}${d.cuando?" · para el "+esc(d.cuando.split("-").reverse().join("/")):""}</div></div>`).join(""):""}
+      ${CEOD.nota?h3("📝 Nota de la semana")+`<div style="font-size:13.5px;background:#F7F9FB;border-radius:8px;padding:8px 10px">${esc(CEOD.nota)}</div>`:""}
+      <div style="font-size:12px;color:#8A94A0;margin-top:14px">Las decisiones salen la semana ${semSig().sem} en el cierre del director y del CEO para comprobar si se han hecho.</div>
+      <a href="https://crmwikuk.vercel.app/" style="display:inline-block;margin-top:14px;background:#14181F;color:#fff;text-decoration:none;padding:10px 20px;border-radius:9px;font-size:13px;font-weight:700">Abrir el portal</a>
+    </div></div>`;
+}
+window.cerrarCEO2=async()=>{
+  if(segFaltan()) return;
+  const dp=D.dirs.filter(d=>!d.inf);
+  if(dp.length&&!confirm("El director todavía no ha cerrado. ¿Cerrar igualmente?")) return;
+  const b=document.getElementById("btnCEO"); b.disabled=true; b.textContent="Guardando…";
+  try{
+    const pu=await RC.leer("portal_users",10).catch(()=>[]);
+    const emailDe=(u)=>u.email||((pu.find(x=>x.email&&[x.crmId,x.id,x._id].some(k=>k&&U(k)===U(u._id)))||{}).email)||"";
+    const dest=[...D.dirs,...D.jefes].map(p=>({email:emailDe(p.f),nombre:p.nombre})).filter(x=>x.email);
+    const yo=D.us.find(u=>U(u._id)===U(UID)||String(u.rol||"").toLowerCase()==="ceo"); if(yo&&emailDe(yo)) dest.push({email:emailDe(yo),nombre:yo.nombre||"CEO"});
+    const to=[...new Set(dest.map(x=>x.email.trim().toLowerCase()))];
+    let enviado=false;
+    if(to.length){ try{ const r=await fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({to,subject:"⭐ Cierre del grupo · semana "+W.sem,html:htmlActaCEO()})}); enviado=r.ok; }catch(e){} }
+    const tot=totalCumpl();
+    await escribir("cierres_flujo",idFlujo("ceo"),{anio:W.anio,semana:W.sem,paso:"ceo",por:UID||AGENTE,porNombre:NOMBRE||AGENTE,
+      fecha:new Date().toISOString(),nota:(CEOD.nota||"").trim(),decisiones:JSON.stringify(CEOD.dec),
+      resumen:JSON.stringify({cumpl:tot?{tot:tot.tot,hecho:tot.hecho,pct:tot.pct}:null,equipos:tablaEquipos().map(t=>({eq:t.eq,partes:t.partes,comites:t.comites,n:t.n,pct:t.r.pct||null}))}),
+      enviadoA:JSON.stringify(dest),correoEnviado:enviado});
+    try{ localStorage.removeItem(claveCEO()); }catch(e){}
+    alert(enviado?"Semana cerrada. Acta enviada a "+dest.map(x=>x.nombre).join(", ")+".":"Semana cerrada. El correo no se ha podido enviar; el acta queda guardada.");
+    cerrarCapa();
+  }catch(e){ b.disabled=false; b.textContent="✓ Cerrar la semana y enviar el acta"; alert(e.message); }
+};
+
 // ══ Pintar ════════════════════════════════════════════════════════════
 function pintar(){
   document.getElementById("hs").textContent=(NOMBRE||AGENTE||"")+" · "+PAPEL_TXT[ROL];
@@ -435,12 +604,12 @@ function pintar(){
   document.getElementById("semTxt").textContent=`Semana ${W.sem} · ${l.getDate()}/${l.getMonth()+1} – ${s.getDate()}/${s.getMonth()+1}`;
   if(FUERA(EQUIPO)){ document.getElementById("app").innerHTML=`<p class="estado">Francia no entra en los cierres de la semana.</p>`; return; }
   if(!D) return;
-  document.getElementById("app").innerHTML=(ROL==="comercial"||ROL==="admin"?tarjetaYo()+tarjetaEquipo()+tarjetaFlujo():tarjetaFlujo()+tarjetaYo()+tarjetaEquipo())
+  document.getElementById("app").innerHTML=(ROL==="comercial"||ROL==="admin"?tarjetaYo()+tarjetaEquipo()+tarjetaFlujo():tarjetaFlujo()+tarjetaYo()+tarjetaSeg()+tarjetaEquipo())
     +`<p class="cs" style="text-align:center">Fase 1 · las pantallas de cierre de cada uno son todavía las de siempre y se abren desde aquí.<br>Versión ${VERSION_CIERRES}</p>`;
 }
 async function recargar(){
   pintar();
-  try{ await cargar(); pintar(); }
+  try{ await cargar(); pintar(); cargarSeg().then(pintar).catch(e=>console.warn("[seguimiento]",e)); }
   catch(e){ document.getElementById("app").innerHTML=`<p class="estado">No se ha podido cargar la semana: ${esc(e.message)}.<br><button class="btn" style="margin-top:10px" onclick="recargar()">Reintentar</button></p>`; }
 }
 window.cambiarSemana=(n)=>{ const l=lunes(W.anio,W.sem); l.setDate(l.getDate()+7*n); W=isoSem(l); D=null;
