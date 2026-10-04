@@ -1196,7 +1196,17 @@ const opsC=(k)=>/^cobro:|^kpi:cobros/.test(k)?OPS_COB_C:OPS_DEF_C;
 const TONO_C={ok:"#16A34A",cambia:"#D97706",sube:"#7C3AED"};
 const QUIEN_C=["Comercial","Jefe","Los dos","Otro departamento"];
 const claveC=()=>"comite_"+AGENTE+"_"+SEMANA;
-const guardaC=()=>{ try{ localStorage.setItem(claveC(),JSON.stringify(DC)); }catch(e){} };
+// (oct 2026) El borrador del comité también va a Firebase: el comercial lo sigue en directo en su móvil
+// (modo «solover») y el jefe puede seguir en otro dispositivo.
+const SOLO_VER_C=MODO_COMITE&&P.get("solover")==="1";
+const idBorrC=()=>new Date().getFullYear()+"_s"+SEMANA+"_comiteborr_"+String(AGENTE).replace(/[\/\s#?]/g,"_");
+let _tBorr=null;
+function subirBorrC(){ if(SOLO_VER_C) return; clearTimeout(_tBorr); _tBorr=setTimeout(()=>{
+  fetch(`${FB}/cierres_flujo/${encodeURIComponent(idBorrC())}?updateMask.fieldPaths=dc&updateMask.fieldPaths=jefe&updateMask.fieldPaths=fecha&updateMask.fieldPaths=paso&updateMask.fieldPaths=semana`,{method:"PATCH",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({fields:{dc:{stringValue:JSON.stringify(DC)},jefe:{stringValue:JEFE.nombre},fecha:{stringValue:new Date().toISOString()},paso:{stringValue:"comite_borrador"},semana:{integerValue:String(SEMANA)}}})}).catch(()=>{}); },1200); }
+async function leerBorrC(){ try{ const r=await fetch(`${FB}/cierres_flujo/${encodeURIComponent(idBorrC())}`,{cache:"no-store"}); if(!r.ok) return null;
+  const f=(await r.json()).fields||{}; return {dc:JSON.parse((f.dc&&f.dc.stringValue)||"{}"),fecha:(f.fecha&&f.fecha.stringValue)||""}; }catch(e){ return null; } }
+const guardaC=()=>{ try{ localStorage.setItem(claveC(),JSON.stringify(DC)); }catch(e){} subirBorrC(); };
 const sel=(k)=>'.rv[data-k="'+String(k).replace(/"/g,'\\"')+'"]';
 function revInner(k,general){
   const d=DC[k]||{}, kk=_escR(k).replace(/'/g,"&#39;");
@@ -1270,9 +1280,11 @@ async function montarSegC(app){
 }
 async function montarComite(){
   window._COMITE_LISTO=false;
-  if(window.RC) RC.NIVEL_UI="jefe";
+  if(window.RC) RC.NIVEL_UI=SOLO_VER_C?"comercial":"jefe";
   try{ if(RC.cargarDeptos) await RC.cargarDeptos(); }catch(e){}
-  try{ DC=JSON.parse(localStorage.getItem(claveC())||"{}")||{}; }catch(e){ DC={}; }
+  try{ DC=SOLO_VER_C?{}:(JSON.parse(localStorage.getItem(claveC())||"{}")||{}); }catch(e){ DC={}; }
+  if(SOLO_VER_C||!Object.keys(DC).length){ const b=await leerBorrC(); if(b&&b.dc) DC=b.dc; }
+  if(SOLO_VER_C) document.body.classList.add("solover");
   const ri=await fetch(`${FB}/informes/${encodeURIComponent("informe_"+AGENTE+"_s"+SEMANA)}`,{cache:"no-store"});
   const app=document.getElementById("app");
   if(!ri.ok){ app.insertAdjacentHTML("afterbegin",`<div class="card" style="border-color:#D97706;background:#FFFBEB;color:#92400E;font-weight:700">${_escR(NOMBRE_COM)} todavía no ha cerrado su parte de la semana ${SEMANA}. El comité se hace sobre el parte cerrado.</div>`);
@@ -1338,8 +1350,32 @@ async function montarComite(){
       <p style="margin:2px 0 0;font-size:12.5px;color:#64748B">Firmas tú al cerrar. Después, a ${_escR(String(NOMBRE_COM).split(" ")[0])} le sale en su portal para firmarla en su móvil y, por último, la firma el jefe comercial en el suyo.</p>
       <div id="firmaJef"></div></div><div class="barra" id="actaC"></div>`;
   window._PADS={};
-  if(window.FIRMA){ window._PADS.jef=FIRMA.pad(document.getElementById("firmaJef"),"Tu firma ("+JEFE.nombre+", jefe de equipo)",()=>estadoComite()); }
+  if(SOLO_VER_C){ document.getElementById("firmasC").remove(); }
+  else if(window.FIRMA){ window._PADS.jef=FIRMA.pad(document.getElementById("firmaJef"),"Tu firma ("+JEFE.nombre+", jefe de equipo)",()=>estadoComite()); }
   window._COMITE_LISTO=true; estadoComite();
+  if(SOLO_VER_C) seguirEnDirecto();
+}
+// Comercial: ve el comité de su jefe en directo (se actualiza cada pocos segundos) y, al cerrarse, le sale para firmar
+function seguirEnDirecto(){
+  if(!document.getElementById("solCss")){ const st=document.createElement("style"); st.id="solCss";
+    st.textContent=".solover .rv{pointer-events:none}.solover .rv .acc .chip:not(.on){display:none}.solover .rvb[onclick^=\"okApartado\"]{display:none}.solover #btnActaC{display:none}.solover [id^=nuevo_]{display:none}"; document.head.appendChild(st); }
+  document.getElementById("app").insertAdjacentHTML("afterbegin",`<div class="card" id="enDirecto" style="background:#0F172A;color:#fff;border:none">
+    <b>👁 Comité en directo con ${_escR(JEFE.nombre)}</b><div style="font-size:12.5px;opacity:.8;margin-top:2px">Ves lo que va decidiendo tu jefe punto a punto. Se actualiza solo. Cuando lo cierre, te saldrá para firmar el acta.</div>
+    <div id="dirEstado" style="font-size:12px;opacity:.7;margin-top:4px"></div></div>`);
+  let ult="";
+  const tick=async()=>{
+    // ¿Ya está cerrado?
+    try{ const r=await fetch(`${FB}/cierres_flujo/${encodeURIComponent(new Date().getFullYear()+"_s"+SEMANA+"_comite_"+AGENTE)}`,{cache:"no-store"});
+      if(r.ok){ clearInterval(window._tDir); document.getElementById("enDirecto").outerHTML=`<div class="card" style="background:#FEF3C7;border-color:#F59E0B">
+        <b>✍️ Tu jefe ha cerrado y firmado el acta</b><div style="font-size:13px;margin:3px 0 8px">Ahora te toca firmarla a ti.</div>
+        <button class="env" style="background:#0F172A;color:#fff" onclick="parent.postMessage({type:'FIRMAR_ACTA'},'*')">✍️ Firmar el acta</button></div>`; window.scrollTo(0,0); return; } }catch(e){}
+    const b=await leerBorrC(); if(!b) return;
+    const s=JSON.stringify(b.dc||{}); if(s===ult) return; ult=s; DC=b.dc||{};
+    document.querySelectorAll(".rv").forEach(el=>{ el.innerHTML=revInner(el.dataset.k,el.dataset.gen==="1"); });
+    estadoComite();
+    const de=document.getElementById("dirEstado"); if(de) de.textContent="Actualizado "+new Date().toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+  };
+  tick(); window._tDir=setInterval(tick,4000);
 }
 // Cada apartado: ✓ cuando todos sus puntos tienen decisión
 function estadoComite(){
