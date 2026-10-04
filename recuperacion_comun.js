@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20261004e";
+  RC.VERSION="20261004f";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -562,7 +562,12 @@
       return l0.find(e=>!e.eliminada&&/pendiente/.test(e.estado||"")&&(e.ofertas||e.productos||[]).some(o=>ARR(o.codigo||o.nombre)===k||ARR(o.nombre)===ARR(l.desc)))||null;
     }catch(e){ return null; }
   };
-  RC.txtYaExiste=(e)=>"Ya estaba pedida"+(e.fechaCreacionStr?" el "+e.fechaCreacionStr:"")+" ("+((e.ofertas||[])[0]||{}).nombre+" a "+(((e.ofertas||[])[0]||{}).precioOferta||"")+" €) y sigue pendiente de "+(e.pendienteDeNombre||"aprobar")+". No se ha creado otra.\n\nEl resultado te llega por correo y queda en la ficha del cliente.";
+  // Artículo completo: código, nombre, calibre, metros y precio (antes → después)
+  RC.txtLineaEst=(o)=>{ o=o||{}; const f=(n)=>num(n).toLocaleString("es-ES",{minimumFractionDigits:2,maximumFractionDigits:2}); return [o.codigo?"["+o.codigo+"]":"",o.nombre||"",o.calibre||""].filter(Boolean).join(" ")
+    +(num(o.cantidad)?" · "+num(o.cantidad).toLocaleString("es-ES")+" "+(o.unidad||"m"):"")
+    +" · "+(num(o.precioActual)?f(o.precioActual)+" → ":"")+f(o.precioOferta||o.precioFinal)+" €/"+(o.unidad||"m")
+    +(o.dto!=null&&o.dto!==""?" (dto "+o.dto+" %)":""); };
+  RC.txtYaExiste=(e)=>"Ya estaba pedida"+(e.fechaCreacionStr?" el "+e.fechaCreacionStr:"")+" ("+RC.txtLineaEst((e.ofertas||[])[0])+") y sigue pendiente de "+(e.pendienteDeNombre||"aprobar")+". No se ha creado otra.\n\nEl resultado te llega por correo y queda en la ficha del cliente.";
   RC.crearEstrategia=async(caso,l,nota,por)=>{
     const llave=ARR(caso.cliente||caso.nombre)+"|"+ARR(l.art||l.desc);
     if(RC._estEnCurso.has(llave)) throw new Error("ya se está enviando, espera un momento");
@@ -612,7 +617,7 @@
     if(estado==="aprobada") await RC.ofertaDeEstrategia(doc,por,nota);
     // En el caso queda anotado
     const hist=(caso.historial||[]).concat([{sem:RC.semanaISO(hoy),fecha:hoy.toISOString(),por:por.nombre,
-      sistema:(nivel==="comercial"?"Pide estrategia: ":"Estrategia: ")+linea.nombre+" a "+linea.precioOferta+" € (dto "+dto+" %)"+(estado==="aprobada"?" · aprobada":" · pendiente de "+(pend&&pend.nombre||"aprobar"))}]);
+      sistema:(nivel==="comercial"?"Pide estrategia: ":"Estrategia: ")+RC.txtLineaEst(linea)+(estado==="aprobada"?" · aprobada":" · pendiente de "+(pend&&pend.nombre||"aprobar"))}]);
     const campos={historial:hist};
     if(nivel==="comercial") campos.ultimaAccion=hoy.toISOString();
     if(caso._id){ try{ await RC.guardar(caso._id,campos); Object.assign(caso,campos); }catch(e){} }
@@ -734,7 +739,7 @@
     if(e.casoId){ try{ const c=await RC.leerUno(e.casoId); if(c){ const o=(e.ofertas||[])[0]||{}, hoy=new Date();
       const t=(accion==="aprobar"?"✅ Aprobada":accion==="rechazar"?"❌ Rechazada":"↑ Elevada a "+(campos.pendienteDeNombre||"dirección"))+" por "+por.nombre;
       await RC.guardar(e.casoId,{historial:(c.historial||[]).concat([{sem:RC.semanaISO(hoy),fecha:hoy.toISOString(),por:por.nombre,
-        sistema:"Resultado estrategia: "+(o.nombre||e.estrategia||"")+(o.precioOferta?" a "+o.precioOferta+" €":"")+" · "+t+(nota?" — "+nota:"")}])}); } }catch(x){} }
+        sistema:"Resultado estrategia: "+(o.nombre?RC.txtLineaEst(o):e.estrategia||"")+" · "+t+(nota?" — "+nota:"")}])}); } }catch(x){} }
     // Oferta automática al aprobar, como hace el CRM
     if(accion==="aprobar") await RC.ofertaDeEstrategia(e,por,nota);
     try{
