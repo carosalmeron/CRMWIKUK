@@ -74,6 +74,7 @@ const SEM=RC.semanaISO(new Date());
 const esc=(s)=>String(s??"").replace(/[<>&"]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]));
 const fch=(s)=>s?String(s).slice(0,10).split("-").reverse().join("/"):"";
 
+let CASOS_TODOS=[], GF={eq:"",ag:""};   // (oct 2026) filtro de cabecera: equipo › comercial
 let CASOS=[], AG={}, TAB=ES_CEO?"comite":ES_JEFE?"comite":"casos", FIL={estado:"abiertos",nivel:"",agente:"",equipo:""};
 
 // Qué casos ve cada uno
@@ -109,7 +110,7 @@ async function cargar(){
   await RC.prepararEsts(ests.filter(e=>!e.eliminada&&!RC.esFrancia(e.equipo)));
   ESTS=ests.filter(e=>!e.eliminada);
   AG={}; res.forEach(a=>AG[ARR(a._id)]=a);
-  CASOS=casos.filter(enAmbito);
+  CASOS=CASOS_TODOS=casos.filter(enAmbito);
 }
 
 // ── Detectar en toda la cartera (sin esperar a que cada comercial abra su parte)
@@ -223,6 +224,8 @@ function tiles(l){
     <div class="tile"><span>Sin plan</span><b style="color:${r.sinPlan?"var(--red)":"var(--green)"}">${r.sinPlan}</b></div>
     <div class="tile"><span>Parados +14 días</span><b style="color:${r.parados?"var(--red)":"var(--green)"}">${r.parados}</b></div>
     <div class="tile"><span>Recuperados</span><b style="color:var(--green)">${r.recuperados} · ${eur(r.recuperadosEur)}</b></div>
+    ${(()=>{ const n=l.reduce((t,c)=>t+RC.spotDe(c).length,0), e=l.reduce((t,c)=>t+RC.spotEur(c),0);
+      return `<div class="tile" style="cursor:pointer" onclick="TAB='spot';pintar()"><span>🚫 Venta puntual</span><b style="color:#64748B">${eur(e)}</b><small style="display:block;font-size:11px;color:#64748B">${n} artículo${n===1?"":"s"} · ${l.filter(c=>RC.spotDe(c).length).length} clientes ›</small></div>`; })()}
     <div class="tile"><span>${ES_JEFE?"Te toca decidir":"Esperan decisión"}</span><b style="color:${(ES_JEFE?porDecidir():r.propuestas)?"var(--amber)":"var(--navy)"}">${ES_JEFE?porDecidir():r.propuestas}</b></div>
   </div>`;
 }
@@ -737,6 +740,135 @@ async function cargarKpisSem(){
   }catch(e){ KPIS_SEM={sem:SEM,filas:[]}; }
   if(TAB==="comite") pintar();
 }
+// ══ (oct 2026) Acta del comité de recuperación ════════════════════════
+// Solo lo de recuperación: lo acordado y hecho con cada cliente en la semana
+// (instrucciones, diagnósticos, estrategias, ofertas, incidencias, dormir,
+// bloquear, ventas puntuales, recuperados). Sale del historial de cada caso.
+let ACTA_SEM=SEM;
+const TIPOS_ACTA=[
+  [/^(Comité|Instrucción|📝)/,"📌","Acuerdo del comité","#1D4ED8"],
+  [/^Diagn/,"🩺","Diagnóstico","#0F766E"],
+  [/Pide diagnóstico/,"⏱","Pide diagnóstico","#B45309"],
+  [/Estrategia|estrategia/,"💶","Estrategia de precio","#7C3AED"],
+  [/^Oferta/,"📨","Oferta","#2563EB"],
+  [/^Alternativa/,"🔁","Alternativa","#0891B2"],
+  [/Incidencia/,"🧩","Incidencia","#DB2777"],
+  [/Venta puntual|Vuelve a contar/,"🚫","Venta puntual","#64748B"],
+  [/^Recuperado/,"✅","Recuperado","#15803D"],
+  [/margen/i,"⚖️","Margen","#B45309"],
+  [/Dormid|aplaz|60 días/i,"😴","Dormido 60 días","#64748B"],
+  [/bloque|No paga|Ha cerrado/i,"⛔","Bloqueado","#B91C1C"],
+  [/archiv|insistir/i,"🗄","Deja de insistir","#475569"],
+  [/Reabierto|Vuelve tras/i,"↩️","Vuelve a abrirse","#B45309"]];
+function tipoActa(h){
+  if(!h.sistema) return ["🗣","Respuesta del comercial","#334155"];
+  const t=TIPOS_ACTA.find(x=>x[0].test(h.sistema)); return t?t.slice(1):["•","Movimiento","#64748B"];
+}
+function textoActa(h){
+  if(h.sistema) return String(h.sistema).replace(/^(Comité|Instrucción):\s*/,"").replace(/^📝\s*/,"");
+  return [h.hecho,h.respuesta||h.texto||h.nota].filter(Boolean).join(" — ");
+}
+function datosActa(sem){
+  const L=[];
+  CASOS.forEach(c=>{ const h=(c.historial||[]).filter(x=>Number(x.sem)===sem&&(x.sistema||x.hecho||x.respuesta||x.texto));
+    if(h.length) L.push({c,h:h.map(x=>({...x,_t:tipoActa(x)}))}); });
+  const acuerdos=L.reduce((t,x)=>t+x.h.filter(h=>h.sistema).length,0);
+  const cuenta=(lab)=>L.filter(x=>x.h.some(h=>h._t[1]===lab)).length;
+  const recEur=L.filter(x=>x.h.some(h=>h._t[1]==="Recuperado")).reduce((t,x)=>t+num(x.c.recuperadoEur||x.c.eurosObjetivo||0),0);
+  const sinTratar=CASOS.filter(c=>RC.abierto(c)&&!L.some(x=>x.c._id===c._id)).sort((a,b)=>num(b.perdido)-num(a.perdido));
+  return {L,acuerdos,riesgo:L.reduce((t,x)=>t+(RC.abierto(x.c)?num(x.c.perdido):0),0),
+    rec:cuenta("Recuperado"),recEur,dorm:cuenta("Dormido 60 días"),bloq:cuenta("Bloqueado"),
+    est:cuenta("Estrategia de precio"),of:cuenta("Oferta"),inc:cuenta("Incidencia"),diag:cuenta("Diagnóstico"),
+    spot:L.reduce((t,x)=>t+x.h.filter(h=>/^🚫 Venta puntual/.test(h.sistema||"")).length,0),sinTratar};
+}
+const rangoSem=(sem)=>{ const y=new Date().getFullYear(), e=new Date(y,0,4), l=new Date(e); l.setDate(e.getDate()-((e.getDay()||7)-1)+(sem-1)*7);
+  const v=new Date(l); v.setDate(v.getDate()+4); return l.getDate()+"/"+(l.getMonth()+1)+" – "+v.getDate()+"/"+(v.getMonth()+1); };
+// En la pestaña del comité: el resumen del acta, arriba
+function resumenActa(){
+  if(!ES_JEFE) return "";
+  const A=datosActa(SEM);
+  return `<div class="card" style="padding:0;overflow:hidden;cursor:pointer" onclick="TAB='acta';ACTA_SEM=SEM;pintar();window.scrollTo(0,0)">
+    <div style="background:#0F172A;color:#fff;padding:12px 15px;display:flex;align-items:center;gap:10px">
+      <div style="flex:1"><div style="font-size:10.5px;letter-spacing:.08em;opacity:.7;text-transform:uppercase">Acta del comité de recuperación</div>
+        <b style="font-size:15.5px">Semana ${SEM} · ${A.L.length} clientes tratados · ${A.acuerdos} acuerdos</b></div><span style="font-size:13px;font-weight:800">Ver ›</span></div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;padding:10px 15px;font-size:12px">
+      ${[["🩺",A.diag,"diagnósticos"],["💶",A.est,"estrategias"],["📨",A.of,"ofertas"],["🧩",A.inc,"incidencias"],["✅",A.rec,"recuperados"],["😴",A.dorm,"dormidos"],["⛔",A.bloq,"bloqueados"]]
+        .filter(x=>x[1]).map(x=>`<span style="background:#F1F5F9;border-radius:99px;padding:3px 9px;font-weight:700">${x[0]} ${x[1]} ${x[2]}</span>`).join("")||'<span class="muted">Todavía no hay acuerdos esta semana.</span>'}
+      ${A.sinTratar.length?`<span style="background:#FEF2F2;color:#B91C1C;border-radius:99px;padding:3px 9px;font-weight:800">${A.sinTratar.length} abiertos sin tratar · ${eur(A.sinTratar.reduce((t,c)=>t+num(c.perdido),0))}</span>`:""}</div></div>`;
+}
+function vistaActa(){
+  const sem=ACTA_SEM, A=datosActa(sem);
+  const g={}; A.L.forEach(x=>(g[ARR(x.c.agente)]=g[ARR(x.c.agente)]||[]).push(x));
+  const orden=Object.entries(g).sort((a,b)=>b[1].reduce((t,x)=>t+num(x.c.perdido),0)-a[1].reduce((t,x)=>t+num(x.c.perdido),0));
+  const ambito=GF.ag?nomAg(GF.ag):GF.eq?GF.eq:(ES_DIR?"Todos los equipos":(EQUIPO||"Tu equipo"));
+  const tile=(v,t,c)=>`<div style="flex:1;min-width:120px;background:#fff;border:1px solid #E2E8F0;border-radius:12px;padding:10px 12px"><div style="font-size:10.5px;color:#64748B;text-transform:uppercase;font-weight:800;letter-spacing:.04em">${t}</div><div style="font-size:21px;font-weight:800;color:${c||"#0F172A"}">${v}</div></div>`;
+  const estadoTag=(c)=>RC.abierto(c)?`<span style="background:#FEF2F2;color:#B91C1C;border-radius:99px;padding:2px 8px;font-size:11px;font-weight:800">cae ${eur(c.perdido)}</span>`
+    :`<span style="background:#F1F5F9;color:#475569;border-radius:99px;padding:2px 8px;font-size:11px;font-weight:800">${esc(RC.txtEstadoCerrado?RC.txtEstadoCerrado(c):c.estado)}</span>`;
+  const linea=(h)=>{ const [ic,tt,col]=h._t;
+    return `<div style="display:flex;gap:9px;padding:6px 0;border-top:1px solid #F1F5F9">
+      <div style="flex-shrink:0;width:28px;height:28px;border-radius:8px;background:${col}14;display:flex;align-items:center;justify-content:center;font-size:14px">${ic}</div>
+      <div style="min-width:0;flex:1"><div style="font-size:11px;font-weight:800;color:${col};text-transform:uppercase;letter-spacing:.03em">${tt}</div>
+        <div style="font-size:13.5px;color:#0F172A;line-height:1.4">${esc(textoActa(h))}</div>
+        <div style="font-size:11.5px;color:#94A3B8">${esc(h.por||"")}${h.fecha?" · "+fch(h.fecha):""}</div></div></div>`; };
+  return `<div class="card" style="padding:0;overflow:hidden">
+      <div style="background:#0F172A;color:#fff;padding:16px 18px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <button class="btn gris" style="padding:4px 10px" onclick="ACTA_SEM--;pintar()">‹</button>
+          <div style="flex:1;text-align:center"><div style="font-size:10.5px;letter-spacing:.1em;opacity:.7;text-transform:uppercase">Acta del comité de recuperación</div>
+            <div style="font-size:19px;font-weight:800">Semana ${sem} · ${rangoSem(sem)}</div>
+            <div style="font-size:12px;opacity:.75">${esc(ambito)}</div></div>
+          <button class="btn gris" style="padding:4px 10px${sem>=SEM?";visibility:hidden":""}" onclick="ACTA_SEM++;pintar()">›</button></div></div>
+      <div style="padding:12px 14px;background:#F8FAFC">
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          ${tile(A.L.length,"Clientes tratados")}${tile(A.acuerdos,"Acuerdos")}${tile(eur(A.riesgo),"En juego (tratados)","#B91C1C")}${tile(A.rec+(A.recEur?" · "+eur(A.recEur):""),"Recuperados","#15803D")}</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;font-size:12px">
+          ${[["🩺",A.diag,"diagnósticos"],["💶",A.est,"estrategias"],["📨",A.of,"ofertas"],["🧩",A.inc,"incidencias"],["🚫",A.spot,"ventas puntuales"],["😴",A.dorm,"dormidos"],["⛔",A.bloq,"bloqueados"]]
+            .map(x=>`<span style="background:#fff;border:1px solid #E2E8F0;border-radius:99px;padding:4px 10px;font-weight:700;${x[1]?"":"opacity:.45"}">${x[0]} ${x[1]} ${x[2]}</span>`).join("")}</div></div></div>
+    ${sem===SEM&&A.sinTratar.length?`<div class="card" style="border-color:#FCA5A5;background:#FEF2F2">
+      <b style="color:#B91C1C">⚠️ ${A.sinTratar.length} caso${A.sinTratar.length===1?"":"s"} abierto${A.sinTratar.length===1?"":"s"} sin tratar esta semana · ${eur(A.sinTratar.reduce((t,c)=>t+num(c.perdido),0))}</b>
+      <div style="font-size:12.5px;color:#7F1D1D;margin-top:4px">${A.sinTratar.slice(0,8).map(c=>`<a href="#" onclick="abrirFicha('${c._id}');return false" style="color:inherit">${esc(c.nombre||c.cliente)}</a> (${eur(c.perdido)})`).join(" · ")}${A.sinTratar.length>8?" · …":""}</div></div>`:""}
+    ${orden.length?orden.map(([a,l])=>`<div class="card" style="padding:0;overflow:hidden">
+      <div style="display:flex;align-items:center;gap:10px;padding:11px 15px;border-bottom:1px solid #E2E8F0;background:#fff">
+        <div style="width:32px;height:32px;border-radius:99px;background:#334155;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px">${esc(String(nomAg(a)).split(/\s+/).slice(0,2).map(x=>x[0]).join("").toUpperCase())}</div>
+        <div style="flex:1"><b style="font-size:15px">${esc(nomAg(a))}</b><div class="muted">${l.length} cliente${l.length===1?"":"s"} · ${l.reduce((t,x)=>t+x.h.filter(h=>h.sistema).length,0)} acuerdos</div></div></div>
+      ${l.sort((x,y)=>num(y.c.perdido)-num(x.c.perdido)).map(x=>`<div style="padding:10px 15px;border-bottom:1px solid #F1F5F9">
+        <div style="display:flex;gap:8px;align-items:center;cursor:pointer" onclick="abrirFicha('${x.c._id}')"><b style="flex:1;font-size:14px">${esc(x.c.nombre||x.c.cliente)}</b>${estadoTag(x.c)}<span style="color:#94A3B8">›</span></div>
+        ${x.c.causa?`<div style="font-size:12px;color:#64748B;margin-top:2px">Causa: ${esc(x.c.causa)}${x.c.accion?" · plan: "+esc(x.c.accion):""}${x.c.fechaObjetivo?" · para el "+fch(x.c.fechaObjetivo):""}</div>`:""}
+        ${x.h.map(linea).join("")}</div>`).join("")}</div>`).join("")
+      :`<div class="card muted">No hay acuerdos registrados en la semana ${sem}.</div>`}
+    ${sem===SEM&&orden.length?`<div class="card" style="background:#0F172A;color:#fff">
+      <b>📧 Enviar el acta</b><div style="font-size:12.5px;opacity:.8;margin:3px 0 8px">A cada comercial le llega lo suyo, con copia a su jefe y al director.</div>
+      <button class="btn" style="width:100%;background:#fff;color:#0F172A" id="btnActaR" onclick="enviarActaR()">Enviar el acta de la semana ${sem}</button></div>`:""}`;
+}
+function htmlActaRMail(a,l,sem){
+  const fila=(h)=>{ const [ic,tt,col]=h._t; return `<div style="border-left:3px solid ${col};background:#F7F9FB;border-radius:0 8px 8px 0;padding:6px 10px;margin:5px 0">
+    <div style="font-size:11px;font-weight:800;color:${col};text-transform:uppercase">${ic} ${tt}</div><div style="font-size:13.5px">${esc(textoActa(h))}</div>
+    <div style="font-size:11.5px;color:#8A94A0">${esc(h.por||"")}${h.fecha?" · "+fch(h.fecha):""}</div></div>`; };
+  return `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:600px;margin:0 auto;color:#14181F">
+    <div style="background:#14181F;color:#fff;padding:16px 20px;border-radius:12px 12px 0 0">
+      <div style="font-size:11px;letter-spacing:.08em;opacity:.7;text-transform:uppercase">Acta del comité de recuperación · semana ${sem}</div>
+      <div style="font-size:19px;font-weight:800;margin-top:2px">${esc(nomAg(a))}</div></div>
+    <div style="border:1px solid #DCE1E7;border-top:none;border-radius:0 0 12px 12px;padding:18px 20px">
+      <p style="margin:0 0 8px;font-size:14px">Esto es lo acordado esta semana con tus clientes en recuperación (${l.length}):</p>
+      ${l.map(x=>`<div style="margin:14px 0 4px"><b style="font-size:14.5px">${esc(x.c.nombre||x.c.cliente)}</b> <span style="font-size:12px;color:${RC.abierto(x.c)?"#C2263D":"#6B7684"};font-weight:700">${RC.abierto(x.c)?"cae "+eur(x.c.perdido):esc(RC.txtEstadoCerrado?RC.txtEstadoCerrado(x.c):x.c.estado)}</span></div>
+        ${x.h.map(fila).join("")}`).join("")}
+      <a href="https://crmwikuk.vercel.app/" style="display:inline-block;margin-top:16px;background:#14181F;color:#fff;text-decoration:none;padding:10px 20px;border-radius:9px;font-size:13px;font-weight:700">Abrir el portal</a>
+    </div></div>`;
+}
+async function enviarActaR(){
+  const b=document.getElementById("btnActaR"); b.disabled=true; b.textContent="Enviando…";
+  const A=datosActa(SEM), g={}; A.L.forEach(x=>(g[ARR(x.c.agente)]=g[ARR(x.c.agente)]||[]).push(x));
+  let ok=0, sin=[];
+  for(const [a,l] of Object.entries(g)){
+    try{ const d=await RC.destinatarios(a,"");
+      const to=[...d.para,...d.copias].map(x=>x.email); if(!d.para.length) sin.push(nomAg(a)); if(!to.length) continue;
+      const r=await fetch("/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({to,subject:`📝 Acta del comité de recuperación · ${nomAg(a)} · semana ${SEM}`,html:htmlActaRMail(a,l,SEM)})});
+      if(r.ok) ok++; }catch(e){}
+  }
+  b.disabled=false; b.textContent="Enviar el acta de la semana "+SEM;
+  alert(`Acta enviada a ${ok} de ${Object.keys(g).length} comerciales.`+(sin.length?`\nSin email: ${sin.join(", ")} (le llega solo a su jefe).`:""));
+}
 function bloqueKpisSem(){
   if(!RC.htmlKpisEquipo) return "";
   if(KPIS_SEM===null){ setTimeout(cargarKpisSem,0); return ""; }
@@ -745,10 +877,10 @@ function bloqueKpisSem(){
 }
 function vistaComite(){
   const ab=CASOS.filter(RC.abierto);
-  if(!ab.length) return bloqueKpisSem()+ `<div class="card muted">No hay casos abiertos. Pulsa <b>Detectar ahora</b> para revisar la cartera.</div>`;
+  if(!ab.length) return resumenActa()+ `<div class="card muted">No hay casos abiertos. Pulsa <b>Detectar ahora</b> para revisar la cartera.</div>`;
   const g={}; ab.forEach(c=>(g[ARR(c.agente)]=g[ARR(c.agente)]||[]).push(c));
   const orden=Object.entries(g).sort((a,b)=>b[1].reduce((t,c)=>t+num(c.perdido),0)-a[1].reduce((t,c)=>t+num(c.perdido),0));
-  return bloqueKpisSem()+`<div class="card" style="background:var(--blueL);border-color:#BFDBFE;font-size:13px;line-height:1.5">
+  return resumenActa()+`<div class="card" style="background:var(--blueL);border-color:#BFDBFE;font-size:13px;line-height:1.5">
       <b>Comité del viernes.</b> Pulsa un comercial para ver sus clientes y un cliente para ver qué ha dejado de comprar,
       el plan y las tres respuestas de la semana. En rojo lo que falta.</div>`
    +`<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
@@ -787,8 +919,6 @@ function vistaCasos(){
   return `<div class="filtros">
     ${sel("estado",[["abiertos","Abiertos"],["recuperado","Recuperados"],["archivado","Archivados"],["aplazado","Dormidos (60 días)"],["bloqueado","Bloqueados"],["propuesta_archivo","Piden archivo"],["","Todos"]])}
     ${sel("nivel",[["","Todos los niveles"],["3","CEO"],["2","Jefe de ventas"],["1","Comercial"]])}
-    ${ES_JEFE?sel("agente",[["","Todos los comerciales"],...ags.map(a=>[a,nomAg(a)])]):""}
-    ${ES_DIR&&eqs.length>1?sel("equipo",[["","Todos los equipos"],...eqs.map(e=>[e,e])]):""}
   </div>
   <div class="card" style="padding:4px 15px">${l.length?l.map(c=>filaCompacta(c,true)).join(""):'<p class="muted">Ningún caso con este filtro.</p>'}</div>`;
 }
@@ -1026,7 +1156,6 @@ function vistaSpot(){
       <p class="muted" style="margin:6px 0 0;font-size:12px">Ventas que fueron puntuales (no recurrentes). No salen en los casos ni suman en lo que cae. «Volver a contar» las devuelve.</p></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
       <div class="tabs" style="margin:0">${chip("modo","cli","Por cliente")}${chip("modo","art","Por artículo")}</div>
-      ${ES_JEFE&&ags.length>1?`<select onchange="FSP.ag=this.value;pintar()" style="padding:8px;border-radius:9px;border:1.5px solid #CBD5E1;font:inherit"><option value="">Todos los comerciales</option>${ags.map(a=>`<option value="${esc(a)}"${FSP.ag===a?" selected":""}>${esc(nomAg(a))}</option>`).join("")}</select>`:""}
       <input placeholder="Buscar cliente o artículo" value="${esc(FSP.q)}" onchange="FSP.q=this.value;pintar()" style="flex:1;min-width:160px;padding:8px 10px;border-radius:9px;border:1.5px solid #CBD5E1;font:inherit"></div>
     ${cuerpo}`;
 }
@@ -1043,20 +1172,40 @@ async function volverSpot(id,i){
   catch(e){ alert("No se ha guardado: "+e.message); }
 }
 function pintar(){ pintar0(); if(window.RC&&RC.activarForms) RC.activarForms(); }
+// ── (oct 2026) Filtro de cabecera en árbol: equipo › comercial. Afecta a las cifras y a todas las pestañas.
+const eqDe=(c)=>ARR(c.equipo||(AG[ARR(c.agente)]||{}).equipo||"")||"SIN EQUIPO";
+function gfOk(c){ if(GF.ag) return ARR(c.agente)===GF.ag; if(GF.eq) return eqDe(c)===GF.eq; return true; }
+function filtroArbol(){
+  const g={}; CASOS_TODOS.forEach(c=>{ const e=eqDe(c), a=ARR(c.agente); ((g[e]=g[e]||{})[a]=(g[e][a]||0)+(RC.abierto(c)?1:0)); });
+  const eqs=Object.keys(g).sort(), nAg=new Set(CASOS_TODOS.map(c=>ARR(c.agente))).size;
+  if(!ES_JEFE||nAg<2) return "";
+  const v=GF.ag?"ag:"+GF.ag:GF.eq?"eq:"+GF.eq:"", sp="\u00A0\u00A0\u00A0\u00A0";
+  const tot=(o)=>Object.values(o).reduce((t,n)=>t+n,0);
+  const opt=(val,txt)=>`<option value="${esc(val)}"${v===val?" selected":""}>${esc(txt)}</option>`;
+  return `<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+    <select onchange="setGF(this.value)" style="flex:1;padding:10px;border-radius:10px;border:1.5px solid ${v?"#0F172A":"#CBD5E1"};font:inherit;font-weight:700;background:#fff">
+      ${opt("",(eqs.length>1?"Todos los equipos":"Todo el equipo")+" · "+CASOS_TODOS.filter(c=>RC.abierto(c)).length+" abiertos")}
+      ${eqs.map(e=>(eqs.length>1?opt("eq:"+e,"▾ "+e+" · "+tot(g[e])):"")
+        +Object.keys(g[e]).sort((a,b)=>nomAg(a).localeCompare(nomAg(b))).map(a=>opt("ag:"+a,(eqs.length>1?sp:"")+"└ "+nomAg(a)+" · "+g[e][a])).join("")).join("")}
+    </select>${v?`<button class="btn gris" onclick="setGF('')">✕</button>`:""}</div>`;
+}
+window.setGF=(v)=>{ GF={eq:v.startsWith("eq:")?v.slice(3):"",ag:v.startsWith("ag:")?v.slice(3):""}; FIL.agente=""; FIL.equipo=""; FSP.ag=""; pintar(); };
 function pintar0(){
-  if(FICHA){ const c=CASOS.find(x=>x._id===FICHA);
+  CASOS=CASOS_TODOS.filter(gfOk);
+  if(FICHA){ const c=CASOS_TODOS.find(x=>x._id===FICHA);
     if(c){ document.getElementById("app").innerHTML=vistaFicha(c); RC.activarForms(); return; } FICHA=null; }
   const pend=porDecidir();
   const tabs=[["comite","Comité del viernes",ES_JEFE],["casos","Casos",true],
     ["acciones","Acciones",true],["aprobar",`Aprobar${pend?" ("+pend+")":""}`,ES_JEFE],["causas","Causas",ES_JEFE],
-    ["spot",`🚫 Venta puntual${nSpot()?" ("+nSpot()+")":""}`,true]].filter(t=>t[2]);
+    ["spot",`🚫 Venta puntual${nSpot()?" ("+nSpot()+")":""}`,true],["acta","📝 Acta",ES_JEFE]].filter(t=>t[2]);
   document.getElementById("app").innerHTML=`
+    ${filtroArbol()}
     ${tiles(CASOS)}
     <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap">
       <div class="tabs" style="margin:0;flex-wrap:wrap">${tabs.map(([k,t])=>`<button class="${TAB===k?"on":""}" onclick="TAB='${k}';pintar()">${t}</button>`).join("")}</div>
       ${ES_JEFE?`<button class="btn gris" onclick="detectarTodo(this)">🔎 Detectar ahora</button>`:""}
     </div>
-    ${TAB==="comite"?vistaComite():TAB==="acciones"?vistaAcciones():TAB==="aprobar"?vistaAprobar():TAB==="causas"?vistaCausas():TAB==="spot"?vistaSpot():vistaCasos()}`;
+    ${TAB==="comite"?vistaComite():TAB==="acciones"?vistaAcciones():TAB==="aprobar"?vistaAprobar():TAB==="causas"?vistaCausas():TAB==="spot"?vistaSpot():TAB==="acta"?vistaActa():vistaCasos()}`;
   // Los productos se buscan en el orden en que salen en pantalla, solo los
   // 12 primeros de golpe; el resto, al pulsar «Ver qué ha dejado de comprar».
   const orden=[...document.querySelectorAll('[id^="arts_"]')].map(el=>el.id.slice(5));
