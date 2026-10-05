@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20261005d";
+  RC.VERSION="20261005e";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -50,6 +50,19 @@
   RC.CLASIF={estrategica:["🎯","Venta estratégica","#B91C1C"],gancho:["🪝","Gancho","#B45309"],fuera:["🚫","Fuera de estrategia","#64748B"]};
   RC.tipoClasif=(x)=>x&&x.tipo==="gancho"?"gancho":"fuera";
   RC.clasifDe=(c,a)=>{ const k=String(a&&(a.art||a.articulo||a.desc)||"").toUpperCase().trim(); const x=k&&RC.spotDe(c).find(z=>String(z.art||z.desc||"").toUpperCase().trim()===k); return x?RC.tipoClasif(x):"estrategica"; };
+  // (oct 2026) Pérdida del cliente repartida por tipo, y que SUME la caída real.
+  // Lo marcado como gancho/fuera es lo que pierden esos artículos; si otros artículos
+  // crecen, puede pasar de la caída neta del cliente (año pasado − este año). En ese
+  // caso se reparte la caída neta en proporción, para que el total sea el real.
+  RC.perdidas=(c)=>{
+    const g0=RC.spotEur(c,"gancho"), f0=RC.spotEur(c,"fuera"), e0=num(c.perdido);
+    const hayV=c&&c.ventasAnt!=null&&c.ventasAct!=null&&num(c.ventasAnt)>0;
+    const neto=hayV?Math.max(0,num(c.ventasAnt)-num(c.ventasAct)):null;
+    if(RC.esFueraCli&&RC.esFueraCli(c)){ const N=neto!=null?neto:e0+g0+f0; return {tot:N,e:0,g:0,f:N,brutoG:g0,brutoF:f0,neto,cliFuera:true}; }
+    let e=e0,g=g0,f=f0;
+    if(neto!=null&&g+f>neto&&e<=0.5){ const k=(g+f)?neto/(g+f):0; g=Math.round(g*k); f=Math.round(f*k); e=0; }
+    return {tot:e+g+f,e,g,f,brutoG:g0,brutoF:f0,neto,ajustado:g!==g0||f!==f0};
+  };
   RC.spotEur=(c,tipo)=>RC.spotDe(c).filter(x=>!tipo||RC.tipoClasif(x)===tipo).reduce((t,x)=>t+Math.abs(Number(x.dif)||0),0);
   RC.esPausa=(m)=>m===RC.MOT_PAUSA||RC._PAUSA_ANT.includes(m);
   RC.esBloqueo=(m)=>[RC.MOT_BLOQ_IMPAGO,RC.MOT_BLOQ_CIERRE,"Impago","Cierre del negocio"].includes(m);
