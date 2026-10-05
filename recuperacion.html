@@ -57,7 +57,7 @@
 </header>
 <main id="app"><p class="estado">Leyendo casos…</p></main>
 
-<script src="/recuperacion_comun.js?v=20261005b"></script>
+<script src="/recuperacion_comun.js?v=20261005d"></script>
 <script>
 const P=new URLSearchParams(location.search);
 const EMBED=P.get("embed")==="1", FICHA_URL=P.get("ficha")||"", ART_URL=P.get("art")||"";
@@ -102,10 +102,10 @@ const estDeOtros=()=>ESTS.filter(e=>e.estado==="pendiente_aprobacion"&&estEnAmbi
 async function cargar(){
   const [casos,res,ests,us]=await Promise.all([RC.leerCasos(), RC.leer("pbi_resumen_agente"), RC.leerProfundo("estrategias").catch(()=>[]), RC.leer("usuarios",10).catch(()=>[])]);
   RC._us=us;
-  if(RC.VERSION!=="20261005b"){
+  if(RC.VERSION!=="20261005d"){
     // Se vuelve a pedir sin caché antes de rendirse
     await new Promise(ok=>{ const sc=document.createElement("script"); sc.src="/recuperacion_comun.js?t="+Date.now(); sc.onload=sc.onerror=ok; document.head.appendChild(sc); });
-    if(RC.VERSION!=="20261005b") throw new Error("en el servidor está la versión «"+(RC.VERSION||"antigua, sin número")+"» de recuperacion_comun.js y hace falta la 20261005b. "
+    if(RC.VERSION!=="20261005d") throw new Error("en el servidor está la versión «"+(RC.VERSION||"antigua, sin número")+"» de recuperacion_comun.js y hace falta la 20261005d. "
       +"Sube recuperacion_comun.js a la MISMA carpeta que recuperacion.html (la raíz, no api/), espera a que Vercel termine y recarga.");
   }
   await RC.prepararEsts(ests.filter(e=>!e.eliminada&&!RC.esFrancia(e.equipo)));
@@ -180,7 +180,7 @@ function lineaCaso(c,conAcciones,opts){
           ${ES_JEFE&&conAcciones?`<button class="btn gris" style="margin-top:6px" onclick="pedirDiag(['${c._id}'])">📨 Pedir diagnóstico en 48 h</button>`:""}`)
       : `<div class="q"><b>Causa:</b> ${esc(c.causa)}${c.causaNota?" — "+esc(c.causaNota):""}</div>
          <div class="q"><b>Plan:</b> ${esc(c.accion)}${c.margenOferta!=null&&c.margenOferta!==""?" ("+esc(c.margenOferta)+" % margen)":""}${c.accionNota?" — "+esc(c.accionNota):""}
-           · <b>${eur(c.eurosObjetivo)}</b> antes del ${fch(c.fechaObjetivo)}${
+           ${num(c.eurosObjetivo)?`· <b>${eur(c.eurosObjetivo)}</b> `:"· "}antes del ${fch(c.fechaObjetivo)}${
            c.fechaObjetivo&&c.fechaObjetivo<new Date().toISOString().slice(0,10)?' <span class="falta">· plazo vencido</span>':""}</div>`;
     if(RC.tienePlan(c)){
       h+= u ? `<div class="q"><b>¿Qué hiciste?</b> ${esc(u.hecho)}</div>
@@ -262,7 +262,7 @@ function formDiagnostico(c,abierto,titulo){
       <input id="dg_margenOferta_${id}" type="number" step="0.5" value="${v("margenOferta")}" placeholder="Margen de la oferta % (solo si es oferta de vuelta)">
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
         <label class="muted">Fecha objetivo<input id="dg_fechaObjetivo_${id}" type="date" value="${v("fechaObjetivo")}"></label>
-        <label class="muted">€ a recuperar<input id="dg_eurosObjetivo_${id}" type="number" min="0" step="100" value="${num(c.eurosObjetivo)||""}" placeholder="${Math.round(num(c.perdido)/2)}"></label>
+        <label class="muted">€ a recuperar (opcional)<input id="dg_eurosObjetivo_${id}" type="number" min="0" step="100" value="${num(c.eurosObjetivo)||""}" placeholder="${Math.round(num(c.perdido)/2)}"></label>
       </div>
       <button class="btn ok" onclick="guardarDiag('${id}')">Guardar diagnóstico</button>
     </div></details>`;
@@ -272,7 +272,7 @@ async function guardarDiag(id){
   const v=(k)=>(document.getElementById(`dg_${k}_${id}`)?.value||"").trim();
   const r={causa:v("causa"),causaNota:v("causaNota"),accion:v("accion"),margenOferta:v("margenOferta"),
     fechaObjetivo:v("fechaObjetivo"),eurosObjetivo:v("eurosObjetivo")};
-  if(!r.causa||!r.accion||!r.fechaObjetivo||!(Number(r.eurosObjetivo)>0)){ alert("Falta la causa, la acción, la fecha o los euros a recuperar."); return; }
+  if(!r.causa||!r.accion||!r.fechaObjetivo){ alert("Falta la causa, la acción o la fecha."); return; }
   if(r.accion==="Oferta de vuelta"&&r.margenOferta===""){ alert("Pon el margen de la oferta."); return; }
   try{ await RC.guardarDiagnostico(c,r,ES_JEFE?QUIEN:(NOMBRE||AGENTE)); pintar(); }
   catch(e){ alert("No se ha guardado: "+e.message); }
@@ -300,6 +300,23 @@ function abrirFicha(id){ cargarOfs(); cargarIncs(); FORM_INC=null; _scrollLista=
 function cerrarFicha(){
   if(EMBED&&FICHA_URL){ try{ parent.postMessage({type:"RC_CERRAR"},"*"); }catch(e){} return; }
   FICHA=null; pintar(); window.scrollTo(0,_scrollLista); }
+async function completarArtsCat(c){
+  const L=[...((c._arts&&c._arts.caen)||[]),...((c._arts&&c._arts.spot)||[]),...((c._arts&&c._arts.suben)||[])].filter(a=>!a.cal||!a.metros);
+  if(!L.length) return;
+  try{
+    const cat=await RC.catalogo(); if(!cat||!cat.length) return;
+    const por=new Map(cat.map(p=>[ARR(p.codigo),p]));
+    const buscar=(cod)=>{ cod=ARR(cod); if(!cod) return null; if(por.has(cod)) return por.get(cod);
+      const base=cod.replace(/\.[A-Z0-9]+$/,""); if(por.has(base)) return por.get(base);   // sin el envase (.15, .C140…)
+      return cat.find(p=>ARR(p.codigo).startsWith(base+"."))||null; };
+    let n=0;
+    L.forEach(a=>{ const p=buscar(a.art); if(!p) return;
+      if(!a.cal&&p.calibre){ a.cal=p.calibre; n++; }
+      if(!a.metros&&p.metros){ a.metros=p.metros; n++; }
+      if(!a.formato&&p.formato) a.formato=p.formato; });
+    if(n&&FICHA===c._id) pintar();
+  }catch(e){}
+}
 async function cargarTodosArt(c,forzar){
   if(c._arts&&!forzar) return;
   c._arts="cargando"; if(FICHA===c._id) pintar();
@@ -312,6 +329,8 @@ async function cargarTodosArt(c,forzar){
       uni:num(a.unidades),uniAnt:num(a.unidadesAnt),ult:a.ultimaCompra||null});
     const caen0=(j.articulos||[]).map(m);
     c._arts={caen:caen0.filter(a=>!RC.esSpot(c,a)),spot:caen0.filter(a=>RC.esSpot(c,a)).map(a=>Object.assign(a,{_tipo:RC.clasifDe(c,a)})),suben:(j.suben||[]).map(m)};
+    // (oct 2026) Calibre y metros: si el maestro del Power BI no los trae, se sacan del catálogo del CRM
+    completarArtsCat(c);
     // Para que los formularios de precio enseñen lo último que pagó
     RC._ult=RC._ult||{}; [...c._arts.caen,...c._arts.suben].forEach(a=>{ if(a.ult) RC._ult[ARR(c.cliente)+"|"+ARR(a.art)]=a.ult; });
   }catch(e){ c._arts={error:e.message}; }
@@ -386,7 +405,7 @@ function vistaFicha(c){
       const conSel=RC.abierto(c)&&FICHA_ART.tab==="caen", marc=FICHA_ART.sel&&FICHA_ART.sel.has(i);
       return `<div id="art_${i}" style="border-top:1px solid #F1F5F9;padding:9px 0${FICHA_ART._focoI===i?";background:#FFFBEB;outline:2px solid #F59E0B;border-radius:8px;padding:9px 8px":marc?";background:#EFF6FF;border-radius:8px;padding:9px 8px":""}">
         <div class="row" style="align-items:flex-start">${conSel?`<input type="checkbox" ${marc?"checked":""} onclick="selArtR(${i})" style="width:20px;height:20px;margin:2px 8px 0 0;flex:none;accent-color:#2563EB">`:""}<div style="min-width:0;flex:1"><b style="font-size:13px">${esc(a.desc)}</b>
-          <div class="muted" style="font-size:11.5px">${esc(a.art)}${a.cal?" · calibre "+esc(a.cal):""}${a.metros?" · "+esc(a.metros)+" m":""}</div></div>
+          <div class="muted" style="font-size:11.5px">${esc(a.art)}${a.cal?" · calibre <b>"+esc(a.cal)+"</b>":""}${a.metros?" · <b>"+esc(String(a.metros).replace(/\s*m$/i,""))+" m</b>":""}${a.formato?" · "+esc(a.formato):""}${!a.cal&&!a.metros?' · <span style="color:#B45309">sin calibre ni metros en el maestro</span>':""}</div></div>
           <div style="text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;font-size:12.5px">
             ${eur(a.ant)} → <b style="color:${a.act<0||a.dif<0?"var(--red)":"var(--green)"}">${eur(a.act)}</b>${a.act<0?' <span class="muted">(abono)</span>':""}
             <div style="font-weight:800;color:${a.dif<0?"var(--red)":"var(--green)"}">${a.dif>0?"+":""}${eur(a.dif)}</div></div></div>

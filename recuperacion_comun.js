@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20261005b";
+  RC.VERSION="20261005d";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -152,7 +152,8 @@
     return c;
   };
   RC.abierto=(c)=>RC.ABIERTOS.includes(c.estado||"abierto");
-  RC.tienePlan=(c)=>!!(c.causa&&c.accion&&c.fechaObjetivo&&num(c.eurosObjetivo)>0);
+  // (oct 2026) Los euros a recuperar son opcionales: hay planes (una visita, un intento) sin cifra de negocio
+  RC.tienePlan=(c)=>!!(c.causa&&c.accion&&c.fechaObjetivo);
 
   // ── Detección ─────────────────────────────────────────────────────────
   // cli: documento de pbi_ventas_cliente · fila: [codigo, ene..dic] de este año
@@ -442,7 +443,7 @@
     const ahora=new Date(); const limite=new Date(ahora.getTime()+horas*3600000);
     const fl=limite.toLocaleDateString("es-ES",{weekday:"long",day:"numeric",month:"long"});
     const sem=RC.semanaISO(ahora);
-    const txt=`Diagnostica antes del ${fl}: por qué cae, qué vas a hacer, para cuándo y cuánto vas a recuperar.`;
+    const txt=`Diagnostica antes del ${fl}: por qué cae, qué vas a hacer y para cuándo.`;
     for(const c of casos){
       const hist=(c.historial||[]).concat([{sem,fecha:ahora.toISOString(),por:quien,sistema:"Pide diagnóstico en "+horas+" h"}]);
       const campos={historial:hist,instruccion:txt,instruccionPor:quien,instruccionEn:ahora.toISOString(),instruccionLeida:false,
@@ -459,7 +460,7 @@
           <div style="font-size:19px;font-weight:800;margin-top:2px">${casos.length} cliente${casos.length===1?"":"s"} · ${RC.eur(tot)} en juego</div></div>
         <div style="border:1px solid #DCE1E7;border-top:none;border-radius:0 0 12px 12px;padding:18px 20px">
           <div style="font-size:14px;margin-bottom:10px"><b>${esc(quien)}</b> pide a <b>${esc(d.nombreComercial)}</b> el diagnóstico de estos clientes
-            <b>antes del ${esc(fl)}</b>: por qué cae, qué vas a hacer, para cuándo y cuánto vas a recuperar.</div>
+            <b>antes del ${esc(fl)}</b>: por qué cae, qué vas a hacer y para cuándo.</div>
           ${casos.slice().sort((a,b)=>num(b.perdido)-num(a.perdido)).map(c=>`<div style="border:1px solid #EEF1F5;border-left:3px solid ${RC.NIVEL_COL[RC.nivelDe(c).nivel]};border-radius:6px;padding:8px 10px;margin:6px 0">
             <div style="display:flex;justify-content:space-between;gap:8px"><b style="font-size:13px">${esc(c.nombre)}</b>
               <span style="font-size:12.5px;font-weight:800;color:#C2263D;white-space:nowrap">−${RC.eur(c.perdido)}</span></div>
@@ -1406,9 +1407,11 @@
     const res=cf?`<div style="font-size:12.5px;font-weight:700;margin-top:4px;color:${cf.resultado==="pedido"?"#15803D":"#B91C1C"}">${cf.resultado==="pedido"?"✅ Ha entrado pedido":"❌ No ha salido"}${cf.subTipo?" · "+RC.esc((RC.MOTIVOS_KO.find(m=>m[0]===cf.subTipo)||[,cf.subTipo])[1]):""} · ${RC.esc(cf.fecha||"")}${cf.nota?" — “"+RC.esc(cf.nota)+"”":""}</div>`
       :ss&&ss.estado==="pendiente"&&e.estado==="aprobada"?`<div style="font-size:12.5px;font-weight:700;margin-top:4px;color:#B45309">⏳ Sin pedido todavía (semana ${RC.esc(ss.semana)})${ss.nota?" — “"+RC.esc(ss.nota)+"”":""}</div>`:"";
     const o=(e.ofertas||[])[0]||{};
+    const cli=e.clienteNombre||e.cliente||"";
     return `<div style="border:1px solid #E5E7EB;border-radius:12px;padding:10px 12px;margin:8px 0;background:#fff">
+      ${cli?`<div style="font-size:12.5px;font-weight:800;color:#0F172A;margin-bottom:2px">🏪 ${RC.esc(cli)}${e.clienteId?` <span style="font-weight:600;color:#94A3B8">· ${RC.esc(e.clienteId)}</span>`:""}${e.agenteNombre?` <span style="font-weight:600;color:#64748B">· ${RC.esc(e.agenteNombre)}</span>`:""}</div>`:""}
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
-        <b style="font-size:13.5px">💶 ${RC.esc(o.nombre||e.estrategia||"Estrategia")}${o.calibre?" · "+RC.esc(o.calibre):""}</b>
+        <b style="font-size:13.5px">💶 ${o.codigo?`<span style="color:#64748B;font-weight:700">[${RC.esc(o.codigo)}]</span> `:""}${RC.esc(o.nombre||e.estrategia||"Estrategia")}${o.calibre?" · "+RC.esc(o.calibre):""}${num(o.cantidad)?" · "+num(o.cantidad).toLocaleString("es-ES")+" "+RC.esc(o.unidad||"m"):""}</b>
         <span style="font-size:11.5px;font-weight:800;color:${c};background:${bg};border-radius:99px;padding:3px 9px">${t}${e.estado==="pendiente_aprobacion"?(()=>{ const q=RC.quienLaTiene(e); return " · "+RC.esc(q.nombre)+(q.antes?" (estaba con "+RC.esc(q.antes)+")":""); })():""}</span></div>
       <div style="font-size:13px;margin-top:4px">${o.precioActual?RC.esc(o.precioActual)+" € → ":o.precioBase?"catálogo "+RC.esc(o.precioBase)+" € → ":""}<b style="color:#6D28D9">${RC.esc(o.precioFinal||o.precioOferta||"")} €/${RC.esc(o.unidad||"m")}</b> · ${e._dtoEf!=null
         ?`<b>${e._dtoEf} % sobre su tarifa</b> <span style="color:#6B7280">(tarifa ${num(e._tarifaCli).toFixed(2)} € · ${e._dtoCli} % ${RC.esc(e._catCli||"")}${e._sinTarifa?" · sin tarifa en el CRM":""} · ${num(e.maxDescuento)} % sobre catálogo)</span>`
