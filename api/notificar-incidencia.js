@@ -605,6 +605,56 @@ function emailSemanal(todos, hoy, hist){
   };
 }
 
+// (oct 2026) Resumen semanal de incidencias atascadas, en formato visual
+function htmlResumenIncViejas(viejas,porTipo,op){
+  op=op||{};
+  const e=(t)=>String(t??"").replace(/[<>&"]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]));
+  const colDias=(d)=>d>60?["#B91C1C","#FEE2E2"]:d>30?["#B45309","#FEF3C7"]:["#475569","#F1F5F9"];
+  const n60=viejas.filter(x=>x.dias>60).length, n30=viejas.filter(x=>x.dias>30&&x.dias<=60).length, n7=viejas.length-n60-n30;
+  const cap=(t)=>{ t=String(t||"—"); return t.length<=3?t.toUpperCase():t.charAt(0).toUpperCase()+t.slice(1); };
+  const grupos=Object.entries(porTipo).sort((a,b)=>b[1].length-a[1].length).map(([t,l])=>[cap(t),l]);
+  const media=Math.round(viejas.reduce((t,x)=>t+x.dias,0)/viejas.length);
+  const tile=(v,t,c,bg)=>`<td style="padding:0 4px;width:25%;vertical-align:top"><div style="background:${bg};border-radius:10px;padding:10px 8px;text-align:center">
+      <div style="font-size:22px;font-weight:800;color:${c};line-height:1.1">${v}</div><div style="font-size:10.5px;color:#475569;margin-top:2px">${t}</div></div></td>`;
+  // Tabla y no flex: Gmail y Outlook no respetan flex
+  const tr=(n,c)=>n?`<td style="width:${(n/viejas.length*100).toFixed(1)}%;background:${c};height:10px;font-size:0;line-height:0">&nbsp;</td>`:"";
+  const barra=`<table style="width:100%;border-collapse:collapse;margin:12px 0 4px;border-radius:99px;overflow:hidden"><tr>${tr(n60,"#DC2626")}${tr(n30,"#F59E0B")}${tr(n7,"#94A3B8")}</tr></table>
+    <div style="font-size:11px;color:#64748B">🔴 más de 60 días · 🟠 31–60 días · ⚪ 8–30 días</div>`;
+  const reparto=grupos.map(([t,l])=>`<tr><td style="padding:3px 0;font-size:12.5px;width:38%">${e(t)}</td>
+      <td style="padding:3px 6px"><div style="background:#F1F5F9;border-radius:99px;height:8px;overflow:hidden"><div style="width:${Math.round(l.length/grupos[0][1].length*100)}%;height:8px;background:#0F172A;border-radius:99px"></div></div></td>
+      <td style="padding:3px 0;font-size:12.5px;font-weight:800;text-align:right;width:30px">${l.length}</td></tr>`).join("");
+  const fila=({inc,dias})=>{ const [c,bg]=colDias(dias), cli=inc.cliente||inc.clienteNombre||"";
+    const prio=String(inc.prioridad||"media").toLowerCase(), pc=prio==="alta"||prio==="urgente"?"#DC2626":prio==="baja"?"#CBD5E1":"#F59E0B";
+    return `<tr><td style="padding:8px 0;border-top:1px solid #EEF1F5;vertical-align:top">
+        <table style="width:100%;border-collapse:collapse"><tr>
+          <td style="vertical-align:top"><span style="display:inline-block;width:8px;height:8px;border-radius:99px;background:${pc};margin-right:5px" title="Prioridad ${e(prio)}"></span><b style="font-size:13.5px">${cli?e(cli):"<span style=\"color:#64748B\">Interna (sin cliente)</span>"}</b>
+            ${inc.agente||inc.autorNombre?`<span style="font-size:11.5px;color:#94A3B8"> · ${e(inc.autorNombre||inc.agente)}</span>`:""}
+            <div style="font-size:12.5px;color:#475569;margin-top:2px;line-height:1.4">${e(String(inc.descripcion||inc.titulo||"").replace(/\s+/g," ").slice(0,150))}${String(inc.descripcion||"").length>150?"…":""}</div></td>
+          <td style="vertical-align:top;text-align:right;white-space:nowrap;padding-left:8px"><span style="display:inline-block;background:${bg};color:${c};border-radius:99px;padding:3px 9px;font-size:12px;font-weight:800">${dias} días</span></td>
+        </tr></table></td></tr>`; };
+  const secciones=grupos.map(([t,l])=>{ const peor=l[0].dias, [c]=colDias(peor);
+    return `<div style="margin-top:18px;border:1px solid #E2E8F0;border-radius:12px;overflow:hidden">
+      <div style="background:#F8FAFC;padding:10px 14px;border-bottom:1px solid #E2E8F0">
+        <table style="width:100%;border-collapse:collapse"><tr><td><b style="font-size:15px">${e(t)}</b> <span style="font-size:12px;color:#64748B">· ${l.length} incidencia${l.length===1?"":"s"}</span></td>
+        <td style="text-align:right;font-size:11.5px;color:${c};font-weight:800">la más antigua: ${peor} días</td></tr></table></div>
+      <div style="padding:2px 14px 6px"><table style="width:100%;border-collapse:collapse">${l.map(fila).join("")}</table></div></div>`; }).join("");
+  return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:640px;margin:0 auto;color:#0F172A;background:#fff">
+    <div style="background:#0F172A;color:#fff;padding:18px 20px;border-radius:12px 12px 0 0">
+      <div style="font-size:11px;letter-spacing:.08em;opacity:.7;text-transform:uppercase">${e(op.antetitulo||"Resumen semanal · incidencias fuera de protocolo")}</div>
+      <div style="font-size:21px;font-weight:800;margin-top:2px">📋 ${e(op.titulo||viejas.length+" incidencias con más de 7 días abiertas")}</div></div>
+    <div style="border:1px solid #DCE1E7;border-top:none;border-radius:0 0 12px 12px;padding:18px 20px">
+      <table style="width:100%;border-collapse:separate;border-spacing:0;margin:0 -4px"><tr>
+        ${tile(viejas.length,"abiertas +7 días","#0F172A","#F1F5F9")}${tile(n60,"más de 60 días","#B91C1C","#FEE2E2")}${tile(n30,"de 31 a 60 días","#B45309","#FEF3C7")}${tile(media,"días de media","#334155","#F1F5F9")}
+      </tr></table>
+      ${barra}
+      ${grupos.length>1?`<div style="font-size:12px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.04em;margin:18px 0 6px">Por departamento</div>
+      <table style="width:100%;border-collapse:collapse">${reparto}</table>`:""}
+      ${secciones}
+      <p style="font-size:12.5px;color:#64748B;margin:18px 0 0">${e(op.pie||"Cada departamento recibe también su propio resumen. Esto es para que sepas qué se está atascando.")}</p>
+      <div style="text-align:center;margin-top:14px"><a href="https://crmwikuk.vercel.app/" style="display:inline-block;background:#0F172A;color:#fff;text-decoration:none;padding:11px 26px;border-radius:10px;font-size:13.5px;font-weight:700">Abrir las incidencias en el CRM</a></div>
+      <p style="font-size:11px;color:#94A3B8;margin:14px 0 0;text-align:center">CRM Grupo Consolidado · resumen de los lunes</p>
+    </div></div>`;
+}
 async function enviarRetrasos(to,subject,html){
   const base=process.env.VERCEL_PROJECT_PRODUCTION_URL
     ? "https://"+process.env.VERCEL_PROJECT_PRODUCTION_URL : CRM;
@@ -1367,6 +1417,30 @@ async function avisarHilo(inc, id){
   return {ok:r.ok,nuevas:nuevas.length,to:r.destinatarios||[]};
 }
 
+// (oct 2026) Resumen de incidencias fuera de protocolo: a Dirección (todas) y a cada departamento (las suyas)
+async function enviarResumenInc(viejas,datos,etiqTipo,op){
+  op=op||{};
+          const porTipo={};
+          viejas.forEach(x=>{ const t=etiqTipo(x.inc); (porTipo[t]=porTipo[t]||[]).push(x); });
+          // (oct 2026) Cada departamento recibe su propia franja fuera de protocolo (más de 7 días abiertas)
+          const porDep={}, depsEnv=[];
+          viejas.forEach(x=>{ const tl=String(x.inc.tipo||"").toLowerCase(), tg=TIPO_A_TIPOLOGIA[tl]||tl; if(tg) (porDep[tg]=porDep[tg]||[]).push(x); });
+          for(const [tg,l] of Object.entries(porDep)){
+            try{
+              const dest=destinatariosDe(datos,tg); if(!dest.directos.length) { depsEnv.push({dep:tg,n:l.length,sinEmail:true}); continue; }
+              const nom=etiqTipo(l[0].inc), pt={}; pt[nom]=l;
+              if(op.soloCeo) continue;
+              const ok=await enviarRetrasos(op.to?[op.to]:[...new Set([...dest.directos,...dest.escalado])],
+                "⏰ "+nom+": "+l.length+" incidencia"+(l.length===1?"":"s")+" fuera de protocolo (más de 7 días)",
+                htmlResumenIncViejas(l,pt,{antetitulo:"Tu departamento · incidencias fuera de protocolo",
+                  titulo:nom+" · "+l.length+" abierta"+(l.length===1?"":"s")+" hace más de 7 días",
+                  pie:"El protocolo es responder en menos de 7 días. Este resumen llega cada lunes mientras sigan abiertas; Dirección recibe el de todos los departamentos."}));
+              depsEnv.push({dep:tg,n:l.length,ok});
+            }catch(e){ depsEnv.push({dep:tg,error:String(e&&e.message||e)}); }
+          }
+          const s=op.soloDeps?true:await enviarRetrasos([op.to||CC_SIEMPRE],"📋 "+viejas.length+" incidencias fuera de protocolo (más de 7 días)",htmlResumenIncViejas(viejas,porTipo));
+          return {ok:!!s,incidencias:viejas.length,departamentos:depsEnv};
+}
 module.exports = async function handler(req, res){
   try{
     // ─────── Informe semanal de dirección, por URL ───────
@@ -1393,6 +1467,23 @@ module.exports = async function handler(req, res){
         equipos:D.equipos.map(E=>({eq:E.eq,jefe:E.jefe,obj:E.obj,cerr:E.cerr,aus:E.aus,sinCerrar:E.sinCerrar,
           gente:E.gente.map(p=>{ const o={}; campos.forEach(k=>{ if(p[k]!==undefined) o[k]=p[k]; }); return o; })}))});
       return;
+    }
+
+    // ─────── (oct 2026) Resumen de incidencias fuera de protocolo, por URL ───────
+    // ?resumenInc=1&secret=…  → lo envía ya (Dirección + cada departamento), aunque ya se enviara hoy
+    //   &ver=1 (sin enviar, enseña el correo de Dirección) · &solo=ceo | &solo=deps · &to=correo (prueba: todo a ese correo)
+    if(req.method==="GET" && req.query && req.query.resumenInc){
+      const sec=process.env.CRON_SECRET;
+      if(sec && req.query.secret!==sec){ res.status(401).json({error:"falta el secreto"}); return; }
+      const [incidencias,datos]=await Promise.all([listColeccion("incidencias"),cargarDatos()]);
+      const etiqTipo=(inc)=>LABEL_TIPO[TIPO_A_TIPOLOGIA[String(inc.tipo||"").toLowerCase()]]||inc.tipo||"—";
+      const viejas=incidencias.filter(i=>!i.eliminada&&(i.estado||"abierta")==="abierta")
+        .map(inc=>({inc,dias:diasDesde(inc.fecha)})).filter(x=>x.dias>7).sort((a,b)=>b.dias-a.dias);
+      if(req.query.ver==="1"){ const pt={}; viejas.forEach(x=>{ const t=etiqTipo(x.inc); (pt[t]=pt[t]||[]).push(x); });
+        res.setHeader("Content-Type","text/html; charset=utf-8"); res.status(200).send(viejas.length?htmlResumenIncViejas(viejas,pt):"<p>No hay incidencias de más de 7 días.</p>"); return; }
+      if(!viejas.length){ res.status(200).json({ok:true,omitido:"ninguna de más de 7 días"}); return; }
+      const r=await enviarResumenInc(viejas,datos,etiqTipo,{to:req.query.to,soloCeo:req.query.solo==="ceo",soloDeps:req.query.solo==="deps"});
+      res.status(200).json(r); return;
     }
 
     // ─────── Avisos de retrasos de pedido, por URL ───────
@@ -1565,17 +1656,10 @@ module.exports = async function handler(req, res){
         const viejas=abiertas.map(inc=>({inc,dias:diasDesde(inc.fecha)})).filter(x=>x.dias>7)
           .sort((a,b)=>b.dias-a.dias);
         if(!(ya&&ya.enviado)&&viejas.length){
-          const porTipo={};
-          viejas.forEach(x=>{ const t=etiqTipo(x.inc); (porTipo[t]=porTipo[t]||[]).push(x); });
-          const body="Incidencias abiertas hace más de 7 días: "+viejas.length+"\n\n"
-            +Object.entries(porTipo).sort((a,b)=>b[1].length-a[1].length).map(([t,l])=>
-              "■ "+t+" ("+l.length+")\n"+l.map(({inc,dias})=>"   · "+(inc.cliente||inc.clienteNombre||"—")+" — "+dias+" días · "
-                +String(inc.descripcion||"").replace(/\s+/g," ").slice(0,90)).join("\n")).join("\n\n")
-            +"\n\nSus responsables reciben el recordatorio. Esto es solo para que sepas qué se está atascando.\n"
-            +"https://crmwikuk.vercel.app/\n—\nCRM Grupo Consolidado · Resumen semanal";
-          const s=await enviarEmail([CC_SIEMPRE],"📋 "+viejas.length+" incidencias con más de 7 días abiertas",body,{sinCopia:true});
-          if(s.ok) await guardarDocR(marca,{enviado:"si",n:viejas.length,fecha:new Date().toISOString()});
-          resumenCeo={ok:s.ok,incidencias:viejas.length};
+          const rr=await enviarResumenInc(viejas,datos,etiqTipo,{});
+          if(rr.ok) await guardarDocR(marca,{enviado:"si",n:viejas.length,fecha:new Date().toISOString()});
+          resumenCeo=rr;
+
         } else resumenCeo={omitido:ya&&ya.enviado?"ya enviado":"ninguna de más de 7 días"};
       }catch(e){ resumenCeo={error:String(e&&e.message||e)}; }
     }
