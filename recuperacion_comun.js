@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20261005f";
+  RC.VERSION="20261005g";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -745,6 +745,11 @@
     return true;
   };
   // Resolver: accion "aprobar" | "rechazar" | "elevar"
+  // Texto para avisar al que decide de a quién le ha llegado el correo
+  RC.txtAvisosEst=(e)=>{ const l=e&&e._avisos||[]; if(!l.length) return "";
+    const ok=l.filter(x=>x.ok).map(x=>x.quien), ko=l.filter(x=>!x.ok).map(x=>x.quien);
+    return (ok.length?"📧 Aviso enviado a: "+ok.join(", "):"⚠️ No se ha enviado ningún correo")+(ko.length?"\n⚠️ Sin email en su ficha: "+ko.join(", "):"")
+      +(e._errorOferta?"\n(La oferta automática no se ha podido crear: "+e._errorOferta+")":""); };
   RC.resolverEstrategia=async(e,accion,por,nota)=>{
     const hoyS=new Date().toLocaleDateString("es-ES");
     const cad=await RC.cadenaDe(e.agente);
@@ -773,19 +778,29 @@
       await RC.guardar(e.casoId,{historial:(c.historial||[]).concat([{sem:RC.semanaISO(hoy),fecha:hoy.toISOString(),por:por.nombre,
         sistema:"Resultado estrategia: "+(o.nombre?RC.txtLineaEst(o):e.estrategia||"")+" · "+t+(nota?" — "+nota:"")}])}); } }catch(x){} }
     // Oferta automática al aprobar, como hace el CRM
-    if(accion==="aprobar") await RC.ofertaDeEstrategia(e,por,nota);
+    // (oct 2026) La oferta automática no puede tapar el aviso: si falla, el correo sale igual
+    if(accion==="aprobar"){ try{ await RC.ofertaDeEstrategia(e,por,nota); }catch(x){ e._errorOferta=x.message; } }
+    const avisos=[];
     try{
       const txt=accion==="aprobar"?"✅ Aprobada":accion==="rechazar"?"❌ Rechazada":"↑ Elevada";
-      if(accion==="elevar"&&campos.pendienteDe) await RC.avisarA(campos.pendienteDe,`↑ ${por.nombre} te eleva una estrategia: ${e.cliente}`,
-        `${RC.esc(e.estrategia||e.texto||"")}. Descuento ${num(e.maxDescuento)} %.${nota?"<br><i>“"+RC.esc(nota)+"”</i>":""}`);
-      else {
-        const cuerpo=`${RC.esc(e.estrategia||"")} · descuento ${num(e.maxDescuento)} %. Lo ha decidido <b>${RC.esc(por.nombre)}</b>.${nota?"<br><i>“"+RC.esc(nota)+"”</i>":""}`
+      const o=(e.ofertas||[])[0]||{};
+      const art=RC.txtLineaEst?RC.txtLineaEst(o):(o.nombre||"");
+      if(accion==="elevar"&&campos.pendienteDe){
+        const ok=await RC.avisarA(campos.pendienteDe,`↑ ${por.nombre} te eleva una estrategia: ${e.cliente}`,
+          `${RC.esc(e.estrategia||e.texto||"")}. Descuento ${num(e.maxDescuento)} %.${nota?"<br><i>“"+RC.esc(nota)+"”</i>":""}`);
+        avisos.push({quien:campos.pendienteDeNombre||campos.pendienteDe,ok});
+      } else {
+        const cuerpo=`<b>${RC.esc(e.cliente||"")}</b><br>${RC.esc(art)}<br>Lo ha decidido <b>${RC.esc(por.nombre)}</b>.${nota?"<br><i>“"+RC.esc(nota)+"”</i>":""}`
           +(accion==="aprobar"?"<br>Tiene la oferta creada en el CRM. <b>La semana que viene, en el parte, dirá si ha entrado pedido.</b>":"");
-        await RC.avisarA(e.agente,`${txt}: tu estrategia para ${e.cliente}`,cuerpo);
-        // Copia al jefe de equipo si no ha sido él quien la ha decidido
-        if(cad.resp&&ARR(cad.resp.id)!==ARR(por.id)) await RC.avisarA(cad.resp.id,`${txt}: estrategia de ${cad.ag.nombre} para ${e.cliente}`,cuerpo);
+        // A quién: el comercial (por su ficha y por el código que trae la estrategia), quien la pidió y su jefe de equipo
+        const dest=[[cad.ag&&cad.ag.id,cad.ag&&cad.ag.nombre],[e.agente,e.agenteNombre],[e.creadoPor,e.creadoPorNombre],[cad.resp&&cad.resp.id,cad.resp&&cad.resp.nombre]]
+          .filter(x=>x[0]&&ARR(x[0])!==ARR(por.id));
+        const vistos=new Set();
+        for(const [id,nom] of dest){ if(vistos.has(ARR(id))) continue; vistos.add(ARR(id));
+          const ok=await RC.avisarA(id,`${txt}: estrategia para ${e.cliente}`,cuerpo); avisos.push({quien:nom||id,ok}); }
       }
-    }catch(x){}
+    }catch(x){ avisos.push({quien:"(error)",ok:false,error:x.message}); }
+    e._avisos=avisos;
     return e;
   };
   RC.estrategiasDeCaso=(ests,c)=>ests.filter(e=>!e.eliminada&&(e.casoId===c._id||ARR(e.clienteId)===ARR(c.cliente)));
