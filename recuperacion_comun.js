@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20261005e";
+  RC.VERSION="20261005f";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -63,7 +63,8 @@
     if(neto!=null&&g+f>neto&&e<=0.5){ const k=(g+f)?neto/(g+f):0; g=Math.round(g*k); f=Math.round(f*k); e=0; }
     return {tot:e+g+f,e,g,f,brutoG:g0,brutoF:f0,neto,ajustado:g!==g0||f!==f0};
   };
-  RC.spotEur=(c,tipo)=>RC.spotDe(c).filter(x=>!tipo||RC.tipoClasif(x)===tipo).reduce((t,x)=>t+Math.abs(Number(x.dif)||0),0);
+  // Solo cuenta lo que se pierde: un artículo que crece puede estar marcado (gancho…) sin sumar pérdida
+  RC.spotEur=(c,tipo)=>RC.spotDe(c).filter(x=>!tipo||RC.tipoClasif(x)===tipo).reduce((t,x)=>t+Math.max(0,-(Number(x.dif)||0)),0);
   RC.esPausa=(m)=>m===RC.MOT_PAUSA||RC._PAUSA_ANT.includes(m);
   RC.esBloqueo=(m)=>[RC.MOT_BLOQ_IMPAGO,RC.MOT_BLOQ_CIERRE,"Impago","Cierre del negocio"].includes(m);
   // Qué estado queda al aprobar la propuesta, según el motivo
