@@ -86,7 +86,7 @@ let SELC=new Set(), SELA=new Set(), FORM_NO=false, APLICAR=null;
 
 function volver(){ if(history.length>1) history.back(); else location.href="/recuperacion.html"+location.search; }
 function enAmbito(c){
-  if(RC.esFrancia(c.eq)) return false;
+  // El mapa de negocio incluye Francia (recuperación no)
   if(ES_DIR) return true;
   if(ES_JEFE) return !EQUIPO||ARR(c.eq)===EQUIPO||ARR(c.eq).includes(EQUIPO)||(c.eq&&EQUIPO.includes(ARR(c.eq)));
   return c.ag===AGENTE;
@@ -110,12 +110,15 @@ async function cargar(){
 async function cargarArts(forzar){
   ARTS=null; ARTS_ERR=""; pintar();
   try{
-    const r=await fetch("/api/pbi-sync?mapaNegocio=1"+(forzar?"&recargar=1":""));
+    // Mismo ámbito que la parte de clientes, para que las dos sumas cuadren
+    const amb=GF.ag?"&agente="+encodeURIComponent(GF.ag):GF.eq?"&equipo="+encodeURIComponent(GF.eq)
+      :!ES_JEFE?"&agente="+encodeURIComponent(AGENTE):(!ES_DIR&&EQUIPO)?"&equipo="+encodeURIComponent(EQUIPO):"";
+    const r=await fetch("/api/pbi-sync?mapaNegocio=1"+amb+(forzar?"&recargar=1":""));
     const txt=await r.text(); let j=null; try{ j=JSON.parse(txt); }catch(e){ throw new Error("el servidor no ha respondido a tiempo ("+r.status+"). Pulsa 🔄 en un minuto"); }
     if(j.ok===false) throw new Error(j.error||"sin respuesta");
     if(!Array.isArray(j.filas)) throw new Error("en el servidor no está la versión nueva de api/pbi-sync.js"+(j.error?" (responde «"+j.error+"»)":"")+". Súbela a la carpeta api/ y espera a que Vercel termine");
     ARTS=(j.filas||[]).map(f=>({cod:ARR(f[0]),desc:f[1]||f[0],cal:f[2]||"",met:f[3]||"",calidad:f[4]||"",act:num(f[5]),ant:num(f[6]),cli:num(f[7]),ne:num(f[8])}));
-    ARTS_INFO={periodo:j.periodo,basadoEn:j.basadoEn,noEst:j.noEstrategicos,deCache:j.deCache};
+    ARTS_INFO={periodo:j.periodo,basadoEn:j.basadoEn,noEst:j.noEstrategicos,deCache:j.deCache,ambito:j.ambito||"",clientes:j.clientesEnAmbito};
   }catch(e){ ARTS_ERR=e.message||String(e); }
   pintar();
 }
@@ -156,7 +159,7 @@ function filtroArbol(){
     ${opt("",eqs.length>1?"Todos los equipos":"Todo el equipo")}
     ${eqs.map(e=>(eqs.length>1?opt("eq:"+e,"▾ "+e):"")+Object.keys(g[e]).sort((a,b)=>nomAg(a).localeCompare(nomAg(b))).map(a=>opt("ag:"+a,(eqs.length>1?sp:"")+"└ "+nomAg(a)+" · "+g[e][a])).join("")).join("")}</select>`;
 }
-window.setGF=(v)=>{ GF={eq:v.startsWith("eq:")?v.slice(3):"",ag:v.startsWith("ag:")?v.slice(3):""}; SELC=new Set(); pintar(); };
+window.setGF=(v)=>{ GF={eq:v.startsWith("eq:")?v.slice(3):"",ag:v.startsWith("ag:")?v.slice(3):""}; SELC=new Set(); SELA=new Set(); cargarArts(false); };
 
 function caja(col,ic,tx,v,sub,onc){ return `<div class="caja" style="--c:${col}" onclick="${onc}"><div class="t">${ic} ${tx}</div><div class="v">${eur(v)}</div><div class="s">${sub}</div></div>`; }
 function vistaResumen(L,tot,totAnt){
@@ -181,9 +184,9 @@ function vistaResumen(L,tot,totAnt){
   ARTS.forEach(r=>{ const x=a[claseArt(r.cod)]; x.v+=r.act; x.a+=r.ant; x.ne+=r.ne; if(r.act>0) x.n++; });
   const totA=Object.values(a).reduce((t,x)=>t+x.v,0);
   const barA=["estrategica","gancho","fuera","sin"].map(k=>`<i style="width:${pct(Math.max(0,a[k].v),Math.max(1,totA))}%;background:${CA[k][2]}"></i>`).join("");
-  h+=`<div class="card"><h2>📦 Por tipo de artículo <span class="muted" style="font-weight:600">· toda la empresa</span></h2>
+  h+=`<div class="card"><h2>📦 Por tipo de artículo</h2>
     <div class="muted">Un artículo gancho o fuera de estrategia lo es para todos los clientes (salvo excepción en la ficha del cliente).</div>
-    <div class="bar">${barA}</div>
+    <div class="bar">${barA}</div>${Math.abs(totA-tot)>Math.max(1000,Math.abs(tot)*0.01)?`<div class="muted" style="color:#B45309">Por artículo suma ${eur(totA)} y por cliente ${eur(tot)}: la diferencia son ventas de clientes que no están en la cartera del CRM.</div>`:""}
     <div class="cajas">${["estrategica","gancho","fuera","sin"].map(k=>caja(CA[k][2],CA[k][0],CA[k][1],a[k].v,a[k].n?`${pct(a[k].v,totA)} % · ${a[k].n} artículo${a[k].n===1?"":"s"} · ${varTxt(a[k].v,a[k].a)}`:"ninguno todavía",`irTab('articulos','${k}')`)).join("")}</div></div>`;
   // Los artículos gancho, con lo que venden a todos los clientes
   const G=ARTS.filter(r=>claseArt(r.cod)==="gancho").sort((x,y)=>y.act-x.act);
@@ -197,7 +200,7 @@ function vistaResumen(L,tot,totAnt){
     return `<tr><td>${txt}</td><td${k==="estrategica"?' style="background:#FEF2F2;font-weight:800;color:var(--est)"':""}>${eur(x.v-x.ne)}</td><td>${eur(x.ne)}</td><td><b>${eur(x.v)}</b></td></tr>`; };
   const nucleo=(a.estrategica.v+a.sin.v)-(a.estrategica.ne+a.sin.ne), resto=totA-nucleo;
   h+=`<div class="card"><h2>🧭 ¿Cuál es mi negocio estratégico?</h2>
-    <div class="muted">Toda la empresa, sin intercompañía. Clientes no estratégicos: ${num(ARTS_INFO.noEst)} (los marcados aquí y los que recuperación ha dejado fuera de estrategia).</div>
+    <div class="muted">Mismos clientes que arriba. Clientes no estratégicos: ${num(ARTS_INFO.noEst)} (los marcados aquí y los que recuperación ha dejado fuera de estrategia).</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
       <div style="flex:1;min-width:180px;background:#FEF2F2;border-radius:12px;padding:10px 12px"><div class="muted" style="font-weight:800;color:var(--est)">🎯 NEGOCIO ESTRATÉGICO</div>
         <div style="font-size:22px;font-weight:800;color:var(--est)">${eur(nucleo)}</div><div class="muted">${pct(nucleo,totA)} % · artículos estratégicos a clientes estratégicos${a.sin.v?` <br>(incluye ${eur(a.sin.v-a.sin.ne)} de artículos aún sin clasificar)`:""}</div></div>
@@ -283,7 +286,7 @@ function vistaArticulos(){
       <select onchange="FA.orden=this.value;pintarLista()"><option value="act"${FA.orden==="act"?" selected":""}>Más venta</option><option value="ne"${FA.orden==="ne"?" selected":""}>Más venta a no estratégicos</option><option value="caida"${FA.orden==="caida"?" selected":""}>Más caída</option></select>
       <button class="btn gris" onclick="csvArts()">⬇️ Listado</button></div>
     <div class="muted" style="margin-bottom:4px">${PUEDE_ART?"Lo que marques vale para todos los clientes. En la ficha de recuperación se puede hacer una excepción para un cliente concreto."
-      :"Los artículos los clasifica el jefe comercial o el CEO (valen para toda la empresa)."} Toda la empresa, sin intercompañía.</div>
+      :"Los artículos los clasifica el jefe comercial o el CEO (valen para toda la empresa)."} Ventas de los mismos clientes que el resumen (con Francia, sin intercompañía).</div>
     ${PUEDE_ART||ES_JEFE?`<div style="margin:6px 0 8px"><button class="btn gris" onclick="aplicarRecuperacion(this)">🚨 Aplicar a los clientes en recuperación</button>
       <span class="muted"> Pasa los artículos gancho / fuera a sus casos abiertos${ES_DIR?"":" de tu equipo"}.</span>${APLICAR?`<div class="muted" style="margin-top:4px">${esc(APLICAR)}</div>`:""}</div>`:""}
     <div id="lista">${htmlListaA()}</div></div>`;
@@ -376,7 +379,7 @@ window.clasificarArts=async(tipo)=>{
   if(err.length) alert(`No se han podido guardar ${err.length}: ${err[0]}. Vuelve a intentarlo.`);
 };
 window.aplicarRecuperacion=async(btn)=>{
-  const L=CASOS.filter(c=>RC.abierto(c)&&enAmbito({eq:c.equipo||(AG[ARR(c.agente)]||{}).equipo||"",ag:ARR(c.agente)}));
+  const L=CASOS.filter(c=>RC.abierto(c)&&!RC.esFrancia(c.equipo)&&enAmbito({eq:c.equipo||(AG[ARR(c.agente)]||{}).equipo||"",ag:ARR(c.agente)}));
   if(!L.length){ alert("No hay clientes abiertos en recuperación."); return; }
   if(!confirm(`Se revisan los artículos de ${L.length} clientes abiertos en recuperación y se les aplica la clasificación (gancho / fuera de estrategia). Puede tardar unos minutos: no cierres la pantalla.`)) return;
   btn.disabled=true; await MAPA.arts(true); let cambiados=0;
