@@ -57,7 +57,7 @@
 </header>
 <main id="app"><p class="estado">Leyendo casos…</p></main>
 
-<script src="/recuperacion_comun.js?v=20261005d"></script>
+<script src="/recuperacion_comun.js?v=20261005e"></script>
 <script>
 const P=new URLSearchParams(location.search);
 const EMBED=P.get("embed")==="1", FICHA_URL=P.get("ficha")||"", ART_URL=P.get("art")||"";
@@ -102,10 +102,10 @@ const estDeOtros=()=>ESTS.filter(e=>e.estado==="pendiente_aprobacion"&&estEnAmbi
 async function cargar(){
   const [casos,res,ests,us]=await Promise.all([RC.leerCasos(), RC.leer("pbi_resumen_agente"), RC.leerProfundo("estrategias").catch(()=>[]), RC.leer("usuarios",10).catch(()=>[])]);
   RC._us=us;
-  if(RC.VERSION!=="20261005d"){
+  if(RC.VERSION!=="20261005e"){
     // Se vuelve a pedir sin caché antes de rendirse
     await new Promise(ok=>{ const sc=document.createElement("script"); sc.src="/recuperacion_comun.js?t="+Date.now(); sc.onload=sc.onerror=ok; document.head.appendChild(sc); });
-    if(RC.VERSION!=="20261005d") throw new Error("en el servidor está la versión «"+(RC.VERSION||"antigua, sin número")+"» de recuperacion_comun.js y hace falta la 20261005d. "
+    if(RC.VERSION!=="20261005e") throw new Error("en el servidor está la versión «"+(RC.VERSION||"antigua, sin número")+"» de recuperacion_comun.js y hace falta la 20261005e. "
       +"Sube recuperacion_comun.js a la MISMA carpeta que recuperacion.html (la raíz, no api/), espera a que Vercel termine y recarga.");
   }
   await RC.prepararEsts(ests.filter(e=>!e.eliminada&&!RC.esFrancia(e.equipo)));
@@ -226,8 +226,8 @@ function tiles(l,lt){
   const r=RC.resumen(l), rt=RC.resumen(lt||l), ab=l.filter(RC.abierto);
   // 1 · Total de pérdidas · 2 · desglose por tipo de venta · 3 · el resto
   const T={estrategica:{e:r.enRiesgo,n:ab.filter(c=>num(c.perdido)>0).length,a:null},
-    gancho:{e:ab.reduce((t,c)=>t+RC.spotEur(c,"gancho"),0),n:ab.filter(c=>RC.spotEur(c,"gancho")>0).length,a:ab.reduce((t,c)=>t+RC.spotDe(c).filter(x=>RC.tipoClasif(x)==="gancho").length,0)},
-    fuera:{e:ab.reduce((t,c)=>t+RC.spotEur(c,"fuera"),0)+l.filter(RC.esFueraCli).reduce((t,c)=>t+num(c.perdido)+RC.spotEur(c),0),
+    gancho:{e:ab.reduce((t,c)=>t+RC.perdidas(c).g,0),n:ab.filter(c=>RC.spotEur(c,"gancho")>0).length,a:ab.reduce((t,c)=>t+RC.spotDe(c).filter(x=>RC.tipoClasif(x)==="gancho").length,0)},
+    fuera:{e:ab.reduce((t,c)=>t+RC.perdidas(c).f,0)+l.filter(RC.esFueraCli).reduce((t,c)=>t+RC.perdidas(c).tot,0),
       n:new Set([...ab.filter(c=>RC.spotEur(c,"fuera")>0),...l.filter(RC.esFueraCli)].map(c=>c._id)).size,
       a:ab.reduce((t,c)=>t+RC.spotDe(c).filter(x=>RC.tipoClasif(x)==="fuera").length,0),cli:l.filter(RC.esFueraCli).length}};
   const tot=T.estrategica.e+T.gancho.e+T.fuera.e;
@@ -344,9 +344,9 @@ async function cargarProg(c){
   if(FICHA===c._id) pintar();
 }
 // (oct 2026) Pérdida del cliente: total y desglose por tipo de venta
-const perdTot=(c)=>num(c.perdido)+RC.spotEur(c);
+const perdTot=(c)=>RC.perdidas(c).tot;
 function desglosePerdida(c){
-  const fc=RC.esFueraCli(c), e=fc?0:num(c.perdido), g=RC.spotEur(c,"gancho"), f=RC.spotEur(c,"fuera")+(fc?num(c.perdido):0), t=e+g+f;
+  const P=RC.perdidas(c), fc=!!P.cliFuera, e=P.e, g=P.g, f=P.f, t=P.tot;
   if(!t) return "";
   const pc=(v)=>t?Math.round(v/t*100):0;
   const caja=(k,v)=>{ const [ic,tx,col]=RC.CLASIF[k];
@@ -359,8 +359,18 @@ function desglosePerdida(c){
       ${["estrategica","gancho","fuera"].map((k,i)=>`<i style="width:${pc([e,g,f][i])}%;background:${RC.CLASIF[k][2]}"></i>`).join("")}</div>
     <div style="display:flex;gap:6px;flex-wrap:wrap">${caja("estrategica",e)}${caja("gancho",g)}${caja("fuera",f)}</div>
     ${fc?`<div class="muted" style="font-size:12px;margin-top:6px">🚫 Cliente entero fuera de estrategia: toda su pérdida cuenta como fuera de estrategia.</div>`
+      :P.ajustado?`<div style="font-size:12px;margin-top:6px;background:#FFFBEB;border-radius:8px;padding:6px 9px;color:#92400E">Por artículos pierde ${P.brutoG?"<b>"+eur(P.brutoG)+"</b> en 🪝 gancho":""}${P.brutoG&&P.brutoF?" y ":""}${P.brutoF?"<b>"+eur(P.brutoF)+"</b> en 🚫 fuera de estrategia":""}, pero otros artículos crecen: la caída real del cliente es <b>${eur(t)}</b> (año pasado − este año) y se reparte en proporción.</div>`
       :!e?`<div class="muted" style="font-size:12px;margin-top:6px">No le queda pérdida en venta estratégica: todo lo que cae está marcado como gancho o fuera de estrategia.</div>`:""}</div>`;
 }
+// (oct 2026) Lista de artículos de la pestaña elegida: estratégica (caen), gancho, fuera o crecen
+const esCaeTab=()=>["caen","gancho","fuera"].includes(FICHA_ART.tab);
+function listaTab(c){ const A=c&&c._arts; if(!A||typeof A!=="object") return [];
+  if(FICHA_ART.tab==="suben") return A.suben||[];
+  if(FICHA_ART.tab==="gancho"||FICHA_ART.tab==="fuera"){ A._por=A._por||{}; const k=FICHA_ART.tab;
+    const l=(A.spot||[]).filter(a=>(a._tipo||"fuera")===k);
+    // misma lista mientras no cambie: los índices de la selección apuntan a ella
+    if(!A._por[k]||A._por[k].length!==l.length||A._por[k].some((x,i)=>x!==l[i])) A._por[k]=l; return A._por[k]; }
+  return A.caen||[]; }
 function vistaFicha(c){
   const nv=RC.nivelDe(c); const [et,ec]=estadoCorto(c);
   const ant=num(c.ventasAnt), act=num(c.ventasAct);
@@ -393,7 +403,7 @@ function vistaFicha(c){
   if(A==="cargando"||!A) arts=`<p class="muted">Buscando todos los artículos… (la primera vez tarda unos segundos)</p>`;
   else if(A.error) arts=`<p class="muted">No se han podido consultar (${esc(A.error)}). <a href="#" onclick="cargarTodosArt(CASOS.find(x=>x._id==='${c._id}'),true);return false">Reintentar</a></p>`;
   else{
-    const l=FICHA_ART.tab==="caen"?A.caen:A.suben;
+    const l=listaTab(c);
     const sumC=A.caen.reduce((t,a)=>t-a.dif,0), sumS=A.suben.reduce((t,a)=>t+a.dif,0);
     // Familias: lo que va antes del primer espacio (MAD.CERDO, MAD.BUEY…)
     const fam=(a)=>String(a.desc||a.art||"").trim().split(/\s+/)[0]||"Otros";
@@ -420,7 +430,7 @@ function vistaFicha(c){
       const i=a._i, w=a.ant?Math.max(0,Math.min(100,Math.round(a.act/a.ant*100))):100;
       const acc=FICHA_ART.acc&&FICHA_ART.acc.i===i?FICHA_ART.acc.tipo:null;
       const m=marcas(a);
-      const conSel=RC.abierto(c)&&FICHA_ART.tab==="caen", marc=FICHA_ART.sel&&FICHA_ART.sel.has(i);
+      const conSel=RC.abierto(c)&&esCaeTab(), marc=FICHA_ART.sel&&FICHA_ART.sel.has(i);
       return `<div id="art_${i}" style="border-top:1px solid #F1F5F9;padding:9px 0${FICHA_ART._focoI===i?";background:#FFFBEB;outline:2px solid #F59E0B;border-radius:8px;padding:9px 8px":marc?";background:#EFF6FF;border-radius:8px;padding:9px 8px":""}">
         <div class="row" style="align-items:flex-start">${conSel?`<input type="checkbox" ${marc?"checked":""} onclick="selArtR(${i})" style="width:20px;height:20px;margin:2px 8px 0 0;flex:none;accent-color:#2563EB">`:""}<div style="min-width:0;flex:1"><b style="font-size:13px">${esc(a.desc)}</b>
           <div class="muted" style="font-size:11.5px">${esc(a.art)}${a.cal?" · calibre <b>"+esc(a.cal)+"</b>":""}${a.metros?" · <b>"+esc(String(a.metros).replace(/\s*m$/i,""))+" m</b>":""}${a.formato?" · "+esc(a.formato):""}${!a.cal&&!a.metros?' · <span style="color:#B45309">sin calibre ni metros en el maestro</span>':""}</div></div>
@@ -431,13 +441,15 @@ function vistaFicha(c){
           · <b>${num(a.ult.unidades).toLocaleString("es-ES")} ud</b>${a.ult.precio?` a <b>${num(a.ult.precio).toLocaleString("es-ES",{minimumFractionDigits:2,maximumFractionDigits:2})} €/ud</b>`:""}
           ${a.uniAnt||a.uni?`<span class="muted"> · unidades ${num(a.uniAnt).toLocaleString("es-ES")} → ${num(a.uni).toLocaleString("es-ES")}</span>`:""}</div>`
           :(a.uni||a.uniAnt?`<div class="muted" style="font-size:12px;margin-top:3px">Unidades ${num(a.uniAnt).toLocaleString("es-ES")} → ${num(a.uni).toLocaleString("es-ES")}</div>`:"")}
-        ${FICHA_ART.tab==="caen"?`<div class="barra" style="background:#E2E8F0"><i style="width:${w}%;background:var(--red)"></i></div>`:""}
+        ${esCaeTab()?`<div class="barra" style="background:#E2E8F0"><i style="width:${w}%;background:var(--red)"></i></div>`:""}
         ${m?`<div style="margin-top:6px;display:flex;gap:5px;flex-wrap:wrap">${m}</div>`:""}
       </div>`;
     };
     arts=`<div class="tabs" style="margin-bottom:6px">
         <button class="${FICHA_ART.tab==="caen"?"on":""}" onclick="FICHA_ART.tab='caen';FICHA_ART.acc=null;FICHA_ART.sel=new Set();FICHA_ART.fams=null;pintar()">🎯 Venta estratégica (${A.caen.length}) · −${eur(sumC)}</button>
-        <button class="${FICHA_ART.tab==="suben"?"on":""}" onclick="FICHA_ART.tab='suben';FICHA_ART.acc=null;FICHA_ART.sel=new Set();FICHA_ART.fams=null;pintar()">Crecen (${A.suben.length}) · +${eur(sumS)}</button></div>
+        <button class="${FICHA_ART.tab==="suben"?"on":""}" onclick="FICHA_ART.tab='suben';FICHA_ART.acc=null;FICHA_ART.sel=new Set();FICHA_ART.fams=null;pintar()">Crecen (${A.suben.length}) · +${eur(sumS)}</button>
+        ${["gancho","fuera"].map(tp=>{ const L=(A.spot||[]).filter(a=>(a._tipo||"fuera")===tp); if(!L.length&&FICHA_ART.tab!==tp) return ""; const [ic,tx]=RC.CLASIF[tp];
+          return `<button class="${FICHA_ART.tab===tp?"on":""}" onclick="FICHA_ART.tab='${tp}';FICHA_ART.acc=null;FICHA_ART.sel=new Set();FICHA_ART.fams=null;pintar()">${ic} ${tx} (${L.length}) · −${eur(L.reduce((t,a)=>t-a.dif,0))}</button>`; }).join("")}</div>
       ${!l.length?`<p class="muted">Ninguno.</p>`:orden.map(([k,g])=>{
         const ab=FICHA_ART.fams.has(k), tot=g.reduce((t,a)=>t+a.dif,0);
         return `<div style="border:1px solid var(--border);border-radius:12px;margin:8px 0;overflow:hidden">
@@ -447,11 +459,8 @@ function vistaFicha(c){
             <span class="muted" style="width:14px;text-align:center">${ab?"▾":"›"}</span></div>
           ${ab?`<div style="padding:0 12px 4px">${g.map(filaArt).join("")}</div>`:""}
         </div>`; }).join("")}
-      ${RC.abierto(c)&&FICHA_ART.tab==="caen"&&l.length?barraArts(c,l):""}
-      ${FICHA_ART.tab==="caen"?["gancho","fuera"].map(tp=>{ const [ic,tx,col]=RC.CLASIF[tp], L=(A.spot||[]).map((a,k)=>({a,k})).filter(x=>(x.a._tipo||"fuera")===tp); if(!L.length) return "";
-        return `<details style="margin-top:10px"><summary style="cursor:pointer;font-size:12.5px;font-weight:800;color:${col}">${ic} ${tx} · ${L.length} · −${eur(L.reduce((t,x)=>t-x.a.dif,0))} <span class="muted" style="font-weight:600">(no cuenta en el riesgo)</span></summary>
-        ${L.map(({a,k})=>`<div class="row" style="border-top:1px solid #F1F5F9;padding:7px 0;font-size:12.5px"><div style="min-width:0"><b>${esc(a.desc)}</b><div class="muted">${esc(a.art)}${a.cal?" · "+esc(a.cal):""} · ${eur(a.ant)} → ${eur(a.act)}${(()=>{ const x=RC.spotDe(c).find(z=>String(z.art||z.desc).toUpperCase()===String(a.art||a.desc).toUpperCase()); return x?` · marcado por ${esc(x.por||"")}`:""; })()}</div></div>
-          ${RC.abierto(c)?`<a href="#" onclick="quitarSpot('${c._id}',${k});return false" style="font-size:12px;white-space:nowrap">Volver a venta estratégica</a>`:""}</div>`).join("")}</details>`; }).join(""):""}`;
+      ${RC.abierto(c)&&esCaeTab()&&l.length?barraArts(c,l):""}
+      ${(FICHA_ART.tab==="gancho"||FICHA_ART.tab==="fuera")?`<p class="muted" style="font-size:12px;margin-top:8px">${RC.CLASIF[FICHA_ART.tab][0]} No cuentan en el riesgo. Puedes trabajarlos igual (estrategia, oferta, incidencia…) o cambiarlos de tipo desde la barra.</p>`:""}`;
   }
   return `<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
       <button class="btn gris" onclick="cerrarFicha()">${EMBED&&FICHA_URL?"✕ Cerrar":"← Volver a la lista"}</button></div>
@@ -496,6 +505,24 @@ async function marcarSpot(id,tipo){
     FICHA_ART.sel=new Set(); FICHA_ART.acc=null; pintar(); }
   catch(e){ alert("No se ha guardado: "+e.message); }
 }
+// Cambiar el tipo de los artículos marcados desde cualquier pestaña
+async function reclasificar(id,tipo){
+  if(FICHA_ART.tab==="caen") return marcarSpot(id,tipo);
+  const c=CASOS_TODOS.find(x=>x._id===id); if(!c||!c._arts) return;
+  const lista=listaTab(c), S=[...(FICHA_ART.sel||[])].sort((a,b)=>a-b).map(i=>lista[i]).filter(Boolean);
+  if(!S.length){ alert("Marca primero el artículo o los artículos."); return; }
+  const [IC,TX]=RC.CLASIF[tipo]; if(!confirm(`${IC} ${TX}:\n\n${S.map(a=>"· "+a.desc+(a.cal?" "+a.cal:"")).join("\n")}`)) return;
+  const key=(a)=>String(a.art||a.desc).toUpperCase(), keys=new Set(S.map(key)), ahora=new Date().toISOString(), por=(ES_JEFE||ES_CEO?QUIEN:NOMBRE);
+  let L=RC.spotDe(c), perd=num(c.perdido);
+  if(tipo==="estrategica"){ L=L.filter(x=>!keys.has(String(x.art||x.desc).toUpperCase())); perd+=S.reduce((t,a)=>t+Math.abs(a.dif||0),0); }
+  else L=L.map(x=>keys.has(String(x.art||x.desc).toUpperCase())?Object.assign({},x,{tipo,por,fecha:ahora}):x);
+  const hist=(c.historial||[]).concat([{sem:SEM,fecha:ahora,por,sistema:(tipo==="estrategica"?"↩️ Vuelve a venta estratégica: ":IC+" "+TX+": ")+S.map(a=>a.desc+(a.cal?" "+a.cal:"")).join(", ")}]);
+  try{ await RC.guardar(id,{spotJSON:JSON.stringify(L),historial:hist,perdido:perd}); Object.assign(c,{spotJSON:JSON.stringify(L),historial:hist,perdido:perd});
+    if(tipo==="estrategica"){ c._arts.spot=c._arts.spot.filter(a=>!S.includes(a)); S.forEach(a=>{ delete a._tipo; c._arts.caen.push(a); }); c._arts.caen.sort((x,y)=>x.dif-y.dif); }
+    else S.forEach(a=>a._tipo=tipo);
+    FICHA_ART.sel=new Set(); FICHA_ART.acc=null; pintar(); }
+  catch(e){ alert("No se ha guardado: "+e.message); }
+}
 async function quitarSpot(id,k){
   const c=CASOS.find(x=>x._id===id); if(!c||!c._arts||!c._arts.spot) return; const a=c._arts.spot[k]; if(!a) return;
   const key=String(a.art||a.desc).toUpperCase(), L=RC.spotDe(c).filter(x=>String(x.art||x.desc).toUpperCase()!==key);
@@ -523,8 +550,8 @@ function barraArts(c,l){
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
       ${b("est",NIVEL==="comercial"?"💶 Pedir estrategia":"💶 Estrategia","#6D28D9")}${b("of","📨 Oferta","#1D4ED8")}${b("alt","🔄 Alternativa","#C2410C")}
       ${b("inc","🧩 Otro depto","#0369A1")}${b("diag","✍️ Diagnóstico","#0F766E")}${ES_JEFE?b("plan","📌 Pedir plan","#0F766E"):""}
-      <button class="chipA" style="--c:#B45309${S.length?"":";opacity:.45"}" onclick="marcarSpot('${c._id}','gancho')">🪝 Gancho</button>
-      <button class="chipA" style="--c:#64748B${S.length?"":";opacity:.45"}" onclick="marcarSpot('${c._id}','fuera')">🚫 Fuera de estrategia</button></div></div>`;
+      ${["estrategica","gancho","fuera"].filter(k=>k!==(FICHA_ART.tab==="caen"?"estrategica":FICHA_ART.tab)).map(k=>{ const [ic,tx,col]=RC.CLASIF[k];
+        return `<button class="chipA" style="--c:${col}${S.length?"":";opacity:.45"}" onclick="reclasificar('${c._id}','${k}')">${ic} ${FICHA_ART.tab==="caen"?tx:"Pasar a "+tx.toLowerCase()}</button>`; }).join("")}</div></div>`;
   if(acc&&acc.todos&&l[acc.i]){
     const a=Object.assign({_i:acc.i},l[acc.i]), n=FICHA_ART.cola?acc.todos.length-FICHA_ART.cola.length+1:0;
     const cab=FICHA_ART.cola&&acc.todos.length>1?`<div style="font-size:12.5px;font-weight:800;color:#1D4ED8;margin:8px 0 -2px">Artículo ${n} de ${acc.todos.length}: ${esc(a.desc)}${a.cal?" · "+esc(a.cal):""}</div>`:"";
@@ -574,7 +601,7 @@ function formArt(c,a,tipo){
 }
 async function enviarAlt(id,i){
   const c=CASOS.find(x=>x._id===id); if(!c||!c._arts) return;
-  const a=(FICHA_ART.tab==="caen"?c._arts.caen:c._arts.suben)[i];
+  const a=listaTab(c)[i];
   const alt=RC.leerAlternativa("fx");
   if(!alt.desc){ alert("Busca y elige el producto alternativo en el catálogo."); return; }
   if(!(alt.precioActual>0)){ alert("Falta la tarifa: este artículo no tiene precio en el catálogo, ponla a mano."); return; }
@@ -590,7 +617,7 @@ async function enviarAlt(id,i){
 }
 async function enviarArt(id,i,tipo){
   const c=CASOS.find(x=>x._id===id); if(!c||!c._arts) return;
-  const lista=FICHA_ART.tab==="caen"?c._arts.caen:c._arts.suben;
+  const lista=listaTab(c);
   const a=lista[i];
   const l=RC.leerFormEstrategia("fa",[a]);
   if(!(l.precioActual>0)){ alert("Falta la tarifa: este artículo no tiene precio en el catálogo, ponla a mano."); return; }
@@ -638,7 +665,7 @@ function bloqueInc(c){
 }
 async function enviarInc(id,pref,i){
   const c=CASOS.find(x=>x._id===id); if(!c) return;
-  const a=i!=null&&c._arts?(FICHA_ART.tab==="caen"?c._arts.caen:c._arts.suben)[i]:null;
+  const a=i!=null&&c._arts?listaTab(c)[i]:null;
   const d=RC.leerIncidencia(pref);
   if(d.texto.length<8){ alert("Explica qué pasa y qué necesitas del departamento."); return; }
   try{
@@ -769,7 +796,7 @@ function estadoCorto(c){
 }
 // (oct 2026) Pérdidas del cliente clasificadas: 🎯 estratégica · 🪝 gancho · 🚫 fuera de estrategia
 function perdidasCli(c){
-  const e=num(c.perdido), g=RC.spotEur(c,"gancho"), f=RC.spotEur(c,"fuera");
+  const P=RC.perdidas(c), e=P.e, g=P.g, f=P.f;
   const ch=(v,ic,bg,col)=>`<span style="background:${bg};color:${col};border-radius:99px;padding:1px 7px">${ic} ${eur(v)}</span>`;
   return `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:3px;font-size:11px;font-weight:800">${ch(e,"🎯","#FEF2F2","#B91C1C")}${g?ch(g,"🪝","#FFFBEB","#B45309"):""}${f?ch(f,"🚫","#F1F5F9","#475569"):""}</div>`;
 }
@@ -785,7 +812,7 @@ function filaCompacta(c,conAgente){
           const pe=RC.estrategiasDeCaso(ESTS,c).filter(e=>e.estado==="pendiente_aprobacion");
           return pe.length?` · <span style="color:#6D28D9;font-weight:800">💶 ${pe.length} estrategia${pe.length===1?"":"s"} por aprobar</span>`:""; })()}</div>
         ${perdidasCli(c)}</div>
-      <div style="text-align:right"><div class="neg" style="font-size:13px">−${eur(num(c.perdido)+RC.spotEur(c))}</div><div class="muted" style="font-size:10px">total</div></div>
+      <div style="text-align:right"><div class="neg" style="font-size:13px">−${eur(RC.perdidas(c).tot)}</div><div class="muted" style="font-size:10px">total</div></div>
       <span style="color:var(--muted);font-size:16px;width:14px;text-align:center">›</span>
     </div>
   </div>`;
@@ -1003,8 +1030,8 @@ const FET={};   // comercial → {p: tipo de pérdida, e: etiqueta de acción}
 const paradoC=(c)=>{ const d=RC.dias(c.ultimaAccion||c.abierto); return d!=null&&d>RC.UMBRAL.diasSinAccion; };
 const PERD=[
   ["estrategica","🎯 Estratégico","#B91C1C",(c)=>num(c.perdido)>0,(c)=>num(c.perdido)],
-  ["gancho","🪝 Gancho","#B45309",(c)=>RC.spotEur(c,"gancho")>0,(c)=>RC.spotEur(c,"gancho")],
-  ["fuera","🚫 Fuera de estrategia","#475569",(c)=>RC.spotEur(c,"fuera")>0,(c)=>RC.spotEur(c,"fuera")]];
+  ["gancho","🪝 Gancho","#B45309",(c)=>RC.spotEur(c,"gancho")>0,(c)=>RC.perdidas(c).g],
+  ["fuera","🚫 Fuera de estrategia","#475569",(c)=>RC.spotEur(c,"fuera")>0,(c)=>RC.perdidas(c).f]];
 const ETIQ=[
   ["sinplan","⚠️ Sin plan",(c)=>!RC.tienePlan(c)&&c.estado!=="propuesta_archivo"],
   ["sinav","⏳ Sin avance",(c)=>RC.tienePlan(c)&&!ultimaDeSemana(c)&&!diagEstaSemana(c)],
@@ -1022,7 +1049,7 @@ function filtroEtiquetasAg(a,l){
   return `<div style="display:flex;gap:5px;flex-wrap:wrap;margin:0 0 8px">${bt(!f.e,`Todos · ${l.length}`,`setEtq('${A}','')`)}
     ${ETIQ.map(([k,t,fn])=>{ const n=l.filter(fn).length; if(!n&&f.e!==k) return ""; return bt(f.e===k,`${t} · ${n}`,`setEtq('${A}','${k}')`); }).join("")}</div>`;
 }
-const montoTipo=(c)=>TIPO==="estrategica"?num(c.perdido):TIPO==="gancho"?RC.spotEur(c,"gancho"):TIPO==="fuera"?RC.spotEur(c,"fuera")+(RC.esFueraCli(c)?num(c.perdido):0):num(c.perdido)+RC.spotEur(c);
+const montoTipo=(c)=>{ const P=RC.perdidas(c); return TIPO==="estrategica"?P.e:TIPO==="gancho"?P.g:TIPO==="fuera"?P.f:P.tot; };
 function vistaComite(){
   const ab=CASOS.filter(RC.abierto);
   if(!ab.length) return  `<div class="card muted">No hay casos abiertos. Pulsa <b>Detectar ahora</b> para revisar la cartera.</div>`;
@@ -1044,9 +1071,9 @@ function vistaComite(){
           <div class="muted">${l.length} casos · <span style="color:${r.sinPlan?"var(--red)":"inherit"}">${r.sinPlan} sin plan</span> · <span style="color:${sinAv?"var(--red)":"inherit"}">${sinAv} sin avance</span> · ${r.parados} parados</div>
           <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:4px;font-size:11.5px;font-weight:800">
             <span style="background:#FEF2F2;color:#B91C1C;border-radius:99px;padding:2px 8px">🎯 ${eur(r.enRiesgo)}</span>
-            ${(()=>{ const g=l.reduce((t,c)=>t+RC.spotEur(c,"gancho"),0), f=l.reduce((t,c)=>t+RC.spotEur(c,"fuera"),0);
+            ${(()=>{ const g=l.reduce((t,c)=>t+RC.perdidas(c).g,0), f=l.reduce((t,c)=>t+RC.perdidas(c).f,0);
               return (g?`<span style="background:#FFFBEB;color:#B45309;border-radius:99px;padding:2px 8px">🪝 ${eur(g)}</span>`:"")+(f?`<span style="background:#F1F5F9;color:#475569;border-radius:99px;padding:2px 8px">🚫 ${eur(f)}</span>`:""); })()}</div></div>
-        <div style="text-align:right"><div class="neg">−${eur(TIPO?l.reduce((t,c)=>t+montoTipo(c),0):r.enRiesgo+l.reduce((t,c)=>t+RC.spotEur(c),0))}</div><div class="muted" style="font-size:10.5px">${TIPO?RC.CLASIF[TIPO][0]+" "+RC.CLASIF[TIPO][1].toLowerCase():"total pérdida"}</div></div>
+        <div style="text-align:right"><div class="neg">−${eur(l.reduce((t,c)=>t+montoTipo(c),0))}</div><div class="muted" style="font-size:10.5px">${TIPO?RC.CLASIF[TIPO][0]+" "+RC.CLASIF[TIPO][1].toLowerCase():"total pérdida"}</div></div>
         <span style="color:var(--muted);font-size:18px;width:16px;text-align:center">${ab?"▾":"›"}</span>
       </div>
       ${ab?`<div style="padding:0 15px 8px">
@@ -1310,12 +1337,12 @@ function vistaSpot(){
   // Clientes enteros fuera de estrategia (solo en la pestaña «Fuera de estrategia»)
   let CF=FSP.tipo==="fuera"?CASOS.filter(RC.esFueraCli):[];
   if(q) CF=CF.filter(c=>N([c.nombre,c.cliente].join(" ")).includes(q));
-  const totCF=CF.reduce((t,c)=>t+num(c.perdido)+RC.spotEur(c),0);
+  const totCF=CF.reduce((t,c)=>t+RC.perdidas(c).tot,0);
   const bloqueCF=CF.length?`<div class="card" style="border-left:4px solid #475569"><b>🚫 Clientes enteros fuera de estrategia · ${CF.length} · ${eur(totCF)}</b>
     <div class="muted" style="font-size:12px;margin-bottom:4px">No son estratégicos ni gancho aunque tengan artículos estratégicos.</div>
     ${CF.sort((a,b)=>num(b.perdido)-num(a.perdido)).map(c=>`<div class="row" style="border-top:1px solid #F1F5F9;padding:8px 0;font-size:13px;align-items:flex-start">
       <div style="min-width:0;flex:1;cursor:pointer" onclick="abrirFicha('${c._id}')"><b>${esc(c.nombre||c.cliente)}</b><div class="muted">${esc(nomAg(c.agente))} · ${esc(c.fueraMotivo||"")}${c.fueraPor?" · "+esc(c.fueraPor):""}${c.fueraEn?" · "+fch(c.fueraEn):""}</div></div>
-      <div style="text-align:right;white-space:nowrap"><b>${eur(num(c.perdido)+RC.spotEur(c))}</b>${ES_JEFE?`<div><a href="#" style="font-size:12px" onclick="volverEstrategico('${c._id}');return false">Volver a estratégico</a></div>`:""}</div></div>`).join("")}</div>`:"";
+      <div style="text-align:right;white-space:nowrap"><b>${eur(RC.perdidas(c).tot)}</b>${ES_JEFE?`<div><a href="#" style="font-size:12px" onclick="volverEstrategico('${c._id}');return false">Volver a estratégico</a></div>`:""}</div></div>`).join("")}</div>`:"";
   if(!L.length&&CF.length) cuerpo="";
   return `<div class="card" style="background:#F8FAFC;border-left:4px solid ${COL}">
       <div style="font-size:12px;font-weight:800;color:${COL};text-transform:uppercase;letter-spacing:.04em">${IC} ${TX}</div>
