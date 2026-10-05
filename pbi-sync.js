@@ -898,6 +898,202 @@ export default async function handler(req, res) {
     });
   }
 
+  // (oct 2026) ?mapaNegocio=1 → MAPA DE NEGOCIO. Ventas de este año por
+  // artículo en toda la empresa (sin intercompañía) y, de cada artículo,
+  // cuánto se vende a clientes NO estratégicos (los que el jefe ha marcado en
+  // clasif_clientes y los que recuperación ha dejado fuera de estrategia).
+  // Solo lectura, como articulosCliente. Se guarda junto al sello de la
+  // última sincronización y a la lista de no estratégicos: mientras no cambie
+  // ninguno de los dos, se devuelve lo guardado sin tocar Power BI.
+  // Formato compacto: filas [codigo, descripcion, calibre, metros, calidad,
+  //   ventasAct, ventasAnt, clientesAct, ventasActNoEstrategicos]
+  if (req.query.mapaNegocio === "1") {
+    const out = { ok: true };
+    try {
+      let sello = null;
+      try {
+        const m = await fbLeerDocumento("pbi_meta", "estado");
+        sello = m && m.ultimaSync ? String(m.ultimaSync) : null;
+      } catch (e) { /* sin sello se consulta siempre */ }
+
+      // Variantes del código del cliente: el histórico conserva el antiguo
+      const variantes = (cod) => {
+        const c = String(cod || "").trim().toUpperCase();
+        if (!c) return [];
+        const s = new Set([c, canonico(c)]);
+        const m = /^U430(\d{4})$/.exec(c);
+        if (m) s.add("U43" + m[1]);
+        return [...s];
+      };
+      const limpio = (c) => String(c).replace(/["\\]/g, "");
+
+      // 1) Clientes no estratégicos
+      const noEst = new Set(), estrategicos = new Set();
+      try {
+        for (const d of await fbLeerColeccion("clasif_clientes")) {
+          const cod = String(d.codigo || d._id).toUpperCase().trim();
+          if (d.tipo === "no_estrategico") noEst.add(cod);
+          else if (d.tipo === "estrategico") estrategicos.add(cod);
+        }
+      } catch (e) { out.avisoClasif = e.message.slice(0, 120); }
+      try {
+        for (const c of await fbLeerColeccion("recuperacion")) {
+          const cod = String(c.cliente || "").toUpperCase().trim();
+          // Lo que el jefe marca en el mapa manda sobre recuperación
+          if (cod && c.estado === "fuera_estrategia" && !estrategicos.has(cod)) noEst.add(cod);
+        }
+      } catch (e) { out.avisoRecuperacion = e.message.slice(0, 120); }
+
+      // 2) Intercompañía: traspasos entre empresas del grupo, no son venta
+      const interco = new Set();
+      try {
+        for (const d of await fbLeerColeccion("pbi_ventas_cliente")) {
+          if (d.intercompany) interco.add(String(d._id).toUpperCase().trim());
+        }
+      } catch (e) { out.avisoIntercompany = e.message.slice(0, 120); }
+
+      const lNE = [...new Set([...noEst].flatMap(variantes))].sort();
+      const lIC = [...new Set([...interco].flatMap(variantes))].sort();
+      out.noEstrategicos = noEst.size;
+      out.intercompanyExcluidos = interco.size;
+
+      // Huella de las dos listas: si el jefe marca un cliente, se recalcula
+      let h = 5381;
+      for (const ch of lNE.join(",") + "|" + lIC.join(",")) h = ((h * 33) ^ ch.charCodeAt(0)) >>> 0;
+      const clave = docId(`mapa_v1_${h.toString(36)}`);
+
+      if (sello && req.query.recargar !== "1") {
+        try {
+          const g = await fbLeerDocumento("pbi_mapa_negocio", clave);
+          if (g && g.basadoEn === sello && g.partes) {
+            let txt = "";
+            for (let i = 0; i < Number(g.partes); i++) {
+              const p = await fbLeerDocumento("pbi_mapa_negocio", `${clave}_${i}`);
+              if (!p || p.texto == null) throw new Error("parte " + i + " no encontrada");
+              txt += p.texto;
+            }
+            out.filas = JSON.parse(txt);
+            out.deCache = true;
+            out.basadoEn = sello;
+            try { out.periodo = g.periodo ? JSON.parse(g.periodo) : null; } catch (e) { out.periodo = null; }
+            return res.status(200).json(out);
+          }
+        } catch (e) { out.avisoCache = e.message.slice(0, 120); }
+      }
+
+      await cargarEquivArticulos();
+      const { token } = await getToken(req);
+      const T = M.ventas;
+      const Q = dax(null);
+      const sinIC = lIC.length
+        ? `, NOT ( ${T}[CLIENTE] IN {${lIC.map((c) => `"${limpio(c)}"`).join(", ")}} )` : "";
+      const colNE = lNE.length
+        ? `,
+        "ActNE", CALCULATE(SUM(${M.vBase}),
+          ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy,
+          ${T}[CLIENTE] IN {${lNE.map((c) => `"${limpio(c)}"`).join(", ")}})` : "";
+
+      const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+  VAR _iniAct = DATE(_anoAct, 1, 1)
+  VAR _iniAnt = DATE(_anoAnt, 1, 1)
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
+EVALUATE
+  FILTER(
+    ADDCOLUMNS(
+      CALCULATETABLE(VALUES(${T}[CODIGO]), ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _hoy),
+      "Act", CALCULATE(SUM(${M.vBase}),
+        ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy${sinIC}),
+      "Ant", CALCULATE(SUM(${M.vBase}),
+        ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt${sinIC}),
+      "Cli", CALCULATE(DISTINCTCOUNT(${T}[CLIENTE]),
+        ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy${sinIC})${colNE}
+    ),
+    [Act] <> 0 || [Ant] <> 0
+  )`, true);
+      out.filasPowerBI = filas.length;
+
+      // Maestro de artículos
+      const arts = new Map();
+      try {
+        for (const a of await pbiQuery(token, Q.articulos, true)) {
+          const cod = String(pick(a, "CODIGO") || "").trim().toUpperCase();
+          if (cod && !arts.has(cod)) arts.set(cod, {
+            descripcion: pick(a, "DESCRIPCION"),
+            calibre: pick(a, "CALIBRE"),
+            metros: pick(a, "METROS"),
+            calidad: pick(a, "CALIDAD"),
+          });
+        }
+      } catch (e) { out.errorMaestro = e.message.slice(0, 160); }
+
+      // Mismo agrupado que la ficha del cliente (articulosCliente): código
+      // actual y, si es el mismo artículo con otro envase, el código base.
+      // Así lo que se clasifica aquí casa con lo que se ve en la ficha.
+      const RE_ENVASE = /\.[A-Z0-9]+$/i;
+      const desc = (c) => String((arts.get(c) || {}).descripcion || "")
+        .toUpperCase().replace(/\s*\.[A-Z0-9]+$/, "").replace(/\s+/g, " ").trim();
+      const tronco = (d) => d.replace(/[^A-Z0-9]/g, "").slice(0, 16);
+      const parecidas = (a, b) => {
+        if (!a || !b) return false;
+        const t1 = tronco(a), t2 = tronco(b);
+        return t1.length >= 12 && t1 === t2;
+      };
+      const conEnvase = (cod) => {
+        const base = cod.replace(RE_ENVASE, "");
+        if (base !== cod && arts.has(base) && parecidas(desc(base), desc(cod))) return base;
+        return cod;
+      };
+
+      const g = new Map();
+      for (const r of filas) {
+        const original = String(pick(r, "CODIGO") || "").trim().toUpperCase();
+        if (!original) continue;
+        const cod = conEnvase(codArt(original));
+        const x = g.get(cod) || { act: 0, ant: 0, cli: 0, ne: 0, origen: [] };
+        x.act += num(pick(r, "Act"));
+        x.ant += num(pick(r, "Ant"));
+        // Aproximado al agrupar códigos: un cliente que compra los dos cuenta dos veces
+        x.cli = Math.max(x.cli, num(pick(r, "Cli")));
+        x.ne += num(pick(r, "ActNE"));
+        x.origen.push(original);
+        g.set(cod, x);
+      }
+      out.filas = [...g.entries()].map(([cod, x]) => {
+        let f = arts.get(cod);
+        if (!f) for (const o of x.origen) { if (arts.get(o)) { f = arts.get(o); break; } }
+        f = f || {};
+        return [cod, f.descripcion || "", f.calibre || "", f.metros || "", f.calidad || "",
+          Math.round(x.act), Math.round(x.ant), Math.round(x.cli), Math.round(x.ne)];
+      }).filter((r) => r[5] !== 0 || r[6] !== 0)
+        .sort((a, b) => b[5] - a[5]);
+      out.deCache = false;
+      out.basadoEn = sello;
+      const hoy = new Date();
+      out.periodo = { desde: `${hoy.getFullYear()}-01-01`, hasta: hoy.toISOString().slice(0, 10) };
+
+      if (sello && out.filas.length) {
+        try {
+          const txt = JSON.stringify(out.filas);
+          const TAM = 400000, partes = [];
+          for (let i = 0; i < txt.length; i += TAM) partes.push(txt.slice(i, i + TAM));
+          await fbCommit("pbi_mapa_negocio", partes.map((t, i) => ({ _id: `${clave}_${i}`, texto: t })));
+          await fbCommit("pbi_mapa_negocio", [{
+            _id: clave, basadoEn: sello, partes: partes.length,
+            periodo: JSON.stringify(out.periodo), guardadoEl: new Date().toISOString(),
+          }]);
+        } catch (e) { out.avisoGuardar = e.message.slice(0, 120); }
+      }
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
   // Consulta de solo lectura que llama la pantalla de análisis desde el
   // navegador. Va antes del control de acceso porque no se puede poner el
   // secreto en el código del cliente sin exponerlo. No escribe nada.

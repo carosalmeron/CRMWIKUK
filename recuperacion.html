@@ -58,6 +58,7 @@
 <main id="app"><p class="estado">Leyendo casos…</p></main>
 
 <script src="/recuperacion_comun.js?v=20261005h"></script>
+<script src="/mapa_comun.js?v=20261005a"></script>
 <script>
 const P=new URLSearchParams(location.search);
 const EMBED=P.get("embed")==="1", FICHA_URL=P.get("ficha")||"", ART_URL=P.get("art")||"";
@@ -112,6 +113,23 @@ async function cargar(){
   ESTS=ests.filter(e=>!e.eliminada);
   AG={}; res.forEach(a=>AG[ARR(a._id)]=a);
   CASOS=CASOS_TODOS=casos.filter(enAmbito);
+  await sincronizarMapa();
+}
+// (oct 2026) Mapa de negocio: un cliente que el jefe ha marcado como NO estratégico sale del trabajo
+// diario aunque el caso se haya abierto después (detección automática).
+async function sincronizarMapa(){
+  if(!window.MAPA||!ES_JEFE) return;
+  try{
+    const CC=await MAPA.clis(true); await MAPA.arts(true);
+    for(const c of CASOS_TODOS){
+      const d=CC.get(ARR(c.cliente));
+      if(!d||d.tipo!=="no_estrategico"||!RC.abierto(c)) continue;
+      const ahora=new Date().toISOString();
+      const campos={estado:"fuera_estrategia",fueraMotivo:d.motivo||"Cliente no estratégico (mapa de negocio)",fueraNota:d.nota||"",fueraPor:d.por||MAPA.POR_MAPA,fueraEn:ahora,
+        historial:(c.historial||[]).concat([{sem:SEM,fecha:ahora,por:MAPA.POR_MAPA,sistema:`🚫 Cliente no estratégico en el mapa de negocio${d.motivo?" ("+d.motivo+")":""}${d.por?" · lo marcó "+d.por:""}`}])};
+      try{ await RC.guardar(c._id,campos); Object.assign(c,campos); }catch(e){}
+    }
+  }catch(e){}
 }
 
 // ── Detectar en toda la cartera (sin esperar a que cada comercial abra su parte)
@@ -327,8 +345,10 @@ async function cargarTodosArt(c,forzar){
     const m=(a)=>({art:a.articulo,desc:a.descripcion||a.articulo,cal:a.calibre||"",metros:a.metros||"",
       act:Math.round(num(a.ventasAct)),ant:Math.round(num(a.ventasAnt)),dif:Math.round(num(a.diferencia)),
       uni:num(a.unidades),uniAnt:num(a.unidadesAnt),ult:a.ultimaCompra||null});
-    const caen0=(j.articulos||[]).map(m);
-    c._arts={caen:caen0.filter(a=>!RC.esSpot(c,a)),spot:caen0.filter(a=>RC.esSpot(c,a)).map(a=>Object.assign(a,{_tipo:RC.clasifDe(c,a)})),suben:(j.suben||[]).map(m).map(a=>{ const t=RC.clasifDe(c,a); if(t!=="estrategica") a._tipo=t; return a; })};
+    const caen0=(j.articulos||[]).map(m), sub0=(j.suben||[]).map(m);
+    // (oct 2026) Mapa de negocio: los artículos gancho / fuera de estrategia de la empresa se aplican solos a este cliente
+    try{ if(window.MAPA&&RC.abierto(c)){ await MAPA.arts(); const r=await MAPA.aplicar(c,{caen:caen0,suben:sub0},SEM); if(r) c._mapaAplicado=r.cambios; } }catch(e){}
+    c._arts={caen:caen0.filter(a=>!RC.esSpot(c,a)),spot:caen0.filter(a=>RC.esSpot(c,a)).map(a=>Object.assign(a,{_tipo:RC.clasifDe(c,a)})),suben:sub0.map(a=>{ const t=RC.clasifDe(c,a); if(t!=="estrategica") a._tipo=t; return a; })};
     // (oct 2026) Calibre y metros: si el maestro del Power BI no los trae, se sacan del catálogo del CRM
     completarArtsCat(c);
     // Para que los formularios de precio enseñen lo último que pagó
@@ -481,7 +501,7 @@ function vistaFicha(c){
       ${tile("Variación",pct!=null?pct+" %":"—","var(--red)")}
     </div>
     <div class="card"><b>Mes a mes</b>${meses}</div>
-    <div class="card"><b>Artículos</b><div class="muted" style="font-size:12px;margin-bottom:6px">Todos los que se mueven frente al año pasado, de mayor a menor.</div>${arts}</div>
+    <div class="card"><b>Artículos</b><div class="muted" style="font-size:12px;margin-bottom:6px">Todos los que se mueven frente al año pasado, de mayor a menor.</div>${c._mapaAplicado?`<div style="font-size:12px;background:#F0F9FF;color:#075985;border-radius:8px;padding:6px 9px;margin-bottom:6px">🧭 Se ha aplicado la clasificación de artículos del mapa de negocio: ${esc(c._mapaAplicado.slice(0,6).join(", "))}${c._mapaAplicado.length>6?" y "+(c._mapaAplicado.length-6)+" más":""}. Si para este cliente alguno sí es venta estratégica, márcalo y pulsa «Pasar a venta estratégica».</div>`:""}${arts}</div>
     <div class="card"><b>📨 Ofertas y 💶 estrategias de precio</b>${bloqueEstrategias(c)}</div>
     ${(()=>{ const bi=bloqueInc(c); return bi?`<div class="card"><b>🧩 Otros departamentos</b>${bi}</div>`:""; })()}
     <div class="card"><b>Diagnóstico y plan</b>
@@ -517,9 +537,11 @@ async function reclasificar(id,tipo){
   const key=(a)=>String(a.art||a.desc).toUpperCase(), keys=new Set(S.map(key)), ahora=new Date().toISOString(), por=(ES_JEFE||ES_CEO?QUIEN:NOMBRE);
   let L=RC.spotDe(c), perd=num(c.perdido);
   if(tipo==="estrategica"){ L=L.filter(x=>!keys.has(String(x.art||x.desc).toUpperCase())); perd+=S.reduce((t,a)=>t+Math.abs(a.dif||0),0); }
-  else L=L.map(x=>keys.has(String(x.art||x.desc).toUpperCase())?Object.assign({},x,{tipo,por,fecha:ahora}):x);
+  else L=L.map(x=>keys.has(String(x.art||x.desc).toUpperCase())?Object.assign({},x,{tipo,por,fecha:ahora,global:false}):x);
   const hist=(c.historial||[]).concat([{sem:SEM,fecha:ahora,por,sistema:(tipo==="estrategica"?"↩️ Vuelve a venta estratégica: ":IC+" "+TX+": ")+S.map(a=>a.desc+(a.cal?" "+a.cal:"")).join(", ")}]);
-  try{ await RC.guardar(id,{spotJSON:JSON.stringify(L),historial:hist,perdido:perd}); Object.assign(c,{spotJSON:JSON.stringify(L),historial:hist,perdido:perd});
+  const cmp={spotJSON:JSON.stringify(L),historial:hist,perdido:perd};
+  if(window.MAPA) cmp.artExcepJSON=tipo==="estrategica"?MAPA.conExcepcion(c,S.map(a=>a.art)):MAPA.sinExcepcion(c,S.map(a=>a.art));
+  try{ await RC.guardar(id,cmp); Object.assign(c,cmp);
     if(tipo==="estrategica"){ c._arts.spot=c._arts.spot.filter(a=>!S.includes(a)); S.forEach(a=>{ delete a._tipo; c._arts.caen.push(a); }); c._arts.caen.sort((x,y)=>x.dif-y.dif); }
     else S.forEach(a=>a._tipo=tipo);
     FICHA_ART.sel=new Set(); FICHA_ART.acc=null; pintar(); }
@@ -534,7 +556,9 @@ async function marcarSuben(id,tipo){
   let L=RC.spotDe(c).filter(x=>!keys.has(String(x.art||x.desc).toUpperCase()));
   if(tipo!=="estrategica") L=L.concat(S.map(a=>({art:a.art,desc:a.desc,cal:a.cal,dif:a.dif,ant:a.ant,act:a.act,tipo,por,fecha:ahora,crece:true})));
   const hist=(c.historial||[]).concat([{sem:SEM,fecha:ahora,por,sistema:`${IC} ${TX} (crece): `+S.map(a=>a.desc+(a.cal?" "+a.cal:"")).join(", ")}]);
-  try{ await RC.guardar(id,{spotJSON:JSON.stringify(L),historial:hist}); Object.assign(c,{spotJSON:JSON.stringify(L),historial:hist});
+  const cmp={spotJSON:JSON.stringify(L),historial:hist};
+  if(window.MAPA) cmp.artExcepJSON=tipo==="estrategica"?MAPA.conExcepcion(c,S.map(a=>a.art)):MAPA.sinExcepcion(c,S.map(a=>a.art));
+  try{ await RC.guardar(id,cmp); Object.assign(c,cmp);
     S.forEach(a=>{ if(tipo==="estrategica") delete a._tipo; else a._tipo=tipo; }); FICHA_ART.sel=new Set(); FICHA_ART.acc=null; pintar(); }
   catch(e){ alert("No se ha guardado: "+e.message); }
 }
@@ -543,7 +567,8 @@ async function quitarSpot(id,k){
   const key=String(a.art||a.desc).toUpperCase(), L=RC.spotDe(c).filter(x=>String(x.art||x.desc).toUpperCase()!==key);
   const ahora=new Date().toISOString(), hist=(c.historial||[]).concat([{sem:SEM,fecha:ahora,por:(ES_JEFE||ES_CEO?QUIEN:NOMBRE),sistema:"↩️ Vuelve a contar: "+a.desc}]);
   const perd=num(c.perdido)+Math.abs(a.dif||0);
-  try{ await RC.guardar(id,{spotJSON:JSON.stringify(L),historial:hist,perdido:perd}); Object.assign(c,{spotJSON:JSON.stringify(L),historial:hist,perdido:perd});
+  const cmp={spotJSON:JSON.stringify(L),historial:hist,perdido:perd}; if(window.MAPA) cmp.artExcepJSON=MAPA.conExcepcion(c,[a.art]);
+  try{ await RC.guardar(id,cmp); Object.assign(c,cmp);
     c._arts.spot.splice(k,1); c._arts.caen.push(a); c._arts.caen.sort((x,y)=>x.dif-y.dif); FICHA_ART.sel=new Set(); pintar(); }
   catch(e){ alert("No se ha guardado: "+e.message); }
 }
@@ -1457,7 +1482,7 @@ function pintar0(){
   document.getElementById("app").innerHTML=`
     ${ES_JEFE?`<div style="display:flex;gap:8px;margin-bottom:10px">${modo(!esComites(),"🚨 Plan de recuperación","TAB='comite';pintar()")}${modo(esComites(),"📝 Actas de cada semana","TIPO='';TAB='acta';pintar()")}</div>`:""}
     ${ES_JEFE?`<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
-      <button class="btn gris" onclick="detectarTodo(this)">🔎 Detectar ahora</button>${filtroArbol()}</div>`:""}
+      <button class="btn gris" onclick="detectarTodo(this)">🔎 Detectar ahora</button><a class="btn gris" style="text-decoration:none" href="/mapa_negocio.html${location.search}">🧭 Mapa de negocio</a>${filtroArbol()}</div>`:""}
     ${esComites()?""
       :tiles(CASOS_GF,CASOS)+`<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">${tb(tabsP)}
         ${TIPO?`<span style="margin-left:auto;font-size:12.5px;font-weight:800;color:${RC.CLASIF[TIPO][2]}">Viendo ${RC.CLASIF[TIPO][0]} ${RC.CLASIF[TIPO][1]} · <a href="#" onclick="setTipo('${TIPO}');return false">ver todo</a></span>`:""}</div>`}
@@ -1535,7 +1560,9 @@ async function clienteFuera(id){
   const ahora=new Date().toISOString();
   const campos={estado:"fuera_estrategia",fueraMotivo:m,fueraNota:t,fueraPor:QUIEN,fueraEn:ahora,
     historial:(c.historial||[]).concat([{sem:SEM,fecha:ahora,por:QUIEN,sistema:`🚫 Cliente fuera de estrategia (${m}): ${t}`}])};
-  try{ await RC.guardar(id,campos); Object.assign(c,campos); SAL_MODO[id]=""; if(FICHA===id) cerrarFicha(); else pintar(); }
+  try{ await RC.guardar(id,campos); Object.assign(c,campos); SAL_MODO[id]="";
+    if(window.MAPA) try{ await MAPA.guardarCli(c.cliente,"no_estrategico",{motivo:m,nota:t,nombre:c.nombre,agente:c.agente,equipo:c.equipo},QUIEN); }catch(e){}
+    if(FICHA===id) cerrarFicha(); else pintar(); }
   catch(e){ alert("No se ha guardado: "+e.message); }
 }
 async function volverEstrategico(id){
@@ -1543,7 +1570,9 @@ async function volverEstrategico(id){
   const ahora=new Date().toISOString();
   const campos={estado:"abierto",fueraMotivo:"",fueraNota:"",ultimaAccion:ahora,
     historial:(c.historial||[]).concat([{sem:SEM,fecha:ahora,por:QUIEN,sistema:"↩️ Vuelve a ser cliente estratégico"}])};
-  try{ await RC.guardar(id,campos); Object.assign(c,campos); pintar(); }catch(e){ alert("No se ha guardado: "+e.message); }
+  try{ await RC.guardar(id,campos); Object.assign(c,campos);
+    if(window.MAPA) try{ await MAPA.guardarCli(c.cliente,"estrategico",{nombre:c.nombre,agente:c.agente,equipo:c.equipo},QUIEN); }catch(e){}
+    pintar(); }catch(e){ alert("No se ha guardado: "+e.message); }
 }
 async function archivarDirecto(id){
   const c=CASOS.find(x=>x._id===id); if(!c) return;
