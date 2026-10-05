@@ -944,23 +944,54 @@ export default async function handler(req, res) {
         }
       } catch (e) { out.avisoRecuperacion = e.message.slice(0, 120); }
 
-      // 2) Intercompañía: traspasos entre empresas del grupo, no son venta
-      const interco = new Set();
-      try {
-        for (const d of await fbLeerColeccion("pbi_ventas_cliente")) {
-          if (d.intercompany) interco.add(String(d._id).toUpperCase().trim());
+      // 2) Ámbito: los MISMOS clientes que suma el mapa por cliente (pbi_ventas_cliente),
+      //    para que la suma por artículo cuadre con la de arriba. Fuera intercompañía
+      //    (Francia SÍ cuenta); con &equipo= o &agente=, solo los de ese equipo o comercial. Cada
+      //    cliente arrastra los códigos fusionados en él (su venta está sumada en el principal).
+      const U = (v) => String(v || "").toUpperCase().trim();
+      const fEq = U(req.query.equipo), fAg = U(req.query.agente);
+      const eqDe = {};
+      try { for (const a of await fbLeerColeccion("pbi_resumen_agente")) eqDe[U(a._id)] = U(a.equipo); }
+      catch (e) { out.avisoEquipos = e.message.slice(0, 120); }
+      const dentro = new Set(), fuera = new Set(), hijos = new Map();
+      const vc = await fbLeerColeccion("pbi_ventas_cliente");
+      for (const d of vc) {
+        const cod = U(d._id);
+        if (d.fusionadoEn) {
+          const p = U(d.fusionadoEn);
+          if (!hijos.has(p)) hijos.set(p, []);
+          hijos.get(p).push(cod);
+          continue;
         }
-      } catch (e) { out.avisoIntercompany = e.message.slice(0, 120); }
+        const ag = U(d.agenteFinal || d.agente), eq = eqDe[ag] || "";
+        const ok = !d.intercompany && !d.obsoleto
+          && (!fAg || ag === fAg)
+          && (!fEq || eq === fEq || (eq && (eq.includes(fEq) || fEq.includes(eq))));
+        (ok ? dentro : fuera).add(cod);
+      }
+      const conHijos = (set) => { const r = new Set();
+        for (const c of set) { r.add(c); for (const h of (hijos.get(c) || [])) r.add(h); } return r; };
+      const lDentro = [...new Set([...conHijos(dentro)].flatMap(variantes))].sort();
+      const setDentro = new Set(lDentro);
+      const lFuera = [...new Set([...conHijos(fuera)].flatMap(variantes))]
+        .filter((c) => !setDentro.has(c)).sort();
+      // «Solo estos» es lo exacto (un cliente que no esté en la cartera no cuenta, igual que arriba).
+      // Solo si la lista es enorme se usa «todos menos estos».
+      const lista = (l) => l.map((c) => `"${limpio(c)}"`).join(", ");
+      const ambito = (lDentro.length <= 9000 || lDentro.length <= lFuera.length)
+        ? `, ${M.ventas}[CLIENTE] IN {${lista(lDentro)}}`
+        : (lFuera.length ? `, NOT ( ${M.ventas}[CLIENTE] IN {${lista(lFuera)}} )` : "");
+      out.clientesEnAmbito = dentro.size;
+      if (!lDentro.length) { out.filas = []; out.ambito = "sin clientes"; return res.status(200).json(out); }
+      out.ambito = fAg ? "agente " + fAg : fEq ? "equipo " + fEq : "toda la empresa (sin intercompañía)";
 
-      const lNE = [...new Set([...noEst].flatMap(variantes))].sort();
-      const lIC = [...new Set([...interco].flatMap(variantes))].sort();
+      const lNE = [...new Set([...conHijos(noEst)].flatMap(variantes))].sort();
       out.noEstrategicos = noEst.size;
-      out.intercompanyExcluidos = interco.size;
 
-      // Huella de las dos listas: si el jefe marca un cliente, se recalcula
+      // Huella del ámbito y de los no estratégicos: si cambia algo, se recalcula
       let h = 5381;
-      for (const ch of lNE.join(",") + "|" + lIC.join(",")) h = ((h * 33) ^ ch.charCodeAt(0)) >>> 0;
-      const clave = docId(`mapa_v1_${h.toString(36)}`);
+      for (const ch of lNE.join(",") + "|" + ambito) h = ((h * 33) ^ ch.charCodeAt(0)) >>> 0;
+      const clave = docId(`mapa_v2_${h.toString(36)}`);
 
       if (sello && req.query.recargar !== "1") {
         try {
@@ -985,12 +1016,11 @@ export default async function handler(req, res) {
       const { token } = await getToken(req);
       const T = M.ventas;
       const Q = dax(null);
-      const sinIC = lIC.length
-        ? `, NOT ( ${T}[CLIENTE] IN {${lIC.map((c) => `"${limpio(c)}"`).join(", ")}} )` : "";
+      const sinIC = ambito;
       const colNE = lNE.length
         ? `,
         "ActNE", CALCULATE(SUM(${M.vBase}),
-          ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy,
+          ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy${ambito},
           ${T}[CLIENTE] IN {${lNE.map((c) => `"${limpio(c)}"`).join(", ")}})` : "";
 
       const filas = await pbiQuery(token, `
