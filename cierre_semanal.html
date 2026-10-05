@@ -374,7 +374,11 @@ function prodsAcc(c,p){
       <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin-top:4px">
         ${m||`<span style="font-size:11.5px;font-weight:700;color:#B91C1C">Sin plan para este artículo</span>`}
         <button type="button" class="chip abreficha" style="padding:4px 9px;font-size:11.5px;margin-left:auto" onclick="fichaArt('${id}','${_escR(a.art||a.desc).replace(/'/g,"&#39;")}')">${m?"Ver en la ficha ›":"Hacer el plan en la ficha ›"}</button></div></div>`; }).join("")}
-    <div style="font-size:11.5px;color:#6B7684;margin-top:5px">${caen.length===1?"Este artículo cae":"Estos "+caen.length+" artículos caen"} <b>${RC.eur(pierde)}</b>. El cliente cae <b>${RC.eur(c.perdido)}</b> en total.</div>`;
+    ${(()=>{ const P=RC.perdidas(c), sp=RC.spotDe(c).filter(x=>!x.crece&&(Number(x.dif)||0)<0);
+      const grupo=(k)=>{ const l=sp.filter(x=>RC.tipoClasif(x)===k); if(!l.length) return ""; const [ic,tx,col]=RC.CLASIF[k];
+        return `<div style="font-size:12px;margin-top:4px;color:${col}">${ic} <b>${tx}</b>: ${l.slice(0,4).map(x=>_escR(x.desc||x.art)).join(", ")}${l.length>4?" y "+(l.length-4)+" más":""} · <b>${RC.eur(k==="gancho"?P.g:P.f)}</b> <span style="color:#6B7684">(se trabajan en la ficha)</span></div>`; };
+      return grupo("gancho")+grupo("fuera")
+        +`<div style="font-size:11.5px;color:#6B7684;margin-top:5px">${caen.length?`${caen.length===1?"Este artículo":"Estos "+caen.length+" artículos"} de 🎯 venta estratégica ${caen.length===1?"cae":"caen"} <b>${RC.eur(pierde)}</b>. `:""}Pérdida total del cliente: <b>${RC.eur(P.tot)}</b>${P.g||P.f?` (🎯 ${RC.eur(P.e)} · 🪝 ${RC.eur(P.g)} · 🚫 ${RC.eur(P.f)})`:""}.</div>`; })()}`;
 }
 // Lo que ya se ha hecho con cada artículo (estrategias, ofertas, alternativas, otros departamentos)
 async function cargarPlanesArt(){
@@ -533,6 +537,10 @@ window.recChip=(id,campo,v,el)=>{
     const m=document.getElementById("mg_"+id);
     if(m) m.style.display=(r.accion==="Oferta de vuelta")?"block":"none";
   }
+  if(campo==="hecho"){
+    const t=el.parentNode.nextElementSibling;
+    if(t&&t.tagName==="TEXTAREA") t.placeholder=r.hecho==="No he podido"?"¿Por qué no has podido?":"¿Qué te ha dicho el cliente?";
+  }
   if(campo==="archMotivo"){
     const w=document.getElementById("arw_"+id);
     if(w) w.style.display=r.archMotivo?"block":"none";
@@ -574,8 +582,8 @@ function recFalta(c){
   // Si ya tenía plan (de otra semana), se cuenta el avance
   if(RC.tienePlan(c)){
     if(!r.hecho) return "falta qué hiciste";
-    if((r.respuesta||"").length<5) return "falta qué dijo el cliente";
-    if((r.siguiente||"").length<5) return "falta qué harás";
+    if((r.respuesta||"").length<5) return r.hecho==="No he podido"?"falta por qué no has podido":"falta qué dijo el cliente";
+    if((r.siguiente||"").length<5) return "falta tu compromiso para la semana que viene";
   }
   return "";
 }
@@ -642,7 +650,7 @@ function _pintarCasoBase(c,req){
     </div>
     <div id="arts_${id}" style="background:#F7F9FB;border-radius:6px;padding:6px 10px;margin:8px 0 2px">${c.productos&&(c.productos.caen||[]).length?prodsAcc(c,c.productos):RC.htmlProductos(c.productos,{cargando:true,max:8,perdido:c.perdido})}</div>
     <div id="pe_${id}" style="margin:4px 0 2px"><button type="button" class="chip abreficha" style="font-size:12px" onclick="fichaArt('${id}','')">Abrir la ficha completa del cliente ›</button></div>`;
-  if(c.instruccion&&RC.dias(c.instruccionEn)!=null&&RC.dias(c.instruccionEn)<=10)
+  if(c.instruccion&&RC.dias(c.instruccionEn)!=null&&RC.dias(c.instruccionEn)<=10&&!(RC.tienePlan(c)&&!window.CASOS_EDIT.has(id)))
     h+=`<div style="background:#EFF6FF;border-radius:6px;padding:8px 10px;margin:6px 0;font-size:12.5px;color:#1E3A8A">
       📌 <b>Comité:</b> ${_escR(c.instruccion)}${c.instruccionPor?` <span style="opacity:.7">(${_escR(c.instruccionPor)})</span>`:""}</div>`;
   if(c.archivoDecision==="rechazado"&&c.archivoRespuesta)
@@ -654,20 +662,29 @@ function _pintarCasoBase(c,req){
     return h;
   }
   if(conPlan){
-    h+=`<div class="dato" style="margin:8px 0 4px;font-size:12.5px">
-      <b>Causa:</b> ${_escR(c.causa)}${c.causaNota?" · "+_escR(c.causaNota):""}<br>
+    // (oct 2026) Seguimiento en dos pasos: 1) lo que te comprometiste a hacer, con todos los datos; 2) qué has hecho
+    const prev=(c.historial||[]).filter(x=>x.siguiente&&Number(x.sem)!==SEMANA).slice(-1)[0]||null;
+    const dObj=c.fechaObjetivo?Math.ceil((Date.parse(c.fechaObjetivo)-Date.now())/86400000):null;
+    const inst=c.instruccion&&RC.dias(c.instruccionEn)!=null&&RC.dias(c.instruccionEn)<=10;
+    const otros=hist.filter(x=>x.sistema);
+    const caja=(n,t,col,bg,cont)=>`<div style="border:1.5px solid ${col};border-radius:8px;margin:10px 0 0;overflow:hidden">
+      <div style="background:${col};color:#fff;font-weight:800;font-size:13px;padding:6px 10px">${n} ${t}</div><div style="background:${bg};padding:9px 11px;font-size:12.5px;line-height:1.55">${cont}</div></div>`;
+    h+=caja("1️⃣","Tu compromiso","#1E3A8A","#F5F8FF",`
+      ${prev?`<div style="font-size:14px;margin-bottom:6px">📝 <b>La semana ${_escR(prev.sem)} dijiste que harías:</b><br><span style="font-size:14.5px">«${_escR(prev.siguiente)}»</span>
+        ${prev.hecho||prev.respuesta?`<div style="color:var(--tenue);font-size:12px;margin-top:2px">Entonces: ${_escR([prev.hecho,prev.respuesta].filter(Boolean).join(" · "))}</div>`:""}</div>`:""}
+      ${inst?`<div style="background:#DBEAFE;border-radius:6px;padding:6px 8px;margin-bottom:6px">📌 <b>Comité:</b> ${_escR(c.instruccion)}${c.instruccionPor?` <span style="opacity:.7">(${_escR(c.instruccionPor)})</span>`:""}</div>`:""}
       <b>Plan:</b> ${_escR(c.accion)}${c.margenOferta!=null&&c.margenOferta!==""?" al "+_escR(c.margenOferta)+" % de margen":""}${c.accionNota?" · "+_escR(c.accionNota):""}<br>
-      <b>Objetivo:</b> ${num(c.eurosObjetivo)?RC.eur(c.eurosObjetivo)+" ":""}antes del ${fchTxt(c.fechaObjetivo)}
+      <b>Causa:</b> ${_escR(c.causa)}${c.causaNota?" · "+_escR(c.causaNota):""}<br>
+      <b>Objetivo:</b> ${num(c.eurosObjetivo)?"recuperar <b>"+RC.eur(c.eurosObjetivo)+"</b> ":""}antes del <b>${fchTxt(c.fechaObjetivo)}</b>${dObj!=null?(dObj<0?` <span style="color:#B91C1C;font-weight:800">· vencido hace ${-dObj} día${dObj===-1?"":"s"}</span>`:` <span style="color:var(--tenue)">· quedan ${dObj} día${dObj===1?"":"s"}</span>`):""}
       ${c.necesitaAprobacion==="margen"?`<br><span style="color:#B45309">⏳ Margen pendiente de aprobar por el CEO</span>`:""}
       ${c.margenAprobado==="no"?`<br><span style="color:#B91C1C">✖ El CEO no aprueba ese margen${c.margenRespuesta?": "+_escR(c.margenRespuesta):""}</span>`:""}
-      ${hist.length?`<div style="margin-top:6px;color:var(--tenue)">${hist.map(x=>
-        `S${x.sem}: ${_escR(x.sistema||[x.hecho,x.respuesta].filter(Boolean).join(" · "))}`).join("<br>")}</div>`:""}
-      <div style="margin-top:6px"><a href="#" onclick="recEditar('${id}');return false" style="font-size:12px;color:var(--tinta)">Cambiar el plan</a></div>
-    </div>
-    <p class="rot" style="margin-top:10px">Esta semana</p>
-    ${chips("hecho",RC.HECHO)}
-    <textarea placeholder="¿Qué te ha dicho el cliente?" oninput="recVal('${id}','respuesta',this)">${_escR(r.respuesta||"")}</textarea>
-    <textarea style="margin-top:6px" placeholder="¿Qué harás la semana que viene?" oninput="recVal('${id}','siguiente',this)">${_escR(r.siguiente||"")}</textarea>`;
+      ${otros.length?`<div style="margin-top:6px;color:var(--tenue);font-size:11.5px">${otros.map(x=>`S${x.sem}: ${_escR(x.sistema)}`).join("<br>")}</div>`:""}
+      <div style="margin-top:6px"><a href="#" onclick="recEditar('${id}');return false" style="font-size:12px;color:var(--tinta)">Cambiar el plan</a></div>`);
+    h+=caja("2️⃣","¿Qué has hecho esta semana?","#15803D","#F6FEF9",`
+      ${chips("hecho",RC.HECHO)}
+      <textarea placeholder="${r.hecho==="No he podido"?"¿Por qué no has podido?":"¿Qué te ha dicho el cliente?"}" oninput="recVal('${id}','respuesta',this)">${_escR(r.respuesta||"")}</textarea>
+      <div style="font-weight:800;margin:8px 0 2px">Tu compromiso para la semana que viene</div>
+      <textarea placeholder="¿Qué vas a hacer? (es lo que se te preguntará el próximo jueves)" oninput="recVal('${id}','siguiente',this)">${_escR(r.siguiente||"")}</textarea>`);
   } else {
     h+=`<p class="rot" style="margin-top:10px">¿Por qué cae?</p>
     ${chips("causa",RC.CAUSAS)}
