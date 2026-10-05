@@ -4774,7 +4774,10 @@ EVALUATE
         // El cierre semanal solo ANOTA la equivalencia; aqui se aplica. Las
         // visitas se mueven al codigo real guardando de donde venian, para
         // poder deshacerlo si alguien se equivoca.
-        if (req.query.fusiones === "1" || req.query.fusiones === "dry") {
+        // (oct 2026) Se aplican SIEMPRE en cada sincronizacion (antes solo con &fusiones=1, que el
+        // cron no pasaba: los comerciales confirmaban y el duplicado volvia la semana siguiente).
+        // &fusiones=0 las salta · &fusiones=dry solo cuenta.
+        if (req.query.fusiones !== "0") {
           try {
             const soloVer = req.query.fusiones === "dry";
             const base = `projects/${ENV.FB_PROJECT_ID}/databases/(default)/documents`;
