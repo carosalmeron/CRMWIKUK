@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 (function(g){
   const RC={};
-  RC.VERSION="20261005g";
+  RC.VERSION="20261005h";
   RC.FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
   RC.COL="recuperacion";
   RC.UMBRAL={ pct:0.15, euros:3000, bruscaPct:-40, ritmoMin:400,
@@ -56,7 +56,9 @@
   // caso se reparte la caída neta en proporción, para que el total sea el real.
   RC.perdidas=(c)=>{
     const g0=RC.spotEur(c,"gancho"), f0=RC.spotEur(c,"fuera"), e0=num(c.perdido);
-    const hayV=c&&c.ventasAnt!=null&&c.ventasAct!=null&&num(c.ventasAnt)>0;
+    // Solo en las caídas del año: en «lleva N meses sin comprar» o «caída brusca» la pérdida es la de esos
+    // meses (ritmo × meses), aunque en el acumulado del año vaya por encima.
+    const hayV=c&&(c.tipo||"anual")==="anual"&&c.ventasAnt!=null&&c.ventasAct!=null&&num(c.ventasAnt)>0;
     const neto=hayV?Math.max(0,num(c.ventasAnt)-num(c.ventasAct)):null;
     if(RC.esFueraCli&&RC.esFueraCli(c)){ const N=neto!=null?neto:e0+g0+f0; return {tot:N,e:0,g:0,f:N,brutoG:g0,brutoF:f0,neto,cliFuera:true}; }
     let e=e0,g=g0,f=f0;
