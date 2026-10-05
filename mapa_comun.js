@@ -15,7 +15,18 @@ window.MAPA=(function(){
   const idDoc=(c)=>ARR(c).replace(/[\/#?\[\]*]/g,"_")||"SIN_CODIGO";
   const base=(c)=>ARR(c).replace(/\.[A-Z0-9]+$/,"");
   const POR_MAPA="🧭 Mapa de negocio";
-  let CA=null, CC=null;
+  let CA=null, CC=null, REC=new Map();
+  // (oct 2026) Lo marcado a mano en recuperación cliente a cliente. Un artículo marcado 🪝 gancho en
+  // cualquier cliente es gancho para toda la empresa (el gancho es del artículo), salvo que en el mapa
+  // se haya decidido otra cosa. Lo marcado 🚫 fuera queda solo como pista: suele ser de ese cliente.
+  function setRec(casos){
+    const m=new Map();
+    (casos||[]).forEach(c=>RC.spotDe(c).forEach(x=>{ if(x.global) return; const k=ARR(x.art); if(!k) return;
+      const s=m.get(k)||{gancho:0,fuera:0,cli:new Set(),desc:x.desc||""}; if(s.cli.has(c.cliente)) return;
+      s.cli.add(c.cliente); s[RC.tipoClasif(x)]++; m.set(k,s); }));
+    REC=m; return m;
+  }
+  const recDe=(cod)=>REC.get(ARR(cod))||REC.get(base(cod))||null;
 
   async function arts(forzar){
     if(CA&&!forzar) return CA;
@@ -30,7 +41,10 @@ window.MAPA=(function(){
     CC=m; return CC;
   }
   // Tipo global de un artículo (por su código o por el código sin envase)
-  const tipoArt=(cod)=>{ if(!CA||!cod) return null; const d=CA.get(ARR(cod))||CA.get(base(cod)); return d&&d.tipo||null; };
+  const tipoArt=(cod)=>{ if(!cod) return null; const d=CA&&(CA.get(ARR(cod))||CA.get(base(cod))); if(d&&d.tipo) return d.tipo;
+    const r=recDe(cod); return r&&r.gancho?"gancho":null; };
+  // De dónde sale la clase: "mapa" (decidido aquí), "recuperacion" (gancho marcado en algún cliente) o null
+  const origenArt=(cod)=>{ const d=CA&&(CA.get(ARR(cod))||CA.get(base(cod))); if(d&&d.tipo) return "mapa"; const r=recDe(cod); return r&&r.gancho?"recuperacion":null; };
   const tipoCli=(cod)=>{ if(!CC||!cod) return null; const d=CC.get(ARR(cod)); return d&&d.tipo||null; };
 
   async function guardarArt(cod,tipo,info,por){
@@ -98,5 +112,5 @@ window.MAPA=(function(){
     const m=(a)=>({art:a.articulo,desc:a.descripcion||a.articulo,cal:a.calibre||"",act:Math.round(num(a.ventasAct)),ant:Math.round(num(a.ventasAnt)),dif:Math.round(num(a.diferencia))});
     return {caen:(j.articulos||[]).map(m),suben:(j.suben||[]).map(m)};
   }
-  return {arts,clis,tipoArt,tipoCli,guardarArt,guardarCli,excepciones,conExcepcion,sinExcepcion,calcular,aplicar,articulosDe,idDoc,POR_MAPA,VERSION:"20261005a"};
+  return {setRec,recDe,origenArt,arts,clis,tipoArt,tipoCli,guardarArt,guardarCli,excepciones,conExcepcion,sinExcepcion,calcular,aplicar,articulosDe,idDoc,POR_MAPA,VERSION:"20261005b"};
 })();

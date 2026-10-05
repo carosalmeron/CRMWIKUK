@@ -61,7 +61,7 @@
 <div class="barra" id="barra" style="display:none"></div>
 
 <script src="/recuperacion_comun.js?v=20261005h"></script>
-<script src="/mapa_comun.js?v=20261005a"></script>
+<script src="/mapa_comun.js?v=20261005b"></script>
 <script>
 const P=new URLSearchParams(location.search);
 const ARR=RC.ARR, num=RC.num, eur=RC.eur, esc=RC.esc||((s)=>String(s??"").replace(/[<>&"]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c])));
@@ -104,15 +104,16 @@ async function cargar(){
       mg:num(d.margenAct),base:num(d.baseAct)||num(d.ventasAct)};
   }).filter(c=>(c.act||c.ant)&&enAmbito(c));
   // Lo que ya se ha marcado a mano en recuperación, cliente a cliente: pista para clasificar el artículo
-  SUG={};
-  casos.forEach(c=>RC.spotDe(c).forEach(x=>{ if(x.global) return; const k=ARR(x.art); if(!k) return;
-    const s=SUG[k]=SUG[k]||{gancho:0,fuera:0,cli:new Set()}; if(!s.cli.has(c.cliente)){ s.cli.add(c.cliente); s[RC.tipoClasif(x)]++; } }));
+  // Lo marcado en recuperación: 🪝 gancho cuenta para toda la empresa; 🚫 fuera queda como pista
+  SUG=Object.fromEntries(MAPA.setRec(casos));
 }
 async function cargarArts(forzar){
   ARTS=null; ARTS_ERR=""; pintar();
   try{
     const r=await fetch("/api/pbi-sync?mapaNegocio=1"+(forzar?"&recargar=1":""));
-    const j=await r.json(); if(j.ok===false) throw new Error(j.error||"sin respuesta");
+    const txt=await r.text(); let j=null; try{ j=JSON.parse(txt); }catch(e){ throw new Error("el servidor no ha respondido a tiempo ("+r.status+"). Pulsa 🔄 en un minuto"); }
+    if(j.ok===false) throw new Error(j.error||"sin respuesta");
+    if(!Array.isArray(j.filas)) throw new Error("en el servidor no está la versión nueva de api/pbi-sync.js"+(j.error?" (responde «"+j.error+"»)":"")+". Súbela a la carpeta api/ y espera a que Vercel termine");
     ARTS=(j.filas||[]).map(f=>({cod:ARR(f[0]),desc:f[1]||f[0],cal:f[2]||"",met:f[3]||"",calidad:f[4]||"",act:num(f[5]),ant:num(f[6]),cli:num(f[7]),ne:num(f[8])}));
     ARTS_INFO={periodo:j.periodo,basadoEn:j.basadoEn,noEst:j.noEstrategicos,deCache:j.deCache};
   }catch(e){ ARTS_ERR=e.message||String(e); }
@@ -184,6 +185,13 @@ function vistaResumen(L,tot,totAnt){
     <div class="muted">Un artículo gancho o fuera de estrategia lo es para todos los clientes (salvo excepción en la ficha del cliente).</div>
     <div class="bar">${barA}</div>
     <div class="cajas">${["estrategica","gancho","fuera","sin"].map(k=>caja(CA[k][2],CA[k][0],CA[k][1],a[k].v,a[k].n?`${pct(a[k].v,totA)} % · ${a[k].n} artículo${a[k].n===1?"":"s"} · ${varTxt(a[k].v,a[k].a)}`:"ninguno todavía",`irTab('articulos','${k}')`)).join("")}</div></div>`;
+  // Los artículos gancho, con lo que venden a todos los clientes
+  const G=ARTS.filter(r=>claseArt(r.cod)==="gancho").sort((x,y)=>y.act-x.act);
+  if(G.length) h+=`<div class="card"><div class="row"><h2>🪝 Artículos gancho · ${G.length}</h2><b style="color:var(--gan)">${eur(a.gancho.v)}</b></div>
+    <div class="muted">Lo que venden este año a todos los clientes. ${pct(a.gancho.v,totA)} % de las ventas de la empresa.</div>
+    ${G.slice(0,8).map(r=>`<div class="item"><div style="flex:1;min-width:0"><b style="font-size:13px">${esc(r.desc)}</b><div class="muted">${esc(r.cod)}${r.cal?" · "+esc(r.cal):""} · ${r.cli} clientes${MAPA.origenArt(r.cod)==="recuperacion"?" · desde recuperación":""}</div></div>
+      <div class="num"><b>${eur(r.act)}</b><div class="muted" style="color:${r.act<r.ant?"var(--red)":"var(--green)"}">${varTxt(r.act,r.ant)}</div></div></div>`).join("")}
+    ${G.length>8?`<a href="#" onclick="irTab('articulos','gancho');return false" style="font-size:12.5px;font-weight:700">Ver los ${G.length} ›</a>`:""}</div>`;
   // Cruce: qué es negocio estratégico de verdad
   const fila=(k,txt)=>{ const x=k==="estrategica"?{v:a.estrategica.v+a.sin.v,ne:a.estrategica.ne+a.sin.ne}:a[k];
     return `<tr><td>${txt}</td><td${k==="estrategica"?' style="background:#FEF2F2;font-weight:800;color:var(--est)"':""}>${eur(x.v-x.ne)}</td><td>${eur(x.ne)}</td><td><b>${eur(x.v)}</b></td></tr>`; };
@@ -208,7 +216,7 @@ function progreso(L){
   if(ARTS){ const ta=ARTS.reduce((t,r)=>t+Math.max(0,r.act),0), ac=ARTS.filter(r=>claseArt(r.cod)!=="sin"), vac=ac.reduce((t,r)=>t+Math.max(0,r.act),0);
     h+=`<div>📦 Artículos: <b>${ac.length}</b> de ${ARTS.filter(r=>r.act>0).length} con venta · <b>${pct(vac,ta)} %</b> de las ventas</div>`;
     const ns=Object.keys(SUG).filter(k=>claseArt(k)==="sin").length;
-    if(ns) h+=`<div style="margin-top:6px"><a href="#" onclick="irTab('articulos','sug');return false">💡 ${ns} artículos marcados como gancho o fuera en algún cliente de recuperación, pendientes de decidir para toda la empresa</a></div>`; }
+    if(ns) h+=`<div style="margin-top:6px"><a href="#" onclick="irTab('articulos','sug');return false">💡 ${ns} artículos marcados 🚫 fuera de estrategia en algún cliente de recuperación: decide si lo son para toda la empresa</a></div>`; }
   return h+`<div class="muted" style="margin-top:6px">Consejo: empieza por los clientes y artículos que más venden; con los 50 primeros suele quedar clasificado más del 70 % del negocio.</div></div>`;
 }
 
@@ -269,7 +277,7 @@ function vistaArticulos(){
   const ch=(k,txt,col)=>`<button class="chip${FA.clase===k?" on":""}" style="--c:${col}" onclick="FA.clase='${k}';FA.n=150;SELA=new Set();pintar()">${txt}</button>`;
   const fams=[...new Set(ARTS.map(famDe))].sort();
   return `<div class="card">
-    <div class="fil">${ch("","Todos · "+ARTS.length,"#334155")}${ch("sin","⏳ Sin clasificar · "+n("sin"),"#64748B")}${ch("estrategica","🎯 Estratégica · "+n("estrategica"),"#B91C1C")}${ch("gancho","🪝 Gancho · "+n("gancho"),"#B45309")}${ch("fuera","🚫 Fuera · "+n("fuera"),"#475569")}${ns?ch("sug","💡 Marcados en recuperación · "+ns,"#0369A1"):""}</div>
+    <div class="fil">${ch("","Todos · "+ARTS.length,"#334155")}${ch("sin","⏳ Sin clasificar · "+n("sin"),"#64748B")}${ch("estrategica","🎯 Estratégica · "+n("estrategica"),"#B91C1C")}${ch("gancho","🪝 Gancho · "+n("gancho"),"#B45309")}${ch("fuera","🚫 Fuera · "+n("fuera"),"#475569")}${ns?ch("sug","💡 Marcados fuera en recuperación · "+ns,"#0369A1"):""}</div>
     <div class="fil"><input placeholder="Buscar artículo, código o calibre" value="${esc(FA.q)}" oninput="FA.q=this.value;FA.n=150;pintarLista()" style="flex:1;min-width:200px">
       <select onchange="FA.fam=this.value;FA.n=150;pintarLista()"><option value="">Todas las familias</option>${fams.map(f=>`<option${FA.fam===f?" selected":""}>${esc(f)}</option>`).join("")}</select>
       <select onchange="FA.orden=this.value;pintarLista()"><option value="act"${FA.orden==="act"?" selected":""}>Más venta</option><option value="ne"${FA.orden==="ne"?" selected":""}>Más venta a no estratégicos</option><option value="caida"${FA.orden==="caida"?" selected":""}>Más caída</option></select>
@@ -290,7 +298,8 @@ function htmlListaA(){
         <div style="flex:1;min-width:0"><b style="font-size:13.5px">${esc(r.desc)}</b>
           <div class="muted">${esc(r.cod)}${r.cal?" · calibre <b>"+esc(r.cal)+"</b>":""}${r.met?" · <b>"+esc(String(r.met).replace(/\s*m$/i,""))+" m</b>":""}${r.calidad?" · "+esc(r.calidad):""} · ${r.cli} cliente${r.cli===1?"":"s"}</div>
           <div style="margin-top:3px;display:flex;gap:5px;flex-wrap:wrap;align-items:center"><span class="tag" style="--c:${CA[k][2]}">${CA[k][0]} ${CA[k][1]}</span>
-            ${d&&d.por?`<span class="muted" style="font-size:11.5px">${esc(d.por)}${d.fecha?" · "+fch(d.fecha):""}</span>`:""}
+            ${d&&d.por?`<span class="muted" style="font-size:11.5px">${esc(d.por)}${d.fecha?" · "+fch(d.fecha):""}</span>`
+              :MAPA.origenArt(r.cod)==="recuperacion"?`<span class="muted" style="font-size:11.5px">desde recuperación · marcado gancho en ${sg?sg.gancho:1} cliente${sg&&sg.gancho>1?"s":""}</span>`:""}
             ${sg&&k==="sin"?`<span class="tag" style="--c:#0369A1">💡 ${sg.gancho?"🪝 gancho en "+sg.gancho:""}${sg.gancho&&sg.fuera?" · ":""}${sg.fuera?"🚫 fuera en "+sg.fuera:""} cliente${sg.gancho+sg.fuera===1?"":"s"}</span>`:""}
             ${r.ne?`<span class="muted" style="font-size:11.5px">🚫 a no estratégicos: <b>${eur(r.ne)}</b> (${pct(r.ne,r.act)} %)</span>`:""}</div></div>
         <div class="num"><b>${eur(r.act)}</b><div class="muted" style="color:${r.act<r.ant?"var(--red)":"var(--green)"}">${varTxt(r.act,r.ant)}</div></div></div>`; }).join("")
