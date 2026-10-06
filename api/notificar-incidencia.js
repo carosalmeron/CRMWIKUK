@@ -192,7 +192,16 @@ function casaDepto(d,tipologia){
 
 // Destinatarios de una tipología según el organigrama:
 // { directos:[emails], escalado:[emails del depto padre] }
-function destinatariosDe(datos, tipologia){
+// (oct 2026) Incidencia de COBRO: creada desde el panel de cobros, atada a una factura, o con
+// un motivo de cobro (impago, cobro, pago, vencimiento, abono). Solo estas llegan también a los
+// miembros del departamento (Administración de clientes); el resto, solo a los responsables.
+function esCobro(inc){
+  if(!inc) return false;
+  if(inc.origen==="cobros"||inc.claveFactura||inc.estadoCobro) return true;
+  const t=[inc.subtipo,inc.titulo,inc.categoria].filter(Boolean).join(" ");
+  return /impago|cobro|pago|vencimient|abono|reclamaci[oó]n de (deuda|cobro|pago)/i.test(t);
+}
+function destinatariosDe(datos, tipologia, inc){
   const directos=new Set(), escalado=new Set();
   const addD=e=>{ if(e) directos.add(String(e).toLowerCase()); };
   const addE=e=>{ if(e) escalado.add(String(e).toLowerCase()); };
@@ -208,6 +217,24 @@ function destinatariosDe(datos, tipologia){
   });
   deps.forEach(dep=>{
     (dep.responsableIds||[]).forEach(rid=>addD(emailDeCuenta(datos,rid)));
+    // (oct 2026) En las incidencias de COBRO, también los MIEMBROS del departamento, no solo
+    // el responsable (Alba, administración de clientes, las veía en el CRM pero no le llegaba el
+    // correo). Miembro = ficha con departamentoId de este departamento, o en miembros/miembroIds.
+    if(esCobro(inc)){
+    // El departamento y sus subdepartamentos (p. ej. Administración › Administración de clientes)
+    const depIds=new Set([dep._id,dep.id].filter(Boolean).map(x=>String(x).toLowerCase()));
+    datos.departamentos.forEach(h=>{ if(h.activo!==false&&h.padre&&depIds.has(String(h.padre).toLowerCase())) [h._id,h.id].filter(Boolean).forEach(x=>depIds.add(String(x).toLowerCase())); });
+    const subdeps=datos.departamentos.filter(h=>[h._id,h.id].some(x=>x&&depIds.has(String(x).toLowerCase())));
+    [datos.portal,datos.usuarios].forEach(col=>(col||[]).forEach(u=>{
+      if(!cuentaValida(u)||!u.email) return;
+      if(u.departamentoId&&depIds.has(String(u.departamentoId).toLowerCase())) addD(u.email);
+    }));
+    subdeps.forEach(sd=>{
+      if(sd!==dep) (sd.responsableIds||[]).forEach(rid=>addD(emailDeCuenta(datos,rid)));
+      const mi=Array.isArray(sd.miembros)?sd.miembros:Array.isArray(sd.miembroIds)?sd.miembroIds:[];
+      mi.forEach(mid=>addD(emailDeCuenta(datos,typeof mid==="object"&&mid?(mid.id||mid._id):mid)));
+    });
+    }
     // Escalado: responsables del departamento PADRE (excepto dirección)
     if(dep.padre && dep.padre!=="direccion"){
       const padre=datos.departamentos.find(d=>d._id===dep.padre||d.id===dep.padre);
@@ -1376,7 +1403,7 @@ async function avisarHilo(inc, id){
   if(!nuevas.length) return {ok:true,skipped:"nada nuevo"};
   const datos=await cargarDatos();
   const tipoLc=String(inc.tipo||"").toLowerCase(), tipologia=TIPO_A_TIPOLOGIA[tipoLc]||tipoLc;
-  const dept=destinatariosDe(datos,tipologia).directos.map(e=>({email:e,papel:"departamento"}));
+  const dept=destinatariosDe(datos,tipologia,inc).directos.map(e=>({email:e,papel:"departamento"}));
   const lista=[...dept,...ventasDe(datos,inc)];
   // Fuera quien acaba de escribir
   const quien=nuevas.map(h=>String(h.por||"").toUpperCase().trim()).filter(Boolean);
@@ -1508,7 +1535,7 @@ module.exports = async function handler(req, res){
       const deps=datos.departamentos.filter(d=>casaDepto(d,tipologia))
         .map(d=>({id:d._id,nombre:d.nombre,activo:d.activo!==false,
         responsables:(d.responsableIds||[]).map(r=>({id:r,email:emailDeCuenta(datos,r)||"❌ sin email"}))}));
-      const dest=destinatariosDe(datos,tipologia);
+      const dest=destinatariosDe(datos,tipologia,req.query.cobro==="1"?{origen:"cobros"}:null);
       // Quien tiene esta tipologia en su ficha (la via de respaldo)
       const porFicha=[...datos.usuarios,...datos.portal]
         .filter(u=>cuentaValida(u)&&String(u.tipologia||ID_A_TIPOLOGIA[u.id||u._id]||"").toLowerCase()===tipologia)
@@ -1541,7 +1568,7 @@ module.exports = async function handler(req, res){
       if(!tipologia){ res.status(200).json({ok:true, skipped:"incidencia sin tipo"}); return; }
 
       const datos = await cargarDatos();
-      const dest = destinatariosDe(datos, tipologia);
+      const dest = destinatariosDe(datos, tipologia, inc);
       if(dest.directos.length===0 && dest.escalado.length===0){
         res.status(200).json({ok:true, skipped:"sin email configurado para "+tipologia}); return;
       }
@@ -1614,7 +1641,7 @@ module.exports = async function handler(req, res){
       const tipoLc = String(inc.tipo||"").toLowerCase();
       const tipologia = TIPO_A_TIPOLOGIA[tipoLc] || tipoLc;
       if(!tipologia){ saltadas++; continue; }
-      const dest = destinatariosDe(datos, tipologia);
+      const dest = destinatariosDe(datos, tipologia, inc);
       if(dest.directos.length===0){ sinEmail++; continue; }
       tocanHoy.push({inc,dias});
       dest.directos.forEach(em=>{ const k=String(em).trim().toLowerCase(); if(!k) return;
