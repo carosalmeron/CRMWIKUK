@@ -113,7 +113,11 @@ async function cargarArts(forzar){
     // Mismo ámbito que la parte de clientes, para que las dos sumas cuadren
     const amb=GF.ag?"&agente="+encodeURIComponent(GF.ag):GF.eq?"&equipo="+encodeURIComponent(GF.eq)
       :!ES_JEFE?"&agente="+encodeURIComponent(AGENTE):(!ES_DIR&&EQUIPO)?"&equipo="+encodeURIComponent(EQUIPO):"";
-    const r=await fetch("/api/pbi-sync?mapaNegocio=1"+amb+(forzar?"&recargar=1":""));
+    const ctl=new AbortController(), t0=Date.now(); const tope=setTimeout(()=>ctl.abort(),150000);
+    const reloj=setInterval(()=>{ const el=document.getElementById("relojArts"); if(el) el.textContent=Math.round((Date.now()-t0)/1000)+" s"; },1000);
+    let r; try{ r=await fetch("/api/pbi-sync?mapaNegocio=1"+amb+(forzar?"&recargar=1":""),{signal:ctl.signal}); }
+    catch(e){ throw new Error(e.name==="AbortError"?"Power BI tarda más de 2 minutos. Pulsa 🔄 dentro de un rato: el cálculo sigue y se guarda":e.message); }
+    finally{ clearTimeout(tope); clearInterval(reloj); }
     const txt=await r.text(); let j=null; try{ j=JSON.parse(txt); }catch(e){ throw new Error("el servidor no ha respondido a tiempo ("+r.status+"). Pulsa 🔄 en un minuto"); }
     if(j.ok===false) throw new Error(j.error||"sin respuesta");
     if(!Array.isArray(j.filas)) throw new Error("en el servidor no está la versión nueva de api/pbi-sync.js"+(j.error?" (responde «"+j.error+"»)":"")+". Súbela a la carpeta api/ y espera a que Vercel termine");
@@ -161,33 +165,42 @@ function filtroArbol(){
 }
 window.setGF=(v)=>{ GF={eq:v.startsWith("eq:")?v.slice(3):"",ag:v.startsWith("ag:")?v.slice(3):""}; SELC=new Set(); SELA=new Set(); cargarArts(false); };
 
-function caja(col,ic,tx,v,sub,onc){ return `<div class="caja" style="--c:${col}" onclick="${onc}"><div class="t">${ic} ${tx}</div><div class="v">${eur(v)}</div><div class="s">${sub}</div></div>`; }
+function caja(col,ic,tx,v,sub,onc,perd){ return `<div class="caja" style="--c:${col}" onclick="${onc}"><div class="t">${ic} ${tx}</div><div class="v">${eur(v)}</div>
+  ${perd!=null?(perd>0?`<div style="font-size:12px;font-weight:800;color:var(--red);margin-top:1px">Perdido −${eur(perd)}</div>`:`<div style="font-size:12px;font-weight:700;color:var(--green);margin-top:1px">Sin pérdida</div>`):""}<div class="s">${sub}</div></div>`; }
+// Fila de total debajo de las etiquetas
+function filaTotal(v,a,perd){ return `<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;border-top:1.5px solid var(--border);margin-top:10px;padding-top:8px;font-size:13px">
+  <b>Total</b><span><b>${eur(v)}</b> <span class="muted">· año pasado ${eur(a)} (${varTxt(v,a)})</span> · <b style="color:var(--red)">perdido −${eur(perd)}</b></span></div>`; }
 function vistaResumen(L,tot,totAnt){
   // Por cliente
-  const g={est:{v:0,a:0,n:0,mg:0,b:0},no:{v:0,a:0,n:0,mg:0,b:0},sin:{v:0,a:0,n:0,mg:0,b:0}};
-  L.forEach(c=>{ const x=g[claseCli(c)]; x.v+=c.act; x.a+=c.ant; x.n++; x.mg+=c.mg; x.b+=c.base; });
+  // Perdido = lo que han dejado de comprar los clientes que caen (sin compensar con los que crecen)
+  const g={est:{v:0,a:0,n:0,mg:0,b:0,p:0},no:{v:0,a:0,n:0,mg:0,b:0,p:0},sin:{v:0,a:0,n:0,mg:0,b:0,p:0}};
+  L.forEach(c=>{ const x=g[claseCli(c)]; x.v+=c.act; x.a+=c.ant; x.n++; x.mg+=c.mg; x.b+=c.base; x.p+=Math.max(0,c.ant-c.act); });
+  const perdTot=g.est.p+g.no.p+g.sin.p;
   const mgTxt=(x)=>x.b?` · margen ${Math.round(x.mg/x.b*100)} %`:"";
   const barC=["est","no","sin"].map(k=>`<i style="width:${pct(Math.max(0,g[k].v),Math.max(1,tot))}%;background:${CC[k][2]}"></i>`).join("");
   let h=`<div class="card">
     <div class="row"><h2>Tus ventas este año</h2><b style="font-size:20px">${eur(tot)}</b></div>
-    <div class="muted">Año pasado, mismo periodo: ${eur(totAnt)} (${varTxt(tot,totAnt)})</div></div>
+    <div class="muted">Año pasado, mismo periodo: ${eur(totAnt)} (${varTxt(tot,totAnt)})</div>
+    <div style="font-size:13px;margin-top:4px"><b style="color:var(--red)">Perdido −${eur(perdTot)}</b> <span class="muted">en los clientes que caen · ganado +${eur(Math.max(0,perdTot+(tot-totAnt)))} en los que crecen</span></div></div>
   <div class="card"><h2>👥 Por tipo de cliente</h2><div class="muted">Lo decide el jefe en la pestaña Clientes. Sin clasificar se trabaja como estratégico hasta que se decida.</div>
     <div class="bar">${barC}</div>
-    <div class="cajas">${["est","no","sin"].map(k=>caja(CC[k][2],CC[k][0],CC[k][3],g[k].v,g[k].n?`${pct(g[k].v,tot)} % · ${g[k].n} cliente${g[k].n===1?"":"s"} · ${varTxt(g[k].v,g[k].a)}${mgTxt(g[k])}`:"ninguno todavía",`irTab('clientes','${k}')`)).join("")}</div></div>`;
+    <div class="cajas">${["est","no","sin"].map(k=>caja(CC[k][2],CC[k][0],CC[k][3],g[k].v,g[k].n?`${pct(g[k].v,tot)} % · ${g[k].n} cliente${g[k].n===1?"":"s"} · ${varTxt(g[k].v,g[k].a)}${mgTxt(g[k])}`:"ninguno todavía",`irTab('clientes','${k}')`,g[k].n?g[k].p:null)).join("")}</div>${filaTotal(tot,totAnt,perdTot)}</div>`;
   // Por artículo y cruce (toda la empresa)
   if(!ARTS){
     h+=`<div class="card"><h2>📦 Por tipo de artículo</h2>${ARTS_ERR?`<p class="muted">No se han podido calcular las ventas por artículo (${esc(ARTS_ERR)}). <a href="#" onclick="cargarArts(true);return false">Reintentar</a></p>`
-      :`<p class="muted">Calculando ventas por artículo en Power BI… la primera vez del día puede tardar un minuto.</p>`}</div>`;
+      :`<p class="muted">Calculando ventas por artículo en Power BI… <b id="relojArts"></b> (la primera vez del día puede tardar un par de minutos).</p>`}</div>`;
     return h+progreso(L);
   }
-  const a={estrategica:{v:0,a:0,n:0,ne:0},gancho:{v:0,a:0,n:0,ne:0},fuera:{v:0,a:0,n:0,ne:0},sin:{v:0,a:0,n:0,ne:0}};
-  ARTS.forEach(r=>{ const x=a[claseArt(r.cod)]; x.v+=r.act; x.a+=r.ant; x.ne+=r.ne; if(r.act>0) x.n++; });
+  const a={estrategica:{v:0,a:0,n:0,ne:0,p:0},gancho:{v:0,a:0,n:0,ne:0,p:0},fuera:{v:0,a:0,n:0,ne:0,p:0},sin:{v:0,a:0,n:0,ne:0,p:0}};
+  ARTS.forEach(r=>{ const x=a[claseArt(r.cod)]; x.v+=r.act; x.a+=r.ant; x.ne+=r.ne; if(r.act>0) x.n++; x.p+=Math.max(0,r.ant-r.act); });
   const totA=Object.values(a).reduce((t,x)=>t+x.v,0);
   const barA=["estrategica","gancho","fuera","sin"].map(k=>`<i style="width:${pct(Math.max(0,a[k].v),Math.max(1,totA))}%;background:${CA[k][2]}"></i>`).join("");
   h+=`<div class="card"><h2>📦 Por tipo de artículo</h2>
     <div class="muted">Un artículo gancho o fuera de estrategia lo es para todos los clientes (salvo excepción en la ficha del cliente).</div>
     <div class="bar">${barA}</div>${Math.abs(totA-tot)>Math.max(1000,Math.abs(tot)*0.01)?`<div class="muted" style="color:#B45309">Por artículo suma ${eur(totA)} y por cliente ${eur(tot)}: la diferencia son ventas de clientes que no están en la cartera del CRM.</div>`:""}
-    <div class="cajas">${["estrategica","gancho","fuera","sin"].map(k=>caja(CA[k][2],CA[k][0],CA[k][1],a[k].v,a[k].n?`${pct(a[k].v,totA)} % · ${a[k].n} artículo${a[k].n===1?"":"s"} · ${varTxt(a[k].v,a[k].a)}`:"ninguno todavía",`irTab('articulos','${k}')`)).join("")}</div></div>`;
+    <div class="cajas">${["estrategica","gancho","fuera","sin"].map(k=>caja(CA[k][2],CA[k][0],CA[k][1],a[k].v,a[k].n?`${pct(a[k].v,totA)} % · ${a[k].n} artículo${a[k].n===1?"":"s"} · ${varTxt(a[k].v,a[k].a)}`:"ninguno todavía",`irTab('articulos','${k}')`,a[k].n?a[k].p:null)).join("")}</div>
+    ${filaTotal(totA,Object.values(a).reduce((t,x)=>t+x.a,0),Object.values(a).reduce((t,x)=>t+x.p,0))}
+    <div class="muted" style="margin-top:4px">Perdido por artículo: lo que han dejado de vender los artículos que caen. No coincide con el perdido por cliente porque cada uno compensa cosas distintas (un cliente que cambia un artículo por otro no pierde, pero el artículo sí).</div></div>`;
   // Los artículos gancho, con lo que venden a todos los clientes
   const G=ARTS.filter(r=>claseArt(r.cod)==="gancho").sort((x,y)=>y.act-x.act);
   if(G.length) h+=`<div class="card"><div class="row"><h2>🪝 Artículos gancho · ${G.length}</h2><b style="color:var(--gan)">${eur(a.gancho.v)}</b></div>
@@ -275,7 +288,7 @@ function listaArts(){
   return L;
 }
 function vistaArticulos(){
-  if(!ARTS) return `<div class="card">${ARTS_ERR?`<p class="muted">No se han podido calcular (${esc(ARTS_ERR)}). <a href="#" onclick="cargarArts(true);return false">Reintentar</a></p>`:`<p class="muted">Calculando ventas por artículo en Power BI… la primera vez del día puede tardar un minuto.</p>`}</div>`;
+  if(!ARTS) return `<div class="card">${ARTS_ERR?`<p class="muted">No se han podido calcular (${esc(ARTS_ERR)}). <a href="#" onclick="cargarArts(true);return false">Reintentar</a></p>`:`<p class="muted">Calculando ventas por artículo en Power BI… <b id="relojArts"></b> (la primera vez del día puede tardar un par de minutos).</p>`}</div>`;
   const n=(k)=>ARTS.filter(r=>claseArt(r.cod)===k).length, ns=ARTS.filter(r=>SUG[r.cod]&&claseArt(r.cod)==="sin").length;
   const ch=(k,txt,col)=>`<button class="chip${FA.clase===k?" on":""}" style="--c:${col}" onclick="FA.clase='${k}';FA.n=150;SELA=new Set();pintar()">${txt}</button>`;
   const fams=[...new Set(ARTS.map(famDe))].sort();
