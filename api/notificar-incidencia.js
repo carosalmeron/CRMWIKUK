@@ -193,15 +193,20 @@ function casaDepto(d,tipologia){
 // Destinatarios de una tipología según el organigrama:
 // { directos:[emails], escalado:[emails del depto padre] }
 // (oct 2026) Incidencia de COBRO: creada desde el panel de cobros, atada a una factura, o con
-// un motivo de cobro (impago, cobro, pago, vencimiento, abono). Solo estas llegan también a los
-// miembros del departamento (Administración de clientes); el resto, solo a los responsables.
+// un motivo de cobro (impago, cobro, pago, vencimiento, abono). Van solo a EMAILS_COBRO.
 function esCobro(inc){
   if(!inc) return false;
   if(inc.origen==="cobros"||inc.claveFactura||inc.estadoCobro) return true;
   const t=[inc.subtipo,inc.titulo,inc.categoria].filter(Boolean).join(" ");
   return /impago|cobro|pago|vencimient|abono|reclamaci[oó]n de (deuda|cobro|pago)/i.test(t);
 }
+// Quién recibe las incidencias de cobro: el jefe de administración (José Antonio) y
+// Administración de clientes (Alba). Nadie más del departamento. Se puede cambiar sin tocar
+// código con la variable COBRO_EMAILS en Vercel (emails separados por comas).
+const EMAILS_COBRO=(process.env.COBRO_EMAILS||"jagarcia@unitedcaro.com,administracion@unitedcaro.com")
+  .split(",").map(e=>e.trim().toLowerCase()).filter(Boolean);
 function destinatariosDe(datos, tipologia, inc){
+  if(esCobro(inc)) return {directos:[...EMAILS_COBRO], escalado:[]};
   const directos=new Set(), escalado=new Set();
   const addD=e=>{ if(e) directos.add(String(e).toLowerCase()); };
   const addE=e=>{ if(e) escalado.add(String(e).toLowerCase()); };
@@ -217,24 +222,6 @@ function destinatariosDe(datos, tipologia, inc){
   });
   deps.forEach(dep=>{
     (dep.responsableIds||[]).forEach(rid=>addD(emailDeCuenta(datos,rid)));
-    // (oct 2026) En las incidencias de COBRO, también los MIEMBROS del departamento, no solo
-    // el responsable (Alba, administración de clientes, las veía en el CRM pero no le llegaba el
-    // correo). Miembro = ficha con departamentoId de este departamento, o en miembros/miembroIds.
-    if(esCobro(inc)){
-    // El departamento y sus subdepartamentos (p. ej. Administración › Administración de clientes)
-    const depIds=new Set([dep._id,dep.id].filter(Boolean).map(x=>String(x).toLowerCase()));
-    datos.departamentos.forEach(h=>{ if(h.activo!==false&&h.padre&&depIds.has(String(h.padre).toLowerCase())) [h._id,h.id].filter(Boolean).forEach(x=>depIds.add(String(x).toLowerCase())); });
-    const subdeps=datos.departamentos.filter(h=>[h._id,h.id].some(x=>x&&depIds.has(String(x).toLowerCase())));
-    [datos.portal,datos.usuarios].forEach(col=>(col||[]).forEach(u=>{
-      if(!cuentaValida(u)||!u.email) return;
-      if(u.departamentoId&&depIds.has(String(u.departamentoId).toLowerCase())) addD(u.email);
-    }));
-    subdeps.forEach(sd=>{
-      if(sd!==dep) (sd.responsableIds||[]).forEach(rid=>addD(emailDeCuenta(datos,rid)));
-      const mi=Array.isArray(sd.miembros)?sd.miembros:Array.isArray(sd.miembroIds)?sd.miembroIds:[];
-      mi.forEach(mid=>addD(emailDeCuenta(datos,typeof mid==="object"&&mid?(mid.id||mid._id):mid)));
-    });
-    }
     // Escalado: responsables del departamento PADRE (excepto dirección)
     if(dep.padre && dep.padre!=="direccion"){
       const padre=datos.departamentos.find(d=>d._id===dep.padre||d.id===dep.padre);
