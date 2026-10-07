@@ -52,6 +52,9 @@
       numN(f['Unid Stock Actual']),f['ABCDE1']==null?null:f['ABCDE1'],f['SUBFAMILIA DESC']==null?null:f['SUBFAMILIA DESC']]);
   }
 
+  // Producto al que pertenece un código de tripa: quita el envase (.C12) y el entubado (F3, R2…)
+  // FU36.9LF3.BG → FU36.9L · C3.8R.BG → C3.8R · FU36.9NR2 → FU36.9N. Si no tiene esa forma, null.
+  const raizDe=(c)=>{ const m=/^([A-Z]{1,3}\d{1,3}\.\d{1,2}[A-Z]+?)(?:[FR]\d+)?(?:\.[A-Z0-9]+)?$/.exec(String(c||'').trim().toUpperCase()); return m?m[1]:null; };
   function calcular(raw,cfg,ref){
     cfg=cfg||{}; ref=ref||{};
     const ROT_OBJ=Object.assign({},ROT_OBJ_DEF,cfg.rotObj||{});
@@ -63,10 +66,14 @@
     const ALM_NOMBRES={}; alm.forEach(a=>ALM_NOMBRES[a.cod]=a.nombre);
     const ALM_EXCL={}; alm.filter(a=>!a.computa).forEach(a=>ALM_EXCL[a.cod]=a.grupo||'Incidencias');
 
+    // ── (oct 2026) Madeja + envases + entubados de su letra = mismo producto ──
+    // FU36.9L junta FU36.9L.C12… (envases) y FU36.9LF3 / FU36.9LR3 (TF/TR). FU36.9NF1 va con FU36.9N.
+    const AGRUPA=cfg.agruparRaiz!==false;
+    const aRep=(c)=>AGRUPA?(raizDe(c)||c):c;
     // ── UC ──
     const U=new Map(), EXCL=[], child2padre=new Map();
     let ucTotal=0, nLineasUC=0;
-    const ucRows=raw.uc||null;
+    const ucRows=raw.uc?(AGRUPA?raw.uc.map(l=>{ const p=aRep(l[0]); return p===l[0]?l:[p].concat(l.slice(1)); }):raw.uc):null;
     if(ucRows){
       nLineasUC=ucRows.length; ucTotal=ucRows.reduce((t,x)=>t+x[6],0);
       const grupos=[...new Set(Object.values(ALM_EXCL))].sort((a,b)=>{ const o=(g)=>g==='Incidencias'?0:g==='Consigna'?1:9; return o(a)-o(b); });
@@ -103,7 +110,7 @@
     const W=new Map(); let EXCL_WK=null;
     const wkInfo={filas:0,excluidas:0,neg:0,negVal:0,totalFichero:null,sumaLineas:0,nostockVal:0,negValTotal:0};
     if(raw.wk){
-      let d=raw.wk.map(x=>x.slice());
+      let d=raw.wk.map(x=>{ const y=x.slice(); if(AGRUPA&&y[0]) y[0]=aRep(y[0]); return y; });
       const tot=d.find(x=>x[0]==='TOTAL'); if(tot) wkInfo.totalFichero=isNaN(tot[6])?null:tot[6];
       d=d.filter(x=>x[0]!=='TOTAL'&&!x[0].startsWith('FILTROS')).filter(x=>!(x[0]===''&&vacio(x[1])));
       const sum=(l,i)=>l.reduce((t,x)=>t+(isNaN(x[i])?0:x[i]),0);
@@ -246,5 +253,5 @@
     return {uc,modo:'unidades',info:{codigos:Object.keys(ex).length,conStock:new Set(uc.map(l=>l[1])).size,enBase,nuevos,sinCoste,uds,
       quitados:quitados.length,valor:uc.reduce((t,l)=>t+l[6],0)}};
   }
-  G.STOCK={tipoFichero,compactarUC,compactarWK,calcular,desdeSAP,ROT_OBJ_DEF,WK_NO_COMERCIAL_DEF,COLS_UC,COLS_WK};
+  G.STOCK={tipoFichero,compactarUC,compactarWK,calcular,desdeSAP,raizDe,ROT_OBJ_DEF,WK_NO_COMERCIAL_DEF,COLS_UC,COLS_WK};
 })(typeof window!=='undefined'?window:globalThis);
