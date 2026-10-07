@@ -36,7 +36,7 @@ async function buscar(){
     if(!r.ok) throw new Error('No se puede leer productos (HTTP '+r.status+')');
     const j=await r.json(); (j.documents||[]).forEach(d=>{ TOTAL++; const f=d.fields||{};
       const ck=v(f,'categoriaKey'), tp=v(f,'tipoPromo');
-      if(/^promo_/i.test(ck)||tp) out.push({name:d.name,codigo:v(f,'codigo'),nombre:v(f,'nombre'),precio:v(f,'precio'),ck,sub:v(f,'subcategoria'),tp,doc:d}); });
+      if((/^promo_/i.test(ck)||tp)&&!(f.retiradoPromo&&f.retiradoPromo.booleanValue)) out.push({name:d.name,codigo:v(f,'codigo'),nombre:v(f,'nombre'),precio:v(f,'precio'),ck,sub:v(f,'subcategoria'),tp,doc:d}); });
     tok=j.nextPageToken||null; n++; }while(tok&&n<100);
   return out;
 }
@@ -66,12 +66,22 @@ async function borrar(){
   const go=document.getElementById('go'), st=document.getElementById('st');
   if(!confirm(`Se van a borrar ${PROMOS.length} promociones antiguas de la base de datos. No se puede deshacer (salvo con la copia). ¿Seguimos?`)) return;
   copia(); go.disabled=true;
-  let ok=0, mal=0;
+  let ok=0, ret=0, mal=0, err='', borrarNo=false;
+  const url=(p)=>'https://firestore.googleapis.com/v1/'+p.name.split('/').map((x,i,arr)=>i===arr.length-1?encodeURIComponent(decodeURIComponent(x)):x).join('/');
+  const leerErr=async(r)=>{ let t=''; try{ const j=await r.json(); t=(j.error&&(j.error.status+': '+j.error.message))||''; }catch(e){} return 'HTTP '+r.status+(t?' · '+t:''); };
   for(const p of PROMOS){
-    try{ const r=await fetch('https://firestore.googleapis.com/v1/'+p.name,{method:'DELETE'}); if(r.ok) ok++; else mal++; }catch(e){ mal++; }
-    st.textContent=`Borrando… ${ok+mal} de ${PROMOS.length}`;
+    try{
+      if(!borrarNo){ const r=await fetch(url(p),{method:'DELETE'}); if(r.ok){ ok++; st.textContent=`Borrando… ${ok+ret+mal} de ${PROMOS.length}`; continue; } err=await leerErr(r); if(r.status===403||r.status===401) borrarNo=true; }
+      // Si la base de datos no deja borrar, se retira: se le quita la sección de promoción y la marca,
+      // y el catálogo ya no lo carga (solo carga productos con sección)
+      const r2=await fetch(url(p)+'?updateMask.fieldPaths=categoriaKey&updateMask.fieldPaths=tipoPromo&updateMask.fieldPaths=retiradoPromo',
+        {method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({fields:{categoriaKey:{stringValue:''},tipoPromo:{stringValue:''},retiradoPromo:{booleanValue:true}}})});
+      if(r2.ok) ret++; else { mal++; err=err||await leerErr(r2); if(!err.includes('PATCH')) err+=' · al retirar: '+await leerErr(r2); }
+    }catch(e){ mal++; err=err||e.message; }
+    st.textContent=`Procesando… ${ok+ret+mal} de ${PROMOS.length}`;
   }
-  st.innerHTML=mal?`<span class="err">Borradas ${ok}; ${mal} no se han podido borrar. Vuelve a abrir la página para reintentarlo.</span>`:`<span class="ok">✓ Borradas las ${ok} promociones antiguas.</span>`;
+  st.innerHTML=(ok?`<div class="ok">✓ Borradas: ${ok}</div>`:'')+(ret?`<div class="ok">✓ Retiradas del catálogo: ${ret} <span class="dim">(la base de datos no deja borrar en productos; se les ha quitado la sección de promoción y ya no se cargan)</span></div>`:'')
+    +(mal?`<div class="err">✗ No se han podido tocar: ${mal}. Motivo: ${esc(err)}</div>`:'');
   setTimeout(init,1500);
 }
 async function init(){ TOTAL=0; try{ PROMOS=await buscar(); pintar(); }catch(e){ document.getElementById('res').innerHTML=`<p class="err">${esc(e.message)}</p>`; } }
