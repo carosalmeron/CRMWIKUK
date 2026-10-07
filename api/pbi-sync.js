@@ -1124,6 +1124,192 @@ EVALUATE
     return res.status(200).json(out);
   }
 
+  // (oct 2026) ?estudio=1 → ESTUDIO DEL NEGOCIO ESTRATÉGICO. Ventas de este año y
+  // del mismo periodo del año pasado por ARTÍCULO × COMERCIAL (vendedor del ERP
+  // traducido a comercial del CRM), solo de los clientes estratégicos (los no
+  // estratégicos fuera; los sin clasificar cuentan como estratégicos), con el
+  // mismo ámbito que el mapa (&equipo= / &agente=). Sirve para ver dónde se pierde:
+  // qué familias, qué comerciales y qué tipo de comercial. Solo lectura y guardado
+  // junto al sello de la última sincronización.
+  // Respuesta: filas [codigo, agente, ventasAct, ventasAnt] y agentes {agente: {tipo, equipo, ambito}}
+  if (req.query.estudio === "1") {
+    const out = { ok: true };
+    try {
+      let sello = null;
+      try {
+        const m = await fbLeerDocumento("pbi_meta", "estado");
+        sello = m && m.ultimaSync ? String(m.ultimaSync) : null;
+      } catch (e) { /* sin sello se consulta siempre */ }
+      const U = (v) => String(v || "").toUpperCase().trim();
+      const variantes = (cod) => {
+        const c = U(cod); if (!c) return [];
+        const s = new Set([c, canonico(c)]);
+        const m = /^U430(\d{4})$/.exec(c);
+        if (m) s.add("U43" + m[1]);
+        return [...s];
+      };
+      const limpio = (c) => String(c).replace(/["\\]/g, "");
+
+      // No estratégicos (mapa + recuperación, como en mapaNegocio)
+      const noEst = new Set(), estrategicos = new Set();
+      try {
+        for (const d of await fbLeerColeccion("clasif_clientes")) {
+          const cod = U(d.codigo || d._id);
+          if (d.tipo === "no_estrategico") noEst.add(cod);
+          else if (d.tipo === "estrategico") estrategicos.add(cod);
+        }
+      } catch (e) { out.avisoClasif = e.message.slice(0, 120); }
+      try {
+        for (const c of await fbLeerColeccion("recuperacion")) {
+          const cod = U(c.cliente);
+          if (cod && c.estado === "fuera_estrategia" && !estrategicos.has(cod)) noEst.add(cod);
+        }
+      } catch (e) { out.avisoRecuperacion = e.message.slice(0, 120); }
+
+      // Ámbito: clientes de la cartera, sin intercompañía, sin no estratégicos
+      const fEq = U(req.query.equipo), fAg = U(req.query.agente);
+      const eqDe = {};
+      try { for (const a of await fbLeerColeccion("pbi_resumen_agente")) eqDe[U(a._id)] = U(a.equipo); }
+      catch (e) { out.avisoEquipos = e.message.slice(0, 120); }
+      const dentro = new Set(), hijos = new Map();
+      for (const d of await fbLeerColeccion("pbi_ventas_cliente")) {
+        const cod = U(d._id);
+        if (d.fusionadoEn) {
+          const p = U(d.fusionadoEn);
+          if (!hijos.has(p)) hijos.set(p, []);
+          hijos.get(p).push(cod);
+          continue;
+        }
+        const ag = U(d.agenteFinal || d.agente), eq = eqDe[ag] || "";
+        if (d.intercompany || d.obsoleto || noEst.has(cod)) continue;
+        if (fAg && ag !== fAg) continue;
+        if (fEq && !(eq === fEq || (eq && (eq.includes(fEq) || fEq.includes(eq))))) continue;
+        dentro.add(cod);
+      }
+      const todos = new Set();
+      for (const c of dentro) { todos.add(c); for (const h of (hijos.get(c) || [])) todos.add(h); }
+      const lista = [...new Set([...todos].flatMap(variantes))].sort();
+      out.clientesEstrategicos = dentro.size;
+      out.ambito = fAg ? "agente " + fAg : fEq ? "equipo " + fEq : "toda la empresa (sin intercompañía)";
+      if (!lista.length) { out.filas = []; out.agentes = {}; return res.status(200).json(out); }
+
+      let h = 5381;
+      for (const ch of lista.join(",")) h = ((h * 33) ^ ch.charCodeAt(0)) >>> 0;
+      const clave = docId(`estudio_v1_${h.toString(36)}`);
+      if (sello && req.query.recargar !== "1") {
+        try {
+          const g = await fbLeerDocumento("pbi_mapa_negocio", clave);
+          if (g && g.basadoEn === sello && g.partes) {
+            let txt = "";
+            for (let i = 0; i < Number(g.partes); i++) {
+              const p = await fbLeerDocumento("pbi_mapa_negocio", `${clave}_${i}`);
+              if (!p || p.texto == null) throw new Error("parte " + i + " no encontrada");
+              txt += p.texto;
+            }
+            const j = JSON.parse(txt);
+            out.filas = j.filas; out.agentes = j.agentes; out.periodo = j.periodo;
+            out.deCache = true; out.basadoEn = sello;
+            return res.status(200).json(out);
+          }
+        } catch (e) { out.avisoCache = e.message.slice(0, 120); }
+      }
+
+      await cargarEquivArticulos();
+      const { token } = await getToken(req);
+      const T = M.ventas;
+      const Q = dax(null);
+      const filas = await pbiQuery(token, `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+  VAR _iniAct = DATE(_anoAct, 1, 1)
+  VAR _iniAnt = DATE(_anoAnt, 1, 1)
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
+EVALUATE
+  FILTER(
+    SUMMARIZECOLUMNS(
+      ${T}[CODIGO], ${M.vVendedor},
+      TREATAS({${lista.map((c) => `"${limpio(c)}"`).join(", ")}}, ${T}[CLIENTE]),
+      "Act", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy),
+      "Ant", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt)
+    ),
+    [Act] <> 0 || [Ant] <> 0
+  )`, true);
+      out.filasPowerBI = filas.length;
+
+      // Vendedor del ERP → comercial del CRM, con su tipo y su equipo
+      const agentes = new Map();
+      try {
+        for (const a of await pbiQuery(token, Q.agentes, true)) {
+          const cod = String(pick(a, "CODIGO") || "").trim().toUpperCase();
+          if (!cod) continue;
+          agentes.set(cod, {
+            grupo: String(pick(a, "GRUPOAGENTE") || "").trim().toUpperCase() || null,
+            tipo: String(pick(a, "GRUPONIVEL3") || "").trim() || null,
+            ambito: String(pick(a, "GRUPONIVEL2") || "").trim() || null,
+            equipo: (() => { const v = String(pick(a, "GRUPONIVEL4") || "").trim(); return v && v !== "-" ? v : null; })(),
+          });
+        }
+      } catch (e) { out.avisoAgentes = e.message.slice(0, 120); }
+
+      // Mismo agrupado de artículos que el mapa (código actual y envase)
+      const arts = new Map();
+      try {
+        for (const a of await pbiQuery(token, Q.articulos, true)) {
+          const cod = String(pick(a, "CODIGO") || "").trim().toUpperCase();
+          if (cod && !arts.has(cod)) arts.set(cod, { descripcion: pick(a, "DESCRIPCION") });
+        }
+      } catch (e) { out.errorMaestro = e.message.slice(0, 160); }
+      const RE_ENVASE = /\.[A-Z0-9]+$/i;
+      const desc = (c) => String((arts.get(c) || {}).descripcion || "")
+        .toUpperCase().replace(/\s*\.[A-Z0-9]+$/, "").replace(/\s+/g, " ").trim();
+      const tronco = (d) => d.replace(/[^A-Z0-9]/g, "").slice(0, 16);
+      const conEnvase = (cod) => {
+        const base = cod.replace(RE_ENVASE, "");
+        if (base !== cod && arts.has(base)) {
+          const t1 = tronco(desc(base)), t2 = tronco(desc(cod));
+          if (t1.length >= 12 && t1 === t2) return base;
+        }
+        return cod;
+      };
+
+      const g = new Map(), infoAg = {};
+      for (const r of filas) {
+        const art = conEnvase(codArt(String(pick(r, "CODIGO") || "").trim().toUpperCase()));
+        if (!art) continue;
+        const vend = String(pick(r, "VENDEDOR") || "").trim().toUpperCase();
+        const a = agentes.get(vend);
+        const ag = (a && a.grupo) || vend || "SIN COMERCIAL";
+        if (a && !infoAg[ag]) infoAg[ag] = { tipo: a.tipo, equipo: a.equipo, ambito: a.ambito };
+        const k = art + "|" + ag;
+        const x = g.get(k) || [art, ag, 0, 0];
+        x[2] += num(pick(r, "Act")); x[3] += num(pick(r, "Ant"));
+        g.set(k, x);
+      }
+      out.filas = [...g.values()].map((x) => [x[0], x[1], Math.round(x[2]), Math.round(x[3])])
+        .filter((x) => x[2] || x[3]);
+      out.agentes = infoAg;
+      const hoy = new Date();
+      out.periodo = { desde: `${hoy.getFullYear()}-01-01`, hasta: hoy.toISOString().slice(0, 10) };
+      out.deCache = false; out.basadoEn = sello;
+
+      if (sello && out.filas.length) {
+        try {
+          const txt = JSON.stringify({ filas: out.filas, agentes: out.agentes, periodo: out.periodo });
+          const TAM = 400000, partes = [];
+          for (let i = 0; i < txt.length; i += TAM) partes.push(txt.slice(i, i + TAM));
+          await fbCommit("pbi_mapa_negocio", partes.map((t, i) => ({ _id: `${clave}_${i}`, texto: t })));
+          await fbCommit("pbi_mapa_negocio", [{ _id: clave, basadoEn: sello, partes: partes.length, guardadoEl: new Date().toISOString() }]);
+        } catch (e) { out.avisoGuardar = e.message.slice(0, 120); }
+      }
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    return res.status(200).json(out);
+  }
+
   // Consulta de solo lectura que llama la pantalla de análisis desde el
   // navegador. Va antes del control de acceso porque no se puede poner el
   // secreto en el código del cliente sin exponerlo. No escribe nada.
