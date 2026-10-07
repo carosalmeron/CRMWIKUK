@@ -329,11 +329,123 @@ async function procesar(file){
 // > 70 días ya calculados. No se lee ninguna otra pestaña ni el detalle de
 // facturas. La empresa de cada fila se deduce de VENTAS 12M: las filas de
 // WIKUK traen un número; las de UC, «Sin Datos».
+// ── (oct 2026) TODOS por FACTURA ─────────────────────────────────
+// Desde octubre la pestaña TODOS trae una fila por factura: CLIENTE, FACTURA,
+// FECHA FACTURA, FECHA VENCIMIENTO, IMPORTE PENDIENTE, EMPRESA, SOCIEDAD,
+// TIPO DOC, COMERCIAL, DÍAS VENCIDO y ESTADO. Los saldos del cliente se calculan
+// sumando sus facturas con las mismas reglas que el análisis de Administración:
+//   · fuera de plazo = suma de lo «Vencida» (abonos y correcciones vencidos restan)
+//   · +20 días = vencidos hace más de 20 días
+//   · más de 70 días = vencidos y con fecha de factura de hace más de 70 días
+// La fecha de corte es la del Excel: vencimiento + DÍAS VENCIDO.
+function esTodosPorFactura(rows){
+  const h=filaCabecera(rows,["CLIENTE","FACTURA","VENCIMIENTO","IMPORTE PENDIENTE"]);
+  return h>=0?h:-1;
+}
+function construirFacturas(wb, nombreFichero, rows, h){
+  const avisos=[];
+  const cab=rows[h];
+  const iCli=indiceCol(cab,["CLIENTE"]), iFac=indiceCol(cab,["FACTURA"]),
+        iFf =indiceCol(cab,["FECHA FACTURA"]), iFv=indiceCol(cab,["FECHA VENCIMIENTO"]),
+        iP  =indiceCol(cab,["IMPORTE PENDIENTE"]), iEmp=indiceCol(cab,["EMPRESA"]),
+        iSoc=indiceCol(cab,["SOCIEDAD"]), iTip=indiceCol(cab,["TIPO DOC","TIPO"]),
+        iCom=indiceCol(cab,["COMERCIAL"]), iDv=indiceCol(cab,["DIAS VENCIDO"]),
+        iEst=indiceCol(cab,["ESTADO"]);
+  // Datos del cliente (región, categoría, ventas, margen…) de las plantillas
+  const meta={};
+  [buscarHoja(wb,["PLANTILLA","WIKUK"]),buscarHoja(wb,["PLANTILLA","UC"])].forEach(hoja=>{
+    if(!hoja) return; const rr=leerHoja(wb,hoja), hh=filaCabecera(rr,["CLIENTE","COMERCIAL"]); if(hh<0) return;
+    const c=rr[hh], ic=indiceCol(c,["CLIENTE"]), ir=indiceCol(c,["REGION"]), ica=indiceCol(c,["CATEGORIA"]),
+      ic7=indiceCol(c,["CATEGORIA 70 DIAS"]), iv=indiceCol(c,["VENTAS 12M"]), im=indiceCol(c,["MG%","MG"]), idp=indiceCol(c,["DIAS PAGO REAL"]);
+    for(let r=hh+1;r<rr.length;r++){ const f=rr[r]; if(!f||!f[ic]) continue; const k=normCli(f[ic]);
+      // Si el cliente está en las dos plantillas manda la categoría que no es «OK» (la de la empresa con deuda)
+      if(meta[k]&&!(/^OK$/i.test(meta[k].cat)&&ica>=0&&f[ica]&&!/^OK$/i.test(String(f[ica]).trim()))) continue;
+      const t=(i)=>i>=0&&f[i]!=null&&!/sin datos/i.test(String(f[i]))?f[i]:"";
+      meta[k]={r:String(t(ir)||"").trim(),cat:String(t(ica)||"").trim(),c70:String(t(ic7)||"").trim(),
+        v12:typeof f[iv]==="number"?f[iv]:0,mg:typeof f[im]==="number"?f[im]:0,dp:typeof f[idp]==="number"?f[idp]:0}; }
+  });
+  // Fecha de corte del Excel
+  const cnt={};
+  for(let r=h+1;r<rows.length;r++){ const f=rows[r]; if(!f) continue; const fv=iso(f[iFv]), dv=num(f[iDv]);
+    if(fv&&dv){ const d=new Date(fv+"T12:00:00Z"); d.setUTCDate(d.getUTCDate()+dv); const k=d.toISOString().slice(0,10); cnt[k]=(cnt[k]||0)+1; } }
+  const fechaDatos=Object.entries(cnt).sort((a,b)=>b[1]-a[1])[0]?.[0]||hoyISO();
+  const diasEntre=(a,b)=>Math.round((new Date(b+"T12:00:00Z")-new Date(a+"T12:00:00Z"))/86400000);
+
+  const PC={}, nombres={}, INTERCO=["WIKUK","INTERKEY","UNITED CARO","DISCOB","JBOSCH"], movidos=new Set();
+  let nFilas=0, sinFecha=0;
+  for(let r=h+1;r<rows.length;r++){
+    const f=rows[r]; if(!f||!f[iCli]) continue;
+    const k=normCli(f[iCli]); if(!k) continue;
+    const im=Math.round(num(f[iP])*100)/100; if(!im) continue;
+    let nomC=String(f[iCom]==null||f[iCom]===0?"":f[iCom]).trim()||"Sin Comercial";
+    if(INTERCO.some(x=>norm(f[iCli]).includes(x)) && !/^INTERC/i.test(nomC)){ movidos.add(String(f[iCli]).trim()+" ("+nomC+")"); nomC="INTERC.NACIONAL"; }
+    const cod=normCom(nomC)||"SINCOMERCIAL"; nombres[cod]=nombres[cod]||nomC;
+    const g=String(f[iEmp]||"").trim().toUpperCase()||"?";
+    const tipo=String(f[iTip]==null?"":f[iTip]).trim(), t=(tipo==="-"?"":tipo);
+    const ff=iso(f[iFf]), fv=iso(f[iFv]); if(!fv) sinFecha++;
+    const dv=iDv>=0&&f[iDv]!=null&&f[iDv]!==""?Math.round(num(f[iDv])):(fv?diasEntre(fv,fechaDatos):0);
+    const venc=iEst>=0?/^vencid/i.test(String(f[iEst]||"").trim()):dv>0;
+    const cs=(PC[cod]=PC[cod]||{});
+    if(!cs[k]){ const m=meta[k]||{}; cs[k]={c:String(f[iCli]).trim(),cod:"",r:m.r||"",cat:m.cat||"",c70:m.c70||"",
+      v12:m.v12||0,mg:m.mg||0,dp:m.dp||0,p:0,ven:0,v20:0,v70:0,emp:{},f:[]}; }
+    const soc=iSoc>=0?String(f[iSoc]||"").trim():"";
+    cs[k].f.push({n:String(f[iFac]==null?"":f[iFac]).trim(),t,ff,fv,im,g,em:soc,dv,ve:venc?1:0,corr:/correcci/i.test(soc)?1:0});
+    nFilas++;
+  }
+  if(!nFilas) throw new Error("La pestaña TODOS no tiene facturas.");
+  // Saldos por cliente y empresa, sumando sus documentos (un mismo nº puede venir partido en varias líneas)
+  const r2=(x)=>Math.round(x*100)/100;
+  for(const cod of Object.keys(PC)) for(const c of Object.values(PC[cod])){
+    // Correcciones de Administración: anulan una factura del mismo importe con signo contrario.
+    // Las dos se marcan «anul» para que no salgan como deuda real (seguro, antigüedad), aunque
+    // siguen sumando en los saldos, que así cuadran con la PLANTILLA de Administración.
+    { const cent=(x)=>Math.round(x*100);
+      c.f.filter(x=>x.corr).forEach(x=>{ if(x.anul) return;
+        const y=c.f.find(z=>z!==x&&!z.anul&&z.g===x.g&&cent(z.im)===-cent(x.im)&&(!z.corr||true));
+        if(y){ x.anul=1; y.anul=1; } }); }
+    // Igual que la PLANTILLA de Administración: sumas netas (los abonos y correcciones vencidos restan)
+    c.f.forEach(x=>{
+      const e=(c.emp[x.g]=c.emp[x.g]||{p:0,ven:0,v20:0,v70:0,n:0});
+      e.p+=x.im; e.n++; c.p+=x.im;
+      if(x.ve){ e.ven+=x.im; c.ven+=x.im;
+        if(x.dv>20){ e.v20+=x.im; c.v20+=x.im; }
+        if((x.ff||x.fv)&&diasEntre(x.ff||x.fv,fechaDatos)>70){ e.v70+=x.im; c.v70+=x.im; } }
+    });
+    ["p","ven","v20","v70"].forEach(q=>c[q]=r2(c[q])); Object.values(c.emp).forEach(e=>["p","ven","v20","v70"].forEach(q=>e[q]=r2(e[q])));
+    c.f.sort((a,b)=>(a.fv||"").localeCompare(b.fv||""));
+  }
+  if(movidos.size) avisos.push("Sociedades del grupo que estaban a nombre de un vendedor y pasan a intercompañía: "+[...movidos].join(", ")+".");
+  if(sinFecha) avisos.push(sinFecha+" facturas sin fecha de vencimiento legible.");
+  const docs=[]; let totalP=0, totalV=0, nF=0;
+  // Seguro de crédito: facturas con más de 90 / 110 días vencidas (sin apuntes ni abonos)
+  const SR=90, SV=110; let segR=0, segV=0, nSegR=0, nSegV=0;
+  for(const cod of Object.keys(PC)){
+    const clientes=Object.values(PC[cod]).filter(c=>Math.abs(c.p)>=0.01||Math.abs(c.ven)>=0.01).sort((a,b)=>b.ven-a.ven||b.p-a.p);
+    const p=clientes.reduce((t,c)=>t+c.p,0), v=clientes.reduce((t,c)=>t+c.ven,0), nf=clientes.reduce((t,c)=>t+c.f.length,0);
+    totalP+=p; totalV+=v; nF+=nf;
+    if(!/^INTERC/.test(cod)) clientes.forEach(c=>c.f.forEach(x=>{ if(!x.ve||x.im<=0||x.t==="AS"||x.corr||x.anul) return; if(x.dv>SV){ segV+=x.im; nSegV++; } else if(x.dv>SR){ segR+=x.im; nSegR++; } }));
+    docs.push({ id:cod, comercial:cod, comercialNombre:nombres[cod]||cod,
+      fechaDatos, actualizado:new Date().toISOString(), ficheroOrigen:nombreFichero,
+      fuente:"TODOS", facturas:true,
+      totalPendiente:r2(p), totalVencido:r2(v),
+      totalV20:r2(clientes.reduce((t,c)=>t+c.v20,0)), totalV70:r2(clientes.reduce((t,c)=>t+c.v70,0)),
+      nClientes:clientes.length, nFacturas:nf, nVencidas:clientes.filter(c=>c.ven>=1).length,
+      datos:JSON.stringify(clientes) });
+  }
+  docs.sort((a,b)=>b.totalVencido-a.totalVencido);
+  avisos.push(`Seguro de crédito (sin intercompañía, sin apuntes ni facturas anuladas por corrección): ⚠️ riesgo (91-110 días) ${nSegR} facturas · ${eur(segR)} — 🛡️ a enviar (+110 días) ${nSegV} facturas · ${eur(segV)}.`);
+  const pesado=docs.filter(d=>d.datos.length>900000);
+  if(pesado.length) avisos.push("Los vendedores "+pesado.map(d=>d.comercial).join(", ")+" superan el tamaño máximo por documento. Avisa a IT.");
+  return {docs, fechaDatos, avisos, totalP, totalV, totalF:nFilas, nComerciales:docs.length, nFacturas:nFilas, nombreFichero};
+}
+
 function construir(wb, nombreFichero){
   const avisos=[];
   const hT=buscarHoja(wb,["TODOS"]);
   if(!hT) throw new Error("El Excel no tiene la pestaña TODOS.");
   const rows=leerHoja(wb,hT);
+  // (oct 2026) Formato nuevo: una fila por factura
+  { const hf=esTodosPorFactura(rows); if(hf>=0) return construirFacturas(wb,nombreFichero,rows,hf); }
   const h=filaCabecera(rows,["CLIENTE","COMERCIAL","PENDIENTE"]);
   if(h<0) throw new Error("La pestaña «"+hT+"» no tiene las columnas CLIENTE, COMERCIAL y TOTAL IMPORTE PENDIENTE.");
   const cab=rows[h];
@@ -350,12 +462,19 @@ function construir(wb, nombreFichero){
   if(iV<0) avisos.push("No se encuentra la columna IMPORTE FUERA DE PLAZO: el vencido saldrá a 0.");
   let fechaDatos="";
   const PC={}, nombres={};
+  const INTERCO=["WIKUK","INTERKEY","UNITED CARO","DISCOB","JBOSCH"], movidosGrupo=[];
   let nFilas=0;
   for(let r=h+1;r<rows.length;r++){
     const f=rows[r]; if(!f||!f[iCli]) continue;
     const k=normCli(f[iCli]); if(!k) continue;
     const g=(iV12>=0&&typeof f[iV12]==="number")?"WIKUK":"UC";
-    const nomC=String(f[iCom]||"").trim()||"Sin Comercial", cod=normCom(nomC)||"SINCOMERCIAL";
+    let nomC=String(f[iCom]||"").trim()||"Sin Comercial";
+    // (sep 2026) Las sociedades del grupo nunca son deuda de un vendedor, aunque
+    // TODOS las tenga a su nombre (WIKUK EASY SLU salía en la cartera de ACRUZ).
+    // Mismo criterio de intercompañía que las ventas.
+    if(INTERCO.some(x=>norm(f[iCli]).includes(x)) && !/^INTERC/i.test(nomC)){
+      movidosGrupo.push(String(f[iCli]).trim()+" ("+nomC+")"); nomC="INTERC.NACIONAL"; }
+    const cod=normCom(nomC)||"SINCOMERCIAL";
     nombres[cod]=nombres[cod]||nomC;
     if(iFec>=0){ const fe=iso(f[iFec]); if(fe&&fe>fechaDatos) fechaDatos=fe; }
     const cs=((PC[cod]=PC[cod]||{}));
@@ -374,7 +493,21 @@ function construir(wb, nombreFichero){
     nFilas++;
   }
   if(!nFilas) throw new Error("La pestaña TODOS no tiene filas de clientes.");
+  if(movidosGrupo.length) avisos.push("Sociedades del grupo que TODOS tenía a nombre de un vendedor y pasan a intercompañía: "+movidosGrupo.join(", ")+".");
   if(!fechaDatos) fechaDatos=hoyISO();
+  // Las facturas (nº, fecha, vencimiento) solo acompañan a los saldos de TODOS
+  // para que se sepa qué hay que cobrar. Los importes siguen siendo los de
+  // TODOS. Se cuelgan solo de clientes que están en TODOS y con las
+  // CORRECCIONES de Administración ya cruzadas.
+  let nLineas=0;
+  try{
+    const det=construirDetalle(wb,nombreFichero), m={};
+    det.docs.forEach(d=>JSON.parse(d.datos).forEach(c=>{ m[d.comercial+"|"+normCli(c.c)]=c.f||[]; }));
+    for(const cod of Object.keys(PC)) for(const k of Object.keys(PC[cod])){
+      const L=(m[cod+"|"+k]||[]).filter(x=>PC[cod][k].emp[x.g]);
+      PC[cod][k].f=L; nLineas+=L.length;
+    }
+  }catch(e){ avisos.push("No se ha podido leer el detalle de facturas ("+e.message+"): se muestran solo los saldos de TODOS."); }
   const r2=(x)=>Math.round(x*100)/100;
   const docs=[]; let totalP=0, totalV=0;
   for(const cod of Object.keys(PC)){
@@ -390,7 +523,7 @@ function construir(wb, nombreFichero){
       fuente:"TODOS",
       totalPendiente:r2(p), totalVencido:r2(v),
       totalV20:r2(clientes.reduce((t,c)=>t+c.v20,0)), totalV70:r2(clientes.reduce((t,c)=>t+c.v70,0)),
-      nClientes:clientes.length, nFacturas:0,
+      nClientes:clientes.length, nFacturas:clientes.reduce((t,c)=>t+c.f.length,0),
       nVencidas:clientes.filter(c=>c.ven>=1).length,        // clientes con importe fuera de plazo
       datos:JSON.stringify(clientes) });
   }
@@ -528,7 +661,7 @@ function construirDetalle(wb, nombreFichero){
           cli:String(f[iCli]).trim(), g:"UC",
           n:String(f[iDoc]==null?"":f[iDoc]).trim(),
           t:iTip>=0?String(f[iTip]||"").trim():"",
-          ff:iso(f[iFc]), fv:iso(f[iFv])||iso(f[iFc]),   // p. ej. «08/03//2024» en CORRECCIONES
+          ff:iso(f[iFc]), fv:iso(f[iFv]),   // vencimiento ilegible («08/03//2024»): sin fecha, como en el Excel, no cuenta como fuera de plazo
           im:Math.round(im*100)/100, tf:0,
           em:"UC",
           cod:iCod>=0?String(f[iCod]||"").trim():"",
@@ -557,8 +690,7 @@ function construirDetalle(wb, nombreFichero){
       const cands=(porCli[c.g+"|"+normCli(c.cli)]||[]).filter(j=>j!==i&&!quitar.has(j)&&!facturas[j].corr
         && Math.abs(cent(facturas[j].im)+cent(c.im))<=1);
       const j = cands.find(j=>numDoc(facturas[j].n)&&numDoc(facturas[j].n)===numDoc(c.n))
-             ?? cands.find(j=>c.ref&&facturas[j].ref===c.ref)
-             ?? cands[0];
+             ?? cands.find(j=>c.ref&&facturas[j].ref===c.ref);   // solo mismo nº o misma referencia
       if(j!=null){ quitar.add(i); quitar.add(j); nCorr++; }
     });
     if(quitar.size){
@@ -742,7 +874,7 @@ function pintar(R){
   const hoy=R.fechaDatos||hoyISO();
   document.getElementById("stats").innerHTML = [
     ["Fecha de los datos", R.fechaDatos.split("-").reverse().join("/")],
-    ["Filas de TODOS", R.nFacturas.toLocaleString("es-ES")],
+    ["Facturas / filas de TODOS", R.nFacturas.toLocaleString("es-ES")],
     ["Vendedores", R.nComerciales],
     ["Total pendiente", eur(R.totalP)],
     ["Fuera de plazo a "+hoy.split("-").reverse().join("/"), eur(R.totalV)],

@@ -179,6 +179,7 @@ let ST = {
   meta    : null,
   incid   : {},   // clave factura → nº de incidencias abiertas
   modal   : null,
+  seguro  : Q.get("seguro")||"",   // (oct 2026) "" | riesgo | va — facturas en riesgo de seguro o a enviar al seguro
 };
 
 // ── Utilidades ──────────────────────────────────────────────────
@@ -227,6 +228,18 @@ function paresCompensables(facs){
 function claveDoc(f){ return String(f.g||"")+"|"+String(f.t||"")+"|"+String(f.n||"")+"|"+String(f.fv||""); }
 
 function esApunte(f){ return String(f.t||"").toUpperCase()==="AS"; }
+// (oct 2026) Seguro de crédito, factura a factura: vencida, a cobrar, sin apuntes ni correcciones.
+// ⚠️ riesgo = más de 90 días vencida · 🛡️ a enviar = más de 110 días (RC.SEGURO_RIESGO / RC.SEGURO_VA)
+const S_RIESGO=()=>(window.RC&&RC.SEGURO_RIESGO)||90, S_VA=()=>(window.RC&&RC.SEGURO_VA)||110;
+function nivelSeguro(f){
+  if(!f||f._saldo||!(f.im>0)||esApunte(f)||f.corr||f.anul||!(f.fv&&f.fv<CORTE)) return "";
+  const d=dias(f.fv); return d>S_VA()?"va":d>S_RIESGO()?"riesgo":"";
+}
+// Facturas de seguro de un cliente: fuera las que tienen un abono del mismo importe (se compensan, no se deben)
+function facsSeguro(c,facs){
+  facs=facs||c.f||[]; const comp=new Set(paresCompensables(facs).map(x=>claveDoc(x.factura)));
+  return facs.filter(f=>nivelSeguro(f)&&!comp.has(claveDoc(f)));
+}
 function claveFac(cliente, f){ return normCom(cliente)+"|"+String(f.n||"")+"|"+(f.fv||""); }
 function semanaISO(){
   const d=new Date(), s=new Date(d.getFullYear(),0,1);
@@ -340,13 +353,14 @@ function preparados(){
     let facs=lineasDe(c);
     if(ST.empresa) facs=facs.filter(f=>f.g===ST.empresa);
     if(ST.vista==="vencidos") facs=facs.filter(f=>f._saldo ? Math.abs(f.ven)>=1 : (f.fv && f.fv<CORTE));
+    if(ST.seguro){ facs=facsSeguro(c,facs).filter(f=>nivelSeguro(f)===ST.seguro); if(!facs.length) continue; }
     // (sep 2026) Importes oficiales (pestaña TODOS), por empresa si hay filtro
     const O = oficial(c);
-    if(!facs.length && !(O && Math.abs(ST.vista==="vencidos"?O.ven:O.p)>=1)) continue;
+    if(!facs.length && (ST.seguro || !(O && Math.abs(ST.vista==="vencidos"?O.ven:O.p)>=1))) continue;
     if(q && !String(c.c||"").toUpperCase().includes(q)) continue;
     let p   = facs.reduce((s,f)=>s+(f.im||0),0);
     let v   = facs.filter(f=>f.fv&&f.fv<CORTE).reduce((s,f)=>s+(f.im||0),0);
-    if(O){ v=O.ven; p=(ST.vista==="vencidos")?O.ven:O.p; }
+    if(O&&!ST.seguro){ v=O.ven; p=(ST.vista==="vencidos")?O.ven:O.p; }
     // Modo compensación: solo los clientes donde hay algo que cuadrar.
     let pares=[];
     if(ST.compensar){
@@ -364,12 +378,13 @@ function preparados(){
     // (tipo AS) llevan la fecha del asiento de migración y falseaban el
     // retraso con cifras de 900 y 1.500 días.
     const venc = facs.filter(f=>f.fv&&f.fv<CORTE);
-    const reales = venc.filter(f=>!esApunte(f));
+    const reales = venc.filter(f=>!esApunte(f)&&!f.anul&&!f.corr);
     const masAntigua = (reales.length?reales:venc).map(f=>f.fv).sort()[0] || "9999-12-31";
     const marcados=new Set();
     pares.forEach(x=>{ marcados.add(claveDoc(x.abono)); marcados.add(claveDoc(x.factura)); });
     lista.push(Object.assign({},c,{_f:facs,_p:p,_v:v,_ant:masAntigua,
       _apunte:reales.length===0&&venc.length>0,
+      _segD:Math.max(0,...facsSeguro(c,facs).map(f=>dias(f.fv))),
       _pares:pares, _comp:pares.reduce((s,x)=>s+x.importe,0), _marcados:marcados}));
   }
   if(ST.compensar)              lista.sort((a,b)=> b._comp-a._comp);
@@ -455,6 +470,27 @@ function panelDias(base){
   </div>`;
 }
 
+// (oct 2026) Seguro de crédito: facturas en riesgo y a enviar al seguro
+function panelSeguro(base){
+  if(soloSaldos()) return "";
+  const t={riesgo:{im:0,n:0,cli:new Set()},va:{im:0,n:0,cli:new Set()}};
+  base.forEach(c=>facsSeguro(c).forEach(f=>{ if(ST.empresa&&f.g!==ST.empresa) return; const n=nivelSeguro(f); if(!n) return;
+    t[n].im+=f.im; t[n].n++; t[n].cli.add(c.c); }));
+  if(!t.riesgo.n&&!t.va.n) return "";
+  const k=(id,tit,col,bg,x,sub)=>`<div class="kpi ${ST.seguro===id?"on":""}" style="${ST.seguro===id?`border-color:${col};box-shadow:0 4px 14px ${col}33`:""};background:${bg}" onclick="setSeguro('${id}')">
+      <p class="l" style="color:${col}">${tit}</p><p class="v" style="color:${col}">${eur(x.im)}</p>
+      <p class="s">${x.n} factura${x.n===1?"":"s"} · ${x.cli.size} cliente${x.cli.size===1?"":"s"}</p><p class="s" style="color:${col}">${sub}</p></div>`;
+  return `<div class="kpis">
+    ${k("riesgo","⚠️ Riesgo de seguro","#B91C1C","#FFF5F5",t.riesgo,`vencidas de ${S_RIESGO()+1} a ${S_VA()} días`)}
+    ${k("va","🛡️ A enviar al seguro","#7F1D1D","#FEF2F2",t.va,`vencidas hace más de ${S_VA()} días`)}
+  </div>
+  ${ST.seguro?`<div style="background:${ST.seguro==="va"?"#7F1D1D":"#FEE2E2"};color:${ST.seguro==="va"?"#fff":"#991B1B"};border-radius:12px;padding:10px 12px;margin:-2px 0 12px;font-size:12.5px;line-height:1.5">
+      ${ST.seguro==="va"?`🛡️ <b>Facturas a enviar al seguro</b>: llevan más de ${S_VA()} días vencidas. Hay que declararlas a la aseguradora.`
+        :`⚠️ <b>Facturas en riesgo de seguro</b>: entre ${S_RIESGO()+1} y ${S_VA()} días vencidas. Si no se cobran antes de los ${S_VA()} días, hay que enviarlas al seguro.`}
+      No cuentan los apuntes (AS), las correcciones de Administración ni las facturas que tienen un abono del mismo importe. <a href="#" onclick="setSeguro('');return false" style="color:inherit;font-weight:800">Quitar filtro</a> · <a href="#" onclick="exportar();return false" style="color:inherit;font-weight:800">⬇︎ Descargar Excel</a></div>`:""}`;
+}
+function setSeguro(v){ ST.seguro=ST.seguro===v?"":v; if(ST.seguro){ ST.orden="antiguedad"; } ST.abiertos={}; render(); }
+
 // ── Render ──────────────────────────────────────────────────────
 function render(){
   const lista = preparados();
@@ -486,7 +522,8 @@ function render(){
       </div>
     </div>
 
-    ${panelDias(todosCli)}
+    ${panelSeguro(todosCli)}
+    ${ST.seguro?"":panelDias(todosCli)}
 
     <div class="bar">
       <input class="buscar" id="q" placeholder="Buscar cliente…" value="${esc(ST.buscar)}"
@@ -527,7 +564,7 @@ function render(){
 
     <p style="margin:0 0 10px;font-size:12px;color:#64748B">
       <b>${lista.length}</b> ${lista.length===1?"cliente":"clientes"} · <b>${eur(sumP)}</b>
-      ${ST.vista==="vencidos"?" fuera de plazo":" pendiente"}
+      ${ST.seguro==="va"?" a enviar al seguro":ST.seguro==="riesgo"?" en riesgo de seguro":ST.vista==="vencidos"?" fuera de plazo":" pendiente"}
       ${VE_TODO&&ST.interco==="no"?` · <span style="color:#8B5CF6;font-weight:700">intercompañía excluida</span>`:""}
       ${VE_TODO&&ST.interco==="solo"?` · <span style="color:#8B5CF6;font-weight:700">solo intercompañía</span>`:""}
     </p>
@@ -556,7 +593,7 @@ function tarjeta(c,ci){
   <div class="cli">
     <div class="cli-h" onclick="toggle('${k}')">
       <div class="cli-n">
-        <b>${esc(c.c)}</b> ${!saldo&&antig&&window.RC&&RC.seguroTag?RC.seguroTag(antig,true):""}
+        <b>${esc(c.c)}</b> ${!saldo&&c._segD&&window.RC&&RC.seguroTag?RC.seguroTag(c._segD,true):""}
         <span>${saldo ? esc(c.c70||c.cat||"") : `${c._f.length} ${c._f.length===1?"factura":"facturas"}`}
           ${vencidas.length?` · <b style="color:#DC2626">${vencidas.length} vencida${vencidas.length>1?"s":""}</b>`:""}
           ${antig>0?` · ${c._apunte?"apuntes de "+fecha(c._ant):antig+" días de retraso"}`:""}
@@ -596,7 +633,8 @@ function lineasDe(c){
       .filter(f=>Math.abs(f.im)>=0.01||Math.abs(f.ven)>=0.01).sort((a,b)=>a.g.localeCompare(b.g));
   return c.f||[];
 }
-function soloSaldos(){ return ST.docs.some(d=>d.fuente==="TODOS"); }
+// (oct 2026) Con TODOS por factura (facturas:true) hay detalle: no es «solo saldos»
+function soloSaldos(){ return ST.docs.some(d=>d.fuente==="TODOS"&&!d.facturas); }
 // Importes oficiales del cliente (pestaña TODOS del Excel de
 // Administración). Con filtro de empresa, los de esa empresa. null si la carga
 // es antigua y no los trae: entonces se suman las facturas.
@@ -641,7 +679,8 @@ function fila(c,f,ci,fi){
           esApunte(f) ? "apunte a cuenta "+fecha(f.fv)
                       : venc ? d+" días vencida" : f.fv ? "vence "+fecha(f.fv) : "sin vencimiento"}</span>
         <span class="tag t-emp">${esc(f.g||"")}${f.em&&f.em!==f.g?" · "+esc(f.em):""}</span>
-        ${venc&&window.RC&&RC.seguroTag?RC.seguroTag(d):""}
+        ${f.corr?`<span class="tag t-ap">corrección de Administración</span>`:f.anul?`<span class="tag t-ap">anulada por corrección</span>`:""}
+        ${nivelSeguro(f)&&window.RC&&RC.seguroTag&&facsSeguro(c).includes(f)?RC.seguroTag(d):""}
         ${nInc?`<span class="tag t-inc">⚑ ${nInc} incidencia${nInc>1?"s":""}</span>`:""}
         ${ST.compensar&&c._marcados&&c._marcados.has(claveDoc(f))
           ? `<span class="tag t-comp">🔄 ${f.im<0?"abono":"factura"} compensable</span>`:""}
@@ -658,7 +697,7 @@ function toggle(k){
   ST.abiertos[k]=!abierto; render();
 }
 function setVista(v){
-  ST.vista=v;
+  ST.vista=v; ST.seguro="";
   ST.orden = (v==="vencidos") ? "antiguedad" : "importe";
   ST.abiertos={};
   render();
@@ -918,13 +957,15 @@ function exportar(){
         Documento:(f.t?f.t+" ":"")+(f.n||""),
         "Fecha emisión":fecha(f.ff), "Fecha vencimiento":fecha(f.fv),
         "Importe pendiente":f.im, Estado:venc?"Vencida":"En plazo",
-        "Días vencida":venc?dias(f.fv):0, Región:c.r||"",
+        "Días vencida":venc?dias(f.fv):0,
+        "Seguro": !facsSeguro(c).includes(f)?"":nivelSeguro(f)==="va"?"A enviar al seguro":nivelSeguro(f)==="riesgo"?"Riesgo de seguro":"",
+        Categoría:c.c70||c.cat||"", Región:c.r||"",
       });
     }
   }
   const ws=XLSX.utils.json_to_sheet(filas), wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb,ws,"Cobros");
-  XLSX.writeFile(wb,`cobros_${ST.compensar?"compensables":ST.vista}_${HOY}.xlsx`);
+  XLSX.writeFile(wb,`cobros_${ST.seguro==="va"?"enviar_al_seguro":ST.seguro==="riesgo"?"riesgo_de_seguro":ST.compensar?"compensables":ST.vista}_${HOY}.xlsx`);
 }
 
 // ── Arranque ────────────────────────────────────────────────────
