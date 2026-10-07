@@ -875,6 +875,13 @@ const docId = (v) => String(v || "").trim().replace(/[/#?\[\]*]/g, "_") || "SIN_
 
 // ─────────────── Handler ───────────────
 export default async function handler(req, res) {
+  // (oct 2026) El catálogo (wikukcatalogo.vercel.app) consulta qué clientes han dejado un artículo.
+  // Solo esa consulta de lectura se abre a otros dominios.
+  if (req.query.clientesArticulo) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    if (req.method === "OPTIONS") return res.status(204).end();
+  }
   // (ago 2026) El plan gratuito de cron-job.org corta a los 30 s y los
   // procesos largos (sync general, full, maestro) tardan 44-54: el cron los
   // daba por fallidos aunque Vercel los ejecutara bien. Con &async=1 se
