@@ -591,22 +591,39 @@ function plazosDe(c){ if(c._plz) return c._plz; const m={};
   Object.values(m).forEach(l=>l.sort((a,b)=>String(a.fv).localeCompare(String(b.fv))));
   return (c._plz=m); }
 function plazoTxt(c,f){ const l=plazosDe(c)[claveFra(f)]||[]; return l.length>1?`plazo ${l.indexOf(f)+1} de ${l.length}`:""; }
-// Las facturas con algo vencido, a la vista sin abrir el cliente
-function facturasVenc(c){
-  const P=plazosDe(c), venc=(f)=>f.fv&&f.fv<CORTE;
-  const G=Object.values(P).filter(l=>l.some(f=>venc(f)&&f.im>0&&!f.anul)&&(!ST.empresa||l[0].g===ST.empresa))
-    .sort((a,b)=>String(a.find(venc).fv).localeCompare(String(b.find(venc).fv)));
-  if(!G.length) return "";
-  const fx=(l)=>{ const f=l[0], tot=l.reduce((t,x)=>t+x.im,0), ven=l.filter(venc).reduce((t,x)=>t+x.im,0), v1=l.find(venc);
-    const seg=l.find(x=>facsSeguro(c).includes(x));
-    return `<div style="font-size:12px;margin-top:3px">
-      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">🧾 <b>${esc((f.t?f.t+" ":"")+(f.n||"—"))}</b><span style="color:#64748B">${esc(f.g||"")} · emitida ${fecha(f.ff)}</span>
-        ${l.length>1?`<span>pendiente <b>${eur(tot)}</b> · vencido <b style="color:#DC2626">${eur(ven)}</b></span>`
-          :`<span>vence ${fecha(f.fv)} · <b style="color:#DC2626">${dias(f.fv)} días</b> · <b>${eur(f.im)}</b></span>`}
-        ${seg&&window.RC&&RC.seguroTag?RC.seguroTag(dias(seg.fv),true):""}</div>
-      ${l.length>1?l.map((x,i)=>`<div style="margin-left:20px;color:${venc(x)?"#B91C1C":"#64748B"}">· plazo ${i+1} de ${l.length}: vence ${fecha(x.fv)} · ${venc(x)?`<b>${dias(x.fv)} días vencido</b>`:"en plazo"} · <b>${eur(x.im)}</b></div>`).join(""):""}</div>`; };
-  return `<div style="margin-top:4px;background:#FEF2F2;border-radius:8px;padding:4px 8px">${G.slice(0,5).map(fx).join("")}
-    ${G.length>5?`<div style="font-size:11.5px;color:#B91C1C;margin-top:3px">y ${G.length-5} factura${G.length-5===1?"":"s"} vencida${G.length-5===1?"":"s"} más · pulsa para verlas todas</div>`:""}</div>`;
+// Claves de factura por índice (para no meterlas en el HTML)
+function kIdx(k){ ST._gk=ST._gk||[]; let i=ST._gk.indexOf(k); if(i<0){ ST._gk.push(k); i=ST._gk.length-1; } return i; }
+function accFac(ci,i){ abrirCompromiso(ci,"",(ST._gk||[])[i]); }
+const docTxt=(f)=>((f.t?f.t+" ":"")+(f.n||"")).trim();
+// Acciones abiertas que tocan esta factura (por su nº en el compromiso)
+function compDeFactura(c,f){ const d=normCom(docTxt(f));
+  return compDe(c).filter(i=>String(i.facturaNum||"").split(/\s*,\s*/).some(x=>x&&normCom(x)===d)); }
+// Facturas (agrupando plazos) con algo vencido, de la más antigua a la más reciente
+function gruposVenc(c){ const venc=(f)=>f.fv&&f.fv<CORTE;
+  return Object.entries(plazosDe(c)).filter(([k,l])=>l.some(f=>venc(f)&&f.im>0&&!f.anul)&&(!ST.empresa||l[0].g===ST.empresa))
+    .map(([k,l])=>({k,l,f:l[0],tot:l.reduce((t,x)=>t+x.im,0),ven:l.filter(venc).reduce((t,x)=>t+x.im,0),v1:l.find(venc)}))
+    .sort((a,b)=>String(a.v1.fv).localeCompare(String(b.v1.fv))); }
+const colDias=(d)=>d>110?["#7F1D1D","#fff"]:d>90?["#FEE2E2","#B91C1C"]:d>20?["#FFEDD5","#C2410C"]:["#FEF3C7","#92400E"];
+function facturasVenc(c,ci){
+  const G=gruposVenc(c); if(!G.length) return "";
+  const fx=(g)=>{ const f=g.f, d=dias(g.v1.fv), [bg,co]=colDias(d), seg=g.l.find(x=>facsSeguro(c).includes(x)), cp=compDeFactura(c,f);
+    return `<div style="display:flex;gap:10px;align-items:center;padding:8px 0;border-top:1px solid #FDE2E2">
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:800;font-size:13.5px;color:#0F172A">🧾 ${esc(docTxt(f)||"—")} ${seg&&window.RC&&RC.seguroTag?RC.seguroTag(dias(seg.fv),true):""}</div>
+        <div style="font-size:11.5px;color:#64748B">${esc(f.g||"")} · emitida ${fecha(f.ff)}${g.l.length>1?` · ${g.l.length} plazos · pendiente ${eur(g.tot)}`:` · vence ${fecha(f.fv)}`}</div>
+        ${g.l.length>1?g.l.map((x,i)=>`<div style="font-size:11.5px;color:${x.fv<CORTE?"#B91C1C":"#64748B"}">plazo ${i+1}: vence ${fecha(x.fv)} · ${eur(x.im)}${x.fv<CORTE?` · ${dias(x.fv)} días`:" · en plazo"}</div>`).join(""):""}
+        ${cp.map(i=>`<div style="font-size:11.5px;color:${(RC.ESTADO_COBRO[i.estadoCobro]||[])[1]||"#1D4ED8"};font-weight:700;margin-top:2px">📅 ${esc(i.accionCobro)} · ${esc(RC.fechaES(i.fechaCompromiso))} · ${esc((RC.ESTADO_COBRO[i.estadoCobro]||[""])[0])}</div>`).join("")}
+      </div>
+      <div style="text-align:right;flex:none">
+        <div style="font-weight:900;font-size:15px;color:#DC2626;font-variant-numeric:tabular-nums">${eur(g.ven)}</div>
+        <span style="display:inline-block;margin-top:2px;background:${bg};color:${co};border-radius:99px;padding:1px 8px;font-size:11px;font-weight:800">${d} día${d===1?"":"s"}</span>
+      </div>
+      ${ci!=null&&window.RC&&RC.crearCompromiso?`<button class="binc" title="Acción para esta factura" style="flex:none;padding:8px 9px;font-size:13px${cp.length?"":";border-color:#FCA5A5"}" onclick="event.stopPropagation();accFac(${ci},${kIdx(g.k)})">📅</button>`:""}
+    </div>`; };
+  return `<div style="margin-top:6px;background:#FFF7F7;border:1px solid #FDE2E2;border-radius:10px;padding:0 10px">
+    <div style="font-size:10.5px;font-weight:800;letter-spacing:.05em;color:#B91C1C;padding:6px 0 0">FACTURAS VENCIDAS · ${G.length}</div>
+    ${G.slice(0,5).map(fx).join("")}
+    ${G.length>5?`<div style="font-size:11.5px;color:#B91C1C;padding:6px 0;border-top:1px solid #FDE2E2">y ${G.length-5} más · pulsa el cliente para verlas todas</div>`:""}</div>`;
 }
 function tarjeta(c,ci){
   const k = normCom(c.c);
@@ -626,7 +643,6 @@ function tarjeta(c,ci){
           ${c.r?` · ${esc(c.r)}`:""}</span>
         ${(()=>{ const O=oficial(c); return O&&(Math.abs(O.v20)>=1||Math.abs(O.v70)>=1)
           ? `<div style="font-size:11px;color:#B91C1C;margin-top:2px">+20 días <strong style="font-weight:800">${eur(O.v20)}</strong> · más de 70 días <strong style="font-weight:800">${eur(O.v70)}</strong></div>` : ""; })()}
-        ${!saldo?facturasVenc(c):""}
         ${compDe(c).map(i=>`<div style="font-size:11.5px;margin-top:3px;color:${(RC.ESTADO_COBRO[i.estadoCobro]||[])[1]||"#475569"}">📅 <strong style="font-weight:800">${esc(i.accionCobro)}</strong> · para el ${esc(RC.fechaES(i.fechaCompromiso))} · ${esc((RC.ESTADO_COBRO[i.estadoCobro]||[""])[0])}</div>`).join("")}
         ${(()=>{ const E=porEmpresa(c._f,c); return E.length>1
           ? `<div class="emps">${E.map(e=>`<span class="tag t-emp">${esc(e.g)} ${eur(ST.vista==="vencidos"?e.v:e.p)}</span>`).join("")}</div>`
@@ -640,6 +656,7 @@ function tarjeta(c,ci){
       </div>
       <span class="chev">${ab?"▲":"▼"}</span>
     </div>
+    ${!saldo?`<div style="padding:0 14px 10px">${facturasVenc(c,ci)}</div>`:""}
     ${ab&&window.RC&&RC.crearCompromiso?panelAccion(c,ci):""}
     ${ab&&saldo?`<div class="det">${c._f.map((f,fi)=>filaSaldo(c,f,ci,fi)).join("")}</div>`:""}
     ${ab&&!saldo?`<div class="det">${(()=>{ const E=porEmpresa(c._f,c);
@@ -743,47 +760,61 @@ function hiloH(i){ const h=(i.historial||[]).filter(x=>x&&(x.accion||x.nota));
       <div style="flex:1;font-size:13px"><div style="font-size:11.5px;color:#64748B"><b style="color:#0F172A">${esc(x.por||"")}</b> · ${esc(x.fecha||"")}</div>
       <div style="font-weight:700">${esc(x.accion||"")}</div>${x.nota?`<div style="white-space:pre-wrap;color:#334155">${esc(x.nota)}</div>`:""}</div></div>`; }).join("")}</div>`:""; }
 function panelAccion(c,ci){
-  const L=compTodos(c), ab=L.filter(i=>i.estadoCobro!=="pagado"&&!/resuelta|cerrada/.test(i.estado||"")), i=ab[0], viejos=L.filter(x=>x!==i);
+  const L=compTodos(c), ab=L.filter(i=>i.estadoCobro!=="pagado"&&!/resuelta|cerrada/.test(i.estado||"")), viejos=L.filter(x=>!ab.includes(x));
   let h='<div style="padding:10px 14px 2px">';
-  if(i){ const E=RC.ESTADO_COBRO[i.estadoCobro]||["",""], venc=i.fechaCompromiso&&i.fechaCompromiso<RC.hoyISO()&&i.estadoCobro==="pendiente";
-    h+=`<div style="border:2px solid ${E[1]||"#2563EB"};border-radius:14px;padding:12px 14px;background:#fff">
-      <div style="font-size:10.5px;font-weight:800;letter-spacing:.05em;color:#64748B">📅 ACCIÓN CON ESTE CLIENTE</div>
+  // (oct 2026) Puede haber varias acciones abiertas: una por factura o grupo de facturas
+  ab.forEach((i,n)=>{ const E=RC.ESTADO_COBRO[i.estadoCobro]||["",""], venc=i.fechaCompromiso&&i.fechaCompromiso<RC.hoyISO()&&i.estadoCobro==="pendiente", tid="hrep_"+ci+"_"+n;
+    h+=`<div style="border:2px solid ${E[1]||"#2563EB"};border-radius:14px;padding:12px 14px;background:#fff;margin-bottom:8px">
+      <div style="font-size:10.5px;font-weight:800;letter-spacing:.05em;color:#64748B">📅 ACCIÓN${ab.length>1?" "+(n+1)+" DE "+ab.length:" CON ESTE CLIENTE"}</div>
       <div style="font-size:19px;font-weight:900;color:#0F172A;margin-top:2px">${esc(i.accionCobro||"")}</div>
       <div style="font-size:14px;margin-top:2px">para el <b>${esc(RC.fechaES(i.fechaCompromiso))}</b>${i.importeCompromiso?` · ${eur(i.importeCompromiso)}`:""}${venc?` · <b style="color:#B91C1C">fecha pasada</b>`:""}</div>
+      ${i.facturaNum?`<div style="font-size:12.5px;color:#334155;margin-top:3px">🧾 ${esc(i.facturaNum)}</div>`:`<div style="font-size:12px;color:#64748B;margin-top:3px">Todo el cliente</div>`}
       <div style="display:inline-block;margin-top:7px;padding:4px 10px;border-radius:99px;background:${E[1]}1A;color:${E[1]};font-weight:800;font-size:12.5px">${esc(E[0])}</div>
       ${hiloH(i)}
-      <textarea id="hrep_${ci}" placeholder="Escribe en el hilo (lo ven Administración, el comercial y su jefe)" style="width:100%;margin-top:8px;min-height:54px;border:1.5px solid #CBD5E1;border-radius:10px;padding:9px;font:inherit;font-size:14px;box-sizing:border-box"></textarea>
+      <textarea id="${tid}" placeholder="Escribe en el hilo (lo ven Administración, el comercial y su jefe)" style="width:100%;margin-top:8px;min-height:54px;border:1.5px solid #CBD5E1;border-radius:10px;padding:9px;font:inherit;font-size:14px;box-sizing:border-box"></textarea>
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
-        <button class="binc" style="padding:9px 12px;font-weight:800" onclick="hiloEnviar(${ci},'${esc(i._id)}')">💬 Enviar</button>
+        <button class="binc" style="padding:9px 12px;font-weight:800" onclick="hiloEnviar('${tid}','${esc(i._id)}')">💬 Enviar</button>
         <button class="binc" style="padding:9px 12px;font-weight:800" onclick="abrirCompromiso(${ci},'${esc(i._id)}')">📅 Nueva fecha / acción</button>
-        <button class="binc" style="padding:9px 12px;font-weight:800;color:#15803D;border-color:#86EFAC" onclick="hiloPagado(${ci},'${esc(i._id)}')">✅ Ya ha pagado</button>
-        <button class="binc" style="padding:9px 12px;font-weight:800;color:#B91C1C;border-color:#FCA5A5" onclick="abrirModalCli(${ci})">⚑ Incidencia de pago</button></div></div>`;
-  } else {
+        <button class="binc" style="padding:9px 12px;font-weight:800;color:#15803D;border-color:#86EFAC" onclick="hiloPagado('${tid}','${esc(i._id)}')">✅ Ya ha pagado</button>
+        <button class="binc" style="padding:9px 12px;font-weight:800;color:#B91C1C;border-color:#FCA5A5" onclick="abrirModalCli(${ci})">⚑ Incidencia de pago</button></div></div>`; });
+  const sinAcc=gruposVenc(c).filter(g=>!compDeFactura(c,g.f).length);
+  if(!ab.length){
     h+=`<div style="border:2px dashed #FCA5A5;border-radius:14px;padding:12px 14px;background:#FEF2F2">
       <div style="font-size:15px;font-weight:900;color:#B91C1C">⚠️ Sin acción con este cliente</div>
-      <div style="font-size:12.5px;color:#7F1D1D;margin:2px 0 8px">Pon qué vas a hacer y para cuándo: Administración lo comprueba ese día.</div>
+      <div style="font-size:12.5px;color:#7F1D1D;margin:2px 0 8px">Pon qué vas a hacer y para cuándo: Administración lo comprueba ese día. Puedes poner una acción para todas las facturas o una distinta para cada una (botón 📅 de cada factura).</div>
       <button class="bprim" style="margin:0" onclick="abrirCompromiso(${ci})">📅 Poner acción y fecha</button></div>`;
+  } else if(sinAcc.length && ab.every(i=>i.facturaNum)){
+    h+=`<button class="binc" style="padding:9px 12px;font-weight:800;width:100%;border-style:dashed;border-color:#FCA5A5;color:#B91C1C" onclick="abrirCompromiso(${ci})">➕ Acción para las ${sinAcc.length} factura${sinAcc.length===1?"":"s"} vencida${sinAcc.length===1?"":"s"} sin acción</button>`;
   }
   if(viejos.length) h+=`<details style="margin-top:8px"><summary style="cursor:pointer;font-size:12.5px;font-weight:800;color:#475569">🗂 Histórico de acciones (${viejos.length})</summary>
     ${viejos.map(x=>{ const E=RC.ESTADO_COBRO[x.estadoCobro]||["",""]; return `<div style="border:1px solid #E2E8F0;border-radius:10px;padding:8px 10px;margin-top:6px;background:#F8FAFC">
-      <div style="display:flex;justify-content:space-between;gap:8px;font-size:13px"><b>${esc(x.accionCobro||"")} · ${esc(RC.fechaES(x.fechaCompromiso))}</b><span style="color:${E[1]};font-weight:800;font-size:12px">${esc(E[0])}</span></div>${hiloH(x)}</div>`; }).join("")}</details>`;
+      <div style="display:flex;justify-content:space-between;gap:8px;font-size:13px"><b>${esc(x.accionCobro||"")} · ${esc(RC.fechaES(x.fechaCompromiso))}${x.facturaNum?" · "+esc(x.facturaNum):""}</b><span style="color:${E[1]};font-weight:800;font-size:12px">${esc(E[0])}</span></div>${hiloH(x)}</div>`; }).join("")}</details>`;
   return h+'</div>';
 }
 const _porC=()=>({id:P.uid||normCom(P.agente),nombre:P.nombre||P.agente||"Comercial"});
-async function hiloEnviar(ci,id){ const i=(ST.comp||[]).find(x=>x._id===id), t=((document.getElementById("hrep_"+ci)||{}).value||"").trim();
+async function hiloEnviar(tid,id){ const i=(ST.comp||[]).find(x=>x._id===id), t=((document.getElementById(tid)||{}).value||"").trim();
   if(!i||t.length<2){ alert("Escribe el mensaje."); return; }
   try{ await RC.cobroResponder(i,_porC(),t); render(); }catch(e){ alert("No se ha guardado: "+e.message); } }
-async function hiloPagado(ci,id){ const i=(ST.comp||[]).find(x=>x._id===id); if(!i) return;
+async function hiloPagado(tid,id){ const i=(ST.comp||[]).find(x=>x._id===id); if(!i) return;
   if(!confirm("¿Marcar que ya ha pagado?")) return;
-  try{ await RC.cobroPagado(i,_porC(),((document.getElementById("hrep_"+ci)||{}).value||"").trim()); render(); }catch(e){ alert("No se ha guardado: "+e.message); } }
-function abrirCompromiso(ci,idExistente){
+  try{ await RC.cobroPagado(i,_porC(),((document.getElementById(tid)||{}).value||"").trim()); render(); }catch(e){ alert("No se ha guardado: "+e.message); } }
+function abrirCompromiso(ci,idExistente,clave){
   const c=(ST._lista||[])[ci]; if(!c) return;
   const E=porEmpresa(c._f,c), O=oficial(c);
   const d=new Date(); d.setDate(d.getDate()+3);
+  // (oct 2026) Acción por factura: se eligen las facturas a las que va la acción. Desde el botón 📅 de una
+  // factura, solo esa; desde «Poner acción», las vencidas que aún no tienen acción.
+  const G=idExistente?[]:gruposVenc(c);
+  const sel=new Set(clave?[clave]:G.filter(g=>!compDeFactura(c,g.f).length).map(g=>g.k));
+  if(!clave&&!sel.size) G.forEach(g=>sel.add(g.k));
   ST.modal={comp:true,c,emps:E.map(e=>e.g),empresa:E.length===1?E[0].g:"",accion:RC.ACC_COBRO[0],fecha:d.toISOString().slice(0,10),
-    importe:Math.round(((O?O.ven:c._v)||c._p||0)*100)/100,nota:"",enviando:false,idEx:idExistente||""};
+    importe:Math.round(((O?O.ven:c._v)||c._p||0)*100)/100,nota:"",enviando:false,idEx:idExistente||"",G,sel,impMan:false};
+  if(G.length) impSel();
   pintarCompromiso();
 }
+function impSel(){ const M=ST.modal; if(!M||!M.G||M.impMan) return; M.importe=Math.round(M.G.filter(g=>M.sel.has(g.k)).reduce((t,g)=>t+g.ven,0)*100)/100;
+  const gs=new Set(M.G.filter(g=>M.sel.has(g.k)).map(g=>g.f.g)); if(gs.size===1) M.empresa=[...gs][0]; }
+function togFac(k){ const M=ST.modal; if(!M) return; M.sel.has(k)?M.sel.delete(k):M.sel.add(k); impSel(); pintarCompromiso(); }
 function pintarCompromiso(){
   const M=ST.modal; if(!M||!M.comp) return;
   let el=document.getElementById("mask");
@@ -791,13 +822,19 @@ function pintarCompromiso(){
   const hoyI=new Date().toISOString().slice(0,10);
   el.innerHTML=`<div class="modal"><h3>📅 Acción de cobro</h3>
     <p class="msub">${esc(M.c.c)} · ${eur(M.c._p)} pendiente${M.c._v?` · <b style="color:#DC2626">${eur(M.c._v)} vencido</b>`:""}</p>
-    <span class="lab">Tu acción con este cliente</span>
+    ${M.G&&M.G.length?`<span class="lab">Facturas a las que va esta acción</span>
+      <div style="border:1.5px solid #E2E8F0;border-radius:12px;padding:4px 10px;margin-bottom:14px;max-height:220px;overflow:auto">${M.G.map(g=>{ const cp=compDeFactura(M.c,g.f);
+        return `<label style="display:flex;gap:9px;align-items:center;padding:7px 0;border-top:1px solid #F1F5F9;cursor:pointer">
+          <input type="checkbox" ${M.sel.has(g.k)?"checked":""} onchange="togFac((ST._gk||[])[${kIdx(g.k)}])" style="width:19px;height:19px;flex:none">
+          <span style="flex:1;font-size:13px"><b>${esc(docTxt(g.f))}</b> <span style="color:#64748B;font-size:11.5px">${esc(g.f.g||"")} · vence ${fecha(g.v1.fv)} · ${dias(g.v1.fv)} días${cp.length?` · ya tiene: ${esc(cp[0].accionCobro)}`:""}</span></span>
+          <b style="color:#DC2626;font-size:13px">${eur(g.ven)}</b></label>`; }).join("")}</div>`:""}
+    <span class="lab">Tu acción${M.G&&M.G.length?" para estas facturas":" con este cliente"}</span>
     <div class="chips">${RC.ACC_COBRO.map(a=>`<button class="chip ${M.accion===a?"on":""}" onclick="ST.modal.accion='${a}';pintarCompromiso()">${a}</button>`).join("")}</div>
     <span class="lab">Fecha compromiso (Administración lo comprueba ese día)</span>
     <input type="date" class="full" min="${hoyI}" value="${M.fecha}" onchange="ST.modal.fecha=this.value">
     ${M.emps.length>1?`<span class="lab">Empresa</span><select class="full" onchange="ST.modal.empresa=this.value"><option value="">Las dos</option>${M.emps.map(g=>`<option ${M.empresa===g?"selected":""}>${esc(g)}</option>`).join("")}</select>`:""}
     <span class="lab">Importe (€)</span>
-    <input type="number" step="0.01" class="full" value="${M.importe}" oninput="ST.modal.importe=this.value">
+    <input type="number" step="0.01" class="full" value="${M.importe}" oninput="ST.modal.importe=this.value;ST.modal.impMan=true">
     <span class="lab">Detalle</span>
     <textarea id="ctxt" placeholder="Con quién hablas, qué te dicen" oninput="ST.modal.nota=this.value">${esc(M.nota)}</textarea>
     <button class="bprim" onclick="guardarCompromiso()" ${M.enviando?"disabled":""}>${M.enviando?"Guardando…":"Guardar compromiso"}</button>
@@ -810,7 +847,9 @@ async function guardarCompromiso(){
   try{
     const ex=M.idEx&&(ST.comp||[]).find(x=>x._id===M.idEx);
     if(ex){ await RC.cobroResponder(ex,_porC(),(M.nota||"").trim(),M.fecha,M.accion); cerrarModal(); render(); alert("Nueva acción apuntada para el "+RC.fechaES(M.fecha)+"."); return; }
-    const doc=await RC.crearCompromiso({cliente:M.c.c,codigo:M.c.cod||"",empresa:M.empresa,importe:Number(M.importe)||0,
+    if(M.G&&M.G.length&&!M.sel.size){ M.enviando=false; pintarCompromiso(); alert("Marca al menos una factura."); return; }
+    const facturas=M.G&&M.G.length?M.G.filter(g=>M.sel.has(g.k)).map(g=>docTxt(g.f)).join(", "):"";
+    const doc=await RC.crearCompromiso({cliente:M.c.c,codigo:M.c.cod||"",empresa:M.empresa,importe:Number(M.importe)||0,factura:facturas,
       accion:M.accion,fecha:M.fecha,nota:(M.nota||"").trim(),agente:M.c._cod||normCom(P.agente)||P.uid,equipo:P.equipo||""},
       {id:P.uid||normCom(P.agente),nombre:P.nombre||P.agente||"Comercial"});
     ST.comp=(ST.comp||[]).concat([doc]);
