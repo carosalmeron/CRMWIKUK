@@ -1904,7 +1904,7 @@ ${[...Array(12)].map((_, i) => mes(i + 1)).join(",\n")}
   if (req.query.clientesArticulo) {
     const cod = String(req.query.clientesArticulo).trim().toUpperCase()
       .replace(/[^A-Z0-9._\-]/g, "");
-    const n = Math.min(parseInt(req.query.top, 10) || 20, 60);
+    const n = Math.min(parseInt(req.query.top, 10) || 20, 300);
     const out = { ok: true, articulo: cod, top: n };
     try {
       await cargarEquivArticulos();
