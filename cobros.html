@@ -583,6 +583,31 @@ function render(){
                    : VE_TODO ? "Vista global" : (P.nombre || P.agente || "");
 }
 
+// (oct 2026) Una factura puede venir en varios plazos (varias filas con el mismo nº y fecha de factura).
+// Se agrupan: total pendiente de la factura, lo vencido y cada plazo con su vencimiento.
+const claveFra=(f)=>[f.g,f.t,f.n,f.ff].join("|");
+function plazosDe(c){ if(c._plz) return c._plz; const m={};
+  (c.f||c._f||[]).forEach(f=>{ if(f._saldo) return; (m[claveFra(f)]=m[claveFra(f)]||[]).push(f); });
+  Object.values(m).forEach(l=>l.sort((a,b)=>String(a.fv).localeCompare(String(b.fv))));
+  return (c._plz=m); }
+function plazoTxt(c,f){ const l=plazosDe(c)[claveFra(f)]||[]; return l.length>1?`plazo ${l.indexOf(f)+1} de ${l.length}`:""; }
+// Las facturas con algo vencido, a la vista sin abrir el cliente
+function facturasVenc(c){
+  const P=plazosDe(c), venc=(f)=>f.fv&&f.fv<CORTE;
+  const G=Object.values(P).filter(l=>l.some(f=>venc(f)&&f.im>0&&!f.anul)&&(!ST.empresa||l[0].g===ST.empresa))
+    .sort((a,b)=>String(a.find(venc).fv).localeCompare(String(b.find(venc).fv)));
+  if(!G.length) return "";
+  const fx=(l)=>{ const f=l[0], tot=l.reduce((t,x)=>t+x.im,0), ven=l.filter(venc).reduce((t,x)=>t+x.im,0), v1=l.find(venc);
+    const seg=l.find(x=>facsSeguro(c).includes(x));
+    return `<div style="font-size:12px;margin-top:3px">
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">🧾 <b>${esc((f.t?f.t+" ":"")+(f.n||"—"))}</b><span style="color:#64748B">${esc(f.g||"")} · emitida ${fecha(f.ff)}</span>
+        ${l.length>1?`<span>pendiente <b>${eur(tot)}</b> · vencido <b style="color:#DC2626">${eur(ven)}</b></span>`
+          :`<span>vence ${fecha(f.fv)} · <b style="color:#DC2626">${dias(f.fv)} días</b> · <b>${eur(f.im)}</b></span>`}
+        ${seg&&window.RC&&RC.seguroTag?RC.seguroTag(dias(seg.fv),true):""}</div>
+      ${l.length>1?l.map((x,i)=>`<div style="margin-left:20px;color:${venc(x)?"#B91C1C":"#64748B"}">· plazo ${i+1} de ${l.length}: vence ${fecha(x.fv)} · ${venc(x)?`<b>${dias(x.fv)} días vencido</b>`:"en plazo"} · <b>${eur(x.im)}</b></div>`).join(""):""}</div>`; };
+  return `<div style="margin-top:4px;background:#FEF2F2;border-radius:8px;padding:4px 8px">${G.slice(0,5).map(fx).join("")}
+    ${G.length>5?`<div style="font-size:11.5px;color:#B91C1C;margin-top:3px">y ${G.length-5} factura${G.length-5===1?"":"s"} vencida${G.length-5===1?"":"s"} más · pulsa para verlas todas</div>`:""}</div>`;
+}
 function tarjeta(c,ci){
   const k = normCom(c.c);
   const ab = ST.compensar ? (ST.abiertos[k]!==false) : !!ST.abiertos[k];
@@ -601,6 +626,7 @@ function tarjeta(c,ci){
           ${c.r?` · ${esc(c.r)}`:""}</span>
         ${(()=>{ const O=oficial(c); return O&&(Math.abs(O.v20)>=1||Math.abs(O.v70)>=1)
           ? `<div style="font-size:11px;color:#B91C1C;margin-top:2px">+20 días <strong style="font-weight:800">${eur(O.v20)}</strong> · más de 70 días <strong style="font-weight:800">${eur(O.v70)}</strong></div>` : ""; })()}
+        ${!saldo?facturasVenc(c):""}
         ${compDe(c).map(i=>`<div style="font-size:11.5px;margin-top:3px;color:${(RC.ESTADO_COBRO[i.estadoCobro]||[])[1]||"#475569"}">📅 <strong style="font-weight:800">${esc(i.accionCobro)}</strong> · para el ${esc(RC.fechaES(i.fechaCompromiso))} · ${esc((RC.ESTADO_COBRO[i.estadoCobro]||[""])[0])}</div>`).join("")}
         ${(()=>{ const E=porEmpresa(c._f,c); return E.length>1
           ? `<div class="emps">${E.map(e=>`<span class="tag t-emp">${esc(e.g)} ${eur(ST.vista==="vencidos"?e.v:e.p)}</span>`).join("")}</div>`
@@ -679,6 +705,7 @@ function fila(c,f,ci,fi){
           esApunte(f) ? "apunte a cuenta "+fecha(f.fv)
                       : venc ? d+" días vencida" : f.fv ? "vence "+fecha(f.fv) : "sin vencimiento"}</span>
         <span class="tag t-emp">${esc(f.g||"")}${f.em&&f.em!==f.g?" · "+esc(f.em):""}</span>
+        ${plazoTxt(c,f)?`<span class="tag t-emp">${plazoTxt(c,f)}</span>`:""}
         ${f.corr?`<span class="tag t-ap">corrección de Administración</span>`:f.anul?`<span class="tag t-ap">anulada por corrección</span>`:""}
         ${nivelSeguro(f)&&window.RC&&RC.seguroTag&&facsSeguro(c).includes(f)?RC.seguroTag(d):""}
         ${nInc?`<span class="tag t-inc">⚑ ${nInc} incidencia${nInc>1?"s":""}</span>`:""}
