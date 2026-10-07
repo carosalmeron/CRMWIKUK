@@ -122,6 +122,7 @@ async function cargarArts(forzar){
     if(j.ok===false) throw new Error(j.error||"sin respuesta");
     if(!Array.isArray(j.filas)) throw new Error("en el servidor no está la versión nueva de api/pbi-sync.js"+(j.error?" (responde «"+j.error+"»)":"")+". Súbela a la carpeta api/ y espera a que Vercel termine");
     ARTS=(j.filas||[]).map(f=>({cod:ARR(f[0]),desc:f[1]||f[0],cal:f[2]||"",met:f[3]||"",calidad:f[4]||"",act:num(f[5]),ant:num(f[6]),cli:num(f[7]),ne:num(f[8])}));
+    await ponerFamilias();
     ARTS_INFO={periodo:j.periodo,basadoEn:j.basadoEn,noEst:j.noEstrategicos,deCache:j.deCache,ambito:j.ambito||"",clientes:j.clientesEnAmbito};
   }catch(e){ ARTS_ERR=e.message||String(e); }
   pintar();
@@ -278,7 +279,19 @@ window.selC=(k)=>{ SELC.has(k)?SELC.delete(k):SELC.add(k); pintarLista(); };
 window.selTodosC=()=>{ const L=listaClientes().slice(0,FC.n); const todos=L.every(c=>SELC.has(c.cod)); L.forEach(c=>todos?SELC.delete(c.cod):SELC.add(c.cod)); pintarLista(); };
 
 // ── Artículos ──────────────────────────────────────────────────────────
-const famDe=(r)=>String(r.desc||r.cod||"").trim().split(/\s+/)[0]||"Otros";
+// (oct 2026) Familia = la categoría del catálogo del CRM (colección productos), la misma que se ve en el
+// catálogo. Se busca por código exacto, sin el envase (.C140, .15…) o por el primer código de esa base.
+const SIN_FAM="Sin familia en el catálogo";
+async function ponerFamilias(){
+  try{
+    const cat=await RC.catalogo(); const por=new Map();
+    (cat||[]).forEach(p=>{ const k=ARR(p.codigo); if(k&&p.cat&&!por.has(k)) por.set(k,String(p.cat).trim()); });
+    const base=(c)=>c.replace(/\.[A-Z0-9]+$/,"");
+    const pref=new Map(); por.forEach((v,k)=>{ const b=base(k); if(!pref.has(b)) pref.set(b,v); });
+    ARTS.forEach(r=>{ r.fam=por.get(r.cod)||por.get(base(r.cod))||pref.get(r.cod)||pref.get(base(r.cod))||SIN_FAM; });
+  }catch(e){ ARTS.forEach(r=>{ r.fam=r.fam||SIN_FAM; }); }
+}
+const famDe=(r)=>r.fam||SIN_FAM;
 // (oct 2026) Filtro por número de clientes que compran el artículo este año
 const RANGOS_CLI=[["","Cualquier nº de clientes"],["0","Ningún cliente este año"],["1","1 cliente"],["2-3","2 a 3 clientes"],["4-10","4 a 10 clientes"],["11-30","11 a 30 clientes"],["31-100","31 a 100 clientes"],["101-","Más de 100 clientes"]];
 function cliOk(n){ if(!FA.cli) return true; n=Number(n)||0; const [a,b]=FA.cli.split("-");
@@ -297,11 +310,11 @@ function vistaArticulos(){
   if(!ARTS) return `<div class="card">${ARTS_ERR?`<p class="muted">No se han podido calcular (${esc(ARTS_ERR)}). <a href="#" onclick="cargarArts(true);return false">Reintentar</a></p>`:`<p class="muted">Calculando ventas por artículo en Power BI… <b id="relojArts"></b> (la primera vez del día puede tardar un par de minutos).</p>`}</div>`;
   const n=(k)=>ARTS.filter(r=>claseArt(r.cod)===k).length, ns=ARTS.filter(r=>SUG[r.cod]&&claseArt(r.cod)==="sin").length;
   const ch=(k,txt,col)=>`<button class="chip${FA.clase===k?" on":""}" style="--c:${col}" onclick="FA.clase='${k}';FA.n=150;SELA=new Set();pintar()">${txt}</button>`;
-  const fams=[...new Set(ARTS.map(famDe))].sort();
+  const fams=[...new Set(ARTS.map(famDe))].sort((a,b)=>a===SIN_FAM?1:b===SIN_FAM?-1:a.localeCompare(b));
   return `<div class="card">
     <div class="fil">${ch("","Todos · "+ARTS.length,"#334155")}${ch("sin","⏳ Sin clasificar · "+n("sin"),"#64748B")}${ch("estrategica","🎯 Estratégica · "+n("estrategica"),"#B91C1C")}${ch("gancho","🪝 Gancho · "+n("gancho"),"#B45309")}${ch("fuera","🚫 Fuera · "+n("fuera"),"#475569")}${ns?ch("sug","💡 Marcados fuera en recuperación · "+ns,"#0369A1"):""}</div>
     <div class="fil"><input placeholder="Buscar artículo, código o calibre" value="${esc(FA.q)}" oninput="FA.q=this.value;FA.n=150;pintarLista()" style="flex:1;min-width:200px">
-      <select onchange="FA.fam=this.value;FA.n=150;pintarLista()"><option value="">Todas las familias</option>${fams.map(f=>`<option${FA.fam===f?" selected":""}>${esc(f)}</option>`).join("")}</select>
+      <select onchange="FA.fam=this.value;FA.n=150;pintarLista()"><option value="">Todas las familias</option>${fams.map(f=>`<option value="${esc(f)}"${FA.fam===f?" selected":""}>${esc(f)} · ${ARTS.filter(r=>famDe(r)===f).length}</option>`).join("")}</select>
       <select onchange="FA.orden=this.value;pintarLista()"><option value="act"${FA.orden==="act"?" selected":""}>Más venta</option><option value="ne"${FA.orden==="ne"?" selected":""}>Más venta a no estratégicos</option><option value="caida"${FA.orden==="caida"?" selected":""}>Más caída</option><option value="cliMas"${FA.orden==="cliMas"?" selected":""}>Más clientes</option><option value="cliMenos"${FA.orden==="cliMenos"?" selected":""}>Menos clientes</option></select>
       <select onchange="FA.cli=this.value;FA.n=150;SELA=new Set();pintarLista()" style="border-color:${FA.cli?"#0F172A":"var(--border)"}">${RANGOS_CLI.map(([v,t])=>`<option value="${v}"${FA.cli===v?" selected":""}>👥 ${t}${v?" · "+ARTS.filter(r=>{ const o=FA.cli; FA.cli=v; const k=cliOk(r.cli); FA.cli=o; return k; }).length:""}</option>`).join("")}</select>
       <button class="btn gris" onclick="csvArts()">⬇️ Listado</button></div>
@@ -319,7 +332,7 @@ function htmlListaA(){
     +L.slice(0,FA.n).map(r=>{ const k=claseArt(r.cod), d=MAPA.tipoArt(r.cod)?docArt(r.cod):null, s=SELA.has(r.cod), sg=SUG[r.cod];
       return `<div class="item${s?" sel":""}">${PUEDE_ART?`<input type="checkbox" ${s?"checked":""} onclick="selA('${esc(r.cod)}')">`:""}
         <div style="flex:1;min-width:0"><b style="font-size:13.5px">${esc(r.desc)}</b>
-          <div class="muted">${esc(r.cod)}${r.cal?" · calibre <b>"+esc(r.cal)+"</b>":""}${r.met?" · <b>"+esc(String(r.met).replace(/\s*m$/i,""))+" m</b>":""}${r.calidad?" · "+esc(r.calidad):""} · ${r.cli} cliente${r.cli===1?"":"s"}</div>
+          <div class="muted">${esc(r.cod)} · ${esc(famDe(r))}${r.cal?" · calibre <b>"+esc(r.cal)+"</b>":""}${r.met?" · <b>"+esc(String(r.met).replace(/\s*m$/i,""))+" m</b>":""}${r.calidad?" · "+esc(r.calidad):""} · ${r.cli} cliente${r.cli===1?"":"s"}</div>
           <div style="margin-top:3px;display:flex;gap:5px;flex-wrap:wrap;align-items:center"><span class="tag" style="--c:${CA[k][2]}">${CA[k][0]} ${CA[k][1]}</span>
             ${d&&d.por?`<span class="muted" style="font-size:11.5px">${esc(d.por)}${d.fecha?" · "+fch(d.fecha):""}</span>`
               :MAPA.origenArt(r.cod)==="recuperacion"?`<span class="muted" style="font-size:11.5px">desde recuperación · marcado gancho en ${sg?sg.gancho:1} cliente${sg&&sg.gancho>1?"s":""}</span>`:""}
@@ -420,9 +433,9 @@ window.csvClientes=()=>{ const L=listaClientes();
       return [c.cod,c.nombre,c.pob,nomAg(c.ag),c.eq,c.act,c.ant,c.ant?Math.round((c.act-c.ant)/Math.abs(c.ant)*100):"",c.base?Math.round(c.mg/c.base*100):"",CC[k][1],
         d.motivo||(k==="no"&&caso?caso.fueraMotivo||"":""),d.por||(k==="no"&&caso?"recuperación":""),fch(d.fecha)]; }))); };
 window.csvArts=()=>{ const L=listaArts();
-  descargar(`articulos_mapa_negocio_${new Date().toISOString().slice(0,10)}.csv`,[["Código","Artículo","Calibre","Metros","Calidad","Ventas este año","Mismo periodo año pasado","Variación %","Clientes","Venta a no estratégicos","Clase","Clasificado por"]]
+  descargar(`articulos_mapa_negocio_${new Date().toISOString().slice(0,10)}.csv`,[["Código","Artículo","Familia","Calibre","Metros","Calidad","Ventas este año","Mismo periodo año pasado","Variación %","Clientes","Venta a no estratégicos","Clase","Clasificado por"]]
     .concat(L.map(r=>{ const k=claseArt(r.cod), d=docArt(r.cod)||{};
-      return [r.cod,r.desc,r.cal,r.met,r.calidad,r.act,r.ant,r.ant?Math.round((r.act-r.ant)/Math.abs(r.ant)*100):"",r.cli,r.ne,CA[k][1],d.por||""]; }))); };
+      return [r.cod,r.desc,famDe(r),r.cal,r.met,r.calidad,r.act,r.ant,r.ant?Math.round((r.act-r.ant)/Math.abs(r.ant)*100):"",r.cli,r.ne,CA[k][1],d.por||""]; }))); };
 
 // Documentos completos de la clasificación (quién y cuándo)
 let _CCD={};
