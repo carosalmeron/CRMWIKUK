@@ -144,8 +144,8 @@ function cli2(){ return CLI.filter(c=>!GF.ag?(!GF.eq||ARR(c.eq||"SIN EQUIPO")===
 function pintar(){
   const L=cli2(), tot=L.reduce((t,c)=>t+c.act,0), totAnt=L.reduce((t,c)=>t+c.ant,0);
   document.getElementById("hs").textContent=`Ventas de este año (1 de enero a hoy) frente al mismo periodo del año pasado · ${L.length} clientes${GF.eq||GF.ag?" · "+(GF.ag?nomAg(GF.ag):GF.eq):""}`;
-  const tabs=[["resumen","📊 Resumen"],["clientes","👥 Clientes"],["articulos","📦 Artículos"]];
-  const v=TAB==="clientes"?vistaClientes():TAB==="articulos"?vistaArticulos():vistaResumen(L,tot,totAnt);
+  const tabs=[["resumen","📊 Resumen"],["clientes","👥 Clientes"],["articulos","📦 Artículos"],["estudio","🔍 Estudio"]];
+  const v=TAB==="clientes"?vistaClientes():TAB==="articulos"?vistaArticulos():TAB==="estudio"?vistaEstudio():vistaResumen(L,tot,totAnt);
   document.getElementById("app").innerHTML=`
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
       <div class="tabs" style="margin:0;flex:1">${tabs.map(([k,t])=>`<button class="${TAB===k?"on":""}" onclick="irTab('${k}')">${t}</button>`).join("")}</div>
@@ -164,7 +164,7 @@ function filtroArbol(){
     ${opt("",eqs.length>1?"Todos los equipos":"Todo el equipo")}
     ${eqs.map(e=>(eqs.length>1?opt("eq:"+e,"▾ "+e):"")+Object.keys(g[e]).sort((a,b)=>nomAg(a).localeCompare(nomAg(b))).map(a=>opt("ag:"+a,(eqs.length>1?sp:"")+"└ "+nomAg(a)+" · "+g[e][a])).join("")).join("")}</select>`;
 }
-window.setGF=(v)=>{ GF={eq:v.startsWith("eq:")?v.slice(3):"",ag:v.startsWith("ag:")?v.slice(3):""}; SELC=new Set(); SELA=new Set(); cargarArts(false); };
+window.setGF=(v)=>{ GF={eq:v.startsWith("eq:")?v.slice(3):"",ag:v.startsWith("ag:")?v.slice(3):""}; SELC=new Set(); SELA=new Set(); EST=null; EST_ERR=""; cargarArts(false); };
 
 function caja(col,ic,tx,v,sub,onc,perd){ return `<div class="caja" style="--c:${col}" onclick="${onc}"><div class="t">${ic} ${tx}</div><div class="v">${eur(v)}</div>
   ${perd!=null?(perd>0?`<div style="font-size:12px;font-weight:800;color:var(--red);margin-top:1px">Perdido −${eur(perd)}</div>`:`<div style="font-size:12px;font-weight:700;color:var(--green);margin-top:1px">Sin pérdida</div>`):""}<div class="s">${sub}</div></div>`; }
@@ -421,6 +421,125 @@ window.aplicarRecuperacion=async(btn)=>{
   APLICAR=`Hecho el ${new Date().toLocaleString("es-ES")}: ${cambiados} clientes con cambios de ${L.length} revisados${err.length?` · ${err.length} no se han podido consultar (se aplicarán al abrir su ficha)`:""}.`;
   btn.disabled=false; pintar();
 };
+
+// ══ (oct 2026) ESTUDIO DEL NEGOCIO ESTRATÉGICO ══════════════════════════
+// Solo 🎯 artículos (y sin clasificar) vendidos a 🎯 clientes (y sin clasificar).
+// Por artículo × comercial (vendedor del ERP): dónde se pierde y si hay patrón.
+let EST=null, EST_ERR="", EST_CARGANDO=false, EST_FAM=null;
+async function cargarEstudio(forzar){
+  if(EST_CARGANDO) return; EST_CARGANDO=true; EST=null; EST_ERR=""; if(TAB==="estudio") pintar();
+  try{
+    const amb=GF.ag?"&agente="+encodeURIComponent(GF.ag):GF.eq?"&equipo="+encodeURIComponent(GF.eq)
+      :!ES_JEFE?"&agente="+encodeURIComponent(AGENTE):(!ES_DIR&&EQUIPO)?"&equipo="+encodeURIComponent(EQUIPO):"";
+    const ctl=new AbortController(), t0=Date.now(), tope=setTimeout(()=>ctl.abort(),150000);
+    const reloj=setInterval(()=>{ const el=document.getElementById("relojEst"); if(el) el.textContent=Math.round((Date.now()-t0)/1000)+" s"; },1000);
+    let r; try{ r=await fetch("/api/pbi-sync?estudio=1"+amb+(forzar?"&recargar=1":""),{signal:ctl.signal}); }
+    catch(e){ throw new Error(e.name==="AbortError"?"Power BI tarda más de 2 minutos. Vuelve a entrar en un rato: el cálculo sigue y se guarda":e.message); }
+    finally{ clearTimeout(tope); clearInterval(reloj); }
+    const txt=await r.text(); let j=null; try{ j=JSON.parse(txt); }catch(e){ throw new Error("el servidor no ha respondido a tiempo ("+r.status+")"); }
+    if(j.ok===false) throw new Error(j.error||"sin respuesta");
+    if(!Array.isArray(j.filas)) throw new Error("en el servidor no está la versión nueva de api/pbi-sync.js");
+    EST={filas:j.filas.map(f=>({cod:ARR(f[0]),ag:ARR(f[1]),act:num(f[2]),ant:num(f[3])})),agentes:j.agentes||{},periodo:j.periodo,clientes:j.clientesEstrategicos};
+  }catch(e){ EST_ERR=e.message||String(e); }
+  EST_CARGANDO=false; if(TAB==="estudio") pintar();
+}
+const artInfo=(cod)=>{ const r=ARTS&&ARTS._por&&ARTS._por.get(cod); return r||{desc:cod,fam:SIN_FAM}; };
+const esArtEst=(cod)=>{ const k=claseArt(cod); return k==="estrategica"||k==="sin"; };
+function grupo(lista,clave){ const m=new Map(); lista.forEach(x=>{ const k=clave(x); const g=m.get(k)||{k,act:0,ant:0,perd:0,gan:0,n:0,items:[]}; g.act+=x.act; g.ant+=x.ant; const d=x.act-x.ant; if(d<0) g.perd-=d; else g.gan+=d; g.n++; g.items.push(x); m.set(k,g); }); return [...m.values()]; }
+const pctV=(a,b)=>b?Math.round((a-b)/Math.abs(b)*100):null;
+const colVar=(v)=>v<0?"var(--red)":"var(--green)";
+const fmtVar=(a,b)=>{ const d=a-b, p=pctV(a,b); return `<b style="color:${colVar(d)}">${d>0?"+":""}${eur(d)}</b>${p!=null?` <span class="muted">(${p>0?"+":""}${p} %)</span>`:""}`; };
+function tablaE(cab,filas){ return `<div style="overflow-x:auto"><table class="x"><tr>${cab.map(c=>`<th>${c}</th>`).join("")}</tr>${filas.join("")}</table></div>`; }
+
+function vistaEstudio(){
+  if(!ARTS) return `<div class="card"><p class="muted">Primero se cargan las ventas por artículo… <b id="relojArts"></b></p></div>`;
+  if(!EST&&!EST_ERR&&!EST_CARGANDO) setTimeout(()=>cargarEstudio(false),0);
+  if(EST_ERR) return `<div class="card"><p class="muted">No se ha podido hacer el estudio (${esc(EST_ERR)}). <a href="#" onclick="cargarEstudio(true);return false">Reintentar</a></p></div>`;
+  if(!EST) return `<div class="card"><h2>🔍 Estudio del negocio estratégico</h2><p class="muted">Calculando en Power BI las ventas de cada artículo por comercial… <b id="relojEst"></b> (la primera vez del día puede tardar un par de minutos).</p></div>`;
+  if(!ARTS._por){ ARTS._por=new Map(); ARTS.forEach(r=>ARTS._por.set(r.cod,r)); }
+  // Solo artículos estratégicos (los sin clasificar cuentan como estratégicos)
+  const F=EST.filas.filter(r=>esArtEst(r.cod)).map(r=>Object.assign(r,{fam:famDe(artInfo(r.cod)),desc:artInfo(r.cod).desc}));
+  const tot={act:F.reduce((t,r)=>t+r.act,0),ant:F.reduce((t,r)=>t+r.ant,0)};
+  const perd=F.reduce((t,r)=>t+Math.max(0,r.ant-r.act),0), gan=F.reduce((t,r)=>t+Math.max(0,r.act-r.ant),0);
+  const nomA=(a)=>nomAg(a);
+  const tipoA=(a)=>(EST.agentes[a]||{}).tipo||"Sin tipo", eqA=(a)=>(EST.agentes[a]||{}).equipo||((AG[a]||{}).equipo)||"Sin equipo";
+  // Agrupados
+  const fams=grupo(F,r=>r.fam).sort((a,b)=>(a.act-a.ant)-(b.act-b.ant));
+  const ags=grupo(F,r=>r.ag).filter(g=>g.ant>0||g.act>0).sort((a,b)=>(a.act-a.ant)-(b.act-b.ant));
+  const tipos=grupo(F,r=>tipoA(r.ag)).sort((a,b)=>(a.act-a.ant)-(b.act-b.ant));
+  const eqs=grupo(F,r=>eqA(r.ag)).sort((a,b)=>(a.act-a.ant)-(b.act-b.ant));
+  // Por familia: en cuántos comerciales cae (los que la venden)
+  fams.forEach(f=>{ const pa=grupo(f.items,r=>r.ag).filter(x=>x.ant>=500); f.vend=pa.length; f.caen=pa.filter(x=>x.act<x.ant*0.9).length;
+    const perdAg=pa.map(x=>Math.max(0,x.ant-x.act)).sort((a,b)=>b-a); const pt=perdAg.reduce((t,v)=>t+v,0);
+    f.conc2=pt?(perdAg[0]+(perdAg[1]||0))/pt:0; f.top=pa.sort((a,b)=>(a.act-a.ant)-(b.act-b.ant)).slice(0,2).map(x=>x.k); });
+  ags.forEach(a=>{ const pf=grupo(a.items,r=>r.fam).filter(x=>x.ant>=500); a.fams=pf.length; a.famsCaen=pf.filter(x=>x.act<x.ant*0.9).length; });
+  // Clientes estratégicos (nivel cliente, por su comercial asignado)
+  const CE=cli2().filter(c=>claseCli(c)!=="no");
+  const perdidos=CE.filter(c=>c.ant>500&&c.act<=0), caenP=CE.filter(c=>c.ant>500&&c.act>0&&c.act<c.ant);
+  const pPerd=perdidos.reduce((t,c)=>t+c.ant-c.act,0), pCae=caenP.reduce((t,c)=>t+c.ant-c.act,0);
+  const top10=[...perdidos,...caenP].sort((a,b)=>(a.act-a.ant)-(b.act-b.ant)).slice(0,10), pTop=top10.reduce((t,c)=>t+c.ant-c.act,0);
+  const cliPorAg={}; CE.forEach(c=>{ const x=cliPorAg[c.ag]=cliPorAg[c.ag]||{n:0,caen:0,perd:0}; x.n++; if(c.ant>500&&c.act<c.ant) x.caen++; if(c.ant>500&&c.act<=0) x.perd++; });
+  // Causas declaradas en recuperación (clientes estratégicos)
+  const cs=CASOS.filter(c=>RC.abierto(c)&&!RC.esFueraCli(c)&&CE.some(x=>x.cod===ARR(c.cliente)));
+  const causas=grupo(cs.map(c=>({causa:c.causa||"⏳ Sin diagnosticar",act:0,ant:RC.perdidas(c).e})),x=>x.causa).sort((a,b)=>b.ant-a.ant);
+
+  // ── Patrones (frases) ──
+  const P=[];
+  const totPerdF=fams.reduce((t,f)=>t+Math.max(0,f.ant-f.act),0)||1;
+  const f3=fams.filter(f=>f.act<f.ant).slice(0,3);
+  if(f3.length) P.push(`📦 <b>Las familias que más caen</b>: ${f3.map(f=>`${esc(f.k)} (${eur(f.act-f.ant)})`).join(", ")}. ${f3.length===1?"Es":"Entre las "+f3.length+" son"} el ${Math.round(f3.reduce((t,f)=>t+(f.ant-f.act),0)/totPerdF*100)} % de la caída neta por familias.`);
+  const prod=fams.filter(f=>f.act<f.ant&&f.vend>=3&&f.caen/f.vend>=0.6).slice(0,4);
+  if(prod.length) P.push(`🧪 <b>Patrón de producto</b> (cae en casi todos los comerciales que lo venden, así que no es cosa de uno): ${prod.map(f=>`${esc(f.k)} — cae en ${f.caen} de ${f.vend}`).join("; ")}. Revisar precio, calidad, servicio o competencia de esa familia.`);
+  const com=fams.filter(f=>f.act<f.ant&&f.ant-f.act>5000&&f.conc2>=0.7&&f.vend>=3).slice(0,4);
+  if(com.length) P.push(`👤 <b>Patrón de comercial</b> (la caída se concentra en uno o dos comerciales): ${com.map(f=>`${esc(f.k)} — ${Math.round(f.conc2*100)} % en ${f.top.map(a=>esc(nomA(a))).join(" y ")}`).join("; ")}.`);
+  const carts=ags.filter(a=>a.ant>20000&&a.fams>=4&&a.famsCaen/a.fams>=0.6).slice(0,5);
+  if(carts.length) P.push(`🧭 <b>Patrón de cartera</b> (el comercial cae en la mayoría de sus familias, no en una concreta): ${carts.map(a=>`${esc(nomA(a.k))} — ${a.famsCaen} de ${a.fams} familias`).join("; ")}. Suele ser falta de visitas o de seguimiento, no de producto.`);
+  const tv=tipos.filter(t=>t.ant>0); if(tv.length>1){ const pt=pctV(tot.act,tot.ant);
+    P.push(`🏷️ <b>Por tipo de comercial</b>: ${tv.map(t=>`${esc(t.k)} ${pctV(t.act,t.ant)>0?"+":""}${pctV(t.act,t.ant)} %`).join(" · ")} (media ${pt>0?"+":""}${pt} %).`); }
+  if(pPerd+pCae) P.push(`🚪 <b>Cómo se pierde</b>: ${perdidos.length} clientes estratégicos han dejado de comprar (${eur(pPerd)}, ${Math.round(pPerd/(pPerd+pCae)*100)} %) y ${caenP.length} compran menos (${eur(pCae)}). Los 10 que más caen son el ${Math.round(pTop/(pPerd+pCae)*100)} % de lo perdido.`);
+  if(causas.length){ const c0=causas.find(c=>!/Sin diagn/.test(c.k)), sd=causas.find(c=>/Sin diagn/.test(c.k));
+    P.push(`🩺 <b>Causas declaradas en recuperación</b>: ${c0?`la principal es <b>${esc(c0.k)}</b> (${c0.n} clientes, ${eur(c0.ant)})`:"ninguna todavía"}${sd?`; ${sd.n} clientes siguen sin diagnosticar (${eur(sd.ant)})`:""}.`); }
+
+  // ── Mapa de calor comercial × familia ──
+  const famTop=fams.filter(f=>f.act<f.ant).slice(0,8).map(f=>f.k);
+  const agTop=ags.filter(a=>a.act<a.ant).slice(0,14);
+  const celda=(a,f)=>{ const l=a.items.filter(r=>r.fam===f); if(!l.length) return `<td style="color:#CBD5E1">—</td>`;
+    const d=l.reduce((t,r)=>t+r.act-r.ant,0), ref=Math.max(...famTop.map(ff=>Math.abs(fams.find(x=>x.k===ff).act-fams.find(x=>x.k===ff).ant)/4),1);
+    const i=Math.min(1,Math.abs(d)/ref), bg=d<0?`rgba(220,38,38,${0.08+0.6*i})`:`rgba(22,163,74,${0.08+0.4*i})`;
+    return `<td style="background:${bg};font-size:11.5px;${i>0.6&&d<0?"color:#fff;font-weight:800":""}">${d>0?"+":""}${Math.round(d/1000)}k</td>`; };
+
+  const filaG=(g,extra)=>`<tr><td>${g.lbl||esc(g.k)}</td><td>${eur(g.act)}</td><td>${fmtVar(g.act,g.ant)}</td><td style="color:var(--red)">−${eur(g.perd)}</td>${extra||""}</tr>`;
+  return `<div class="card"><h2>🔍 Estudio del negocio estratégico</h2>
+      <div class="muted">Solo 🎯 artículos estratégicos vendidos a 🎯 clientes estratégicos (lo sin clasificar cuenta como estratégico). ${num(EST.clientes)} clientes · ${EST.periodo?`del ${fch(EST.periodo.desde)} al ${fch(EST.periodo.hasta)} frente al mismo periodo del año pasado`:""}.</div>
+      <div class="cajas">
+        <div class="caja" style="--c:var(--est)"><div class="t">🎯 Venta estratégica 2026</div><div class="v">${eur(tot.act)}</div><div class="s">año pasado ${eur(tot.ant)} · ${fmtVar(tot.act,tot.ant)}</div></div>
+        <div class="caja" style="--c:var(--red)"><div class="t">Perdido</div><div class="v">−${eur(perd)}</div><div class="s">artículos y comerciales que caen</div></div>
+        <div class="caja" style="--c:var(--green)"><div class="t">Ganado</div><div class="v" style="color:var(--green)">+${eur(gan)}</div><div class="s">artículos y comerciales que crecen</div></div></div></div>
+    <div class="card"><h2>🧩 Qué está pasando</h2>
+      ${P.length?`<ul style="margin:6px 0 0;padding-left:18px;line-height:1.55;font-size:13.5px">${P.map(p=>`<li style="margin-bottom:6px">${p}</li>`).join("")}</ul>`:`<p class="muted">No se ve ningún patrón claro con estos datos.</p>`}
+      <div class="muted" style="margin-top:6px">Reglas: patrón de producto = la familia cae (más de un 10 %) en al menos el 60 % de los comerciales que la vendían; patrón de comercial = el 70 % de lo que pierde la familia está en uno o dos comerciales; patrón de cartera = el comercial cae en el 60 % de sus familias.</div></div>
+    <div class="card"><h2>📦 Por familia</h2><div class="muted">De la que más cae a la que más crece. Pulsa una familia para ver sus artículos.</div>
+      ${tablaE(["Familia","2026","Variación","Perdido","Comerciales que caen"],fams.map(f=>`${filaG(Object.assign(f,{lbl:`<a href="#" onclick="EST_FAM=EST_FAM==='${esc(f.k).replace(/'/g,"\\'")}'?null:'${esc(f.k).replace(/'/g,"\\'")}';pintar();return false">${esc(f.k)}</a>`}),`<td>${f.vend?f.caen+" de "+f.vend:"—"}</td>`)}${EST_FAM===f.k?`<tr><td colspan="5" style="background:#F8FAFC;text-align:left">${grupo(f.items,r=>r.cod).sort((a,b)=>(a.act-a.ant)-(b.act-b.ant)).slice(0,12).map(x=>`<div class="row" style="padding:3px 0;font-size:12.5px"><span>${esc(artInfo(x.k).desc)} <span class="muted">${esc(x.k)}</span></span><span>${eur(x.act)} · ${fmtVar(x.act,x.ant)}</span></div>`).join("")}</td></tr>`:""}`))}</div>
+    <div class="card"><h2>👤 Por comercial</h2><div class="muted">Venta estratégica de cada comercial (por quién la factura) y sus clientes estratégicos (por quién los tiene asignados).</div>
+      ${tablaE(["Comercial","2026","Variación","Perdido","Familias que caen","Clientes que caen · perdidos"],ags.map(a=>{ const c=cliPorAg[a.k]||{n:0,caen:0,perd:0};
+        return filaG(Object.assign(a,{lbl:`<b>${esc(nomA(a.k))}</b><div class="muted">${esc(eqA(a.k))} · ${esc(tipoA(a.k))}</div>`}),`<td>${a.fams?a.famsCaen+" de "+a.fams:"—"}</td><td>${c.n?`${c.caen} de ${c.n} · ${c.perd}`:"—"}</td>`); }))}</div>
+    <div class="card"><h2>🏷️ Por tipo de comercial y por equipo</h2>
+      ${tablaE(["Tipo de comercial","2026","Variación","Perdido","Comerciales"],tipos.map(t=>filaG(t,`<td>${new Set(t.items.map(r=>r.ag)).size}</td>`)))}
+      <div style="height:8px"></div>
+      ${tablaE(["Equipo","2026","Variación","Perdido","Comerciales"],eqs.map(t=>filaG(t,`<td>${new Set(t.items.map(r=>r.ag)).size}</td>`)))}</div>
+    ${famTop.length&&agTop.length?`<div class="card"><h2>🔥 Comercial × familia</h2><div class="muted">Variación en miles de € de las familias que más caen. Rojo intenso = donde más se pierde. Si una columna está roja entera es la familia (patrón de producto); si una fila está roja entera es el comercial (patrón de cartera).</div>
+      <div style="overflow-x:auto"><table class="x"><tr><th>Comercial</th>${famTop.map(f=>`<th style="min-width:64px;white-space:normal">${esc(f)}</th>`).join("")}</tr>
+        ${agTop.map(a=>`<tr><td style="white-space:nowrap">${esc(nomA(a.k))}</td>${famTop.map(f=>celda(a,f)).join("")}</tr>`).join("")}</table></div></div>`:""}
+    <div class="card"><h2>🚪 Clientes estratégicos que más caen</h2>
+      ${tablaE(["Cliente","2026","Variación","Comercial"],top10.map(c=>`<tr><td>${esc(c.nombre)}<div class="muted">${esc(c.cod)}${c.act<=0?" · <b style='color:var(--red)'>ha dejado de comprar</b>":""}</div></td><td>${eur(c.act)}</td><td>${fmtVar(c.act,c.ant)}</td><td>${esc(nomAg(c.ag))}</td></tr>`))}</div>
+    ${causas.length?`<div class="card"><h2>🩺 Causas declaradas en recuperación</h2><div class="muted">Clientes estratégicos abiertos en el plan de recuperación, por la causa que ha puesto el comercial. Pérdida en venta estratégica.</div>
+      ${tablaE(["Causa","Clientes","Pérdida"],causas.map(c=>`<tr><td>${esc(c.k)}</td><td>${c.n}</td><td style="color:var(--red)">−${eur(c.ant)}</td></tr>`))}</div>`:""}
+    <div style="text-align:center;margin:8px 0"><button class="btn gris" onclick="csvEstudio()">⬇️ Descargar los datos del estudio</button> <button class="btn gris" onclick="cargarEstudio(true)">🔄 Recalcular</button></div>`;
+}
+window.csvEstudio=()=>{ if(!EST) return;
+  descargar(`estudio_estrategico_${new Date().toISOString().slice(0,10)}.csv`,[["Código","Artículo","Familia","Clase","Comercial","Equipo","Tipo de comercial","Ventas este año","Mismo periodo año pasado","Variación"]]
+    .concat(EST.filas.filter(r=>esArtEst(r.cod)).map(r=>{ const a=artInfo(r.cod), i=EST.agentes[r.ag]||{};
+      return [r.cod,a.desc,famDe(a),CA[claseArt(r.cod)][1],nomAg(r.ag),i.equipo||"",i.tipo||"",r.act,r.ant,r.act-r.ant]; }))); };
 
 // ── Listados para Excel ────────────────────────────────────────────────
 function descargar(nombre,filas){
