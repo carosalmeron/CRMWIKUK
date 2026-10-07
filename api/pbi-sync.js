@@ -1181,7 +1181,7 @@ EVALUATE
           continue;
         }
         const ag = U(d.agenteFinal || d.agente), eq = eqDe[ag] || "";
-        if (d.intercompany || d.obsoleto || noEst.has(cod)) continue;
+        if (d.intercompany || d.obsoleto) continue;
         if (fAg && ag !== fAg) continue;
         if (fEq && !(eq === fEq || (eq && (eq.includes(fEq) || fEq.includes(eq))))) continue;
         dentro.add(cod);
@@ -1189,13 +1189,18 @@ EVALUATE
       const todos = new Set();
       for (const c of dentro) { todos.add(c); for (const h of (hijos.get(c) || [])) todos.add(h); }
       const lista = [...new Set([...todos].flatMap(variantes))].sort();
-      out.clientesEstrategicos = dentro.size;
+      // Los no estratégicos del ámbito (con sus códigos fusionados): su venta va aparte
+      const ne = new Set();
+      for (const c of dentro) if (noEst.has(c)) { ne.add(c); for (const h of (hijos.get(c) || [])) ne.add(h); }
+      const lNE = [...new Set([...ne].flatMap(variantes))].sort();
+      out.clientesEstrategicos = [...dentro].filter((c) => !noEst.has(c)).length;
+      out.clientesNoEstrategicos = [...dentro].filter((c) => noEst.has(c)).length;
       out.ambito = fAg ? "agente " + fAg : fEq ? "equipo " + fEq : "toda la empresa (sin intercompañía)";
       if (!lista.length) { out.filas = []; out.agentes = {}; return res.status(200).json(out); }
 
       let h = 5381;
-      for (const ch of lista.join(",")) h = ((h * 33) ^ ch.charCodeAt(0)) >>> 0;
-      const clave = docId(`estudio_v1_${h.toString(36)}`);
+      for (const ch of lista.join(",") + "|" + lNE.join(",")) h = ((h * 33) ^ ch.charCodeAt(0)) >>> 0;
+      const clave = docId(`estudio_v2_${h.toString(36)}`);
       if (sello && req.query.recargar !== "1") {
         try {
           const g = await fbLeerDocumento("pbi_mapa_negocio", clave);
@@ -1232,7 +1237,11 @@ EVALUATE
       ${T}[CODIGO], ${M.vVendedor},
       TREATAS({${lista.map((c) => `"${limpio(c)}"`).join(", ")}}, ${T}[CLIENTE]),
       "Act", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy),
-      "Ant", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt)
+      "Ant", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt)${lNE.length ? `,
+      "ActNE", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniAct, ${M.vFecha} <= _hoy,
+        KEEPFILTERS(${T}[CLIENTE] IN {${lNE.map((c) => `"${limpio(c)}"`).join(", ")}})),
+      "AntNE", CALCULATE(SUM(${M.vBase}), ${M.vFecha} >= _iniAnt, ${M.vFecha} <= _corteAnt,
+        KEEPFILTERS(${T}[CLIENTE] IN {${lNE.map((c) => `"${limpio(c)}"`).join(", ")}}))` : ""}
     ),
     [Act] <> 0 || [Ant] <> 0
   )`, true);
@@ -1283,11 +1292,13 @@ EVALUATE
         const ag = (a && a.grupo) || vend || "SIN COMERCIAL";
         if (a && !infoAg[ag]) infoAg[ag] = { tipo: a.tipo, equipo: a.equipo, ambito: a.ambito };
         const k = art + "|" + ag;
-        const x = g.get(k) || [art, ag, 0, 0];
+        const x = g.get(k) || [art, ag, 0, 0, 0, 0];
         x[2] += num(pick(r, "Act")); x[3] += num(pick(r, "Ant"));
+        x[4] += num(pick(r, "ActNE")); x[5] += num(pick(r, "AntNE"));
         g.set(k, x);
       }
-      out.filas = [...g.values()].map((x) => [x[0], x[1], Math.round(x[2]), Math.round(x[3])])
+      // [codigo, agente, ventasAct, ventasAnt, de ellas a no estratégicos: act, ant]
+      out.filas = [...g.values()].map((x) => [x[0], x[1], Math.round(x[2]), Math.round(x[3]), Math.round(x[4]), Math.round(x[5])])
         .filter((x) => x[2] || x[3]);
       out.agentes = infoAg;
       const hoy = new Date();
