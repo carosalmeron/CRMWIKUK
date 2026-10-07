@@ -74,20 +74,23 @@ async function borrar(){
   }catch(e){ if(!confirm('No se ha podido guardar la copia en la base de datos ('+e.message+'). ¿Borrar igualmente? (puedes descargarla antes con el botón)')){ go.disabled=false; st.textContent=''; return; } }
   let ok=0, ret=0, mal=0, err='', borrarNo=false;
   const url=(p)=>'https://firestore.googleapis.com/v1/'+p.name.split('/').map((x,i,arr)=>i===arr.length-1?encodeURIComponent(decodeURIComponent(x)):x).join('/');
+  // fetch con reintentos: en el móvil a veces falla la conexión («Load failed»)
+  const espera=(ms)=>new Promise(r=>setTimeout(r,ms));
+  const fx=async(u,o)=>{ let e1; for(let k=0;k<4;k++){ try{ return await fetch(u,o); }catch(e){ e1=e; await espera(700*(k+1)); } } throw e1; };
   const leerErr=async(r)=>{ let t=''; try{ const j=await r.json(); t=(j.error&&(j.error.status+': '+j.error.message))||''; }catch(e){} return 'HTTP '+r.status+(t?' · '+t:''); };
   const una=async(p)=>{
     try{
-      if(!borrarNo){ const r=await fetch(url(p),{method:'DELETE'}); if(r.ok){ ok++; st.textContent=`Borrando… ${ok+ret+mal} de ${PROMOS.length}`; return; } err=await leerErr(r); if(r.status===403||r.status===401) borrarNo=true; }
+      if(!borrarNo){ const r=await fx(url(p),{method:'DELETE'}); if(r.ok){ ok++; st.textContent=`Borrando… ${ok+ret+mal} de ${PROMOS.length}`; return; } err=await leerErr(r); if(r.status===403||r.status===401) borrarNo=true; }
       // Si la base de datos no deja borrar, se retira: se le quita la sección de promoción y la marca,
       // y el catálogo ya no lo carga (solo carga productos con sección)
-      const r2=await fetch(url(p)+'?updateMask.fieldPaths=categoriaKey&updateMask.fieldPaths=tipoPromo&updateMask.fieldPaths=retiradoPromo',
+      const r2=await fx(url(p)+'?updateMask.fieldPaths=categoriaKey&updateMask.fieldPaths=tipoPromo&updateMask.fieldPaths=retiradoPromo',
         {method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({fields:{categoriaKey:{stringValue:''},tipoPromo:{stringValue:''},retiradoPromo:{booleanValue:true}}})});
       if(r2.ok) ret++; else { mal++; err=err||await leerErr(r2); if(!err.includes('PATCH')) err+=' · al retirar: '+await leerErr(r2); }
-    }catch(e){ mal++; err=err||e.message; }
+    }catch(e){ mal++; err=err||('sin conexión con la base de datos ('+e.message+')'); }
     st.textContent=`Procesando… ${ok+ret+mal} de ${PROMOS.length}`;
   };
-  // De 10 en 10 a la vez: termina en segundos
-  for(let i=0;i<PROMOS.length;i+=10) await Promise.all(PROMOS.slice(i,i+10).map(una));
+  // De 3 en 3, con reintentos y una pausa corta entre tandas
+  for(let i=0;i<PROMOS.length;i+=3){ await Promise.all(PROMOS.slice(i,i+3).map(una)); await espera(150); }
   st.innerHTML=(ok?`<div class="ok">✓ Borradas: ${ok}</div>`:'')+(ret?`<div class="ok">✓ Retiradas del catálogo: ${ret} <span class="dim">(la base de datos no deja borrar en productos; se les ha quitado la sección de promoción y ya no se cargan)</span></div>`:'')
     +(mal?`<div class="err">✗ No se han podido tocar: ${mal}. Motivo: ${esc(err)}</div>`:'');
   setTimeout(async()=>{ const antes=PROMOS.length; await init(); const q=PROMOS.length;
