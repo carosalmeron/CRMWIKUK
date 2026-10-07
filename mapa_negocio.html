@@ -439,7 +439,7 @@ async function cargarEstudio(forzar){
     const txt=await r.text(); let j=null; try{ j=JSON.parse(txt); }catch(e){ throw new Error("el servidor no ha respondido a tiempo ("+r.status+")"); }
     if(j.ok===false) throw new Error(j.error||"sin respuesta");
     if(!Array.isArray(j.filas)) throw new Error("en el servidor no está la versión nueva de api/pbi-sync.js");
-    EST={filas:j.filas.map(f=>({cod:ARR(f[0]),ag:ARR(f[1]),act:num(f[2]),ant:num(f[3])})),agentes:j.agentes||{},periodo:j.periodo,clientes:j.clientesEstrategicos};
+    EST={filas:j.filas.map(f=>({cod:ARR(f[0]),ag:ARR(f[1]),act:num(f[2]),ant:num(f[3]),ane:num(f[4]),bne:num(f[5])})),agentes:j.agentes||{},periodo:j.periodo,clientes:j.clientesEstrategicos,clientesNE:j.clientesNoEstrategicos};
   }catch(e){ EST_ERR=e.message||String(e); }
   EST_CARGANDO=false; if(TAB==="estudio") pintar();
 }
@@ -457,8 +457,17 @@ function vistaEstudio(){
   if(EST_ERR) return `<div class="card"><p class="muted">No se ha podido hacer el estudio (${esc(EST_ERR)}). <a href="#" onclick="cargarEstudio(true);return false">Reintentar</a></p></div>`;
   if(!EST) return `<div class="card"><h2>🔍 Estudio del negocio estratégico</h2><p class="muted">Calculando en Power BI las ventas de cada artículo por comercial… <b id="relojEst"></b> (la primera vez del día puede tardar un par de minutos).</p></div>`;
   if(!ARTS._por){ ARTS._por=new Map(); ARTS.forEach(r=>ARTS._por.set(r.cod,r)); }
-  // Solo artículos estratégicos (los sin clasificar cuentan como estratégicos)
-  const F=EST.filas.filter(r=>esArtEst(r.cod)).map(r=>Object.assign(r,{fam:famDe(artInfo(r.cod)),desc:artInfo(r.cod).desc}));
+  // Cada fila (artículo × comercial) se reparte en 4 tipos de venta:
+  //   e 🎯 estratégica (artículo 🎯 a cliente 🎯) · g 🪝 gancho · f 🚫 artículo fuera de estrategia
+  //   n 🚫 cliente no estratégico (cualquier artículo)
+  const R=EST.filas.map(r=>{ const k=claseArt(r.cod), b={e:[0,0],g:[0,0],f:[0,0],n:[r.ane,r.bne]};
+    b[k==="gancho"?"g":k==="fuera"?"f":"e"]=[r.act-r.ane,r.ant-r.bne];
+    return Object.assign({},r,{b,fam:famDe(artInfo(r.cod)),desc:artInfo(r.cod).desc}); });
+  // El estudio de patrones se hace sobre lo estratégico
+  const F=R.filter(r=>r.b.e[0]||r.b.e[1]).map(r=>Object.assign({},r,{act:r.b.e[0],ant:r.b.e[1]}));
+  const TIPOS_P=[["e","🎯 Estratégico","var(--est)"],["g","🪝 Gancho","var(--gan)"],["f","🚫 Artículo fuera","var(--fue)"],["n","🚫 Cliente no estratégico","#475569"]];
+  const perdT=(l)=>{ const o={e:0,g:0,f:0,n:0,tot:0,act:0,ant:0}; l.forEach(r=>{ TIPOS_P.forEach(([k])=>{ const p=Math.max(0,r.b[k][1]-r.b[k][0]); o[k]+=p; o.tot+=p; }); o.act+=r.act; o.ant+=r.ant; }); return o; };
+  const PT=perdT(R);
   const tot={act:F.reduce((t,r)=>t+r.act,0),ant:F.reduce((t,r)=>t+r.ant,0)};
   const perd=F.reduce((t,r)=>t+Math.max(0,r.ant-r.act),0), gan=F.reduce((t,r)=>t+Math.max(0,r.act-r.ant),0);
   const nomA=(a)=>nomAg(a);
@@ -510,12 +519,23 @@ function vistaEstudio(){
 
   const filaG=(g,extra)=>`<tr><td>${g.lbl||esc(g.k)}</td><td>${eur(g.act)}</td><td>${fmtVar(g.act,g.ant)}</td><td style="color:var(--red)">−${eur(g.perd)}</td>${extra||""}</tr>`;
   return `<div class="card"><h2>🔍 Estudio del negocio estratégico</h2>
-      <div class="muted">Solo 🎯 artículos estratégicos vendidos a 🎯 clientes estratégicos (lo sin clasificar cuenta como estratégico). ${num(EST.clientes)} clientes · ${EST.periodo?`del ${fch(EST.periodo.desde)} al ${fch(EST.periodo.hasta)} frente al mismo periodo del año pasado`:""}.</div>
+      <div class="muted">Solo 🎯 artículos estratégicos vendidos a 🎯 clientes estratégicos (lo sin clasificar cuenta como estratégico). ${num(EST.clientes)} clientes estratégicos${EST.clientesNE?" (y "+num(EST.clientesNE)+" no estratégicos en lo perdido por tipo)":""} · ${EST.periodo?`del ${fch(EST.periodo.desde)} al ${fch(EST.periodo.hasta)} frente al mismo periodo del año pasado`:""}.</div>
       <div class="cajas">
         <div class="caja" style="--c:var(--est)"><div class="t">🎯 Venta estratégica 2026</div><div class="v">${eur(tot.act)}</div><div class="s">año pasado ${eur(tot.ant)} · ${fmtVar(tot.act,tot.ant)}</div></div>
         <div class="caja" style="--c:var(--red)"><div class="t">Perdido</div><div class="v">−${eur(perd)}</div><div class="s">artículos y comerciales que caen</div></div>
         <div class="caja" style="--c:var(--green)"><div class="t">Ganado</div><div class="v" style="color:var(--green)">+${eur(gan)}</div><div class="s">artículos y comerciales que crecen</div></div></div></div>
-    <div class="card"><h2>🧩 Qué está pasando</h2>
+    <div class="card"><h2>📉 Lo perdido por tipo de venta</h2>
+      <div class="muted">Todo lo que se vende (no solo lo estratégico). Perdido = lo que han dejado de vender los artículos de cada comercial que caen.</div>
+      <div class="bar">${TIPOS_P.map(([k,,c])=>`<i style="width:${pct(PT[k],PT.tot||1)}%;background:${c}"></i>`).join("")}</div>
+      <div class="cajas">${TIPOS_P.map(([k,t,c])=>`<div class="caja" style="--c:${c};cursor:default"><div class="t">${t}</div>${PT[k]?`<div class="v" style="color:var(--red)">−${eur(PT[k])}</div>`:`<div class="v" style="color:var(--green);font-size:15px">Sin pérdida</div>`}<div class="s">${pct(PT[k],PT.tot||1)} % de lo perdido</div></div>`).join("")}</div>
+      <div class="row" style="border-top:1.5px solid var(--border);margin-top:10px;padding-top:8px"><b>Total perdido</b><b style="color:var(--red)">−${eur(PT.tot)}</b></div></div>
+    <div class="card"><h2>👤 Perdido por comercial y tipo de venta</h2><div class="muted">De quien más pierde a quien menos. 2026 y variación de todo lo que vende.</div>
+      ${tablaE(["Comercial","2026","Variación","Perdido total",...TIPOS_P.map(x=>x[1])],grupo(R,r=>r.ag).map(g=>Object.assign(g,{p:perdT(g.items)})).filter(g=>g.p.tot>0).sort((a,b)=>b.p.tot-a.p.tot).map(g=>
+        `<tr><td><b>${esc(nomA(g.k))}</b><div class="muted">${esc(eqA(g.k))} · ${esc(tipoA(g.k))}</div></td><td>${eur(g.act)}</td><td>${fmtVar(g.act,g.ant)}</td><td style="color:var(--red);font-weight:800">−${eur(g.p.tot)}</td>${TIPOS_P.map(([k])=>`<td style="color:${g.p[k]?"var(--red)":"#CBD5E1"}">${g.p[k]?"−"+eur(g.p[k]):"—"}</td>`).join("")}</tr>`))}</div>
+    <div class="card"><h2>📦 Perdido por familia y tipo de venta</h2>
+      ${tablaE(["Familia","2026","Variación","Perdido total",...TIPOS_P.map(x=>x[1])],grupo(R,r=>r.fam).map(g=>Object.assign(g,{p:perdT(g.items)})).filter(g=>g.p.tot>0).sort((a,b)=>b.p.tot-a.p.tot).map(g=>
+        `<tr><td><b>${esc(g.k)}</b></td><td>${eur(g.act)}</td><td>${fmtVar(g.act,g.ant)}</td><td style="color:var(--red);font-weight:800">−${eur(g.p.tot)}</td>${TIPOS_P.map(([k])=>`<td style="color:${g.p[k]?"var(--red)":"#CBD5E1"}">${g.p[k]?"−"+eur(g.p[k]):"—"}</td>`).join("")}</tr>`))}</div>
+    <div class="card"><h2>🧩 Qué está pasando <span class="muted" style="font-weight:600">· en lo estratégico</span></h2>
       ${P.length?`<ul style="margin:6px 0 0;padding-left:18px;line-height:1.55;font-size:13.5px">${P.map(p=>`<li style="margin-bottom:6px">${p}</li>`).join("")}</ul>`:`<p class="muted">No se ve ningún patrón claro con estos datos.</p>`}
       <div class="muted" style="margin-top:6px">Reglas: patrón de producto = la familia cae (más de un 10 %) en al menos el 60 % de los comerciales que la vendían; patrón de comercial = el 70 % de lo que pierde la familia está en uno o dos comerciales; patrón de cartera = el comercial cae en el 60 % de sus familias.</div></div>
     <div class="card"><h2>📦 Por familia</h2><div class="muted">De la que más cae a la que más crece. Pulsa una familia para ver sus artículos.</div>
@@ -537,9 +557,9 @@ function vistaEstudio(){
     <div style="text-align:center;margin:8px 0"><button class="btn gris" onclick="csvEstudio()">⬇️ Descargar los datos del estudio</button> <button class="btn gris" onclick="cargarEstudio(true)">🔄 Recalcular</button></div>`;
 }
 window.csvEstudio=()=>{ if(!EST) return;
-  descargar(`estudio_estrategico_${new Date().toISOString().slice(0,10)}.csv`,[["Código","Artículo","Familia","Clase","Comercial","Equipo","Tipo de comercial","Ventas este año","Mismo periodo año pasado","Variación"]]
-    .concat(EST.filas.filter(r=>esArtEst(r.cod)).map(r=>{ const a=artInfo(r.cod), i=EST.agentes[r.ag]||{};
-      return [r.cod,a.desc,famDe(a),CA[claseArt(r.cod)][1],nomAg(r.ag),i.equipo||"",i.tipo||"",r.act,r.ant,r.act-r.ant]; }))); };
+  descargar(`estudio_estrategico_${new Date().toISOString().slice(0,10)}.csv`,[["Código","Artículo","Familia","Clase del artículo","Comercial","Equipo","Tipo de comercial","Ventas este año","Mismo periodo año pasado","Variación","De ellas a clientes no estratégicos (este año)","A clientes no estratégicos (año pasado)"]]
+    .concat(EST.filas.map(r=>{ const a=artInfo(r.cod), i=EST.agentes[r.ag]||{};
+      return [r.cod,a.desc,famDe(a),CA[claseArt(r.cod)][1],nomAg(r.ag),i.equipo||"",i.tipo||"",r.act,r.ant,r.act-r.ant,r.ane,r.bne]; }))); };
 
 // ── Listados para Excel ────────────────────────────────────────────────
 function descargar(nombre,filas){
