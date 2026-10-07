@@ -50,7 +50,7 @@ function pintar(){
     ${PROMOS.map(p=>`<tr><td class="mono">${esc(p.codigo)}</td><td>${esc(p.nombre)}</td><td>${esc(p.ck)}${p.sub?' · '+esc(p.sub):''}</td><td>${esc(p.precio)}</td><td>${esc(p.tp)}</td></tr>`).join('')}
     </tbody></table></div>
     <div class="row"><button id="bk">⬇️ Descargar copia de seguridad</button></div>
-    <p class="dim">Antes de borrar se descarga siempre una copia (JSON) con todo lo que se va a borrar.</p>
+    <p class="dim">Antes de borrar se guarda siempre una copia de todo lo que se va a borrar en la base de datos (colección <b>respaldo_promos_antiguas</b>). El botón de arriba es por si además la quieres en el ordenador. Deja esta pantalla abierta hasta que termine (unos segundos).</p>
     <div class="row"><input id="conf" placeholder="Escribe BORRAR" autocomplete="off"><button class="del" id="go" disabled>🗑️ Borrar ${PROMOS.length} promociones antiguas</button></div>
     <p id="st" class="dim"></p>`;
   document.getElementById('bk').onclick=copia;
@@ -65,13 +65,19 @@ function copia(){
 async function borrar(){
   const go=document.getElementById('go'), st=document.getElementById('st');
   if(!confirm(`Se van a borrar ${PROMOS.length} promociones antiguas de la base de datos. No se puede deshacer (salvo con la copia). ¿Seguimos?`)) return;
-  copia(); go.disabled=true;
+  go.disabled=true; st.textContent='Guardando la copia de seguridad…';
+  // Copia en la base de datos (en el móvil descargar un fichero saca de la página y corta el borrado)
+  try{ const t=JSON.stringify(PROMOS.map(p=>p.doc)), TAM=300000, id='r'+Date.now();
+    for(let i=0;i*TAM<t.length;i++){ const r=await fetch(`${FB}/respaldo_promos_antiguas/${id}_${i}`,{method:'PATCH',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({fields:{texto:{stringValue:t.slice(i*TAM,(i+1)*TAM)},parte:{integerValue:String(i)},fecha:{stringValue:new Date().toISOString()}}})});
+      if(!r.ok) throw new Error('HTTP '+r.status); }
+  }catch(e){ if(!confirm('No se ha podido guardar la copia en la base de datos ('+e.message+'). ¿Borrar igualmente? (puedes descargarla antes con el botón)')){ go.disabled=false; st.textContent=''; return; } }
   let ok=0, ret=0, mal=0, err='', borrarNo=false;
   const url=(p)=>'https://firestore.googleapis.com/v1/'+p.name.split('/').map((x,i,arr)=>i===arr.length-1?encodeURIComponent(decodeURIComponent(x)):x).join('/');
   const leerErr=async(r)=>{ let t=''; try{ const j=await r.json(); t=(j.error&&(j.error.status+': '+j.error.message))||''; }catch(e){} return 'HTTP '+r.status+(t?' · '+t:''); };
-  for(const p of PROMOS){
+  const una=async(p)=>{
     try{
-      if(!borrarNo){ const r=await fetch(url(p),{method:'DELETE'}); if(r.ok){ ok++; st.textContent=`Borrando… ${ok+ret+mal} de ${PROMOS.length}`; continue; } err=await leerErr(r); if(r.status===403||r.status===401) borrarNo=true; }
+      if(!borrarNo){ const r=await fetch(url(p),{method:'DELETE'}); if(r.ok){ ok++; st.textContent=`Borrando… ${ok+ret+mal} de ${PROMOS.length}`; return; } err=await leerErr(r); if(r.status===403||r.status===401) borrarNo=true; }
       // Si la base de datos no deja borrar, se retira: se le quita la sección de promoción y la marca,
       // y el catálogo ya no lo carga (solo carga productos con sección)
       const r2=await fetch(url(p)+'?updateMask.fieldPaths=categoriaKey&updateMask.fieldPaths=tipoPromo&updateMask.fieldPaths=retiradoPromo',
@@ -79,10 +85,13 @@ async function borrar(){
       if(r2.ok) ret++; else { mal++; err=err||await leerErr(r2); if(!err.includes('PATCH')) err+=' · al retirar: '+await leerErr(r2); }
     }catch(e){ mal++; err=err||e.message; }
     st.textContent=`Procesando… ${ok+ret+mal} de ${PROMOS.length}`;
-  }
+  };
+  // De 10 en 10 a la vez: termina en segundos
+  for(let i=0;i<PROMOS.length;i+=10) await Promise.all(PROMOS.slice(i,i+10).map(una));
   st.innerHTML=(ok?`<div class="ok">✓ Borradas: ${ok}</div>`:'')+(ret?`<div class="ok">✓ Retiradas del catálogo: ${ret} <span class="dim">(la base de datos no deja borrar en productos; se les ha quitado la sección de promoción y ya no se cargan)</span></div>`:'')
     +(mal?`<div class="err">✗ No se han podido tocar: ${mal}. Motivo: ${esc(err)}</div>`:'');
-  setTimeout(init,1500);
+  setTimeout(async()=>{ const antes=PROMOS.length; await init(); const q=PROMOS.length;
+    document.getElementById('res').insertAdjacentHTML('afterbegin',`<p class="${q?'err':'ok'}">${q?`Quedan ${q} de ${antes}. Pulsa otra vez para seguir.`:'✓ Hecho: ya no queda ninguna.'}</p>`); },1200);
 }
 async function init(){ TOTAL=0; try{ PROMOS=await buscar(); pintar(); }catch(e){ document.getElementById('res').innerHTML=`<p class="err">${esc(e.message)}</p>`; } }
 init();
