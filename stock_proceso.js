@@ -196,5 +196,55 @@
     return {data,excl:{grupos:EXCL.concat(EXCL_WK?[EXCL_WK]:[]),nombres:ALM_NOMBRES},cuadre,
       resumen:{codigos:data.length,total,uc:tuc,wk:twk,porEstado}};
   }
-  G.STOCK={tipoFichero,compactarUC,compactarWK,calcular,ROT_OBJ_DEF,WK_NO_COMERCIAL_DEF,COLS_UC,COLS_WK};
+  // ── (oct 2026) UC desde el stock de SAP que ya se gestiona en el CRM (stock_sap/resumen) ──
+  // Lo que hay allí: {código: [stock, entradas, comprometido]} en UNIDADES. El valor a coste, el padre,
+  // el almacén y las ventas 6M salen de la base (la última carga completa de UC): coste unitario medio
+  // del código (o de su padre), reparto por almacén en la misma proporción y ventas 6M de la base.
+  // Si SAP trae líneas completas (con valor), se usan tal cual.
+  const sinAc=(s)=>String(s).normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  const ALIAS={padre:['padre','codigopadre'],cod:['codigoarticulo','codigo','articulo','itemcode','cod','ref'],
+    nom:['nombrearticulo','nombre','descripcion','itemname','desc'],grp:['nombregrupo','grupo','familia','itmsgrpnam'],
+    alm:['almacen','whscode'],cant:['cantidaddisponible','cantidad','stock','onhand','unidades','disponible'],
+    valor:['valorcostolote','valorcoste','valor','importe','importestock','valorstock'],v6:['importeventas6m','ventas6m','ventas'],mg:['margen']};
+  function lineasSAP(lineas){
+    const k0=Object.keys(lineas[0]||{}), m={};
+    for(const [c,al] of Object.entries(ALIAS)){ const k=k0.find(x=>al.includes(sinAc(x))); if(k) m[c]=k; }
+    if(!m.cod||!m.cant||!m.valor) return null;
+    return lineas.map(f=>{ const cod=norm(f[m.cod]); let padre=m.padre?norm(f[m.padre]):''; if(!padre) padre=cod;
+      let mg=m.mg?numN(f[m.mg]):NaN; if(!isNaN(mg)&&Math.abs(mg)>1.5) mg=mg/100;
+      return [padre,cod,m.nom&&f[m.nom]!=null?String(f[m.nom]):'',m.grp?txt(f[m.grp]):null,m.alm?String(f[m.alm]==null?'':f[m.alm]).trim():'SAP',
+        num0(f[m.cant]),num0(f[m.valor]),m.v6?num0(f[m.v6]):0,isNaN(mg)?null:mg]; }).filter(x=>x[1]!=='');
+  }
+  function desdeSAP(sap,base){
+    sap=sap||{}; base=base||[];
+    if(Array.isArray(sap.lineas)&&sap.lineas.length){ const L=lineasSAP(sap.lineas); if(L) return {uc:L,modo:'lineas',info:{lineas:L.length,valor:L.reduce((t,l)=>t+l[6],0)}}; }
+    const ex=sap.exact||{}, unid=(a)=>num0(Array.isArray(a)?a[0]:a);
+    // Base por código: padre, nombre, grupo, ventas, margen, unidades y valor por almacén
+    const B=new Map(), BP=new Map();
+    base.forEach(l=>{ const o=B.get(l[1])||{padre:l[0],nom:l[2],grp:l[3],v6:l[7],mg:l[8],cant:0,valor:0,alm:new Map()};
+      o.cant+=l[5]; o.valor+=l[6]; const a=o.alm.get(l[4])||[0,0]; a[0]+=l[5]; a[1]+=l[6]; o.alm.set(l[4],a); B.set(l[1],o);
+      const p=BP.get(l[0])||{cant:0,valor:0}; p.cant+=l[5]; p.valor+=l[6]; BP.set(l[0],p); });
+    const uc=[], sinCoste=[], nuevos=[]; let enBase=0, uds=0;
+    for(const [k,a] of Object.entries(ex)){
+      const cod=norm(k), cant=unid(a); if(!cod||cant<=0) continue;
+      // Código nuevo: padre, nombre y familia del detalle de SAP (stock_sap_detalle: producto base, descripción, familia)
+      const d=(sap.detalle&&sap.detalle[cod])||null;
+      uds+=cant; const o=B.get(cod); const padre=o?o.padre:(BP.has(cod)?cod:(d&&d.base&&BP.has(d.base)?d.base:(d&&d.base)||cod.split('.')[0]));
+      let cu=null; if(o&&o.cant>0&&o.valor>0) cu=o.valor/o.cant; else { const p=BP.get(padre); if(p&&p.cant>0&&p.valor>0) cu=p.valor/p.cant; }
+      if(o) enBase++; else nuevos.push(cod);
+      if(cu==null) sinCoste.push([cod,cant]);
+      const valor=cu==null?0:cant*cu;
+      // Reparto por almacén como en la base (así consigna e incidencias siguen fuera del cálculo)
+      const reparto=o&&o.cant>0?[...o.alm.entries()].filter(([,x])=>x[0]>0):[];
+      if(!reparto.length) uc.push([padre,cod,o?o.nom:(d&&d.desc)||'',o?o.grp:(d&&d.familia)||null,'SAP',cant,valor,o?o.v6:0,o?o.mg:null]);
+      else { const tot=reparto.reduce((t,[,x])=>t+x[0],0);
+        // cada almacén con su propio coste unitario (lotes distintos); si no lo tiene, el medio del código
+        reparto.forEach(([alm,x])=>{ const u=cant*x[0]/tot, c=x[1]>0?x[1]/x[0]:(cu||0); uc.push([padre,cod,o.nom,o.grp,alm,u,u*c,o.v6,o.mg]); }); }
+    }
+    // Códigos de la base sin stock hoy en SAP: dejan de tener stock, pero sus ventas cuentan si hay stock del padre
+    const quitados=[...B.keys()].filter(c=>!(c in ex)||unid(ex[c])<=0);
+    return {uc,modo:'unidades',info:{codigos:Object.keys(ex).length,conStock:new Set(uc.map(l=>l[1])).size,enBase,nuevos,sinCoste,uds,
+      quitados:quitados.length,valor:uc.reduce((t,l)=>t+l[6],0)}};
+  }
+  G.STOCK={tipoFichero,compactarUC,compactarWK,calcular,desdeSAP,ROT_OBJ_DEF,WK_NO_COMERCIAL_DEF,COLS_UC,COLS_WK};
 })(typeof window!=='undefined'?window:globalThis);

@@ -286,6 +286,8 @@
   @media (max-width:560px){ .home-card{grid-template-columns:auto 1fr; grid-template-areas:"n t" "n a" "f f"; padding:18px;} .home-card .hf{padding-top:8px;} }
   /* (oct 2026) CRM: configuración */
   .cfg-drop{margin-top:14px;border:2px dashed var(--line);border-radius:12px;padding:22px;text-align:center;cursor:pointer;background:var(--surface-2);display:flex;flex-direction:column;gap:4px}
+  .cfg-sap{margin-top:12px;padding:10px 12px;border-radius:10px;background:var(--surface-2);font-size:13px;line-height:1.5}
+  .cfg-sap small{color:var(--ink-dim)}
   .cfg-drop.over{border-color:var(--accent);background:var(--accent-soft)}
   .cfg-drop span{font-size:12.5px;color:var(--ink-dim)}
   .cfg-l{font-size:13px;color:var(--ink-dim);display:inline-flex;gap:8px;align-items:center}
@@ -307,7 +309,7 @@
   .quien{font-size:12px;color:var(--ink-dim);margin-left:8px}
 </style>
 <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-<script src="/stock_proceso.js?v=20261007a"></script>
+<script src="/stock_proceso.js?v=20261007c"></script>
 </head>
 <body>
 
@@ -493,10 +495,11 @@
   <!-- ===================== CONFIGURACIÓN (CRM) ===================== -->
   <section class="panel" id="panel-config">
     <div class="card">
-      <h2>⚙️ Subir ficheros de stock</h2>
-      <p class="desc">Sube el Excel de stock de UC (SAP) y el de Wikuk. Se reconocen por sus columnas, el orden da igual. Si solo subes uno, se usa el otro de la última carga. Antes de publicar se enseña el cuadre con los Excel.</p>
+      <h2>⚙️ Actualizar el stock</h2>
+      <p class="desc">Solo hay que subir el Excel de <b>Wikuk</b>. El stock de <b>UC</b> se toma solo del stock de SAP que ya se gestiona en el CRM (el mismo que usan el catálogo y Compras). Antes de publicar se enseña el cuadre.</p>
+      <div class="cfg-sap" id="cfg-sap">Leyendo el stock de SAP…</div>
       <div class="cfg-drop" id="cfg-drop"><input type="file" id="cfg-files" accept=".xlsx,.xls" multiple hidden>
-        <b>📂 Arrastra aquí los dos Excel o pulsa para elegirlos</b><span id="cfg-files-txt">Ningún fichero elegido</span></div>
+        <b>📂 Arrastra aquí el Excel de Wikuk o pulsa para elegirlo</b><span id="cfg-files-txt">Ningún fichero elegido · si no subes ninguno se usa el de la última carga</span></div>
       <div class="toolbar"><label class="cfg-l">Fecha del stock <input type="date" id="cfg-fecha"></label>
         <button class="primary-btn" id="cfg-calc" disabled>Calcular</button><span class="count" id="cfg-ult"></span></div>
       <div id="cfg-res"></div>
@@ -697,10 +700,10 @@ const eur0=(v)=>EUR.format(Math.round(v||0))+' €';
 function htmlResultado(R,fuentes){
   const c=R.cuadre, ord=['PROMOCIÓN','LIQUIDACIÓN','OK','MP/PROYECTO (sin objetivo)','SIN CATEGORIZAR'];
   const ok=(!c.uc||c.uc.ok)&&(!c.wk||c.wk.ok);
-  return `<div class="${ok?'cfg-ok':'cfg-err'}">${ok?'✓ Cuadra con los Excel.':'⚠️ No cuadra: revisa antes de publicar.'}</div>
+  return `<div class="${ok?'cfg-ok':'cfg-err'}">${ok?'✓ Cuadra con SAP y el Excel de Wikuk.':'⚠️ No cuadra: revisa antes de publicar.'}</div>
     <div class="cfg-sum">
       ${fuentes?`<div>${fuentes}</div>`:''}
-      ${c.uc?`<div><b>Cuadre UC</b>: Excel ${eur0(c.uc.excel)} − almacenes fuera del cálculo ${eur0(c.uc.fuera)} = ${eur0(c.uc.esperado)} (en la página: ${eur0(c.uc.pagina)})</div>`:'<div class="cfg-warn">Falta el fichero de UC.</div>'}
+      ${c.uc?`<div><b>Cuadre UC</b>: stock SAP ${eur0(c.uc.excel)} − almacenes fuera del cálculo ${eur0(c.uc.fuera)} = ${eur0(c.uc.esperado)} (en la página: ${eur0(c.uc.pagina)})</div>`:'<div class="cfg-warn">Falta el fichero de UC.</div>'}
       ${c.wk?`<div><b>Cuadre Wikuk</b>: suma de líneas ${eur0(c.wk.sumaLineas)}${c.wk.totalFichero!=null?` (la fila «Total» dice ${eur0(c.wk.totalFichero)})`:''} + negativos ignorados ${eur0(c.wk.negativos)} − gastos/inmovilizado ${eur0(c.wk.gastos)} − Otros Wikuk ${eur0(c.wk.otros)} = ${eur0(c.wk.esperado)} (en la página: ${eur0(c.wk.pagina)})</div>`:'<div class="cfg-warn">Falta el fichero de Wikuk.</div>'}
       <div><b>${R.resumen.codigos}</b> códigos (${c.lineasUC} líneas UC · ${c.ambos} en las dos empresas) · stock total <b>${eur0(R.resumen.total)}</b> = UC ${eur0(R.resumen.uc)} + Wikuk ${eur0(R.resumen.wk)}</div>
       <div>Fuera del cálculo: ${R.excl.grupos.map(g=>`${escapeHtml(g.grupo)} ${eur0(g.valor)}`).join(' · ')}</div>
@@ -722,6 +725,56 @@ async function publicar(R,raw,fecha,nuevoRaw){
   if(ant&&ant.version) borrarTrozos('datos',ant.version,Number(ant.partes));
   META={version,partes:n,fecha}; setData({data:R.data,excl:R.excl}); renderAll(); pintarUltima();
 }
+// ── Stock de SAP (UC): el que ya se gestiona en el CRM, colección stock_sap ──
+let SAP=null, BASEUC=null;
+const fechaTxt=(v)=>{ if(!v) return ''; if(/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(String(v).trim())) return String(v).trim(); const d=new Date(v); return isNaN(d)?String(v):d.toLocaleString('es-ES',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'}); };
+async function leerSAP(){
+  const r=await fetch(`${FB}/stock_sap/resumen`,{cache:'no-store'});
+  if(!r.ok) throw new Error('no se puede leer el stock de SAP (stock_sap/resumen, HTTP '+r.status+')');
+  const j=await r.json(), d=fsObj(j); let exact=null, lineas=null;
+  for(const [k,v] of Object.entries(d)){ if(typeof v!=='string'||!/^\s*[\[{]/.test(v)) continue; let x; try{ x=JSON.parse(v); }catch(e){ continue; }
+    if(k==='exact'&&x&&!Array.isArray(x)) exact=x;
+    else if(!lineas&&Array.isArray(x)&&x.length&&x[0]&&typeof x[0]==='object'&&!Array.isArray(x[0])) lineas=x; }
+  const kf=Object.keys(d).find(k=>/^(fecha|actualizad|ultima|updated|subid|cargad)/i.test(k)&&d[k]);
+  // Detalle (lo guarda stock_sap_united_caro.html): producto base, descripción y familia de cada código
+  const detalle={};
+  try{ const m=await fsGet('stock_sap','meta'); const n=Number(m&&m.chunks)||0;
+    const P=await Promise.all([...Array(n)].map((_,i)=>fsGet('stock_sap_detalle','chunk_'+i).catch(()=>null)));
+    P.forEach(c=>{ let rows=[]; try{ rows=JSON.parse(c&&c.rows||'[]'); }catch(e){}
+      rows.forEach(r=>{ const k=String(r.cod==null?'':r.cod).trim().toUpperCase(); if(k) detalle[k]={base:String(r.base||'').trim().toUpperCase(),desc:r.desc||'',familia:r.familia||''}; }); }); }catch(e){}
+  SAP={exact,lineas,detalle,fecha:kf?d[kf]:j.updateTime,ts:d.ts,campos:Object.keys(d).filter(k=>k!=='_id')}; return SAP;
+}
+// Base de costes de UC: la última carga completa del Excel de UC (si alguien la sube) o la incluida en el CRM
+async function cargarBaseUC(){
+  if(BASEUC) return BASEUC;
+  const m=await fsGet('stock_mesa','ucbase').catch(()=>null);
+  if(m&&m.version){ try{ BASEUC={lineas:await leerTrozos('ucbase',m.version,Number(m.partes)||1),fecha:m.fecha||'',origen:m.ficheros||'Excel de UC'}; return BASEUC; }catch(e){} }
+  const b=await fetch('/stock_uc_base.json').then(r=>r.json()).catch(()=>null);
+  BASEUC=b?{lineas:b.lineas||[],fecha:b.fecha||'',origen:b.origen||''}:{lineas:[],fecha:'',origen:''}; return BASEUC;
+}
+async function guardarBaseUC(lineas,nombre,fecha){
+  const ant=await fsGet('stock_mesa','ucbase').catch(()=>null), version=String(Date.now());
+  const n=await guardarTrozos('ucbase',version,lineas);
+  await fsSet('stock_mesa','ucbase',{version,partes:n,fecha,ficheros:nombre,por:QUIEN,en:new Date().toISOString()});
+  if(ant&&ant.version) borrarTrozos('ucbase',ant.version,Number(ant.partes));
+  BASEUC={lineas,fecha,origen:nombre};
+}
+async function pintarSAP(){
+  const el=document.getElementById('cfg-sap'); if(!el) return;
+  try{ const S=await leerSAP(), B=await cargarBaseUC();
+    const n=S.lineas?S.lineas.length:Object.keys(S.exact||{}).length;
+    if(!n){ el.innerHTML=`<span class="cfg-err" style="display:inline">⚠️ El stock de SAP está vacío o no tiene el formato esperado.</span> <small>Campos que tiene: ${escapeHtml(S.campos.join(', ')||'ninguno')}</small>`; return; }
+    el.innerHTML=`🏭 <b>UC · stock de SAP</b> del CRM: ${n.toLocaleString('es-ES')} ${S.lineas?'líneas':'códigos'} · actualizado <b>${escapeHtml(fechaTxt(S.fecha))}</b><br>
+      <small>${S.lineas?'Trae valor a coste: se usa tal cual.':`SAP da unidades. El valor a coste, el reparto por almacén y las ventas 6M salen de la base de costes de UC (${escapeHtml(B.origen||'—')}${B.fecha?' del '+escapeHtml(B.fecha):''}, ${B.lineas.length.toLocaleString('es-ES')} líneas). Si algún día subes aquí el Excel completo de UC, pasa a ser la nueva base.`}</small>`;
+    document.getElementById('cfg-calc').disabled=false;
+  }catch(e){ el.innerHTML=`<span class="cfg-err" style="display:inline">⚠️ ${escapeHtml(e.message)}</span>`; }
+}
+function resumenSAP(S){ const i=S.info; if(S.modo==='lineas') return `UC: stock de SAP del ${escapeHtml(fechaTxt(SAP.fecha))} (${i.lineas} líneas con valor)`;
+  return `UC: stock de SAP del ${escapeHtml(fechaTxt(SAP.fecha))} · ${i.conStock.toLocaleString('es-ES')} códigos con stock · ${eur0(i.valor)} a coste`; }
+function avisosSAP(S){ if(S.modo!=='unidades') return ''; const i=S.info, out=[];
+  if(i.sinCoste.length) out.push(`<div class="cfg-warn">${i.sinCoste.length} código${i.sinCoste.length>1?'s':''} de SAP sin coste en la base (cuentan a 0 €): <b>${i.sinCoste.slice(0,15).map(x=>escapeHtml(x[0])).join(', ')}</b>${i.sinCoste.length>15?' y '+(i.sinCoste.length-15)+' más':''}. Se arregla subiendo el Excel completo de UC (pasa a ser la nueva base).</div>`);
+  if(i.nuevos.length) out.push(`<div class="quien" style="margin-top:4px">${i.nuevos.length} código${i.nuevos.length>1?'s':''} nuevo${i.nuevos.length>1?'s':''} respecto a la base: valorados con el coste de su padre si lo hay, en el almacén «SAP».</div>`);
+  return out.join(''); }
 // ── Subida de ficheros ──
 let SUBIDOS={uc:null,wk:null}, CALC=null;
 function leerExcel(file){ return file.arrayBuffer().then(b=>{ const wb=XLSX.read(b,{type:'array',cellDates:true}); return XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:null,raw:true}); }); }
@@ -732,30 +785,35 @@ async function elegirFicheros(files){
     try{ const filas=await leerExcel(f); const t=STOCK.tipoFichero(filas);
       if(!t.tipo){ out.innerHTML+=`<div class="cfg-err">No reconozco «${escapeHtml(f.name)}». El de UC (SAP) debe traer «Padre», «Código Artículo»…; el de Wikuk «Producto Padre», «Importe Stock»…</div>`; continue; }
       if(t.faltan.length){ out.innerHTML+=`<div class="cfg-err">Al fichero de ${t.tipo==='uc'?'UC':'Wikuk'} «${escapeHtml(f.name)}» le faltan las columnas: <b>${t.faltan.map(escapeHtml).join(', ')}</b>.</div>`; continue; }
-      SUBIDOS[t.tipo]={nombre:f.name,filas}; txt.push((t.tipo==='uc'?'UC: ':'Wikuk: ')+f.name);
+      SUBIDOS[t.tipo]={nombre:f.name,filas}; txt.push((t.tipo==='uc'?'Base de costes UC: ':'Wikuk: ')+f.name);
     }catch(e){ out.innerHTML+=`<div class="cfg-err">No se ha podido leer «${escapeHtml(f.name)}»: ${escapeHtml(e.message)}</div>`; }
   }
-  const tx=[SUBIDOS.uc&&('UC: '+SUBIDOS.uc.nombre),SUBIDOS.wk&&('Wikuk: '+SUBIDOS.wk.nombre)].filter(Boolean);
-  document.getElementById('cfg-files-txt').textContent=tx.length?tx.join(' · '):'Ningún fichero elegido';
-  document.getElementById('cfg-calc').disabled=!(SUBIDOS.uc||SUBIDOS.wk);
+  const tx=[SUBIDOS.wk&&('Wikuk: '+SUBIDOS.wk.nombre),SUBIDOS.uc&&('Base de costes UC: '+SUBIDOS.uc.nombre)].filter(Boolean);
+  document.getElementById('cfg-files-txt').textContent=tx.length?tx.join(' · '):'Ningún fichero elegido · si no subes ninguno se usa el de la última carga';
+  document.getElementById('cfg-calc').disabled=false;
 }
 async function calcularSubida(){
   const out=document.getElementById('cfg-res'), b=document.getElementById('cfg-calc');
   b.disabled=true; b.textContent='Calculando…';
   try{
-    const prev=(!SUBIDOS.uc||!SUBIDOS.wk)?await cargarRaw():null;
-    const raw={uc:SUBIDOS.uc?STOCK.compactarUC(SUBIDOS.uc.filas):(prev&&prev.uc)||null,
-               wk:SUBIDOS.wk?STOCK.compactarWK(SUBIDOS.wk.filas):(prev&&prev.wk)||null};
+    const prev=!SUBIDOS.wk?await cargarRaw():null;
+    // UC: del stock de SAP del CRM. Si se ha subido el Excel completo de UC, es la nueva base de costes.
+    const ucBase=SUBIDOS.uc?STOCK.compactarUC(SUBIDOS.uc.filas):(await cargarBaseUC()).lineas;
+    await leerSAP(); const S=STOCK.desdeSAP(SAP,ucBase);
+    if(!S.uc.length) throw new Error('el stock de SAP no tiene ningún código con stock');
+    const raw={uc:S.uc,wk:SUBIDOS.wk?STOCK.compactarWK(SUBIDOS.wk.filas):(prev&&prev.wk)||null};
+    if(!raw.wk) throw new Error('falta el Excel de Wikuk (todavía no hay ninguno cargado)');
     const pf=prev&&prev._meta?(prev._meta.fecha||''):'';
-    const fuentes=[SUBIDOS.uc?'UC: '+escapeHtml(SUBIDOS.uc.nombre):(raw.uc?`UC: el de la carga anterior (${escapeHtml(pf)})`:''),
-                   SUBIDOS.wk?'Wikuk: '+escapeHtml(SUBIDOS.wk.nombre):(raw.wk?`Wikuk: el de la carga anterior (${escapeHtml(pf)})`:'')].filter(Boolean).join(' · ');
+    const fuentes=[resumenSAP(S)+(SUBIDOS.uc?' · nueva base de costes: '+escapeHtml(SUBIDOS.uc.nombre):''),
+                   SUBIDOS.wk?'Wikuk: '+escapeHtml(SUBIDOS.wk.nombre):`Wikuk: el de la carga anterior (${escapeHtml(pf)})`].join(' · ');
     raw._ficheros=fuentes.replace(/<[^>]+>/g,'');
     const R=STOCK.calcular(raw,CFG,REF);
     const f=document.getElementById('cfg-fecha').value; const fecha=f?f.split('-').reverse().join('.').replace(/^(\d\d\.\d\d\.)\d\d(\d\d)$/,'$1$2'):'';
-    CALC={R,raw,fecha};
-    out.innerHTML=htmlResultado(R,fuentes)+`<div class="toolbar"><button class="primary-btn" id="cfg-pub">Publicar el stock del ${escapeHtml(fecha)}</button><span class="count">Sustituye al stock publicado. Las categorías y decisiones se mantienen.</span></div>`;
+    CALC={R,raw,fecha,ucBase:SUBIDOS.uc?ucBase:null,ucNombre:SUBIDOS.uc&&SUBIDOS.uc.nombre};
+    out.innerHTML=htmlResultado(R,fuentes)+avisosSAP(S)+`<div class="toolbar"><button class="primary-btn" id="cfg-pub">Publicar el stock del ${escapeHtml(fecha)}</button><span class="count">Sustituye al stock publicado. Las categorías y decisiones se mantienen.</span></div>`;
     document.getElementById('cfg-pub').onclick=async(e)=>{ const btn=e.target; btn.disabled=true; btn.textContent='Publicando…';
-      try{ await publicar(CALC.R,CALC.raw,CALC.fecha,true); SUBIDOS={uc:null,wk:null}; document.getElementById('cfg-files-txt').textContent='Ningún fichero elegido';
+      try{ if(CALC.ucBase) await guardarBaseUC(CALC.ucBase,CALC.ucNombre,CALC.fecha);
+        await publicar(CALC.R,CALC.raw,CALC.fecha,true); SUBIDOS={uc:null,wk:null}; document.getElementById('cfg-files-txt').textContent='Ningún fichero elegido · si no subes ninguno se usa el de la última carga';
         btn.textContent='✓ Publicado'; out.insertAdjacentHTML('beforeend','<div class="cfg-ok">✓ Publicado. Los apartados 1 y 2 ya enseñan este stock.</div>'); }
       catch(err){ btn.disabled=false; btn.textContent='Publicar'; alert('No se ha podido publicar: '+err.message); } };
   }catch(e){ out.innerHTML=`<div class="cfg-err">No se ha podido calcular: ${escapeHtml(e.message)}</div>`; }
@@ -815,7 +873,7 @@ function montarConfig(){
     if(!n||!a){ alert('Pon los dos códigos.'); return; } CFG.equivalencias[n]=a; document.getElementById('cfg-eq-nuevo').value=''; document.getElementById('cfg-eq-ant').value=''; EQ_Q=n; document.getElementById('cfg-eq-q').value=n; pintarConfig(); };
   document.getElementById('cfg-div-add').onclick=()=>{ const k=document.getElementById('cfg-div-k').value.trim().toUpperCase(), n=document.getElementById('cfg-div-n').value.trim()||k;
     if(!k) return; CFG.wkNoComercial[k]=n; document.getElementById('cfg-div-k').value=''; document.getElementById('cfg-div-n').value=''; pintarConfig(); };
-  pintarUltima(); pintarConfig();
+  pintarUltima(); pintarConfig(); pintarSAP();
 }
 async function initCapabilities(){
   if(!YO.stock){ document.getElementById('app').innerHTML='<div class="card" style="margin-top:30px"><h2>Acceso restringido</h2><p class="desc">Entra desde el portal. Esta herramienta es solo para el CEO, el jefe comercial y el jefe de administración.</p></div>'; return; }
