@@ -226,6 +226,8 @@ function listaComerciales(us,pu,res){
       if(u.grupoAgente||u.catalogoVendedor||A_conoce(posibles)) m.codigo=true;
       if(!m.equipo&&u.equipo) m.equipo=U(u.equipo);
       if(!m.entrega&&u.entregaParte) m.entrega=String(u.entregaParte).toLowerCase(); }
+    // (oct 2026) Manda el equipo puesto en el portal (Administrador → Equipo): «determina en qué equipo aparece»
+    if(esCuenta&&PU_IDS.has(u._id)&&u.equipo) map[canon].equipo=U(u.equipo);
   });
   const nomN=(x)=>String(x||"").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^A-Z0-9]/g,"");
   const porNom={};
@@ -286,7 +288,7 @@ async function cargar(){
   // (oct 2026) Mi cierre aunque mi ficha no se encuentre o esté guardado con otra clave
   if(yo&&!yo.inf) yo.inf=informes.find(d=>yoCl.includes(U(d.agente))||(UID&&String(d.uid||"")===UID))||null;
   if(yo&&yo.inf&&yo.papel==="jefe"){ const j=jefes.find(x=>x===yo); if(j) j.inf=yo.inf; }
-  D={us,informes,flujo,coms,jefes,dirs,equipos,yo,
+  D={us,pu,informes,flujo,coms,jefes,dirs,equipos,yo,
      admin:flujo.find(x=>x.paso==="admin")||null, ceo:flujo.find(x=>x.paso==="ceo")||null};
 }
 
@@ -431,12 +433,43 @@ function filaCom(p,modo){
 }
 let ABIERTO=new Set();
 window.togEq=(eq)=>{ ABIERTO.has(eq)?ABIERTO.delete(eq):ABIERTO.add(eq); pintar(); };
+// (oct 2026) «¿Falta alguien?»: las fichas de un equipo que no salen en la lista y por qué
+const NNOM=(x)=>String(x||"").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^A-Z0-9]/g,"");
+function fueraDe(eq){
+  const E=NNOM(eq), PU=new Set((D.pu||[]).map(p=>p._id)), dentro=new Map(D.coms.map(p=>[NNOM(p.nombre),p]));
+  const jefesN=new Set(D.jefes.map(j=>NNOM(j.nombre)));
+  const NO_PERSONA=/^(interc|clientsdirect|cataluna|tienda|telefono|sinagente|_?total|campofrio|wikuk|interkey|francia|distribuidor)/i;
+  const out=new Map();
+  [...(D.us||[]),...(D.pu||[])].forEach(u=>{
+    const nom=String(u.nombre||u.username||u._id||"").trim(), k=NNOM(nom); if(!k) return;
+    const eqU=NNOM(u.equipo);
+    const p=dentro.get(k);
+    if(p&&NNOM(p.equipo)===E) return;                      // ya sale en este equipo
+    if(eqU!==E&&!(p&&NNOM(p.equipo)!==E&&eqU===E)) return; // solo fichas de este equipo
+    if(jefesN.has(k)) return;                              // es el jefe
+    const rol=String(u.rol||"").toLowerCase(), m=[];
+    if(p) m.push(`sale en el equipo ${p.equipo||"—"} (otra ficha suya dice ese equipo)`);
+    if(u.activo===false||String(u.activo)==="false") m.push("la ficha está desactivada");
+    if(!ROL_COM.includes(rol)) m.push(`su rol es «${rol||"sin rol"}», no comercial`);
+    if(u.tipologia||(u.departamentoId&&!/^(eq_|ventas$|comercial)/i.test(u.departamentoId))) m.push(`está en otro departamento (${u.departamentoId||u.tipologia})`);
+    if(NO_PERSONA.test(nom.replace(/[.\s_-]/g,""))) m.push("su nombre parece un canal o intercompañía");
+    if(String(u.entregaParte||"").toLowerCase()==="no") m.push("marcado «no entrega parte»");
+    if(String(u.entregaParte||"").toLowerCase()!=="si"&&!PU.has(u._id)&&!(D.pu||[]).some(x=>NNOM(x.nombre)===k)) m.push("no tiene usuario en el portal (y no está marcado «sí entrega parte»)");
+    if(!m.length) m.push("ficha duplicada o sin código de vendedor");
+    const ya=out.get(k); if(ya){ m.forEach(x=>{ if(!ya.m.includes(x)) ya.m.push(x); }); } else out.set(k,{nombre:nom,m});
+  });
+  return [...out.values()];
+}
+function faltaH(eq){ const l=fueraDe(eq); if(!l.length) return "";
+  return `<details style="margin-top:10px"><summary style="cursor:pointer;font-size:12.5px;font-weight:700;color:#64748B">¿Falta alguien? ${l.length} ficha${l.length===1?"":"s"} del equipo ${esc(eq)} no sale${l.length===1?"":"n"} en la lista</summary>
+    ${l.map(x=>`<div style="font-size:12.5px;padding:6px 0;border-top:1px solid #F1F5F9"><b>${esc(x.nombre)}</b><div style="color:#B45309">${x.m.map(esc).join(" · ")}</div></div>`).join("")}
+    <p class="cs" style="margin-top:6px">Se arregla en Usuarios (rol, equipo, «entrega parte») o en el portal.</p></details>`; }
 function tarjetaEquipo(){
   if(ROL==="jefe"){
     const mios=D.coms.filter(p=>p.equipo===EQUIPO);
     return `<div class="card"><p class="ct">Comités con tu equipo</p>
       <p class="cs">Pulsa en cada comercial: revisas su parte con él, decides, añades comentarios y acciones, y cierras el acta.</p>
-      ${mios.length?mios.map(p=>filaCom(p,"jefe")).join(""):`<p class="cs">No encuentro comerciales del equipo ${esc(EQUIPO||"—")}.</p>`}</div>`;
+      ${mios.length?mios.map(p=>filaCom(p,"jefe")).join(""):`<p class="cs">No encuentro comerciales del equipo ${esc(EQUIPO||"—")}.</p>`}${faltaH(EQUIPO)}</div>`;
   }
   if(ROL==="director"||ROL==="ceo"){
     return `<div class="card"><p class="ct">Equipos</p><p class="cs">Pulsa un comercial para ver el acta de su comité o su parte.</p>
@@ -446,7 +479,7 @@ function tarjetaEquipo(){
           <div style="flex:1">${esc(eq)}${op?' <span class="tag t-fut">opcional</span>':""}<small>${j?esc(j.nombre)+" · "+(j.inf?"✓ cerrado "+esc(cuando(j.inf.fechaEnvio)):"sin cerrar"):"Sin jefe de equipo"}</small></div>
           <span class="tag ${pc===cs.length?"t-ok":op?"t-fut":"t-pend"}">Partes ${pc}/${cs.length}</span>
           ${j&&flujoNuevo()?`<span class="tag ${cc===cs.length?"t-ok":op?"t-fut":"t-pend"}">Comités ${cc}/${cs.length}</span>`:""}<span class="chev">${ab?"▾":"›"}</span></div>
-          ${ab?`<div style="padding-bottom:6px">${cs.map(p=>filaCom(p,"ver")).join("")||'<p class="cs">Sin comerciales</p>'}</div>`:""}</div>`; }).join("")}</div>`;
+          ${ab?`<div style="padding-bottom:6px">${cs.map(p=>filaCom(p,"ver")).join("")||'<p class="cs">Sin comerciales</p>'}${faltaH(eq)}</div>`:""}</div>`; }).join("")}</div>`;
   }
   return "";
 }
