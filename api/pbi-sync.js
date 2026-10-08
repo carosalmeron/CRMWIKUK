@@ -1918,6 +1918,11 @@ ${[...Array(12)].map((_, i) => mes(i + 1)).join(",\n")}
       const familia = new Set([cod]);
       const raizTripa = (x) => { const m = /^([A-Z]{1,3}\d{1,3}\.\d{1,2}[A-Z]+?)(?:[FR]\d+)?(?:\.[A-Z0-9]+)?$/.exec(String(x || "").trim().toUpperCase()); return m ? m[1] : null; };
       const raizCod = raizTripa(cod);
+      // (oct 2026) Equivalentes en la venta (&mas=FU34.9L,…): se cuentan como el mismo artículo
+      const mas = String(req.query.mas || "").toUpperCase().split(",").map((x) => x.replace(/[^A-Z0-9._\-]/g, "")).filter(Boolean).slice(0, 20);
+      mas.forEach((x) => familia.add(x));
+      const raices = new Set([raizCod, ...mas.map(raizTripa)].filter(Boolean));
+      const padres = new Set([cod, ...mas]);
       for (const [viejo, nuevo] of Object.entries(EQUIV_ART || {})) {
         if (nuevo === cod) familia.add(viejo);
       }
@@ -1939,9 +1944,9 @@ ${[...Array(12)].map((_, i) => mes(i + 1)).join(",\n")}
           const d1 = descs.get(base) || "", d2 = descs.get(c) || "";
           const [k1, k2] = d1.length <= d2.length ? [d1, d2] : [d2, d1];
           const mismoTexto = k1.length >= 12 && k2.startsWith(k1);
-          if (padre === cod || (base === cod && base !== c && mismoTexto)) familia.add(c);
+          if (padres.has(padre) || (base === cod && base !== c && mismoTexto)) familia.add(c);
           // (oct 2026) Misma madeja: envases y entubados de su letra (FU36.9LF3, FU36.9LR3.C12 → FU36.9L)
-          if (raizCod && raizTripa(c) === raizCod) familia.add(c);
+          if (raices.size && raices.has(raizTripa(c))) familia.add(c);
           // También los códigos antiguos de las variantes
           if (familia.has(codArt(c))) familia.add(c);
         }
