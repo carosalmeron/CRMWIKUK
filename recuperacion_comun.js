@@ -365,7 +365,7 @@
     const caen=p.caen.slice(0,max), suben=opts.sinSuben?[]:(p.suben||[]);
     // Un importe negativo este año es un abono o una devolución, no una venta
     const imp=(v,col)=>v<0?`<b style="color:#C2263D">${RC.eur(v)}</b> <span style="color:#8A94A0">(abono)</span>`:`<b style="color:${col}">${RC.eur(v)}</b>`;
-    const fila=(a,col)=>`<tr><td style="padding:3px 8px 3px 0;font-size:12px;line-height:1.35">${esc(a.desc)}${a.art&&a.desc!==a.art?`<span style="color:#8A94A0"> · ${esc(a.art)}</span>`:""}</td>
+    const fila=(a,col)=>`<tr><td style="padding:3px 8px 3px 0;font-size:12px;line-height:1.35">${esc(RC.descCM?RC.descCM(a):a.desc)}${a.art&&a.desc!==a.art?`<span style="color:#8A94A0"> · ${esc(a.art)}</span>`:""}</td>
       <td style="padding:3px 0;font-size:12px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums">${RC.eur(a.ant)} → ${imp(a.act,a.act?"#B45309":"#C2263D")}</td></tr>`;
     // Cuadre con la cabecera: la lista es solo lo más grande
     const pierde=caen.reduce((t,a)=>t+(num(a.ant)-num(a.act)),0);
@@ -857,6 +857,25 @@
   const _rzP=(x)=>{ const m=/^([A-Z]{1,3}\d{1,3}\.\d{1,2}[A-Z]+?)(?:[FR]\d+)?(?:\.[A-Z0-9]+)?$/.exec(ARR(x)); return m?m[1]:null; };
   RC.promoDe=async(art)=>{ const c=ARR(art); if(!c) return null; const L=await RC.promoLista(), rc=_rzP(c);
     return L.find(it=>{ const cs=[it.cod,...(it.eq||[]),...(it.codigos||[])].map(ARR); return cs.includes(c)||(rc&&cs.some(x=>_rzP(x)===rc)); })||null; };
+  // Versión inmediata (con la lista ya cargada): para pintar sin esperar
+  RC.promoDeSync=(art)=>{ const c=ARR(art); if(!c||!RC._promo) return null; const rc=_rzP(c);
+    return RC._promo.find(it=>{ const cs=[it.cod,...(it.eq||[]),...(it.codigos||[])].map(ARR); return cs.includes(c)||(rc&&cs.some(x=>_rzP(x)===rc)); })||null; };
+  // (oct 2026) Calibre y metros de cualquier código, del detalle del stock de SAP (cuando Power BI no los trae)
+  RC._cm=null;
+  RC.cargarCalMet=async()=>{ if(RC._cm) return RC._cm; RC._cm={cod:{},base:{}};
+    try{ const g=async(c,id)=>{ const r=await fetch(`${RC.FB}/${c}/${id}`); if(!r.ok) return null; const j=await r.json(), o={}; for(const [k,v] of Object.entries(j.fields||{})) o[k]=v.stringValue??(v.integerValue!=null?Number(v.integerValue):v.doubleValue??null); return o; };
+      const m=await g("stock_sap","meta"), n=Number(m&&m.chunks)||0;
+      const P=await Promise.all([...Array(n)].map((_,i)=>g("stock_sap_detalle","chunk_"+i).catch(()=>null)));
+      const ok=(v)=>v&&!/^sin calibre$/i.test(String(v).trim())&&String(v).trim()!=="0";
+      P.forEach(ch=>{ let rows=[]; try{ rows=JSON.parse((ch&&ch.rows)||"[]"); }catch(e){}
+        rows.forEach(r=>{ const k=ARR(r.cod); if(!k) return; const x={cal:ok(r.calibre)?String(r.calibre).trim():"",met:Number(r.met)>0?String(r.met):""};
+          RC._cm.cod[k]=x; const b=ARR(r.base)||k.split(".")[0]; if(!RC._cm.base[b]||(!RC._cm.base[b].cal&&x.cal)) RC._cm.base[b]=x; }); });
+    }catch(e){}
+    return RC._cm; };
+  RC.calMetDe=(art)=>{ const k=ARR(art), M=RC._cm; if(!k||!M) return null; return M.cod[k]||M.base[k]||M.cod[k.split(".")[0]]||M.base[k.split(".")[0]]||null; };
+  // Texto del artículo con calibre y metros aunque no vengan en la venta
+  RC.descCM=(a)=>{ let d=String(a.desc||a.art||""); const x=RC.calMetDe(a.art); if(!x) return d;
+    if(x.cal&&!/cal\.?\s/i.test(d)) d+=" · cal. "+x.cal; if(x.met&&!/\d\s?m\b/.test(d)) d+=" · "+x.met+" m"; return d; };
   RC.promoDto=(it,catCli)=>/FABRICANTE|DISTRIBUIDOR|GRAN CUENTA/i.test(String(catCli||""))?(Number(it.dtoFab)||0):(Number(it.dtoGen)||0);
   RC.limitesDto=async()=>{
     if(RC._lim) return RC._lim;
