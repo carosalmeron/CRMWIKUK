@@ -45,7 +45,8 @@
   const eur2=(n)=>(Math.round(n*100)/100).toLocaleString('es-ES',{minimumFractionDigits:2,maximumFractionDigits:2})+' €';
   function precios(it){ const b=Number(it.tarifa)||0; if(!(b>0)) return null;
     return {carn:{tar:b,dto:Number(it.dtoGen)||0,p:b*(1-(Number(it.dtoGen)||0)/100)},fab:{tar:b*0.9,dto:Number(it.dtoFab)||0,p:b*0.9*(1-(Number(it.dtoFab)||0)/100)}}; }
-  function preciosH(it){ const p=precios(it); if(!p) return '<span style="color:#94A3B8">sin tarifa en el catálogo</span>';
+  // (oct 2026) Sin precio en el catálogo: el descuento permitido de cada tipo de cliente
+  function preciosH(it){ const p=precios(it); if(!p) return `Carn. <b style="color:#B45309">−${Number(it.dtoGen)||0}%</b> · Fab. <b style="color:#B45309">−${Number(it.dtoFab)||0}%</b> <span style="color:#94A3B8">sobre tarifa</span>`;
     const l=(n,x)=>`${n} ${x.dto?`<s style="color:#94A3B8">${eur2(x.tar)}</s> <b style="color:#B45309">${eur2(x.p)}</b> −${x.dto}%`:`<b>${eur2(x.tar)}</b>`}`;
     return l('Carn.',p.carn)+' · '+l('Fab.',p.fab); }
   // Familias en el orden del catálogo
