@@ -689,6 +689,29 @@ let RECOD = { prefijo: "U43", digitos: 4, inserta: "0" };
 // Se calculan aqui una sola vez y se escriben en pbi_resumen_agente, para
 // que el CRM y las paginas de analisis no tengan que repetir la regla.
 // Editable en Firestore: pbi_config/ramas
+// ── (oct 2026) Grupo de venta, igual que en Stock Promoción y Liquidación ──
+// La madeja y sus entubados de la misma letra van juntos (FU36.9LF3,
+// FU36.9LR3.C12 → FU36.9L) y los equivalentes en la venta también
+// (FC34.9L = FU34.9L, configurados en Stock: stock_config/actual). Sin esto,
+// un cliente que ha pasado de FU a FC salía como que deja de comprar FU.
+const raizTripaV = (x) => { const m = /^([A-Z]{1,3}\d{1,3}\.\d{1,2}[A-Z]+?)(?:[FR]\d+)?(?:\.[A-Z0-9]+)?$/.exec(String(x || "").trim().toUpperCase()); return m ? m[1] : null; };
+async function cargarGrupoVenta() {
+  let EQV = {}, PREF = {}, aviso;
+  try {
+    const sc = await fbLeerDocumento("stock_config", "actual");
+    if (sc && sc.equivVenta) EQV = JSON.parse(sc.equivVenta) || {};
+    if (sc && sc.prefVenta) PREF = JSON.parse(sc.prefVenta) || {};
+  } catch (e) { aviso = e.message.slice(0, 120); }
+  const fn = (c) => {
+    const r = raizTripaV(c); if (!r) return c;
+    if (EQV[r]) return raizTripaV(EQV[r]) || EQV[r];
+    const m = /^([A-Z]{1,3})(\d.*)$/.exec(r);
+    return m && PREF[m[1]] ? PREF[m[1]] + m[2] : r;
+  };
+  fn.aviso = aviso;
+  return fn;
+}
+
 // ── Equivalencias de artículos ─────────────────────────────────────
 // Al cambiar la codificación, un artículo vendido el año pasado como US45.70
 // hoy se factura como IR18.7N. Sin traducir, el análisis muestra el antiguo
@@ -1352,7 +1375,7 @@ EVALUATE
       // La clave lleva versión: al cambiar el formato de la respuesta, las
       // consultas guardadas con el formato viejo dejan de servirse solas y
       // no hay que acordarse de purgar.
-      const idCache = docId(`${cli}_${n}_v3`);   // v3: última compra (fecha, unidades, precio)
+      const idCache = docId(`${cli}_${n}_v4`);   // v4: equivalentes en la venta y madeja + entubados juntos
       if (sello && req.query.recargar !== "1") {
         try {
           const g = await fbLeerDocumento("pbi_articulos_cliente", idCache);
@@ -1471,14 +1494,19 @@ EVALUATE
         return cod;
       };
 
+      const grupoVenta = await cargarGrupoVenta();
+      if (grupoVenta.aviso) out.avisoEquivVenta = grupoVenta.aviso;
+      let porGrupoVenta = 0;
       const porCodigo = new Map();
       let traducidos = 0;
       for (const r of filas) {
         const original = String(pick(r, "CODIGO") || "").trim().toUpperCase();
         if (!original) continue;
-        // Primero el codigo actual, despues su envase padre
+        // Primero el codigo actual, despues su envase padre y su grupo de venta
         const actual = codArt(original);
-        const cod = conEnvase(actual);
+        const env = conEnvase(actual);
+        const cod = grupoVenta(env);
+        if (cod !== env) porGrupoVenta++;
         if (actual !== original) traducidos++;
 
         const g = porCodigo.get(cod) || {
@@ -1498,6 +1526,7 @@ EVALUATE
       }
       out.codigosTraducidos = traducidos;
       out.agrupadosPorEnvase = porEnvase;
+      out.agrupadosPorEquivalencia = porGrupoVenta;
 
       out.articulos = [...porCodigo.values()].map((g) => {
         // La descripcion se busca por el codigo actual y, si no esta en el
@@ -1612,7 +1641,7 @@ EVALUATE
         sello = m && m.ultimaSync ? String(m.ultimaSync) : null;
       } catch (e) {}
 
-      const idCache = docId(`grupo_${ag || "TODOS"}_${n}_${suben ? "up" : "down"}_v2`
+      const idCache = docId(`grupo_${ag || "TODOS"}_${n}_${suben ? "up" : "down"}_v3`
         + (req.query.sinAgrupar === "1" ? "_sinagrupar" : ""));
       if (sello && req.query.recargar !== "1") {
         try {
@@ -1750,14 +1779,15 @@ EVALUATE
       };
 
       // Se agrupa por el código actual, igual que en la vista por cliente
+      const grupoVenta = agrupado ? await cargarGrupoVenta() : (c) => c;
       const porCodigo = new Map();
       for (const r of filas) {
         const original = String(pick(r, "CODIGO") || "").trim().toUpperCase();
         if (!original) continue;
-        // Primero se traduce el código antiguo al actual, y después se sube
-        // al producto padre: las dos cosas, en ese orden.
+        // Primero se traduce el código antiguo al actual, después se sube
+        // al producto padre y por último a su grupo de venta.
         const actual = codArt(original);
-        const cod = padreDe(actual);
+        const cod = grupoVenta(padreDe(actual));
         const g = porCodigo.get(cod)
           || { articulo: cod, ventasAct: 0, ventasAnt: 0, clientes: 0,
                origen: [], hijos: [] };
@@ -1906,6 +1936,21 @@ ${[...Array(12)].map((_, i) => mes(i + 1)).join(",\n")}
       .replace(/[^A-Z0-9._\-]/g, "");
     const n = Math.min(parseInt(req.query.top, 10) || 20, 300);
     const out = { ok: true, articulo: cod, top: n };
+    // (oct 2026) Guardado hasta la siguiente sincronización: lo piden el catálogo y los cierres
+    // (un artículo para muchos comerciales), y cada consulta a Power BI tarda segundos.
+    let selloCA = null, claveCA = null;
+    try {
+      const m = await fbLeerDocumento("pbi_meta", "estado");
+      selloCA = m && m.ultimaSync ? String(m.ultimaSync) : null;
+      claveCA = docId(`cliart_${cod}_${String(req.query.mas || "").toUpperCase().replace(/[^A-Z0-9.,]/g, "")}_${n}`).slice(0, 140);
+      if (selloCA && req.query.recargar !== "1") {
+        const g = await fbLeerDocumento("pbi_mapa_negocio", claveCA);
+        if (g && g.basadoEn === selloCA && g.texto) {
+          const o = JSON.parse(g.texto); o.deCache = true;
+          return res.status(200).json(o);
+        }
+      }
+    } catch (e) { out.avisoCache = e.message.slice(0, 120); }
     try {
       await cargarEquivArticulos();
       const { token } = await getToken(req);
@@ -2025,6 +2070,12 @@ EVALUATE
       out.totalClientes = porCli.size;
       out.sumaCaidas = num(out.clientes.filter((c) => c.diferencia < 0)
         .reduce((x, c) => x + c.diferencia, 0));
+      if (selloCA && claveCA) {
+        try {
+          const t = JSON.stringify(out);
+          if (t.length < 900000) await fbCommit("pbi_mapa_negocio", [{ _id: claveCA, texto: t, basadoEn: selloCA, guardadoEl: new Date().toISOString() }]);
+        } catch (e) { /* sin guardar: la próxima vez se vuelve a consultar */ }
+      }
     } catch (e) {
       out.ok = false;
       out.error = e.message;
