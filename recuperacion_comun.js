@@ -1394,6 +1394,18 @@
   // ══ Cobros · Muestras · Actividad del equipo (de los partes) ═══════════
   // filas: [{nombre, equipo, k}] con k = kpis del informe (o null si no cerró)
   RC.parseKpis=(inf)=>{ try{ const k=typeof inf.kpis==="string"?JSON.parse(inf.kpis||"null"):inf.kpis; return k&&k.muestras?k:null; }catch(e){ return null; } };
+  // (oct 2026) Plan de cobro cliente a cliente (y sus facturas vencidas), tal como lo dejó el comercial
+  // clis: [{c, ven, acc, fe, tx, fac:[{n, fv, im, d}]}]
+  RC.htmlCobroClis=(clis)=>{
+    const L=(clis||[]).filter(Boolean); if(!L.length) return "";
+    const eu=(n)=>Math.round(num(n)).toLocaleString("es-ES")+" €";
+    const fe=(x)=>x?String(x).slice(0,10).split("-").reverse().join("/"):"";
+    return `<div style="margin-top:6px">`+L.map(c=>`<div style="border-top:1px solid #EEF1F5;padding:6px 0;font-size:12.5px">
+      <div style="display:flex;justify-content:space-between;gap:8px"><b>${RC.esc(c.c)}</b>${num(c.ven)?`<b style="color:#B91C1C;white-space:nowrap">${eu(c.ven)}</b>`:""}</div>
+      ${c.acc?`<div><b>${RC.esc(c.acc)}</b>${c.fe?" · para el "+fe(c.fe):""}${c.tx?" — "+RC.esc(c.tx):""}</div>`:`<div style="color:#B91C1C;font-weight:700">Sin acción</div>`}
+      ${(c.fac||[]).length?`<div style="color:#64748B;font-size:11.5px">${c.fac.map(f=>`🧾 ${RC.esc(f.n||"—")} · vence ${fe(f.fv)}${f.d!=null?" · "+f.d+" días":""} · ${eu(f.im)}`).join("<br>")}</div>`:""}
+    </div>`).join("")+`</div>`;
+  };
   RC.htmlKpisEquipo=(filas,titulo)=>{
     const eu=(n)=>Math.round(num(n)).toLocaleString("es-ES")+" €";
     const pc=(r,o)=>o?Math.round(r/o*100):null;
@@ -1423,6 +1435,7 @@
             <span>👋 ${cel(a.vis,a.objVis)} vis · ${cel(a.lla,a.objLla)} llam</span></div></summary>
         <div style="font-size:12.5px;margin-top:6px;display:grid;gap:4px">
           ${c.plan?`<div><b>💰 Plan de cobro:</b> ${RC.esc(c.plan)}</div>`:c.pasa?`<div style="color:#B91C1C"><b>💰 Sin plan de cobro</b></div>`:""}
+          ${(c.clis||[]).length?`<div><b>💰 Factura a factura:</b>${RC.htmlCobroClis(c.clis)}</div>`:""}
           ${m.plan?`<div><b>📦 Muestras la semana que viene:</b> ${RC.esc(m.plan)}</div>`:`<div style="color:#B45309">📦 Sin plan de muestras</div>`}
           ${a.plan?`<div><b>👋 Plan de actividad:</b> ${RC.esc(a.plan)}</div>`:a.flojo?`<div style="color:#B91C1C"><b>👋 Sin plan de actividad</b></div>`:""}
         </div></details>`; }).join("");
