@@ -117,6 +117,47 @@ const CORTO={hoy:"🔔 Hoy",rec:"❌ Reclamados",prox:"📅 Próximos",ok:"✅ P
 window.abrir=(id)=>{ SEL=id; pintar(); window.scrollTo(0,0); };
 window.atras=()=>{ SEL=null; pintar(); };
 
+// (oct 2026) Facturas del cliente (las mismas que en Cobros): factura, empresa, fecha, vencimiento, importe y vencido
+let COBROS_DOCS=null;
+async function docsCobros(){
+  if(COBROS_DOCS) return COBROS_DOCS;
+  const FBC='https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents/cobros_comercial';
+  const out=[]; let tok=null, n=0;
+  do{ const r=await fetch(FBC+'?pageSize=100'+(tok?'&pageToken='+encodeURIComponent(tok):''),{cache:'no-store'}); if(!r.ok) break;
+    const j=await r.json(); (j.documents||[]).forEach(d=>{ try{ out.push({id:d.name.split('/').pop(),clis:JSON.parse((d.fields&&d.fields.datos&&d.fields.datos.stringValue)||'[]')}); }catch(e){} });
+    tok=j.nextPageToken||null; n++; }while(tok&&n<20);
+  return COBROS_DOCS=out;
+}
+async function pintarFacturas(i){
+  const box=document.getElementById('facBox'); if(!box) return;
+  try{
+    const D=await docsCobros(), cod=U(i.clienteCodigo||i.clienteId), nom=U(i.clienteNombre||i.cliente);
+    const prim=D.filter(d=>U(d.id)===U(i.agente)).concat(D.filter(d=>U(d.id)!==U(i.agente)));
+    let c=null; for(const d of prim){ c=d.clis.find(x=>(cod&&U(x.cod)===cod)||U(x.c)===nom); if(c) break; }
+    if(SEL!==i._id) return;
+    const F=c?(c.f||[]).filter(f=>f.im>0&&!f.anul):[];
+    if(!F.length){ box.innerHTML=c?'No tiene facturas pendientes.':'No encuentro sus facturas en Cobros.'; return; }
+    const venc=(f)=>f.ve===1||(f.ve===undefined&&f.fv&&f.fv<hoy);
+    const G={}; F.forEach(f=>{ const k=[f.g,f.t,f.n,f.ff].join('|'); (G[k]=G[k]||[]).push(f); });
+    const filas=Object.values(G).map(l=>{ l.sort((a,b)=>String(a.fv).localeCompare(String(b.fv))); const f=l[0];
+      const ven=l.filter(venc), fvV=ven.length?ven[0].fv:f.fv;
+      return {num:((f.t?f.t+' ':'')+(f.n||'—')).trim(),emp:f.g||'',ff:f.ff,fv:fvV,plazos:l.length,imp:l.reduce((t,x)=>t+x.im,0),vimp:ven.reduce((t,x)=>t+x.im,0),
+        dias:ven.length?(ven[0].dv!=null?ven[0].dv:Math.round((Date.parse(hoy)-Date.parse(ven[0].fv))/86400000)):null,
+        esta:i.facturaNum&&String(f.n||'').includes(String(i.facturaNum))}; })
+      .sort((a,b)=>(b.vimp>0)-(a.vimp>0)||String(a.fv).localeCompare(String(b.fv)));
+    const tI=filas.reduce((t,x)=>t+x.imp,0), tV=filas.reduce((t,x)=>t+x.vimp,0);
+    box.style.color='inherit';
+    box.innerHTML=`<div style="margin-bottom:6px;font-size:13px">Pendiente <b>${eur(tI)}</b> · Vencido <b style="color:#B91C1C">${eur(tV)}</b> · ${filas.length} factura${filas.length===1?'':'s'}</div>`
+      +filas.map(x=>`<div style="border-top:1px solid #EEF1F5;padding:8px 0;${x.esta?'background:#FFFBEB;':''}">
+        <div style="display:flex;justify-content:space-between;gap:8px"><b style="font-size:13.5px">🧾 ${esc(x.num)}</b><span style="font-size:11.5px;font-weight:800;background:#F1F5F9;border-radius:99px;padding:2px 8px">${esc(x.emp)}</span></div>
+        <div class="dato" style="grid-template-columns:repeat(4,1fr);gap:5px;margin-top:5px">
+          <div><span>Fecha</span><b style="font-size:13px">${esc(fES(x.ff))}</b></div>
+          <div><span>Vencimiento</span><b style="font-size:13px">${esc(fES(x.fv))}</b></div>
+          <div><span>Importe</span><b style="font-size:13px">${eur(x.imp)}</b></div>
+          <div><span>Vencido</span><b style="font-size:13px;color:${x.vimp?'#B91C1C':'#15803D'}">${eur(x.vimp)}</b></div></div>
+        <div style="font-size:11.5px;color:#64748B;margin-top:2px">${x.dias!=null?`<b style="color:#B91C1C">${x.dias} días vencida</b>`:'en plazo'}${x.plazos>1?` · ${x.plazos} plazos`:''}${x.esta?' · <b>factura del compromiso</b>':''}</div></div>`).join('');
+  }catch(e){ box.textContent='No se han podido cargar las facturas ('+e.message+').'; }
+}
 function detalle(){
   const i=LISTA.find(x=>x._id===SEL);
   const app=document.getElementById("app");
@@ -131,6 +172,7 @@ function detalle(){
       ${estadoTag(i)}</div>
       <div class="dato"><div><span>Acción</span><b>${esc(i.accionCobro||"")}</b></div><div><span>Fecha</span><b>${esc(fES(i.fechaCompromiso))}</b></div>
         ${i.importeCompromiso?`<div><span>Importe</span><b>${eur(i.importeCompromiso)}</b></div>`:""}<div><span>Apuntado</span><b>${esc(i.fecha||"")}</b></div></div></div>
+    <div class="card" id="facCard"><p style="margin:0;font-weight:800">🧾 Facturas pendientes</p><div id="facBox" style="font-size:12.5px;color:#64748B;margin-top:6px">Buscando sus facturas…</div></div>
     <div class="card"><p style="margin:0;font-weight:800">Hilo</p><div class="hilo">
       ${hilo.map(h=>`<div class="msg ${cls(h)}"><div class="q"><b>${esc(h.por||"")}</b> · ${esc(h.fecha||"")} · ${esc(h.accion||"")}</div>${h.nota?`<div class="t">${esc(h.nota)}</div>`:""}</div>`).join("")}</div></div>
     ${cerrado?`<div class="aviso" style="background:#F0FDF4;color:#166534">✓ Cobrado. Hilo cerrado.</div>`:ES_ADM?`
@@ -147,6 +189,7 @@ function detalle(){
         <div style="background:none;padding:0"><span>Acción</span><select id="resAcc">${RC.ACC_COBRO.map(a=>`<option${a===i.accionCobro?" selected":""}>${a}</option>`).join("")}</select></div></div>
       <div class="acc"><button class="btn prim" onclick="responder(this)">Enviar respuesta</button><button class="btn ok" onclick="dicePagado(this)">✅ Ya ha pagado</button></div>
       <div class="aviso" style="background:#EFF6FF;color:#1E40AF">Si pones nueva fecha, Administración lo vuelve a comprobar ese día.</div></div>`}`;
+  pintarFacturas(i);
 }
 async function accion(btn,fn){ if(btn){ btn.disabled=true; btn.textContent="Guardando…"; }
   try{ await fn(); pintar(); }catch(e){ alert("No se ha guardado: "+e.message); if(btn) btn.disabled=false; } }
