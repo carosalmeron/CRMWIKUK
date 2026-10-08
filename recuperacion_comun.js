@@ -1422,7 +1422,7 @@
     return `<div style="margin-top:6px">`+L.map(c=>`<div style="border-top:1px solid #EEF1F5;padding:6px 0;font-size:12.5px">
       <div style="display:flex;justify-content:space-between;gap:8px"><b>${RC.esc(c.c)}</b>${num(c.ven)?`<b style="color:#B91C1C;white-space:nowrap">${eu(c.ven)}</b>`:""}</div>
       ${c.acc?`<div><b>${RC.esc(c.acc)}</b>${c.fe?" · para el "+fe(c.fe):""}${c.tx?" — "+RC.esc(c.tx):""}</div>`:`<div style="color:#B91C1C;font-weight:700">Sin acción</div>`}
-      ${(c.fac||[]).length?`<div style="color:#64748B;font-size:11.5px">${c.fac.map(f=>`🧾 ${RC.esc(f.n||"—")}${f.g?" · "+RC.esc(f.g):""}${f.ff?" · fecha "+fe(f.ff):""} · vence ${fe(f.fv)}${f.d!=null?" · "+f.d+" días vencida":""}${f.ff?" · lleva "+Math.max(0,Math.round((Date.parse(RC.hoyISO())-Date.parse(f.ff))/86400000))+" días":""} · ${eu(f.im)} ${f.d!=null?RC.seguroProc(RC.diasFactura(f.ff,f.fv)):""}`).join("<br>")}</div>`:""}
+      ${(c.fac||[]).length?`<div style="color:#64748B;font-size:11.5px">${c.fac.map(f=>`🧾 ${RC.esc(f.n||"—")}${f.g?" · "+RC.esc(f.g):""}${f.ff?" · fecha "+fe(f.ff):""} · vence ${fe(f.fv)}${f.d!=null?" · "+f.d+" días vencida":""}${f.ff?" · lleva "+Math.max(0,Math.round((Date.parse(RC.hoyISO())-Date.parse(f.ff))/86400000))+" días":""} · ${eu(f.im)} ${/^AS\b/i.test(f.n||"")?"(apunte contable)":(f.d!=null?RC.seguroProc(RC.diasFactura(f.ff,f.fv)):"")}`).join("<br>")}</div>`:""}
     </div>`).join("")+`</div>`;
   };
   RC.htmlKpisEquipo=(filas,titulo)=>{
