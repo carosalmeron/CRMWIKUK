@@ -69,7 +69,11 @@
     // ── (oct 2026) Madeja + envases + entubados de su letra = mismo producto ──
     // FU36.9L junta FU36.9L.C12… (envases) y FU36.9LF3 / FU36.9LR3 (TF/TR). FU36.9NF1 va con FU36.9N.
     const AGRUPA=cfg.agruparRaiz!==false;
-    const aRep=(c)=>AGRUPA?(raizDe(c)||c):c;
+    // (oct 2026) Equivalentes en la venta: FU34.9L se vende como FC34.9L (con todas sus variantes).
+    // Por código (equivVenta {FU34.9L:'FC34.9L'}) o por prefijo para todos los calibres (prefVenta {FU:'FC'}).
+    const EQV=cfg.equivVenta||{}, PREF=cfg.prefVenta||{};
+    const aEquiv=(r)=>{ if(!r) return r; if(EQV[r]) return raizDe(EQV[r])||EQV[r]; const m=/^([A-Z]{1,3})(\d.*)$/.exec(r); return m&&PREF[m[1]]?PREF[m[1]]+m[2]:r; };
+    const aRep=(c)=>{ if(!AGRUPA) return c; const r=raizDe(c); return r?aEquiv(r):c; };
     // ── UC ──
     const U=new Map(), EXCL=[], child2padre=new Map();
     let ucTotal=0, nLineasUC=0;
@@ -253,5 +257,6 @@
     return {uc,modo:'unidades',info:{codigos:Object.keys(ex).length,conStock:new Set(uc.map(l=>l[1])).size,enBase,nuevos,sinCoste,uds,
       quitados:quitados.length,valor:uc.reduce((t,l)=>t+l[6],0)}};
   }
-  G.STOCK={tipoFichero,compactarUC,compactarWK,calcular,desdeSAP,raizDe,ROT_OBJ_DEF,WK_NO_COMERCIAL_DEF,COLS_UC,COLS_WK};
+  G.STOCK={tipoFichero,compactarUC,compactarWK,calcular,desdeSAP,raizDe,equivDe:(cod,cfg)=>{ cfg=cfg||{}; const out=new Set(), EQV=cfg.equivVenta||{}, PREF=cfg.prefVenta||{};
+    Object.entries(EQV).forEach(([a,b])=>{ if((raizDe(b)||b)===cod) out.add(a); }); const m=/^([A-Z]{1,3})(\d.*)$/.exec(cod); if(m) Object.entries(PREF).forEach(([a,b])=>{ if(b===m[1]) out.add(a+m[2]); }); return [...out]; },ROT_OBJ_DEF,WK_NO_COMERCIAL_DEF,COLS_UC,COLS_WK};
 })(typeof window!=='undefined'?window:globalThis);

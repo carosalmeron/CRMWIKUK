@@ -403,7 +403,7 @@
   .quien{font-size:12px;color:var(--ink-dim);margin-left:8px}
 </style>
 <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-<script src="/stock_proceso.js?v=20261007d"></script>
+<script src="/stock_proceso.js?v=20261008a"></script>
 </head>
 <body>
 
@@ -546,6 +546,15 @@
       <div class="toolbar"><label class="cfg-l">Fecha del stock <input type="date" id="cfg-fecha"></label>
         <button class="primary-btn" id="cfg-calc" disabled>Calcular</button><span class="count" id="cfg-ult"></span></div>
       <div id="cfg-res"></div>
+    </div>
+    <div class="card" id="cfg-eqv-card">
+      <h2>Artículos equivalentes en la venta</h2>
+      <p class="desc">Códigos distintos que se venden como el mismo artículo (por ejemplo <b>FU34.9L = FC34.9L</b>). Se juntan con todas sus variantes (envases y entubados): su stock y sus ventas cuentan juntos para la rotación, el sobrante y la propuesta, y en el catálogo y en «clientes que lo han dejado» se tienen en cuenta los dos. El primero es el que se queda.</p>
+      <div class="toolbar"><input type="search" id="cfg-eqv-a" placeholder="Se queda (p. ej. FC34.9L)"><span>=</span><input type="search" id="cfg-eqv-b" placeholder="Equivalente (p. ej. FU34.9L)">
+        <label class="cfg-l"><input type="checkbox" id="cfg-eqv-pref"> Para todos los calibres (todo FU… = FC…)</label><button class="act" id="cfg-eqv-add">+ Añadir</button></div>
+      <div id="cfg-eqv" class="btnrow" style="margin-top:8px"></div>
+      <details style="margin-top:10px"><summary class="quien" style="cursor:pointer">💡 Posibles equivalentes (mismo calibre y tira, distinta letra)</summary><div id="cfg-eqv-sug" class="btnrow" style="margin-top:8px"></div></details>
+      <p class="desc" style="margin-top:8px">Se aplica al pulsar «Guardar y recalcular» (abajo del todo).</p>
     </div>
     <div class="card">
       <h2>Almacenes de UC</h2>
@@ -727,7 +736,8 @@ async function cargarConfig(){
   const P=(t,d)=>{ try{ return t?JSON.parse(t):d; }catch(e){ return d; } };
   CFG={almacenes:P(c&&c.almacenes,alm.almacenes||[]),rotObj:Object.assign({},STOCK.ROT_OBJ_DEF,P(c&&c.rotObj,{})),
     mgDefecto:c&&c.mgDefecto!=null?Number(c.mgDefecto):0.30,wkNoComercial:P(c&&c.wkNoComercial,STOCK.WK_NO_COMERCIAL_DEF),
-    equivalencias:P(c&&c.equivalencias,eq.equivalencias||{})};
+    equivalencias:P(c&&c.equivalencias,eq.equivalencias||{}),
+    equivVenta:P(c&&c.equivVenta,{}),prefVenta:P(c&&c.prefVenta,{})};
   Object.assign(ROT_OBJETIVO,CFG.rotObj);
 }
 async function cargarDatos(){
@@ -867,8 +877,23 @@ function pintarUltima(){ const el=document.getElementById('cfg-ult'); if(!el) re
   el.textContent=META&&META.fecha?`Publicado: stock del ${META.fecha}${META.publicadoPor?' · '+META.publicadoPor:''}`:'Todavía no hay stock publicado'; }
 // ── Edición de la configuración ──
 let EQ_Q='', ALM_Q='';
+function pintarEquivVenta(){
+  if(!CFG) return; const box=document.getElementById('cfg-eqv'); if(!box) return;
+  const L=[...Object.entries(CFG.prefVenta||{}).map(([b,a])=>({t:'p',b,a,txt:`Todo <b>${escapeHtml(b)}…</b> = <b>${escapeHtml(a)}…</b>`})),
+           ...Object.entries(CFG.equivVenta||{}).map(([b,a])=>({t:'c',b,a,txt:`<b>${escapeHtml(b)}</b> = <b>${escapeHtml(a)}</b>`}))];
+  box.innerHTML=L.map(x=>`<span class="chipx">${x.txt}<button title="Quitar" data-t="${x.t}" data-b="${escapeHtml(x.b)}">✕</button></span>`).join('')||'<span class="quien">Ninguno todavía</span>';
+  box.querySelectorAll('button[data-b]').forEach(b=>b.onclick=()=>{ if(b.dataset.t==='p') delete CFG.prefVenta[b.dataset.b]; else delete CFG.equivVenta[b.dataset.b]; pintarEquivVenta(); });
+  // Sugerencias: mismo calibre y tira (lo de después de las letras), distinta letra; los dos de la misma familia
+  const sug=document.getElementById('cfg-eqv-sug'), por=new Map();
+  DATA.forEach(r=>{ const m=/^([A-Z]{1,3})(\d{1,3}\.\d{1,2}[A-Z]+)$/.exec(r.cod); if(!m) return; (por.get(m[2])||por.set(m[2],[]).get(m[2])).push(r); });
+  const ya=(c)=>(CFG.equivVenta||{})[c]||(()=>{ const m=/^([A-Z]{1,3})(\d.*)$/.exec(c); return m&&(CFG.prefVenta||{})[m[1]]; })();
+  const out=[]; por.forEach(arr=>{ if(arr.length<2) return; arr.sort((a,b)=>b.stock-a.stock);
+    for(let i=1;i<arr.length;i++){ const a=arr[0], b=arr[i]; if(ya(b.cod)||ya(a.cod)) continue; if((a.fam||'')!==(b.fam||'')) continue; out.push([a,b]); } });
+  sug.innerHTML=out.slice(0,60).map(([a,b])=>`<span class="chipx"><b>${escapeHtml(b.cod)}</b> = <b>${escapeHtml(a.cod)}</b> <small>${escapeHtml((b.nom||'').slice(0,26))}</small><button title="Añadir" data-a="${escapeHtml(a.cod)}" data-b="${escapeHtml(b.cod)}">＋</button></span>`).join('')||'<span class="quien">No hay sugerencias</span>';
+  sug.querySelectorAll('button[data-a]').forEach(x=>x.onclick=()=>{ CFG.equivVenta=CFG.equivVenta||{}; CFG.equivVenta[x.dataset.b]=x.dataset.a; pintarEquivVenta(); });
+}
 function pintarConfig(){
-  if(!CFG) return;
+  if(!CFG) return; pintarEquivVenta();
   const A=document.getElementById('cfg-alm');
   A.innerHTML=CFG.almacenes.map((a,i)=>({a,i})).filter(({a})=>!ALM_Q||(a.cod+' '+a.nombre).toUpperCase().includes(ALM_Q.toUpperCase())).map(({a,i})=>`<tr>
     <td class="cod">${a._nuevo?`<input type="text" value="${escapeHtml(a.cod)}" onchange="CFG.almacenes[${i}].cod=this.value.trim().toUpperCase()" style="min-width:80px;width:90px">`:escapeHtml(a.cod)}</td>
@@ -892,7 +917,7 @@ async function guardarConfig(){
   const almOk=CFG.almacenes.filter(a=>a.cod).map(a=>({cod:a.cod,nombre:a.nombre||'',computa:!!a.computa,grupo:a.computa?null:(a.grupo||'Incidencias')}));
   b.disabled=true; b.textContent='Guardando…';
   try{
-    await fsSet('stock_config','actual',{almacenes:almOk,rotObj:CFG.rotObj,mgDefecto:CFG.mgDefecto,wkNoComercial:CFG.wkNoComercial,equivalencias:CFG.equivalencias,por:QUIEN,en:new Date().toISOString()});
+    await fsSet('stock_config','actual',{almacenes:almOk,rotObj:CFG.rotObj,mgDefecto:CFG.mgDefecto,wkNoComercial:CFG.wkNoComercial,equivalencias:CFG.equivalencias,equivVenta:CFG.equivVenta||{},prefVenta:CFG.prefVenta||{},por:QUIEN,en:new Date().toISOString()});
     CFG.almacenes=almOk; Object.assign(ROT_OBJETIVO,CFG.rotObj);
     const raw=await cargarRaw();
     if(!raw){ out.innerHTML='<div class="card"><div class="cfg-warn">Configuración guardada. Todavía no hay ficheros subidos: se aplicará en la primera carga.</div></div>'; }
@@ -917,6 +942,12 @@ function montarConfig(){
     if(!n||!a){ alert('Pon los dos códigos.'); return; } CFG.equivalencias[n]=a; document.getElementById('cfg-eq-nuevo').value=''; document.getElementById('cfg-eq-ant').value=''; EQ_Q=n; document.getElementById('cfg-eq-q').value=n; pintarConfig(); };
   document.getElementById('cfg-div-add').onclick=()=>{ const k=document.getElementById('cfg-div-k').value.trim().toUpperCase(), n=document.getElementById('cfg-div-n').value.trim()||k;
     if(!k) return; CFG.wkNoComercial[k]=n; document.getElementById('cfg-div-k').value=''; document.getElementById('cfg-div-n').value=''; pintarConfig(); };
+  document.getElementById('cfg-eqv-add').onclick=()=>{ const a=document.getElementById('cfg-eqv-a').value.trim().toUpperCase(), b=document.getElementById('cfg-eqv-b').value.trim().toUpperCase();
+    if(!a||!b||a===b){ alert('Pon los dos códigos (distintos).'); return; }
+    if(document.getElementById('cfg-eqv-pref').checked){ const ma=/^([A-Z]{1,3})\d/.exec(a), mb=/^([A-Z]{1,3})\d/.exec(b); if(!ma||!mb){ alert('Para todos los calibres, los códigos tienen que empezar por letras y seguir con el calibre (FC34.9L, FU34.9L).'); return; }
+      CFG.prefVenta=CFG.prefVenta||{}; CFG.prefVenta[mb[1]]=ma[1]; }
+    else { CFG.equivVenta=CFG.equivVenta||{}; CFG.equivVenta[STOCK.raizDe(b)||b]=STOCK.raizDe(a)||a; }
+    document.getElementById('cfg-eqv-a').value=''; document.getElementById('cfg-eqv-b').value=''; pintarEquivVenta(); };
   document.getElementById('cfg-dto-q').oninput=(e)=>{ DTO_Q=e.target.value; pintarDescuentos(); };
   document.getElementById('cfg-dto-solo').onchange=pintarDescuentos;
   document.getElementById('cfg-dto-save').onclick=guardarDescuentos;
@@ -1308,7 +1339,7 @@ function itemsCatalogo(){
   DATA.forEach(r=>{ const g=ppGrupo(r); if(g!=='PROMO'&&g!=='LIQ') return; const c=cantDe(r.cod); if(!(c>0)) return;
     const d=dtoDe(r), fam=famCat(r), x=calMet(r);
     out.push({cod:r.cod,nom:r.nom||'',fam,fo:C&&C.famOrden.includes(fam)?C.famOrden.indexOf(fam):999,div:effectiveDiv(r)||'',est:g==='LIQ'?'LIQUIDACIÓN':'PROMOCIÓN',
-      uds:Math.round(c*100)/100,cal:x.cal,met:x.met,tarifa:tarifaDe(r),dtoGen:d.gen,dtoFab:d.fab,codigos:prodsDe(r).slice(0,30)}); });
+      uds:Math.round(c*100)/100,cal:x.cal,met:x.met,eq:STOCK.equivDe(r.cod,CFG),tarifa:tarifaDe(r),dtoGen:d.gen,dtoFab:d.fab,codigos:prodsDe(r).slice(0,30)}); });
   return out.sort((a,b)=>a.fo-b.fo||a.fam.localeCompare(b.fam)||a.nom.localeCompare(b.nom)||a.cod.localeCompare(b.cod));
 }
 let _tCat=null, _pubCat=false, _otraCat=false;
