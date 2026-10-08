@@ -254,7 +254,7 @@ window.toggleObj=function(i){
 </script>
 </head>
 <body>
-<div id="app"><p class="estado">Leyendo… v1.77</p></div>
+<div id="app"><p class="estado">Leyendo… v1.78</p></div>
 <script src="agentes.js"></script>
 
 <script>
@@ -292,7 +292,19 @@ function plano(doc){
 const FALLOS=[], PAGINAS={}; let HECHAS=0, TOTAL=0;
 // Con tiempo limite: una peticion que no vuelve dejaba la pagina en "Leyendo…"
 // para siempre, sin decir cual era. Ahora aborta a los 12 s y lo cuenta.
+// (oct 2026) Progreso visible: qué colecciones faltan y por qué página van.
+// Antes se quedaba en «Leyendo…» sin decir nada y parecía colgado.
+const PROG={}; let PROG_FIN=false;
+function progreso(){
+  if(PROG_FIN) return; const app=document.getElementById("app"); if(!app) return;
+  const L=Object.entries(PROG), hechas=L.filter(([,x])=>x.fin).length, faltan=L.filter(([,x])=>!x.fin);
+  app.innerHTML=`<p class="estado">Leyendo… v1.78 · ${hechas} de ${L.length} listas${faltan.length?`<br><span style="font-size:12.5px">Faltan: ${faltan.map(([c,x])=>c+(x.pag?" (pág. "+(x.pag+1)+")":"")).join(", ")}</span>`:""}</p>`;
+}
 async function leerCol(col){
+  PROG[col]={pag:0,fin:false}; progreso();
+  try{ return await leerCol0(col); } finally { PROG[col].fin=true; progreso(); }
+}
+async function leerCol0(col){
   // El try iba fuera del bucle: si fallaba la segunda pagina, el catch la
   // silenciaba y devolvia los primeros 300 como si fueran todos.
   const todo=[]; let tok=null, pag=0;
@@ -317,7 +329,7 @@ async function leerCol(col){
     }finally{ if(reloj) clearTimeout(reloj); }
     const docs=(j.documents||[]).map(plano);
     todo.push(...docs);
-    pag++;
+    pag++; if(PROG[col]){ PROG[col].pag=pag; progreso(); }
     tok=j.nextPageToken||null;
     if(!docs.length) break;                 // pagina vacia: no seguir
   }while(tok&&pag<30);
@@ -326,10 +338,14 @@ async function leerCol(col){
 }
 
 async function leerDoc(ruta){
+  // (oct 2026) Con tiempo límite, como leerCol: un fetch que no vuelve colgaba la página
+  const ctrl=(typeof AbortController!=="undefined")?new AbortController():null;
+  const reloj=ctrl?setTimeout(()=>ctrl.abort(),12000):null;
   try{
-    const r=await fetch(`${FB}/${ruta}`);
+    const r=await fetch(`${FB}/${ruta}`,ctrl?{signal:ctrl.signal}:undefined);
     return r.ok ? plano(await r.json()) : null;
   }catch(e){ return null; }
+  finally{ if(reloj) clearTimeout(reloj); }
 }
 
 // La identidad viaja en el hash, como en pedidos.html: localStorage se pierde
@@ -532,7 +548,8 @@ function desvHTML(pct, etqMenos, etqMas){
            muestras,ofertas,estrategias,incidencias,semanas,estacion,clientesFB,mesesCli,
            informes,planes,visitas,ajustes,motivosRetraso,objSemana]=await Promise.all([
       // La tabla de identidades primero: todo el cruce por agente depende de ella
-      Agentes.cargar().then(()=>leerCol("pbi_resumen_agente")),
+      // (oct 2026) La tabla de alias, con tiempo límite: si no responde se sigue sin ella
+      Promise.race([Agentes.cargar().catch(()=>null),new Promise(r=>setTimeout(r,12000))]).then(()=>leerCol("pbi_resumen_agente")),
       leerCol("pbi_objetivos"),
       leerCol("usuarios"),
       leerCol("portal_users"),
@@ -689,10 +706,12 @@ function desvHTML(pct, etqMenos, etqMas){
     // 14 dias: la semana en curso y la anterior, para poder comparar si los
     // retrasos mejoran o empeoran.
     const fechas=[]; for(let i=0;i<14;i++){ const d=new Date(); d.setDate(d.getDate()-i); fechas.push(iso(d)); }
+    if(!PROG_FIN) app.innerHTML=`<p class="estado">Leyendo… v1.78 · cambios de pedidos de los últimos 14 días</p>`;
     const dias=(await Promise.all(fechas.map(f=>leerDoc(`pbi_pedidos_cambios/${f}`)))).filter(Boolean);
     const diasCambios=dias;   // lo usa el resumen de retrasos
 
     function pintar(){
+    PROG_FIN=true;
     const mios=seleccionados();
     const t=agregar(mios);
 
@@ -1887,7 +1906,7 @@ ${RETRASOS?`<section>
   ${FALLOS.join(" · ")}.<br>`:""}
   <span style="font-size:11px">Páginas leídas: ${
     Object.entries(PAGINAS).map(([k,v])=>k+" "+v).join(" · ")}</span><br>
-  <b>Parte semanal v1.77.</b> Lee Firestore en directo y no escribe nada.
+  <b>Parte semanal v1.78.</b> Lee Firestore en directo y no escribe nada.
   El «hoy tocaría» sale de <b>pbi_objetivos</b>, que
   suma los meses ya cerrados, no un prorrateo. No se puede retroceder de semana
   porque <b>pbi_resumen_agente</b> solo guarda la semana en curso.
@@ -1895,6 +1914,7 @@ ${RETRASOS?`<section>
     }
     pintar();
   }catch(e){
+    PROG_FIN=true;
     app.innerHTML=`<p class="estado">No se ha podido montar el parte: ${e.message}</p>`;
   }
 })();
