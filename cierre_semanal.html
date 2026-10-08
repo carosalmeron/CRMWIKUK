@@ -278,6 +278,39 @@ window.marcarVarias=(claves,v,el)=>{
   }
   refrescar();
 };
+// (oct 2026) Dormir un cliente 60 días: SOLO en el comité. Deja de salir en «indicios de bajada» hasta esa fecha.
+window.dormirCaso=async(id,btn)=>{
+  if(!MODO_COMITE) return; const c=(window.CASOS||[]).find(x=>x._id===id); if(!c) return;
+  const motivo=prompt("¿Por qué se duerme "+(c.nombre||c.cliente)+" 60 días? (lo verá el comercial en el acta)","");
+  if(motivo===null) return;
+  if(motivo.trim().length<4){ alert("Escribe el motivo."); return; }
+  if(P.get("prueba")==="1"){ alert("Modo prueba: no se guarda."); return; }
+  btn.disabled=true; btn.textContent="Guardando…";
+  const ahora=new Date().toISOString();
+  const campos={...RC.camposAprobar(RC.MOT_PAUSA,ahora),archivoMotivo:RC.MOT_PAUSA,archivoNota:motivo.trim(),archivoDecision:"aprobado",archivadoPor:JEFE.nombre,archivadoEn:ahora,
+    historial:(c.historial||[]).concat([{sem:SEMANA,fecha:ahora,por:JEFE.nombre,sistema:`${JEFE.nombre} lo duerme ${RC.DIAS_PAUSA} días en el comité: ${motivo.trim()}`}])};
+  try{ await RC.guardar(id,campos); Object.assign(c,campos);
+    const hasta=String(campos.recordarEl||"").split("-").reverse().join("/");
+    try{ alActa("recup","😴 Dormido 60 días · "+(c.nombre||c.cliente)+" (vuelve el "+hasta+")",motivo.trim()); }catch(e){}
+    btn.parentNode.innerHTML=`<span style="font-size:12.5px;font-weight:700;color:#334155;background:#F1F5F9;border-radius:8px;padding:5px 9px">😴 Dormido · vuelve el ${hasta} · ${_escR(motivo.trim())}</span>`;
+  }catch(e){ btn.disabled=false; btn.textContent="😴 Dormir 60 días (comité)"; alert("No se ha guardado: "+e.message); }
+};
+window.dormirCli=async(cod,nom,btn)=>{
+  if(!MODO_COMITE) return;
+  const motivo=prompt("¿Por qué se duerme "+nom+" 60 días? (lo verá el comercial en el acta)","");
+  if(motivo===null) return;
+  if(motivo.trim().length<4){ alert("Escribe el motivo."); return; }
+  if(P.get("prueba")==="1"){ alert("Modo prueba: no se guarda."); return; }
+  btn.disabled=true; btn.textContent="Guardando…";
+  const h=new Date(); h.setDate(h.getDate()+60); const hasta=h.toISOString().slice(0,10);
+  try{ const r=await fetch(`${FB}/clientes_dormidos/${encodeURIComponent(AGENTE+"_"+cod)}`,{method:"PATCH",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({fields:{cliente:{stringValue:cod},nombre:{stringValue:nom},agente:{stringValue:AGENTE},hasta:{stringValue:hasta},
+        desde:{stringValue:new Date().toISOString()},motivo:{stringValue:motivo.trim()},por:{stringValue:JEFE.nombre||""},semana:{integerValue:String(SEMANA)},origen:{stringValue:"comite"}}})});
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    try{ alActa("cli","😴 Dormido 60 días · "+nom+" (hasta el "+hasta.split("-").reverse().join("/")+")",motivo.trim()); }catch(e){}
+    btn.parentNode.innerHTML=`<span style="font-size:12.5px;font-weight:700;color:#334155;background:#F1F5F9;border-radius:8px;padding:5px 9px">😴 Dormido hasta el ${hasta.split("-").reverse().join("/")} · ${_escR(motivo.trim())}</span>`;
+  }catch(e){ btn.disabled=false; btn.textContent="😴 Dormir 60 días (comité)"; alert("No se ha guardado: "+e.message); }
+};
 window.texto=(k,el)=>{ R[k]=R[k]||{}; R[k].texto=el.value.trim();
   if(window.NOMBRES_CLAVE&&window.NOMBRES_CLAVE[k]) R[k].nom=window.NOMBRES_CLAVE[k];
   if(window.CRMID_CLAVE&&window.CRMID_CLAVE[k]) R[k].crmId=window.CRMID_CLAVE[k];
@@ -746,9 +779,11 @@ function _pintarCasoBase(c,req){
         style="width:130px;padding:7px 8px;border:1.5px solid var(--linea);border-radius:4px;font-size:14px"></label>
     </div>`;
   }
+  // (oct 2026) Dormir 60 días: SOLO en el comité, y lo hace el jefe directamente
+  if(MODO_COMITE) h+=`<div class="dormBox" style="margin-top:10px"><button type="button" class="chip" style="border-color:#64748B;color:#334155" onclick="dormirCaso('${id}',this)">😴 Dormir 60 días (comité)</button></div>`;
   h+=`<details style="margin-top:10px;font-size:12.5px"${r.archMotivo?" open":""}>
-      <summary style="cursor:pointer;color:var(--tenue)">😴 Dormir 60 días, ⛔ bloquear o dejar de insistir (lo valida tu jefe)</summary>
-      ${chips("archMotivo",RC.MOTIVOS_ARCHIVO)}
+      <summary style="cursor:pointer;color:var(--tenue)">⛔ Bloquear o dejar de insistir (lo valida tu jefe)</summary>
+      ${chips("archMotivo",RC.MOTIVOS_ARCHIVO.filter(m=>!RC.esPausa(m)))}
       <div id="arw_${id}" style="display:${r.archMotivo?"block":"none"}">
         <textarea placeholder="Explica por qué (obligatorio)" oninput="recVal('${id}','archNota',this)">${_escR(r.archNota||"")}</textarea></div>
     </details>
@@ -2625,6 +2660,7 @@ async function enviar(){
   }
   doc.cerrados = cerrar.length;
 
+
   // Plan de recuperación: se guarda antes que el informe. Si falla, no se cierra.
   const fR=await guardarRecuperacion();
   if(fR){
@@ -2876,8 +2912,18 @@ async function enviar(){
       .replace(/[^A-Z0-9]/g,"");
 
     const avisos=[];
+    // (oct 2026) Clientes dormidos 60 días desde el parte: no vuelven a salir hasta esa fecha
+    const DORMIDOS=new Map();
+    try{ const rq=await fetch(`${FB}:runQuery`,{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({structuredQuery:{from:[{collectionId:"clientes_dormidos"}],where:{fieldFilter:{field:{fieldPath:"agente"},op:"EQUAL",value:{stringValue:AGENTE}}}}})});
+      const hoyD=new Date().toISOString().slice(0,10);
+      (rq.ok?await rq.json():[]).filter(x=>x.document).forEach(x=>{ const f=x.document.fields||{}, h=(f.hasta&&f.hasta.stringValue)||"";
+        if(h>=hoyD) DORMIDOS.set(ARR((f.cliente&&f.cliente.stringValue)||""),h); });
+    }catch(e){}
+    window._DORMIDOS=DORMIDOS;
     for(const c of mios){
       if(EN_CASO.has(ARR(c._id))) continue;   // ya está en el plan de recuperación
+      if(DORMIDOS.has(ARR(c._id))) continue;  // dormido: no sale hasta la fecha
       const f=mes[ARR(c._id)]; if(!f) continue;
       const act=num(c.ventasAct), ant=num(c.ventasAntYTD);
       if(act<3000) continue;
@@ -3514,7 +3560,8 @@ async function enviar(){
           <textarea placeholder="${c.yaDicho
             ? "Qué pasó con lo que dijiste la semana pasada"
             : "Qué ha pasado y cuándo lo vas a hacer"}"
-            oninput="texto('${k}',this)"></textarea>`;
+            oninput="texto('${k}',this)"></textarea>
+          ${MODO_COMITE?`<div class="dormBox" style="margin:4px 0 8px"><button type="button" class="chip" style="border-color:#64748B;color:#334155" onclick="dormirCli('${_escR(c.id)}','${_escR(String(c.nom)).replace(/'/g,"&#39;")}',this)">😴 Dormir 60 días (comité)</button></div>`:""}`;
         }).join("") : '<p class="sub" style="margin:0">Ninguno da señales por ahora.</p>'}
       </div>
 
