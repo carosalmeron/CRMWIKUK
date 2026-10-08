@@ -707,7 +707,7 @@ function setData(obj){
 }
 async function cargarDecisiones(){
   try{ const L=await fsList('stock_decisiones'); const next={};
-    L.forEach(d=>{ if(!d.cod) return; const o={}; if(d.estado) o.estado=d.estado; if(d.catManual) o.catManual=d.catManual; if(d.cantProp!=null&&d.cantProp!=='') o.cantProp=Number(d.cantProp); if(d.dtoGen!=null&&d.dtoGen!=='') o.dtoGen=Number(d.dtoGen); if(d.dtoFab!=null&&d.dtoFab!=='') o.dtoFab=Number(d.dtoFab); o.by=d.by||''; o.at=d.at||''; next[d.cod]=o; if(o.by) profilesCache[o.by]={name:o.by}; });
+    L.forEach(d=>{ if(!d.cod) return; const o={}; if(d.estado) o.estado=d.estado; if(d.catManual) o.catManual=d.catManual; if(d.cantProp!=null&&d.cantProp!=='') o.cantProp=Number(d.cantProp); if(d.dtoGen!=null&&d.dtoGen!=='') o.dtoGen=Number(d.dtoGen); if(d.dtoFab!=null&&d.dtoFab!=='') o.dtoFab=Number(d.dtoFab); if(Number(d.tarifa)>0) o.tarifa=Number(d.tarifa); o.by=d.by||''; o.at=d.at||''; next[d.cod]=o; if(o.by) profilesCache[o.by]={name:o.by}; });
     overrides=next; setLive(true,'conectado'+(META&&META.fecha?' · stock del '+META.fecha:'')); }
   catch(e){ setLive(false,'sin conexión'); }
 }
@@ -719,7 +719,7 @@ async function writeOverride(cod, patch){
 async function clearOverrideField(cod, field){
   const current = Object.assign({}, overrides[cod]); delete current[field];
   try{
-    if (!current.estado && !current.catManual && current.cantProp==null && current.dtoGen==null && current.dtoFab==null){ delete overrides[cod]; renderAll(); await fsDel('stock_decisiones',idDe(cod)); }
+    if (!current.estado && !current.catManual && current.cantProp==null && current.dtoGen==null && current.dtoFab==null && !(current.tarifa>0)){ delete overrides[cod]; renderAll(); await fsDel('stock_decisiones',idDe(cod)); }
     else { const merged = Object.assign({}, current, { by: QUIEN, at: new Date().toISOString() }); overrides[cod]=merged; renderAll();
       await fsSet('stock_decisiones',idDe(cod),Object.assign({cod},merged)); }
     pedirCatalogo();
@@ -1324,9 +1324,18 @@ const calMetTxt=(r)=>{ const x=calMet(r); return [x.cal?'Cal. <b>'+escapeHtml(x.
 const SIN_FAM='Sin familia en el catálogo';
 function prodsDe(r){ const C=CALMET; if(!C) return []; const cod=String(r.cod).toUpperCase(), b=cod.replace(/\.[A-Z0-9]+$/,'');
   const l=[]; const ad=(k)=>{ if(k&&C.cat.has(k)&&!l.includes(k)) l.push(k); };
-  ad(cod); (C.hijos.get(cod)||[]).forEach(ad); if(!l.length){ ad(b); (C.hijos.get(b)||[]).forEach(ad); } return l; }
+  ad(cod); (C.hijos.get(cod)||[]).forEach(ad); if(!l.length){ ad(b); (C.hijos.get(b)||[]).forEach(ad); }
+  // (oct 2026) Si no está, por su madeja (FU36.9LF3 → FU36.9L) y por sus equivalentes en la venta
+  if(!l.length){ const rz=STOCK.raizDe?STOCK.raizDe(cod):null; const alt=[rz,...(STOCK.equivDe?STOCK.equivDe(rz||cod,CFG):[])].filter(Boolean);
+    alt.forEach(x=>{ ad(x); (C.hijos.get(x)||[]).forEach(ad); });
+    if(!l.length&&rz){ for(const k of C.cat.keys()){ if(STOCK.raizDe(k)===rz) ad(k); if(l.length>=30) break; } } }
+  return l; }
 function famCat(r){ const C=CALMET; if(!C) return r.fam||SIN_FAM; const l=prodsDe(r); for(const k of l){ const f=C.cat.get(k).fam; if(f) return f; } return SIN_FAM; }
-function tarifaDe(r){ const C=CALMET; if(!C) return 0; const l=prodsDe(r); const k=l.find(x=>C.cat.get(x).precio>0); return k?C.cat.get(k).precio:0; }
+function tarifaCat(r){ const C=CALMET; if(!C) return 0; const l=prodsDe(r); const k=l.find(x=>C.cat.get(x).precio>0); return k?C.cat.get(k).precio:0; }
+// (oct 2026) Tarifa: la puesta a mano en el artículo manda; si no, la del catálogo
+function tarifaDe(r){ const o=overrides[r.cod]||{}; return Number(o.tarifa)>0?Number(o.tarifa):tarifaCat(r); }
+// Precio medio al que se ha vendido (12 meses), como pista cuando no hay tarifa
+function precioMedioVenta(r){ const cu=r.cant>0?r.stock/r.cant:0, u=cu>0?(r.ventas||0)/cu:0; return u>0&&r.ventasPV>0?Math.round(r.ventasPV/u*100)/100:0; }
 let DTOFAM={};
 async function cargarDescuentos(){ try{ const d=await fsGet('stock_config','descuentos'); DTOFAM=d&&d.fam?JSON.parse(d.fam):{}; }catch(e){ DTOFAM={}; } }
 function dtoDe(r){ const o=overrides[r.cod]||{}, e=finalEstado(r), f=DTOFAM[famCat(r)]||{}, liq=e==='LIQUIDACIÓN';
@@ -1385,8 +1394,8 @@ const DTO_EDIT=new Set();
 const pvTxt=(t,d)=>t>0?`<s>${fmtEur2(t)}</s> → <b>${fmtEur2(t*(1-(Number(d)||0)/100))}</b>`:'<span class="quien">sin tarifa en el catálogo</span>';
 function guardarDtoArt(cod,gen,fab){ const n=(v)=>v===''||v==null?null:Math.min(90,Math.max(0,Number(String(v).replace(',','.'))||0));
   const g=n(gen), f=n(fab); DTO_EDIT.delete(cod);
-  if(g==null&&f==null){ const cur=Object.assign({},overrides[cod]); delete cur.dtoGen; delete cur.dtoFab;
-    if(!cur.estado&&!cur.catManual&&cur.cantProp==null){ delete overrides[cod]; renderAll(); fsDel('stock_decisiones',idDe(cod)).then(pedirCatalogo); }
+  if(g==null&&f==null){ const cur=Object.assign({},overrides[cod]); delete cur.dtoGen; delete cur.dtoFab; if(!(cur.tarifa>0)) delete cur.tarifa;
+    if(!cur.estado&&!cur.catManual&&cur.cantProp==null&&!(cur.tarifa>0)){ delete overrides[cod]; renderAll(); fsDel('stock_decisiones',idDe(cod)).then(pedirCatalogo); }
     else { const m=Object.assign(cur,{by:QUIEN,at:new Date().toISOString()}); overrides[cod]=m; renderAll(); fsSet('stock_decisiones',idDe(cod),Object.assign({cod},m)).then(pedirCatalogo); } return; }
   const o=Object.assign({},overrides[cod]); delete o.dtoGen; delete o.dtoFab; overrides[cod]=o;
   writeOverride(cod,Object.assign(g!=null?{dtoGen:g}:{},f!=null?{dtoFab:f}:{})); }
@@ -1435,11 +1444,13 @@ function renderPropuestas(){
         <div class="pp-q"><button class="pp-s" data-set="${escapeHtml(r.cod)}" data-v="${Math.round(sob)}" ${ro}>Sobrante ${fmtNum(Math.round(sob))}</button><button class="pp-s" data-set="${escapeHtml(r.cod)}" data-v="${Math.round(r.cant*100)/100}" ${ro}>Todo ${fmtNum(r.cant)}</button>${c!=null?`<button class="pp-s" data-set="${escapeHtml(r.cod)}" data-v="" ${ro}>Borrar</button>`:''}</div>
         <div class="pp-eq">${c>0?`= <b>${fmtEur(c*cu)}</b> a coste · ${(c/r.cant*100).toFixed(0)}% del stock`:'<span class="quien">Sin cantidad propuesta</span>'}</div></div>`:'';
     const D=enPL?dtoDe(r):null, tar=enPL?tarifaDe(r):0;
-    const dtoHtml=!enPL?'':DTO_EDIT.has(r.cod)?`<div class="pp-dto ed"><b>Descuento en el catálogo</b>
+    const tCat=enPL?tarifaCat(r):0, tMan=Number(o.tarifa)>0, pmv=enPL?precioMedioVenta(r):0;
+    const dtoHtml=!enPL?'':DTO_EDIT.has(r.cod)?`<div class="pp-dto ed"><b>Precio y descuento en el catálogo</b>
+        <label>Tarifa (carnicero) <span class="pp-in"><input type="number" inputmode="decimal" min="0" step="0.01" id="dt-${escapeHtml(r.cod)}" value="${tMan?o.tarifa:''}" placeholder="${tCat?String(tCat).replace('.',','):'sin tarifa'}"> € <em>${tCat?'catálogo '+fmtEur2(tCat):'no está en el catálogo'}${pmv?' · se vende a '+fmtEur2(pmv)+' de media':''}</em></span></label>
         <label>General <span class="pp-in"><input type="number" min="0" max="90" step="0.5" id="dg-${escapeHtml(r.cod)}" value="${D.gen}" data-pv="${tar}" data-out="pvg-${escapeHtml(r.cod)}"> % <em id="pvg-${escapeHtml(r.cod)}">${pvTxt(tar,D.gen)}</em></span></label>
         <label>Fabricante <span class="pp-in"><input type="number" min="0" max="90" step="0.5" id="df-${escapeHtml(r.cod)}" value="${D.fab}" data-pv="${tar*0.9}" data-out="pvf-${escapeHtml(r.cod)}"> % <em id="pvf-${escapeHtml(r.cod)}">${pvTxt(tar*0.9,D.fab)}</em></span></label>
         <div class="pp-q"><button class="pp-s" data-dtook="${escapeHtml(r.cod)}">Guardar</button>${D.propio?`<button class="pp-s" data-dtofam="${escapeHtml(r.cod)}">Usar el de la familia (${pct(D.famGen)} / ${pct(D.famFab)})</button>`:''}<button class="pp-s" data-dtox="${escapeHtml(r.cod)}">Cancelar</button></div></div>`
-      :`<div class="pp-dto"><span>Catálogo · <b>${escapeHtml(famCat(r))}</b></span><span>General <b>−${pct(D.gen)}</b>${tar?` <small>${fmtEur2(tar*(1-D.gen/100))}</small>`:''} · Fabricante <b>−${pct(D.fab)}</b>${tar?` <small>${fmtEur2(tar*0.9*(1-D.fab/100))}</small>`:''}${D.propio?' <i>(propio)</i>':''}</span>
+      :`<div class="pp-dto"><span>Catálogo · <b>${escapeHtml(famCat(r))}</b> · ${tar?`tarifa <b>${fmtEur2(tar)}</b>${tMan?' <i>(puesta a mano)</i>':''}`:`<b style="color:#B91C1C">sin precio</b>${pmv?` <small>(se vende a ${fmtEur2(pmv)} de media)</small>`:''} · ponlo en ✏️ Cambiar`}</span><span>General <b>−${pct(D.gen)}</b>${tar?` <small>${fmtEur2(tar*(1-D.gen/100))}</small>`:''} · Fabricante <b>−${pct(D.fab)}</b>${tar?` <small>${fmtEur2(tar*0.9*(1-D.fab/100))}</small>`:''}${D.propio?' <i>(propio)</i>':''}</span>
         <a data-dtoed="${escapeHtml(r.cod)}" ${ro?'style="display:none"':''}>✏️ Cambiar</a></div>`;
     const botones=g==='OKROT'?`<button class="act" data-cod="${escapeHtml(r.cod)}" data-action="promo" ${ro}>➕ A promoción</button><button class="act" data-cod="${escapeHtml(r.cod)}" data-action="liq" ${ro}>➕ A liquidación</button>`
       :g==='EXCL'?`<button class="act" data-cod="${escapeHtml(r.cod)}" data-action="reset" ${ro}>Volver a la propuesta</button>`
@@ -1462,11 +1473,17 @@ function renderPropuestas(){
   L.querySelectorAll('a[data-alm]').forEach(a=>a.onclick=()=>{ const c=a.dataset.alm; if(expanded.has(c)) expanded.delete(c); else expanded.add(c); renderPropuestas(); });
   L.querySelectorAll('a[data-dtoed]').forEach(a=>a.onclick=()=>{ DTO_EDIT.add(a.dataset.dtoed); renderPropuestas(); });
   L.querySelectorAll('input[data-pv]').forEach(i=>i.oninput=()=>{ const o=document.getElementById(i.dataset.out); if(o) o.innerHTML=pvTxt(Number(i.dataset.pv),i.value); });
+  // Al cambiar la tarifa a mano, los precios de al lado se recalculan
+  L.querySelectorAll('input[id^="dt-"]').forEach(i=>i.oninput=()=>{ const c=i.id.slice(3), t=Number(String(i.value).replace(',','.'))||tarifaCat(DATA_BY_COD[c]);
+    [['dg-',t],['df-',t*0.9]].forEach(([p,v])=>{ const x=document.getElementById(p+c); if(!x) return; x.dataset.pv=v; const o=document.getElementById(x.dataset.out); if(o) o.innerHTML=pvTxt(v,x.value); }); });
   L.querySelectorAll('button[data-dtox]').forEach(b=>b.onclick=()=>{ DTO_EDIT.delete(b.dataset.dtox); renderPropuestas(); });
   L.querySelectorAll('button[data-dtofam]').forEach(b=>b.onclick=()=>guardarDtoArt(b.dataset.dtofam,'',''));
   L.querySelectorAll('button[data-dtook]').forEach(b=>b.onclick=()=>{ const c=b.dataset.dtook, D=dtoDe(DATA_BY_COD[c]);
     const g=document.getElementById('dg-'+c).value, f=document.getElementById('df-'+c).value;
+    const tv=String((document.getElementById('dt-'+c)||{}).value||'').replace(',','.').trim(), tn=tv===''?0:Number(tv);
+    if(tv!==''&&!(tn>0)){ alert('Pon la tarifa en euros (o déjala vacía para usar la del catálogo).'); return; }
     const o=overrides[c]||{};
+    if((Number(o.tarifa)||0)!==tn){ if(tn>0) overrides[c]=Object.assign({},o,{tarifa:Math.round(tn*100)/100}); else { const x=Object.assign({},o); delete x.tarifa; overrides[c]=x; } }
     guardarDtoArt(c, o.dtoGen==null&&Number(g)===D.famGen?'':g, o.dtoFab==null&&Number(f)===D.famFab?'':f); });
 }
 function guardarCant(cod,v){ const r=DATA_BY_COD[cod]; let n=v===''||v==null?null:Number(String(v).replace(',','.'));
