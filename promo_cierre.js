@@ -17,19 +17,21 @@
     return {items,fecha:m.fecha||'',en:m.en||''};
   }
   // De N en N a la vez, para no saturar Power BI la primera vez del día
-  async function enTandas(L,n,fn){ const out=new Array(L.length); let i=0;
-    await Promise.all([...Array(Math.min(n,L.length))].map(async()=>{ while(i<L.length){ const k=i++; try{ out[k]=await fn(L[k]); }catch(e){ out[k]=null; } } })); return out; }
+  async function enTandas(L,n,fn,av){ const out=new Array(L.length); let i=0, h=0; if(av) av(0,L.length);
+    await Promise.all([...Array(Math.min(n,L.length))].map(async()=>{ while(i<L.length){ const k=i++; try{ out[k]=await fn(L[k]); }catch(e){ out[k]=null; } h++; if(av) try{ av(h,L.length); }catch(e){} } })); return out; }
   const ARR=(s)=>String(s||'').toUpperCase().trim();
   async function clientesDe(it){
     const mas=(it.eq||[]).length?'&mas='+encodeURIComponent(it.eq.join(',')):'';
-    const r=await fetch('/api/pbi-sync?clientesArticulo='+encodeURIComponent(it.cod)+'&top=300'+mas); const j=await r.json();
+    // Con tiempo límite: un artículo que Power BI no contesta no puede dejar el cierre esperando
+    const ctl=typeof AbortController!=='undefined'?new AbortController():null, t=setTimeout(()=>{ try{ ctl&&ctl.abort(); }catch(e){} },45000);
+    let j; try{ const r=await fetch('/api/pbi-sync?clientesArticulo='+encodeURIComponent(it.cod)+'&top=300'+mas,ctl?{signal:ctl.signal}:{}); j=await r.json(); } finally{ clearTimeout(t); }
     if(j.ok===false) throw new Error(j.error||'sin respuesta'); return j.clientes||[];
   }
   async function cargar(agentes,opts){
     opts=opts||{};
     const A=new Set((agentes||[]).map(ARR).filter(Boolean));
     const {items,fecha}=await articulos();
-    const listas=await enTandas(items,opts.tandas||4,clientesDe);
+    const listas=await enTandas(items,opts.tandas||4,clientesDe,opts.alAvanzar);
     const out=items.map((it,i)=>{
       const L=(listas[i]||[]).filter(c=>!A.size||A.has(ARR(c.agente)));
       // Han perdido ventas (este año 0) o se están enfriando (compran menos que el año pasado)
