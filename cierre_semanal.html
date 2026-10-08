@@ -90,7 +90,7 @@
 <div id="pie"></div>
 
 <script src="/recuperacion_comun.js?v=20261008a"></script>
-<script src="/promo_cierre.js?v=20261008a"></script>
+<script src="/promo_cierre.js?v=20261008b"></script>
 <script src="/seguimiento_comun.js?v=20261004a"></script>
 <script src="/firma_comun.js?v=20261004a"></script>
 <script>
@@ -806,7 +806,9 @@ window.PROMO_C={items:[],prev:[],cargado:false};
 async function cargarPromoC(){
   // (oct 2026) Si algo falla, el apartado sale igual diciendo qué pasa (antes desaparecía sin avisar)
   if(!window.PROMOC){ window.PROMO_C.error="no se ha cargado promo_cierre.js (súbelo a la raíz del CRM)"; window.PROMO_C.cargado=true; return; }
-  const {items}=await PROMOC.cargar([AGENTE]);
+  const {items}=await PROMOC.cargar([AGENTE],{alAvanzar:(h,n)=>{ window.PROMO_C.prog=[h,n];
+    if(!window._MONTADO&&window._etapa) window._etapa(`promoción y liquidación · ${h} de ${n} artículos`);
+    const el=document.getElementById("promoProg"); if(el) el.textContent=`Buscando los clientes de cada artículo… ${h} de ${n}`; }});
   window.PROMO_C.items=items.filter(it=>it.clientes.length);
   window.PROMO_C.todos=items;
   // Lo que dijo la semana pasada que iba a caer
@@ -888,8 +890,23 @@ function tarjetaPromoSeg(x){
     <p class="obl promoff" data-k="${_escR(k)}" style="color:#B91C1C"></p>
   </div>`;
 }
+// Cuando la promoción llega después de abrir el parte: se cambia el apartado en su sitio
+function repintarPromoC(){
+  const L=document.getElementById("apLista"); if(!L) return;
+  const cont=[...L.querySelectorAll(".pcont")].find(c=>c.dataset.k==="promo"); if(!cont) return;
+  const tmp=document.createElement("div"); tmp.innerHTML=bloquePromoC(); const nuevo=tmp.firstElementChild; if(!nuevo) return;
+  const t=nuevo.querySelector(".tit"); if(t) t.remove(); nuevo.removeAttribute("style");
+  const sb=nuevo.querySelector(".sub"), txt=sb?sb.textContent.trim():"", i=txt.indexOf(". ");
+  cont.replaceChildren(nuevo);
+  const row=cont.previousElementSibling, sm=row&&row.querySelector(".pt small"); if(sm) sm.textContent=(i>0?txt.slice(0,i+1):txt).replace(/\s+/g," ").slice(0,110);
+  try{ estadoArbol(); }catch(e){}
+}
 function bloquePromoC(){
-  const P_=window.PROMO_C||{}; if(!P_.cargado) return "";
+  const P_=window.PROMO_C||{};
+  if(!P_.cargado){ const pr=P_.prog||[0,0];
+    return `<div class="paso" style="border-color:#D97706;border-width:1.5px"><p class="tit"><span class="num" style="background:#D97706">🏷️</span>Promoción y liquidación</p>
+      <p class="sub">Buscando los clientes que han dejado los artículos en promoción. Se completa solo en unos segundos.</p>
+      <p id="promoProg" style="font-size:12.5px;color:#B45309;font-weight:700">Buscando los clientes de cada artículo…${pr[1]?" "+pr[0]+" de "+pr[1]:""}</p></div>`; }
   const cab=(sub)=>`<div class="paso" style="border-color:#D97706;border-width:1.5px">
     <p class="tit"><span class="num" style="background:#D97706">🏷️</span>Promoción y liquidación</p><p class="sub">${sub}</p>`;
   if(P_.error) return cab(`<span style="color:#B91C1C;font-weight:700">No se han podido cargar los artículos en promoción: ${_escR(P_.error)}</span>`)+`</div>`;
@@ -2679,6 +2696,11 @@ async function enviar(){
     ];
     const [res,cli,mesesRaw,mu,of,es,estac,objs,peds,perf,portal,usus,vis,objAct]=await Promise.all(_lista.map(_p));
     clearInterval(_tick);
+    // (oct 2026) Después de leer las listas aún quedan pasos (recuperación, estrategias, promoción…): se dice cuál
+    { let _et="cruzando los datos";
+      const _pe=()=>{ const el=document.getElementById("app"); if(!el||window._MONTADO){ clearInterval(window._etTick); return; }
+        el.innerHTML=`<div class="estado">Datos leídos (${_NOMS.length} de ${_NOMS.length}). Preparando tu parte: <b>${_et}</b> · ${Math.round((Date.now()-_t0)/1000)} s</div>`; };
+      window._etapa=(t)=>{ _et=t; _pe(); }; window._etTick=setInterval(_pe,1000); _pe(); }
     if(window.CACHE_USADA){ const sp=document.getElementById("salir"); if(sp&&sp.parentNode&&!document.getElementById("refrescar")){
       const a=document.createElement("a"); a.id="refrescar"; a.href="#"; a.textContent="🔄 Actualizar datos";
       a.style.cssText="color:#A7B2BE;font-size:12.5px;margin-left:14px";
@@ -2724,6 +2746,7 @@ async function enviar(){
     window._MIS_CLIS=mios.map(c=>({cod:c._id,nom:c.nombre||c.clienteNombre||c._id})).sort((x,y)=>String(x.nom).localeCompare(String(y.nom)));
 
     // Plan de recuperación: abre y actualiza sus casos (todos menos Francia)
+    window._etapa("plan de recuperación");
     const EN_CASO=new Set();
     if(P.get("solover")!=="1"&&window.RC&&!RC.esFrancia(yo.equipo)){
       try{
@@ -2752,8 +2775,17 @@ async function enviar(){
         window.CASOS=ab;
       }catch(e){ console.warn("recuperación",e); }
     }
+    window._etapa("estrategias");
     if(P.get("solover")!=="1"&&window.RC){ try{ await cargarEstRes(); }catch(e){ console.warn("estrategias",e); } }
-    try{ await cargarPromoC(); }catch(e){ console.warn("promoción",e); window.PROMO_C.error=String(e&&e.message||e); window.PROMO_C.cargado=true; }
+    // (oct 2026) Promoción y liquidación: consulta Power BI artículo a artículo y la primera vez del día tarda.
+    // En el comité se espera (el jefe revisa cada punto); al comercial se le abre el parte a los 15 s como mucho
+    // y el apartado se completa solo cuando llega.
+    window._etapa("promoción y liquidación");
+    { const _pp=cargarPromoC().catch(e=>{ console.warn("promoción",e); window.PROMO_C.error=String(e&&e.message||e); window.PROMO_C.cargado=true; });
+      if(MODO_COMITE) await _pp;
+      else { const ok=await Promise.race([_pp.then(()=>true),new Promise(r=>setTimeout(()=>r(false),15000))]);
+        if(!ok) _pp.then(()=>{ try{ repintarPromoC(); }catch(e){ console.warn(e); } }); } }
+    window._etapa("clientes con indicios de bajada");
 
     // 2 · Los que dan señales de bajada, con la misma regla del parte
     // (sep 2026) El cierre recalculaba desde cero cada viernes: un cliente
