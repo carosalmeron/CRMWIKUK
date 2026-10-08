@@ -89,7 +89,8 @@
 <main id="app"><p class="estado">Leyendo…</p></main>
 <div id="pie"></div>
 
-<script src="/recuperacion_comun.js?v=20261005h"></script>
+<script src="/recuperacion_comun.js?v=20261008a"></script>
+<script src="/promo_cierre.js?v=20261008a"></script>
 <script src="/seguimiento_comun.js?v=20261004a"></script>
 <script src="/firma_comun.js?v=20261004a"></script>
 <script>
@@ -797,6 +798,106 @@ async function guardarEstRes(){
   }
   return fallos;
 }
+// ══ (oct 2026) PROMOCIÓN Y LIQUIDACIÓN ═══════════════════════════════
+// Artículos en promoción/liquidación (los que publica Stock), por familia, con los clientes de este
+// comercial que los compraban y los han dejado o se están enfriando. Por cada artículo: qué va a caer
+// (unidades, a quién, cuándo) o por qué no. La semana siguiente: qué ha caído. El comité lo revisa.
+window.PROMO_C={items:[],prev:[],cargado:false};
+async function cargarPromoC(){
+  if(!window.PROMOC) return;
+  const {items}=await PROMOC.cargar([AGENTE]);
+  window.PROMO_C.items=items.filter(it=>it.clientes.length);
+  window.PROMO_C.todos=items;
+  // Lo que dijo la semana pasada que iba a caer
+  try{ const rp=await fetch(`${FB}/informes/informe_${encodeURIComponent(AGENTE)}_s${SEMANA-1}`,{cache:"no-store"});
+    if(rp.ok){ const jp=await rp.json(); let R2={}; try{ R2=JSON.parse(jp.fields?.respuestas?.stringValue||"{}"); }catch(e){}
+      window.PROMO_C.prev=Object.entries(R2).filter(([k,v])=>k.startsWith("promo:")&&v&&v.accion==="Va a caer")
+        .map(([k,v])=>({cod:k.slice(6),uds:v.uds||"",texto:v.texto||"",nom:String(v.nom||"").replace(/^🏷️\s*/,""),art:items.find(x=>x.cod===k.slice(6))||null})); } }catch(e){}
+  window.PROMO_C.items.forEach(it=>{ const k="promo:"+it.cod, nom="🏷️ "+it.nom+" ("+it.cod+")";
+    window.NOMBRES_CLAVE[k]=nom; PENDIENTES.push(k);
+    plantear(k,"promo",nom,it.clientes.length+" cliente"+(it.clientes.length===1?"":"s")+" lo han dejado o compran menos · "+(it.est==="LIQUIDACIÓN"?"liquidación":"promoción")); });
+  window.PROMO_C.prev.forEach(x=>{ const k="promoSeg:"+x.cod, nom="🏷️ "+(x.nom||x.cod)+" · lo que iba a caer";
+    window.NOMBRES_CLAVE[k]=nom; PENDIENTES.push(k); plantear(k,"promoSeg",nom,"Dijo: "+(x.uds?x.uds+" uds":"")+(x.texto?" · "+x.texto:"")); });
+  window.PROMO_C.cargado=true;
+}
+window.promoUds=(k,el)=>{ R[k]=R[k]||{}; R[k].uds=String(el.value||"").trim(); if(window.NOMBRES_CLAVE[k]) R[k].nom=window.NOMBRES_CLAVE[k]; refrescar(); };
+// Falta: «Va a caer» sin unidades, o sin decir a quién/cuándo; «No va a caer» sin el porqué
+function promoFaltas(){ let n=0;
+  document.querySelectorAll(".promoff").forEach(el=>{ const r=R[el.dataset.k]||{}, seg=el.dataset.k.startsWith("promoSeg:");
+    let m="";
+    if(!seg&&r.accion==="Va a caer"&&!(Number(String(r.uds||"").replace(",","."))>0)) m="⚠️ Pon cuántas unidades van a caer";
+    else if(!seg&&r.accion==="Va a caer"&&!(r.texto||"").trim()) m="⚠️ Di a qué clientes y cuándo";
+    else if(!seg&&r.accion==="No va a caer"&&!(r.texto||"").trim()) m="⚠️ Di por qué no va a caer";
+    else if(seg&&r.accion&&r.accion!=="Ha caído todo"&&!(r.texto||"").trim()) m="⚠️ Cuenta qué ha pasado";
+    el.textContent=m; el.classList.toggle("falta",!!m); if(m) n++; });
+  return MODO_COMITE?0:n; }
+window.promoFicha=(t,cod,i)=>{
+  const it=(window.PROMO_C.items||[]).find(x=>x.cod===cod), c=it&&it.clientes[i]; if(!it||!c) return;
+  window._NV_ART={art:cod,desc:it.nom,it};
+  fichaNuevo(t); NV.cli={cod:c.cliente,nom:c.nombre||c.cliente}; pintarNV(false);
+  // Precio de la promoción: sobre la tarifa del cliente, el descuento de su tipo (fabricante o general)
+  const pref="nw"+t; let n=0;
+  const poner=()=>{ const pa=document.getElementById(pref+"_pa"), pd=document.getElementById(pref+"_pd"), no=document.getElementById(pref+"_nota");
+    if(!pa||!pd){ if(n++<40) setTimeout(poner,150); return; }
+    if(!(Number(pa.value)>0)&&n++<10){ setTimeout(poner,150); return; }
+    const sel=(window.RC&&RC._sel&&RC._sel[pref])||{}, fab=/FABRICANTE|DISTRIBUIDOR|GRAN CUENTA/i.test(String(sel.catCli||""));
+    // Sin tarifa en el formulario: la de la promoción (carnicero = PVP, fabricante = PVP −10 %)
+    if(!(Number(pa.value)>0)&&Number(it.tarifa)>0){ pa.value=(fab?Number(it.tarifa)*0.9:Number(it.tarifa)).toFixed(2); }
+    const d=fab?Number(it.dtoFab)||0:Number(it.dtoGen)||0;
+    if(d&&!pd.value){ pd.value=String(d); if(RC.dtoUI) RC.dtoUI(pref,"pd"); }
+    if(no&&!no.value) no.value=(it.est==="LIQUIDACIÓN"?"Liquidación":"Promoción")+": "+it.uds+" uds disponibles. "+(c.estado==="perdido"?"Lo compraba y lo ha dejado":"Está comprando menos")+" (año pasado "+eur(c.ventasAnt)+", este año "+eur(c.ventasAct)+").";
+  };
+  setTimeout(poner,200);
+};
+function tarjetaPromoC(it){
+  const k="promo:"+it.cod, r=R[k]||{}, kk=_escR(k).replace(/'/g,"&#39;");
+  const tag=(c)=>c.estado==="perdido"?'<span style="background:#FEE2E2;color:#991B1B;border-radius:5px;padding:1px 6px;font-size:11px;font-weight:800">La ha dejado</span>'
+    :`<span style="background:#FEF3C7;color:#92400E;border-radius:5px;padding:1px 6px;font-size:11px;font-weight:800">Se enfría${c.variacionPct!=null?" "+Math.round(c.variacionPct)+" %":""}</span>`;
+  const cli=(c,i)=>`<div style="display:flex;gap:8px;align-items:center;justify-content:space-between;border-top:1px solid #EEF1F5;padding:7px 0">
+      <div style="min-width:0"><b style="font-size:13.5px">${_escR(c.nombre||c.cliente)}</b> ${tag(c)}<small style="display:block;color:#64748B">${_escR(c.cliente)}${c.poblacion?" · "+_escR(c.poblacion):""} · año pasado ${eur(c.ventasAnt)} → este año ${eur(c.ventasAct)}</small></div>
+      <div style="display:flex;flex-direction:column;gap:4px;flex:none"><button type="button" class="chip abreficha" style="font-size:12px;padding:5px 10px;border-color:#2563EB;color:#1D4ED8" onclick="promoFicha('of','${_escR(it.cod)}',${i})">📨 Oferta</button>
+        <button type="button" class="chip abreficha" style="font-size:12px;padding:5px 10px;border-color:#7C3AED;color:#5B21B6" onclick="promoFicha('est','${_escR(it.cod)}',${i})">💶 Estrategia</button></div></div>`;
+  const C=it.clientes, vis=C.slice(0,6), mas=C.slice(6);
+  return `<div class="item" style="display:block;border:1px solid #E5E7EB;border-left:4px solid ${it.est==="LIQUIDACIÓN"?"#DC2626":"#D97706"};border-radius:12px;padding:10px 12px;margin:8px 0;background:#fff">
+    <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><div><b style="font-family:ui-monospace,Menlo,monospace">${_escR(it.cod)}</b> · <b>${_escR(it.nom)}</b></div>
+      <span style="font-size:11px;font-weight:800;border-radius:99px;padding:2px 8px;background:${it.est==="LIQUIDACIÓN"?"#FEE2E2;color:#991B1B":"#FEF3C7;color:#92400E"}">${it.est==="LIQUIDACIÓN"?"Liquidación":"Promoción"}</span></div>
+    <div style="font-size:12.5px;color:#475569;margin-top:3px">${[it.cal?"Cal. "+_escR(it.cal):"",it.met?_escR(it.met)+" m":"",(Number(it.uds)||0).toLocaleString("es-ES")+" uds disponibles"].filter(Boolean).join(" · ")}</div>
+    <div style="font-size:12.5px;margin-top:3px">${PROMOC.preciosH(it)}</div>
+    <div style="font-size:12.5px;margin-top:6px;font-weight:700">${C.length} cliente${C.length===1?"":"s"} tuyo${C.length===1?"":"s"} · ${eur(it.perdido)} menos que el año pasado</div>
+    ${vis.map(cli).join("")}
+    ${mas.length?`<details><summary style="cursor:pointer;font-size:12.5px;font-weight:700;margin-top:4px">${mas.length} más</summary>${mas.map((c,j)=>cli(c,j+6)).join("")}</details>`:""}
+    <p class="rot" style="margin-top:10px">¿Qué va a caer de este artículo?</p>
+    <div class="acc">${["Va a caer","No va a caer"].map(v=>`<button class="chip${r.accion===v?" on":""}" onclick="marcar('${kk}','${v}',this)">${v}</button>`).join("")}</div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><label style="font-size:12.5px;color:#475569">Unidades <input type="number" min="0" step="any" data-promouds="${_escR(k)}" value="${_escR(r.uds||"")}" oninput="promoUds('${kk}',this)" style="width:110px;padding:8px;border:1.5px solid #CBD5E1;border-radius:9px;font:inherit;font-weight:700"></label></div>
+    <textarea placeholder="A qué clientes, cuántas unidades y para cuándo · o por qué no va a caer" oninput="texto('${kk}',this)">${_escR(r.texto||"")}</textarea>
+    <p class="obl promoff" data-k="${_escR(k)}" style="color:#B91C1C"></p>
+  </div>`;
+}
+function tarjetaPromoSeg(x){
+  const k="promoSeg:"+x.cod, r=R[k]||{}, kk=_escR(k).replace(/'/g,"&#39;");
+  return `<div class="item" style="display:block;border:1.5px solid #F59E0B;border-radius:12px;padding:10px 12px;margin:8px 0;background:#FFFBEB">
+    <div style="font-size:12px;font-weight:800;color:#92400E">1️⃣ Tu compromiso de la semana pasada</div>
+    <div style="font-size:14px;margin-top:2px"><b>${_escR(x.nom||x.cod)}</b> <small style="color:#64748B">${_escR(x.cod)}</small></div>
+    <div style="font-size:13px;margin-top:2px">Dijiste que caían <b>${_escR(x.uds||"?")} uds</b>${x.texto?": «"+_escR(x.texto)+"»":""}</div>
+    ${x.art?`<div style="font-size:12px;color:#475569;margin-top:2px">Sigue en ${x.art.est==="LIQUIDACIÓN"?"liquidación":"promoción"} · ${(Number(x.art.uds)||0).toLocaleString("es-ES")} uds disponibles</div>`:`<div style="font-size:12px;color:#475569;margin-top:2px">Ya no está en promoción</div>`}
+    <div style="font-size:12px;font-weight:800;color:#92400E;margin-top:8px">2️⃣ ¿Qué ha caído?</div>
+    <div class="acc">${["Ha caído todo","Ha caído en parte","No ha caído"].map(v=>`<button class="chip${r.accion===v?" on":""}" onclick="marcar('${kk}','${v}',this)">${v}</button>`).join("")}</div>
+    <label style="font-size:12.5px;color:#475569">Unidades que han caído <input type="number" min="0" step="any" data-promouds="${_escR(k)}" value="${_escR(r.uds||"")}" oninput="promoUds('${kk}',this)" style="width:110px;padding:8px;border:1.5px solid #CBD5E1;border-radius:9px;font:inherit;font-weight:700"></label>
+    <textarea placeholder="Qué clientes, qué ha pasado, qué haces ahora" oninput="texto('${kk}',this)">${_escR(r.texto||"")}</textarea>
+    <p class="obl promoff" data-k="${_escR(k)}" style="color:#B91C1C"></p>
+  </div>`;
+}
+function bloquePromoC(){
+  const P_=window.PROMO_C||{}; if(!P_.cargado||(!P_.items.length&&!P_.prev.length)) return "";
+  const tot=P_.items.reduce((t,it)=>t+it.perdido,0), nCli=new Set(P_.items.flatMap(it=>it.clientes.map(c=>c.cliente))).size;
+  return `<div class="paso" style="border-color:#D97706;border-width:1.5px">
+    <p class="tit"><span class="num" style="background:#D97706">🏷️</span>Promoción y liquidación</p>
+    <p class="sub"><b>${P_.items.length} artículo${P_.items.length===1?"":"s"} en promoción o liquidación que tus clientes han dejado o compran menos · ${nCli} cliente${nCli===1?"":"s"} · ${eur(tot)} menos que el año pasado.</b>
+      Por cada artículo: qué va a caer (unidades, a quién y cuándo) o por qué no. Desde cada cliente puedes hacer la oferta o pedir la estrategia. La semana que viene, qué ha caído. Se revisa en el comité.</p>
+    ${P_.prev.map(tarjetaPromoSeg).join("")}
+    ${PROMOC.porFamilia(P_.items).map(([f,L])=>`<p class="rot" style="margin-top:12px">${_escR(f)}</p>${L.map(tarjetaPromoC).join("")}`).join("")}
+  </div>`;
+}
 function bloqueRecuperacion(){
   const ab=window.CASOS;
   if(!ab.length) return "";
@@ -876,7 +977,7 @@ window.abrirCobrosCierre=function(){
 // No cambia nada de lo que se pregunta ni de lo que se guarda: solo ordena los
 // apartados, los numera y los pliega. El comité lee exactamente lo mismo.
 const ORDEN_AP=[["lunes",/dijiste el lunes/i],["vas",/^cómo vas/i],["jefe",/te pidió tu jefe/i],["cob",/^cobros/i],["mues",/^muestras/i],
-  ["act",/^actividad/i],["recup",/recuperación/i],["est",/estrategias/i],["frio",/^ofertas/i],["cli",/indicios de bajada/i],["dup",/mismo cliente/i],["prox",/semana que viene/i]];
+  ["act",/^actividad/i],["recup",/recuperación/i],["promo",/promoción y liquidación/i],["est",/estrategias/i],["frio",/^ofertas/i],["cli",/indicios de bajada/i],["dup",/mismo cliente/i],["prox",/semana que viene/i]];
 const ABIERTOS_AP=new Set();
 function tarjetaSemana(){
   const C=window._CIERRE_CIFRAS||{}, d=(typeof kpiDatos==="function")?kpiDatos():{actividad:{},muestras:{}};
@@ -926,7 +1027,7 @@ window.fichaNuevo=(t)=>{
     <div id="nvBox" style="flex:1;overflow-y:auto;padding:14px 16px 40px;max-width:640px;width:100%;margin:0 auto"></div>`;
   document.body.appendChild(d); document.body.style.overflow="hidden"; pintarNV();
 };
-window.cerrarFichaNuevo=()=>{ const d=document.getElementById("capaNuevo"); if(d) d.remove(); document.body.style.overflow=""; if(NV) RC.olvidarForm("nw"+NV.t); NV=null; };
+window.cerrarFichaNuevo=()=>{ window._NV_ART=null; const d=document.getElementById("capaNuevo"); if(d) d.remove(); document.body.style.overflow=""; if(NV) RC.olvidarForm("nw"+NV.t); NV=null; };
 function pintarNV(foco){
   const b=document.getElementById("nvBox"); if(!b||!NV) return;
   const t=NV.t, T=NUEVO_T[t], c=T.col, pref="nw"+t;
@@ -949,7 +1050,7 @@ function pintarNV(foco){
           <label style="font-size:12px;color:#6B7280">Tipo<select id="${pref}_tipo" style="width:100%;padding:9px;border:1.5px solid ${c[1]};border-radius:9px;font:inherit"><option>Tripa natural</option><option>Colágeno</option><option>Fibrosa</option><option>Celulosa</option><option>Plástica</option><option>Ingrediente</option><option>Otro</option></select></label>
           <label style="font-size:12px;color:#6B7280">Unidades<input id="${pref}_uds" type="number" min="0" style="width:100%;padding:9px;border:1.5px solid ${c[1]};border-radius:9px;font:inherit"></label></div>
         <textarea id="${pref}_nota" placeholder="Para qué la quiere, qué está usando ahora…" style="min-height:60px;padding:9px;border:1.5px solid ${c[1]};border-radius:9px;font:inherit;font-size:14px"></textarea></div>`
-    :RC.formEstrategia(pref,[],T.ico+" "+T.tit(),t==="of"?{fondo:c[0],borde:c[1],fuerte:c[2],titulo:c[3]}:null,{cliente:NV.cli.cod,nombre:NV.cli.nom});
+    :RC.formEstrategia(pref,window._NV_ART?[{art:window._NV_ART.art,desc:window._NV_ART.desc}]:[],T.ico+" "+T.tit(),t==="of"?{fondo:c[0],borde:c[1],fuerte:c[2],titulo:c[3]}:null,{cliente:NV.cli.cod,nombre:NV.cli.nom});
   h+=`<button class="env" id="nvBtn" style="background:${c[2]};color:#fff;margin-top:12px" onclick="guardarNuevo()">${T.btn()}</button>`;
   b.innerHTML=h; if(RC.activarForms) RC.activarForms();
 }
@@ -1360,6 +1461,7 @@ async function montarComite(){
   app.querySelectorAll('[onclick^="marcar("]').forEach(b=>{ const m=b.getAttribute("onclick").match(/marcar\('([^']+)','([^']*)'/); if(m) b.classList.toggle("on",(R[m[1]]||{}).accion===m[2]); });
   app.querySelectorAll("textarea[oninput]").forEach(t=>{ const oi=t.getAttribute("oninput"); let m=oi.match(/texto\('([^']+)'/); if(m) t.value=(R[m[1]]||{}).texto||"";
     m=oi.match(/kpiPlan\('([^']+)'/); if(m) t.value=((KPIS_C||{})[m[1]]||{}).plan||""; });
+  app.querySelectorAll('input[data-promouds]').forEach(i=>{ i.value=(R[i.dataset.promouds]||{}).uds||""; });
   app.querySelectorAll('input[onchange^="cobFecha("]').forEach(i=>{ const m=i.getAttribute("onchange").match(/cobFecha\('([^']+)'/); if(m) i.value=(R[m[1]]||{}).fecha||""; });
   // Notas del cliente: si no escribió nada no es un punto; si escribió, se abre su grupo para revisarla
   app.querySelectorAll(".notacli").forEach(n=>{ if(!((R[n.dataset.nota]||{}).texto||"").trim()){ n.remove(); return; }
@@ -1805,7 +1907,9 @@ function refrescar(){
   if(!MODO_COMITE) document.querySelectorAll(".cobff").forEach(el=>{ const r=R[el.dataset.k]||{}, mal=!!(r.accion&&!r.fecha);
     el.classList.toggle("falta",mal); el.textContent=mal?"⚠️ Pon la fecha de la acción (obligatoria)":"";
     const inp=document.querySelector('.cobfe[data-k="'+el.dataset.k.replace(/"/g,'\\"')+'"]'); if(inp) inp.style.borderColor=mal?"#DC2626":""; });
-  const total=faltan.length+RETRASOS_SIN_MOTIVO+RF+EF+KF+JF+CF;
+  const PF=(typeof promoFaltas==="function")?promoFaltas():0;
+  if(PF||document.querySelector(".promoff")){ try{ estadoArbol(); }catch(e){} }
+  const total=faltan.length+RETRASOS_SIN_MOTIVO+RF+EF+KF+JF+CF+PF;
   document.getElementById("cuenta").innerHTML = total
     ? (faltan.length
         ? `Faltan <b style="color:#fff">${faltan.length}</b> de ${PENDIENTES.length}`
@@ -1815,6 +1919,7 @@ function refrescar(){
       +(KF?((faltan.length||RF||EF)?" · ":"")+`<b style="color:#fff">${KF}</b> plan${KF===1?"":"es"} (cobros, muestras o actividad)`:"")
       +(JF?((faltan.length||RF||EF||KF)?" · ":"")+`<b style="color:#fff">${JF}</b> objetivo${JF===1?"":"s"} de tu jefe sin contestar`:"")
       +(CF?((faltan.length||RF||EF||KF||JF)?" · ":"")+`<b style="color:#fff">${CF}</b> acción${CF===1?"":"es"} de cobro sin fecha`:"")
+      +(PF?((faltan.length||RF||EF||KF||JF||CF)?" · ":"")+`<b style="color:#fff">${PF}</b> artículo${PF===1?"":"s"} de promoción sin completar`:"")
       +(RETRASOS_SIN_MOTIVO
         ? (faltan.length?" · ":"")+`<b style="color:#fff">${RETRASOS_SIN_MOTIVO}</b> retraso${
             RETRASOS_SIN_MOTIVO===1?"":"s"} sin motivo`
@@ -2565,6 +2670,7 @@ async function enviar(){
       }catch(e){ console.warn("recuperación",e); }
     }
     if(P.get("solover")!=="1"&&window.RC){ try{ await cargarEstRes(); }catch(e){ console.warn("estrategias",e); } }
+    try{ await cargarPromoC(); }catch(e){ console.warn("promoción",e); }
 
     // 2 · Los que dan señales de bajada, con la misma regla del parte
     // (sep 2026) El cierre recalculaba desde cero cada viernes: un cliente
@@ -3192,6 +3298,7 @@ async function enviar(){
       ${bloqueObjJefe()}
       ${bloqueKpis()}
       ${bloqueRecuperacion()}
+      ${bloquePromoC()}
       ${bloqueEstRes()}
 
       <div class="paso">

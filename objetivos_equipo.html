@@ -171,8 +171,9 @@
 <main><div class="estado" id="app">Cargando…</div></main>
 
 <script src="agentes.js"></script>
-<script src="/recuperacion_comun.js?v=20261005h"></script>
+<script src="/recuperacion_comun.js?v=20261008a"></script>
 <script src="/seguimiento_comun.js?v=20261004a"></script>
+<script src="/promo_cierre.js?v=20261008a"></script>
 <script>
 const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
 const P=new URLSearchParams(location.search);
@@ -2492,6 +2493,54 @@ window.anularObj=async(id)=>{
   o.eliminado=true; SEGUIM=SEGUIM.filter(x=>x.id!==id); OBJETIVOS=OBJETIVOS.filter(x=>x.id!==id); pintar();
   try{ await escribir("objetivos_semana",id,Object.assign({},o,{eliminado:true,anuladoPor:window._MI_NOMBRE_JEFE||AGENTE})); }catch(e){ alert("No se ha guardado: "+e.message); }
 };
+// ══ (oct 2026) PROMOCIÓN Y LIQUIDACIÓN del equipo ═════════════════════
+// Los artículos en promoción/liquidación, por familia; de cada uno, los clientes de cada comercial (y los
+// tuyos) que lo han dejado o compran menos, lo que cada comercial ha dicho que va a caer en su cierre y,
+// de la semana pasada, lo que ha caído. Desde cada cliente, oferta o estrategia.
+let PROMO_EQ=null, PROMO_EQ_CARG=false;
+async function cargarPromoEq(){ if(PROMO_EQ_CARG||!window.PROMOC) return; PROMO_EQ_CARG=true;
+  try{ const cods=[...new Set([...USUARIOS.map(u=>U(u.cod)),AGENTE].filter(Boolean))];
+    const r=await PROMOC.cargar(cods); PROMO_EQ={items:r.items.filter(it=>it.clientes.length),todos:r.items}; }
+  catch(e){ PROMO_EQ={items:[],todos:[],error:e.message}; }
+  try{ pintar(); }catch(e){} }
+function seccionPromoEq(){
+  if(!window.PROMOC) return {ok:null,d:"No se puede leer (falta subir promo_cierre.js)."};
+  if(PROMO_EQ===null){ setTimeout(cargarPromoEq,0); return {ok:false,d:"Calculando… (la primera vez del día tarda un poco)"}; }
+  if(PROMO_EQ.error) return {ok:null,d:"No se ha podido calcular: "+escT(PROMO_EQ.error)};
+  const L=PROMO_EQ.items; if(!L.length) return {ok:true,d:"Ningún cliente del equipo ha dejado los artículos en promoción o liquidación."};
+  const eu=(n)=>Math.round(Number(n)||0).toLocaleString("es-ES")+" €";
+  const quien=(cod)=>{ const u=USUARIOS.find(x=>U(x.cod)===U(cod)); return u?u:(U(cod)===AGENTE?{id:"_yo",nombre:"Tu cartera",cod:AGENTE}:{id:"",nombre:cod,cod}); };
+  const RDe=(u)=>{ const ci=u&&u.id?CIERRES[u.id]:null; if(!ci||!ci.info) return null; try{ return JSON.parse(ci.info.respuestas||"{}"); }catch(e){ return {}; } };
+  let pend=0, uds=0;
+  const filaCom=(it,cod,cl)=>{ const u=quien(cod), R=u.id==="_yo"?null:RDe(u), r=R?R["promo:"+it.cod]:null, sg=R?R["promoSeg:"+it.cod]:null;
+    const per=-cl.reduce((t,c)=>t+Number(c.diferencia||0),0);
+    let dijo;
+    if(u.id==="_yo") dijo='<span style="color:#64748B">Tus clientes</span>';
+    else if(!R){ dijo='<span style="color:#B45309">⏳ sin cerrar todavía</span>'; pend++; }
+    else if(!r||(!r.accion&&!r.texto)){ dijo='<span style="color:#B91C1C">⚠️ no contestó</span>'; pend++; }
+    else { if(r.accion==="Va a caer") uds+=Number(String(r.uds||0).replace(",","."))||0;
+      dijo=(r.accion==="Va a caer"?'<b style="color:#15803D">Va a caer '+escT(r.uds||"?")+' uds</b>':'<b style="color:#B91C1C">'+escT(r.accion||"")+'</b>')+(r.texto?' · «'+escT(r.texto)+'»':''); }
+    const seg=sg&&sg.accion?'<div style="font-size:12px;color:#92400E">Semana pasada: '+escT(sg.accion)+(sg.uds?' · '+escT(sg.uds)+' uds':'')+(sg.texto?' · «'+escT(sg.texto)+'»':'')+'</div>':'';
+    const i=PROMO_EQ.items.indexOf(it);
+    const cli=cl.map(c=>{ const j=it.clientes.indexOf(c);
+      return '<div style="display:flex;gap:8px;align-items:center;justify-content:space-between;border-top:1px solid #F1F5F9;padding:5px 0">'
+        +'<div style="min-width:0;font-size:12.5px"><b>'+escT(c.nombre||c.cliente)+'</b> '+(c.estado==="perdido"?'<span style="color:#991B1B;font-weight:800">la ha dejado</span>':'<span style="color:#92400E;font-weight:800">se enfría</span>')
+        +'<div style="color:#64748B">'+escT(c.cliente)+' · '+eu(c.ventasAnt)+' → '+eu(c.ventasAct)+'</div></div>'
+        +'<div style="display:flex;gap:4px;flex:none"><button class="mini" onclick="PROMOC.abrirCRM(\'of\',PROMO_EQ.items['+i+'],PROMO_EQ.items['+i+'].clientes['+j+'])">📨 Oferta</button>'
+        +'<button class="mini" onclick="PROMOC.abrirCRM(\'est\',PROMO_EQ.items['+i+'],PROMO_EQ.items['+i+'].clientes['+j+'])">💶 Estrategia</button></div></div>'; }).join("");
+    return '<div style="border-top:1px solid #EEF1F5;padding:6px 0"><div style="display:flex;justify-content:space-between;gap:8px;font-size:13px"><b>'+escT(u.nombre)+'</b><span>'+cl.length+' cliente'+(cl.length===1?'':'s')+' · '+eu(per)+'</span></div>'
+      +'<div style="font-size:12.5px">'+dijo+'</div>'+seg
+      +'<details><summary style="cursor:pointer;font-size:12px;color:#475569">Ver clientes</summary>'+cli+'</details></div>'; };
+  const art=(it)=>{ const por=new Map(); it.clientes.forEach(c=>{ const k=U(c.agente); if(!por.has(k)) por.set(k,[]); por.get(k).push(c); });
+    return '<div style="border:1px solid #E5E7EB;border-left:4px solid '+(it.est==="LIQUIDACIÓN"?"#DC2626":"#D97706")+';border-radius:10px;padding:8px 10px;margin:7px 0;background:#fff">'
+      +'<div style="display:flex;justify-content:space-between;gap:8px"><b style="font-size:13.5px">'+escT(it.cod)+' · '+escT(it.nom)+'</b><span style="font-size:11px;font-weight:800;color:'+(it.est==="LIQUIDACIÓN"?"#991B1B":"#92400E")+'">'+(it.est==="LIQUIDACIÓN"?"Liquidación":"Promoción")+'</span></div>'
+      +'<div style="font-size:12px;color:#475569">'+[it.cal?"Cal. "+escT(it.cal):"",it.met?escT(it.met)+" m":"",(Number(it.uds)||0).toLocaleString("es-ES")+" uds disponibles"].filter(Boolean).join(" · ")+'</div>'
+      +'<div style="font-size:12px">'+PROMOC.preciosH(it)+'</div>'
+      +[...por.entries()].sort((a,b)=>b[1].length-a[1].length).map(([cod,cl])=>filaCom(it,cod,cl)).join("")+'</div>'; };
+  const html=PROMOC.porFamilia(L).map(([f,A])=>'<div style="font-size:11.5px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#64748B;margin-top:10px">'+escT(f)+'</div>'+A.map(art).join("")).join("");
+  const nCli=new Set(L.flatMap(it=>it.clientes.map(c=>c.cliente))).size, tot=L.reduce((t,it)=>t+it.perdido,0);
+  return {ok:pend===0,d:L.length+" artículo"+(L.length===1?"":"s")+" · "+nCli+" cliente"+(nCli===1?"":"s")+" del equipo los han dejado o compran menos ("+eu(tot)+")"+(uds?" · comprometidas "+uds.toLocaleString("es-ES")+" uds":"")+(pend?" · "+pend+" sin contestar":""),c:html};
+}
 function seccionSeguimiento(){
   const mios=SEGUIM.filter(o=>USUARIOS.some(u=>U(u.id)===U(o.agente)||U(u.cod)===U(o.agente)||(u.alias||[]).map(U).includes(U(o.agente))));
   if(!mios.length) return {d:"La semana pasada no se marcaron objetivos.",c:"",ok:true};
@@ -2565,6 +2614,8 @@ function pasosCierre(sinCerrar){
     const mu=cargando?{d:"Calculando…"}:seccionMuestras(), ac=cargando?{d:"Calculando…"}:seccionActividad(),
       co=cargando?{d:"Calculando…"}:seccionCobros(), rg=seccionRiesgo(), sg=seccionSeguimiento();
     pasos.splice(1,0,{k:"riesgo",ok:rg.ok===undefined?false:rg.ok,t:"🚨 Recuperación y clientes en riesgo",d:rg.d,c:()=>rg.c});
+    const pr=seccionPromoEq();
+    pasos.splice(2,0,{k:"promo",ok:pr.ok,t:"🏷️ Promoción y liquidación",d:pr.d,c:()=>pr.c});
     pasos.push({k:"muestras",ok:mu.ok===undefined?null:mu.ok,t:"📦 Muestras (cambio de cartera)",d:mu.d,c:()=>mu.c});
     pasos.push({k:"actividad",ok:ac.ok===undefined?null:ac.ok,t:"👋 Actividad",d:ac.d,c:()=>ac.c});
     pasos.push({k:"cobros",ok:co.ok===undefined?null:co.ok,t:"💰 Cobros",d:co.d,c:()=>co.c});

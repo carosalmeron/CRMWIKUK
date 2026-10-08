@@ -331,7 +331,7 @@
   RC.cargarProductos=async(caso,forzar)=>{
     if(!caso||!caso.cliente) return null;
     // v2: 8 artículos en vez de 5; lo guardado con la versión anterior se renueva
-    if(!forzar&&caso.productos&&!caso.productos.error&&caso.productos.v===2){
+    if(!forzar&&caso.productos&&!caso.productos.error&&caso.productos.v===3){
       const d=RC.dias(caso.productosEn);
       if(d!=null&&d<RC.PROD_DIAS) return caso.productos;
     }
@@ -345,7 +345,7 @@
       if(j&&j.ok===false) throw new Error(j.error||"sin respuesta");
       const m=(a)=>({art:a.articulo,desc:RC.prodTexto(a),act:Math.round(num(a.ventasAct)),ant:Math.round(num(a.ventasAnt))});
       const p={caen:(j.articulos||[]).filter(a=>num(a.diferencia)<0).slice(0,8).map(m),
-               suben:(j.suben||[]).filter(a=>num(a.diferencia)>0).slice(0,3).map(m),v:2};
+               suben:(j.suben||[]).filter(a=>num(a.diferencia)>0).slice(0,3).map(m),v:3};
       caso.productos=p; caso.productosEn=new Date().toISOString();
       try{ await RC.guardar(caso._id,{productos:p,productosEn:caso.productosEn}); }catch(e){}
       return p;
@@ -616,7 +616,11 @@
     const dto=RC.dtoDe(l.precioActual,l.precioOferta);
     let estado="aprobada", pend=null, cadena=[];
     const nivel=por.nivel;
-    if(nivel==="comercial"){
+    const _pr=await RC.promoDe(l.art), _pd=_pr?RC.promoDto(_pr,l.catCliente):0;
+    if(_pr&&dto<=_pd+0.05){
+      // Precio de promoción/liquidación: ya aprobado en Stock
+      cadena=[{rol:"promocion",nombre:(_pr.est==="LIQUIDACIÓN"?"Liquidación":"Promoción")+" aprobada en Stock (−"+_pd+" %)",estado:"aprobado",fecha:hoyS}];
+    } else if(nivel==="comercial"){
       estado="pendiente_aprobacion";
       // (sep 2026) Va directo a quien puede aprobar ese descuento (el jefe se entera por copia)
       pend=dto>RC.LIM_DTO.director?(cad.ceo||cad.dir||cad.resp):dto>RC.LIM_DTO.jefe?(cad.dir||cad.ceo||cad.resp):(cad.resp||cad.dir);
@@ -837,6 +841,23 @@
   // ══ Ofertas (colección «ofertas» del CRM) ═══════════════════════════
   // Límites de descuento del comercial en una oferta: los del CRM
   // (configuracion/general → limites_dto; por defecto 4 / 10 / 15 %).
+  // (oct 2026) PROMOCIÓN Y LIQUIDACIÓN: el descuento de cada artículo ya está aprobado en Stock (sobre la
+  // tarifa de carnicero o de fabricante). Hasta ese descuento, ni la oferta ni la estrategia se vuelven a aprobar.
+  RC._promo=null; RC._promoT=0;
+  RC.promoLista=async()=>{
+    if(RC._promo&&Date.now()-RC._promoT<300000) return RC._promo;
+    const L=[]; try{
+      const g=async(id)=>{ const r=await fetch(`${RC.FB}/catalogo_promo/${id}`,{cache:"no-store"}); if(!r.ok) return null; const j=await r.json(), o={};
+        for(const [k,v] of Object.entries(j.fields||{})) o[k]=v.stringValue??(v.integerValue!=null?Number(v.integerValue):v.doubleValue??null); return o; };
+      const m=await g("actual");
+      if(m&&m.version){ let t=""; for(let i=0;i<(Number(m.partes)||1);i++){ const d=await g(`items_${m.version}_${i}`); t+=(d&&d.texto)||""; } L.push(...JSON.parse(t||"[]")); }
+    }catch(e){}
+    RC._promo=L; RC._promoT=Date.now(); return L;
+  };
+  const _rzP=(x)=>{ const m=/^([A-Z]{1,3}\d{1,3}\.\d{1,2}[A-Z]+?)(?:[FR]\d+)?(?:\.[A-Z0-9]+)?$/.exec(ARR(x)); return m?m[1]:null; };
+  RC.promoDe=async(art)=>{ const c=ARR(art); if(!c) return null; const L=await RC.promoLista(), rc=_rzP(c);
+    return L.find(it=>{ const cs=[it.cod,...(it.eq||[]),...(it.codigos||[])].map(ARR); return cs.includes(c)||(rc&&cs.some(x=>_rzP(x)===rc)); })||null; };
+  RC.promoDto=(it,catCli)=>/FABRICANTE|DISTRIBUIDOR|GRAN CUENTA/i.test(String(catCli||""))?(Number(it.dtoFab)||0):(Number(it.dtoGen)||0);
   RC.limitesDto=async()=>{
     if(RC._lim) return RC._lim;
     RC._lim={agente:4,jefe:10,director:15};
@@ -851,7 +872,8 @@
     const lim=await RC.limitesDto();
     const tope=por.nivel==="ceo"?100:por.nivel==="director"?lim.director:por.nivel==="jefe"?lim.jefe:lim.agente;
     const dto=RC.dtoDe(l.precioActual,l.precioOferta);
-    if(num(l.precioActual)>0&&dto>tope){
+    const _pr=await RC.promoDe(l.art), _pd=_pr?RC.promoDto(_pr,l.catCliente):0;
+    if(num(l.precioActual)>0&&dto>tope&&!(_pr&&dto<=_pd+0.05)){
       const e=await RC.crearEstrategia(caso,l,(nota?nota+" · ":"")+"Oferta con "+dto+" % de descuento: supera el límite del "+tope+" %",
         Object.assign({},por,{nivel:por.nivel==="comercial"?"comercial":por.nivel}));
       return {tipo:"estrategia",doc:e,dto,tope};
@@ -1139,6 +1161,8 @@
     const lim=await RC.limitesDto(); const n=RC.NIVEL_UI;
     const tope=n==="ceo"?100:n==="director"?lim.director:n==="jefe"?lim.jefe:lim.agente;
     const d=Math.round((1-po/pa)*1000)/10;
+    const _s=RC._sel&&RC._sel[pref], _pr=_s&&_s.codigo?await RC.promoDe(_s.codigo):null, _pd=_pr?RC.promoDto(_pr,_s.catCli):0;
+    if(_pr&&d>0&&d<=_pd+0.05){ el.innerHTML=`<span style="color:#15803D">🏷️ Descuento ${d} %: precio de ${_pr.est==="LIQUIDACIÓN"?"liquidación":"promoción"} (hasta −${_pd} %), ya aprobado. No hace falta aprobación.</span>`; return; }
     el.innerHTML=d<=0?`<span style="color:#15803D">Sin descuento sobre tarifa</span>`
       :d<=tope?`<span style="color:#15803D">Descuento ${d} %: dentro de tu límite (${tope} %)</span>`
       :`<span style="color:#B45309">Descuento ${d} %: supera tu límite del ${tope} % → irá a aprobación</span>`;

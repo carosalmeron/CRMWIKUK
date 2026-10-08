@@ -75,7 +75,7 @@
     };
   </script>
 
-  <script src="/recuperacion_comun.js?v=20261005h"></script>
+  <script src="/recuperacion_comun.js?v=20261008a"></script>
 <script type="text/babel" data-presets="react">
 // ── Extraer hooks de React global ──────────────────────────────────
 const { useState, useEffect, useCallback, useMemo, useRef } = React;
@@ -9660,7 +9660,7 @@ function ClienteRow({nombre,visita,ops,onSave,clienteCodigo,clienteId,equipo,age
     if(!_requiere && ofertaForm.precioBase){
       var _cli=clienteParaTarifa(clienteId,nombre);
       var _u0=(typeof window!=="undefined"&&window._usuarioActual)||null;
-      var _ev=evaluarPrecioManual(precio, ofertaForm.precioBase, _cli, _u0);
+      var _ev=evaluarPrecioManual(precio, ofertaForm.precioBase, _cli, _u0, ofertaForm.codigo);
       if(_ev.calculable){ _dtoCalc=_ev.dtoTotal; _requiere=_ev.requiereAprobacion; }
     }
     if(_requiere){
@@ -10967,7 +10967,7 @@ function Informe({usuario, clientesFB, actividadSemana, muestrasDB, estrategiasD
                       if(ofertaForm.precioBase){
                         var _cli3=(window._clientesFB||[]).find(function(c){return c.id===((clienteSel&&clienteSel.id)||"");})||clienteSel||null;
                         var _u3=(typeof window!=="undefined"&&window._usuarioActual)||null;
-                        var _ev3=evaluarPrecioManual(precio, ofertaForm.precioBase, _cli3, _u3);
+                        var _ev3=evaluarPrecioManual(precio, ofertaForm.precioBase, _cli3, _u3, ofertaForm.codigo);
                         if(_ev3&&_ev3.calculable&&_ev3.requiereAprobacion){
                           if(!confirm("⚠️ Ese precio supone un "+_ev3.dtoExtra+" % de descuento sobre la tarifa de este cliente y supera tu límite.\n\n¿Crear una estrategia para pedir aprobación?")) return;
                           if(typeof window._abrirEstrategiaDesdeOferta==="function"){
@@ -20052,7 +20052,7 @@ function OfertasModule({usuario, ofertasDB, setOfertasDB, onBack, onAbrirCliente
                   var dtoCalc=formOf.dto||"";
                   if(!requiere && formOf.precioBase){
                     var _cli=clienteParaTarifa(formOf.clienteId,formOf.clienteNombre);
-                    var ev=evaluarPrecioManual(pr, formOf.precioBase, _cli, usuario);
+                    var ev=evaluarPrecioManual(pr, formOf.precioBase, _cli, usuario, formOf.codigo);
                     if(ev.calculable){
                       dtoCalc=ev.dtoTotal;
                       requiere=ev.requiereAprobacion;
@@ -27194,7 +27194,32 @@ function dtoTotalAcumulado(cliente, dtoExtra){
 // (v3.41) Calcula el descuento TOTAL (%) que implica un precio tecleado vs el precio base de tarifa.
 // precioBaseTarifa = precio del producto a tarifa 0 (precio de catálogo sin descuento).
 // Devuelve {dtoTotal, requiereAprobacion} comparando con el margen del vendedor para ese cliente.
-function evaluarPrecioManual(precioTecleado, precioBaseTarifa, cliente, usuario){
+// (oct 2026) PROMOCIÓN Y LIQUIDACIÓN: el descuento de cada artículo ya lo aprobaron en Stock (por familia o
+// por artículo, sobre la tarifa de carnicero o de fabricante). A ese precio o por encima, no se vuelve a aprobar.
+window._PROMO_CAT=null;
+(function cargarPromoCat(){ try{
+  var FBp="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents/catalogo_promo/";
+  var vv=function(f,k){ var x=f&&f[k]; return x?(x.stringValue!=null?x.stringValue:x.integerValue!=null?Number(x.integerValue):x.doubleValue!=null?Number(x.doubleValue):null):null; };
+  fetch(FBp+"actual").then(function(r){ return r.ok?r.json():null; }).then(function(m){ if(!m) { window._PROMO_CAT=[]; return; }
+    var ver=vv(m.fields,"version"), n=Number(vv(m.fields,"partes"))||1; if(!ver){ window._PROMO_CAT=[]; return; }
+    var ps=[]; for(var i=0;i<n;i++) ps.push(fetch(FBp+"items_"+ver+"_"+i).then(function(r){ return r.ok?r.json():null; }));
+    return Promise.all(ps).then(function(L){ var t=L.map(function(d){ return (d&&vv(d.fields,"texto"))||""; }).join("");
+      try{ window._PROMO_CAT=JSON.parse(t||"[]"); }catch(e){ window._PROMO_CAT=[]; } }); }).catch(function(){ window._PROMO_CAT=[]; });
+}catch(e){ window._PROMO_CAT=[]; } })();
+function promoDeCodigo(codigo){
+  var L=window._PROMO_CAT||[], c=String(codigo||"").toUpperCase().trim(); if(!c||!L.length) return null;
+  var rz=function(x){ var m=/^([A-Z]{1,3}\d{1,3}\.\d{1,2}[A-Z]+?)(?:[FR]\d+)?(?:\.[A-Z0-9]+)?$/.exec(String(x||"").toUpperCase()); return m?m[1]:null; };
+  var rc=rz(c);
+  for(var i=0;i<L.length;i++){ var it=L[i], cods=[it.cod].concat(it.eq||[],it.codigos||[]).map(function(x){ return String(x||"").toUpperCase(); });
+    if(cods.indexOf(c)>=0) return it; if(rc&&cods.some(function(x){ return rz(x)===rc; })) return it; }
+  return null;
+}
+// Descuento de promoción permitido para ese cliente (fabricante, distribuidor y gran cuenta: el de fabricante)
+function promoDtoPermitido(it, cliente){
+  var cat=String((cliente&&cliente.categoriaCliente)||"").toUpperCase();
+  return /FABRICANTE|DISTRIBUIDOR|GRAN CUENTA/.test(cat)?(Number(it.dtoFab)||0):(Number(it.dtoGen)||0);
+}
+function evaluarPrecioManual(precioTecleado, precioBaseTarifa, cliente, usuario, codigo){
   var precio=parseFloat(String(precioTecleado).replace(",","."));
   var base=parseFloat(String(precioBaseTarifa).replace(",","."));
   if(isNaN(precio)||isNaN(base)||base<=0) return {dtoTotal:0, requiereAprobacion:false, calculable:false};
@@ -27213,8 +27238,11 @@ function evaluarPrecioManual(precioTecleado, precioBaseTarifa, cliente, usuario)
   // (sep 2026) Se compara el descuento EXTRA sobre la tarifa del cliente
   var dCli=dtoTarifaCliente(cliente)||0;
   var dtoExtra=dtoExtraSobreTarifa(dtoTotal, cliente);
+  // Artículo en promoción: el descuento extra sobre su tarifa hasta el de la promoción ya está aprobado
+  var _pr=codigo?promoDeCodigo(codigo):null, _pd=_pr?promoDtoPermitido(_pr,cliente):0;
+  if(_pr&&_pd>dtoMaxSinAprob) dtoMaxSinAprob=_pd;
   return {dtoTotal:dtoTotal, dtoExtra:dtoExtra, dtoCliente:dCli, precioTarifaCliente:Math.round(base*(1-dCli/100)*100)/100,
-    requiereAprobacion:(dtoExtra>dtoMaxSinAprob+0.05), calculable:true, dtoMaxSinAprob:dtoMaxSinAprob};
+    requiereAprobacion:(dtoExtra>dtoMaxSinAprob+0.05), calculable:true, dtoMaxSinAprob:dtoMaxSinAprob, promo:_pr?{est:_pr.est,dto:_pd}:null};
 }
 
 // (v3.41) Crea automáticamente una estrategia de aprobación de precio.
@@ -27225,7 +27253,7 @@ function _superaMargenForm(form, cliente, usuario){
     if(!form||!form.precioBase) return false;
     var pr=parseFloat(String(form.precio||"").replace(",","."));
     if(isNaN(pr)||pr<=0) return false;
-    var ev=evaluarPrecioManual(pr, form.precioBase, cliente||null, usuario||((typeof window!=="undefined"&&window._usuarioActual)||null));
+    var ev=evaluarPrecioManual(pr, form.precioBase, cliente||null, usuario||((typeof window!=="undefined"&&window._usuarioActual)||null), form.codigo);
     return !!(ev&&ev.calculable&&ev.requiereAprobacion);
   }catch(e){ return false; }
 }
@@ -35719,7 +35747,7 @@ function VisitaTab({cliente,act,usuario,resultados,onGuardar,onIrAPotencial}){
               if(ofertaForm.precioBase){
                 var _cli4=(typeof cliente!=="undefined"&&cliente)?cliente:null;
                 var _u4=(typeof window!=="undefined"&&window._usuarioActual)||null;
-                var _ev4=evaluarPrecioManual(precio, ofertaForm.precioBase, _cli4, _u4);
+                var _ev4=evaluarPrecioManual(precio, ofertaForm.precioBase, _cli4, _u4, ofertaForm.codigo);
                 if(_ev4&&_ev4.calculable&&_ev4.requiereAprobacion){
                   if(!confirm("⚠️ Ese precio supone un "+_ev4.dtoExtra+" % de descuento sobre la tarifa de este cliente y supera tu límite.\n\n¿Crear una estrategia para pedir aprobación?")) return;
                   if(typeof window._abrirEstrategiaDesdeOferta==="function"){
@@ -38011,17 +38039,17 @@ function App(props){
       try{ var qs=new URLSearchParams(location.search), nv=qs.get("nuevo"); if(nv){
         var d={cliente:qs.get("cli")||"",clienteId:qs.get("cli")||"",nombreCliente:qs.get("nom")||""};
         // (oct 2026) Desde el catálogo (promoción y liquidación): también el artículo y el precio
-        var desdeCat=qs.get("desde")==="catalogo";
+        var desdeCat=qs.get("desde")==="catalogo"||qs.get("desde")==="cierre";
         var art={articulo:qs.get("art")||"",descripcion:qs.get("desc")||"",calibre:qs.get("cal")||"",metros:qs.get("met")||"",
           precioBase:qs.get("pb")||"",precio:qs.get("pr")||"",clienteCodigo:qs.get("cli")||""};
-        if(nv==="oferta"){ sessionStorage.setItem("ofertaDesdeAnalisis",JSON.stringify(Object.assign({},d,art,{cliente:d.nombreCliente||d.cliente,vacia:true,origenTxt:qs.get("nota")||(desdeCat?"Desde el catálogo":"Desde el cierre semanal")}))); setSection("ofertas"); }
+        if(nv==="oferta"){ sessionStorage.setItem("ofertaDesdeAnalisis",JSON.stringify(Object.assign({},d,art,{cliente:d.nombreCliente||d.cliente,vacia:true,origenTxt:qs.get("nota")||(qs.get("desde")==="catalogo"?"Desde el catálogo":"Desde el cierre semanal")}))); setSection("ofertas"); }
         else { sessionStorage.setItem("nuevoDesdeCierre",JSON.stringify(Object.assign({tipo:nv},d,desdeCat?Object.assign({},art,{nota:qs.get("nota")||"",dtoTotal:qs.get("dto")||"",agente:qs.get("ag")||"",desdeCat:true}):{}))); setSection(nv==="estrategia"?"estrategias":"muestras"); }
         history.replaceState(null,"",location.pathname+location.hash);
         if(!document.getElementById("volverCierreBtn")){ var bt=document.createElement("button"); bt.id="volverCierreBtn"; bt.textContent=(qs.get("desde")==="catalogo")?"‹ Volver al catálogo":"‹ Volver al cierre";
           bt.style.cssText="position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:9999;background:#0F172A;color:#fff;border:none;border-radius:99px;padding:12px 22px;font:800 14px system-ui,sans-serif;box-shadow:0 6px 20px rgba(0,0,0,.3);cursor:pointer";
           bt.onclick=function(){
             // (oct 2026) Dentro del portal y viniendo del catálogo: que el portal vuelva a abrir el catálogo
-            if(qs.get("desde")==="catalogo"&&window.top!==window.self){ try{ window.top.postMessage({type:"WK_ABRIR_MODULO",id:"catalogo"},location.origin); return; }catch(e){} }
+            if((qs.get("desde")==="catalogo"||qs.get("desde")==="cierre")&&window.top!==window.self){ try{ window.top.postMessage({type:"WK_ABRIR_MODULO",id:qs.get("desde")==="catalogo"?"catalogo":"cierres"},location.origin); return; }catch(e){} }
             try{ window.close(); }catch(e){} setTimeout(function(){ if(history.length>1) history.back(); },300); };
           document.body.appendChild(bt); } } }catch(e){} };
     mirar();
