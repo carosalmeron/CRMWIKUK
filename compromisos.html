@@ -83,12 +83,26 @@ async function cargar(){
         .forEach(u=>[u._id,u.id,u.crmId,u.grupoAgente,u.catalogoVendedor,u.username].forEach(k=>{ if(k) MIS.add(U(k)); })); }catch(e){}
   }
   LISTA=await RC.leerCompromisos();
-  if(VER_SEG){ try{ SEG=await facturasSeguro(); }catch(e){ SEG=[]; SEG_ERR=e.message; } }
+  if(VER_SEG){ try{ const [a,b]=await Promise.all([facturasSeguro(),RC.leer("seguro_facturas",10).catch(()=>[])]); SEG=a; SEGM={}; b.forEach(d=>{ SEGM[d._id]=d; }); }catch(e){ SEG=[]; SEG_ERR=e.message; } }
 }
 // (oct 2026) ÁREA DE SEGURO (Administración): todas las facturas con aviso o parte de seguro.
 // Días desde la FECHA DE FACTURA, solo facturas vencidas y por cobrar (sin apuntes, anuladas ni compensadas con un abono)
 const VER_SEG=ROL!=="comercial";
-let SEG=[], SEG_ERR="", SEG_F="";
+let SEG=[], SEG_ERR="", SEG_F="", SEGM={};
+// Lo hecho con cada factura (colección seguro_facturas): aviso enviado y/o parte enviado, con fecha y quién
+const segId=(x)=>[x.com,x.cli,x.g,x.num,String(x.ff).slice(0,10)].join("|").toUpperCase().replace(/[^A-Z0-9|]/g,"").replace(/\|/g,"__").slice(0,140);
+window.segMarcar=async(i,campo,btn)=>{
+  const x=SEG[i]; if(!x) return; const id=segId(x), d=SEGM[id]||{};
+  const quita=!!d[campo];
+  if(quita&&!confirm("¿Quitar la marca de "+(campo==="parte"?"parte enviado":"aviso enviado")+"?")) return;
+  if(!quita&&!confirm((campo==="parte"?"¿Marcar como ENVIADO AL SEGURO (parte)?":"¿Marcar el AVISO de seguro como enviado?")+"\n\n"+x.cli+" · "+x.num+" · "+eur(x.im))) return;
+  if(btn){ btn.disabled=true; btn.textContent="Guardando…"; }
+  const ahora=new Date().toISOString(), hist=(Array.isArray(d.historial)?d.historial:[]).concat([{accion:(quita?"Quita ":"")+(campo==="parte"?"parte enviado":"aviso enviado"),por:NOMBRE,fecha:ahora}]);
+  const o={cliente:x.cli,clienteCodigo:x.cod,comercial:x.com,factura:x.num,empresa:x.g,fechaFactura:x.ff,vencimiento:x.fv,importe:x.im,historial:hist,actualizado:ahora};
+  o[campo]=!quita; o[campo+"Fecha"]=quita?"":ahora; o[campo+"Por"]=quita?"":NOMBRE;
+  try{ await RC.guardarEn("seguro_facturas",id,o,true); SEGM[id]=Object.assign({},d,o); lista(); }
+  catch(e){ alert("No se ha guardado: "+e.message); if(btn){ btn.disabled=false; } }
+};
 async function facturasSeguro(){
   const D=await docsCobros(), out=[], nomCom={};
   try{ (await RC.leer("usuarios",10)).forEach(u=>[u.grupoAgente,u.catalogoVendedor,u.username,u._id].forEach(k=>{ if(k) nomCom[U(k)]=u.nombre||k; })); }catch(e){}
@@ -111,19 +125,32 @@ async function facturasSeguro(){
 function segHTML(){
   if(SEG_ERR) return `<p class="vacio">No se han podido leer las facturas: ${esc(SEG_ERR)}</p>`;
   const q=U(SEG_F), L=SEG.filter(x=>!q||U(x.cli).includes(q)||U(x.comNom).includes(q)||U(x.num).includes(q));
-  const va=L.filter(x=>x.niv==="va"), ri=L.filter(x=>x.niv==="riesgo"), sum=(l)=>l.reduce((t,x)=>t+x.im,0);
+  const M=(x)=>SEGM[segId(x)]||{};
+  const env=L.filter(x=>M(x).parte), va=L.filter(x=>x.niv==="va"&&!M(x).parte), ri=L.filter(x=>x.niv==="riesgo"&&!M(x).parte&&!M(x).aviso),
+        riOk=L.filter(x=>x.niv==="riesgo"&&!M(x).parte&&M(x).aviso), sum=(l)=>l.reduce((t,x)=>t+x.im,0);
+  const fD=(iso)=>iso?new Date(iso).toLocaleDateString("es-ES"):"";
+  const marcas=(x)=>{ const m=M(x), i=SEG.indexOf(x);
+    return `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:5px">
+      ${m.aviso?`<span style="font-size:11.5px;font-weight:700;background:#ECFDF5;color:#15803D;border-radius:8px;padding:3px 8px">✓ Aviso enviado ${esc(fD(m.avisoFecha))}${m.avisoPor?" · "+esc(m.avisoPor):""}</span>`:""}
+      ${m.parte?`<span style="font-size:11.5px;font-weight:700;background:#7F1D1D;color:#fff;border-radius:8px;padding:3px 8px">🛡️ Enviado al seguro ${esc(fD(m.parteFecha))}${m.partePor?" · "+esc(m.partePor):""}</span>`:""}
+      ${ES_ADM?`<button class="btn" style="padding:5px 10px;font-size:12px" onclick="segMarcar(${i},'aviso',this)">${m.aviso?"Quitar aviso":"✓ Aviso enviado"}</button>
+        ${x.niv==="va"||m.parte?`<button class="btn" style="padding:5px 10px;font-size:12px;${m.parte?"":"background:#7F1D1D;border-color:#7F1D1D;color:#fff"}" onclick="segMarcar(${i},'parte',this)">${m.parte?"Quitar parte":"🛡️ Parte enviado al seguro"}</button>`:""}`:""}
+    </div>`; };
   const cp=(x)=>LISTA.filter(i=>i.estadoCobro!=="pagado"&&U(i.clienteNombre||i.cliente)===U(x.cli)).sort((a,b)=>String(b.fechaCreacion||"").localeCompare(String(a.fechaCreacion||"")))[0];
   const fila=(x)=>{ const c=cp(x);
     return `<div class="fila" style="cursor:default"><div class="n"><b>${esc(x.cli)}</b> ${RC.seguroProc(x.ds)}
       <small>🧾 <b>${esc(x.num||"—")}</b> · ${esc(x.g)} · fecha ${esc(fES(x.ff))} · vence ${esc(fES(x.fv))}</small>
       <small><b style="color:#B91C1C">${x.ds} días desde la factura</b> · ${x.dv} vencida · ${esc(x.comNom)}</small>
       ${c?`<small style="color:#1D4ED8;font-weight:700">📅 ${esc(c.accionCobro||"")} · para el ${esc(fES(c.fechaCompromiso))} · ${esc((RC.ESTADO_COBRO[c.estadoCobro]||[""])[0])}</small>`:`<small style="color:#B91C1C;font-weight:700">Sin acción</small>`}
+      ${marcas(x)}
       <a href="/cobros.html?agente=${encodeURIComponent(x.com)}&cliente=${encodeURIComponent(x.cli)}&vista=vencidos&rol=admin&nombre=${encodeURIComponent(NOMBRE)}&uid=${encodeURIComponent(UID)}" style="font-size:12px;font-weight:700;color:#2563EB">Ver en Cobros ›</a></div>
       <div class="imp" style="color:#B91C1C">${eur(x.im)}</div></div>`; };
   const bloque=(t,col,bg,l,sub)=>`<div style="background:${bg};color:${col};border-radius:10px;padding:8px 11px;margin:10px 0 4px;font-weight:800;font-size:13px">${t} · ${l.length} factura${l.length===1?"":"s"} · ${eur(sum(l))}<div style="font-weight:600;font-size:11.5px;opacity:.85">${sub}</div></div>${l.length?l.map(fila).join(""):`<p class="vacio">Ninguna.</p>`}`;
   return `<input placeholder="Buscar cliente, comercial o factura…" value="${esc(SEG_F)}" oninput="SEG_F=this.value;clearTimeout(window._sf);window._sf=setTimeout(()=>{ lista(); const i=document.querySelector('#app input'); if(i){ i.focus(); i.setSelectionRange(i.value.length,i.value.length); } },250)" style="margin:4px 0 6px">
-    ${bloque("🛡️ PARTE SEGURO","#fff","#7F1D1D",va,`Más de ${RC.SEGURO_VA} días desde la fecha de factura: hay que declararlas a la aseguradora`)}
-    ${bloque("⚠️ AVISO SEGURO","#B91C1C","#FEE2E2",ri,`De ${RC.SEGURO_RIESGO+1} a ${RC.SEGURO_VA} días desde la fecha de factura: cobrarlas antes de que pasen al seguro`)}`;
+    ${bloque("🛡️ PARTE SEGURO · pendiente de enviar","#fff","#7F1D1D",va,`Más de ${RC.SEGURO_VA} días desde la fecha de factura: hay que declararlas a la aseguradora`)}
+    ${bloque("⚠️ AVISO SEGURO · pendiente de enviar","#B91C1C","#FEE2E2",ri,`De ${RC.SEGURO_RIESGO+1} a ${RC.SEGURO_VA} días desde la fecha de factura: enviar el aviso y cobrarlas antes de que pasen al seguro`)}
+    ${bloque("✓ AVISO ENVIADO · en seguimiento","#15803D","#ECFDF5",riOk,`Aviso hecho: si no se cobran antes de los ${RC.SEGURO_VA} días, pasan a parte`)}
+    ${bloque("🛡️ ENVIADAS AL SEGURO","#475569","#F1F5F9",env,"Parte hecho a la aseguradora")}`;
 }
 function filaHTML(i){
   const vence=String(i.fechaCompromiso||"");
@@ -149,7 +176,7 @@ function lista(){
     grupos={mios:["Mis compromisos abiertos",ab.sort((a,b)=>(a.estadoCobro==="no_pagado"?-1:0)-(b.estadoCobro==="no_pagado"?-1:0)||String(a.fechaCompromiso).localeCompare(String(b.fechaCompromiso))),"No tienes compromisos abiertos. Se apuntan desde Cobros o desde tu cierre semanal."],
             ok:["✅ Pagados",M.filter(i=>i.estadoCobro==="pagado"),"Todavía ninguno."]};
   }
-  if(VER_SEG) grupos.seg=["🛡️ Seguro · aviso y parte",SEG,""];
+  if(VER_SEG) grupos.seg=["🛡️ Seguro · aviso y parte",SEG.filter(x=>!(SEGM[segId(x)]||{}).parte),""];
   const [tit,l,vac]=grupos[VISTA]||Object.values(grupos)[0];
   app.innerHTML=`<div class="tabs">${Object.entries(grupos).map(([k,[t,x]])=>`<button class="${k===VISTA?"on":""}" onclick="VISTA='${k}';lista()">${CORTO[k]||t.split(" ")[0]} ${x.length}</button>`).join("")}</div>
     <div class="card"><p style="margin:0 0 4px;font-weight:800;font-size:14.5px">${tit}</p>
