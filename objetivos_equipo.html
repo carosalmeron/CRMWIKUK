@@ -1970,6 +1970,14 @@ async function cargarPasos(){
         &&(esCeo||esDir||!EQUIPO||U(c.equipo).includes(EQUIPO)||EQUIPO.includes(U(c.equipo))));
       out.casos=todos.filter(c=>RC.abierto(c)&&c.estado!=="propuesta_archivo");
       out.todosCasos=todos;   // (oct 2026) para «Decisiones de la semana» (CEO / director)
+      // (oct 2026) Actas de los comités de esta semana → «Conclusiones de los comités» (CEO / director)
+      if(esCeo||esDir){ try{
+        const r=await fetch(FB+":runQuery",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({structuredQuery:{from:[{collectionId:"cierres_flujo"}],
+          where:{fieldFilter:{field:{fieldPath:"semana"},op:"EQUAL",value:{integerValue:String(SEMANA)}}}}})});
+        const j=r.ok?await r.json():[];
+        out.actasComite=(Array.isArray(j)?j:[]).filter(x=>x.document).map(x=>{ const o={_id:decodeURIComponent(x.document.name.split("/").pop())}; for(const [k,y] of Object.entries(x.document.fields||{})) o[k]=val(y); return o; })
+          .filter(a=>a.paso==="comite"&&(!a.anio||Number(a.anio)===ANIO)&&!/FRANC|DISTRIB/i.test(a.equipo||""));
+      }catch(e){ out.actasComite=[]; } }
       // Acumulado del año: recuperados y archivados
       const delAnio=(f)=>String(f||"").slice(0,4)===String(ANIO);
       out.recAnio=todos.filter(c=>c.estado==="recuperado"&&delAnio(c.recuperadoEn||c.actualizado));
@@ -2338,74 +2346,110 @@ function accionDeCaso(c){
   (ESTS||[]).filter(e=>(e.casoId===c._id||U(e.clienteId)===U(c.cliente))&&(e.estado==="pendiente_aprobacion"||e.estado==="aprobada")).forEach(e=>out.push("💶 "+(e.estrategia||"Estrategia")));
   return [...new Set(out)];
 }
-// (oct 2026) CIERRE ESTRATÉGICO (CEO / director): qué se ha decidido esta semana sobre la recuperación,
-// por qué se pierde (causas) y qué se ha hecho con las mayores pérdidas.
-const TIPOS_DEC=[["comite","📝","Acuerdos del comité",/^📝\s*Comit|comité/i],["instr","📌","Instrucciones del jefe",/^Instrucci|^📌/i],
-  ["est","💶","Estrategias de precio",/💶|estrategia/i],["of","📨","Ofertas",/📨|oferta/i],["alt","🔄","Alternativas",/🔄|alternativ/i],
-  ["mue","📦","Muestras",/📦|muestra/i],["inc","🧩","A otros departamentos",/🧩|incidencia/i],
-  ["dorm","😴","Dormidos 60 días",/duerme|dormid/i],["bloq","⛔","Bloqueados",/bloquea/i],["arch","🚫","Dejar de insistir",/archiva|dejar de insistir|fuera de estrategia/i]];
-window.DEC_SEL="";
-function decisionesRecH(){
-  const D=PASOS_DATA||{}, T=D.todosCasos||[]; if(!T.length) return "";
-  const ini=lunesSem().getTime()-2*86400000, fin=ini+9*86400000, enSem=(f)=>{ const t=Date.parse(f||""); return t&&t>=ini&&t<=fin; };
-  const eur=(n)=>euT(n);
-  const dec=new Map(), cnt={}, eurT={};
-  TIPOS_DEC.forEach(([k])=>{ cnt[k]=0; eurT[k]=0; });
-  T.forEach(c=>{ const hs=(c.historial||[]).filter(h=>h&&(Number(h.sem)===SEMANA||enSem(h.fecha)));
-    const ds=[];
-    hs.forEach(h=>{ const t=String(h.sistema||h.hecho||""); if(!t) return;
-      const tp=TIPOS_DEC.find(([k,ic,n,re])=>re.test(t)); if(tp){ ds.push({k:tp[0],ic:tp[1],t,por:h.por||""}); } });
-    (ESTS||[]).filter(e=>(e.casoId===c._id||U(e.clienteId)===U(c.cliente))&&(enSem(e.fechaCreacion)||(e.estado==="aprobada"&&RC.fechaAprob&&RC.fechaAprob(e)>=ini&&RC.fechaAprob(e)<=fin)))
-      .forEach(e=>{ if(!ds.some(d=>d.k==="est")) ds.push({k:"est",ic:"💶",t:"Estrategia: "+(e.estrategia||"")+" · "+(RC.ESTADO_EST[e.estado]||[e.estado])[0],por:e.agenteNombre||""}); });
-    if(c.estado==="recuperado"&&enSem(c.recuperadoEn)) ds.push({k:"rec",ic:"✅",t:"Recuperado",por:""});
-    if(ds.length){ dec.set(c._id,ds); [...new Set(ds.map(d=>d.k))].forEach(k=>{ cnt[k]=(cnt[k]||0)+1; eurT[k]=(eurT[k]||0)+(Number(c.perdido)||0); }); }
-  });
-  const abiertos=D.casos||[], conDec=abiertos.filter(c=>dec.has(c._id)), sumP=(l)=>l.reduce((t,c)=>t+(Number(c.perdido)||0),0);
-  const rec=T.filter(c=>c.estado==="recuperado"&&enSem(c.recuperadoEn));
-  // Causas: por qué se pierde (lo que pusieron en el plan)
-  const causas=new Map(); abiertos.forEach(c=>{ const k=String(c.causa||"").trim()||"Sin diagnóstico"; const x=causas.get(k)||{n:0,e:0}; x.n++; x.e+=Number(c.perdido)||0; causas.set(k,x); });
-  const cs=[...causas.entries()].sort((a,b)=>b[1].e-a[1].e);
-  const totE=sumP(abiertos)||1;
-  // (oct 2026) Cada cuadro se abre: lista de los casos de esa decisión, con el detalle
-  const sel=window.DEC_SEL||"";
-  const tile=(v,t,col,sub,k)=>`<div ${k?`onclick="DEC_SEL=DEC_SEL==='${k}'?'':'${k}';pintar()"`:""} style="background:${k&&sel===k?"#EFF6FF":"#fff"};border:${k&&sel===k?"2px solid #2563EB":"1px solid #E2E8F0"};border-radius:12px;padding:9px 10px;${k?"cursor:pointer":""}"><div style="font-size:18px;font-weight:800;color:${col||"#0F172A"}">${v}${k?` <span style="font-size:12px;color:#94A3B8">${sel===k?"▴":"▾"}</span>`:""}</div><div style="font-size:11.5px;color:#64748B">${t}${sub?"<br>"+sub:""}</div></div>`;
-  const filaC=(c,ds)=>`<div style="border-top:1px solid #E2E8F0;padding:7px 0;font-size:12.5px;cursor:pointer" onclick="abrirFichaR('${esc2(c.cliente)}')">
-        <div style="display:flex;justify-content:space-between;gap:8px"><b>${escT(c.nombre||c.cliente)}</b><b style="color:#DC2626;white-space:nowrap">−${eur(c.perdido)}</b></div>
-        <div style="color:#64748B">${escT(c.agenteNombre||c.agente||"")}${c.causa?" · causa: "+escT(c.causa):" · <b style='color:#DC2626'>sin diagnóstico</b>"}${c.accion?" · plan: "+escT(c.accion):""}</div>
-        ${ds.map(d=>`<div>${d.ic} ${escT(String(d.t).slice(0,220))}${d.por?` <span style="color:#94A3B8">· ${escT(d.por)}</span>`:""}</div>`).join("")}
-        <div style="color:#2563EB;font-weight:700;font-size:12px">Abrir su ficha ›</div></div>`;
-  const listaSel=(()=>{ if(!sel) return "";
-    const L=sel==="con"?T.filter(c=>dec.has(c._id)&&RC.abierto(c)):sel==="sin"?abiertos.filter(c=>!dec.has(c._id)):sel==="rec"?rec:T.filter(c=>(dec.get(c._id)||[]).some(d=>d.k===sel));
-    const nom=sel==="con"?"Casos con alguna decisión":sel==="sin"?"Casos sin ninguna decisión":sel==="rec"?"Recuperados esta semana":((TIPOS_DEC.find(x=>x[0]===sel)||[])[2]||sel);
-    return `<div style="background:#fff;border:2px solid #2563EB;border-radius:12px;padding:8px 12px;margin-top:8px">
-      <div style="display:flex;justify-content:space-between;align-items:center"><b style="font-size:13.5px">${escT(nom)} · ${L.length} · ${eur(sumP(L))}</b><a href="#" onclick="DEC_SEL='';pintar();return false" style="font-size:12px">Cerrar ✕</a></div>
-      ${L.sort((a,b)=>(Number(b.perdido)||0)-(Number(a.perdido)||0)).map(c=>filaC(c,(dec.get(c._id)||[]).filter(d=>sel==="con"||sel==="sin"||d.k===sel||sel==="rec"))).join("")||'<p style="font-size:12.5px;color:#64748B">Ninguno.</p>'}</div>`; })();
-  const top=abiertos.slice().sort((a,b)=>(Number(b.perdido)||0)-(Number(a.perdido)||0)).slice(0,12);
+// (oct 2026) CIERRE ESTRATÉGICO (CEO / director): CONCLUSIONES DE LOS COMITÉS sobre la recuperación.
+// Sale de las actas guardadas (cierres_flujo, paso «comite»): qué se decidió con cada cliente,
+// qué te suben, qué acciones hay (quién y cuándo) y qué grandes pérdidas no han pasado por el comité.
+const DEC_COM={ok:["✓","De acuerdo con el plan","#16A34A","#F0FDF4"],cambia:["✎","Se cambia el plan","#2563EB","#EFF6FF"],
+  sube:["📤","Te lo suben","#DC2626","#FEF2F2"],pospone:["⏭","Se deja para la semana que viene","#B45309","#FFFBEB"]};
+window.CC_ABIERTO=window.CC_ABIERTO||{};
+window.ccToggle=(k)=>{ CC_ABIERTO[k]=!CC_ABIERTO[k]; pintar(); };
+const _jsn=(s,d)=>{ if(s&&typeof s==="object") return s; try{ return JSON.parse(s||""); }catch(e){ return d; } };
+const _fdia=(s)=>{ if(!s) return ""; const p=String(s).slice(0,10).split("-"); return p.length===3?p[2]+"/"+p[1]:String(s); };
+function conclusionesComiteH(){
+  const D=PASOS_DATA||{}, actas=(D.actasComite||[]), T=D.todosCasos||[], abiertos=D.casos||[];
+  if(D.actasComite===undefined) return "";
+  const casoDe=new Map(T.map(c=>[c._id,c]));
+  // 1) Cada punto de recuperación decidido en un comité
+  const P=[];
+  actas.forEach(a=>{ const pts=(_jsn(a.puntos,{})||{}).p||{};
+    Object.entries(pts).forEach(([k,q])=>{ if(!k.startsWith("rec:")||!q||!q.r) return;
+      const c=casoDe.get(k.slice(4))||{};
+      P.push({aid:a._id,k,r:q.r,t:q.t||"",com:q.com||"",accs:q.accs||[],c,cli:c.nombre||c.cliente||"(cliente)",per:Number(c.perdido)||0,
+        com_:a.agenteNombre||a.agente||"",eq:a.equipo||c.equipo||"",jefe:a.porNombre||"",fecha:a.fecha||""}); }); });
+  const enCom=new Set(P.map(x=>x.k.slice(4)));
+  const sumE=(l)=>l.reduce((t,x)=>t+(x.per||0),0);
+  const de=(r)=>P.filter(x=>x.r===r).sort((a,b)=>b.per-a.per);
+  // 2) Acciones acordadas
+  const A=P.flatMap(x=>(x.accs||[]).map(y=>({...y,cli:x.cli,com_:x.com_,per:x.per,c:x.c})));
+  const aDep=A.filter(y=>y.dep||y.depNom), aCom=A.filter(y=>!(y.dep||y.depNom));
+  // 3) Comités hechos / que faltan
+  const gente=(typeof panelGente==="function"?panelGente():[]).filter(p=>!/FRANC|DISTRIB/i.test(p.eqNom||""));
+  const tieneActa=(p)=>actas.some(a=>[p.cod,p.id].filter(Boolean).map(U).includes(U(a.agente)));
+  const faltan=gente.filter(p=>!tieneActa(p));
+  // 4) Grandes pérdidas que no han pasado por ningún comité
+  const sinCom=abiertos.filter(c=>!enCom.has(c._id)).sort((a,b)=>(Number(b.perdido)||0)-(Number(a.perdido)||0));
+  const umbral=10000, grandes=sinCom.filter(c=>(Number(c.perdido)||0)>=umbral);
+
+  const H=(t,sub)=>`<div style="font-weight:800;font-size:14px;margin:16px 0 2px">${t}</div>${sub?`<div style="font-size:12px;color:#64748B;margin-bottom:6px">${sub}</div>`:""}`;
+  const cliLink=(c,nom)=>c&&c.cliente?`<a href="#" onclick="abrirFichaR('${esc2(c.cliente)}');return false" style="color:#0F172A;font-weight:700;text-decoration:none">${escT(nom)}</a>`:`<b>${escT(nom)}</b>`;
+  const accH=(y)=>`<div style="display:flex;gap:6px;font-size:12.5px;margin-top:3px"><span>➕</span><span><b>${escT(y.que||"")}</b>
+      <span style="color:#64748B">· ${escT(y.depNom||y.dep||y.quien||"")}${y.cuando?" · para el "+escT(_fdia(y.cuando)):""}${y.incId?" · incidencia creada":""}</span></span></div>`;
+  const tarjeta=(x)=>{ const d=DEC_COM[x.r]||["•",x.r,"#0F172A","#fff"];
+    return `<div style="background:#fff;border:1px solid #E2E8F0;border-left:4px solid ${d[2]};border-radius:10px;padding:8px 10px;margin:6px 0">
+      <div style="display:flex;justify-content:space-between;gap:8px;font-size:13px">${cliLink(x.c,x.cli)}<b style="color:#DC2626;white-space:nowrap">−${euT(x.per)}</b></div>
+      <div style="font-size:12px;color:#64748B">${escT(x.com_)}${x.eq?" · "+escT(x.eq):""}${x.c.causa?" · causa: "+escT(x.c.causa):""}</div>
+      ${x.t?`<div style="font-size:12.5px;margin-top:4px">${x.r==="sube"?"<b>Lo que te piden:</b> ":x.r==="pospone"?"<b>Por qué:</b> ":"<b>Acuerdo:</b> "}${escT(x.t)}</div>`:""}
+      ${x.com?`<div style="font-size:12.5px;margin-top:2px;color:#334155">💬 ${escT(x.com)}</div>`:""}
+      ${(x.accs||[]).map(accH).join("")}
+    </div>`; };
+  const grupo=(r,abierto)=>{ const L=de(r); if(!L.length) return ""; const d=DEC_COM[r], k="g_"+r, ab=abierto?!CC_ABIERTO[k]:!!CC_ABIERTO[k];
+    return `<div style="margin-top:10px"><div onclick="ccToggle('${k}')" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;background:${d[3]};border:1px solid ${d[2]}33;border-radius:10px;padding:8px 10px">
+        <b style="color:${d[2]};font-size:13.5px">${d[0]} ${d[1]} · ${L.length}</b><span style="font-size:12.5px;font-weight:700">${euT(sumE(L))} ${ab?"▴":"▾"}</span></div>
+      ${ab?L.map(tarjeta).join(""):""}</div>`; };
+  const tablaAcc=(L,titulo,k)=>{ if(!L.length) return ""; const ab=!CC_ABIERTO[k];
+    return `<div style="margin-top:8px"><div onclick="ccToggle('${k}')" style="cursor:pointer;font-weight:700;font-size:13px">${titulo} · ${L.length} ${ab?"▴":"▾"}</div>
+      ${ab?L.sort((a,b)=>String(a.cuando||"9").localeCompare(String(b.cuando||"9"))).map(y=>`<div style="background:#fff;border:1px solid #E2E8F0;border-radius:10px;padding:7px 10px;margin:5px 0;font-size:12.5px">
+          <div style="display:flex;justify-content:space-between;gap:8px"><b>${escT(y.que||"")}</b><span style="white-space:nowrap;font-weight:700;${y.cuando?"":"color:#DC2626"}">${y.cuando?"📅 "+escT(_fdia(y.cuando)):"sin fecha"}</span></div>
+          <div style="color:#64748B">👉 ${escT(y.depNom||y.dep||y.quien||"")} · ${escT(y.cli)} (${escT(y.com_)})${y.incId?' · <span style="color:#16A34A">incidencia enviada ✓</span>':""}</div></div>`).join(""):""}</div>`; };
+  // Resumen por comercial (quién ha tenido comité, con quién y cuándo)
+  const porCom=actas.map(a=>{ const L=P.filter(x=>x.aid===a._id);
+      return {a,n:L.length,sube:L.filter(x=>x.r==="sube").length,cambia:L.filter(x=>x.r==="cambia").length,acc:L.reduce((t,x)=>t+(x.accs||[]).length,0)}; })
+    .sort((x,y)=>String(x.a.equipo||"").localeCompare(String(y.a.equipo||""))||String(x.a.agenteNombre||"").localeCompare(String(y.a.agenteNombre||"")));
+  const kRes="res", abRes=!!CC_ABIERTO[kRes];
+  const num=(v,t,col)=>`<div style="background:#fff;border:1px solid #E2E8F0;border-radius:12px;padding:8px 10px"><div style="font-size:20px;font-weight:800;color:${col||"#0F172A"}">${v}</div><div style="font-size:11.5px;color:#64748B">${t}</div></div>`;
+
   return `<div style="background:#F8FAFC;border:1.5px solid #0F172A;border-radius:14px;padding:12px;margin:0 0 12px">
-    <div style="font-weight:800;font-size:15px">🧭 Decisiones de la semana ${SEMANA} sobre recuperación</div>
-    <div style="font-size:12px;color:#64748B;margin-bottom:8px">Lo que se ha decidido en partes, comités y fichas. Lo que no aparece aquí, no se ha decidido.</div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:6px">
-      ${tile(conDec.length+" de "+abiertos.length,"casos con alguna decisión",conDec.length<abiertos.length/2?"#DC2626":"#16A34A",eur(sumP(conDec))+" de "+eur(sumP(abiertos)),"con")}
-      ${tile(abiertos.length-conDec.length,"⚠️ sin ninguna decisión","#DC2626",eur(sumP(abiertos)-sumP(conDec)),"sin")}
-      ${tile(rec.length,"✅ recuperados esta semana","#16A34A",eur(sumP(rec)),"rec")}
-      ${TIPOS_DEC.filter(([k])=>cnt[k]).map(([k,ic,n])=>tile(cnt[k],ic+" "+n,null,eur(eurT[k]),k)).join("")}
+    <div style="font-weight:800;font-size:16px">📝 Conclusiones de los comités · semana ${SEMANA}</div>
+    <div style="font-size:12px;color:#64748B">Lo que cada jefe ha decidido con su comercial sobre los clientes en recuperación. Sale de las actas firmadas.</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:6px;margin-top:10px">
+      ${num(actas.length+(gente.length?" de "+gente.length:""),"comités hechos",faltan.length?"#B45309":"#16A34A")}
+      ${num(P.length,"clientes revisados · "+euT(sumE(P)))}
+      ${num(de("sube").length,"📤 te los suben",de("sube").length?"#DC2626":"#16A34A")}
+      ${num(A.length,"➕ acciones acordadas")}
+      ${num(grandes.length,"⚠️ pérdidas de +"+euT(umbral)+" sin comité",grandes.length?"#DC2626":"#16A34A")}
     </div>
-    <div style="font-size:11.5px;color:#64748B;margin-top:4px">Toca un cuadro para ver sus casos con el detalle.</div>
-    ${listaSel}
-    <div style="font-weight:800;font-size:13px;margin:12px 0 4px">Por qué se pierde (causa del diagnóstico)</div>
-    ${cs.slice(0,8).map(([k,x])=>`<div style="display:flex;align-items:center;gap:8px;font-size:12.5px;margin:3px 0">
-      <span style="flex:0 0 42%;${k==="Sin diagnóstico"?"color:#DC2626;font-weight:700":""}">${escT(k)}</span>
-      <span style="flex:1;background:#E2E8F0;border-radius:99px;height:8px;overflow:hidden"><i style="display:block;height:8px;width:${Math.round(x.e/totE*100)}%;background:${k==="Sin diagnóstico"?"#DC2626":"#0F172A"}"></i></span>
-      <span style="white-space:nowrap;font-weight:700">${eur(x.e)}</span><span style="color:#64748B;white-space:nowrap">${x.n} cl.</span></div>`).join("")}
-    <div style="font-weight:800;font-size:13px;margin:12px 0 4px">Las mayores pérdidas: qué se ha decidido</div>
-    ${top.map(c=>{ const ds=dec.get(c._id)||[];
-      return `<div style="border-top:1px solid #E2E8F0;padding:7px 0;font-size:12.5px;cursor:pointer" onclick="abrirFichaR('${esc2(c.cliente)}')">
-        <div style="display:flex;justify-content:space-between;gap:8px"><b>${escT(c.nombre||c.cliente)}</b><b style="color:#DC2626;white-space:nowrap">−${eur(c.perdido)}</b></div>
-        <div style="color:#64748B">${escT(c.agenteNombre||c.agente||"")}${c.causa?" · causa: "+escT(c.causa):" · <b style='color:#DC2626'>sin diagnóstico</b>"}${c.accion?" · plan: "+escT(c.accion):""}</div>
-        ${ds.length?ds.slice(0,3).map(d=>`<div>${d.ic} ${escT(String(d.t).slice(0,140))}${d.por?` <span style="color:#94A3B8">· ${escT(d.por)}</span>`:""}</div>`).join("")
-          :`<div style="color:#DC2626;font-weight:700">⚠️ Sin ninguna decisión esta semana</div>`}</div>`; }).join("")}
+    ${faltan.length?`<div style="font-size:12.5px;margin-top:6px;color:#B45309"><b>Sin comité todavía:</b> ${faltan.map(p=>escT(p.nombre||p.cod)).join(", ")}</div>`:""}
+    ${!actas.length?`<div style="background:#FFFBEB;border:1px solid #FCD34D;border-radius:10px;padding:10px;margin-top:10px;font-size:13px">Todavía no hay ningún acta de comité guardada esta semana.</div>`:""}
+
+    ${P.length?H("1 · Lo que se ha decidido, cliente a cliente","Primero lo que te toca a ti. Toca un bloque para abrirlo o cerrarlo; toca un cliente para ver su ficha.")
+      +grupo("sube",true)+grupo("cambia",true)+grupo("pospone",false)+grupo("ok",false):""}
+
+    ${A.length?H("2 · Acciones acordadas","Quién hace qué y para cuándo. Las de otros departamentos se han enviado como incidencia.")
+      +tablaAcc(aDep,"🏢 A otros departamentos","t_dep")+tablaAcc(aCom,"👤 Comercial y jefe","t_com"):""}
+
+    ${grandes.length?H("3 · ⚠️ Grandes pérdidas que no han pasado por ningún comité","Clientes que caen más de "+euT(umbral)+" y nadie ha revisado esta semana.")
+      +grandes.slice(0,12).map(c=>`<div style="display:flex;justify-content:space-between;gap:8px;border-top:1px solid #E2E8F0;padding:6px 0;font-size:12.5px">
+        <span>${cliLink(c,c.nombre||c.cliente)}<br><span style="color:#64748B">${escT(c.agenteNombre||c.agente||"")}${c.causa?" · causa: "+escT(c.causa):" · <b style='color:#DC2626'>sin diagnóstico</b>"}</span></span>
+        <b style="color:#DC2626;white-space:nowrap">−${euT(c.perdido)}</b></div>`).join("")
+      +(grandes.length>12?`<div style="font-size:12px;color:#64748B">y ${grandes.length-12} más (${euT(grandes.slice(12).reduce((t,c)=>t+(Number(c.perdido)||0),0))}).</div>`:""):""}
+
+    ${porCom.length?`<div onclick="ccToggle('${kRes}')" style="cursor:pointer;font-weight:800;font-size:14px;margin:16px 0 4px">4 · Comité por comercial ${abRes?"▴":"▾"}</div>
+      ${abRes?`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px;background:#fff">
+        <thead><tr style="background:#F1F5F9;color:#64748B;font-size:11px;text-transform:uppercase"><th style="text-align:left;padding:5px">Comercial</th><th style="text-align:left;padding:5px">Jefe · día</th><th style="padding:5px">Clientes</th><th style="padding:5px">📤</th><th style="padding:5px">✎</th><th style="padding:5px">➕</th></tr></thead>
+        <tbody>${porCom.map(o=>`<tr style="border-top:1px solid #E2E8F0"><td style="padding:5px"><b>${escT(o.a.agenteNombre||o.a.agente)}</b><br><span style="color:#64748B">${escT(o.a.equipo||"")}</span></td>
+          <td style="padding:5px">${escT(o.a.porNombre||"")}<br><span style="color:#64748B">${escT(_fdia(o.a.fecha))}</span></td>
+          <td style="padding:5px;text-align:center">${o.n}</td><td style="padding:5px;text-align:center;${o.sube?"color:#DC2626;font-weight:700":""}">${o.sube}</td>
+          <td style="padding:5px;text-align:center">${o.cambia}</td><td style="padding:5px;text-align:center">${o.acc}</td></tr>`).join("")}</tbody></table></div>`:""}`:""}
+    ${(()=>{ const m=new Map(); abiertos.forEach(c=>{ const k=String(c.causa||"").trim()||"Sin diagnóstico"; const x=m.get(k)||{n:0,e:0}; x.n++; x.e+=Number(c.perdido)||0; m.set(k,x); });
+      const cs=[...m.entries()].sort((a,b)=>b[1].e-a[1].e), tot=abiertos.reduce((t,c)=>t+(Number(c.perdido)||0),0)||1, ab=!!CC_ABIERTO.causas;
+      return `<div onclick="ccToggle('causas')" style="cursor:pointer;font-weight:800;font-size:14px;margin:16px 0 4px">5 · Por qué se pierde (todos los casos abiertos) ${ab?"▴":"▾"}</div>`
+        +(ab?cs.slice(0,8).map(([k,x])=>`<div style="display:flex;align-items:center;gap:8px;font-size:12.5px;margin:3px 0">
+          <span style="flex:0 0 42%;${k==="Sin diagnóstico"?"color:#DC2626;font-weight:700":""}">${escT(k)}</span>
+          <span style="flex:1;background:#E2E8F0;border-radius:99px;height:8px;overflow:hidden"><i style="display:block;height:8px;width:${Math.round(x.e/tot*100)}%;background:${k==="Sin diagnóstico"?"#DC2626":"#0F172A"}"></i></span>
+          <span style="white-space:nowrap;font-weight:700">${euT(x.e)}</span><span style="color:#64748B;white-space:nowrap">${x.n} cl.</span></div>`).join(""):""); })()}
   </div>`;
 }
+
 function seccionRiesgo(){
   const D=PASOS_DATA||{}; if(!D.casos) return {d:"Comprobando…",c:""};
   const l=D.casos.map(c=>({c,acc:accionDeCaso(c)}));
@@ -2428,7 +2472,7 @@ function seccionRiesgo(){
   const c=bloqueComun({k:"rg",tema:"Recuperación",unidad:"casos",filas,
     tiles:[["−"+euT(sumP(l)),"En riesgo","#DC2626"],[l.length,"Casos abiertos"],[sinPlanC,"Sin plan",sinPlanC?"#DC2626":"#16A34A"],
       [sin.length,"Sin acción esta semana",sin.length?"#DC2626":"#16A34A"],[(D.recAnio||[]).length+" · "+euT((D.recAnio||[]).reduce((t,c)=>t+(Number(c.perdido)||0),0)),"Recuperados (año)","#16A34A"],[(D.archAnio||[]).length,"Dejados de insistir (año)"]]});
-  return {d:con.length+" con acción · "+sin.length+" sin acción ("+euT(sumP(sin))+")",c:((esCeo||esDir)?decisionesRecH():"")+c,ok:!sin.length};
+  return {d:con.length+" con acción · "+sin.length+" sin acción ("+euT(sumP(sin))+")",c:((esCeo||esDir)?conclusionesComiteH():"")+c,ok:!sin.length};
 }
 // Pedir acción sobre un caso de muestras o cobros: correo al comercial y
 // objetivo para su semana siguiente (sale en su parte y en el seguimiento).
