@@ -1969,6 +1969,7 @@ async function cargarPasos(){
       const todos=(await RC.leerCasos()).filter(c=>!RC.esFrancia(c.equipo)&&!/DISTRIB/i.test(c.equipo||"")
         &&(esCeo||esDir||!EQUIPO||U(c.equipo).includes(EQUIPO)||EQUIPO.includes(U(c.equipo))));
       out.casos=todos.filter(c=>RC.abierto(c)&&c.estado!=="propuesta_archivo");
+      out.todosCasos=todos;   // (oct 2026) para «Decisiones de la semana» (CEO / director)
       // Acumulado del año: recuperados y archivados
       const delAnio=(f)=>String(f||"").slice(0,4)===String(ANIO);
       out.recAnio=todos.filter(c=>c.estado==="recuperado"&&delAnio(c.recuperadoEn||c.actualizado));
@@ -2337,6 +2338,57 @@ function accionDeCaso(c){
   (ESTS||[]).filter(e=>(e.casoId===c._id||U(e.clienteId)===U(c.cliente))&&(e.estado==="pendiente_aprobacion"||e.estado==="aprobada")).forEach(e=>out.push("💶 "+(e.estrategia||"Estrategia")));
   return [...new Set(out)];
 }
+// (oct 2026) CIERRE ESTRATÉGICO (CEO / director): qué se ha decidido esta semana sobre la recuperación,
+// por qué se pierde (causas) y qué se ha hecho con las mayores pérdidas.
+const TIPOS_DEC=[["comite","📝","Acuerdos del comité",/^📝\s*Comit|comité/i],["instr","📌","Instrucciones del jefe",/^Instrucci|^📌/i],
+  ["est","💶","Estrategias de precio",/💶|estrategia/i],["of","📨","Ofertas",/📨|oferta/i],["alt","🔄","Alternativas",/🔄|alternativ/i],
+  ["mue","📦","Muestras",/📦|muestra/i],["inc","🧩","A otros departamentos",/🧩|incidencia/i],
+  ["dorm","😴","Dormidos 60 días",/duerme|dormid/i],["bloq","⛔","Bloqueados",/bloquea/i],["arch","🚫","Dejar de insistir",/archiva|dejar de insistir|fuera de estrategia/i]];
+function decisionesRecH(){
+  const D=PASOS_DATA||{}, T=D.todosCasos||[]; if(!T.length) return "";
+  const ini=lunesSem().getTime()-2*86400000, fin=ini+9*86400000, enSem=(f)=>{ const t=Date.parse(f||""); return t&&t>=ini&&t<=fin; };
+  const eur=(n)=>euT(n);
+  const dec=new Map(), cnt={}, eurT={};
+  TIPOS_DEC.forEach(([k])=>{ cnt[k]=0; eurT[k]=0; });
+  T.forEach(c=>{ const hs=(c.historial||[]).filter(h=>h&&(Number(h.sem)===SEMANA||enSem(h.fecha)));
+    const ds=[];
+    hs.forEach(h=>{ const t=String(h.sistema||h.hecho||""); if(!t) return;
+      const tp=TIPOS_DEC.find(([k,ic,n,re])=>re.test(t)); if(tp){ ds.push({k:tp[0],ic:tp[1],t,por:h.por||""}); } });
+    (ESTS||[]).filter(e=>(e.casoId===c._id||U(e.clienteId)===U(c.cliente))&&(enSem(e.fechaCreacion)||(e.estado==="aprobada"&&RC.fechaAprob&&RC.fechaAprob(e)>=ini&&RC.fechaAprob(e)<=fin)))
+      .forEach(e=>{ if(!ds.some(d=>d.k==="est")) ds.push({k:"est",ic:"💶",t:"Estrategia: "+(e.estrategia||"")+" · "+(RC.ESTADO_EST[e.estado]||[e.estado])[0],por:e.agenteNombre||""}); });
+    if(c.estado==="recuperado"&&enSem(c.recuperadoEn)) ds.push({k:"rec",ic:"✅",t:"Recuperado",por:""});
+    if(ds.length){ dec.set(c._id,ds); [...new Set(ds.map(d=>d.k))].forEach(k=>{ cnt[k]=(cnt[k]||0)+1; eurT[k]=(eurT[k]||0)+(Number(c.perdido)||0); }); }
+  });
+  const abiertos=D.casos||[], conDec=abiertos.filter(c=>dec.has(c._id)), sumP=(l)=>l.reduce((t,c)=>t+(Number(c.perdido)||0),0);
+  const rec=T.filter(c=>c.estado==="recuperado"&&enSem(c.recuperadoEn));
+  // Causas: por qué se pierde (lo que pusieron en el plan)
+  const causas=new Map(); abiertos.forEach(c=>{ const k=String(c.causa||"").trim()||"Sin diagnóstico"; const x=causas.get(k)||{n:0,e:0}; x.n++; x.e+=Number(c.perdido)||0; causas.set(k,x); });
+  const cs=[...causas.entries()].sort((a,b)=>b[1].e-a[1].e);
+  const totE=sumP(abiertos)||1;
+  const tile=(v,t,col,sub)=>`<div style="background:#fff;border:1px solid #E2E8F0;border-radius:12px;padding:9px 10px"><div style="font-size:18px;font-weight:800;color:${col||"#0F172A"}">${v}</div><div style="font-size:11.5px;color:#64748B">${t}${sub?"<br>"+sub:""}</div></div>`;
+  const top=abiertos.slice().sort((a,b)=>(Number(b.perdido)||0)-(Number(a.perdido)||0)).slice(0,12);
+  return `<div style="background:#F8FAFC;border:1.5px solid #0F172A;border-radius:14px;padding:12px;margin:0 0 12px">
+    <div style="font-weight:800;font-size:15px">🧭 Decisiones de la semana ${SEMANA} sobre recuperación</div>
+    <div style="font-size:12px;color:#64748B;margin-bottom:8px">Lo que se ha decidido en partes, comités y fichas. Lo que no aparece aquí, no se ha decidido.</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:6px">
+      ${tile(conDec.length+" de "+abiertos.length,"casos con alguna decisión",conDec.length<abiertos.length/2?"#DC2626":"#16A34A",eur(sumP(conDec))+" de "+eur(sumP(abiertos)))}
+      ${tile(rec.length,"✅ recuperados esta semana","#16A34A",eur(sumP(rec)))}
+      ${TIPOS_DEC.filter(([k])=>cnt[k]).map(([k,ic,n])=>tile(cnt[k],ic+" "+n,null,eur(eurT[k]))).join("")}
+    </div>
+    <div style="font-weight:800;font-size:13px;margin:12px 0 4px">Por qué se pierde (causa del diagnóstico)</div>
+    ${cs.slice(0,8).map(([k,x])=>`<div style="display:flex;align-items:center;gap:8px;font-size:12.5px;margin:3px 0">
+      <span style="flex:0 0 42%;${k==="Sin diagnóstico"?"color:#DC2626;font-weight:700":""}">${escT(k)}</span>
+      <span style="flex:1;background:#E2E8F0;border-radius:99px;height:8px;overflow:hidden"><i style="display:block;height:8px;width:${Math.round(x.e/totE*100)}%;background:${k==="Sin diagnóstico"?"#DC2626":"#0F172A"}"></i></span>
+      <span style="white-space:nowrap;font-weight:700">${eur(x.e)}</span><span style="color:#64748B;white-space:nowrap">${x.n} cl.</span></div>`).join("")}
+    <div style="font-weight:800;font-size:13px;margin:12px 0 4px">Las mayores pérdidas: qué se ha decidido</div>
+    ${top.map(c=>{ const ds=dec.get(c._id)||[];
+      return `<div style="border-top:1px solid #E2E8F0;padding:7px 0;font-size:12.5px;cursor:pointer" onclick="abrirFichaR('${esc2(c.cliente)}')">
+        <div style="display:flex;justify-content:space-between;gap:8px"><b>${escT(c.nombre||c.cliente)}</b><b style="color:#DC2626;white-space:nowrap">−${eur(c.perdido)}</b></div>
+        <div style="color:#64748B">${escT(c.agenteNombre||c.agente||"")}${c.causa?" · causa: "+escT(c.causa):" · <b style='color:#DC2626'>sin diagnóstico</b>"}${c.accion?" · plan: "+escT(c.accion):""}</div>
+        ${ds.length?ds.slice(0,3).map(d=>`<div>${d.ic} ${escT(String(d.t).slice(0,140))}${d.por?` <span style="color:#94A3B8">· ${escT(d.por)}</span>`:""}</div>`).join("")
+          :`<div style="color:#DC2626;font-weight:700">⚠️ Sin ninguna decisión esta semana</div>`}</div>`; }).join("")}
+  </div>`;
+}
 function seccionRiesgo(){
   const D=PASOS_DATA||{}; if(!D.casos) return {d:"Comprobando…",c:""};
   const l=D.casos.map(c=>({c,acc:accionDeCaso(c)}));
@@ -2359,7 +2411,7 @@ function seccionRiesgo(){
   const c=bloqueComun({k:"rg",tema:"Recuperación",unidad:"casos",filas,
     tiles:[["−"+euT(sumP(l)),"En riesgo","#DC2626"],[l.length,"Casos abiertos"],[sinPlanC,"Sin plan",sinPlanC?"#DC2626":"#16A34A"],
       [sin.length,"Sin acción esta semana",sin.length?"#DC2626":"#16A34A"],[(D.recAnio||[]).length+" · "+euT((D.recAnio||[]).reduce((t,c)=>t+(Number(c.perdido)||0),0)),"Recuperados (año)","#16A34A"],[(D.archAnio||[]).length,"Dejados de insistir (año)"]]});
-  return {d:con.length+" con acción · "+sin.length+" sin acción ("+euT(sumP(sin))+")",c,ok:!sin.length};
+  return {d:con.length+" con acción · "+sin.length+" sin acción ("+euT(sumP(sin))+")",c:((esCeo||esDir)?decisionesRecH():"")+c,ok:!sin.length};
 }
 // Pedir acción sobre un caso de muestras o cobros: correo al comercial y
 // objetivo para su semana siguiente (sale en su parte y en el seguimiento).
