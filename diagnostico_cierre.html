@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Diagnóstico del cierre de semana</title>
+<!-- (oct 2026) DIAGNÓSTICO DEL PROCESO DE CIERRE. Solo lee. Mide, semana a semana y comercial a comercial,
+     cuánto se pregunta en el parte, cuánto se contesta de verdad, qué decide el comité y qué objetivos salen.
+     Es la base para decidir qué recortar. -->
+<style>
+  :root{--tx:#0F172A;--mu:#64748B;--li:#E5E7EB;--ok:#16A34A;--wa:#D97706;--ko:#DC2626}
+  *{box-sizing:border-box} body{margin:0;font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;background:#F4F5F7;color:var(--tx)}
+  .w{max-width:900px;margin:0 auto;padding:12px 14px 60px}
+  h1{font-size:20px;margin:0 0 2px} .sub{color:var(--mu);font-size:13px;margin:0 0 12px}
+  h2{font-size:15px;margin:22px 0 6px} .card{background:#fff;border:1px solid var(--li);border-radius:12px;padding:12px;margin-bottom:10px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;background:#fff} th,td{padding:5px 6px;border-bottom:1px solid #F1F5F9;text-align:right;white-space:nowrap}
+  th{background:#F1F5F9;font-size:11px;text-transform:uppercase;color:var(--mu)} td:first-child,th:first-child{text-align:left;white-space:normal}
+  .ok{color:var(--ok);font-weight:700} .wa{color:var(--wa);font-weight:700} .ko{color:var(--ko);font-weight:700}
+  .num{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px}
+  .num div{background:#F8FAFC;border-radius:10px;padding:8px;text-align:center} .num b{display:block;font-size:20px} .num small{color:var(--mu);font-size:11.5px}
+  .nota{font-size:12.5px;color:var(--mu)} .scroll{overflow-x:auto}
+  textarea{width:100%;height:120px;font:12px ui-monospace,monospace;margin-top:8px}
+</style></head><body><div class="w">
+<h1>🔎 Diagnóstico del cierre de semana</h1>
+<p class="sub">Cuánto se pregunta, cuánto se contesta de verdad, qué decide el comité. Solo lee, no cambia nada.</p>
+<div id="out"><p class="nota">Leyendo las últimas 5 semanas…</p></div>
+</div>
+<script src="/recuperacion_comun.js"></script>
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const U=(s)=>String(s||"").toUpperCase().trim();
+const esc=(t)=>String(t??"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+const num=(v)=>{ const n=Number(String(v??"").replace(",",".")); return isFinite(n)?n:0; };
+const eur=(n)=>Math.round(Math.abs(num(n))).toLocaleString("es-ES")+" €";
+const J=(s,d)=>{ if(s&&typeof s==="object") return s; try{ return JSON.parse(s||""); }catch(e){ return d; } };
+const pct=(a,b)=>b?Math.round(a/b*100)+" %":"—";
+const hora=(s)=>{ const t=Date.parse(s||""); if(!t) return ""; const d=new Date(t); return ["dom","lun","mar","mié","jue","vie","sáb"][d.getDay()]+" "+String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); };
+function isoSem(d){ const t=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate())); const dn=t.getUTCDay()||7; t.setUTCDate(t.getUTCDate()+4-dn); const a=new Date(Date.UTC(t.getUTCFullYear(),0,1)); return {anio:t.getUTCFullYear(),sem:Math.ceil((((t-a)/86400000)+1)/7)}; }
+const val=(f)=>!f?null:f.stringValue!==undefined?f.stringValue:f.doubleValue!==undefined?Number(f.doubleValue):f.integerValue!==undefined?Number(f.integerValue):f.booleanValue!==undefined?f.booleanValue:f.arrayValue?(f.arrayValue.values||[]).map(val):null;
+async function porSemana(col,sem){
+  const q=async(v)=>{ const r=await fetch(FB+":runQuery",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({structuredQuery:{from:[{collectionId:col}],where:{fieldFilter:{field:{fieldPath:"semana"},op:"EQUAL",value:v}}}})});
+    const j=r.ok?await r.json():[]; return (Array.isArray(j)?j:[]).filter(x=>x.document).map(x=>{ const o={_id:decodeURIComponent(x.document.name.split("/").pop())}; for(const [k,y] of Object.entries(x.document.fields||{})) o[k]=val(y); return o; }); };
+  let out=await q({integerValue:String(sem)}); if(!out.length) out=await q({doubleValue:sem}); return out;
+}
+const texto=(s)=>String(s||"").trim(), largo=(s)=>texto(s).length>=20;
+(async()=>{
+  const hoy=new Date(), w=isoSem(hoy), sems=[]; for(let i=4;i>=0;i--) sems.push(w.sem-i);
+  const errs=[]; const t=async(n,p,d)=>{ try{ return await p; }catch(e){ errs.push(n+": "+e.message); return d; } };
+  const [casos,...porSem]=await Promise.all([t("recuperación",window.RC?RC.leerCasos():Promise.resolve([]),[]),
+    ...sems.map(s=>Promise.all([t("partes s"+s,porSemana("informes",s),[]),t("actas s"+s,porSemana("cierres_flujo",s),[]),t("objetivos s"+(s+1),porSemana("objetivos_semana",s+1),[])]))]);
+  let h="";
+  if(errs.length) h+=`<div class="card ko">No se ha podido leer: ${esc(errs.join(" · "))}</div>`;
+  // ── 1 · Semana a semana ──
+  const filas=sems.map((s,i)=>{ const [inf,flu,obj]=porSem[i]; const partes=inf.filter(x=>x.estado!=="borrador"), actas=flu.filter(x=>x.paso==="comite");
+    const preg=partes.map(p=>(J(p.planteados,[])||[]).length), resp=partes.map(p=>Object.values(J(p.respuestas,{})||{}).filter(v=>v&&typeof v==="object"&&(v.accion||v.texto||v.siguiente||v.hecho)).length);
+    const conTexto=partes.map(p=>Object.values(J(p.respuestas,{})||{}).filter(v=>v&&typeof v==="object"&&(largo(v.texto)||largo(v.siguiente)||largo(v.respuesta))).length);
+    const pts=actas.flatMap(a=>Object.entries((J(a.puntos,{})||{}).p||{}).filter(([k,q])=>q&&q.r));
+    const ptsTexto=pts.filter(([k,q])=>largo(q.t)||largo(q.com)||(q.accs||[]).length).length, sube=pts.filter(([k,q])=>q.r==="sube").length, cambia=pts.filter(([k,q])=>q.r==="cambia").length;
+    const accs=pts.reduce((t,[k,q])=>t+(q.accs||[]).length,0);
+    const sum=(l)=>l.reduce((t,x)=>t+x,0);
+    return {s,partes:partes.length,preg:sum(preg),resp:sum(resp),conTexto:sum(conTexto),actas:actas.length,pts:pts.length,ptsTexto,sube,cambia,accs,objs:obj.length,objJefe:obj.filter(o=>/jefe|ceo|director/i.test(o.origen||"")).length}; });
+  h+=`<h2>1 · Semana a semana</h2><div class="scroll"><table><thead><tr><th>Semana</th><th>Partes</th><th>Preguntas planteadas</th><th>Contestadas</th><th>Con texto real (≥20 letras)</th><th>Comités</th><th>Puntos revisados</th><th>Con algo escrito</th><th>Cambia</th><th>Suben</th><th>Acciones</th><th>Objetivos sem. sig.</th></tr></thead><tbody>
+    ${filas.map(f=>`<tr><td><b>${f.s}</b></td><td>${f.partes}</td><td>${f.preg}${f.partes?` <span class="nota">(${Math.round(f.preg/f.partes)} por parte)</span>`:""}</td><td>${f.resp}</td><td class="${f.resp&&f.conTexto/f.resp<0.4?"ko":f.resp&&f.conTexto/f.resp<0.7?"wa":"ok"}">${f.conTexto} · ${pct(f.conTexto,f.resp)}</td><td>${f.actas}</td><td>${f.pts}${f.actas?` <span class="nota">(${Math.round(f.pts/f.actas)} por comité)</span>`:""}</td><td class="${f.pts&&f.ptsTexto/f.pts<0.3?"ko":f.pts&&f.ptsTexto/f.pts<0.6?"wa":"ok"}">${f.ptsTexto} · ${pct(f.ptsTexto,f.pts)}</td><td>${f.cambia}</td><td>${f.sube}</td><td>${f.accs}</td><td>${f.objs} <span class="nota">(${f.objJefe} de jefes)</span></td></tr>`).join("")}</tbody></table></div>
+    <p class="nota">«Preguntas planteadas» es todo lo que el parte obligó a contestar. «Con texto real» cuenta solo las respuestas con una frase escrita (20 letras o más), no una opción marcada. En el comité, «con algo escrito» es un punto con comentario, cambio o acción, no un simple «de acuerdo».</p>`;
+  // ── 2 · La última semana, comercial a comercial ──
+  const [inf,flu,obj]=porSem[porSem.length-1], partes=inf.filter(x=>x.estado!=="borrador"), actas=flu.filter(x=>x.paso==="comite");
+  const nomDe=(x)=>x.agenteNombre||x.nombre||x.agente||"";
+  const gente=new Map(); partes.forEach(p=>gente.set(U(p.agente),{nom:nomDe(p),p})); actas.forEach(a=>{ const k=[...gente.keys()].find(k=>k===U(a.agente)||U(a.agenteNombre).startsWith(k.slice(0,5)))||U(a.agente); const g=gente.get(k)||{nom:nomDe(a)}; g.a=a; gente.set(k,g); });
+  h+=`<h2>2 · Semana ${sems[sems.length-1]}, comercial a comercial</h2><div class="scroll"><table><thead><tr><th>Comercial</th><th>Parte enviado</th><th>Preguntas</th><th>Contestadas</th><th>Con texto real</th><th>Respuestas de 1-2 palabras</th><th>Comité</th><th>Puntos</th><th>Con algo escrito</th><th>Objetivos sem. sig.</th></tr></thead><tbody>
+    ${[...gente.values()].sort((a,b)=>String(a.nom).localeCompare(String(b.nom))).map(g=>{ const p=g.p, R=p?(J(p.respuestas,{})||{}):{}, vs=Object.values(R).filter(v=>v&&typeof v==="object");
+      const resp=vs.filter(v=>v.accion||v.texto||v.siguiente||v.hecho).length, conT=vs.filter(v=>largo(v.texto)||largo(v.siguiente)||largo(v.respuesta)).length, cortas=vs.filter(v=>(v.texto||v.siguiente)&&!largo(v.texto)&&!largo(v.siguiente)).length;
+      const a=g.a, pts=a?Object.values((J(a.puntos,{})||{}).p||{}).filter(q=>q&&q.r):[], ptsT=pts.filter(q=>largo(q.t)||largo(q.com)||(q.accs||[]).length).length;
+      const oj=obj.filter(o=>U(o.agente)===U(p?p.agente:"")||U(o.agente)===U(p?p.uid:"")).length;
+      return `<tr><td><b>${esc(g.nom)}</b></td><td>${p?hora(p.fechaEnvio):'<span class="ko">no</span>'}</td><td>${p?(J(p.planteados,[])||[]).length:""}</td><td>${p?resp:""}</td><td class="${p?(resp&&conT/resp<0.4?"ko":resp&&conT/resp<0.7?"wa":"ok"):""}">${p?conT+" · "+pct(conT,resp):""}</td><td class="${cortas>3?"wa":""}">${p?cortas:""}</td><td>${a?hora(a.fecha)+(a.porNombre?" · "+esc(a.porNombre):""):'<span class="ko">no</span>'}</td><td>${a?pts.length:""}</td><td class="${a?(pts.length&&ptsT/pts.length<0.3?"ko":pts.length&&ptsT/pts.length<0.6?"wa":"ok"):""}">${a?ptsT+" · "+pct(ptsT,pts.length):""}</td><td>${oj}</td></tr>`; }).join("")}</tbody></table></div>`;
+  // ── 3 · Recuperación: por qué el contador de recuperados está a cero ──
+  const anio=hoy.getFullYear(), abiertos=casos.filter(c=>RC.abierto(c)), rec=casos.filter(c=>c.estado==="recuperado");
+  const porMes={}; abiertos.forEach(c=>{ const m=String(c.abierto||"").slice(0,7)||"sin fecha"; porMes[m]=porMes[m]||{n:0,e:0}; porMes[m].n++; porMes[m].e+=num(c.perdido); });
+  const meses=Object.entries(porMes).sort(); const mesUlt=hoy.getMonth(); // último mes completo (0-11): el anterior al actual
+  const puedeYa=abiertos.filter(c=>{ const mAp=new Date(c.abierto||"").getMonth()+1; return (mesUlt-1)>mAp; }).length;
+  h+=`<h2>3 · Recuperación: el contador de recuperados</h2><div class="card"><div class="num">
+    <div><b>${abiertos.length}</b><small>casos abiertos<br>−${eur(abiertos.reduce((t,c)=>t+num(c.perdido),0))}</small></div>
+    <div><b>${rec.length}</b><small>recuperados<br>(todos los años)</small></div>
+    <div><b>${rec.filter(c=>String(c.recuperadoEn||"").startsWith(String(anio))).length}</b><small>recuperados<br>en ${anio}</small></div>
+    <div><b>${puedeYa}</b><small>casos que ya podrían<br>contar como recuperados</small></div></div>
+    <p class="nota" style="margin-top:8px">La regla para dar un cliente por recuperado exige <b>dos meses completos</b> al 70 % de su ritmo, y los dos <b>después del mes en que se abrió el caso</b>. Un caso abierto en agosto solo puede contar en noviembre (con septiembre y octubre cerrados); uno abierto en septiembre, en diciembre. Casos abiertos por mes de apertura:</p>
+    <table><thead><tr><th>Mes de apertura</th><th>Casos</th><th>Pérdida</th><th>Primer mes en que pueden contar</th></tr></thead><tbody>${meses.map(([m,x])=>{ const [y,mm]=m.split("-").map(Number); const d=mm?new Date(y,mm-1+3,1):null;
+      return `<tr><td>${esc(m)}</td><td>${x.n}</td><td>−${eur(x.e)}</td><td>${d?d.toLocaleDateString("es-ES",{month:"long",year:"numeric"}):"—"}</td></tr>`; }).join("")}</tbody></table></div>`;
+  h+=`<h2>Para mandármelo</h2><p class="nota">Copia este cuadro y pégamelo tal cual.</p><textarea readonly onclick="this.select()">${esc(filas.map(f=>`s${f.s}: partes ${f.partes} · preguntas ${f.preg} · contestadas ${f.resp} · con texto ${f.conTexto} · comités ${f.actas} · puntos ${f.pts} · con algo escrito ${f.ptsTexto} · cambia ${f.cambia} · suben ${f.sube} · acciones ${f.accs} · objetivos ${f.objs} (${f.objJefe} jefes)`).join("\n"))}
+abiertos ${abiertos.length} · recuperados ${rec.length} · pueden contar ya ${puedeYa}
+${esc(meses.map(([m,x])=>m+": "+x.n+" casos, "+Math.round(x.e)+" €").join(" · "))}</textarea>`;
+  document.getElementById("out").innerHTML=h;
+})();
+</script></body></html>
