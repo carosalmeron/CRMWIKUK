@@ -2086,10 +2086,9 @@ function cabeceraConsolidada(){
   const semP=(l)=>{ const a=l.reduce((t,p)=>t+(Number(p.vSem)||0),0), o=l.reduce((t,p)=>t+(Number(p.objSem)||0),0); return pcT(a,o); };
   const filaComL=(p)=>{ const ab=COM_VISTA===(p.cod||p.id);
     return filaLimpia("verCom('"+esc2(p.cod||p.id)+"')",escT(p.nombre),
-        // (oct 2026) Todo con nombre: facturado de la semana contra su objetivo semanal (el del mes entre 4,33), mes contra objetivo, año pasado y previsto
-        "Semana: "+(p.sinDatoSem?"sin dato":euT(p.vSem)+(p.objSem?" de "+euT(p.objSem)+" objetivo ("+(semP([p])==null?"—":semP([p])+" %")+")":""))
-        +" · Mes: previsión "+euT((Number(p.mAct)||0)+(Number(p.prevMes)||0))+" (facturado "+euT(p.mAct)+" + por servir "+euT(p.prevMes)+")"+(p.mObj?" de "+euT(p.mObj)+" objetivo ("+pcT((Number(p.mAct)||0)+(Number(p.prevMes)||0),p.mObj)+" %)":"")
-        +(Number(p.mAnt)?" · año pasado "+euT(p.mAnt):""),mesP([p]),ab)
+        "Semana "+(p.sinDatoSem?"sin dato":semP([p])==null?"—":semP([p])+" %")
+        +" · mes "+euT(p.mAct)+(p.mObj?" de "+euT(p.mObj):"")+(Number(p.mAnt)?" · año pasado "+euT(p.mAnt):"")
+        +(Number(p.prevMes)?" · previsto "+euT((Number(p.mAct)||0)+(Number(p.prevMes)||0))+(p.mObj?" ("+pcT((Number(p.mAct)||0)+(Number(p.prevMes)||0),p.mObj)+" %)":""):""),mesP([p]),ab)
       +(ab?'<div style="margin:4px 0 10px;padding:10px;border:1.5px solid #CBD5E1;border-radius:12px;background:#fff">'
         +'<div style="font-size:11px;font-weight:800;color:#475569;text-transform:uppercase;margin-bottom:6px">👤 Individual · '+escT(p.nombre)+'</div>'+tarjetaCifras([p],true)+'</div>':''); };
   let h='<div class="card" style="border:1.5px solid #0F172A">'
@@ -2517,6 +2516,41 @@ window.r2Decide=async(i,r,btn)=>{ const x=(window._R2L||[])[i]; if(!x) return;
   try{ await r2Instruir(x.c,t,{etiqueta:"⭐ Decisión",campos:{decCeo:{sem:SEMANA,r,t,por:window._MI_NOMBRE_JEFE||"CEO",en:new Date().toISOString()}}}); pintar(); }
   catch(e){ btn.disabled=false; btn.textContent="Reintentar"; alert("No se ha guardado: "+e.message); } };
 
+// (oct 2026) RECUPERACIÓN PARA EL JEFE DE EQUIPO, lo más simple posible: SOLO las acciones de recuperación
+// hechas esta semana, por comercial: qué cliente baja y qué acción tiene. Las decisiones (dormir, bloquear,
+// otro departamento, subir…) van en la misma lista como líneas informativas. Nada de lo que falta.
+window.RJ_AB=window.RJ_AB||new Set();
+window.rjTog=(k)=>{ RJ_AB.has(k)?RJ_AB.delete(k):RJ_AB.add(k); pintar(); };
+function recuperacionJefeH(){
+  const D=PASOS_DATA||{}; const g=panelGente();
+  const deQuien=(ag)=>g.find(p=>[p.cod,p.id].filter(Boolean).map(U).includes(U(ag))||U(agDe(p).id)===U(ag))||null;
+  const ini=lunesSem().getTime()-2*86400000, fin=ini+9*86400000, enSem=(f)=>{ const t=Date.parse(f||""); return t&&t>=ini&&t<=fin; };
+  const ES_DEC=/duerme|dormid|aparc|bloque|incidencia|archiv|dejar de insistir|sube|superior|director|ceo|reabiert|recuperad/i;
+  const porCom=new Map();
+  const add=(c,linea)=>{ const p=deQuien(c.agente), k=p?(p.cod||p.id):U(c.agente||"?");
+    if(!porCom.has(k)) porCom.set(k,{nombre:p?p.nombre:(c.agenteNombre||c.agente||"Sin comercial"),cl:new Map()});
+    const m=porCom.get(k).cl; if(!m.has(c._id)) m.set(c._id,{c,lineas:[]}); const L=m.get(c._id).lineas; if(!L.some(x=>x.txt===linea.txt)) L.push(linea); };
+  (D.todosCasos||D.casos||[]).forEach(c=>{
+    (c.historial||[]).forEach(h=>{ if(!h||!(Number(h.sem)===SEMANA||enSem(h.fecha))) return;
+      if(h.siguiente||h.hecho) add(c,{txt:h.siguiente||h.hecho,tipo:"acc",por:h.por||""});
+      else if(h.sistema&&ES_DEC.test(h.sistema)) add(c,{txt:h.sistema,tipo:"dec",por:h.por||""});
+      else if(h.sistema&&/^Instrucci/i.test(h.sistema)) add(c,{txt:h.sistema,tipo:"acc",por:h.por||""}); });
+    if(c.instruccion&&enSem(c.instruccionEn)) add(c,{txt:"📌 "+c.instruccion,tipo:"acc",por:c.instruccionPor||""});
+    (ESTS||[]).filter(e=>(e.casoId===c._id||U(e.clienteId)===U(c.cliente))&&enSem(e.fechaCreacion||e.fecha)).forEach(e=>add(c,{txt:"💶 Estrategia: "+(e.estrategia||"")+(e.estado?" · "+e.estado.replace(/_/g," "):""),tipo:"acc",por:e.creadoPor||""}));
+  });
+  const nCli=[...porCom.values()].reduce((t,v)=>t+v.cl.size,0), nAcc=[...porCom.values()].reduce((t,v)=>t+[...v.cl.values()].reduce((a,x)=>a+x.lineas.length,0),0);
+  if(!nCli) return '<p class="rcu-muted">Ninguna acción de recuperación registrada esta semana.</p>';
+  const cli=(c)=>'<a href="#" onclick="abrirFichaR(\''+esc2(c.cliente)+'\');return false" style="color:#0F172A;font-weight:800;text-decoration:none">'+escT(c.nombre||c.cliente)+'</a>'+(Number(c.perdido)?' <span style="color:#DC2626;font-weight:700;white-space:nowrap">−'+euT(c.perdido)+'</span>':'');
+  const linea=(x)=>x.tipo==="dec"?'<div style="font-size:13px;color:#1E40AF;margin-top:3px;padding-left:10px;border-left:3px solid #93C5FD">ℹ️ '+escT(x.txt)+(x.por?' <span class="rcu-muted">('+escT(x.por)+')</span>':'')+'</div>'
+    :'<div style="font-size:13.5px;color:#14532D;margin-top:3px;padding-left:10px;border-left:3px solid #16A34A">'+escT(x.txt)+'</div>';
+  RC.UI.css();
+  const tarjetas=[...porCom.entries()].map(([k,v])=>{ const L=[...v.cl.values()].sort((a,b)=>(Number(b.c.perdido)||0)-(Number(a.c.perdido)||0)), ab=!RJ_AB.has("c_"+k);
+    return {n:L.length,h:'<div class="rcu-card"><div class="rcu-cab" onclick="rjTog(\'c_'+esc2(k)+'\')"><div style="flex:1;min-width:0"><b style="font-size:15px">'+escT(v.nombre)+'</b>'
+      +'<div class="rcu-muted">'+L.length+' cliente'+(L.length===1?"":"s")+' con acción esta semana</div></div><span style="color:#64748B;font-size:18px;width:16px;text-align:center">'+(ab?"▾":"›")+'</span></div>'
+      +(ab?'<div style="padding:0 15px 10px">'+L.map(x=>'<div style="padding:8px 0;border-top:1px solid #F1F5F9"><div>'+cli(x.c)+'</div>'+x.lineas.map(linea).join("")+'</div>').join("")+'</div>':'')+'</div>'}; })
+    .sort((a,b)=>b.n-a.n).map(t=>t.h).join("");
+  return '<div style="font-size:13.5px;margin-bottom:10px"><b>'+nAcc+' acciones de recuperación esta semana</b> en '+nCli+' cliente'+(nCli===1?"":"s")+'. Toca el nombre del cliente para ver su ficha.</div>'+tarjetas;
+}
 function seccionRiesgo(){
   const D=PASOS_DATA||{}; if(!D.casos) return {d:"Comprobando…",c:""};
   const l=D.casos.map(c=>({c,acc:accionDeCaso(c)}));
@@ -2541,7 +2575,7 @@ function seccionRiesgo(){
       [sin.length,"Sin acción esta semana",sin.length?"#DC2626":"#16A34A"],[(D.recAnio||[]).length+" · "+euT((D.recAnio||[]).reduce((t,c)=>t+(Number(c.perdido)||0),0)),"Recuperados (año)","#16A34A"],[(D.archAnio||[]).length,"Dejados de insistir (año)"]]});
   if(esCeo||esDir){ const L2=l.map(x=>estadoCaso(x.c,D.actasComite||[])), ko=L2.filter(x=>x.est==="ko").length, sb=L2.filter(x=>x.sube).length, rv=L2.filter(x=>x.hayComite).length;
     return {d:(sb?sb+" para decidir · ":"")+rv+" revisados en comité · "+ko+" sin nada",c:recuperacionCeoH(),ok:!ko&&!sb}; }
-  return {d:con.length+" con acción · "+sin.length+" sin acción ("+euT(sumP(sin))+")",c,ok:!sin.length};
+  return {d:con.length+" con acción · "+sin.length+" sin acción ("+euT(sumP(sin))+")",c:esJefe?recuperacionJefeH():c,ok:!sin.length};
 }
 // Pedir acción sobre un caso de muestras o cobros: correo al comercial y
 // objetivo para su semana siguiente (sale en su parte y en el seguimiento).
@@ -2564,7 +2598,7 @@ window.enviarCaso=async(id,btn)=>{
 };
 window.enviarRA=async(id,btn)=>{
   const c=((PASOS_DATA||{}).casos||[]).find(x=>x._id===id); if(!c) return;
-  const t=((document.getElementById("ra_txt")||{}).value||"").trim();
+  const t=((document.getElementById("ra_txt")||document.getElementById("ins_"+id)||{}).value||"").trim();
   if(t.length<5){ alert("Escribe qué tiene que hacer."); return; }
   btn.disabled=true; btn.textContent="Enviando…";
   const quien=window._MI_NOMBRE_JEFE||AGENTE, ahora=new Date().toISOString(), sem=SEMANA+1;
