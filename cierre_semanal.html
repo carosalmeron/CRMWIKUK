@@ -879,6 +879,10 @@ async function cargarEstRes(){
   // (oct 2026) También las que se han resuelto esta semana desde Recuperación (pedido / no ha salido): salen hechas
   const _sem=RC.semanaISO(new Date());
   // (oct 2026) Si la misma estrategia está dos veces (mismo cliente, artículo, precio y día), se enseña una
+  // (oct 2026) En el comité, el jefe decide aquí mismo las pendientes que son suyas: hace falta su nivel y el descuento efectivo
+  if(MODO_COMITE){ const rolQ=String(P.get("rol")||"").toLowerCase(), mismo=(a,b)=>RC.mismoUsuario?RC.mismoUsuario(a,b):ARR(a)===ARR(b);
+    window.NIVEL_C=rolQ==="ceo"?"ceo":rolQ==="director"?"director":(cad.ceo&&mismo(cad.ceo.id,JEFE.id))?"ceo":(cad.dir&&mismo(cad.dir.id,JEFE.id))?"director":"jefe";
+    try{ if(RC.prepararEsts) await Promise.race([RC.prepararEsts(l),new Promise(r=>setTimeout(r,8000))]); }catch(e){} }
   const vistas=new Set();
   window.ESTRES_L=l.filter(e=>RC.estAbierta(e)||e.estado==="pendiente_aprobacion"||(e.cierreFinal&&e.seguimientoSemanal&&e.seguimientoSemanal.semana===_sem))
     .filter(e=>{ const o=(e.ofertas||[])[0]||{}; const k=[ARR(e.clienteId||e.cliente),ARR(o.codigo||o.nombre),o.precioFinal||o.precioOferta,String(e.fechaCreacion||"").slice(0,10)].join("|"); if(vistas.has(k)) return false; vistas.add(k); return true; })
@@ -902,8 +906,18 @@ function tarjetaEstRes(e){
   const id=e._id, r=window.ESTRES[id]||{}, toca=RC.tocaResultado(e);
   const b=(k,t,col)=>`<button class="chip${r.res===k?" on":""}" style="${r.res===k?`background:${col};border-color:${col}`:""}" onclick="estRes('${id}','res','${k}')">${t}</button>`;
   let h=RC.htmlEstrategia(e,"");
-  if(e.estado==="pendiente_aprobacion")
-    return `<div style="opacity:.85">${h}</div>`;
+  if(e.estado==="pendiente_aprobacion"){
+    if(typeof MODO_COMITE!=="undefined"&&MODO_COMITE&&!SOLO_VER_C&&window.NIVEL_C&&RC.meTocaEst&&(RC.meTocaEst(e,NIVEL_C,JEFE.id)||NIVEL_C==="ceo")){
+      const puede=RC.puedeResolverEst(e,NIVEL_C,JEFE.id);
+      return `<div style="border:1.5px solid #C4B5FD;border-radius:12px;padding:4px 10px 10px;margin:8px 0;background:#FAF5FF">${h}
+        <div style="font-weight:800;font-size:13.5px;margin:2px 0 4px;color:#6D28D9">Espera tu decisión</div>
+        ${puede?"":`<div style="font-size:12.5px;color:#64748B;margin-bottom:4px">Pide un ${RC.dtoEf(e)} % sobre su tarifa: supera tu límite del ${RC.LIM_DTO[NIVEL_C]} %. Elévala o recházala.</div>`}
+        <textarea id="ejc_${id}" placeholder="Comentario (opcional; si la rechazas, di por qué)" style="min-height:40px"></textarea>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+          ${puede?`<button type="button" class="chip" style="background:#16A34A;border-color:#16A34A;color:#fff" onclick="resolverEstC('${id}','aprobar',this)">✅ Aprobar</button>`:""}
+          ${NIVEL_C!=="ceo"?`<button type="button" class="chip" onclick="resolverEstC('${id}','elevar',this)">⬆️ Elevar</button>`:""}
+          <button type="button" class="chip" style="border-color:#FCA5A5;color:#B91C1C" onclick="resolverEstC('${id}','rechazar',this)">✖ Rechazar</button></div></div>`; }
+    return `<div style="opacity:.85">${h}</div>`; }
   if(e.cierreFinal) return h+`<div style="font-size:12.5px;color:#475569;margin:-4px 0 8px">Apuntado esta semana${e.cierreFinal.por?" por "+RC.esc(e.cierreFinal.por):""} el ${RC.esc(e.cierreFinal.fecha||"")}: no hay que contestar nada.</div>`;
   if(!toca){
     const s=e.seguimientoSemanal;
@@ -919,6 +933,20 @@ function tarjetaEstRes(e){
     <div id="erf_${id}" style="font-size:12px;color:#B45309;font-weight:700;margin-top:4px">${estFalta(e)?"⚠️ "+estFalta(e):""}</div>
     ${(typeof MODO_COMITE!=="undefined"&&MODO_COMITE&&r.res&&!estFalta(e))?`<button type="button" class="chip" style="margin-top:6px;background:#0F172A;color:#fff;border-color:#0F172A" onclick="estResGuardarC('${id}',this)">💾 Apuntar el resultado (comité)</button>`:""}</div>`;
 }
+// (oct 2026) Decidir una estrategia pendiente desde el comité (aprobar, elevar o rechazar), como en el cierre del jefe
+window.resolverEstC=async(id,accion,btn)=>{
+  const e=window.ESTRES_L.find(x=>x._id===id); if(!e) return;
+  const nota=((document.getElementById("ejc_"+id)||{}).value||"").trim();
+  if(accion==="rechazar"&&nota.length<3){ alert("Di por qué la rechazas: el comercial lo verá."); return; }
+  if(P.get("prueba")==="1"){ alert("Modo prueba: no se guarda."); return; }
+  const bs=btn.parentNode.querySelectorAll("button"); bs.forEach(b=>b.disabled=true); btn.textContent="Guardando…";
+  try{ await RC.resolverEstrategia(e,accion,{id:JEFE.id,nombre:JEFE.nombre,nivel:window.NIVEL_C||"jefe"},nota);
+    const o=(e.ofertas||[])[0]||{};
+    try{ alActa("est",(accion==="aprobar"?"✅ Aprobada":accion==="rechazar"?"❌ Rechazada":"⬆️ Elevada")+" · "+(e.clienteNombre||e.cliente||"")+(o.nombre?" · "+o.nombre:""),nota||JEFE.nombre); }catch(x){}
+    repintEstRes();
+    const t=RC.txtAvisosEst?RC.txtAvisosEst(e):""; if(t) alert((accion==="aprobar"?"✅ Aprobada":accion==="rechazar"?"❌ Rechazada":"⬆️ Elevada")+".\n\n"+t);
+  }catch(x){ bs.forEach(b=>b.disabled=false); alert("No se ha guardado: "+x.message); repintEstRes(); }
+};
 // (oct 2026) En el comité el resultado se apunta al momento (el acta no guarda las respuestas del parte)
 window.estResGuardarC=async(id,btn)=>{
   const e=window.ESTRES_L.find(x=>x._id===id), r=window.ESTRES[id]||{}; if(!e||!r.res||estFalta(e)) return;
