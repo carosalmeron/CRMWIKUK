@@ -29,11 +29,13 @@
   }
   async function cargar(agentes,opts){
     opts=opts||{};
-    const A=new Set((agentes||[]).map(ARR).filter(Boolean));
+    // (oct 2026) Sin distinguir puntos, espacios ni acentos: "CARLOS G." (Power BI) es "CARLOSG" (CRM)
+    const NRM=(s)=>ARR(s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^A-Z0-9]/g,'');
+    const A=new Set((agentes||[]).map(NRM).filter(Boolean));
     const {items,fecha}=await articulos();
     const listas=await enTandas(items,opts.tandas||4,clientesDe,opts.alAvanzar);
     const out=items.map((it,i)=>{
-      const L=(listas[i]||[]).filter(c=>!A.size||A.has(ARR(c.agente)));
+      const L=(listas[i]||[]).filter(c=>!A.size||A.has(NRM(c.agente))||A.has(NRM(c.vendedor)));
       // Han perdido ventas (este año 0) o se están enfriando (compran menos que el año pasado)
       const caen=L.filter(c=>Number(c.ventasAnt)>0&&Number(c.diferencia)<0).map(c=>Object.assign({},c,{estado:Number(c.ventasAct)<=0?'perdido':'enfria'}))
         .sort((a,b)=>Number(a.diferencia)-Number(b.diferencia));
