@@ -961,8 +961,15 @@ async function datosCEO(anio,sem){
     rechazos:[],sinResp:[],peor:[]};
 
   // (oct 2026) Cobros de una persona (sacado a función para poder dar los cobros también a quien no entrega parte)
+  // (oct 2026) Clientes que no van en Cobros (intercompañía y participadas): fuera de las listas y del total
+  const COBROS_EXCLUIR=/GLOBAL\s*CASING|DRIMANO|INTERCOMPA/i;
+  const filtrarCobros=(c)=>{ if(!c||!c.datos) return c||{}; let d=[]; try{ d=JSON.parse(c.datos||"[]"); }catch(e){ return c; }
+    const fuera=d.filter(x=>COBROS_EXCLUIR.test(String(x.c||""))); if(!fuera.length) return c;
+    const resto=d.filter(x=>!COBROS_EXCLUIR.test(String(x.c||"")));
+    return Object.assign({},c,{datos:JSON.stringify(resto),totalVencido:numC(c.totalVencido)-fuera.reduce((t,x)=>t+numC(x.ven),0),
+      nFacturasVencidas:Math.max(0,numC(c.nFacturasVencidas)-fuera.reduce((t,x)=>t+(x.f||[]).length,0))}); };
   const llenarCobros=(p,g,E)=>{
-    const c=suyo(cob,g);
+    const c=filtrarCobros(suyo(cob,g));
     p.cobFecha=String(c.fechaDatos||c.actualizado||"").slice(0,10);
     try{
       const vistasF=new Set();   // (sep 2026) la misma factura repetida solo cuenta una vez
