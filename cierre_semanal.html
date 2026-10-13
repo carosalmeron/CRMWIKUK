@@ -878,7 +878,10 @@ async function cargarEstRes(){
   const l=(await RC.leerProfundo("estrategias")).filter(e=>!e.eliminada&&ks.has(ARR(e.agente)));
   // (oct 2026) También las que se han resuelto esta semana desde Recuperación (pedido / no ha salido): salen hechas
   const _sem=RC.semanaISO(new Date());
+  // (oct 2026) Si la misma estrategia está dos veces (mismo cliente, artículo, precio y día), se enseña una
+  const vistas=new Set();
   window.ESTRES_L=l.filter(e=>RC.estAbierta(e)||e.estado==="pendiente_aprobacion"||(e.cierreFinal&&e.seguimientoSemanal&&e.seguimientoSemanal.semana===_sem))
+    .filter(e=>{ const o=(e.ofertas||[])[0]||{}; const k=[ARR(e.clienteId||e.cliente),ARR(o.codigo||o.nombre),o.precioFinal||o.precioOferta,String(e.fechaCreacion||"").slice(0,10)].join("|"); if(vistas.has(k)) return false; vistas.add(k); return true; })
     .sort((a,b)=>RC.tocaResultado(b)-RC.tocaResultado(a)||RC.fechaAprob(a)-RC.fechaAprob(b));
 }
 function estFalta(e){
@@ -913,8 +916,20 @@ function tarjetaEstRes(e){
     <div style="display:flex;gap:6px;flex-wrap:wrap">${b("pedido","✅ Sí, pedido","#16A34A")}${b("pendiente","⏳ Sigue pendiente","#D97706")}${b("ko","❌ No ha salido","#DC2626")}</div>
     ${r.res==="ko"?`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${RC.MOTIVOS_KO.map(([k,t])=>`<button class="chip${r.sub===k?" on":""}" onclick="estRes('${id}','sub','${k}')">${t}</button>`).join("")}</div>`:""}
     ${r.res?`<textarea style="margin-top:6px" placeholder="${r.res==="pedido"?"Cantidad u observaciones (opcional)":r.res==="pendiente"?"Qué falta y para cuándo (obligatorio)":"Explícalo (opcional)"}" oninput="estNota('${id}',this)">${RC.esc(r.nota||"")}</textarea>`:""}
-    <div id="erf_${id}" style="font-size:12px;color:#B45309;font-weight:700;margin-top:4px">${estFalta(e)?"⚠️ "+estFalta(e):""}</div></div>`;
+    <div id="erf_${id}" style="font-size:12px;color:#B45309;font-weight:700;margin-top:4px">${estFalta(e)?"⚠️ "+estFalta(e):""}</div>
+    ${(typeof MODO_COMITE!=="undefined"&&MODO_COMITE&&r.res&&!estFalta(e))?`<button type="button" class="chip" style="margin-top:6px;background:#0F172A;color:#fff;border-color:#0F172A" onclick="estResGuardarC('${id}',this)">💾 Apuntar el resultado (comité)</button>`:""}</div>`;
 }
+// (oct 2026) En el comité el resultado se apunta al momento (el acta no guarda las respuestas del parte)
+window.estResGuardarC=async(id,btn)=>{
+  const e=window.ESTRES_L.find(x=>x._id===id), r=window.ESTRES[id]||{}; if(!e||!r.res||estFalta(e)) return;
+  if(P.get("prueba")==="1"){ alert("Modo prueba: no se guarda."); return; }
+  btn.disabled=true; btn.textContent="Guardando…";
+  try{ await RC.resultadoEstrategia(e,r.res,{id:JEFE.id,nombre:JEFE.nombre,nivel:"jefe"},r.nota||"",r.sub||"");
+    const o=(e.ofertas||[])[0]||{};
+    try{ alActa("est",(r.res==="pedido"?"✅ Pedido":r.res==="ko"?"❌ No ha salido":"⏳ Sigue pendiente")+" · "+(e.clienteNombre||e.cliente||"")+(o.nombre?" · "+o.nombre:""),r.nota||JEFE.nombre); }catch(x){}
+    delete window.ESTRES[id]; repintEstRes();
+  }catch(x){ btn.disabled=false; btn.textContent="💾 Apuntar el resultado (comité)"; alert("No se ha guardado: "+x.message); }
+};
 function bloqueEstRes(){
   const l=window.ESTRES_L; if(!l.length) return `<div id="bloqueEstRes"></div>`;
   const toca=l.filter(e=>RC.tocaResultado(e)).length;
@@ -958,6 +973,16 @@ async function cargarPromoC(){
   const {items}=await PROMOC.cargar([AGENTE],{alAvanzar:(h,n)=>{ window.PROMO_C.prog=[h,n];
     if(!window._MONTADO&&window._etapa) window._etapa(`promoción y liquidación · ${h} de ${n} artículos`);
     const el=document.getElementById("promoProg"); if(el) el.textContent=`Buscando los clientes de cada artículo… ${h} de ${n}`; }});
+  // (oct 2026) «Ya no usa este artículo»: lo marca el comercial y ese cliente deja de salir en ese artículo
+  // (en su parte y en el comité). Se guarda en promo_descartes/<agente>_<artículo>_<cliente>.
+  try{ const r=await fetch(FB+":runQuery",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({structuredQuery:{from:[{collectionId:"promo_descartes"}],
+      where:{fieldFilter:{field:{fieldPath:"agente"},op:"EQUAL",value:{stringValue:AGENTE}}}}})});
+    const j=r.ok?await r.json():[]; window.PROMO_C.descartes=(Array.isArray(j)?j:[]).filter(x=>x.document).map(x=>RC.desdeFB(x.document)).filter(d=>!d.anulado);
+  }catch(e){ window.PROMO_C.descartes=[]; }
+  const D=window.PROMO_C.descartes||[], U_=(x)=>String(x||"").toUpperCase().trim();
+  items.forEach(it=>{ const d=D.filter(x=>U_(x.cod)===U_(it.cod)); if(!d.length) return;
+    it.descartados=it.clientes.filter(c=>d.some(x=>U_(x.cliente)===U_(c.cliente)));
+    it.clientes=it.clientes.filter(c=>!d.some(x=>U_(x.cliente)===U_(c.cliente))); });
   window.PROMO_C.items=items.filter(it=>it.clientes.length);
   window.PROMO_C.todos=items;
   // Lo que dijo la semana pasada que iba a caer
@@ -972,6 +997,21 @@ async function cargarPromoC(){
     window.NOMBRES_CLAVE[k]=nom; PENDIENTES.push(k); plantear(k,"promoSeg",nom,"Dijo: "+(x.uds?x.uds+" uds":"")+(x.texto?" · "+x.texto:"")); });
   window.PROMO_C.cargado=true;
 }
+// (oct 2026) El comercial marca que un cliente ya no usa este artículo: se guarda y desaparece de la lista (parte y comité)
+window.promoDescartar=async(cod,i,btn)=>{
+  const it=(window.PROMO_C.items||[]).find(x=>x.cod===cod), c=it&&it.clientes[i]; if(!it||!c) return;
+  const m=prompt("¿Por qué "+(c.nombre||c.cliente)+" ya no usa "+it.nom+"? (ha cambiado de producto, ha dejado de fabricarlo…)\nDejará de salir en este artículo.","");
+  if(m===null) return;
+  if(P.get("prueba")==="1"){ alert("Modo prueba: no se guarda."); return; }
+  btn.disabled=true; btn.textContent="Guardando…";
+  const id=(AGENTE+"_"+cod+"_"+c.cliente).replace(/[^A-Za-z0-9_.-]/g,"_"), ahora=new Date().toISOString();
+  try{ await RC.guardarEn("promo_descartes",id,{id,agente:AGENTE,cod,articulo:it.nom||"",cliente:c.cliente,clienteNombre:c.nombre||"",motivo:m.trim(),por:AGENTE,semana:SEMANA,fecha:ahora,ventasAnt:Number(c.ventasAnt)||0});
+    (window.PROMO_C.descartes=window.PROMO_C.descartes||[]).push({agente:AGENTE,cod,cliente:c.cliente});
+    (it.descartados=it.descartados||[]).push(c); it.clientes.splice(i,1);
+    if(!it.clientes.length){ window.PROMO_C.items=window.PROMO_C.items.filter(x=>x!==it); const k="promo:"+cod; const ix=PENDIENTES.indexOf(k); if(ix>=0) PENDIENTES.splice(ix,1); delete R[k]; }
+    try{ repintarPromoC(); }catch(e){} refrescar();
+  }catch(e){ btn.disabled=false; btn.textContent="✕ Ya no lo usa"; alert("No se ha guardado: "+e.message); }
+};
 // (oct 2026) Comentario por cliente dentro de un artículo en promoción: R["promo:COD"].coms[cliente]
 window.promoCom=(k,cli,v)=>{ R[k]=R[k]||{}; R[k].coms=R[k].coms||{}; v=String(v||"").trim(); if(v) R[k].coms[cli]=v; else delete R[k].coms[cli]; if(window.NOMBRES_CLAVE[k]) R[k].nom=window.NOMBRES_CLAVE[k]; };
 window.promoUds=(k,el)=>{ R[k]=R[k]||{}; R[k].uds=String(el.value||"").trim(); if(window.NOMBRES_CLAVE[k]) R[k].nom=window.NOMBRES_CLAVE[k]; refrescar(); };
@@ -1030,7 +1070,8 @@ function tarjetaPromoC(it){
     return `<div style="display:flex;gap:8px;align-items:center;justify-content:space-between;border-top:1px solid #EEF1F5;padding:7px 0">
       <div style="min-width:0;flex:1"><b style="font-size:13.5px">${_escR(c.nombre||c.cliente)}</b> ${tag(c)}<small style="display:block;color:#64748B">${_escR(c.cliente)}${c.poblacion?" · "+_escR(c.poblacion):""} · año pasado ${eur(c.ventasAnt)} → este año ${eur(c.ventasAct)}</small><div id="${pid}" data-cod="${_escR(it.cod)}" data-i="${i}">${ya}</div>${comH}</div>
       <div style="display:flex;flex-direction:column;gap:4px;flex:none"><button type="button" class="chip abreficha" style="font-size:12px;padding:5px 10px;border-color:#2563EB;color:#1D4ED8" onclick="promoFicha('of','${_escR(it.cod)}',${i})">📨 ${ya&&ya.includes("Oferta")?"Otra oferta":"Oferta"}</button>
-        <button type="button" class="chip abreficha" style="font-size:12px;padding:5px 10px;border-color:#7C3AED;color:#5B21B6" onclick="promoFicha('est','${_escR(it.cod)}',${i})">💶 Estrategia</button></div></div>`; };
+        <button type="button" class="chip abreficha" style="font-size:12px;padding:5px 10px;border-color:#7C3AED;color:#5B21B6" onclick="promoFicha('est','${_escR(it.cod)}',${i})">💶 Estrategia</button>
+        ${(typeof MODO_COMITE!=="undefined"&&MODO_COMITE)?"":`<button type="button" class="chip abreficha" style="font-size:11.5px;padding:4px 9px;border-color:#94A3B8;color:#475569" title="Este cliente ya no usa este artículo: deja de salir aquí y en el comité" onclick="promoDescartar('${_escR(it.cod)}',${i},this)">✕ Ya no lo usa</button>`}</div></div>`; };
   const cerrados=it.clientes.map((c,i)=>cliCerrado(c.cliente,c.nombre)?i:-1).filter(i=>i>=0);
   const C=it.clientes.map((c,i)=>({c,i})).filter(x=>!cerrados.includes(x.i)), vis=C.slice(0,6), mas=C.slice(6);
   const cliI=(x)=>cli(x.c,x.i);
@@ -1039,7 +1080,7 @@ function tarjetaPromoC(it){
       <span style="font-size:11px;font-weight:800;border-radius:99px;padding:2px 8px;background:${it.est==="LIQUIDACIÓN"?"#FEE2E2;color:#991B1B":"#FEF3C7;color:#92400E"}">${it.est==="LIQUIDACIÓN"?"Liquidación":"Promoción"}</span></div>
     <div style="font-size:12.5px;color:#475569;margin-top:3px">${[it.cal?"Cal. "+_escR(it.cal):"",it.met?_escR(it.met)+" m":"",(Number(it.uds)||0).toLocaleString("es-ES")+" uds disponibles"].filter(Boolean).join(" · ")}</div>
     <div style="font-size:12.5px;margin-top:3px">${PROMOC.preciosH(it)}</div>
-    <div style="font-size:12.5px;margin-top:6px;font-weight:700">${C.length} cliente${C.length===1?"":"s"} tuyo${C.length===1?"":"s"} · ${eur(it.perdido)} menos que el año pasado${cerrados.length?` <span style="font-weight:600;color:#64748B">· ${cerrados.length} bloqueado${cerrados.length===1?"":"s"} o dormido${cerrados.length===1?"":"s"}, no se enseña${cerrados.length===1?"":"n"}</span>`:""}</div>
+    <div style="font-size:12.5px;margin-top:6px;font-weight:700">${C.length} cliente${C.length===1?"":"s"} tuyo${C.length===1?"":"s"} · ${eur(it.perdido)} menos que el año pasado${cerrados.length?` <span style="font-weight:600;color:#64748B">· ${cerrados.length} bloqueado${cerrados.length===1?"":"s"} o dormido${cerrados.length===1?"":"s"}, no se enseña${cerrados.length===1?"":"n"}</span>`:""}${(it.descartados||[]).length?` <span style="font-weight:600;color:#64748B">· ${it.descartados.length} ya no lo usa${it.descartados.length===1?"":"n"}</span>`:""}</div>
     ${vis.map(cliI).join("")}
     ${mas.length?`<details><summary style="cursor:pointer;font-size:12.5px;font-weight:700;margin-top:4px">${mas.length} más</summary>${mas.map(cliI).join("")}</details>`:""}
     <p class="rot" style="margin-top:10px">¿Qué va a caer de este artículo?</p>
@@ -1816,7 +1857,7 @@ async function montarComite(){
     let d=n.parentElement; while(d&&d!==app){ if(d.tagName==="DETAILS") d.open=true; d=d.parentElement; } });
   // Lo del comercial queda de solo lectura
   // (oct 2026) Lo que no es una respuesta del comercial sigue vivo: ordenar cobros, acción a una factura, abrir fichas
-  app.querySelectorAll(".pcont button:not(.abreficha):not([data-cobord]):not(.accfac button):not(.dormBox button),.pcont textarea,.pcont input,.pcont select").forEach(x=>{ if(x.closest('[id^="incform_"],[id^="incs_"]')) return; x.disabled=true; if(x.tagName!=="BUTTON") x.readOnly=true; });
+  app.querySelectorAll(".pcont button:not(.abreficha):not([data-cobord]):not(.accfac button):not(.dormBox button),.pcont textarea,.pcont input,.pcont select").forEach(x=>{ if(x.closest('[id^="incform_"],[id^="incs_"],#bloqueEstRes')) return; x.disabled=true; if(x.tagName!=="BUTTON") x.readOnly=true; });
   app.querySelectorAll('[id^="kf_"],[id^="ojf_"],.obl').forEach(x=>x.remove());
   app.querySelectorAll(".cobcli").forEach(cc=>{ if((R[cc.dataset.k]||{}).accion){ const sp=cc.querySelector("small span"); if(sp) sp.remove(); } });
   // Cobros: lo del comercial no se toca. Para poner o cambiar la acción se va a la ficha de cobros del cliente.
