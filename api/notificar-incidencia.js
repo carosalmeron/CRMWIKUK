@@ -884,11 +884,11 @@ async function datosCEO(anio,sem){
   const hace30=new Date(lunes); hace30.setDate(lunes.getDate()-30);
   const enSem=d=>d&&d>=lunes&&d<=domingo;
 
-  const [alias,us,pu,inf,res,cob,estac,objs,objEq,mues,vis,sems,objSem]=await Promise.all([
+  const [alias,us,pu,inf,res,cob,estac,objs,objEq,mues,vis,sems,objSem,entr]=await Promise.all([
     leerTodoC("agentes_alias"),leerTodoC("usuarios"),leerTodoC("portal_users"),leerTodoC("informes"),
     leerTodoC("pbi_resumen_agente"),leerTodoC("cobros_comercial"),leerTodoC("pbi_estacionalidad"),
     leerTodoC("pbi_objetivos"),leerTodoC("objetivos_equipo"),leerTodoC("muestras"),leerTodoC("visitas"),
-    leerTodoC("pbi_semanas"),leerTodoC("objetivos_semana")]);
+    leerTodoC("pbi_semanas"),leerTodoC("objetivos_semana"),leerTodoC("pbi_entrada_agente").catch(()=>[])]);
   const A=crearAgentes(alias);
   // (sep 2026) Plan de recuperación: casos de clientes en caída (sin Francia)
   let recup=[];
@@ -977,10 +977,16 @@ async function datosCEO(anio,sem){
       const foto=(sems.find(x=>semDeC(x)===anio*100+sem)||{}).agentes;
       let ag=[]; try{ ag=JSON.parse(foto||"[]"); }catch(e){}
       const f=ag.find(x=>A.mismo(x.id||x.agente,g.cod)||A.mismo(x.id||x.agente,g.id));
-      p.vSem=f?numC(f.ventasSem):(sem===isoSemanaC(new Date()).sem-1?numC(r.ventasSemAnt):0);
+      // (oct 2026) ventasSemAnt es la MISMA semana del AÑO PASADO (así está la medida en Power BI), no la semana
+      // anterior: se usaba como tal y el consolidado sumaba semanas de 2025. Sin foto congelada, no hay dato.
+      p.vSem=f?numC(f.ventasSem):0; if(!f) p.sinDatoSem=true;
       if(f&&numC(f.baseSem)){ r.margenPctSem=numC(f.margenSem)/numC(f.baseSem)*100; } else r.margenPctSem=null;
     }
     p.mAct=numC(e2["act_"+mNum]);
+    // (oct 2026) Mes en curso: el resumen diario de Power BI (ventasMes) está más al día que la estacionalidad
+    if(mNum===new Date().getMonth()+1&&numC(r.ventasMes)>p.mAct) p.mAct=numC(r.ventasMes);
+    // Pedidos: introducidos esta semana y en el mes, y lo que queda por servir dentro del mes (pbi_entrada_agente)
+    { const en=suyo(entr,g)||{}; p.pedSem=numC(en.entradaSem); p.pedMes=numC(en.entradaMes); p.prevMes=numC(en.previstoMes); }
     p.mObj=numC(o2["mes_"+mNum]);
     if(!p.mObj) p.mObj=numC(o2.objAnual)*(numC(e2["peso_"+mNum])||1/12);
     p.objSem=p.mObj?p.mObj/4.33:0;
@@ -1073,6 +1079,7 @@ async function datosCEO(anio,sem){
     }
     E.gente.push(p);
     for(const k of ["vSem","objSem","mAct","mObj","cobros","vis","lla","mEnv","mOk"]) E[k]+=p[k];
+    for(const k of ["pedSem","pedMes","prevMes"]) E[k]=(E[k]||0)+(p[k]||0);
     for(const k of ["vSem","objSem","mAct","mObj","cobros","nFacV","vis","lla","mEnv","mOk"]) G[k]+=p[k];
   }
 
@@ -1476,7 +1483,7 @@ module.exports = async function handler(req, res){
       const hoyP=isoSemanaC(new Date());
       const anioP=Number(req.query.anio)||hoyP.anio, semP=Number(req.query.semana)||hoyP.sem;
       const D=await datosCEO(anioP,semP);
-      const campos=["id","cod","nombre","equipo","ausente","motivo","vSem","objSem","mAct","mObj","vis","lla","mEnv","mOk","mKo",
+      const campos=["id","cod","nombre","equipo","ausente","motivo","vSem","sinDatoSem","objSem","mAct","mObj","pedSem","pedMes","prevMes","vMes","vis","lla","mEnv","mOk","mKo",
         "mEnvA","mOkA","mKoA","m60","mAb","obj","cobros","nFacV","limite","k","nota","facV","cobFecha"];
       res.setHeader("Cache-Control","no-store");
       res.status(200).json({ok:true,sem:D.sem,anio:D.anio,mNum:D.mNum,
