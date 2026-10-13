@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Diagnóstico de códigos de un comercial</title>
+<style>
+body{margin:0;font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;background:#F4F5F7;color:#0F172A}
+.w{max-width:720px;margin:0 auto;padding:14px}
+h1{font-size:18px;margin:0 0 6px} p{margin:4px 0}
+input{font:inherit;padding:8px 10px;border:1px solid #CBD5E1;border-radius:8px;width:200px}
+button{font:inherit;font-weight:700;padding:8px 14px;border:0;border-radius:8px;background:#0F172A;color:#fff;cursor:pointer}
+pre{background:#fff;border:1px solid #E2E8F0;border-radius:10px;padding:12px;white-space:pre-wrap;font-size:12.5px;line-height:1.4}
+.ok{color:#15803D;font-weight:700} .ko{color:#B91C1C;font-weight:700} .wa{color:#B45309;font-weight:700}
+</style></head><body><div class="w">
+<h1>🔎 ¿Con qué código está este comercial en cada sitio?</h1>
+<p>Escribe el código del CRM (el de la URL del parte) y pulsa Mirar. Copia el resultado y pégalo en el chat.</p>
+<p><input id="ag" placeholder="CARLOSG"> <button onclick="mirar()">Mirar</button></p>
+<pre id="out">—</pre>
+</div>
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const U=(s)=>String(s||"").toUpperCase().trim();
+const N=(s)=>U(s).normalize("NFD").replace(/[̀-ͯ]/g,"").replace(/[^A-Z0-9]/g,"");
+const val=(f)=>{ if(!f) return null; if(f.stringValue!==undefined) return f.stringValue; if(f.doubleValue!==undefined) return Number(f.doubleValue); if(f.integerValue!==undefined) return Number(f.integerValue); if(f.booleanValue!==undefined) return f.booleanValue; return null; };
+async function leer(col){ const out=[]; let tok=null, v=0;
+  do{ const r=await fetch(`${FB}/${col}?pageSize=1000`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""),{cache:"no-store"}); if(!r.ok) break; const j=await r.json();
+    (j.documents||[]).forEach(d=>{ const o={_id:decodeURIComponent(d.name.split("/").pop())}; for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x); out.push(o); });
+    tok=j.nextPageToken||null; }while(tok&&v++<40);
+  return out; }
+async function mirar(){
+  const ag=U(document.getElementById("ag").value); const out=document.getElementById("out"); if(!ag){ out.textContent="Falta el código."; return; }
+  out.textContent="Leyendo…"; const L=[]; const say=(t)=>{ L.push(t); out.innerHTML=L.join("\n"); };
+  const P=new URLSearchParams(location.search); if(!document.getElementById("ag").value&&P.get("agente")) document.getElementById("ag").value=P.get("agente");
+  const [us,pu,al,res,est,obj,cli,cob]=await Promise.all([leer("usuarios"),leer("portal_users"),leer("agentes_alias"),leer("pbi_resumen_agente"),leer("pbi_estacionalidad"),leer("pbi_objetivos"),leer("pbi_ventas_cliente"),leer("cobros_comercial")]);
+  const claves=new Set([ag]);
+  say(`<b>Código buscado:</b> ${ag}\n`);
+  say(`<b>1 · Fichas del CRM (usuarios) que lo llevan</b>`);
+  us.filter(u=>[u._id,u.id,u.crmId,u.grupoAgente,u.catalogoVendedor,u.username].some(k=>k&&N(k)===N(ag))).forEach(u=>{ [u.grupoAgente,u.catalogoVendedor,u.crmId].filter(Boolean).forEach(k=>claves.add(U(k)));
+    say(`  ${u._id} · ${u.nombre||""} · rol ${u.rol||"—"} · equipo ${u.equipo||"—"} · grupoAgente ${u.grupoAgente||"—"} · catalogoVendedor ${u.catalogoVendedor||"—"} · crmId ${u.crmId||"—"} · activo ${u.activo!==false}`); });
+  say(`<b>2 · Fichas del portal (portal_users) que lo llevan</b>`);
+  pu.filter(u=>[u._id,u.id,u.crmId,u.grupoAgente,u.catalogoVendedor,u.username].some(k=>k&&N(k)===N(ag))).forEach(u=>{ [u.grupoAgente,u.catalogoVendedor,u.crmId].filter(Boolean).forEach(k=>claves.add(U(k)));
+    say(`  ${u._id} · ${u.nombre||""} · rol ${u.rol||"—"} · equipo ${u.equipo||"—"} · crmId ${u.crmId||"—"} · grupoAgente ${u.grupoAgente||"—"} · email ${u.email||"—"}`); });
+  say(`<b>3 · Tabla de alias (agentes_alias)</b>`);
+  const mios=al.filter(a=>N(a.alias||a._id)===N(ag)); const canon=mios.length?mios[0].canonico:null;
+  const todos=canon?al.filter(a=>a.canonico===canon):mios;
+  if(!todos.length) say(`  <span class="wa">no está en la tabla</span>`); todos.forEach(a=>{ claves.add(U(a.original||a.alias||a._id)); say(`  alias ${a.alias||a._id} → ${a.canonico} · original "${a.original||""}" · ${a.nombre||""} · ${a.equipo||""}`); });
+  const esMia=(k)=>k&&[...claves].some(c=>N(c)===N(k));
+  say(`\n<b>4 · Resumen de ventas de Power BI (pbi_resumen_agente)</b>`);
+  const r1=res.filter(a=>esMia(a._id)||esMia(a.agente));
+  if(!r1.length) say(`  <span class="ko">NINGÚN documento con esas claves</span>`); r1.forEach(a=>say(`  <span class="ok">${a._id}</span> · equipo ${a.equipo||"—"} · ventasMes ${a.ventasMes} · ventasSem ${a.ventasSem} · ventasSemAnt ${a.ventasSemAnt} · ventasAct ${a.ventasAct} · actualizado ${a.actualizado||""}`));
+  say(`<b>5 · Clientes de Power BI (pbi_ventas_cliente) por código de comercial</b>`);
+  const cnt={}; cli.forEach(c=>{ const k=U(c.agenteFinal||c.agente||"(sin)"); cnt[k]=(cnt[k]||0)+1; });
+  const m1=Object.entries(cnt).filter(([k])=>esMia(k)); if(!m1.length) say(`  <span class="ko">NINGÚN cliente con esas claves</span>`); m1.forEach(([k,n])=>say(`  <span class="ok">${k}</span> · ${n} clientes`));
+  say(`<b>6 · Estacionalidad (pbi_estacionalidad)</b>`); const e1=est.filter(a=>esMia(a._id)||esMia(a.agente)); if(!e1.length) say(`  <span class="ko">ninguno</span>`); e1.forEach(a=>say(`  ${a._id} · act_8 ${a.act_8} · act_9 ${a.act_9} · act_10 ${a.act_10} · actualizado ${a.actualizado||""}`));
+  say(`<b>7 · Objetivos (pbi_objetivos)</b>`); const o1=obj.filter(a=>esMia(a._id)||esMia(a.agente)); if(!o1.length) say(`  <span class="wa">ninguno</span>`); o1.forEach(a=>say(`  ${a._id} · mes_10 ${a.mes_10} · objAnual ${a.objAnual}`));
+  say(`<b>8 · Cobros (cobros_comercial)</b>`); const c1=cob.filter(a=>esMia(a._id)||esMia(a.comercial)); if(!c1.length) say(`  <span class="ko">ninguno</span>`); c1.forEach(a=>say(`  ${a._id} · vencido ${a.totalVencido??a.venc} · fecha ${a.fechaDatos||a.actualizado||""}`));
+  say(`\n<b>9 · Códigos de Power BI que NO son de ninguna ficha del CRM</b> (si uno es de esta persona, ponlo en su ficha como grupo agente)`);
+  const conocidos=new Set(); [...us,...pu].forEach(f=>[f.grupoAgente,f.catalogoVendedor,f.crmId,f._id,f.id,f.username].filter(Boolean).forEach(k=>conocidos.add(N(k)))); al.forEach(a=>{ conocidos.add(N(a.alias||a._id)); if(a.original) conocidos.add(N(a.original)); });
+  const sueltos=new Set(); res.forEach(a=>{ if(a._id!=="_TOTAL"&&!conocidos.has(N(a._id))) sueltos.add(a._id+" (resumen: mes "+a.ventasMes+" €, equipo "+(a.equipo||"—")+")"); });
+  Object.entries(cnt).forEach(([k,n])=>{ if(!conocidos.has(N(k))) sueltos.add(k+" ("+n+" clientes)"); });
+  if(!sueltos.size) say(`  ninguno`); [...sueltos].sort().forEach(x=>say(`  <span class="wa">${x}</span>`));
+}
+(()=>{ const P=new URLSearchParams(location.search); if(P.get("agente")){ document.getElementById("ag").value=P.get("agente"); mirar(); } })();
+</script></body></html>
