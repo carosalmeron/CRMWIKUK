@@ -2021,7 +2021,9 @@ function panelEquipos(){
   if(!PANEL||!PANEL.equipos) return [];
   return PANEL.equipos.filter(E=>!/FRANC|DISTRIB/.test(U(E.eq))&&(!esJefe||!EQUIPO||U(E.eq)===EQUIPO));
 }
-function panelGente(){ return panelEquipos().flatMap(E=>E.gente.filter(p=>!p.ausente).map(p=>Object.assign({eqNom:E.eq},p))); }
+function panelGente(){ return panelEquipos().flatMap(E=>E.gente.filter(p=>!p.ausente&&!p.soloCobros).map(p=>Object.assign({eqNom:E.eq},p))); }
+// (oct 2026) Para Cobros: todos los que tienen vencido, también los que no entregan parte o están ausentes
+function panelGenteCobros(){ return panelEquipos().flatMap(E=>E.gente.filter(p=>(Number(p.cobros)||0)>=1||(p.limite&&p.cobros>p.limite)).map(p=>Object.assign({eqNom:E.eq},p))); }
 const DET_AB=new Set();
 window.togD=(k,el)=>{ el.open?DET_AB.add(k):DET_AB.delete(k); };
 const det=(k,sum,cuerpo,colBorde)=>'<details '+(DET_AB.has(k)?"open":"")+' ontoggle="togD(\''+k+'\',this)" style="margin:6px 0;border:1px solid '+(colBorde||"#E5E7EB")+';border-radius:10px;background:#fff;padding:7px 10px">'
@@ -2084,7 +2086,7 @@ function cabeceraConsolidada(){
   if(PANEL.error) return '<div class="card"><p class="vacio" style="margin:0">No se han podido leer las cifras ('+escT(PANEL.error)+').</p></div>';
   // Jefe de ventas y CEO: TODAS las ventas. El jefe de equipo, las de su equipo.
   const eqsV=(esDir||esCeo)?PANEL.equipos:panelEquipos();
-  const act=(E)=>E.gente.filter(p=>!p.ausente);
+  const act=(E)=>E.gente.filter(p=>!p.ausente&&!p.soloCobros);
   const g=eqsV.flatMap(E=>act(E).map(p=>Object.assign({eqNom:E.eq},p)));
   const mesP=(l)=>{ const a=l.reduce((t,p)=>t+(Number(p.mAct)||0),0), o=l.reduce((t,p)=>t+(Number(p.mObj)||0),0); return pcT(a,o); };
   const semP=(l)=>{ const a=l.reduce((t,p)=>t+(Number(p.vSem)||0),0), o=l.reduce((t,p)=>t+(Number(p.objSem)||0),0); return pcT(a,o); };
@@ -2189,7 +2191,7 @@ function seccionActividad(){
   const eqs=panelEquipos(); const g=panelGente(); if(!g.length) return {d:"Sin datos todavía.",c:""};
   const flojo=(p)=>p.obj&&((p.obj.visitas&&p.vis<p.obj.visitas*0.8)||(p.obj.llamadas&&p.lla<p.obj.llamadas*0.8));
   const no=g.filter(flojo);
-  const porEq=eqs.map(E=>{ const gg=E.gente.filter(p=>!p.ausente), S=(k)=>gg.reduce((t,p)=>t+(Number(p[k])||0),0), SO=(k)=>gg.reduce((t,p)=>t+(Number((p.obj||{})[k])||0),0);
+  const porEq=eqs.map(E=>{ const gg=E.gente.filter(p=>!p.ausente&&!p.soloCobros), S=(k)=>gg.reduce((t,p)=>t+(Number(p[k])||0),0), SO=(k)=>gg.reduce((t,p)=>t+(Number((p.obj||{})[k])||0),0);
     return '<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid #EEF1F5;font-size:13px"><b>'+escT(E.eq)+'</b><span>👋 '+cifra(S("vis"),SO("visitas"))+' · 📞 '+cifra(S("lla"),SO("llamadas"))+'</span></div>'; }).join("");
   const c=porEq+det("act_no","<b>Comerciales que no llegan</b> · "+no.length,no.length?no.map(p=>{ const k=kpisDe(p)||{}, ag=agDe(p);
       return filaPlan(p.nombre,esJefe?"":p.eqNom,"👋 "+cifra(p.vis,p.obj.visitas)+" · 📞 "+cifra(p.lla,p.obj.llamadas),(k.actividad||{}).plan,ag.id,"Actividad","No llegas a tu actividad de la semana ("+p.vis+" visitas y "+p.lla+" llamadas). ¿Qué visitas y llamadas vas a hacer la semana que viene?"); }).join(""):'<p class="vacio" style="margin:0">Todos llegan.</p>',no.length?"#FCA5A5":"#BBF7D0");
@@ -2308,7 +2310,7 @@ window.fichaCobroEq=(ag,cli)=>{
 window.cerrarFichaCobroEq=async()=>{ const d=document.getElementById("capaCobEq"); if(d) d.remove(); document.body.style.overflow="";
   await cargarCompEq(); pintar(); };
 function seccionCobros(){
-  const g=panelGente(); if(!g.length) return {d:"Sin datos todavía.",c:""};
+  const g=panelGenteCobros(); if(!g.length) return {d:panelGente().length?"Nadie tiene cobros fuera de plazo.":"Sin datos todavía.",c:""};
   if(window._COMP_EQ===null){ window._COMP_EQ=[]; cargarCompEq().then(()=>pintar()); }
   const tot=g.reduce((t,p)=>t+(Number(p.cobros)||0),0), lim=g.reduce((t,p)=>t+(Number(p.limite)||0),0);
   const fueraMax=(p)=>!!(p.limite&&p.cobros>p.limite);
@@ -2334,8 +2336,8 @@ function seccionCobros(){
     const parteDe=(f)=>AC["C:"+NZ(f.cod||f.c||"")]||AC["N:"+NZ(f.cli)]||null;
     const cliU=[...new Set(l.map(f=>NZ(f.cli)))], conAcc=cliU.filter(n=>l.some(f=>NZ(f.cli)===n&&accDe(f))).length;
     const planG=(k.cobros||{}).plan||"";
-    return {p, mal:fueraMax(p), plan:planG||(conAcc?conAcc+" de "+cliU.length+" clientes con acción en su parte":""), peso:Number(p.cobros)||0,
-      importe:euT(p.cobros), sub:'máximo '+euT(p.limite||0)+(cliU.length?' · '+conAcc+'/'+cliU.length+' clientes con acción':'')
+    return {p, mal:p.soloCobros?false:fueraMax(p), plan:p.soloCobros?"":(planG||(conAcc?conAcc+" de "+cliU.length+" clientes con acción en su parte":"")), peso:Number(p.cobros)||0,
+      importe:euT(p.cobros), sub:(p.soloCobros?'<span style="color:#B45309">no entrega parte</span> · ':'')+'máximo '+euT(p.limite||0)+(cliU.length?' · '+conAcc+'/'+cliU.length+' clientes con acción':'')
         +(Math.abs(dif)>=1?'<br><span style="color:#B45309">La lista suma '+euT(sumaL)+(p.saldoNeg?' · '+euT(-p.saldoNeg)+' de saldos a favor restan del total':' · diferencia '+euT(dif)+' con el total')+'</span>':''),
       pedir:"pedirPlanCobros('"+esc2(cod)+"',this)",
       casos:l.map((f,i)=>{ const id="cb_"+cod+"_"+i, d=f.saldo?(f.v70>=1?71:f.v20>=1?21:0):(f.dias||0);
