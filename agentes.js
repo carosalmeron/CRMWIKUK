@@ -123,6 +123,18 @@ function alias(x){
   if(c) return c.alias.slice();
   return variantes(x);
 }
+// (oct 2026) Los mismos identificadores pero tal y como están escritos en origen
+// ("CARLOS G." y no "CARLOSG"): hacen falta para leer documentos por id
+// (pbi_resumen_agente, cobros_comercial…), que se guardan con la grafía del Power BI.
+function originales(x){
+  var out=[], as=alias(x), i, o;
+  for(i=0;i<as.length;i++){
+    o=MAPA[as[i]]?MAPA[as[i]].original:as[i];
+    if(o&&out.indexOf(o)<0) out.push(o);
+    if(out.indexOf(as[i])<0) out.push(as[i]);
+  }
+  return out;
+}
 
 // ¿Este documento es de esta persona? Mira los campos habituales
 var CAMPOS=["agente","agenteId","agenteNombre","responsableComercial",
@@ -156,7 +168,7 @@ function personasDe(docs){
 
 global.Agentes={
   cargar:cargar, id:id, nombre:nombre, equipo:equipo,
-  mismo:mismo, alias:alias, esDe:esDe, ficha:ficha,
+  mismo:mismo, alias:alias, originales:originales, esDe:esDe, ficha:ficha,
   conocido:conocido, personasDe:personasDe,
   norm:norm, variantes:variantes,
   get cargado(){ return CARGADO; },

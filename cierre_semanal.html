@@ -1292,7 +1292,7 @@ function tarjetaSemana(){
     ${(()=>{ // (oct 2026) De cuándo es el dato y con qué código se ha buscado: si sale 0 se ve por qué
       const f=C.pbiFecha?new Date(C.pbiFecha):null, fTxt=f&&!isNaN(f)?f.toLocaleDateString("es-ES",{day:"numeric",month:"short"})+" "+f.toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}):"";
       const cero=!num(C.mAct)&&!num(C.vSem);
-      return `<p style="margin:6px 0 0;font-size:11.5px;color:${cero?"#B45309":"#94A3B8"}">${cero?"⚠️ Power BI no atribuye ventas a este comercial":"Power BI"}${fTxt?" · datos del "+fTxt:""}${C.clavePBI?" · código <b>"+_escR(C.clavePBI)+"</b>":(C.claves&&C.claves.length?" · buscado como "+_escR(C.claves.slice(0,4).join(", ")):"")}${cero&&C.fuenteSem?" · "+_escR(C.fuenteSem):""}</p>`; })()}
+      return `<p style="margin:6px 0 0;font-size:11.5px;color:${cero?"#B45309":"#94A3B8"}">${cero?"⚠️ Power BI no atribuye ventas a este comercial":"Power BI"}${fTxt?" · datos del "+fTxt:""}${C.clavePBI?" · código <b>"+_escR(C.clavePBI)+"</b>":(C.claves&&C.claves.length?" · buscado como "+_escR(C.claves.slice(0,4).join(", ")):"")}${C.docSem&&C.docSem!==C.clavePBI?" · semana con <b>"+_escR(C.docSem)+"</b>":""}${C.docMes&&C.docMes!==C.clavePBI?" · mes con <b>"+_escR(C.docMes)+"</b>":""}${C.fuenteSem?" · "+_escR(C.fuenteSem):""}</p>`; })()}
     <p class="rot">Actividad esta semana</p>
     <div class="barras">${fila("👋","Visitas",a.vis||0,a.objVis||0)}${fila("📞","Llamadas",a.lla||0,a.objLla||0)}
       ${fila("📦","Muestras env.",m.env||0,m.objEnv||0)}${fila("✅","Muestras ok",m.ok||0,m.objOk||0)}</div></div>`;
@@ -3074,7 +3074,7 @@ async function enviar(){
       // (oct 2026) Tabla de alias de comerciales (agentes_alias): "CARLOS G." en Power BI es "CARLOSG" en el CRM
       (window.Agentes?Agentes.cargar().catch(()=>null):Promise.resolve(null)),
     ];
-    const [res,cli,mesesRaw,mu,of,es,estac,objs,peds,perf,portal,usus,vis,objAct]=await Promise.all(_lista.map(_p));
+    let [res,cli,mesesRaw,mu,of,es,estac,objs,peds,perf,portal,usus,vis,objAct]=await Promise.all(_lista.map(_p));
     clearInterval(_tick);
     // (oct 2026) Después de leer las listas aún quedan pasos (recuperación, estrategias, promoción…): se dice cuál
     { let _et="cruzando los datos";
@@ -3112,6 +3112,9 @@ async function enviar(){
       window._SIN_RESUMEN=true;
     } else { CLAVES.add(ARR(yo._id)); if(yo.agente) CLAVES.add(ARR(yo.agente)); [ARR(yo._id),ARR(yo.agente)].forEach(k=>{ if(k) CLAVESN.add(NRM(k)); }); }
     window._CLAVES=CLAVES; window._esClave=esClave;
+    // Los pedidos se leen por el campo agente tal cual: si en Power BI va con otra grafía, se leen también con ella
+    try{ const otros=[...CLAVES].filter(k=>k!==AGENTE&&!FIJOS.test(k)&&!/^U_\d+$/i.test(k)&&(k===ARR(yo._id)||k===ARR(yo.agente)||NRM(k)===NRM(AGENTE)));
+      for(const k of [...new Set(otros)].slice(0,3)){ const extra=await pedidosDe(k); if(extra&&extra.length){ const ids=new Set(peds.map(x=>x._id)); peds=peds.concat(extra.filter(x=>!ids.has(x._id))); } } }catch(e){}
 
     // Meses por cliente, para el aviso temprano
     const mes={};
@@ -3412,8 +3415,8 @@ async function enviar(){
     const jue=SEMANA?juevesDe(ANIO,SEMANA):new Date();
     const mNum=jue.getMonth()+1;
     const esMesEnCurso=(mNum===new Date().getMonth()+1);
-    const e=estac.find(x=>ARR(x.agente||x._id)===AGENTE)||estac.find(x=>CLAVES.has(ARR(x._id))||CLAVES.has(ARR(x.agente)))||{};
-    const o=objs.find(x=>ARR(x._id)===AGENTE)||objs.find(x=>CLAVES.has(ARR(x._id))||CLAVES.has(ARR(x.agente)))||{};
+    const e=estac.find(x=>ARR(x.agente||x._id)===AGENTE)||estac.find(x=>esClave(x._id)||esClave(x.agente))||{};
+    const o=objs.find(x=>ARR(x._id)===AGENTE)||objs.find(x=>esClave(x._id)||esClave(x.agente))||{};
     // (oct 2026) Ventas del mes: la estacionalidad (act_N) solo se recalcula cuando corre su proceso; el resumen
     // diario de Power BI (ventasMes) está al día. Para el mes en curso se enseña la mayor de las dos, que es la
     // que coincide con el Power BI. Se guarda de dónde sale y de cuándo es el dato para decirlo en pantalla.
@@ -3443,25 +3446,13 @@ async function enviar(){
     // (sep 2026) El informe no llevaba cifras arriba: se añaden las ventas del
     // mes, las de la semana y los pedidos introducidos, cada una contra su
     // objetivo. Vienen de pbi_resumen_agente y pbi_entrada_agente.
-    let vSem=0, vSemAnt=0, pedSem=0, pedSemAnt=0, objSem=0, fuenteSem="";
+    let vSem=0, vSemAnt=0, pedSem=0, pedSemAnt=0, objSem=0, fuenteSem="", docSem="";
     try{
-      // (oct 2026) Lo que ya se leyó del resumen (con cualquiera de sus claves) vale como punto de partida
-      if(num(yo.ventasSem)||num(yo.ventasSemAnt)){ vSem=num(yo.ventasSem); vSemAnt=num(yo.ventasSemAnt); }
-      for(const cod of [...CLAVES]){
-        const rr=await fetch(`${FB}/pbi_resumen_agente/${encodeURIComponent(cod)}`,
-          {cache:"no-store"}).then(r=>r.ok?r.json():null).catch(()=>null);
-        if(rr&&rr.fields){
-          const f={};
-          for(const [k,v] of Object.entries(rr.fields))
-            f[k]=v.doubleValue!==undefined?Number(v.doubleValue)
-              :v.integerValue!==undefined?Number(v.integerValue)
-              :v.stringValue;
-          // (oct 2026) Semana en curso y semana pasada por separado: el lunes la semana en curso está a 0
-          // y la pasada no, y con el «si es mayor» de antes se perdía la pasada.
-          if(num(f.ventasSem)>vSem) vSem=num(f.ventasSem);
-          if(num(f.ventasSemAnt)>vSemAnt) vSemAnt=num(f.ventasSemAnt);
-          if(!window._PBI_FECHA&&f.actualizado) window._PBI_FECHA=f.actualizado;
-        }
+      // (oct 2026) La semana sale del MISMO documento del resumen que el resto de cifras (yo): primero el del
+      // código exacto y, solo si no existe, el de otra grafía. Antes se cogía el mayor entre todos sus códigos y
+      // un código compartido con otra persona inflaba la cifra (47.847 € en una semana de 12.000).
+      if(!yo._sinResumen){ vSem=num(yo.ventasSem); vSemAnt=num(yo.ventasSemAnt); docSem=yo._id||""; if(yo.actualizado) window._PBI_FECHA=yo.actualizado; }
+      for(const cod of [AGENTE,...CLAVES].filter((x,i,a)=>x&&a.indexOf(x)===i)){
         const re2=await fetch(`${FB}/pbi_entrada_agente/${encodeURIComponent(cod)}`,
           {cache:"no-store"}).then(r=>r.ok?r.json():null).catch(()=>null);
         if(re2&&re2.fields){
@@ -3470,7 +3461,7 @@ async function enviar(){
             f[k]=v.doubleValue!==undefined?Number(v.doubleValue)
               :v.integerValue!==undefined?Number(v.integerValue)
               :v.stringValue;
-          if(num(f.entradaSem)>pedSem){ pedSem=num(f.entradaSem); pedSemAnt=num(f.entradaSemAnt); }
+          pedSem=num(f.entradaSem); pedSemAnt=num(f.entradaSemAnt); break;   // el primero que exista, no el mayor
         }
       }
       // Objetivo semanal: el del mes repartido entre sus semanas
@@ -3492,7 +3483,8 @@ async function enviar(){
           if(rf.ok){ const jf=await rf.json();
             foto=JSON.parse((jf.fields&&jf.fields.agentes&&jf.fields.agentes.stringValue)||"[]"); }
         }catch(e){}
-        const mio=foto?foto.find(x=>CLAVES.has(ARR(x.id))||CLAVES.has(ARR(x.agente))):null;
+        const mio=foto?(foto.find(x=>ARR(x.id)===AGENTE)||foto.find(x=>ARR(x.id)===ARR(yo._id))||foto.find(x=>esClave(x.id)||esClave(x.agente))):null;
+        if(mio) docSem=mio.id||docSem;
         // (oct 2026) Si es la semana inmediatamente anterior y el resumen diario (ventasSemAnt) trae más que la
         // foto del viernes (facturas que entraron después de congelarla), vale el resumen: es lo que dice Power BI.
         if(mio&&!(SEMANA===_semHoy-1&&vSemAnt>num(mio.ventasSem))){ vSem=num(mio.ventasSem); vSemAnt=0; fuenteSem="foto de la semana "+SEMANA; }
@@ -3506,7 +3498,7 @@ async function enviar(){
     const v2m=[mNum-1,mNum-2].reduce((t,k)=>t+(k>=1?num(e["act_"+k]):num(e["mes_"+(k+12)])),0);
     window._CIERRE_POL={v2m, limite:v2m*0.05};
     window._CIERRE_CIFRAS={mAct,mObj,mAnt,vSem,vSemAnt,pedSem,pedSemAnt,objSem,
-      mes:MESES[mNum-1],fuenteMes,fuenteSem,pbiFecha:yo.actualizado||window._PBI_FECHA||"",
+      mes:MESES[mNum-1],fuenteMes,fuenteSem,docSem,docMes:e._id||e.agente||"",pbiFecha:yo.actualizado||window._PBI_FECHA||"",
       clavePBI:yo._sinResumen?"":(yo._id||""),claves:[...CLAVES]};
 
     let planif=0, planifMes=0;
@@ -3622,19 +3614,22 @@ async function enviar(){
     // (sep 2026) Cobros vencidos, para pedir plan en el parte si se pasa
     try{
       let _v=0,_n=0,_clis=[];
-      for(const cod of [...MIOS]){
+      // (oct 2026) Primero su código exacto; si no hay documento, el del resumen de Power BI y después sus otras grafías.
+      // Se usa el PRIMERO que exista (no el mayor): un código compartido no debe sumar los cobros de otra persona.
+      for(const cod of [AGENTE,ARR(yo._id),...CLAVES].filter((x,i,a)=>x&&a.indexOf(x)===i)){
         const rc=await fetch(`${FB}/cobros_comercial/${encodeURIComponent(cod)}`,{cache:"no-store"});
         if(!rc.ok) continue;
         const fz=(await rc.json()).fields||{};
         const g=(k)=>Number(fz[k]?(fz[k].doubleValue??fz[k].integerValue??fz[k].stringValue):0)||0;
         const vv=g("totalVencido")||g("venc");
-        if(vv>_v){ _v=vv; _n=g("nFacturasVencidas")||g("nFacV"); window._COB_FUENTE={fuente:(fz.fuente&&fz.fuente.stringValue)||"",fecha:((fz.fechaDatos||fz.actualizado||{}).stringValue)||"",doc:cod};
+        { _v=vv; _n=g("nFacturasVencidas")||g("nFacV"); window._COB_FUENTE={fuente:(fz.fuente&&fz.fuente.stringValue)||"",fecha:((fz.fechaDatos||fz.actualizado||{}).stringValue)||"",doc:cod};
           // (oct 2026) Por días de retraso, de mayor a menor (la factura vencida más antigua de cada cliente), como en Cobros
           try{ const _hoy=new Date().toISOString().slice(0,10);
             const _md=(c)=>(c.f||[]).filter(f=>f.im>0&&!f.anul&&(f.ve===1||(f.ve===undefined&&f.fv&&f.fv<_hoy)))
               .reduce((m,f)=>Math.max(m,f.dv!=null?Number(f.dv):Math.round((Date.parse(_hoy)-Date.parse(f.fv))/86400000)),0);
             _clis=JSON.parse((fz.datos&&fz.datos.stringValue)||"[]").filter(c=>Number(c.ven)>=1)
               .map(c=>Object.assign(c,{_md:_md(c)})).sort((x,y)=>y._md-x._md||y.ven-x.ven).slice(0,30); }catch(e){} }
+        break;
       }
       let _comp=[]; try{ if(window.RC&&RC.leerCompromisos) _comp=await RC.leerCompromisos(); }catch(e){}
       window._CIERRE_COB={venc:_v,nFac:_n,clis:_clis,comp:_comp};
