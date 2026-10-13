@@ -279,6 +279,55 @@ window.marcarVarias=(claves,v,el)=>{
   refrescar();
 };
 // (oct 2026) Dormir un cliente 60 días: SOLO en el comité. Deja de salir en «indicios de bajada» hasta esa fecha.
+// (oct 2026) OTRO DEPARTAMENTO DESDE EL COMITÉ, igual que en el plan de recuperación: se crea la incidencia al momento
+// (con aviso por correo), queda en la ficha del cliente y en el acta, y debajo se ve el hilo con su respuesta.
+window.INCS_C=null;
+async function cargarIncsC(){ if(!MODO_COMITE||window.INCS_C||!window.RC||!RC.leerProfundo) return;
+  try{ window.INCS_C=(await RC.leerProfundo("incidencias")).filter(i=>!i.eliminada); }catch(e){ window.INCS_C=[]; }
+  (window.CASOS||[]).forEach(c=>{ const el=document.getElementById("incs_"+c._id); if(el) el.innerHTML=incsCasoH(c._id); }); }
+function incsCasoH(id){ const c=(window.CASOS||[]).find(x=>x._id===id); if(!c||!window.RC) return "";
+  if(!window.INCS_C) return `<div style="font-size:12px;color:#8A94A0;margin-top:4px">Buscando incidencias de este cliente…</div>`;
+  const L=RC.incidenciasDeCaso(window.INCS_C,c).sort((a,b)=>String(b.fechaCreacion||"").localeCompare(String(a.fechaCreacion||"")));
+  if(!L.length) return "";
+  return `<div style="margin-top:6px"><span class="lbl2">🧩 Incidencias de este cliente (${L.length})</span>${L.map(i=>RC.htmlIncidencia(i,true)).join("")}</div>`; }
+window.incCaso=(id)=>{ const c=(window.CASOS||[]).find(x=>x._id===id), box=document.getElementById("incform_"+id); if(!c||!box) return;
+  if(box.innerHTML){ box.innerHTML=""; return; }
+  const pref="incc_"+id.replace(/[^a-zA-Z0-9_]/g,""), lista=((RC.prodDe&&RC.prodDe(c))||c.productos||{}).caen||[];
+  box.innerHTML=RC.formIncidencia(pref,c,null,lista,{})+`<div class="acc" style="margin-top:6px"><button type="button" class="chip rvb on" onclick="enviarIncC('${id}','${pref}',this)">Enviar la incidencia</button><button type="button" class="chip rvb" onclick="incCaso('${id}')">Cancelar</button></div>`;
+  try{ if(RC.activarForms) RC.activarForms(); }catch(e){} };
+window.enviarIncC=async(id,pref,btn)=>{ const c=(window.CASOS||[]).find(x=>x._id===id); if(!c) return;
+  const d=RC.leerIncidencia(pref); if(!d.tipo){ alert("Elige el departamento."); return; } if((d.texto||"").trim().length<8){ alert("Explica qué pasa y qué necesitas del departamento."); return; }
+  if(P.get("prueba")==="1"){ alert("Modo prueba: no se guarda."); return; }
+  btn.disabled=true; btn.textContent="Enviando…";
+  try{ const inc=await RC.crearIncidencia(c,d,{id:JEFE.id,nombre:JEFE.nombre});
+    (window.INCS_C=window.INCS_C||[]).push(inc);
+    // En el acta: como acción a ese departamento, ya con su incidencia creada (al guardar el acta no se duplica)
+    const k="rec:"+id, dc=DC[k]=DC[k]||{}; (dc.accs=dc.accs||[]).push({que:d.texto.trim(),quien:"Otro departamento",dep:d.tipo,depNom:RC.nombreTipoInc(d.tipo),cuando:"",incId:inc._id||inc.id}); guardaC(); pintarRev(k);
+    try{ alActa("recup","🧩 Incidencia a "+RC.nombreTipoInc(d.tipo)+" · "+(c.nombre||c.cliente),d.texto.trim()); }catch(e){}
+    const f=document.getElementById("incform_"+id); if(f) f.innerHTML=""; const l=document.getElementById("incs_"+id); if(l) l.innerHTML=incsCasoH(id);
+    alert("Enviada a "+RC.nombreTipoInc(d.tipo)+" como incidencia de pérdida de venta. En el mismo correo van en copia "+NOMBRE_COM+" (comercial) y tú. Su respuesta saldrá aquí y en la ficha del cliente.");
+  }catch(e){ btn.disabled=false; btn.textContent="Enviar la incidencia"; alert("No se ha enviado: "+e.message); } };
+window.comentarInc=async(incId)=>{ const i=(window.INCS_C||[]).find(x=>(x._id||x.id)===incId); const inp=document.getElementById("ic_"+incId); if(!i||!inp) return;
+  const t=(inp.value||"").trim(); if(t.length<2) return; inp.disabled=true;
+  try{ await RC.comentarIncidencia(i,t,{id:JEFE.id,nombre:JEFE.nombre}); const c=(window.CASOS||[]).find(x=>RC.incidenciasDeCaso([i],x).length); if(c){ const l=document.getElementById("incs_"+c._id); if(l) l.innerHTML=incsCasoH(c._id); } }
+  catch(e){ inp.disabled=false; alert("No se ha enviado: "+e.message); } };
+// (oct 2026) Bloquear desde el comité (no paga / ha cerrado): lo hace el jefe directamente, queda en el acta y en la ficha
+window.bloquearCaso=async(id,btn)=>{
+  if(!MODO_COMITE) return; const c=(window.CASOS||[]).find(x=>x._id===id); if(!c) return;
+  const q=prompt("¿Por qué se bloquea "+(c.nombre||c.cliente)+"?\n1 = no paga · 2 = ha cerrado\n(escribe 1 o 2 y, si quieres, un detalle detrás)","1 ");
+  if(q===null) return;
+  const m=q.trim(); if(!/^[12]/.test(m)){ alert("Escribe 1 (no paga) o 2 (ha cerrado)."); return; }
+  const motivo=m.startsWith("2")?RC.MOT_BLOQ_CIERRE:RC.MOT_BLOQ_IMPAGO, nota=m.slice(1).trim();
+  if(P.get("prueba")==="1"){ alert("Modo prueba: no se guarda."); return; }
+  btn.disabled=true; btn.textContent="Guardando…";
+  const ahora=new Date().toISOString();
+  const campos={...RC.camposAprobar(motivo,ahora),archivoMotivo:motivo,archivoNota:nota,archivoDecision:"aprobado",archivadoPor:JEFE.nombre,archivadoEn:ahora,
+    historial:(c.historial||[]).concat([{sem:SEMANA,fecha:ahora,por:JEFE.nombre,sistema:`${JEFE.nombre} lo bloquea en el comité: ${motivo}${nota?" · "+nota:""}`}])};
+  try{ await RC.guardar(id,campos); Object.assign(c,campos);
+    try{ alActa("recup",motivo+" · "+(c.nombre||c.cliente),nota||JEFE.nombre); }catch(e){}
+    btn.parentNode.innerHTML=`<span style="font-size:12.5px;font-weight:700;color:#B91C1C;background:#FEF2F2;border-radius:8px;padding:5px 9px">${_escR(motivo)}${nota?" · "+_escR(nota):""}</span>`;
+  }catch(e){ btn.disabled=false; btn.textContent="⛔ Bloquear (comité)"; alert("No se ha guardado: "+e.message); }
+};
 window.dormirCaso=async(id,btn)=>{
   if(!MODO_COMITE) return; const c=(window.CASOS||[]).find(x=>x._id===id); if(!c) return;
   const motivo=prompt("¿Por qué se duerme "+(c.nombre||c.cliente)+" 60 días? (lo verá el comercial en el acta)","");
@@ -781,7 +830,10 @@ function _pintarCasoBase(c,req){
     </div>`;
   }
   // (oct 2026) Dormir 60 días: SOLO en el comité, y lo hace el jefe directamente
-  if(MODO_COMITE) h+=`<div class="dormBox" style="margin-top:10px"><button type="button" class="chip" style="border-color:#64748B;color:#334155" onclick="dormirCaso('${id}',this)">😴 Dormir 60 días (comité)</button></div>`;
+  if(MODO_COMITE) h+=`<div class="dormBox" style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap"><button type="button" class="chip" style="border-color:#64748B;color:#334155" onclick="dormirCaso('${id}',this)">😴 Dormir 60 días (comité)</button>
+      <button type="button" class="chip" style="border-color:#DC2626;color:#B91C1C" onclick="bloquearCaso('${id}',this)">⛔ Bloquear (comité)</button>
+      <button type="button" class="chip" style="border-color:#0284C7;color:#0369A1" onclick="incCaso('${id}')">🧩 Otro departamento (comité)</button></div>
+    <div id="incform_${id}"></div><div id="incs_${id}" class="dormBox">${incsCasoH(id)}</div>`;
   h+=`<details style="margin-top:10px;font-size:12.5px"${r.archMotivo?" open":""}>
       <summary style="cursor:pointer;color:var(--tenue)">⛔ Bloquear o dejar de insistir (lo valida tu jefe)</summary>
       ${chips("archMotivo",RC.MOTIVOS_ARCHIVO.filter(m=>!RC.esPausa(m)))}
@@ -1685,6 +1737,7 @@ async function montarComite(){
   try{ DC=SOLO_VER_C?{}:(JSON.parse(localStorage.getItem(claveC())||"{}")||{}); }catch(e){ DC={}; }
   if(SOLO_VER_C||!Object.keys(DC).length){ const b=await leerBorrC(); if(b&&b.dc) DC=b.dc; }
   if(SOLO_VER_C) document.body.classList.add("solover");
+  cargarIncsC();
   const ri=await leerInformeAg();
   const app=document.getElementById("app");
   if(!ri.ok){ app.insertAdjacentHTML("afterbegin",`<div class="card" style="border-color:#D97706;background:#FFFBEB;color:#92400E;font-weight:700">${_escR(NOMBRE_COM)} todavía no ha cerrado su parte de la semana ${SEMANA}. El comité se hace sobre el parte cerrado.</div>`);
@@ -1706,7 +1759,7 @@ async function montarComite(){
     let d=n.parentElement; while(d&&d!==app){ if(d.tagName==="DETAILS") d.open=true; d=d.parentElement; } });
   // Lo del comercial queda de solo lectura
   // (oct 2026) Lo que no es una respuesta del comercial sigue vivo: ordenar cobros, acción a una factura, abrir fichas
-  app.querySelectorAll(".pcont button:not(.abreficha):not([data-cobord]):not(.accfac button),.pcont textarea,.pcont input,.pcont select").forEach(x=>{ x.disabled=true; if(x.tagName!=="BUTTON") x.readOnly=true; });
+  app.querySelectorAll(".pcont button:not(.abreficha):not([data-cobord]):not(.accfac button):not(.dormBox button),.pcont textarea,.pcont input,.pcont select").forEach(x=>{ if(x.closest('[id^="incform_"],[id^="incs_"]')) return; x.disabled=true; if(x.tagName!=="BUTTON") x.readOnly=true; });
   app.querySelectorAll('[id^="kf_"],[id^="ojf_"],.obl').forEach(x=>x.remove());
   app.querySelectorAll(".cobcli").forEach(cc=>{ if((R[cc.dataset.k]||{}).accion){ const sp=cc.querySelector("small span"); if(sp) sp.remove(); } });
   // Cobros: lo del comercial no se toca. Para poner o cambiar la acción se va a la ficha de cobros del cliente.

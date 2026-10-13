@@ -1347,7 +1347,7 @@
     return `<div style="border:1px solid #E5E7EB;border-left:4px solid ${col||"#94A3B8"};border-radius:12px;padding:10px 12px;margin:8px 0;background:#fff">
       <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b style="font-size:13.5px">${RC.esc(RC.nombreTipoInc(i.tipo))}${i.articulo?" · "+RC.esc(i.articulo):""}</b>
         <span style="font-size:11.5px;font-weight:800;color:${col}">${t}${!/resuelta|cerrada/.test(i.estado||"")&&dias>=2?` · <span style="color:#B91C1C">${dias} días</span>`:""}</span></div>
-      <div style="font-size:12px;color:#6B7280">${RC.esc(i.autorNombre||"")} · ${RC.esc(i.fecha||"")}</div>
+      <div style="font-size:12px;color:#6B7280">${RC.esc(i.autorNombre||"")} · ${RC.esc(i.fecha||"")}${i.copiasA?` · en copia: ${RC.esc(i.copiasA)}`:""}</div>
       <div style="font-size:13px;margin-top:4px;white-space:pre-wrap">${RC.esc(String(i.descripcion||"").split("\n\n").slice(1,2).join("") || i.descripcion||"")}</div>
       ${hilo.length?`<div style="margin-top:6px;border-top:1px dashed #E5E7EB;padding-top:6px">${hilo.map(h=>`<div style="font-size:12.5px;margin:3px 0"><b>${RC.esc(h.por||"")}</b> <span style="color:#6B7280">${RC.esc(h.fecha||"")} · ${RC.esc(h.accion||"")}</span>${h.nota?`<div style="white-space:pre-wrap">${RC.esc(h.nota)}</div>`:""}</div>`).join("")}</div>`
         :`<div style="font-size:12px;color:#B45309;margin-top:4px">Sin respuesta todavía.</div>`}
