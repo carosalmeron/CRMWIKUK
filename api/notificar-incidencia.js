@@ -1562,9 +1562,20 @@ module.exports = async function handler(req, res){
 
       let sendD={ok:true}, sendE={ok:true};
       // Email principal a los responsables directos
+      // (oct 2026) Pérdida de venta (plan de recuperación o comité): en el MISMO correo que recibe el
+      // departamento van en copia el comercial del cliente, los jefes de su equipo y quien la abrió
+      // (el jefe que está haciendo el comité). Así todos ven lo mismo y el hilo arranca con todos dentro.
+      let copias=[];
       if(dest.directos.length>0){
         const {subject, body} = construirEmail(inc, 0, false);
-        sendD = await enviarEmail(dest.directos, subject, body);
+        let to=dest.directos.slice();
+        if(inc.origen==="recuperacion"){
+          const vistos=new Set(); copias=ventasDe(datos,inc).filter(x=>{ const e=x.email.toLowerCase(); if(vistos.has(e)) return false; vistos.add(e); return true; });
+          copias.forEach(x=>{ if(!to.some(e=>e.toLowerCase()===x.email.toLowerCase())) to.push(x.email); });
+        }
+        const cuerpo=copias.length?body.replace("Descripción:\n","En copia: "+copias.map(x=>x.nombre+" ("+x.papel+")").join(", ")+"\n\nDescripción:\n"):body;
+        sendD = await enviarEmail(to, subject, cuerpo);
+        if(copias.length){ try{ await setCampo("incidencias", incidenciaId, "copiasA", copias.map(x=>x.nombre+" · "+x.papel).join(", ")); }catch(e){} }
       }
       // Copia informativa a los responsables del departamento padre
       if(dest.escalado.length>0){
@@ -1573,7 +1584,7 @@ module.exports = async function handler(req, res){
       }
       // Pérdida de venta: también se enteran el comercial y su jefe
       let sendV={ok:true};
-      if(inc.origen==="recuperacion"){
+      if(inc.origen==="recuperacion"&&!copias.length){
         try{ sendV=await avisarVentasNueva(inc, datos, incidenciaId); }catch(e){ sendV={ok:false,error:e.message}; }
       }
       if(sendD.ok){
