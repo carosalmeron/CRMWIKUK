@@ -1359,7 +1359,9 @@ function ventasDe(datos, inc){
   const out=[];
   const add=(u,papel)=>{ if(!u) return; const e=u.email||emailDeCuenta(datos,u.id||u._id); if(e&&e.indexOf("@")>0) out.push({email:String(e).trim(),nombre:u.nombre||u.id||u._id,papel}); };
   const com=deAg.find(u=>u.email)||deAg[0]; add(com,"comercial");
-  const eq=U(inc.equipo||(deAg.find(u=>u.equipo)||{}).equipo);
+  // (oct 2026) Equipo: el de la incidencia; si no, el del portal (manda sobre la ficha del CRM, como en el hub de cierres)
+  const enPortal=datos.portal.filter(u=>[u.id,u._id,u.crmId,u.username,u.grupoAgente,u.catalogoVendedor].some(k=>k&&U(k)===U(inc.agente)));
+  const eq=U(inc.equipo||(enPortal.find(u=>u.equipo)||deAg.find(u=>u.equipo)||{}).equipo);
   if(eq) datos.usuarios.filter(u=>["jefe","crm_jefe"].includes(String(u.rol||"").toLowerCase())&&U(u.equipo)===eq&&cuentaValida(u)).forEach(u=>add(u,"jefe de equipo"));
   if(inc.autor){ const a=todas.find(u=>[u.id,u._id,u.crmId,u.username].some(k=>k&&U(k)===U(inc.autor)))
       ||todas.find(u=>U(u.nombre)===U(inc.autorNombre)); add(a,"quien la abrió"); }
