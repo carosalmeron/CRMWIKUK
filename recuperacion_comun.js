@@ -1352,9 +1352,39 @@
     return inc;
   };
   RC.incidenciasDeCaso=(incs,c)=>(incs||[]).filter(i=>!i.eliminada&&(i.casoId===c._id||(i.origen==="recuperacion"&&ARR(i.clienteCodigo||i.clienteId)===ARR(c.cliente))));
+  // (oct 2026) El hilo completo: el CRM guarda los comentarios en «historial» y, desde la pantalla de los
+  // departamentos, las notas y los cambios de estado (resuelta, cerrada…) en «historialEscalado». Solo se leía
+  // el primero y una incidencia cerrada por Producción salía como «Sin respuesta todavía».
+  RC.hiloIncidencia=(i)=>{
+    const fe=(x)=>{ const s=String(x||""); const m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/); if(m) return new Date(+m[3],m[2]-1,+m[1]).getTime(); const t=Date.parse(s); return isNaN(t)?0:t; };
+    const todo=[...(i.historial||[]),...(i.historialEscalado||[])].filter(h=>h&&(h.nota||h.accion));
+    const vistos=new Set(); const out=[];
+    todo.forEach(h=>{ const k=[h.por,h.fecha,h.accion,h.nota].map(x=>String(x||"").trim()).join("|"); if(vistos.has(k)) return; vistos.add(k); out.push(h); });
+    out.sort((a,b)=>fe(a.fecha)-fe(b.fecha));
+    // Si la cerraron sin nota en el hilo, el cierre también cuenta como respuesta
+    if(/resuelta|cerrada/.test(i.estado||"")&&!out.some(h=>/resuelta|cerrada/i.test(h.accion||""))&&(i.cerradoPor||i.fechaCierre||i.resolucion))
+      out.push({accion:i.estado==="cerrada"?"⬜ Cerrada":"✅ Resuelta",por:i.cerradoPor||"",fecha:i.fechaCierre?new Date(i.fechaCierre).toLocaleDateString("es-ES"):"",nota:typeof i.resolucion==="string"?i.resolucion:(i.resolucion&&i.resolucion.nota)||i.notaCierre||""});
+    return out;
+  };
+  RC.cerrarIncidencia=async(inc,nota,por,estado)=>{
+    const hoyS=new Date().toLocaleDateString("es-ES"), est=estado||"resuelta";
+    const hist=(inc.historial||[]).concat([{accion:est==="cerrada"?"⬜ Cerrada":"✅ Resuelta",fecha:hoyS,por:por.nombre,nota:nota||""}]);
+    await RC.guardarEn("incidencias",inc._id||inc.id,{estado:est,historial:hist,fechaCierre:new Date().toISOString(),cerradoPor:por.nombre,fechaUltimoCambio:new Date().toISOString(),ultimoCambioPor:por.nombre},true);
+    Object.assign(inc,{estado:est,historial:hist,cerradoPor:por.nombre});
+    try{ await fetch("/api/notificar-incidencia",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({incidenciaId:inc._id||inc.id,evento:"hilo"})}); }catch(e){}
+    return inc;
+  };
+  RC.reabrirIncidencia=async(inc,nota,por)=>{
+    const hoyS=new Date().toLocaleDateString("es-ES");
+    const hist=(inc.historial||[]).concat([{accion:"🔴 Reabierta",fecha:hoyS,por:por.nombre,nota:nota||""}]);
+    await RC.guardarEn("incidencias",inc._id||inc.id,{estado:"abierta",historial:hist,fechaUltimoCambio:new Date().toISOString(),ultimoCambioPor:por.nombre},true);
+    Object.assign(inc,{estado:"abierta",historial:hist});
+    try{ await fetch("/api/notificar-incidencia",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({incidenciaId:inc._id||inc.id,evento:"hilo"})}); }catch(e){}
+    return inc;
+  };
   RC.htmlIncidencia=(i,conResponder)=>{
     const [t,col]=RC.ESTADO_INC[i.estado]||[i.estado||"",""];
-    const hilo=(i.historial||[]).filter(h=>h&&(h.nota||h.accion));
+    const hilo=RC.hiloIncidencia(i);
     const dias=Math.floor((Date.now()-(Date.parse(i.fechaCreacion||"")||Date.now()))/86400000);
     const id=i._id||i.id;
     return `<div style="border:1px solid #E5E7EB;border-left:4px solid ${col||"#94A3B8"};border-radius:12px;padding:10px 12px;margin:8px 0;background:#fff">
@@ -1365,7 +1395,10 @@
       ${hilo.length?`<div style="margin-top:6px;border-top:1px dashed #E5E7EB;padding-top:6px">${hilo.map(h=>`<div style="font-size:12.5px;margin:3px 0"><b>${RC.esc(h.por||"")}</b> <span style="color:#6B7280">${RC.esc(h.fecha||"")} · ${RC.esc(h.accion||"")}</span>${h.nota?`<div style="white-space:pre-wrap">${RC.esc(h.nota)}</div>`:""}</div>`).join("")}</div>`
         :`<div style="font-size:12px;color:#B45309;margin-top:4px">Sin respuesta todavía.</div>`}
       ${conResponder?`<div style="display:flex;gap:6px;margin-top:6px"><input id="ic_${id}" placeholder="Añadir comentario al hilo" style="flex:1;padding:8px;border:1.5px solid #CBD5E1;border-radius:9px;font:inherit;font-size:13px">
-        <button type="button" onclick="comentarInc('${id}')" style="padding:8px 12px;border-radius:9px;border:none;background:#0F172A;color:#fff;font-weight:700;cursor:pointer">Enviar</button></div>`:""}
+        <button type="button" onclick="comentarInc('${id}')" style="padding:8px 12px;border-radius:9px;border:none;background:#0F172A;color:#fff;font-weight:700;cursor:pointer">Enviar</button></div>
+        ${typeof window.cerrarInc==="function"?(/resuelta|cerrada/.test(i.estado||"")
+          ?`<div style="margin-top:5px"><button type="button" onclick="cerrarInc('${id}','reabrir')" style="font-size:12px;padding:5px 10px;border-radius:8px;border:1.5px solid #CBD5E1;background:#fff;color:#334155;font-weight:700;cursor:pointer">🔴 Reabrir (no está resuelto)</button></div>`
+          :`<div style="margin-top:5px;font-size:12px;color:#6B7280">La cierra el departamento desde el CRM; si ya está solucionado puedes <button type="button" onclick="cerrarInc('${id}','resuelta')" style="font-size:12px;padding:4px 9px;border-radius:8px;border:1.5px solid #15803D;background:#fff;color:#15803D;font-weight:700;cursor:pointer">✅ darla por resuelta</button></div>`):""}`:""}
     </div>`;
   };
   // (oct 2026) Con uno, varios o todos los artículos que caen (p. ej. a Compras: qué solución se le ha dado al cliente)
