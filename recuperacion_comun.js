@@ -401,7 +401,10 @@
   // ── Instrucciones: aviso por correo ──────────────────────────────────
   // Le llega al comercial y, en copia, a su jefe de equipo, al jefe de ventas
   // y al CEO (menos a quien la manda). Así nadie se entera el viernes.
-  RC.destinatarios=async(agente,quienId)=>{
+  // opts.equipo: el equipo en el que se está trabajando (el del hub de cierres); manda sobre las fichas.
+  // opts.ademas: ids de personas que van en copia pase lo que pase (p. ej. quien hace el comité).
+  RC.destinatarios=async(agente,quienId,opts)=>{
+    opts=opts||{};
     const U=(x)=>String(x||"").toUpperCase().trim();
     const [us,pu]=await Promise.all([RC.leer("usuarios",10),RC.leer("portal_users",10)]);
     const emailDe=(u)=>{ if(!u) return "";
@@ -410,10 +413,16 @@
       return p?String(p.email).trim():""; };
     const esDe=(u,a)=>[u._id,u.id,u.crmId,u.grupoAgente,u.catalogoVendedor,u.username].some(k=>k&&U(k)===U(a));
     const com=us.find(u=>esDe(u,agente))||pu.find(u=>esDe(u,agente));
-    const eq=U(com&&com.equipo);
+    // (oct 2026) El equipo: 1º el que diga quien llama (el hub sabe en qué equipo está el comercial),
+    // 2º el del portal (Administrador → Equipo: «determina en qué equipo aparece»), 3º el de la ficha del CRM.
+    // Antes se cogía la primera ficha que apareciera y un comercial de INTERKEY avisaba al Resp. de WIKUK.
+    const eqPortal=(pu.find(u=>esDe(u,agente)&&u.equipo)||{}).equipo;
+    const eqCrm=(us.find(u=>esDe(u,agente)&&u.equipo)||{}).equipo;
+    const eq=U(opts.equipo||eqPortal||eqCrm||(com&&com.equipo));
     const rolDe=(u)=>String(u.rol||"").toLowerCase();
-    const jefes=us.filter(u=>["jefe","crm_jefe"].includes(rolDe(u))&&eq&&U(u.equipo)===eq);
-    const dir=us.filter(u=>["director","crm_director"].includes(rolDe(u)));
+    const activo=(u)=>u.activo!==false&&String(u.activo)!=="false"&&!u.tipologia;
+    const jefes=us.filter(u=>["jefe","crm_jefe"].includes(rolDe(u))&&eq&&U(u.equipo)===eq&&activo(u));
+    const dir=us.filter(u=>["director","crm_director"].includes(rolDe(u))&&activo(u));
     const ceo=[...us,...pu].filter(u=>rolDe(u)==="ceo"||U(u._id)==="CEO"||U(u.id)==="CEO");
     const quien=U(quienId);
     const fuera=(u)=>quien&&[u._id,u.id,u.crmId,u.username,u.grupoAgente].some(k=>k&&U(k)===quien);
@@ -424,10 +433,14 @@
       const otra=[...us,...pu].find(u=>esDe(u,agente)&&String(u.email||"").includes("@"));
       if(otra) para=[{email:String(otra.email).trim(),nombre:com.nombre||agente,papel:"comercial"}];
     }
+    // Quien pide ir en copia sí o sí (quien hace el comité), con el email de cualquiera de sus fichas
+    const ademas=(opts.ademas||[]).filter(Boolean).map(id=>{
+      const f=[...us,...pu].filter(u=>[u._id,u.id,u.crmId,u.username,u.grupoAgente].some(k=>k&&U(k)===U(id)));
+      const u=f.find(x=>emailDe(x))||f[0]; return u?{email:emailDe(u),nombre:u.nombre||u.id||u._id,papel:"comité"}:null; }).filter(x=>x&&x.email);
     const vistos=new Set(para.map(x=>x.email.toLowerCase()));
-    const copias=[...lista(jefes,"jefe de equipo"),...lista(dir,"jefe de ventas"),...lista(ceo,"CEO")]
+    const copias=[...ademas,...lista(jefes,"jefe de equipo"),...lista(dir,"jefe de ventas"),...lista(ceo,"CEO")]
       .filter(x=>!vistos.has(x.email.toLowerCase())&&(vistos.add(x.email.toLowerCase()),true));
-    return {para,copias,nombreComercial:(com&&com.nombre)||agente};
+    return {para,copias,equipo:eq,nombreComercial:(com&&com.nombre)||agente};
   };
   RC.avisarInstruccion=async(caso,texto,quien,quienId)=>{
     const d=await RC.destinatarios(caso.agente,quienId);
