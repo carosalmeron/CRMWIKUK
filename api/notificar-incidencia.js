@@ -903,7 +903,10 @@ async function datosCEO(anio,sem){
   const map={};
   [...us,...pu].forEach(u=>{
     const rol=String(u.rol||"").toLowerCase();
-    if(!["agente","crm_agente","comercial","vendedor"].includes(rol)) return;
+    // (oct 2026) Un jefe de equipo que además vende (Esther) cuenta como comercial: con código de vendedor
+    // o con «sí entrega parte». Se confirma más abajo con que tenga parte o ventas; si no, fuera.
+    const esJefeVende=["jefe","crm_jefe"].includes(rol)&&(u.grupoAgente||String(u.entregaParte||"").toLowerCase()==="si");
+    if(!["agente","crm_agente","comercial","vendedor"].includes(rol)&&!esJefeVende) return;
     if(u.activo===false) return;
     const pos=[u.id,u._id,u.crmId,u.grupoAgente,u.catalogoVendedor,u.username,u.nombre].filter(Boolean);
     let canon=null,ficha=null;
@@ -919,8 +922,9 @@ async function datosCEO(anio,sem){
     if(!map[canon]) map[canon]={id:canon,nombre,equipo:UC(A.equipo(ficha)||u.equipo||""),
       cod:UC(u.grupoAgente||u.catalogoVendedor||canon),
       perfil:String(u.perfilComercial||"").toLowerCase(),
-      entrega:ep, noEntrega:ep==="no", siEntrega:ep==="si", tipDep, conCodigo};
+      entrega:ep, noEntrega:ep==="no", siEntrega:ep==="si", tipDep, conCodigo, jefeVende:esJefeVende};
     else{ const m=map[canon];
+      if(!esJefeVende) m.jefeVende=false; else if(m.jefeVende===undefined) m.jefeVende=true;
       // (oct 2026) Si en cualquiera de sus fichas pone que NO entrega parte, no entrega
       if(ep==="no") m.noEntrega=true; if(ep==="si") m.siEntrega=true;
       if(tipDep) m.tipDep=tipDep; if(conCodigo) m.conCodigo=true;
@@ -962,6 +966,8 @@ async function datosCEO(anio,sem){
       cerr:0,aus:0,sinCerrar:[]});
     // ¿Ha cerrado? informes de esa semana suyos
     const suInf=inf.filter(i=>numC(i.semana)===sem&&(A.mismo(i.agente,g.cod)||A.mismo(i.agente,g.id)));
+    // Jefe que vende: solo si de verdad hace parte de comercial o tiene ventas en Power BI
+    if(g.jefeVende&&!g.siEntrega&&!suInf.some(i=>i.tipo!=="responsable"&&!/jefe/i.test(i.rol||""))&&!numC((suyo(res,g)||{}).ventasAct)) continue;
     const ausente=suInf.some(i=>i.estado==="ausente"||i.ausente===true);
     if(ausente){ E.aus++; E.gente.push({...g,ausente:true,motivo:(suInf.find(i=>i.ausenteMotivo)||{}).ausenteMotivo||"Ausente"}); continue; }
     if(suInf.length) E.cerr++; else if(g.entrega!=="no") E.sinCerrar.push(g.nombre);
@@ -980,15 +986,25 @@ async function datosCEO(anio,sem){
       // (oct 2026) ventasSemAnt es la MISMA semana del AÑO PASADO (así está la medida en Power BI), no la semana
       // anterior: se usaba como tal y el consolidado sumaba semanas de 2025. Sin foto congelada, no hay dato.
       p.vSem=f?numC(f.ventasSem):0; if(!f) p.sinDatoSem=true;
+      // (oct 2026) Lo que el comercial tenía al cerrar su parte (kpis.cifras): ventas y pedidos de ESA semana
+      try{ const cf=p.k&&p.k.cifras; if(cf){ if(!f&&numC(cf.vSem)){ p.vSem=numC(cf.vSem); p.sinDatoSem=false; }
+        p.pedSemCierre=numC(cf.pedSem); p.pedMesCierre=numC(cf.pedMes); p.prevMesCierre=numC(cf.prevMes)||numC(cf.planifMes); p.cifrasDe=cf.fecha||""; } }catch(e){}
+      if(f&&f.entradaSem!==undefined){ p.pedSemFoto=numC(f.entradaSem); p.pedMesFoto=numC(f.entradaMes); p.prevMesFoto=numC(f.previstoMes); }
       if(f&&numC(f.baseSem)){ r.margenPctSem=numC(f.margenSem)/numC(f.baseSem)*100; } else r.margenPctSem=null;
     }
     p.mAct=numC(e2["act_"+mNum]);
     // (oct 2026) Mes en curso: el resumen diario de Power BI (ventasMes) está más al día que la estacionalidad
     if(mNum===new Date().getMonth()+1&&numC(r.ventasMes)>p.mAct) p.mAct=numC(r.ventasMes);
     // Pedidos: introducidos esta semana y en el mes, y lo que queda por servir dentro del mes (pbi_entrada_agente)
-    { const en=suyo(entr,g)||{}; p.pedSem=numC(en.entradaSem); p.pedMes=numC(en.entradaMes); p.prevMes=numC(en.previstoMes); }
+    { const en=suyo(entr,g)||{}; p.pedSem=numC(en.entradaSem); p.pedMes=numC(en.entradaMes); p.prevMes=numC(en.previstoMes);
+      // Semana pasada: los pedidos de ESA semana son los de la foto del viernes o los guardados en el parte, no los de hoy
+      if(sem<isoSemanaC(new Date()).sem){
+        if(p.pedSemFoto!==undefined){ p.pedSem=p.pedSemFoto; p.pedMes=p.pedMesFoto; p.prevMes=p.prevMesFoto; p.pedFuente="foto"; }
+        else if(p.pedSemCierre!==undefined){ p.pedSem=p.pedSemCierre; p.pedMes=p.pedMesCierre; p.prevMes=p.prevMesCierre; p.pedFuente="parte"; }
+        else { p.pedSem=0; p.sinDatoPed=true; p.pedFuente=""; } } }
     p.mObj=numC(o2["mes_"+mNum]);
     if(!p.mObj) p.mObj=numC(o2.objAnual)*(numC(e2["peso_"+mNum])||1/12);
+    p.mAnt=numC(e2["mes_"+mNum]);   // (oct 2026) mismo mes del año pasado, completo
     p.objSem=p.mObj?p.mObj/4.33:0;
     p.mg=(r.margenPctSem!=null&&r.margenPctSem!=="")?numC(r.margenPctSem):null;
     p.mgObj=numC(r.objetivoMargen)||null;
@@ -1483,7 +1499,7 @@ module.exports = async function handler(req, res){
       const hoyP=isoSemanaC(new Date());
       const anioP=Number(req.query.anio)||hoyP.anio, semP=Number(req.query.semana)||hoyP.sem;
       const D=await datosCEO(anioP,semP);
-      const campos=["id","cod","nombre","equipo","ausente","motivo","vSem","sinDatoSem","objSem","mAct","mObj","pedSem","pedMes","prevMes","vMes","vis","lla","mEnv","mOk","mKo",
+      const campos=["id","cod","nombre","equipo","ausente","motivo","vSem","sinDatoSem","objSem","mAct","mObj","mAnt","pedSem","pedMes","prevMes","sinDatoPed","pedFuente","vMes","vis","lla","mEnv","mOk","mKo",
         "mEnvA","mOkA","mKoA","m60","mAb","obj","cobros","nFacV","limite","k","nota","facV","cobFecha"];
       res.setHeader("Cache-Control","no-store");
       res.status(200).json({ok:true,sem:D.sem,anio:D.anio,mNum:D.mNum,
