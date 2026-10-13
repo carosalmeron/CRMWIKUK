@@ -192,7 +192,21 @@ function casaDepto(d,tipologia){
 
 // Destinatarios de una tipología según el organigrama:
 // { directos:[emails], escalado:[emails del depto padre] }
-function destinatariosDe(datos, tipologia){
+// (oct 2026) Incidencia de COBRO: creada desde el panel de cobros, atada a una factura, o con
+// un motivo de cobro (impago, cobro, pago, vencimiento, abono). Van solo a EMAILS_COBRO.
+function esCobro(inc){
+  if(!inc) return false;
+  if(inc.origen==="cobros"||inc.claveFactura||inc.estadoCobro) return true;
+  const t=[inc.subtipo,inc.titulo,inc.categoria].filter(Boolean).join(" ");
+  return /impago|cobro|pago|vencimient|abono|reclamaci[oó]n de (deuda|cobro|pago)/i.test(t);
+}
+// Quién recibe las incidencias de cobro: el jefe de administración (José Antonio) y
+// Administración de clientes (Alba). Nadie más del departamento. Se puede cambiar sin tocar
+// código con la variable COBRO_EMAILS en Vercel (emails separados por comas).
+const EMAILS_COBRO=(process.env.COBRO_EMAILS||"jagarcia@unitedcaro.com,administracion@unitedcaro.com")
+  .split(",").map(e=>e.trim().toLowerCase()).filter(Boolean);
+function destinatariosDe(datos, tipologia, inc){
+  if(esCobro(inc)) return {directos:[...EMAILS_COBRO], escalado:[]};
   const directos=new Set(), escalado=new Set();
   const addD=e=>{ if(e) directos.add(String(e).toLowerCase()); };
   const addE=e=>{ if(e) escalado.add(String(e).toLowerCase()); };
@@ -870,11 +884,11 @@ async function datosCEO(anio,sem){
   const hace30=new Date(lunes); hace30.setDate(lunes.getDate()-30);
   const enSem=d=>d&&d>=lunes&&d<=domingo;
 
-  const [alias,us,pu,inf,res,cob,estac,objs,objEq,mues,vis,sems,objSem]=await Promise.all([
+  const [alias,us,pu,inf,res,cob,estac,objs,objEq,mues,vis,sems,objSem,entr]=await Promise.all([
     leerTodoC("agentes_alias"),leerTodoC("usuarios"),leerTodoC("portal_users"),leerTodoC("informes"),
     leerTodoC("pbi_resumen_agente"),leerTodoC("cobros_comercial"),leerTodoC("pbi_estacionalidad"),
     leerTodoC("pbi_objetivos"),leerTodoC("objetivos_equipo"),leerTodoC("muestras"),leerTodoC("visitas"),
-    leerTodoC("pbi_semanas"),leerTodoC("objetivos_semana")]);
+    leerTodoC("pbi_semanas"),leerTodoC("objetivos_semana"),leerTodoC("pbi_entrada_agente").catch(()=>[])]);
   const A=crearAgentes(alias);
   // (sep 2026) Plan de recuperación: casos de clientes en caída (sin Francia)
   let recup=[];
@@ -963,10 +977,16 @@ async function datosCEO(anio,sem){
       const foto=(sems.find(x=>semDeC(x)===anio*100+sem)||{}).agentes;
       let ag=[]; try{ ag=JSON.parse(foto||"[]"); }catch(e){}
       const f=ag.find(x=>A.mismo(x.id||x.agente,g.cod)||A.mismo(x.id||x.agente,g.id));
-      p.vSem=f?numC(f.ventasSem):(sem===isoSemanaC(new Date()).sem-1?numC(r.ventasSemAnt):0);
+      // (oct 2026) ventasSemAnt es la MISMA semana del AÑO PASADO (así está la medida en Power BI), no la semana
+      // anterior: se usaba como tal y el consolidado sumaba semanas de 2025. Sin foto congelada, no hay dato.
+      p.vSem=f?numC(f.ventasSem):0; if(!f) p.sinDatoSem=true;
       if(f&&numC(f.baseSem)){ r.margenPctSem=numC(f.margenSem)/numC(f.baseSem)*100; } else r.margenPctSem=null;
     }
     p.mAct=numC(e2["act_"+mNum]);
+    // (oct 2026) Mes en curso: el resumen diario de Power BI (ventasMes) está más al día que la estacionalidad
+    if(mNum===new Date().getMonth()+1&&numC(r.ventasMes)>p.mAct) p.mAct=numC(r.ventasMes);
+    // Pedidos: introducidos esta semana y en el mes, y lo que queda por servir dentro del mes (pbi_entrada_agente)
+    { const en=suyo(entr,g)||{}; p.pedSem=numC(en.entradaSem); p.pedMes=numC(en.entradaMes); p.prevMes=numC(en.previstoMes); }
     p.mObj=numC(o2["mes_"+mNum]);
     if(!p.mObj) p.mObj=numC(o2.objAnual)*(numC(e2["peso_"+mNum])||1/12);
     p.objSem=p.mObj?p.mObj/4.33:0;
@@ -1059,6 +1079,7 @@ async function datosCEO(anio,sem){
     }
     E.gente.push(p);
     for(const k of ["vSem","objSem","mAct","mObj","cobros","vis","lla","mEnv","mOk"]) E[k]+=p[k];
+    for(const k of ["pedSem","pedMes","prevMes"]) E[k]=(E[k]||0)+(p[k]||0);
     for(const k of ["vSem","objSem","mAct","mObj","cobros","nFacV","vis","lla","mEnv","mOk"]) G[k]+=p[k];
   }
 
@@ -1345,7 +1366,9 @@ function ventasDe(datos, inc){
   const out=[];
   const add=(u,papel)=>{ if(!u) return; const e=u.email||emailDeCuenta(datos,u.id||u._id); if(e&&e.indexOf("@")>0) out.push({email:String(e).trim(),nombre:u.nombre||u.id||u._id,papel}); };
   const com=deAg.find(u=>u.email)||deAg[0]; add(com,"comercial");
-  const eq=U(inc.equipo||(deAg.find(u=>u.equipo)||{}).equipo);
+  // (oct 2026) Equipo: el de la incidencia; si no, el del portal (manda sobre la ficha del CRM, como en el hub de cierres)
+  const enPortal=datos.portal.filter(u=>[u.id,u._id,u.crmId,u.username,u.grupoAgente,u.catalogoVendedor].some(k=>k&&U(k)===U(inc.agente)));
+  const eq=U(inc.equipo||(enPortal.find(u=>u.equipo)||deAg.find(u=>u.equipo)||{}).equipo);
   if(eq) datos.usuarios.filter(u=>["jefe","crm_jefe"].includes(String(u.rol||"").toLowerCase())&&U(u.equipo)===eq&&cuentaValida(u)).forEach(u=>add(u,"jefe de equipo"));
   if(inc.autor){ const a=todas.find(u=>[u.id,u._id,u.crmId,u.username].some(k=>k&&U(k)===U(inc.autor)))
       ||todas.find(u=>U(u.nombre)===U(inc.autorNombre)); add(a,"quien la abrió"); }
@@ -1376,7 +1399,7 @@ async function avisarHilo(inc, id){
   if(!nuevas.length) return {ok:true,skipped:"nada nuevo"};
   const datos=await cargarDatos();
   const tipoLc=String(inc.tipo||"").toLowerCase(), tipologia=TIPO_A_TIPOLOGIA[tipoLc]||tipoLc;
-  const dept=destinatariosDe(datos,tipologia).directos.map(e=>({email:e,papel:"departamento"}));
+  const dept=destinatariosDe(datos,tipologia,inc).directos.map(e=>({email:e,papel:"departamento"}));
   const lista=[...dept,...ventasDe(datos,inc)];
   // Fuera quien acaba de escribir
   const quien=nuevas.map(h=>String(h.por||"").toUpperCase().trim()).filter(Boolean);
@@ -1417,6 +1440,30 @@ async function avisarHilo(inc, id){
   return {ok:r.ok,nuevas:nuevas.length,to:r.destinatarios||[]};
 }
 
+// (oct 2026) Resumen de incidencias fuera de protocolo: a Dirección (todas) y a cada departamento (las suyas)
+async function enviarResumenInc(viejas,datos,etiqTipo,op){
+  op=op||{};
+          const porTipo={};
+          viejas.forEach(x=>{ const t=etiqTipo(x.inc); (porTipo[t]=porTipo[t]||[]).push(x); });
+          // (oct 2026) Cada departamento recibe su propia franja fuera de protocolo (más de 7 días abiertas)
+          const porDep={}, depsEnv=[];
+          viejas.forEach(x=>{ const tl=String(x.inc.tipo||"").toLowerCase(), tg=TIPO_A_TIPOLOGIA[tl]||tl; if(tg) (porDep[tg]=porDep[tg]||[]).push(x); });
+          for(const [tg,l] of Object.entries(porDep)){
+            try{
+              const dest=destinatariosDe(datos,tg); if(!dest.directos.length) { depsEnv.push({dep:tg,n:l.length,sinEmail:true}); continue; }
+              const nom=etiqTipo(l[0].inc), pt={}; pt[nom]=l;
+              if(op.soloCeo) continue;
+              const ok=await enviarRetrasos(op.to?[op.to]:[...new Set([...dest.directos,...dest.escalado])],
+                "⏰ "+nom+": "+l.length+" incidencia"+(l.length===1?"":"s")+" fuera de protocolo (más de 7 días)",
+                htmlResumenIncViejas(l,pt,{antetitulo:"Tu departamento · incidencias fuera de protocolo",
+                  titulo:nom+" · "+l.length+" abierta"+(l.length===1?"":"s")+" hace más de 7 días",
+                  pie:"El protocolo es responder en menos de 7 días. Este resumen llega cada lunes mientras sigan abiertas; Dirección recibe el de todos los departamentos."}));
+              depsEnv.push({dep:tg,n:l.length,ok});
+            }catch(e){ depsEnv.push({dep:tg,error:String(e&&e.message||e)}); }
+          }
+          const s=op.soloDeps?true:await enviarRetrasos([op.to||CC_SIEMPRE],"📋 "+viejas.length+" incidencias fuera de protocolo (más de 7 días)",htmlResumenIncViejas(viejas,porTipo));
+          return {ok:!!s,incidencias:viejas.length,departamentos:depsEnv};
+}
 module.exports = async function handler(req, res){
   try{
     // ─────── Informe semanal de dirección, por URL ───────
@@ -1436,13 +1483,30 @@ module.exports = async function handler(req, res){
       const hoyP=isoSemanaC(new Date());
       const anioP=Number(req.query.anio)||hoyP.anio, semP=Number(req.query.semana)||hoyP.sem;
       const D=await datosCEO(anioP,semP);
-      const campos=["id","cod","nombre","equipo","ausente","motivo","vSem","objSem","mAct","mObj","vis","lla","mEnv","mOk","mKo",
+      const campos=["id","cod","nombre","equipo","ausente","motivo","vSem","sinDatoSem","objSem","mAct","mObj","pedSem","pedMes","prevMes","vMes","vis","lla","mEnv","mOk","mKo",
         "mEnvA","mOkA","mKoA","m60","mAb","obj","cobros","nFacV","limite","k","nota","facV","cobFecha"];
       res.setHeader("Cache-Control","no-store");
       res.status(200).json({ok:true,sem:D.sem,anio:D.anio,mNum:D.mNum,
         equipos:D.equipos.map(E=>({eq:E.eq,jefe:E.jefe,obj:E.obj,cerr:E.cerr,aus:E.aus,sinCerrar:E.sinCerrar,
           gente:E.gente.map(p=>{ const o={}; campos.forEach(k=>{ if(p[k]!==undefined) o[k]=p[k]; }); return o; })}))});
       return;
+    }
+
+    // ─────── (oct 2026) Resumen de incidencias fuera de protocolo, por URL ───────
+    // ?resumenInc=1&secret=…  → lo envía ya (Dirección + cada departamento), aunque ya se enviara hoy
+    //   &ver=1 (sin enviar, enseña el correo de Dirección) · &solo=ceo | &solo=deps · &to=correo (prueba: todo a ese correo)
+    if(req.method==="GET" && req.query && req.query.resumenInc){
+      const sec=process.env.CRON_SECRET;
+      if(sec && req.query.secret!==sec){ res.status(401).json({error:"falta el secreto"}); return; }
+      const [incidencias,datos]=await Promise.all([listColeccion("incidencias"),cargarDatos()]);
+      const etiqTipo=(inc)=>LABEL_TIPO[TIPO_A_TIPOLOGIA[String(inc.tipo||"").toLowerCase()]]||inc.tipo||"—";
+      const viejas=incidencias.filter(i=>!i.eliminada&&(i.estado||"abierta")==="abierta")
+        .map(inc=>({inc,dias:diasDesde(inc.fecha)})).filter(x=>x.dias>7).sort((a,b)=>b.dias-a.dias);
+      if(req.query.ver==="1"){ const pt={}; viejas.forEach(x=>{ const t=etiqTipo(x.inc); (pt[t]=pt[t]||[]).push(x); });
+        res.setHeader("Content-Type","text/html; charset=utf-8"); res.status(200).send(viejas.length?htmlResumenIncViejas(viejas,pt):"<p>No hay incidencias de más de 7 días.</p>"); return; }
+      if(!viejas.length){ res.status(200).json({ok:true,omitido:"ninguna de más de 7 días"}); return; }
+      const r=await enviarResumenInc(viejas,datos,etiqTipo,{to:req.query.to,soloCeo:req.query.solo==="ceo",soloDeps:req.query.solo==="deps"});
+      res.status(200).json(r); return;
     }
 
     // ─────── Avisos de retrasos de pedido, por URL ───────
@@ -1467,7 +1531,7 @@ module.exports = async function handler(req, res){
       const deps=datos.departamentos.filter(d=>casaDepto(d,tipologia))
         .map(d=>({id:d._id,nombre:d.nombre,activo:d.activo!==false,
         responsables:(d.responsableIds||[]).map(r=>({id:r,email:emailDeCuenta(datos,r)||"❌ sin email"}))}));
-      const dest=destinatariosDe(datos,tipologia);
+      const dest=destinatariosDe(datos,tipologia,req.query.cobro==="1"?{origen:"cobros"}:null);
       // Quien tiene esta tipologia en su ficha (la via de respaldo)
       const porFicha=[...datos.usuarios,...datos.portal]
         .filter(u=>cuentaValida(u)&&String(u.tipologia||ID_A_TIPOLOGIA[u.id||u._id]||"").toLowerCase()===tipologia)
@@ -1500,16 +1564,27 @@ module.exports = async function handler(req, res){
       if(!tipologia){ res.status(200).json({ok:true, skipped:"incidencia sin tipo"}); return; }
 
       const datos = await cargarDatos();
-      const dest = destinatariosDe(datos, tipologia);
+      const dest = destinatariosDe(datos, tipologia, inc);
       if(dest.directos.length===0 && dest.escalado.length===0){
         res.status(200).json({ok:true, skipped:"sin email configurado para "+tipologia}); return;
       }
 
       let sendD={ok:true}, sendE={ok:true};
       // Email principal a los responsables directos
+      // (oct 2026) Pérdida de venta (plan de recuperación o comité): en el MISMO correo que recibe el
+      // departamento van en copia el comercial del cliente, los jefes de su equipo y quien la abrió
+      // (el jefe que está haciendo el comité). Así todos ven lo mismo y el hilo arranca con todos dentro.
+      let copias=[];
       if(dest.directos.length>0){
         const {subject, body} = construirEmail(inc, 0, false);
-        sendD = await enviarEmail(dest.directos, subject, body);
+        let to=dest.directos.slice();
+        if(inc.origen==="recuperacion"){
+          const vistos=new Set(); copias=ventasDe(datos,inc).filter(x=>{ const e=x.email.toLowerCase(); if(vistos.has(e)) return false; vistos.add(e); return true; });
+          copias.forEach(x=>{ if(!to.some(e=>e.toLowerCase()===x.email.toLowerCase())) to.push(x.email); });
+        }
+        const cuerpo=copias.length?body.replace("Descripción:\n","En copia: "+copias.map(x=>x.nombre+" ("+x.papel+")").join(", ")+"\n\nDescripción:\n"):body;
+        sendD = await enviarEmail(to, subject, cuerpo);
+        if(copias.length){ try{ await setCampo("incidencias", incidenciaId, "copiasA", copias.map(x=>x.nombre+" · "+x.papel).join(", ")); }catch(e){} }
       }
       // Copia informativa a los responsables del departamento padre
       if(dest.escalado.length>0){
@@ -1518,7 +1593,7 @@ module.exports = async function handler(req, res){
       }
       // Pérdida de venta: también se enteran el comercial y su jefe
       let sendV={ok:true};
-      if(inc.origen==="recuperacion"){
+      if(inc.origen==="recuperacion"&&!copias.length){
         try{ sendV=await avisarVentasNueva(inc, datos, incidenciaId); }catch(e){ sendV={ok:false,error:e.message}; }
       }
       if(sendD.ok){
@@ -1573,7 +1648,7 @@ module.exports = async function handler(req, res){
       const tipoLc = String(inc.tipo||"").toLowerCase();
       const tipologia = TIPO_A_TIPOLOGIA[tipoLc] || tipoLc;
       if(!tipologia){ saltadas++; continue; }
-      const dest = destinatariosDe(datos, tipologia);
+      const dest = destinatariosDe(datos, tipologia, inc);
       if(dest.directos.length===0){ sinEmail++; continue; }
       tocanHoy.push({inc,dias});
       dest.directos.forEach(em=>{ const k=String(em).trim().toLowerCase(); if(!k) return;
@@ -1615,26 +1690,10 @@ module.exports = async function handler(req, res){
         const viejas=abiertas.map(inc=>({inc,dias:diasDesde(inc.fecha)})).filter(x=>x.dias>7)
           .sort((a,b)=>b.dias-a.dias);
         if(!(ya&&ya.enviado)&&viejas.length){
-          const porTipo={};
-          viejas.forEach(x=>{ const t=etiqTipo(x.inc); (porTipo[t]=porTipo[t]||[]).push(x); });
-          // (oct 2026) Cada departamento recibe su propia franja fuera de protocolo (más de 7 días abiertas)
-          const porDep={}, depsEnv=[];
-          viejas.forEach(x=>{ const tl=String(x.inc.tipo||"").toLowerCase(), tg=TIPO_A_TIPOLOGIA[tl]||tl; if(tg) (porDep[tg]=porDep[tg]||[]).push(x); });
-          for(const [tg,l] of Object.entries(porDep)){
-            try{
-              const dest=destinatariosDe(datos,tg); if(!dest.directos.length) { depsEnv.push({dep:tg,n:l.length,sinEmail:true}); continue; }
-              const nom=etiqTipo(l[0].inc), pt={}; pt[nom]=l;
-              const ok=await enviarRetrasos([...new Set([...dest.directos,...dest.escalado])],
-                "⏰ "+nom+": "+l.length+" incidencia"+(l.length===1?"":"s")+" fuera de protocolo (más de 7 días)",
-                htmlResumenIncViejas(l,pt,{antetitulo:"Tu departamento · incidencias fuera de protocolo",
-                  titulo:nom+" · "+l.length+" abierta"+(l.length===1?"":"s")+" hace más de 7 días",
-                  pie:"El protocolo es responder en menos de 7 días. Este resumen llega cada lunes mientras sigan abiertas; Dirección recibe el de todos los departamentos."}));
-              depsEnv.push({dep:tg,n:l.length,ok});
-            }catch(e){ depsEnv.push({dep:tg,error:String(e&&e.message||e)}); }
-          }
-          const s=await enviarRetrasos([CC_SIEMPRE],"📋 "+viejas.length+" incidencias fuera de protocolo (más de 7 días)",htmlResumenIncViejas(viejas,porTipo));
-          if(s) await guardarDocR(marca,{enviado:"si",n:viejas.length,fecha:new Date().toISOString()});
-          resumenCeo={ok:!!s,incidencias:viejas.length,departamentos:depsEnv};
+          const rr=await enviarResumenInc(viejas,datos,etiqTipo,{});
+          if(rr.ok) await guardarDocR(marca,{enviado:"si",n:viejas.length,fecha:new Date().toISOString()});
+          resumenCeo=rr;
+
         } else resumenCeo={omitido:ya&&ya.enviado?"ya enviado":"ninguna de más de 7 días"};
       }catch(e){ resumenCeo={error:String(e&&e.message||e)}; }
     }
