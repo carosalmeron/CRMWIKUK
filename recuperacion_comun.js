@@ -1498,11 +1498,19 @@
     return `<div style="border:1px solid #E5E7EB;border-radius:12px;padding:10px 12px;margin:8px 0;background:#fff">
       ${cli?`<div style="font-size:12.5px;font-weight:800;color:#0F172A;margin-bottom:2px">🏪 ${RC.esc(cli)}${e.clienteId?` <span style="font-weight:600;color:#94A3B8">· ${RC.esc(e.clienteId)}</span>`:""}${e.agenteNombre?` <span style="font-weight:600;color:#64748B">· ${RC.esc(e.agenteNombre)}</span>`:""}</div>`:""}
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
-        <b style="font-size:13.5px">💶 ${o.codigo?`<span style="color:#64748B;font-weight:700">[${RC.esc(o.codigo)}]</span> `:""}${RC.esc(o.nombre||e.estrategia||"Estrategia")}${o.calibre?" · "+RC.esc(o.calibre):""}${num(o.cantidad)?" · "+num(o.cantidad).toLocaleString("es-ES")+" "+RC.esc(o.unidad||"m"):""}</b>
+        <b style="font-size:13.5px">💶 ${o.codigo?`<span style="color:#64748B;font-weight:700">[${RC.esc(o.codigo)}]</span> `:""}${RC.esc(o.nombre||(e.lanzamiento?"Lanzamiento: "+(e.nombreCampana||""):"")||(e.tipoEst?"Estrategia de "+e.tipoEst:"Estrategia"))}${o.calibre?" · cal. "+RC.esc(o.calibre):""}${o.metros||o.met?" · "+RC.esc(String(o.metros||o.met).replace(/\s*m$/i,""))+" m":""}${num(o.cantidad)?" · "+num(o.cantidad).toLocaleString("es-ES")+" "+RC.esc(o.unidad||"m"):""}</b>
         <span style="font-size:11.5px;font-weight:800;color:${c};background:${bg};border-radius:99px;padding:3px 9px">${t}${e.estado==="pendiente_aprobacion"?(()=>{ const q=RC.quienLaTiene(e); return " · "+RC.esc(q.nombre)+(q.antes?" (estaba con "+RC.esc(q.antes)+")":""); })():""}</span></div>
-      <div style="font-size:13px;margin-top:4px">${o.precioActual?RC.esc(o.precioActual)+" € → ":o.precioBase?"catálogo "+RC.esc(o.precioBase)+" € → ":""}<b style="color:#6D28D9">${RC.esc(o.precioFinal||o.precioOferta||"")} €/${RC.esc(o.unidad||"m")}</b> · ${e._dtoEf!=null
+      ${(()=>{ // (oct 2026) Estrategias sin línea de precio (las del CRM: texto libre, objetivo, lanzamiento): se enseña lo que son, no «€/m · 0 %»
+        const sinPrecio=!num(o.precioFinal||o.precioOferta); if(!sinPrecio) return "";
+        const tipo=({precio:"Precio",lanzamiento:"Lanzamiento",muestra:"Muestra",alternativa:"Alternativa"})[String(e.tipoEst||"").toLowerCase()]||"";
+        const txt=e.estrategia||e.texto||"", prods=(e.productosCampana||[]).join(", ");
+        return `<div style="font-size:13px;margin-top:4px">${tipo?`<span style="font-size:11px;font-weight:800;background:#F5F3FF;color:#6D28D9;border-radius:6px;padding:1px 6px;margin-right:4px">${tipo}</span>`:""}${txt?RC.esc(txt):'<span style="color:#B45309">Sin detalle: no se indicó ni artículo ni precio</span>'}</div>
+          ${e.objetivo?`<div style="font-size:12.5px;color:#374151;margin-top:2px"><b>Objetivo:</b> ${RC.esc(e.objetivo)}</div>`:""}
+          ${prods?`<div style="font-size:12.5px;color:#374151;margin-top:2px"><b>Artículos:</b> ${RC.esc(prods)}${num(e.precioCampana)?" · "+num(e.precioCampana).toFixed(2)+" €":""}</div>`:""}
+          ${num(e.maxDescuento)?`<div style="font-size:12.5px;color:#374151;margin-top:2px"><b>Descuento máximo:</b> ${num(e.maxDescuento)} %</div>`:""}`; })()}
+      ${num(o.precioFinal||o.precioOferta)?`<div style="font-size:13px;margin-top:4px">${o.precioActual?RC.esc(o.precioActual)+" € → ":o.precioBase?"catálogo "+RC.esc(o.precioBase)+" € → ":""}<b style="color:#6D28D9">${RC.esc(o.precioFinal||o.precioOferta||"")} €/${RC.esc(o.unidad||"m")}</b> · ${e._dtoEf!=null
         ?`<b>${e._dtoEf} % sobre su tarifa</b> <span style="color:#6B7280">(tarifa ${num(e._tarifaCli).toFixed(2)} € · ${e._dtoCli} % ${RC.esc(e._catCli||"")}${e._sinTarifa?" · sin tarifa en el CRM":""} · ${num(e.maxDescuento)} % sobre catálogo)</span>`
-        :`descuento ${num(e.maxDescuento)} %`}</div>
+        :`descuento ${num(e.maxDescuento)} %`}</div>`:""}
       <div style="font-size:12px;color:#6B7280;margin-top:2px">${e.solicitudAgente?"Lo pide "+RC.esc(e.agenteNombre||e.agente):"Creada por "+RC.esc(e.creadoPorNombre||"")} · ${RC.fechaTxt(e)}${e.descripcion?" · “"+RC.esc(e.descripcion)+"”":""}</div>
       ${extra}${res}${botones||""}</div>`;
   };
