@@ -1971,7 +1971,7 @@ async function cargarPasos(){
       out.casos=todos.filter(c=>RC.abierto(c)&&c.estado!=="propuesta_archivo");
       out.todosCasos=todos;   // (oct 2026) para «Decisiones de la semana» (CEO / director)
       // (oct 2026) Actas de los comités de esta semana → «Conclusiones de los comités» (CEO / director)
-      if(esCeo||esDir){ try{
+      { try{   // (oct 2026) también el jefe: la lista de recuperación solo enseña lo revisado en comité
         const r=await fetch(FB+":runQuery",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({structuredQuery:{from:[{collectionId:"cierres_flujo"}],
           where:{fieldFilter:{field:{fieldPath:"semana"},op:"EQUAL",value:{integerValue:String(SEMANA)}}}}})});
         const j=r.ok?await r.json():[];
@@ -1981,6 +1981,10 @@ async function cargarPasos(){
       // Acumulado del año: recuperados y archivados
       const delAnio=(f)=>String(f||"").slice(0,4)===String(ANIO);
       out.recAnio=todos.filter(c=>c.estado==="recuperado"&&delAnio(c.recuperadoEn||c.actualizado));
+      // (oct 2026) Incidencias de recuperación / comité, para decir en qué situación está cada una
+      try{ const r=await fetch(FB+":runQuery",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({structuredQuery:{from:[{collectionId:"incidencias"}],
+          where:{fieldFilter:{field:{fieldPath:"origen"},op:"IN",value:{arrayValue:{values:[{stringValue:"recuperacion"},{stringValue:"comite"}]}}}}}})});
+        const j=r.ok?await r.json():[]; out.incs=(Array.isArray(j)?j:[]).filter(x=>x.document).map(x=>RC.desdeFB(x.document)); }catch(e){ out.incs=[]; }
       out.archAnio=todos.filter(c=>/archiv/.test(c.estado||"")&&c.estado!=="propuesta_archivo"&&delAnio(c.archivadoEn||c.archivoDecididoEn||c.actualizado));
       try{ if(RC.cargarDeptos) await RC.cargarDeptos(); if(!RC._us) RC._us=await RC.leer("usuarios",10); }catch(e){}
       try{ out.proyectos=(await RC.leerProfundo("proyectos")).filter(p=>!p.eliminada&&!/cerrad|finaliz|complet|cancel/i.test(p.estado||"")); }catch(e){ out.proyectos=[]; }
@@ -2096,8 +2100,11 @@ function cabeceraConsolidada(){
     +'<span style="font-size:12px;color:#64748B">'+(esJefe?escT(EQUIPO||"tu equipo"):"todos los equipos")+' · '+g.length+' comerciales</span></div>'
     +tarjetaCifras(g,false)+'</div>';
   if(esJefe){
-    h+='<div class="card"><b style="font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#475569">👤 Por comercial</b>'
-      +g.slice().sort((a,b)=>(mesP([a])||0)-(mesP([b])||0)).map(filaComL).join("")+'</div>';
+    // (oct 2026) Árbol: «Por comercial» se pliega y despliega; dentro, cada comercial se abre a su vez
+    const abC=window.COMS_AB!==false;
+    h+='<div class="card"><div onclick="window.COMS_AB=!'+(abC?'true':'false')+';pintar()" style="display:flex;align-items:center;gap:8px;cursor:pointer"><b style="flex:1;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#475569">👤 Por comercial</b>'
+      +'<span style="font-size:12px;color:#64748B">'+g.length+'</span><span style="color:#94A3B8;font-size:18px">'+(abC?"▾":"›")+'</span></div>'
+      +(abC?g.slice().sort((a,b)=>(mesP([a])||0)-(mesP([b])||0)).map(filaComL).join(""):"")+'</div>';
     return h;
   }
   // Cada equipo se abre justo debajo de su línea, igual que los comerciales
@@ -2530,26 +2537,48 @@ function recuperacionJefeH(){
   const add=(c,linea)=>{ const p=deQuien(c.agente), k=p?(p.cod||p.id):U(c.agente||"?");
     if(!porCom.has(k)) porCom.set(k,{nombre:p?p.nombre:(c.agenteNombre||c.agente||"Sin comercial"),cl:new Map()});
     const m=porCom.get(k).cl; if(!m.has(c._id)) m.set(c._id,{c,lineas:[]}); const L=m.get(c._id).lineas; if(!L.some(x=>x.txt===linea.txt)) L.push(linea); };
+  // Solo lo que el jefe ha revisado: la decisión del comité (ok / lo cambiamos / sube), su comentario, lo que
+  // dormió, bloqueó o mandó a otro departamento, o la instrucción que le puso. Lo que el comercial escribió en su
+  // parte sale al lado, como contexto, pero por sí solo no aparece.
+  const OPS={ok:"✓ De acuerdo",cambia:"✎ Lo cambiamos",sube:"📤 Sube al superior",pospone:"⏭ Semana que viene"};
+  const actaDe=(c)=>{ for(const a of (D.actasComite||[])){ let P=a.puntos; if(typeof P==="string"){ try{ P=JSON.parse(P); }catch(e){ P=null; } }
+      const d=P&&P.p&&P.p["rec:"+c._id]; if(d&&(d.r||String(d.com||"").trim()||(d.accs||[]).length)) return {d,por:a.porNombre||""}; } return null; };
   (D.todosCasos||D.casos||[]).forEach(c=>{
+    const jefe=[], com=[];
     (c.historial||[]).forEach(h=>{ if(!h||!(Number(h.sem)===SEMANA||enSem(h.fecha))) return;
-      if(h.siguiente||h.hecho) add(c,{txt:h.siguiente||h.hecho,tipo:"acc",por:h.por||""});
-      else if(h.sistema&&ES_DEC.test(h.sistema)) add(c,{txt:h.sistema,tipo:"dec",por:h.por||""});
-      else if(h.sistema&&/^Instrucci/i.test(h.sistema)) add(c,{txt:h.sistema,tipo:"acc",por:h.por||""}); });
-    if(c.instruccion&&enSem(c.instruccionEn)) add(c,{txt:"📌 "+c.instruccion,tipo:"acc",por:c.instruccionPor||""});
-    (ESTS||[]).filter(e=>(e.casoId===c._id||U(e.clienteId)===U(c.cliente))&&enSem(e.fechaCreacion||e.fecha)).forEach(e=>add(c,{txt:"💶 Estrategia: "+(e.estrategia||"")+(e.estado?" · "+e.estado.replace(/_/g," "):""),tipo:"acc",por:e.creadoPor||""}));
+      if(h.siguiente||h.hecho) com.push({txt:h.siguiente||h.hecho,tipo:"acc",por:h.por||""});
+      else if(h.sistema&&/^📝/.test(h.sistema)) jefe.push({txt:h.sistema.replace(/^📝\s*/,""),tipo:"ok",por:h.por||""});
+      else if(h.sistema&&ES_DEC.test(h.sistema)) jefe.push({txt:h.sistema,tipo:"dec",por:h.por||""});
+      else if(h.sistema&&/^Instrucci/i.test(h.sistema)) jefe.push({txt:h.sistema,tipo:"ok",por:h.por||""}); });
+    if(c.instruccion&&enSem(c.instruccionEn)) jefe.push({txt:"📌 "+c.instruccion,tipo:"ok",por:c.instruccionPor||""});
+    const ac=actaDe(c); if(ac&&!jefe.some(x=>x.tipo==="ok"&&/Comité/.test(x.txt))){ const d=ac.d;
+      jefe.push({txt:"Comité: "+(OPS[d.r]||"")+(d.t?" · "+d.t:"")+(d.com?" · "+d.com:"")+(d.accs||[]).map(y=>" · ➕ "+y.que+(y.quien?" ("+y.quien+")":"")).join(""),tipo:"ok",por:ac.por}); }
+    if(!jefe.length) return;
+    com.forEach(x=>add(c,x)); jefe.forEach(x=>add(c,x));
   });
   const nCli=[...porCom.values()].reduce((t,v)=>t+v.cl.size,0), nAcc=[...porCom.values()].reduce((t,v)=>t+[...v.cl.values()].reduce((a,x)=>a+x.lineas.length,0),0);
-  if(!nCli) return '<p class="rcu-muted">Ninguna acción de recuperación registrada esta semana.</p>';
+  if(!nCli) return '<p class="rcu-muted">Ningún cliente revisado en comité esta semana.</p>';
   const cli=(c)=>'<a href="#" onclick="abrirFichaR(\''+esc2(c.cliente)+'\');return false" style="color:#0F172A;font-weight:800;text-decoration:none">'+escT(c.nombre||c.cliente)+'</a>'+(Number(c.perdido)?' <span style="color:#DC2626;font-weight:700;white-space:nowrap">−'+euT(c.perdido)+'</span>':'');
-  const linea=(x)=>x.tipo==="dec"?'<div style="font-size:13px;color:#1E40AF;margin-top:3px;padding-left:10px;border-left:3px solid #93C5FD">ℹ️ '+escT(x.txt)+(x.por?' <span class="rcu-muted">('+escT(x.por)+')</span>':'')+'</div>'
+  // Artículos que caen de ese cliente: código, descripción, calibre y metros, año pasado → este año (como en la ficha)
+  const prodsH=(c)=>{ let P=c.productos; if(typeof P==="string"){ try{ P=JSON.parse(P); }catch(e){ P=null; } } const L=((P&&P.caen)||[]).slice(0,4); if(!L.length) return "";
+    return '<div style="margin-top:3px;padding-left:10px">'+L.map(a=>{ const d=RC.descCM?RC.descCM(a):(a.desc||""); return '<div style="font-size:12px;color:#475569"><span style="font-family:ui-monospace,Menlo,monospace;font-weight:700;color:#0F172A">'+escT(a.art||"")+'</span> '+escT(d)+(a.cal&&!/cal\./.test(d)?' · cal. '+escT(a.cal):'')+(a.met&&!/\d\s?m\b/.test(d)?' · '+escT(a.met)+' m':'')
+      +' <span style="white-space:nowrap">'+euT(a.ant)+' → <b style="color:'+(Number(a.act)>0?"#B45309":"#C2263D")+'">'+euT(a.act)+'</b></span></div>'; }).join("")+'</div>'; };
+  // Situación de la incidencia (si la línea es una incidencia): estado, días y última respuesta del departamento
+  const sitInc=(c,txt)=>{ if(!/incidencia/i.test(txt)) return ""; const L=(D.incs||[]).filter(i=>!i.eliminada&&(i.casoId===c._id||U(i.clienteCodigo||i.clienteId)===U(c.cliente)));
+    const i=L.sort((a,b)=>String(b.fechaCreacion||"").localeCompare(String(a.fechaCreacion||"")))[0]; if(!i) return "";
+    const [t,col]=(RC.ESTADO_INC||{})[i.estado]||[i.estado||"",""], hilo=RC.hiloIncidencia?RC.hiloIncidencia(i):(i.historial||[]);
+    const ult=hilo.slice().reverse().find(h=>h&&(h.nota||h.accion)&&!/creada/i.test(h.accion||"")), dias=Math.floor((Date.now()-(Date.parse(i.fechaCreacion||"")||Date.now()))/86400000);
+    return '<div style="font-size:12.5px;margin-top:3px;padding-left:10px"><span style="font-weight:800;color:'+(col||"#64748B")+'">'+t+'</span> · '+dias+' día'+(dias===1?"":"s")
+      +(ult?' · última respuesta: <b>'+escT(ult.por||"")+'</b> '+escT(ult.fecha||"")+(ult.nota?' — '+escT(String(ult.nota).slice(0,160)):ult.accion?' — '+escT(ult.accion):''):' · <span style="color:#B45309">sin respuesta del departamento</span>')+'</div>'; };
+  const linea=(x,c)=>x.tipo==="ok"?'<div style="font-size:13px;color:#0F172A;margin-top:3px;padding-left:10px;border-left:3px solid #0F172A">📝 '+escT(x.txt)+(x.por?' <span class="rcu-muted">('+escT(x.por)+')</span>':'')+'</div>'+sitInc(c,x.txt):x.tipo==="dec"?'<div style="font-size:13px;color:#1E40AF;margin-top:3px;padding-left:10px;border-left:3px solid #93C5FD">ℹ️ '+escT(x.txt)+(x.por?' <span class="rcu-muted">('+escT(x.por)+')</span>':'')+'</div>'+sitInc(c,x.txt)
     :'<div style="font-size:13.5px;color:#14532D;margin-top:3px;padding-left:10px;border-left:3px solid #16A34A">'+escT(x.txt)+'</div>';
-  RC.UI.css();
+  RC.UI.css(); if(RC.cargarCalMet&&!RC._cm&&!window._cmPed){ window._cmPed=1; RC.cargarCalMet().then(()=>pintar()).catch(()=>{}); }
   const tarjetas=[...porCom.entries()].map(([k,v])=>{ const L=[...v.cl.values()].sort((a,b)=>(Number(b.c.perdido)||0)-(Number(a.c.perdido)||0)), ab=!RJ_AB.has("c_"+k);
     return {n:L.length,h:'<div class="rcu-card"><div class="rcu-cab" onclick="rjTog(\'c_'+esc2(k)+'\')"><div style="flex:1;min-width:0"><b style="font-size:15px">'+escT(v.nombre)+'</b>'
-      +'<div class="rcu-muted">'+L.length+' cliente'+(L.length===1?"":"s")+' con acción esta semana</div></div><span style="color:#64748B;font-size:18px;width:16px;text-align:center">'+(ab?"▾":"›")+'</span></div>'
-      +(ab?'<div style="padding:0 15px 10px">'+L.map(x=>'<div style="padding:8px 0;border-top:1px solid #F1F5F9"><div>'+cli(x.c)+'</div>'+x.lineas.map(linea).join("")+'</div>').join("")+'</div>':'')+'</div>'}; })
+      +'<div class="rcu-muted">'+L.length+' cliente'+(L.length===1?"":"s")+' revisado'+(L.length===1?"":"s")+' en comité</div></div><span style="color:#64748B;font-size:18px;width:16px;text-align:center">'+(ab?"▾":"›")+'</span></div>'
+      +(ab?'<div style="padding:0 15px 10px">'+L.map(x=>'<div style="padding:8px 0;border-top:1px solid #F1F5F9"><div>'+cli(x.c)+'</div>'+prodsH(x.c)+x.lineas.map(y=>linea(y,x.c)).join("")+'</div>').join("")+'</div>':'')+'</div>'}; })
     .sort((a,b)=>b.n-a.n).map(t=>t.h).join("");
-  return '<div style="font-size:13.5px;margin-bottom:10px"><b>'+nAcc+' acciones de recuperación esta semana</b> en '+nCli+' cliente'+(nCli===1?"":"s")+'. Toca el nombre del cliente para ver su ficha.</div>'+tarjetas;
+  return '<div style="font-size:13.5px;margin-bottom:10px"><b>'+nAcc+' decisiones de recuperación esta semana</b> en '+nCli+' cliente'+(nCli===1?"":"s")+' revisado'+(nCli===1?"":"s")+' en comité. Toca el nombre del cliente para ver su ficha.</div>'+tarjetas;
 }
 function seccionRiesgo(){
   const D=PASOS_DATA||{}; if(!D.casos) return {d:"Comprobando…",c:""};
