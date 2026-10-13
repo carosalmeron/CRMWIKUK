@@ -94,6 +94,7 @@
 <script src="/promo_cierre.js?v=20261008c"></script>
 <script src="/seguimiento_comun.js?v=20261004a"></script>
 <script src="/firma_comun.js?v=20261004a"></script>
+<script src="/agentes.js?v=20261013b"></script>
 <script>
 const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
 const P=new URLSearchParams(location.search);
@@ -3053,7 +3054,7 @@ async function enviar(){
     _svErr("falta el comercial"); return; }
   try{
     // (oct 2026) Progreso visible: qué se está leyendo y cuánto falta (antes solo ponía «Leyendo…»)
-    const _NOMS=["ventas","clientes","meses","muestras","ofertas","estrategias","estacionalidad","objetivos","pedidos","perfiles","usuarios del portal","usuarios","visitas","objetivos del equipo"];
+    const _NOMS=["ventas","clientes","meses","muestras","ofertas","estrategias","estacionalidad","objetivos","pedidos","perfiles","usuarios del portal","usuarios","visitas","objetivos del equipo","códigos del comercial"];
     let _hechas=0; const _t0=Date.now(), _faltan=new Set(_NOMS);
     const _pinta=()=>{ const el=document.getElementById("app"); if(!el||window._MONTADO) return;
       el.innerHTML=`<div class="estado">Leyendo tus datos… <b>${_hechas} de ${_NOMS.length}</b> · ${Math.round((Date.now()-_t0)/1000)} s
@@ -3070,6 +3071,8 @@ async function enviar(){
       // (sep 2026) Objetivos de actividad del equipo, para poder decirle al
       // comercial cuantas visitas y llamadas le tocaban, no solo cuantas hizo.
       leer("objetivos_equipo"),
+      // (oct 2026) Tabla de alias de comerciales (agentes_alias): "CARLOS G." en Power BI es "CARLOSG" en el CRM
+      (window.Agentes?Agentes.cargar().catch(()=>null):Promise.resolve(null)),
     ];
     const [res,cli,mesesRaw,mu,of,es,estac,objs,peds,perf,portal,usus,vis,objAct]=await Promise.all(_lista.map(_p));
     clearInterval(_tick);
@@ -3085,16 +3088,30 @@ async function enviar(){
       sp.parentNode.appendChild(a); } }
     // (oct 2026) Si no está en el resumen de ventas del PBI (comercial nuevo, o sus ventas van con otro
     // código) ya NO se bloquea el cierre: se busca por sus otros códigos y, si no, se cierra con cifras a 0.
-    const _alias=new Set([AGENTE,ARR(UID)]);
+    // (oct 2026) TODAS las claves del comercial, antes de buscar nada: el código de la URL, los alternativos
+    // que manda el hub, la tabla agentes_alias (con la grafía de origen: "CARLOS G." además de "CARLOSG"),
+    // sus perfiles del CRM y sus fichas del portal. Las cifras (ventas, estacionalidad, objetivos, cobros) y
+    // sus clientes se buscan con cualquiera de ellas, y además sin distinguir puntos, espacios ni acentos.
+    // Antes solo se buscaba con el código exacto de la URL: un comercial que en Power BI va como
+    // "CARLOS G." y en el CRM como "CARLOSG" salía con 0 € en todo (mes, semana, cobros, máximo de cobro).
+    const NRM=(s)=>ARR(s).normalize("NFD").replace(/[̀-ͯ]/g,"").replace(/[^A-Z0-9]/g,"");
+    const FIJOS=/^(wk|ik)\d+$/i;   // ids compartidos del portal: no sirven para enlazar fichas de personas distintas
+    const CLAVES=new Set([AGENTE,ARR(UID),...String(P.get("alt")||"").split(",").map(ARR)].filter(Boolean));
+    try{ if(window.Agentes&&Agentes.cargado) (Agentes.originales?Agentes.originales(AGENTE):Agentes.alias(AGENTE)).forEach(a=>{ if(a) CLAVES.add(ARR(a)); }); }catch(e){}
+    const CLAVESN=new Set([...CLAVES].map(NRM));
+    const esClave=(v)=>{ if(!v) return false; const u=ARR(v); return CLAVES.has(u)||CLAVESN.has(NRM(u)); };
+    perf.forEach(x=>{ if(esClave(x.agente)) CLAVES.add(ARR(x._id)); });
     [...portal,...usus].forEach(f=>{ const ks=[f.grupoAgente,f.catalogoVendedor,f.crmId,f._id,f.id,f.username].filter(Boolean).map(ARR);
-      if(ks.some(k=>_alias.has(k))) ks.forEach(k=>_alias.add(k)); });
-    let yo=res.find(a=>ARR(a._id)===AGENTE)||res.find(a=>_alias.has(ARR(a._id))||_alias.has(ARR(a.agente||"")));
+      if(ks.some(k=>!FIJOS.test(k)&&esClave(k))) ks.forEach(k=>{ if(!FIJOS.test(k)) CLAVES.add(k); }); });
+    [...CLAVES].forEach(k=>CLAVESN.add(NRM(k)));
+    let yo=res.find(a=>ARR(a._id)===AGENTE)||res.find(a=>esClave(a._id)||esClave(a.agente));
     if(!yo){
-      const fu=[...portal,...usus].find(f=>[f.grupoAgente,f.catalogoVendedor,f.crmId,f._id,f.id].filter(Boolean).map(ARR).some(k=>_alias.has(k)))||{};
+      const fu=[...portal,...usus].find(f=>[f.grupoAgente,f.catalogoVendedor,f.crmId,f._id,f.id].filter(Boolean).some(k=>esClave(k)))||{};
       yo={_id:AGENTE,agente:AGENTE,nombre:P.get("nombre")||fu.nombre||AGENTE,equipo:String(P.get("equipo")||fu.equipo||"").toUpperCase(),
         reportaA:fu.reportaA||"",ventasAct:0,ventasAntYTD:0,ventasAntFull:0,margenPctAct:0,objetivoMargen:0,ventasSem:0,ventasSemAnt:0,_sinResumen:true};
       window._SIN_RESUMEN=true;
-    }
+    } else { CLAVES.add(ARR(yo._id)); if(yo.agente) CLAVES.add(ARR(yo.agente)); [ARR(yo._id),ARR(yo.agente)].forEach(k=>{ if(k) CLAVESN.add(NRM(k)); }); }
+    window._CLAVES=CLAVES; window._esClave=esClave;
 
     // Meses por cliente, para el aviso temprano
     const mes={};
@@ -3114,21 +3131,11 @@ async function enviar(){
     });
     const esMio=(o)=>MIOS.has(ARR(o.agente||o.autor||o.comercial));
     window._MIOS=MIOS;
-    // (oct 2026) Todas sus claves juntas (código de vendedor, perfiles del CRM, fichas del portal, el id con el
-    // que está en el resumen de Power BI y los códigos alternativos que manda el hub): las cifras de ventas se
-    // buscan con cualquiera de ellas. Antes solo con AGENTE y un comercial cuyo código en Power BI no coincidía
-    // salía con 0 € en el mes y en la semana aunque Power BI tuviera ventas.
-    const CLAVES=new Set([...MIOS,ARR(yo._id),ARR(yo.agente),...String(P.get("alt")||"").split(",").map(ARR)].filter(Boolean));
-    { // Un salto por sus fichas, pero sin usar como enlace los ids compartidos del portal (wk1, ik1…): por ahí se colarían las claves de otra persona
-      const FIJOS=/^(wk|ik)\d+$/i;
-      [...portal,...usus].forEach(f=>{ const ks=[f.grupoAgente,f.catalogoVendedor,f.crmId,f._id,f.id,f.username].filter(Boolean).map(ARR);
-        if(ks.some(k=>!FIJOS.test(k)&&CLAVES.has(k))) ks.forEach(k=>{ if(!FIJOS.test(k)) CLAVES.add(k); }); }); }
-    window._CLAVES=CLAVES;
 
-    // Sus clientes
+    // Sus clientes (con cualquiera de sus claves y sin distinguir grafías)
     const mios=cli.filter(c=>{
       const ok=c.cuenta!==undefined?c.cuenta:(!c.intercompany&&!c.fusionadoEn);
-      return ok && ARR(c.agenteFinal||c.agente)===AGENTE;
+      return ok && esClave(c.agenteFinal||c.agente);
     });
     window._MIS_CLIS=mios.map(c=>({cod:c._id,nom:c.nombre||c.clienteNombre||c._id})).sort((x,y)=>String(x.nom).localeCompare(String(y.nom)));
 
