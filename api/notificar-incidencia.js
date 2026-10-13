@@ -905,7 +905,7 @@ async function datosCEO(anio,sem){
     const rol=String(u.rol||"").toLowerCase();
     // (oct 2026) Un jefe de equipo que además vende (Esther) cuenta como comercial: con código de vendedor
     // o con «sí entrega parte». Se confirma más abajo con que tenga parte o ventas; si no, fuera.
-    const esJefeVende=["jefe","crm_jefe"].includes(rol)&&(u.grupoAgente||String(u.entregaParte||"").toLowerCase()==="si");
+    const esJefeVende=["jefe","crm_jefe"].includes(rol)&&String(u.entregaParte||"").toLowerCase()!=="no";
     if(!["agente","crm_agente","comercial","vendedor"].includes(rol)&&!esJefeVende) return;
     if(u.activo===false) return;
     const pos=[u.id,u._id,u.crmId,u.grupoAgente,u.catalogoVendedor,u.username,u.nombre].filter(Boolean);
@@ -936,7 +936,7 @@ async function datosCEO(anio,sem){
   // (oct 2026) Misma regla que el portal «Cierre de la semana»: fuera quien NO entrega parte
   // («no reporta»), el personal de departamento y quien no tiene código de vendedor (salvo que
   // esté marcado que sí entrega). Antes aparecían en «Comerciales que no llegan» con 0/56.
-  const gente=Object.values(map).filter(g=>g.equipo&&!(g.noEntrega&&!g.siEntrega)&&!g.tipDep&&(g.conCodigo||g.siEntrega));
+  const gente=Object.values(map).filter(g=>g.equipo&&!(g.noEntrega&&!g.siEntrega)&&!g.tipDep&&(g.conCodigo||g.siEntrega||g.jefeVende));
 
   // Jefes por equipo, para el nombre en la tarjeta
   const jefes={};
@@ -960,6 +960,55 @@ async function datosCEO(anio,sem){
     vis:0,lla:0,mEnv:0,mOk:0,mKo:0,mPend:0,mOkAnt:0,mResAnt:0,objVis:0,objLla:0,objMue:0,objMueOk:0,
     rechazos:[],sinResp:[],peor:[]};
 
+  // (oct 2026) Cobros de una persona (sacado a función para poder dar los cobros también a quien no entrega parte)
+  const llenarCobros=(p,g,E)=>{
+    const c=suyo(cob,g);
+    p.cobFecha=String(c.fechaDatos||c.actualizado||"").slice(0,10);
+    try{
+      const vistasF=new Set();   // (sep 2026) la misma factura repetida solo cuenta una vez
+      const datosC=JSON.parse(c.datos||"[]");
+      // Total de cada factura (todos sus plazos, vencidos o no), para mostrarlo junto a lo vencido
+      const totFac={};
+      for(const cli of datosC){ const vis=new Set(); for(const f of (cli.f||[])){ if(!f.n) continue;
+        const kk=(cli.c||"")+"|"+f.n+"|"+f.fv+"|"+f.im; if(vis.has(kk)) continue; vis.add(kk);
+        const kt=(cli.c||"")+"|"+f.n; totFac[kt]=(totFac[kt]||0)+numC(f.im); } }
+      for(const cli of datosC) for(const f of (cli.f||[])){
+        const corte=p.cobFecha||hoyISO;   // (sep 2026) a la fecha del Excel, como Administración
+        if(!f.fv||f.fv>=corte) continue;
+        const kf=(cli.c||"")+"|"+(f.n||"")+"|"+f.fv+"|"+f.im;
+        if(f.n&&vistasF.has(kf)) continue; vistasF.add(kf);
+        const im=numC(f.im); p.cobros+=im; p.nFacV++;
+        const dias=Math.round((new Date(corte+"T12:00:00Z").getTime()-new Date(f.fv+"T12:00:00Z").getTime())/86400000);
+        (p.facV=p.facV||[]).push({cli:cli.c||"",n:f.n||"",ff:f.ff||"",fv:f.fv,im,dias,g:f.g||"",tot:numC(f.tf)||(f.n?totFac[(cli.c||"")+"|"+f.n]:im)});   // tf = TOTAL FACTURA del Excel (WIKUK)
+        if(dias<=30) G.t30+=im; else if(dias<=60) G.t60+=im; else if(dias<=90) G.t90+=im; else G.t90mas+=im;
+        G.peor.push({cli:cli.c||"",im,dias,quien:g.nombre});
+      }
+    }catch(err){ p.cobros=numC(c.totalVencido); }
+    // (sep 2026) Con la pestaña TODOS el vencido oficial es el de Administración;
+    // las facturas siguen sirviendo para el listado.
+    if(c.fuente==="TODOS"){
+      // (sep 2026) Solo pestaña TODOS: no hay facturas, hay saldo por cliente y
+      // empresa con fuera de plazo, +20 y >70 días. Una línea por cliente y
+      // empresa con importe fuera de plazo.
+      p.cobros=numC(c.totalVencido); p.nFacV=0; p.facV=[]; G.todos=true;
+      let dC=[]; try{ dC=JSON.parse(c.datos||"[]"); }catch(e){}
+      const corteT=p.cobFecha||hoyISO;
+      for(const cli of dC) for(const [gE,eE] of Object.entries(cli.emp||{})){
+        const v=numC(eE.ven), v2=numC(eE.v20), v7=numC(eE.v70);
+        if(v<1){ if(v<=-1) p.saldoNeg=(p.saldoNeg||0)+v; continue; }   // (oct 2026) saldos a favor: no salen en la lista pero restan del total
+        const dias=v7>=1?71:v2>=1?21:0, tramo=v7>=1?"más de 70 días":v2>=1?"+20 días":"menos de 20 días";
+        // Con facturas: las vencidas de ese cliente y empresa (nº, fecha, vencimiento)
+        const L=(cli.f||[]).filter(f=>f.g===gE&&f.fv&&f.fv<corteT);
+        if(L.length) L.forEach(f=>{ p.nFacV++;
+          p.facV.push({cli:cli.c||"",n:f.n||"",g:gE,ff:f.ff||"",fv:f.fv,im:numC(f.im),tot:numC(f.tf)||numC(f.im),
+            dias:Math.round((new Date(corteT+"T12:00:00Z")-new Date(f.fv+"T12:00:00Z"))/86400000)}); });
+        else { p.nFacV++;
+          p.facV.push({cli:cli.c||"",n:gE,g:gE,saldo:true,fv:"",ff:"",im:v,tot:numC(eE.p),v20:v2,v70:v7,dias,tramo}); }
+        G.tV=(G.tV||0)+v; G.t20=(G.t20||0)+v2; G.t70=(G.t70||0)+v7;
+        G.peor.push({cli:cli.c||"",im:v,dias,tramo,quien:g.nombre});
+      }
+    }
+  };
   for(const g of gente){
     const E=equipos[g.equipo]||(equipos[g.equipo]={eq:g.equipo,jefe:jefes[g.equipo]||"",
       gente:[],vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,vis:0,lla:0,mEnv:0,mOk:0,mKo:0,
@@ -967,7 +1016,11 @@ async function datosCEO(anio,sem){
     // ¿Ha cerrado? informes de esa semana suyos
     const suInf=inf.filter(i=>numC(i.semana)===sem&&(A.mismo(i.agente,g.cod)||A.mismo(i.agente,g.id)));
     // Jefe que vende: solo si de verdad hace parte de comercial o tiene ventas en Power BI
-    if(g.jefeVende&&!g.siEntrega&&!suInf.some(i=>i.tipo!=="responsable"&&!/jefe/i.test(i.rol||""))&&!numC((suyo(res,g)||{}).ventasAct)) continue;
+    // (se queda si: «sí entrega parte», o tiene un parte de comercial esta semana o alguna reciente, o tiene ventas en Power BI)
+    if(g.jefeVende&&!g.siEntrega){
+      const parteCom=(i)=>i.tipo!=="responsable"&&i.estado!=="ausente"&&(A.mismo(i.agente,g.cod)||A.mismo(i.agente,g.id));
+      const tieneParte=suInf.some(parteCom)||inf.some(i=>parteCom(i)&&numC(i.semana)>=sem-4);
+      if(!tieneParte&&!numC((suyo(res,g)||{}).ventasAct)){ (G.jefesFuera=G.jefesFuera||[]).push(g.nombre+" ("+g.cod+"): sin parte de comercial ni ventas"); continue; } }
     const ausente=suInf.some(i=>i.estado==="ausente"||i.ausente===true);
     if(ausente){ E.aus++; E.gente.push({...g,ausente:true,motivo:(suInf.find(i=>i.ausenteMotivo)||{}).ausenteMotivo||"Ausente"}); continue; }
     if(suInf.length) E.cerr++; else if(g.entrega!=="no") E.sinCerrar.push(g.nombre);
@@ -1016,52 +1069,7 @@ async function datosCEO(anio,sem){
       const f=ag.find(x=>A.mismo(x.id||x.agente,g.cod)||A.mismo(x.id||x.agente,g.id));
       if(f&&p.objSem&&numC(f.ventasSem)<p.objSem*0.5) p.semMal++; else break;
     }
-    const c=suyo(cob,g);
-    p.cobFecha=String(c.fechaDatos||c.actualizado||"").slice(0,10);
-    try{
-      const vistasF=new Set();   // (sep 2026) la misma factura repetida solo cuenta una vez
-      const datosC=JSON.parse(c.datos||"[]");
-      // Total de cada factura (todos sus plazos, vencidos o no), para mostrarlo junto a lo vencido
-      const totFac={};
-      for(const cli of datosC){ const vis=new Set(); for(const f of (cli.f||[])){ if(!f.n) continue;
-        const kk=(cli.c||"")+"|"+f.n+"|"+f.fv+"|"+f.im; if(vis.has(kk)) continue; vis.add(kk);
-        const kt=(cli.c||"")+"|"+f.n; totFac[kt]=(totFac[kt]||0)+numC(f.im); } }
-      for(const cli of datosC) for(const f of (cli.f||[])){
-        const corte=p.cobFecha||hoyISO;   // (sep 2026) a la fecha del Excel, como Administración
-        if(!f.fv||f.fv>=corte) continue;
-        const kf=(cli.c||"")+"|"+(f.n||"")+"|"+f.fv+"|"+f.im;
-        if(f.n&&vistasF.has(kf)) continue; vistasF.add(kf);
-        const im=numC(f.im); p.cobros+=im; p.nFacV++;
-        const dias=Math.round((new Date(corte+"T12:00:00Z").getTime()-new Date(f.fv+"T12:00:00Z").getTime())/86400000);
-        (p.facV=p.facV||[]).push({cli:cli.c||"",n:f.n||"",ff:f.ff||"",fv:f.fv,im,dias,g:f.g||"",tot:numC(f.tf)||(f.n?totFac[(cli.c||"")+"|"+f.n]:im)});   // tf = TOTAL FACTURA del Excel (WIKUK)
-        if(dias<=30) G.t30+=im; else if(dias<=60) G.t60+=im; else if(dias<=90) G.t90+=im; else G.t90mas+=im;
-        G.peor.push({cli:cli.c||"",im,dias,quien:g.nombre});
-      }
-    }catch(err){ p.cobros=numC(c.totalVencido); }
-    // (sep 2026) Con la pestaña TODOS el vencido oficial es el de Administración;
-    // las facturas siguen sirviendo para el listado.
-    if(c.fuente==="TODOS"){
-      // (sep 2026) Solo pestaña TODOS: no hay facturas, hay saldo por cliente y
-      // empresa con fuera de plazo, +20 y >70 días. Una línea por cliente y
-      // empresa con importe fuera de plazo.
-      p.cobros=numC(c.totalVencido); p.nFacV=0; p.facV=[]; G.todos=true;
-      let dC=[]; try{ dC=JSON.parse(c.datos||"[]"); }catch(e){}
-      const corteT=p.cobFecha||hoyISO;
-      for(const cli of dC) for(const [gE,eE] of Object.entries(cli.emp||{})){
-        const v=numC(eE.ven), v2=numC(eE.v20), v7=numC(eE.v70);
-        if(v<1){ if(v<=-1) p.saldoNeg=(p.saldoNeg||0)+v; continue; }   // (oct 2026) saldos a favor: no salen en la lista pero restan del total
-        const dias=v7>=1?71:v2>=1?21:0, tramo=v7>=1?"más de 70 días":v2>=1?"+20 días":"menos de 20 días";
-        // Con facturas: las vencidas de ese cliente y empresa (nº, fecha, vencimiento)
-        const L=(cli.f||[]).filter(f=>f.g===gE&&f.fv&&f.fv<corteT);
-        if(L.length) L.forEach(f=>{ p.nFacV++;
-          p.facV.push({cli:cli.c||"",n:f.n||"",g:gE,ff:f.ff||"",fv:f.fv,im:numC(f.im),tot:numC(f.tf)||numC(f.im),
-            dias:Math.round((new Date(corteT+"T12:00:00Z")-new Date(f.fv+"T12:00:00Z"))/86400000)}); });
-        else { p.nFacV++;
-          p.facV.push({cli:cli.c||"",n:gE,g:gE,saldo:true,fv:"",ff:"",im:v,tot:numC(eE.p),v20:v2,v70:v7,dias,tramo}); }
-        G.tV=(G.tV||0)+v; G.t20=(G.t20||0)+v2; G.t70=(G.t70||0)+v7;
-        G.peor.push({cli:cli.c||"",im:v,dias,tramo,quien:g.nombre});
-      }
-    }
+    llenarCobros(p,g,E);
     for(const v of vis){
       if(v.eliminada||!enSem(fechaDocC(v))||!deQuien(v,g)) continue;
       if(/llamada|no_contesta/i.test(String(v.resultado||v.tipo||""))) p.lla++; else p.vis++;
@@ -1097,6 +1105,24 @@ async function datosCEO(anio,sem){
     for(const k of ["vSem","objSem","mAct","mObj","cobros","vis","lla","mEnv","mOk"]) E[k]+=p[k];
     for(const k of ["pedSem","pedMes","prevMes"]) E[k]=(E[k]||0)+(p[k]||0);
     for(const k of ["vSem","objSem","mAct","mObj","cobros","nFacV","vis","lla","mEnv","mOk"]) G[k]+=p[k];
+  }
+  // (oct 2026) Los cobros son de TODOS los que tienen vencido, tengan o no obligación de hacer parte (jefes,
+  // «no entrega parte», ausentes, fichas genéricas). Entran como personas «solo cobros»: cuentan en Cobros y en
+  // nada más (ventas, actividad y muestras los ignoran).
+  for(const c of cob){
+    const cod=String(c._id||""); if(!cod||cod==="_TOTAL"||!(numC(c.totalVencido)>=1)) continue;
+    const ya=Object.values(equipos).some(E=>E.gente.some(p=>A.mismo(cod,p.cod)||A.mismo(cod,p.id)||(p.ausente&&(A.mismo(cod,p.cod)||A.mismo(cod,p.id)))));
+    if(ya) continue;
+    const f=[...us,...pu].find(u=>[u.grupoAgente,u.catalogoVendedor,u.crmId,u._id,u.id,u.username].some(k=>k&&A.mismo(k,cod)))||{};
+    const r=res.find(x=>A.mismo(x._id,cod))||{};
+    const eq=UC(c.equipo||f.equipo||r.equipo||A.equipo(cod)||"");
+    if(!eq||/FRANC|DISTRIB/i.test(eq)) continue;
+    const g2={id:cod,cod,nombre:f.nombre||(A.nombre(cod)!==cod?A.nombre(cod):"")||r.agente||cod,equipo:eq,soloCobros:true};
+    const E=equipos[eq]||(equipos[eq]={eq,jefe:jefes[eq]||"",gente:[],vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,vis:0,lla:0,mEnv:0,mOk:0,mKo:0,cerr:0,aus:0,sinCerrar:[]});
+    const p={...g2,vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,nFacV:0,vis:0,lla:0,mEnv:0,mOk:0,mKo:0,mEnvA:0,mOkA:0,mKoA:0,m60:[],mAb:[],k:null};
+    const e2=suyo(estac,g2); p.v2m=[mNum-1,mNum-2].reduce((t,k)=>t+(k>=1?numC(e2["act_"+k]):numC(e2["mes_"+(k+12)])),0); p.limite=p.v2m*0.05;
+    try{ llenarCobros(p,g2,E); }catch(e){ continue; }
+    E.gente.push(p); E.cobros+=p.cobros; G.cobros+=p.cobros; G.nFacV+=p.nFacV;
   }
 
   // Objetivos de actividad por equipo (mensual -> semana -> por cabeza)
@@ -1499,10 +1525,10 @@ module.exports = async function handler(req, res){
       const hoyP=isoSemanaC(new Date());
       const anioP=Number(req.query.anio)||hoyP.anio, semP=Number(req.query.semana)||hoyP.sem;
       const D=await datosCEO(anioP,semP);
-      const campos=["id","cod","nombre","equipo","ausente","motivo","vSem","sinDatoSem","objSem","mAct","mObj","mAnt","pedSem","pedMes","prevMes","sinDatoPed","pedFuente","vMes","vis","lla","mEnv","mOk","mKo",
+      const campos=["id","cod","nombre","equipo","ausente","motivo","vSem","sinDatoSem","objSem","mAct","mObj","mAnt","soloCobros","pedSem","pedMes","prevMes","sinDatoPed","pedFuente","vMes","vis","lla","mEnv","mOk","mKo",
         "mEnvA","mOkA","mKoA","m60","mAb","obj","cobros","nFacV","limite","k","nota","facV","cobFecha"];
       res.setHeader("Cache-Control","no-store");
-      res.status(200).json({ok:true,sem:D.sem,anio:D.anio,mNum:D.mNum,
+      res.status(200).json({ok:true,sem:D.sem,anio:D.anio,mNum:D.mNum,jefesFuera:(D.G&&D.G.jefesFuera)||[],
         equipos:D.equipos.map(E=>({eq:E.eq,jefe:E.jefe,obj:E.obj,cerr:E.cerr,aus:E.aus,sinCerrar:E.sinCerrar,
           gente:E.gente.map(p=>{ const o={}; campos.forEach(k=>{ if(p[k]!==undefined) o[k]=p[k]; }); return o; })}))});
       return;
