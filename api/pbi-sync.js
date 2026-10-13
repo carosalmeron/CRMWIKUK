@@ -2060,6 +2060,7 @@ EVALUATE
           nombre: f.nombre || g.cliente,
           poblacion: f.poblacion || null,
           agente: agentes.get(g.ven) || null,
+          vendedor: g.ven || null,   // (oct 2026) código de vendedor: el parte lo usa cuando GRUPOAGENTE no resuelve
           ventasAct: num(g.act),
           ventasAnt: num(g.ant),
           diferencia: num(g.act - g.ant),
