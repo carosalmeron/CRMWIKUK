@@ -1117,7 +1117,10 @@ async function datosCEO(anio,sem){
     const r=res.find(x=>A.mismo(x._id,cod))||{};
     const eq=UC(c.equipo||f.equipo||r.equipo||A.equipo(cod)||"");
     if(!eq||/FRANC|DISTRIB/i.test(eq)) continue;
-    const g2={id:cod,cod,nombre:f.nombre||(A.nombre(cod)!==cod?A.nombre(cod):"")||r.agente||cod,equipo:eq,soloCobros:true};
+    const nombre=f.nombre||(A.nombre(cod)!==cod?A.nombre(cod):"")||r.agente||cod;
+    // Fuera canales e intercompañía (Intercompany, Clientes Global, Drimano…): no son personas
+    if(esCanal(cod)||esCanal(nombre)||/INTERC|CLIENTES?\s*GLOBAL|DRIMANO/i.test(cod+" "+nombre)) continue;
+    const g2={id:cod,cod,nombre,equipo:eq,soloCobros:true};
     const E=equipos[eq]||(equipos[eq]={eq,jefe:jefes[eq]||"",gente:[],vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,vis:0,lla:0,mEnv:0,mOk:0,mKo:0,cerr:0,aus:0,sinCerrar:[]});
     const p={...g2,vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,nFacV:0,vis:0,lla:0,mEnv:0,mOk:0,mKo:0,mEnvA:0,mOkA:0,mKoA:0,m60:[],mAb:[],k:null};
     const e2=suyo(estac,g2); p.v2m=[mNum-1,mNum-2].reduce((t,k)=>t+(k>=1?numC(e2["act_"+k]):numC(e2["mes_"+(k+12)])),0); p.limite=p.v2m*0.05;
