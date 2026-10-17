@@ -2700,6 +2700,10 @@ ${med.join(",\n")}
       const sem = isoSemana(ahora);
       const resumen = await fbLeerColeccion("pbi_resumen_agente");
       const vivos = resumen.filter((a) => a._id !== "_TOTAL");
+      // (oct 2026) También la entrada de pedidos de la semana (introducidos, del mes y por servir): sin congelarla,
+      // el cierre del jefe de la semana pasada no podía enseñar los pedidos de esa semana.
+      let entradaDe = {};
+      try { for (const e of await fbLeerColeccion("pbi_entrada_agente")) entradaDe[String(e._id).toUpperCase()] = e; } catch (e) {}
 
       const CAMPOS = ["agente", "equipo", "tipo", "objetivoMargen",
         "ventasSem", "ventasSemAnt", "margenSem", "baseSem",
@@ -2709,6 +2713,8 @@ ${med.join(",\n")}
       const foto = vivos.map((a) => {
         const o = { id: a._id };
         for (const c of CAMPOS) if (a[c] !== undefined && a[c] !== null) o[c] = a[c];
+        const en = entradaDe[String(a._id).toUpperCase()];
+        if (en) { o.entradaSem = num(en.entradaSem); o.entradaMes = num(en.entradaMes); o.previstoMes = num(en.previstoMes); }
         return o;
       });
 
@@ -3135,18 +3141,38 @@ ${med.join(",\n")}
           "EVALUATE INFO.COLUMNS()",
         ],
       };
-      for (const [k, lista] of Object.entries(variantes)) {
+      // (oct 2026) &solo=tablas → solo la lista de nombres de tabla (corta); &buscar=PEDIDO → además,
+      // las tablas que tienen alguna columna con ese texto. Sin esto la respuesta pasaba de 1 MB y se cortaba.
+      const solo = String(req.query.solo || "");
+      const pide = solo ? Object.fromEntries(Object.entries(variantes).filter(([k]) => solo === k || (solo === "tablas" && (k === "tablas" || (req.query.buscar && k === "columnas"))))) : variantes;
+      for (const [k, lista] of Object.entries(pide)) {
         const fallos = [];
         for (const q of lista) {
           try {
             const filas = await pbiQuery(token, q);
-            out[k] = { consultaQueFunciono: q, filas: filas.slice(0, 400) };
+            out[k] = { consultaQueFunciono: q, filas: filas.slice(0, solo ? 5000 : 400) };
             break;
           } catch (e) {
             fallos.push(`${q.slice(0, 40)} -> ${e.message.slice(0, 120)}`);
           }
         }
         if (!out[k]) out[k] = { error: "ninguna variante funciono", intentos: fallos };
+      }
+      if (solo === "tablas" && out.tablas && out.tablas.filas) {
+        const nom = (r) => pick(r, "Name") || r["[Name]"] || "";
+        const idDe = (r) => pick(r, "ID") || r["[ID]"];
+        const tablas = out.tablas.filas.map((r) => ({ id: idDe(r), nombre: nom(r), oculta: !!(pick(r, "IsHidden") || r["[IsHidden]"]) }));
+        if (req.query.buscar && out.columnas && out.columnas.filas) {
+          const q = String(req.query.buscar).toUpperCase();
+          const cols = out.columnas.filas.map((r) => ({ tabla: pick(r, "TableID") || r["[TableID]"], col: pick(r, "ExplicitName") || r["[ExplicitName]"] || pick(r, "Name") || r["[Name]"] || "" }))
+            .filter((c) => String(c.col).toUpperCase().includes(q));
+          const porTabla = {};
+          for (const c of cols) (porTabla[c.tabla] = porTabla[c.tabla] || []).push(c.col);
+          out.coincidencias = tablas.filter((t) => porTabla[t.id]).map((t) => ({ tabla: t.nombre, columnas: porTabla[t.id] }));
+        }
+        out.tablas = tablas.filter((t) => !t.oculta).map((t) => t.nombre).sort();
+        delete out.columnas;
+        out.total = out.tablas.length;
       }
     } catch (e) {
       return res.status(500).json({ ok: false, error: e.message });
