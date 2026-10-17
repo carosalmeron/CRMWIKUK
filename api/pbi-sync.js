@@ -2692,6 +2692,112 @@ ${med.join(",\n")}
   // ?cierre=1 → congela la foto de la semana. pbi_resumen_agente solo guarda
   // la semana en curso y se pisa cada mañana: sin esto no hay forma de mirar
   // atras. No toca Power BI.
+  // ═══════════════════════════════════════════════════════════════════════
+  // (oct 2026) PEDIDOS SAP → Firestore. La tabla trae cada LÍNEA de pedido con
+  // fecha de pedido (DocDate), cliente, vendedor (SlpName), artículo, unidades
+  // pedidas y pendientes (OpenQty), importe de línea, fecha planificada de
+  // entrega y el estado de la solicitud a fábrica (U_UC_Solicitud / Estado).
+  //   ?pedidosSap=1            → sincroniza (escribe pedidos_sap_agente, pedidos_sap_cliente, pedidos_sap_semanas)
+  //   ?pedidosSap=1&dry=1      → solo calcula y enseña el resumen (no escribe)
+  //   ?pedidosSap=1&desde=2026-01-01 → desde esa fecha de pedido (por defecto, 1 de enero del año)
+  // Vendedor → comercial del CRM: tabla pedidos_sap_vendedores/{SlpCode} {agente:"CARLOSG"}; si no
+  // hay, se intenta por nombre con la tabla de alias; lo que no case sale en «sinMapear» para rellenarlo.
+  if (req.query.pedidosSap === "1") {
+    const t1 = Date.now();
+    const out = { ok: true, tabla: "PEDIDOS SAP" };
+    try {
+      const { token } = await getToken(req);
+      const anio = new Date().getFullYear();
+      const desde = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.desde || "")) ? String(req.query.desde) : `${anio}-01-01`;
+      const [dy, dm, dd] = desde.split("-").map(Number);
+      const T = "'PEDIDOS SAP'";
+      const filas = await pbiQuery(token, `
+EVALUATE
+  SELECTCOLUMNS(
+    FILTER(${T}, ${T}[DocDate] >= DATE(${dy},${dm},${dd})),
+    "DocEntry", ${T}[DocEntry], "DocNum", ${T}[DocNum], "DocDate", ${T}[DocDate], "DocDueDate", ${T}[DocDueDate],
+    "CodigoCliente", ${T}[CodigoCliente], "NombreCliente", ${T}[NombreCliente], "DocTotal", ${T}[DocTotal],
+    "Estado", ${T}[U_UC_SolicitudEstado], "LineNum", ${T}[LineNum], "ItemCode", ${T}[ItemCode], "Dscription", ${T}[Dscription],
+    "Unidades", ${T}[Unidades], "OpenQty", ${T}[OpenQty], "LineTotal", ${T}[LineTotal], "FechaPlan", ${T}[Fecha Planificado],
+    "Solicitud", ${T}[U_UC_Solicitud], "SlpCode", ${T}[SlpCode], "SlpName", ${T}[SlpName])`, true);
+
+      // Vendedor → comercial
+      let mapaVend = {};
+      try { for (const d of await fbLeerColeccion("pedidos_sap_vendedores")) if (d.agente) mapaVend[String(d._id)] = String(d.agente).toUpperCase(); } catch (e) {}
+      let alias = [];
+      try { alias = await fbLeerColeccion("agentes_alias"); } catch (e) {}
+      const N = (x) => String(x || "").toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^A-Z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+      const porNombre = {};
+      for (const a of alias) { const nn = N(a.nombre); if (nn && a.canonico) porNombre[nn] = porNombre[nn] || String(a.original || a.alias || a.canonico).toUpperCase(); }
+      const canonAlias = {}; for (const a of alias) if (a.alias && a.canonico) canonAlias[N(a.alias).replace(/ /g, "")] = a.canonico;
+      const codigoDe = (slp, nombre) => {
+        if (mapaVend[String(slp)]) return mapaVend[String(slp)];
+        const nn = N(String(nombre || "").replace(/\d+%/g, ""));
+        if (/INTERCOMPANY|INTERC\./.test(nn)) return "INTERCOMPANY";
+        if (porNombre[nn]) return porNombre[nn];
+        // por nombre de pila + apellido (ESTHER BAENA → alias cuyo nombre empieza igual)
+        const tok = nn.split(" ").filter(Boolean);
+        for (const a of alias) { const an = N(a.nombre); if (an && tok.length && (an === nn || (tok.length >= 2 && an.startsWith(tok[0] + " " + tok[1])) || (tok.length === 1 && an.startsWith(tok[0])))) return String(a.original || a.alias || a.canonico).toUpperCase(); }
+        return "";
+      };
+
+      const semDe = (iso) => { const d = new Date(String(iso).slice(0, 10) + "T12:00:00Z"); return isNaN(d) ? "" : isoSemana(d); };
+      const hoy = new Date(); const semHoy = isoSemana(hoy);
+      const semAnt = isoSemana(new Date(hoy.getTime() - 7 * 86400000));
+      const mesHoy = hoy.toISOString().slice(0, 7);
+      const finMes = new Date(hoy.getFullYear(), hoy.getMonth() + 1, 0).toISOString().slice(0, 10);
+
+      const agentes = {}, clientes = {}, semanas = {}, sinMapear = {};
+      let lineas = 0, abiertas = 0, cerradas = 0, minFecha = "", maxFecha = "";
+      for (const r of filas) {
+        const g = (k) => pick(r, k);
+        const fecha = String(g("DocDate") || "").slice(0, 10); if (!fecha) continue;
+        lineas++;
+        if (!minFecha || fecha < minFecha) minFecha = fecha; if (fecha > maxFecha) maxFecha = fecha;
+        const uds = num(g("Unidades")), open = num(g("OpenQty")), tot = num(g("LineTotal"));
+        const pend = uds > 0 ? num(tot * open / uds) : (open > 0 ? tot : 0);
+        if (open > 0) abiertas++; else cerradas++;
+        const slp = g("SlpCode"), slpN = String(g("SlpName") || "").trim();
+        const ag = codigoDe(slp, slpN) || ("SLP" + slp);
+        if (!codigoDe(slp, slpN)) sinMapear[String(slp)] = slpN;
+        const sem = semDe(fecha), mes = fecha.slice(0, 7), plan = String(g("FechaPlan") || "").slice(0, 10);
+        const A = agentes[ag] = agentes[ag] || { _id: ag, agente: ag, vendedores: {}, pedSem: 0, pedSemAnt: 0, pedMes: 0, pedAnio: 0, pendiente: 0, previstoMes: 0, nLineas: 0, nPedidos: new Set(), porSemana: {}, porMes: {} };
+        A.vendedores[String(slp)] = slpN;
+        A.nLineas++; A.nPedidos.add(g("DocNum")); A.pedAnio += tot;
+        if (sem === semHoy) A.pedSem += tot; if (sem === semAnt) A.pedSemAnt += tot; if (mes === mesHoy) A.pedMes += tot;
+        A.porSemana[sem] = num((A.porSemana[sem] || 0) + tot); A.porMes[mes] = num((A.porMes[mes] || 0) + tot);
+        if (open > 0) { A.pendiente += pend; if (plan && plan <= finMes) A.previstoMes += pend; }
+        const S = semanas[sem] = semanas[sem] || { _id: sem, semana: sem, total: 0, nLineas: 0, porAgente: {} };
+        S.total += tot; S.nLineas++; S.porAgente[ag] = num((S.porAgente[ag] || 0) + tot);
+        if (open > 0) {
+          const cod = String(g("CodigoCliente") || "").trim();
+          const C = clientes[cod] = clientes[cod] || { _id: cod || "SIN", cliente: cod, nombre: String(g("NombreCliente") || ""), agente: ag, pendiente: 0, previstoMes: 0, lineas: [] };
+          C.pendiente += pend; if (plan && plan <= finMes) C.previstoMes += pend;
+          if (C.lineas.length < 60) C.lineas.push({ ped: g("DocNum"), f: fecha, plan, art: g("ItemCode"), desc: g("Dscription"), uds, open, imp: num(pend), sol: g("Solicitud") || "", est: g("Estado") || "" });
+        }
+      }
+      const docsA = Object.values(agentes).map((A) => ({ ...A, nPedidos: A.nPedidos.size, vendedores: JSON.stringify(A.vendedores),
+        pedSem: num(A.pedSem), pedSemAnt: num(A.pedSemAnt), pedMes: num(A.pedMes), pedAnio: num(A.pedAnio), pendiente: num(A.pendiente), previstoMes: num(A.previstoMes),
+        porSemana: JSON.stringify(A.porSemana), porMes: JSON.stringify(A.porMes), semanaHoy: semHoy, actualizado: new Date().toISOString() }));
+      const docsC = Object.values(clientes).map((C) => ({ ...C, pendiente: num(C.pendiente), previstoMes: num(C.previstoMes), nLineas: C.lineas.length, lineas: JSON.stringify(C.lineas), actualizado: new Date().toISOString() }));
+      const docsS = Object.values(semanas).map((S) => ({ ...S, total: num(S.total), porAgente: JSON.stringify(S.porAgente), actualizado: new Date().toISOString() }));
+      out.resumen = { lineas, abiertas, cerradas, desde: minFecha, hasta: maxFecha, agentes: docsA.length, clientesConPendiente: docsC.length, semanas: docsS.length,
+        pendienteTotal: num(docsA.reduce((t, a) => t + a.pendiente, 0)), introducidoSemanaEnCurso: num(docsA.reduce((t, a) => t + a.pedSem, 0)), introducidoSemanaAnterior: num(docsA.reduce((t, a) => t + a.pedSemAnt, 0)) };
+      out.nota = cerradas ? "La tabla trae también líneas ya servidas (OpenQty 0): sirve para pedidos introducidos de semanas pasadas." : "OJO: solo hay líneas pendientes (OpenQty > 0): las semanas pasadas quedan incompletas en cuanto se sirve el pedido.";
+      out.sinMapear = sinMapear;
+      out.porAgente = docsA.map((a) => ({ agente: a.agente, vendedores: a.vendedores, semana: a.pedSem, semanaAnterior: a.pedSemAnt, mes: a.pedMes, pendiente: a.pendiente, previstoMes: a.previstoMes, pedidos: a.nPedidos })).sort((x, y) => y.mes - x.mes);
+      if (!req.query.dry) {
+        out.escritos = { agentes: await fbCommit("pedidos_sap_agente", docsA), clientes: await fbCommit("pedidos_sap_cliente", docsC), semanas: await fbCommit("pedidos_sap_semanas", docsS) };
+        try { const previos = await fbLeerColeccion("pedidos_sap_cliente"); const vivos = new Set(docsC.map((d) => d._id));
+          const sobran = previos.filter((d) => !vivos.has(d._id)).map((d) => d._id); if (sobran.length) { await fbBorrar("pedidos_sap_cliente", sobran); out.escritos.clientesBorrados = sobran.length; } } catch (e) {}
+      }
+      out.dry = !!req.query.dry;
+    } catch (e) { out.ok = false; out.error = e.message; }
+    out.segundos = Math.round((Date.now() - t1) / 1000);
+    try { await latido("pedidosSap", { segundos: out.segundos, errores: out.ok ? 0 : 1 }); } catch (e) {}
+    return res.status(out.ok ? 200 : 500).json(out);
+  }
+
   if (req.query.cierre === "1") {
     const t1 = Date.now();
     const out = { ok: true, fuente: "firestore" };
