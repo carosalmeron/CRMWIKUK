@@ -2693,6 +2693,115 @@ ${med.join(",\n")}
   // la semana en curso y se pisa cada mañana: sin esto no hay forma de mirar
   // atras. No toca Power BI.
   // ═══════════════════════════════════════════════════════════════════════
+  // (oct 2026) ?comparar=1 → compara, semana a semana y por vendedor, lo que hay en la tabla global
+  // ('00 Entrada Pedidos Global', todas las empresas, por fecha de pedido) con lo que trae 'PEDIDOS SAP'
+  // (solo United, solo líneas pendientes). Sirve para ver qué parte del global es SAP y qué falta en cada lado.
+  //   ?comparar=1                 → desde el lunes de hace 10 semanas, en HTML (para verlo en el móvil)
+  //   ?comparar=1&desde=2026-07-30 → desde esa fecha de pedido
+  //   ?comparar=1&json=1          → lo mismo en JSON
+  if (req.query.comparar === "1") {
+    const t1 = Date.now();
+    const out = { ok: true, global: "'00 Entrada Pedidos Global'", sap: "'PEDIDOS SAP'" };
+    try {
+      const { token } = await getToken(req);
+      let desde = String(req.query.desde || "");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(desde)) {
+        const d = new Date(); const dow = d.getDay() || 7; d.setDate(d.getDate() - (dow - 1) - 70); desde = d.toISOString().slice(0, 10);
+      }
+      const [dy, dm, dd] = desde.split("-").map(Number);
+      const T = "'00 Entrada Pedidos Global'", S = "'PEDIDOS SAP'";
+      out.desde = desde;
+
+      // 1 · Qué columnas tiene la tabla global (se pide una fila y se miran las claves)
+      const unaFila = await pbiQuery(token, `EVALUATE TOPN(1, ${T})`, true);
+      const cols = unaFila.length ? Object.keys(unaFila[0]).map((k) => k.replace(/^.*\[/, "").replace(/\]$/, "")) : [];
+      out.columnasGlobal = cols;
+      const col = (re) => cols.find((c) => re.test(c)) || null;
+      const cCli = col(/^CLIENTE$|^CODCLIENTE$|^CODIGOCLIENTE$/i) || col(/CLIENTE/i);
+      const cPed = col(/NUMPEDIDO|^PEDIDO$|NUMERO|DOCNUM/i);
+      const cEmp = col(/EMPRESA|SOCIEDAD|COMPA|ORIGEN/i);
+      const cArt = col(/^CODIGO$|ARTICULO|ITEMCODE/i);
+      const sel = [`"Fecha", ${T}[FECHA]`, `"Vendedor", ${T}[VENDEDOR]`, `"Base", ${T}[BASE]`];
+      if (cCli) sel.push(`"Cliente", ${T}[${cCli}]`);
+      if (cPed) sel.push(`"Pedido", ${T}[${cPed}]`);
+      if (cEmp) sel.push(`"Empresa", ${T}[${cEmp}]`);
+      if (cArt) sel.push(`"Articulo", ${T}[${cArt}]`);
+      const glob = await pbiQuery(token, `EVALUATE SELECTCOLUMNS(FILTER(${T}, ${T}[FECHA] >= DATE(${dy},${dm},${dd})), ${sel.join(", ")})`, true);
+      const sap = await pbiQuery(token, `
+EVALUATE SELECTCOLUMNS(FILTER(${S}, ${S}[DocDate] >= DATE(${dy},${dm},${dd})),
+  "Fecha", ${S}[DocDate], "Pedido", ${S}[DocNum], "Cliente", ${S}[CodigoCliente], "NombreCliente", ${S}[NombreCliente],
+  "Vendedor", ${S}[SlpName], "SlpCode", ${S}[SlpCode], "Base", ${S}[LineTotal], "OpenQty", ${S}[OpenQty], "Articulo", ${S}[ItemCode])`, true);
+
+      // Mapa vendedor global → comercial del CRM (el de siempre) y vendedor SAP → comercial (tabla manual + automático)
+      const agentes = new Map();
+      try { for (const a of await pbiQuery(token, Q.agentes, true)) { const cod = String(pick(a, "CODIGO") || "").trim(); if (cod) agentes.set(cod, String(pick(a, "GRUPOAGENTE") || "").trim() || cod); } } catch (e) {}
+      let mapaVend = {};
+      try { for (const d of await fbLeerColeccion("pedidos_sap_vendedores")) if (d.agente) mapaVend[String(d._id)] = String(d.agente).toUpperCase(); } catch (e) {}
+
+      const semDe = (iso) => { const d = new Date(String(iso).slice(0, 10) + "T12:00:00Z"); return isNaN(d) ? "" : isoSemana(d); };
+      const NC = (x) => String(x || "").toUpperCase().replace(/^0+/, "").replace(/[^A-Z0-9]/g, "");
+      const sem = {}, vG = {}, vS = {}, cliG = {}, cliS = {}, pedG = new Set(), pedS = new Set(), empG = {};
+      const S0 = () => ({ gImp: 0, gLin: 0, gPed: new Set(), gCli: new Set(), sImp: 0, sLin: 0, sPed: new Set(), sCli: new Set(), sOpen: 0 });
+      for (const r of glob) {
+        const f = String(pick(r, "Fecha") || "").slice(0, 10); if (!f) continue;
+        const w = semDe(f); const x = (sem[w] = sem[w] || S0()); const imp = num(pick(r, "Base"));
+        x.gImp += imp; x.gLin++; const p = pick(r, "Pedido"); if (p !== null && p !== undefined && p !== "") { x.gPed.add(String(p)); pedG.add(String(p)); }
+        const c = pick(r, "Cliente"); if (c) { x.gCli.add(NC(c)); cliG[NC(c)] = (cliG[NC(c)] || 0) + imp; }
+        const v = String(pick(r, "Vendedor") || "(sin)").trim(); vG[v] = (vG[v] || 0) + imp;
+        if (cEmp) { const e = String(pick(r, "Empresa") || "(sin)"); empG[e] = (empG[e] || 0) + imp; }
+      }
+      for (const r of sap) {
+        const f = String(pick(r, "Fecha") || "").slice(0, 10); if (!f) continue;
+        const w = semDe(f); const x = (sem[w] = sem[w] || S0()); const imp = num(pick(r, "Base"));
+        x.sImp += imp; x.sLin++; x.sOpen += num(pick(r, "OpenQty")) > 0 ? imp : 0; const p = pick(r, "Pedido"); if (p !== null && p !== undefined) { x.sPed.add(String(p)); pedS.add(String(p)); }
+        const c = pick(r, "Cliente"); if (c) { x.sCli.add(NC(c)); cliS[NC(c)] = (cliS[NC(c)] || 0) + imp; }
+        const v = String(pick(r, "Vendedor") || "(sin)").trim() + " [" + String(pick(r, "SlpCode")) + "]"; vS[v] = (vS[v] || 0) + imp;
+      }
+      const semanas = Object.keys(sem).sort().map((w) => { const x = sem[w]; const comunes = [...x.sCli].filter((c) => x.gCli.has(c)).length; return {
+        semana: w, globalImporte: num(x.gImp), globalLineas: x.gLin, globalPedidos: x.gPed.size || null, globalClientes: x.gCli.size,
+        sapImporte: num(x.sImp), sapLineas: x.sLin, sapPedidos: x.sPed.size, sapClientes: x.sCli.size, clientesEnLosDos: comunes,
+        pctSapSobreGlobal: x.gImp ? Math.round((x.sImp / x.gImp) * 100) : null }; });
+      const tot = (k) => num(semanas.reduce((a, s) => a + (s[k] || 0), 0));
+      out.resumen = { semanas: semanas.length, globalImporte: tot("globalImporte"), globalLineas: tot("globalLineas"), sapImporte: tot("sapImporte"), sapLineas: tot("sapLineas"),
+        pedidosGlobal: pedG.size || null, pedidosSap: pedS.size, pedidosNumeroCoincide: pedG.size ? [...pedS].filter((p) => pedG.has(p)).length : null,
+        clientesGlobal: Object.keys(cliG).length, clientesSap: Object.keys(cliS).length, clientesEnLosDos: Object.keys(cliS).filter((c) => cliG[c] !== undefined).length };
+      out.porSemana = semanas;
+      out.porEmpresaGlobal = cEmp ? Object.entries(empG).sort((a, b) => b[1] - a[1]).map(([e, i]) => ({ empresa: e, importe: num(i) })) : null;
+      out.porVendedorGlobal = Object.entries(vG).sort((a, b) => b[1] - a[1]).map(([v, i]) => ({ vendedor: v, comercial: agentes.get(v) || "", importe: num(i) }));
+      out.porVendedorSap = Object.entries(vS).sort((a, b) => b[1] - a[1]).map(([v, i]) => ({ vendedor: v, comercial: mapaVend[(v.match(/\[(.*)\]$/) || [])[1]] || "", importe: num(i) }));
+      out.clientesSoloEnSap = Object.entries(cliS).filter(([c]) => cliG[c] === undefined).sort((a, b) => b[1] - a[1]).slice(0, 40).map(([c, i]) => ({ cliente: c, importe: num(i) }));
+      out.clientesSoloEnGlobal = Object.entries(cliG).filter(([c]) => cliS[c] === undefined).sort((a, b) => b[1] - a[1]).slice(0, 40).map(([c, i]) => ({ cliente: c, importe: num(i) }));
+      out.nota = "SAP solo trae líneas pendientes de servir: en semanas pasadas lo servido ya no aparece, así que SAP siempre irá por debajo del global salvo en la semana en curso. Si los clientes 'en los dos' son 0, los códigos de cliente no son los mismos en las dos tablas.";
+      out.segundos = Math.round((Date.now() - t1) / 100) / 10;
+      if (req.query.json === "1") return res.status(200).json(out);
+
+      // HTML sencillo para leerlo en el móvil
+      const E = (s) => String(s ?? "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+      const eur = (n) => (n === null || n === undefined) ? "—" : Math.round(n).toLocaleString("es-ES") + " €";
+      const tabla = (cab, filas) => `<table><thead><tr>${cab.map((c) => `<th>${E(c)}</th>`).join("")}</tr></thead><tbody>${filas.map((f) => `<tr>${f.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+      const R = out.resumen;
+      const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Global vs SAP</title>
+<style>body{margin:0;font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;background:#F4F5F7;color:#0F172A}.w{max-width:860px;margin:0 auto;padding:12px}h1{font-size:18px;margin:0 0 4px}h2{font-size:15px;margin:18px 0 6px}p{margin:4px 0;color:#475569}
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;font-size:13px}th,td{padding:7px 8px;border-top:1px solid #EEF1F5;text-align:right;white-space:nowrap}th{background:#F8FAFC;font-size:11px;text-transform:uppercase;color:#64748B}td:first-child,th:first-child{text-align:left}
+.k{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:8px 0}.k div{background:#fff;border-radius:10px;padding:10px}.k b{display:block;font-size:18px}.k span{font-size:11.5px;color:#64748B;text-transform:uppercase}.m{color:#94A3B8}</style></head><body><div class="w">
+<h1>📦 Tabla global vs PEDIDOS SAP</h1><p>Pedidos desde el ${E(desde)} · global = todas las empresas, por fecha de pedido · SAP = United, solo líneas pendientes de servir</p>
+<div class="k"><div><span>Global</span><b>${eur(R.globalImporte)}</b>${R.globalLineas} líneas${R.pedidosGlobal ? " · " + R.pedidosGlobal + " pedidos" : ""} · ${R.clientesGlobal} clientes</div>
+<div><span>SAP</span><b>${eur(R.sapImporte)}</b>${R.sapLineas} líneas · ${R.pedidosSap} pedidos · ${R.clientesSap} clientes</div>
+<div><span>Clientes en los dos</span><b>${R.clientesEnLosDos}</b>${R.pedidosNumeroCoincide !== null ? "nº de pedido que coincide: " + R.pedidosNumeroCoincide : "<span class='m'>la global no trae nº de pedido</span>"}</div></div>
+<h2>Semana a semana</h2>${tabla(["Semana", "Global", "Líneas", "Clientes", "SAP", "Líneas", "Pedidos", "Clientes", "En los dos", "SAP/Global"], semanas.map((s) => [E(s.semana), eur(s.globalImporte), s.globalLineas, s.globalClientes, eur(s.sapImporte), s.sapLineas, s.sapPedidos, s.sapClientes, s.clientesEnLosDos, s.pctSapSobreGlobal === null ? "—" : s.pctSapSobreGlobal + " %"]))}
+${out.porEmpresaGlobal ? `<h2>Global por empresa (${E(cEmp)})</h2>` + tabla(["Empresa", "Importe"], out.porEmpresaGlobal.map((e) => [E(e.empresa), eur(e.importe)])) : `<p class="m">La tabla global no tiene columna de empresa (columnas: ${E(cols.join(", "))}).</p>`}
+<h2>Global por vendedor</h2>${tabla(["Vendedor", "Comercial CRM", "Importe"], out.porVendedorGlobal.map((v) => [E(v.vendedor), E(v.comercial), eur(v.importe)]))}
+<h2>SAP por vendedor</h2>${tabla(["Vendedor SAP", "Comercial CRM", "Importe"], out.porVendedorSap.map((v) => [E(v.vendedor), E(v.comercial) || "<span class='m'>sin casar</span>", eur(v.importe)]))}
+<h2>Clientes que están en SAP y no en la global</h2>${out.clientesSoloEnSap.length ? tabla(["Cliente", "Importe SAP"], out.clientesSoloEnSap.map((c) => [E(c.cliente), eur(c.importe)])) : "<p>ninguno</p>"}
+<h2>Clientes con pedido en la global y nada en SAP (top 40)</h2>${tabla(["Cliente", "Importe global"], out.clientesSoloEnGlobal.map((c) => [E(c.cliente), eur(c.importe)]))}
+<p class="m">${E(out.nota)} · ${out.segundos} s</p></div></body></html>`;
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.status(200).send(html);
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: e.message });
+    }
+  }
+
   // (oct 2026) PEDIDOS SAP → Firestore. La tabla trae cada LÍNEA de pedido con
   // fecha de pedido (DocDate), cliente, vendedor (SlpName), artículo, unidades
   // pedidas y pendientes (OpenQty), importe de línea, fecha planificada de
@@ -2724,22 +2833,35 @@ EVALUATE
       // Vendedor → comercial
       let mapaVend = {};
       try { for (const d of await fbLeerColeccion("pedidos_sap_vendedores")) if (d.agente) mapaVend[String(d._id)] = String(d.agente).toUpperCase(); } catch (e) {}
-      let alias = [];
+      let alias = [], usuarios = [];
       try { alias = await fbLeerColeccion("agentes_alias"); } catch (e) {}
-      const N = (x) => String(x || "").toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^A-Z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+      try { usuarios = (await fbLeerColeccion("usuarios")).filter((u) => u.activo !== false && /agente|comercial|vendedor|jefe/i.test(String(u.rol || ""))); } catch (e) {}
+      const N = (x) => String(x || "").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+      // Se devuelve el código del CRM (grupoAgente, o el id de la ficha): es con el que cruzan el parte y los cierres
+      const codUsuario = (u) => String(u.grupoAgente || u.catalogoVendedor || u._id || "").toUpperCase();
       const porNombre = {};
-      for (const a of alias) { const nn = N(a.nombre); if (nn && a.canonico) porNombre[nn] = porNombre[nn] || String(a.original || a.alias || a.canonico).toUpperCase(); }
-      const canonAlias = {}; for (const a of alias) if (a.alias && a.canonico) canonAlias[N(a.alias).replace(/ /g, "")] = a.canonico;
+      for (const a of alias) { const nn = N(a.nombre); if (nn && a.canonico) porNombre[nn] = porNombre[nn] || String(a.canonico).toUpperCase(); }
+      for (const u of usuarios) { const nn = N(u.nombre); if (nn && !porNombre[nn]) porNombre[nn] = codUsuario(u); }
       const codigoDe = (slp, nombre) => {
         if (mapaVend[String(slp)]) return mapaVend[String(slp)];
-        const nn = N(String(nombre || "").replace(/\d+%/g, ""));
-        if (/INTERCOMPANY|INTERC\./.test(nn)) return "INTERCOMPANY";
+        if (/INTERCOMPANY|INTERC\b/.test(N(nombre))) return "INTERCOMPANY";
+        const nn = N(String(nombre || "").replace(/\d+%/g, "").replace(/\b(FABRICANTES|NACIONAL|INTERNACIONAL|POTENCIALES|PORTUGAL|COMERCIAL)\b/gi, ""));
         if (porNombre[nn]) return porNombre[nn];
-        // por nombre de pila + apellido (ESTHER BAENA → alias cuyo nombre empieza igual)
-        const tok = nn.split(" ").filter(Boolean);
-        for (const a of alias) { const an = N(a.nombre); if (an && tok.length && (an === nn || (tok.length >= 2 && an.startsWith(tok[0] + " " + tok[1])) || (tok.length === 1 && an.startsWith(tok[0])))) return String(a.original || a.alias || a.canonico).toUpperCase(); }
-        return "";
+        const tok = nn.split(" ").filter(Boolean); if (!tok.length) return "";
+        // nombre + primer apellido coincide con una ficha o un alias (ESTHER BAENA → Esther; AGUSTIN ENRIQUE FERNANDEZ → Agustín)
+        const cand = [];
+        for (const u of usuarios) { const un = N(u.nombre).split(" ").filter(Boolean); if (!un.length) continue;
+          if (un[0] === tok[0] && (un.length === 1 || tok.includes(un[1]))) cand.push(codUsuario(u)); }
+        for (const a of alias) { const an = N(a.nombre).split(" ").filter(Boolean); if (!an.length) continue;
+          if (an[0] === tok[0] && (an.length === 1 || tok.includes(an[1]))) cand.push(String(a.canonico).toUpperCase()); }
+        const unicos = [...new Set(cand.filter(Boolean))];
+        return unicos.length === 1 ? unicos[0] : "";   // si hay dudas (dos Carlos), se deja para la tabla manual
       };
+      // Registro de líneas vistas: la tabla solo trae líneas PENDIENTES, así que una línea desaparece al servirse.
+      // Para saber qué se introdujo cada semana se apunta cada línea la primera vez que se ve, y no se borra nunca.
+      let vistas = {};
+      try { for (const d of await fbLeerColeccion("pedidos_sap_lineas")) vistas[d._id] = d; } catch (e) {}
+      const nuevasLineas = [];
 
       const semDe = (iso) => { const d = new Date(String(iso).slice(0, 10) + "T12:00:00Z"); return isNaN(d) ? "" : isoSemana(d); };
       const hoy = new Date(); const semHoy = isoSemana(hoy);
@@ -2761,14 +2883,12 @@ EVALUATE
         const ag = codigoDe(slp, slpN) || ("SLP" + slp);
         if (!codigoDe(slp, slpN)) sinMapear[String(slp)] = slpN;
         const sem = semDe(fecha), mes = fecha.slice(0, 7), plan = String(g("FechaPlan") || "").slice(0, 10);
+        const idL = String(g("DocEntry")) + "_" + String(g("LineNum"));
+        if (!vistas[idL]) { vistas[idL] = { _id: idL, ped: g("DocNum"), fecha, sem, mes, agente: ag, slp: String(slp), cliente: String(g("CodigoCliente") || ""), art: String(g("ItemCode") || ""), imp: num(tot), visto: new Date().toISOString() }; nuevasLineas.push(vistas[idL]); }
         const A = agentes[ag] = agentes[ag] || { _id: ag, agente: ag, vendedores: {}, pedSem: 0, pedSemAnt: 0, pedMes: 0, pedAnio: 0, pendiente: 0, previstoMes: 0, nLineas: 0, nPedidos: new Set(), porSemana: {}, porMes: {} };
         A.vendedores[String(slp)] = slpN;
-        A.nLineas++; A.nPedidos.add(g("DocNum")); A.pedAnio += tot;
-        if (sem === semHoy) A.pedSem += tot; if (sem === semAnt) A.pedSemAnt += tot; if (mes === mesHoy) A.pedMes += tot;
-        A.porSemana[sem] = num((A.porSemana[sem] || 0) + tot); A.porMes[mes] = num((A.porMes[mes] || 0) + tot);
+        A.nLineas++; A.nPedidos.add(g("DocNum"));
         if (open > 0) { A.pendiente += pend; if (plan && plan <= finMes) A.previstoMes += pend; }
-        const S = semanas[sem] = semanas[sem] || { _id: sem, semana: sem, total: 0, nLineas: 0, porAgente: {} };
-        S.total += tot; S.nLineas++; S.porAgente[ag] = num((S.porAgente[ag] || 0) + tot);
         if (open > 0) {
           const cod = String(g("CodigoCliente") || "").trim();
           const C = clientes[cod] = clientes[cod] || { _id: cod || "SIN", cliente: cod, nombre: String(g("NombreCliente") || ""), agente: ag, pendiente: 0, previstoMes: 0, lineas: [] };
@@ -2776,18 +2896,31 @@ EVALUATE
           if (C.lineas.length < 60) C.lineas.push({ ped: g("DocNum"), f: fecha, plan, art: g("ItemCode"), desc: g("Dscription"), uds, open, imp: num(pend), sol: g("Solicitud") || "", est: g("Estado") || "" });
         }
       }
+      // Introducidos por semana y mes: del REGISTRO (incluye líneas ya servidas), no solo de lo pendiente
+      for (const v of Object.values(vistas)) {
+        const ag = (v.slp && mapaVend[v.slp]) || v.agente || "?";
+        const A = agentes[ag] = agentes[ag] || { _id: ag, agente: ag, vendedores: {}, pedSem: 0, pedSemAnt: 0, pedMes: 0, pedAnio: 0, pendiente: 0, previstoMes: 0, nLineas: 0, nPedidos: new Set(), porSemana: {}, porMes: {} };
+        const imp = num(v.imp);
+        if (v.sem === semHoy) A.pedSem += imp; if (v.sem === semAnt) A.pedSemAnt += imp; if (v.mes === mesHoy) A.pedMes += imp; if (String(v.fecha).slice(0, 4) === String(anio)) A.pedAnio += imp;
+        A.porSemana[v.sem] = num((A.porSemana[v.sem] || 0) + imp); A.porMes[v.mes] = num((A.porMes[v.mes] || 0) + imp);
+        const S = semanas[v.sem] = semanas[v.sem] || { _id: v.sem, semana: v.sem, total: 0, nLineas: 0, porAgente: {} };
+        S.total += imp; S.nLineas++; S.porAgente[ag] = num((S.porAgente[ag] || 0) + imp);
+      }
       const docsA = Object.values(agentes).map((A) => ({ ...A, nPedidos: A.nPedidos.size, vendedores: JSON.stringify(A.vendedores),
         pedSem: num(A.pedSem), pedSemAnt: num(A.pedSemAnt), pedMes: num(A.pedMes), pedAnio: num(A.pedAnio), pendiente: num(A.pendiente), previstoMes: num(A.previstoMes),
         porSemana: JSON.stringify(A.porSemana), porMes: JSON.stringify(A.porMes), semanaHoy: semHoy, actualizado: new Date().toISOString() }));
       const docsC = Object.values(clientes).map((C) => ({ ...C, pendiente: num(C.pendiente), previstoMes: num(C.previstoMes), nLineas: C.lineas.length, lineas: JSON.stringify(C.lineas), actualizado: new Date().toISOString() }));
       const docsS = Object.values(semanas).map((S) => ({ ...S, total: num(S.total), porAgente: JSON.stringify(S.porAgente), actualizado: new Date().toISOString() }));
-      out.resumen = { lineas, abiertas, cerradas, desde: minFecha, hasta: maxFecha, agentes: docsA.length, clientesConPendiente: docsC.length, semanas: docsS.length,
+      out.resumen = { lineas, abiertas, cerradas, desde: minFecha, hasta: maxFecha, lineasNuevasEnRegistro: nuevasLineas.length, lineasEnRegistro: Object.keys(vistas).length, agentes: docsA.length, clientesConPendiente: docsC.length, semanas: docsS.length,
         pendienteTotal: num(docsA.reduce((t, a) => t + a.pendiente, 0)), introducidoSemanaEnCurso: num(docsA.reduce((t, a) => t + a.pedSem, 0)), introducidoSemanaAnterior: num(docsA.reduce((t, a) => t + a.pedSemAnt, 0)) };
-      out.nota = cerradas ? "La tabla trae también líneas ya servidas (OpenQty 0): sirve para pedidos introducidos de semanas pasadas." : "OJO: solo hay líneas pendientes (OpenQty > 0): las semanas pasadas quedan incompletas en cuanto se sirve el pedido.";
+      out.nota = cerradas ? "La tabla trae también líneas ya servidas (OpenQty 0)." : "La tabla solo trae líneas pendientes: cada línea se apunta en pedidos_sap_lineas la primera vez que se ve y los introducidos por semana salen de ese registro (hay que ejecutar esto a diario).";
       out.sinMapear = sinMapear;
       out.porAgente = docsA.map((a) => ({ agente: a.agente, vendedores: a.vendedores, semana: a.pedSem, semanaAnterior: a.pedSemAnt, mes: a.pedMes, pendiente: a.pendiente, previstoMes: a.previstoMes, pedidos: a.nPedidos })).sort((x, y) => y.mes - x.mes);
       if (!req.query.dry) {
-        out.escritos = { agentes: await fbCommit("pedidos_sap_agente", docsA), clientes: await fbCommit("pedidos_sap_cliente", docsC), semanas: await fbCommit("pedidos_sap_semanas", docsS) };
+        out.escritos = { agentes: await fbCommit("pedidos_sap_agente", docsA), clientes: await fbCommit("pedidos_sap_cliente", docsC), semanas: await fbCommit("pedidos_sap_semanas", docsS),
+          lineasNuevas: nuevasLineas.length ? await fbCommit("pedidos_sap_lineas", nuevasLineas) : 0,
+          meta: await fbCommit("pedidos_sap_meta", [{ _id: "ultimo", actualizado: new Date().toISOString(), lineas, sinMapear: JSON.stringify(sinMapear),
+            vendedores: JSON.stringify(Object.values(agentes).reduce((o, A) => { for (const [k, v] of Object.entries(A.vendedores)) o[k] = { nombre: v, agente: A.agente }; return o; }, {})) }]) };
         try { const previos = await fbLeerColeccion("pedidos_sap_cliente"); const vivos = new Set(docsC.map((d) => d._id));
           const sobran = previos.filter((d) => !vivos.has(d._id)).map((d) => d._id); if (sobran.length) { await fbBorrar("pedidos_sap_cliente", sobran); out.escritos.clientesBorrados = sobran.length; } } catch (e) {}
       }
