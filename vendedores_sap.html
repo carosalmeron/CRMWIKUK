@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vendedores SAP → comerciales del CRM</title>
+<style>
+body{margin:0;font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;background:#F4F5F7;color:#0F172A}
+.w{max-width:760px;margin:0 auto;padding:14px}
+h1{font-size:18px;margin:0 0 4px} p{margin:4px 0;color:#475569}
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;margin-top:12px}
+th,td{padding:9px 10px;border-top:1px solid #EEF1F5;text-align:left;vertical-align:middle;font-size:13.5px} th{background:#F8FAFC;font-size:11.5px;text-transform:uppercase;color:#64748B;letter-spacing:.04em}
+select{font:inherit;padding:6px 8px;border:1px solid #CBD5E1;border-radius:8px;max-width:260px}
+.ok{color:#15803D;font-weight:700} .ko{color:#B91C1C;font-weight:700} .auto{color:#64748B;font-size:12px}
+button{font:inherit;font-weight:700;padding:7px 12px;border:0;border-radius:8px;background:#0F172A;color:#fff;cursor:pointer}
+</style></head><body><div class="w">
+<h1>🧾 Vendedores de SAP → comercial del CRM</h1>
+<p>Cada vendedor de la tabla «PEDIDOS SAP» tiene que corresponder a un comercial del CRM para que sus pedidos le cuenten en el parte y en los cierres. Lo que se casa solo sale en gris; lo que no, en rojo: elige el comercial y guarda. «Intercompañía / canal» para lo que no es una persona.</p>
+<p id="estado">Leyendo…</p>
+<table id="t"><thead><tr><th>Código SAP</th><th>Vendedor en SAP</th><th>Ahora</th><th>Comercial del CRM</th><th></th></tr></thead><tbody></tbody></table>
+</div>
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const val=(f)=>{ if(!f) return null; if(f.stringValue!==undefined) return f.stringValue; if(f.doubleValue!==undefined) return Number(f.doubleValue); if(f.integerValue!==undefined) return Number(f.integerValue); if(f.booleanValue!==undefined) return f.booleanValue; return null; };
+async function leer(col){ const out=[]; let tok=null, v=0;
+  do{ const r=await fetch(`${FB}/${col}?pageSize=1000`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""),{cache:"no-store"}); if(!r.ok) break; const j=await r.json();
+    (j.documents||[]).forEach(d=>{ const o={_id:decodeURIComponent(d.name.split("/").pop())}; for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x); out.push(o); }); tok=j.nextPageToken||null; }while(tok&&v++<20);
+  return out; }
+async function escribir(col,id,doc){ const f={}; for(const [k,v] of Object.entries(doc)) f[k]=typeof v==="number"?{doubleValue:v}:{stringValue:String(v)};
+  const r=await fetch(`${FB}/${col}/${encodeURIComponent(id)}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:f})}); if(!r.ok) throw new Error("HTTP "+r.status); }
+const esc=(t)=>String(t??"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+let US=[];
+async function cargar(){
+  const [meta,us,map,lin]=await Promise.all([leer("pedidos_sap_meta"),leer("usuarios"),leer("pedidos_sap_vendedores"),leer("pedidos_sap_lineas")]);
+  const m=meta.find(x=>x._id==="ultimo");
+  let vend={}, sin={}; if(m){ try{ vend=JSON.parse(m.vendedores||"{}"); }catch(e){} try{ sin=JSON.parse(m.sinMapear||"{}"); }catch(e){} }
+  // (oct 2026) También desde el registro de líneas que escribe la sincronización diaria de pedidos
+  let ultimo=m?m.actualizado:null;
+  lin.forEach(l=>{ const slp=String(l.slp||""); if(!slp) return; const auto=/^SLP\d+$/.test(String(l.agente||""))?"":String(l.agente||""); if(!vend[slp]) vend[slp]={nombre:l.vendedor||vend[slp]?.nombre||("vendedor "+slp),agente:auto}; else if(l.vendedor&&!vend[slp].nombre) vend[slp].nombre=l.vendedor; if(!auto&&!vend[slp].agente) sin[slp]=vend[slp].nombre; if(l.visto&&(!ultimo||l.visto>ultimo)) ultimo=l.visto; });
+  if(!Object.keys(vend).length){ document.getElementById("estado").textContent="Todavía no hay datos de PEDIDOS SAP: ejecuta api/pbi-sync?solopedidos=1 (o espera a la sincronización de la noche)."; return; }
+  US=us.filter(u=>u.activo!==false&&/agente|comercial|vendedor|jefe|director/i.test(String(u.rol||""))&&u.nombre).map(u=>({cod:String(u.grupoAgente||u.catalogoVendedor||u._id).toUpperCase(),nombre:u.nombre,equipo:u.equipo||""})).sort((a,b)=>a.nombre.localeCompare(b.nombre));
+  const manual={}; map.forEach(d=>manual[d._id]=d.agente);
+  const filas=Object.entries(vend).sort((a,b)=>(sin[a[0]]?0:1)-(sin[b[0]]?0:1)||String(a[1].nombre).localeCompare(String(b[1].nombre)));
+  document.getElementById("estado").textContent="Última sincronización: "+(ultimo?new Date(ultimo).toLocaleString("es-ES"):"—")+" · "+filas.length+" vendedores · "+Object.keys(sin).length+" sin casar.";
+  const tb=document.querySelector("#t tbody"); tb.innerHTML="";
+  for(const [slp,v] of filas){
+    const esSin=!!sin[slp], actual=manual[slp]||(esSin?"":v.agente);
+    const opts='<option value="">— elegir —</option><option value="INTERCOMPANY"'+(actual==="INTERCOMPANY"?" selected":"")+'>Intercompañía / canal (no es una persona)</option>'
+      +US.map(u=>'<option value="'+esc(u.cod)+'"'+(actual===u.cod?" selected":"")+'>'+esc(u.nombre)+' · '+esc(u.cod)+(u.equipo?' · '+esc(u.equipo):'')+'</option>').join("");
+    tb.insertAdjacentHTML("beforeend",'<tr><td>'+esc(slp)+'</td><td><b>'+esc(v.nombre)+'</b></td><td>'+(manual[slp]?'<span class="ok">'+esc(manual[slp])+' (fijado)</span>':esSin?'<span class="ko">sin casar</span>':'<span class="auto">'+esc(v.agente)+' (automático)</span>')+'</td>'
+      +'<td><select id="s_'+esc(slp)+'">'+opts+'</select></td><td><button onclick="guardar(\''+esc(slp)+'\',\''+esc(v.nombre).replace(/'/g,"\\'")+'\',this)">Guardar</button></td></tr>');
+  }
+}
+window.guardar=async(slp,nombre,btn)=>{ const ag=document.getElementById("s_"+slp).value; if(!ag){ alert("Elige el comercial."); return; }
+  btn.disabled=true; btn.textContent="Guardando…";
+  try{ await escribir("pedidos_sap_vendedores",slp,{agente:ag,nombreSap:nombre,fecha:new Date().toISOString()}); btn.textContent="✓ Guardado"; setTimeout(()=>{ btn.disabled=false; btn.textContent="Guardar"; },1500); }
+  catch(e){ btn.disabled=false; btn.textContent="Guardar"; alert("No se ha guardado: "+e.message); } };
+cargar().catch(e=>{ document.getElementById("estado").textContent="Error: "+e.message; });
+</script></body></html>
