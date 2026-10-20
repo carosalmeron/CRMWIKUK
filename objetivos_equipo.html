@@ -2322,8 +2322,16 @@ window.fichaCobroEq=(ag,cli)=>{
 };
 window.cerrarFichaCobroEq=async()=>{ const d=document.getElementById("capaCobEq"); if(d) d.remove(); document.body.style.overflow="";
   await cargarCompEq(); pintar(); };
+// (oct 2026) Histórico de importaciones de cobros (cobros_meta/hist_<fecha>) para comparar con la semana anterior
+window._COB_HIST=undefined;
+async function cargarCobHist(){ if(window._COB_HIST!==undefined) return; window._COB_HIST=null;
+  try{ const l=(await leer("cobros_meta")).filter(d=>/^hist_/.test(d._id)&&d.fechaDatos);
+    l.forEach(d=>{ try{ d.pc=JSON.parse(d.porComercial||"null"); }catch(e){ d.pc=null; } }); l.sort((a,b)=>String(a.fechaDatos).localeCompare(String(b.fechaDatos)));
+    window._COB_HIST=l; }catch(e){ window._COB_HIST=[]; }
+  try{ pintar(); }catch(e){} }
 function seccionCobros(){
   const g=panelGenteCobros(); if(!g.length) return {d:panelGente().length?"Nadie tiene cobros fuera de plazo.":"Sin datos todavía.",c:""};
+  if(window._COB_HIST===undefined) setTimeout(cargarCobHist,0);
   if(window._COMP_EQ===null){ window._COMP_EQ=[]; cargarCompEq().then(()=>pintar()); }
   const tot=g.reduce((t,p)=>t+(Number(p.cobros)||0),0), lim=g.reduce((t,p)=>t+(Number(p.limite)||0),0);
   const fueraMax=(p)=>!!(p.limite&&p.cobros>p.limite);
@@ -2366,10 +2374,38 @@ function seccionCobros(){
   const fueraL=filas.filter(f=>f.mal);
   const fechas=[...new Set(g.map(p=>p.cobFecha).filter(Boolean))].sort();
   const fData=fechas.length?fechas[fechas.length-1].split("-").reverse().join("/"):"";
+  // ── Comparación con la importación anterior (la última con fecha anterior a la de estos datos) ──
+  const fAct=fechas.length?fechas[fechas.length-1]:"";
+  const H=window._COB_HIST||[], prev=fAct?[...H].reverse().find(d=>String(d.fechaDatos)<fAct):null;
+  const fx=(f)=>String(f||"").split("-").reverse().join("/");
+  const sg=(n)=>(n>0?"▲ +":n<0?"▼ −":"= ")+euT(Math.abs(n));
+  const colD=(n)=>n>0?"#DC2626":n<0?"#16A34A":"#64748B";
+  let compTiles=[], compHtml="";
+  if(prev){
+    const miosCod=new Set(g.map(p=>U(p.cod||p.id)));
+    if(prev.pc){ // por comercial: solo los de este panel, así cuadra con el total de arriba
+      const antes=new Map(prev.pc.filter(x=>miosCod.has(U(x.c))).map(x=>[U(x.c),x]));
+      const totAnt=[...antes.values()].reduce((t,x)=>t+(Number(x.v)||0),0), v70Ant=[...antes.values()].reduce((t,x)=>t+(Number(x.v70)||0),0);
+      compTiles=[[sg(tot-totAnt),"Frente al "+fx(prev.fechaDatos)+" ("+euT(totAnt)+")",colD(tot-totAnt)],[sg(v70-v70Ant),"Más de 70 días, frente al "+fx(prev.fechaDatos),colD(v70-v70Ant)]];
+      const dl=filas.map(f=>{ const a=antes.get(U(f.p.cod||f.p.id)); const va=a?Number(a.v)||0:0; return {f,va,d:(Number(f.p.cobros)||0)-va,nuevo:!a}; });
+      // (también quien tenía vencido y ya no aparece: ha quedado a cero)
+      [...antes.values()].filter(a=>!filas.some(f=>U(f.p.cod||f.p.id)===U(a.c))&&Number(a.v)>=1).forEach(a=>dl.push({f:null,nombre:a.n||a.c,va:Number(a.v)||0,d:-(Number(a.v)||0)}));
+      filas.forEach(f=>{ const x=dl.find(y=>y.f===f); if(x) f.sub+=' · <span style="color:'+colD(x.d)+'">'+(x.nuevo?'nuevo con vencido':'antes '+euT(x.va)+' · '+sg(x.d))+'</span>'; });
+      const mej=dl.filter(x=>x.d<=-1).sort((a,b)=>a.d-b.d), peor=dl.filter(x=>x.d>=1).sort((a,b)=>b.d-a.d);
+      const nomDe=(x)=>x.f?escT(x.f.p.nombre||x.f.p.cod):escT(x.nombre||"");
+      compHtml='<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 0;font-size:12.5px">'
+        +'<div style="background:#F0FDF4;border-radius:10px;padding:8px 10px"><b style="color:#15803D">Mejoran ('+mej.length+')</b>'+(mej.length?mej.slice(0,8).map(x=>'<div>'+nomDe(x)+' <span style="color:#15803D">'+sg(x.d)+'</span></div>').join(''):'<div style="color:#64748B">nadie</div>')+'</div>'
+        +'<div style="background:#FEF2F2;border-radius:10px;padding:8px 10px"><b style="color:#B91C1C">Empeoran ('+peor.length+')</b>'+(peor.length?peor.slice(0,8).map(x=>'<div>'+nomDe(x)+' <span style="color:#B91C1C">'+sg(x.d)+'</span></div>').join(''):'<div style="color:#64748B">nadie</div>')+'</div></div>';
+    } else { // importaciones antiguas: solo el total de todo el Excel
+      const ta=Number(prev.totalVencido)||0;
+      compTiles=[[fx(prev.fechaDatos)+": "+euT(ta),"Total vencido del Excel anterior (todo, sin filtrar)"]];
+      compHtml='<div style="font-size:12px;color:#64748B;margin:6px 0">La importación del '+fx(prev.fechaDatos)+' no guardó el detalle por comercial; a partir de la próxima importación se verá quién mejora y quién empeora.</div>';
+    }
+  } else if(window._COB_HIST&&fAct) compHtml='<div style="font-size:12px;color:#64748B;margin:6px 0">No hay una importación anterior con la que comparar.</div>';
   const c=bloqueComun({k:"cb",tema:"Cobros",unidad:"facturas",filas,
     tiles:[[euT(tot),"Fuera de plazo",lim&&tot>lim?"#DC2626":"#0F172A"],[euT(lim),"Máximo (5 % de 2 meses)"],[fueraL.length,"Fuera del máximo",fueraL.length?"#DC2626":"#16A34A"],
-      [euT(v70),"Más de 70 días",v70?"#DC2626":""],[euT(v90),"Más de 90 días",v90?"#DC2626":""],[filas.length,"Comerciales con vencido"]],
-    nota:fData?"Datos del Excel de cobros (pestaña TODOS) importado el <b>"+fData+"</b>. Si ha cambiado, hay que volver a importarlo.":""});
+      [euT(v70),"Más de 70 días",v70?"#DC2626":""],[euT(v90),"Más de 90 días",v90?"#DC2626":""],[filas.length,"Comerciales con vencido"]].concat(compTiles),
+    nota:(fData?"Datos del Excel de cobros (pestaña TODOS) importado el <b>"+fData+"</b>. Si ha cambiado, hay que volver a importarlo.":"")+compHtml});
   return {d:euT(tot)+" fuera de plazo · "+(fueraL.length?fueraL.length+" fuera del máximo":"todos dentro")+(fData?" · datos del "+fData:""),c,ok:!fueraL.some(f=>!f.plan)};
 }
 // ── Recuperación y clientes en riesgo: con acción / sin acción ──
