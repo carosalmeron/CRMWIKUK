@@ -884,11 +884,12 @@ async function datosCEO(anio,sem){
   const hace30=new Date(lunes); hace30.setDate(lunes.getDate()-30);
   const enSem=d=>d&&d>=lunes&&d<=domingo;
 
-  const [alias,us,pu,inf,res,cob,estac,objs,objEq,mues,vis,sems,objSem,entr]=await Promise.all([
+  const [alias,us,pu,inf,res,cob,estac,objs,objEq,mues,vis,sems,objSem,entr,flujoC]=await Promise.all([
     leerTodoC("agentes_alias"),leerTodoC("usuarios"),leerTodoC("portal_users"),leerTodoC("informes"),
     leerTodoC("pbi_resumen_agente"),leerTodoC("cobros_comercial"),leerTodoC("pbi_estacionalidad"),
     leerTodoC("pbi_objetivos"),leerTodoC("objetivos_equipo"),leerTodoC("muestras"),leerTodoC("visitas"),
-    leerTodoC("pbi_semanas"),leerTodoC("objetivos_semana"),leerTodoC("pbi_entrada_agente").catch(()=>[])]);
+    leerTodoC("pbi_semanas"),leerTodoC("objetivos_semana"),leerTodoC("pbi_entrada_agente").catch(()=>[]),
+    leerTodoC("cierres_flujo").catch(()=>[])]);
   const A=crearAgentes(alias);
   // (sep 2026) Plan de recuperación: casos de clientes en caída (sin Francia)
   let recup=[];
@@ -919,17 +920,20 @@ async function datosCEO(anio,sem){
     const ep=String(u.entregaParte||"").toLowerCase();
     const tipDep=String(u.tipologia||"")||(u.departamentoId&&!/^(eq_|ventas$|comercial)/i.test(String(u.departamentoId))?String(u.departamentoId):"");
     const conCodigo=!!(u.grupoAgente||u.catalogoVendedor);
-    if(!map[canon]) map[canon]={id:canon,nombre,equipo:UC(A.equipo(ficha)||u.equipo||""),
+    // (oct 2026) El equipo manda el de la ficha de usuario; la tabla de alias solo si la ficha no lo dice.
+    // Esther está en INTERKEY en sus dos fichas pero su alias (de cuando era WK5) decía WIKUK y salía en el equipo equivocado.
+    if(!map[canon]) map[canon]={id:canon,nombre,equipo:UC(u.equipo||A.equipo(ficha)||""),
       cod:UC(u.grupoAgente||u.catalogoVendedor||canon),
       perfil:String(u.perfilComercial||"").toLowerCase(),
-      entrega:ep, noEntrega:ep==="no", siEntrega:ep==="si", tipDep, conCodigo, jefeVende:esJefeVende};
+      entrega:ep, noEntrega:ep==="no", siEntrega:ep==="si", tipDep, conCodigo, jefeVende:esJefeVende, _eqFicha:!!u.equipo};
     else{ const m=map[canon];
       if(!esJefeVende) m.jefeVende=false; else if(m.jefeVende===undefined) m.jefeVende=true;
       // (oct 2026) Si en cualquiera de sus fichas pone que NO entrega parte, no entrega
       if(ep==="no") m.noEntrega=true; if(ep==="si") m.siEntrega=true;
       if(tipDep) m.tipDep=tipDep; if(conCodigo) m.conCodigo=true;
       if(nombre.length>m.nombre.length&&!/^[a-z]+$/.test(nombre)) m.nombre=nombre;
-      if(!m.equipo&&u.equipo) m.equipo=UC(u.equipo);
+      if(u.equipo&&(!m.equipo||m.equipo!==UC(u.equipo))&&!m._eqFicha) m.equipo=UC(u.equipo);
+      if(u.equipo) m._eqFicha=true;
       if(!m.perfil&&u.perfilComercial) m.perfil=String(u.perfilComercial).toLowerCase();
       if(!m.entrega&&u.entregaParte) m.entrega=String(u.entregaParte).toLowerCase(); }
   });
@@ -1027,7 +1031,10 @@ async function datosCEO(anio,sem){
     if(g.jefeVende&&!g.siEntrega){
       const parteCom=(i)=>i.tipo!=="responsable"&&i.estado!=="ausente"&&(A.mismo(i.agente,g.cod)||A.mismo(i.agente,g.id));
       const tieneParte=suInf.some(parteCom)||inf.some(i=>parteCom(i)&&numC(i.semana)>=sem-4);
-      if(!tieneParte&&!numC((suyo(res,g)||{}).ventasAct)){ (G.jefesFuera=G.jefesFuera||[]).push(g.nombre+" ("+g.cod+"): sin parte de comercial ni ventas"); continue; } }
+      // (oct 2026) También cuenta como comercial si su jefe le ha hecho comité como a un comercial (acta a su
+      // nombre) en esta semana o en las cuatro anteriores: Esther pasaba por comité y aun así quedaba fuera.
+      const tieneComite=(flujoC||[]).some(f=>f.paso==="comite"&&numC(f.semana)>=sem-4&&numC(f.semana)<=sem&&(A.mismo(f.agente,g.cod)||A.mismo(f.agente,g.id)||A.mismo(f.agenteNombre,g.nombre)));
+      if(!tieneParte&&!tieneComite&&!numC((suyo(res,g)||{}).ventasAct)){ (G.jefesFuera=G.jefesFuera||[]).push(g.nombre+" ("+g.cod+"): sin parte de comercial, sin comité ni ventas"); continue; } }
     const ausente=suInf.some(i=>i.estado==="ausente"||i.ausente===true);
     if(ausente){ E.aus++; E.gente.push({...g,ausente:true,motivo:(suInf.find(i=>i.ausenteMotivo)||{}).ausenteMotivo||"Ausente"}); continue; }
     if(suInf.length) E.cerr++; else if(g.entrega!=="no") E.sinCerrar.push(g.nombre);
