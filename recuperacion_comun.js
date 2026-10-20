@@ -629,7 +629,7 @@
     const dto=RC.dtoDe(l.precioActual,l.precioOferta);
     let estado="aprobada", pend=null, cadena=[];
     const nivel=por.nivel;
-    const _pr=await RC.promoDe(l.art), _pd=_pr?RC.promoDto(_pr,l.catCliente):0;
+    const _pr=await RC.promoDe(l.art), _pd=_pr?RC.promoDto(_pr,await RC.catDeCaso(caso,l)):0;
     if(_pr&&dto<=_pd+0.05){
       // Precio de promoción/liquidación: ya aprobado en Stock
       cadena=[{rol:"promocion",nombre:(_pr.est==="LIQUIDACIÓN"?"Liquidación":"Promoción")+" aprobada en Stock (−"+_pd+" %)",estado:"aprobado",fecha:hoyS}];
@@ -841,6 +841,11 @@
     const pend=(lista||[]).filter(e=>e.estado==="pendiente_aprobacion"||e.estado==="aprobada");
     await Promise.all(pend.map(async e=>{
       const o=(e.ofertas||[])[0]||{}, fin=num(o.precioFinal||o.precioOferta);
+      // (oct 2026) Si el artículo está en promoción/liquidación, se enseña hasta dónde llega y si el precio pedido entra
+      try{ const pr=(o.codigo||o.art)?await RC.promoDe(o.codigo||o.art):null;
+        if(pr&&fin>0){ const t=await RC.tarifaCliente(e.clienteId||e.clienteCodigo,e.cliente||e.clienteNombre); const pd=RC.promoDto(pr,t.cat);
+          const ref=num(o.precioActual)>0?num(o.precioActual):(num(o.precioBase)>0?num(o.precioBase)*(1-t.dto/100):0);
+          e._promo={est:pr.est,dto:pd,cat:t.cat||"",ok:ref>0&&RC.dtoDe(ref,fin)<=pd+0.05,dtoPedido:ref>0?RC.dtoDe(ref,fin):null}; } }catch(x){}
       // (oct 2026) Antes, si la línea traía precioActual, se daba por hecho que era la tarifa del cliente y no se
       // calculaba nada: pero el CRM pone ahí el precio de catálogo. Ahora, si hay precio de catálogo (precioBase)
       // y la línea no trae ya el descuento del cliente, se calcula sobre su tarifa.
@@ -893,6 +898,11 @@
   RC.descCM=(a)=>{ let d=String(a.desc||a.art||""); const x=RC.calMetDe(a.art); if(!x) return d;
     if(x.cal&&!/cal\.?\s/i.test(d)) d+=" · cal. "+x.cal; if(x.met&&!/\d\s?m\b/.test(d)) d+=" · "+x.met+" m"; return d; };
   RC.promoDto=(it,catCli)=>/FABRICANTE|DISTRIBUIDOR|GRAN CUENTA/i.test(String(catCli||""))?(Number(it.dtoFab)||0):(Number(it.dtoGen)||0);
+  // (oct 2026) Tipo de cliente para el descuento de promoción. Si la línea no lo trae (artículo precargado de la
+  // venta, sin pasar por el catálogo), se busca en la ficha del cliente: antes se usaba el descuento de carnicero
+  // para un fabricante y la oferta iba a aprobación aunque estuviera dentro de la promoción.
+  RC.catDeCaso=async(caso,l)=>{ if(l&&l.catCliente) return l.catCliente; const c=caso||{};
+    try{ const t=await RC.tarifaCliente(c.cliente||c.clienteId||c.clienteCodigo||c.codigo,c.nombre||c.clienteNombre); return t.cat||""; }catch(e){ return ""; } };
   RC.limitesDto=async()=>{
     if(RC._lim) return RC._lim;
     RC._lim={agente:4,jefe:10,director:15};
@@ -907,9 +917,11 @@
     const lim=await RC.limitesDto();
     const tope=por.nivel==="ceo"?100:por.nivel==="director"?lim.director:por.nivel==="jefe"?lim.jefe:lim.agente;
     const dto=RC.dtoDe(l.precioActual,l.precioOferta);
-    const _pr=await RC.promoDe(l.art), _pd=_pr?RC.promoDto(_pr,l.catCliente):0;
+    const _pr=await RC.promoDe(l.art), _cat=_pr?await RC.catDeCaso(caso,l):"", _pd=_pr?RC.promoDto(_pr,_cat):0;
+    if(_pr&&!l.catCliente) l=Object.assign({},l,{catCliente:_cat});
     if(num(l.precioActual)>0&&dto>tope&&!(_pr&&dto<=_pd+0.05)){
-      const e=await RC.crearEstrategia(caso,l,(nota?nota+" · ":"")+"Oferta con "+dto+" % de descuento: supera el límite del "+tope+" %",
+      const e=await RC.crearEstrategia(caso,l,(nota?nota+" · ":"")+"Oferta con "+dto+" % de descuento: supera el límite del "+tope+" %"
+        +(_pr?" (en "+(_pr.est==="LIQUIDACIÓN"?"liquidación":"promoción")+" hasta −"+_pd+" % para "+(_cat||"carnicero")+"; el precio pedido pasa de ahí)":""),
         Object.assign({},por,{nivel:por.nivel==="comercial"?"comercial":por.nivel}));
       return {tipo:"estrategia",doc:e,dto,tope};
     }
@@ -1196,7 +1208,9 @@
     const lim=await RC.limitesDto(); const n=RC.NIVEL_UI;
     const tope=n==="ceo"?100:n==="director"?lim.director:n==="jefe"?lim.jefe:lim.agente;
     const d=Math.round((1-po/pa)*1000)/10;
-    const _s=RC._sel&&RC._sel[pref], _pr=_s&&_s.codigo?await RC.promoDe(_s.codigo):null, _pd=_pr?RC.promoDto(_pr,_s.catCli):0;
+    const _s=RC._sel&&RC._sel[pref], _pr=_s&&_s.codigo?await RC.promoDe(_s.codigo):null;
+    let _cat=_s&&_s.catCli; if(_pr&&!_cat){ try{ const c=RC._cliPref[pref]||{}; _cat=(await RC.tarifaCliente(c.cliente,c.nombre)).cat; }catch(e){} }
+    const _pd=_pr?RC.promoDto(_pr,_cat):0;
     if(_pr&&d>0&&d<=_pd+0.05){ el.innerHTML=`<span style="color:#15803D">🏷️ Descuento ${d} %: precio de ${_pr.est==="LIQUIDACIÓN"?"liquidación":"promoción"} (hasta −${_pd} %), ya aprobado. No hace falta aprobación.</span>`; return; }
     el.innerHTML=d<=0?`<span style="color:#15803D">Sin descuento sobre tarifa</span>`
       :d<=tope?`<span style="color:#15803D">Descuento ${d} %: dentro de tu límite (${tope} %)</span>`
@@ -1560,6 +1574,7 @@
       ${num(o.precioFinal||o.precioOferta)?`<div style="font-size:13px;margin-top:4px">${o.precioActual?RC.esc(o.precioActual)+" € → ":o.precioBase?"catálogo "+RC.esc(o.precioBase)+" € → ":""}<b style="color:#6D28D9">${RC.esc(o.precioFinal||o.precioOferta||"")} €/${RC.esc(o.unidad||"m")}</b> · ${e._dtoEf!=null
         ?`<b>${e._dtoEf} % sobre su tarifa</b> <span style="color:#6B7280">(tarifa ${num(e._tarifaCli).toFixed(2)} € · ${e._dtoCli} % ${RC.esc(e._catCli||"")}${e._sinTarifa?" · sin tarifa en el CRM":""} · ${num(e.maxDescuento)} % sobre catálogo)</span>`
         :`descuento ${num(e.maxDescuento)} % <span style="color:#6B7280">sobre ${o.precioActualOrigen==="manual"?"el precio que escribió el comercial":"el precio de catálogo (tarifa general), no sobre la tarifa del cliente"}</span>`}</div>`:""}
+      ${e._promo?`<div style="font-size:12.5px;font-weight:700;margin-top:3px;color:${e._promo.ok?"#15803D":"#B45309"}">🏷️ Artículo en ${e._promo.est==="LIQUIDACIÓN"?"liquidación":"promoción"}: hasta −${e._promo.dto} % para ${RC.esc(e._promo.cat||"carnicero")} ya aprobado en Stock${e._promo.ok?" · el precio pedido entra en la promoción, no necesitaba aprobación":e._promo.dtoPedido!=null?" · el precio pedido supone −"+e._promo.dtoPedido+" %, pasa de la promoción":""}</div>`:""}
       <div style="font-size:12px;color:#6B7280;margin-top:2px">${e.solicitudAgente?"Lo pide "+RC.esc(e.agenteNombre||e.agente):"Creada por "+RC.esc(e.creadoPorNombre||"")} · ${RC.fechaTxt(e)}${e.descripcion?" · “"+RC.esc(e.descripcion)+"”":""}</div>
       ${extra}${res}${botones||""}</div>`;
   };
