@@ -737,7 +737,7 @@ async function writeOverride(cod, patch){
 async function clearOverrideField(cod, field){
   const current = Object.assign({}, overrides[cod]); delete current[field];
   try{
-    if (!current.estado && !current.catManual && current.cantProp==null && current.dtoGen==null && current.dtoFab==null && !(current.tarifa>0)){ delete overrides[cod]; renderAll(); await fsDel('stock_decisiones',idDe(cod)); }
+    if (!current.estado && !current.catManual && current.cantProp==null && current.dtoGen==null && current.dtoFab==null && !(current.tarifa>0) && !(current.entrante>0)){ delete overrides[cod]; renderAll(); await fsDel('stock_decisiones',idDe(cod)); }
     else { const merged = Object.assign({}, current, { by: QUIEN, at: new Date().toISOString() }); overrides[cod]=merged; renderAll();
       await fsSet('stock_decisiones',idDe(cod),Object.assign({cod},merged)); }
     pedirCatalogo();
@@ -1465,6 +1465,10 @@ const PP_CHIPS=[['PL','Promoción + liquidación'],['PROMO','Promoción'],['LIQ'
 const costeUd=(r)=>r.cant>0?r.stock/r.cant:0;
 const udsSobrantes=(r)=>r.stock>0&&r.cant>0?r.cant*stockSobrante(r)/r.stock:0;
 const cantDe=(cod)=>{ const o=overrides[cod]; return o&&o.cantProp!=null&&o.cantProp!==''?Number(o.cantProp):null; };
+// (oct 2026) Stock que va a llegar (pedido a fábrica, en camino): se apunta a mano y amplía el tope de la cantidad a
+// promocionar, para poder meter en promoción algo que todavía no está en el almacén.
+const entranteDe=(cod)=>{ const o=overrides[cod]; return o&&Number(o.entrante)>0?Number(o.entrante):0; };
+const topeCant=(r)=>(r?r.cant:0)+entranteDe(r?r.cod:'');
 function ppGrupo(r){ const o=overrides[r.cod], e=finalEstado(r);
   if(o&&o.estado==='NORMAL') return 'EXCL'; if(e==='PROMOCIÓN') return 'PROMO'; if(e==='LIQUIDACIÓN') return 'LIQ'; if(e==='OK') return 'OKROT'; return null; }
 function ppTotales(){
@@ -1507,8 +1511,10 @@ function renderPropuestas(){
     const rot=`Rot. <b>${fmtRot(effectiveRotA(r))}</b> / obj. ${fmtRot(effectiveRotO(r))}`;
     const accion=enPL?`<div class="pp-cant">
         <label>Cantidad a ${g==='LIQ'?'liquidar':'promocionar'}<span><input type="number" inputmode="decimal" min="0" step="any" value="${c!=null?Math.round(c*100)/100:''}" placeholder="0" data-cant="${escapeHtml(r.cod)}" ${ro}> uds</span></label>
-        <div class="pp-q"><button class="pp-s" data-set="${escapeHtml(r.cod)}" data-v="${Math.round(sob)}" ${ro}>Sobrante ${fmtNum(Math.round(sob))}</button><button class="pp-s" data-set="${escapeHtml(r.cod)}" data-v="${Math.round(r.cant*100)/100}" ${ro}>Todo ${fmtNum(r.cant)}</button>${c!=null?`<button class="pp-s" data-set="${escapeHtml(r.cod)}" data-v="" ${ro}>Borrar</button>`:''}</div>
-        <div class="pp-eq">${c>0?`= <b>${fmtEur(c*cu)}</b> a coste · ${(c/r.cant*100).toFixed(0)}% del stock`:'<span class="quien">Sin cantidad propuesta</span>'}</div></div>`:'';
+        <div class="pp-q"><button class="pp-s" data-set="${escapeHtml(r.cod)}" data-v="${Math.round(sob)}" ${ro}>Sobrante ${fmtNum(Math.round(sob))}</button><button class="pp-s" data-set="${escapeHtml(r.cod)}" data-v="${Math.round(topeCant(r)*100)/100}" ${ro}>Todo ${fmtNum(topeCant(r))}</button>${c!=null?`<button class="pp-s" data-set="${escapeHtml(r.cod)}" data-v="" ${ro}>Borrar</button>`:''}</div>
+        <label style="font-weight:500;color:var(--ink-dim)">📦 Stock que va a llegar<span><input type="number" inputmode="decimal" min="0" step="any" value="${entranteDe(r.cod)||''}" placeholder="0" data-entr="${escapeHtml(r.cod)}" ${ro}> uds</span></label>
+        ${entranteDe(r.cod)>0?`<label style="font-weight:500;color:var(--ink-dim)">Cuándo / de dónde<span><input type="text" value="${escapeHtml(o.entranteNota||'')}" placeholder="p. ej. llega el 28/10, pedido fábrica" data-entrn="${escapeHtml(r.cod)}" style="width:200px" ${ro}></span></label>`:''}
+        <div class="pp-eq">${c>0?`= <b>${fmtEur(c*cu)}</b> a coste · ${(c/topeCant(r)*100).toFixed(0)}% del stock${entranteDe(r.cod)>0?` (${fmtNum(r.cant)} en almacén + ${fmtNum(entranteDe(r.cod))} que van a llegar${o.entranteNota?' · '+escapeHtml(o.entranteNota):''})`:''}`:'<span class="quien">Sin cantidad propuesta</span>'}</div></div>`:'';
     const D=enPL?dtoDe(r):null, tar=enPL?tarifaDe(r):0;
     const tCat=enPL?tarifaCat(r):0, tMan=Number(o.tarifa)>0, pmv=enPL?precioMedioVenta(r):0;
     const dtoHtml=!enPL?'':DTO_EDIT.has(r.cod)?`<div class="pp-dto ed"><b>Precio y descuento en el catálogo</b>
@@ -1536,6 +1542,10 @@ function renderPropuestas(){
   L.querySelectorAll('input[data-cant]').forEach(inp=>{ inp.onkeydown=(e)=>{ if(e.key==='Enter') inp.blur(); };
     inp.onchange=()=>guardarCant(inp.dataset.cant,inp.value); });
   L.querySelectorAll('button[data-set]').forEach(b=>b.onclick=()=>guardarCant(b.dataset.set,b.dataset.v));
+  L.querySelectorAll('input[data-entr]').forEach(inp=>{ inp.onkeydown=(e)=>{ if(e.key==='Enter') inp.blur(); };
+    inp.onchange=()=>{ const n=Number(String(inp.value).replace(',','.')); if(inp.value===''||!(n>0)) clearOverrideField(inp.dataset.entr,'entrante'); else writeOverride(inp.dataset.entr,{entrante:Math.round(n*100)/100}); }; });
+  L.querySelectorAll('input[data-entrn]').forEach(inp=>{ inp.onkeydown=(e)=>{ if(e.key==='Enter') inp.blur(); };
+    inp.onchange=()=>{ const v=String(inp.value).trim(); if(!v) clearOverrideField(inp.dataset.entrn,'entranteNota'); else writeOverride(inp.dataset.entrn,{entranteNota:v}); }; });
   L.querySelectorAll('a[data-alm]').forEach(a=>a.onclick=()=>{ const c=a.dataset.alm; if(expanded.has(c)) expanded.delete(c); else expanded.add(c); renderPropuestas(); });
   L.querySelectorAll('a[data-dtoed]').forEach(a=>a.onclick=()=>{ DTO_EDIT.add(a.dataset.dtoed); renderPropuestas(); });
   L.querySelectorAll('input[data-pv]').forEach(i=>i.oninput=()=>{ const o=document.getElementById(i.dataset.out); if(o) o.innerHTML=pvTxt(Number(i.dataset.pv),i.value); });
@@ -1554,16 +1564,16 @@ function renderPropuestas(){
 }
 function guardarCant(cod,v){ const r=DATA_BY_COD[cod]; let n=v===''||v==null?null:Number(String(v).replace(',','.'));
   if(n!=null&&!(n>=0)){ alert('Pon un número de unidades.'); renderPropuestas(); return; }
-  if(n!=null&&r&&n>r.cant+1e-6){ alert(`No puede pasar del stock: ${fmtNum(r.cant)} uds.`); n=r.cant; }
+  if(n!=null&&r&&n>topeCant(r)+1e-6){ alert(`No puede pasar del stock: ${fmtNum(r.cant)} uds en almacén${entranteDe(cod)>0?' + '+fmtNum(entranteDe(cod))+' que van a llegar':''}.\nSi va a entrar más stock, apúntalo en «Stock que va a llegar» y luego pon la cantidad.`); n=topeCant(r); }
   if(n==null) clearOverrideField(cod,'cantProp'); else writeOverride(cod,{cantProp:Math.round(n*100)/100}); }
 function renderOk(){}
 function descargarPropuesta(){
   const rows=DATA.filter(r=>{ const g=ppGrupo(r); return g==='PROMO'||g==='LIQ'; }).sort((a,b)=>b.stock-a.stock);
   const f=(x)=>String(x==null?'':x).replace(/;/g,',');
   const nf=(x)=>x==null?'':String(Math.round(x*100)/100).replace('.',',');
-  const out=[['Código','Nombre','División','Categoría','Propuesta','Unidades stock','Stock €','Rotación actual','Rotación objetivo','Venta/mes uds','Venta/mes € (PV)','Calibre','Metros','Uds sobrantes','Cantidad propuesta','Valor propuesto €','Por'].join(';')];
+  const out=[['Código','Nombre','División','Categoría','Propuesta','Unidades stock','Stock €','Rotación actual','Rotación objetivo','Venta/mes uds','Venta/mes € (PV)','Calibre','Metros','Uds sobrantes','Uds que van a llegar','Cantidad propuesta','Valor propuesto €','Por'].join(';')];
   rows.forEach(r=>{ const c=cantDe(r.cod), o=overrides[r.cod]||{};
-    out.push([r.cod,r.nom,effectiveDiv(r)||'',effectiveCat(r)||'',finalEstado(r),nf(r.cant),nf(r.stock),nf(effectiveRotA(r)),nf(effectiveRotO(r)),nf(ventaMes(r).uds),nf(ventaMes(r).eur),calMet(r).cal,calMet(r).met,nf(udsSobrantes(r)),nf(c),c>0?nf(c*costeUd(r)):'',o.by||''].map(f).join(';')); });
+    out.push([r.cod,r.nom,effectiveDiv(r)||'',effectiveCat(r)||'',finalEstado(r),nf(r.cant),nf(r.stock),nf(effectiveRotA(r)),nf(effectiveRotO(r)),nf(ventaMes(r).uds),nf(ventaMes(r).eur),calMet(r).cal,calMet(r).met,nf(udsSobrantes(r)),nf(entranteDe(r.cod)||null),nf(c),c>0?nf(c*costeUd(r)):'',o.by||''].map(f).join(';')); });
   const blob=new Blob(['﻿'+out.join('\n')],{type:'text/csv;charset=utf-8'}), a=document.createElement('a');
   a.href=URL.createObjectURL(blob); a.download='propuesta_promocion_liquidacion_'+(META&&META.fecha||'')+'.csv'; a.click(); }
 function wireButtons(container){
