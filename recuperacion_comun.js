@@ -841,7 +841,10 @@
     const pend=(lista||[]).filter(e=>e.estado==="pendiente_aprobacion"||e.estado==="aprobada");
     await Promise.all(pend.map(async e=>{
       const o=(e.ofertas||[])[0]||{}, fin=num(o.precioFinal||o.precioOferta);
-      if(num(o.precioActual)>0||!(num(o.precioBase)>0)||!(fin>0)) return;
+      // (oct 2026) Antes, si la línea traía precioActual, se daba por hecho que era la tarifa del cliente y no se
+      // calculaba nada: pero el CRM pone ahí el precio de catálogo. Ahora, si hay precio de catálogo (precioBase)
+      // y la línea no trae ya el descuento del cliente, se calcula sobre su tarifa.
+      if((o.dtoCliente!=null&&o.dtoCliente!=="")||!(num(o.precioBase)>0)||!(fin>0)) return;
       try{ const t=await RC.tarifaCliente(e.clienteId||e.clienteCodigo,e.cliente||e.clienteNombre);
         const tar=num(o.precioBase)*(1-t.dto/100);
         e._dtoCli=t.dto; e._catCli=t.cat; e._sinTarifa=!!t.sinDato; e._tarifaCli=Math.round(tar*100)/100;
@@ -1556,7 +1559,7 @@
           ${num(e.maxDescuento)?`<div style="font-size:12.5px;color:#374151;margin-top:2px"><b>Descuento máximo:</b> ${num(e.maxDescuento)} %</div>`:""}`; })()}
       ${num(o.precioFinal||o.precioOferta)?`<div style="font-size:13px;margin-top:4px">${o.precioActual?RC.esc(o.precioActual)+" € → ":o.precioBase?"catálogo "+RC.esc(o.precioBase)+" € → ":""}<b style="color:#6D28D9">${RC.esc(o.precioFinal||o.precioOferta||"")} €/${RC.esc(o.unidad||"m")}</b> · ${e._dtoEf!=null
         ?`<b>${e._dtoEf} % sobre su tarifa</b> <span style="color:#6B7280">(tarifa ${num(e._tarifaCli).toFixed(2)} € · ${e._dtoCli} % ${RC.esc(e._catCli||"")}${e._sinTarifa?" · sin tarifa en el CRM":""} · ${num(e.maxDescuento)} % sobre catálogo)</span>`
-        :`descuento ${num(e.maxDescuento)} %`}</div>`:""}
+        :`descuento ${num(e.maxDescuento)} % <span style="color:#6B7280">sobre ${o.precioActualOrigen==="manual"?"el precio que escribió el comercial":"el precio de catálogo (tarifa general), no sobre la tarifa del cliente"}</span>`}</div>`:""}
       <div style="font-size:12px;color:#6B7280;margin-top:2px">${e.solicitudAgente?"Lo pide "+RC.esc(e.agenteNombre||e.agente):"Creada por "+RC.esc(e.creadoPorNombre||"")} · ${RC.fechaTxt(e)}${e.descripcion?" · “"+RC.esc(e.descripcion)+"”":""}</div>
       ${extra}${res}${botones||""}</div>`;
   };
