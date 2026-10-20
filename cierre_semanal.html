@@ -1314,7 +1314,7 @@ window.abrirCobrosCierre=function(){
 // No cambia nada de lo que se pregunta ni de lo que se guarda: solo ordena los
 // apartados, los numera y los pliega. El comité lee exactamente lo mismo.
 const ORDEN_AP=[["prioant",/compromiso de la semana pasada/i],["lunes",/dijiste el lunes/i],["vas",/^cómo vas/i],["jefe",/te pidió tu jefe/i],["cob",/^cobros/i],["mues",/^muestras/i],
-  ["act",/^actividad/i],["recup",/recuperación/i],["promo",/promoción y liquidación/i],["est",/estrategias/i],["frio",/^ofertas/i],["cli",/indicios de bajada/i],["dup",/mismo cliente/i],["prox",/semana que viene/i]];
+  ["act",/^actividad/i],["recup",/recuperación/i],["promo",/promoción y liquidación/i],["est",/estrategias/i],["frio",/^ofertas/i],["hitos",/hitos de proyectos/i],["cli",/indicios de bajada/i],["dup",/mismo cliente/i],["prox",/semana que viene/i]];
 const ABIERTOS_AP=new Set();
 function tarjetaSemana(){
   const C=window._CIERRE_CIFRAS||{}, d=(typeof kpiDatos==="function")?kpiDatos():{actividad:{},muestras:{}};
@@ -2985,6 +2985,19 @@ async function enviar(){
     if(!col||!id||col==="cliente") continue;
     cerrar.push({col,id,estado:v.cierra});
   }
+  // (oct 2026) Hitos marcados como hechos (o que ya no aplican): se cierran en el proyecto para que dejen de salir
+  for(const [k,v] of Object.entries(R)){
+    if(!k.startsWith("hito:")||!v||!/^(✅|✕)/.test(String(v.accion||""))) continue;
+    const m=k.slice(5).match(/^(.*)_(\d+)$/); if(!m) continue;
+    try{
+      const r=await fetch(`${FB}/proyectos/${encodeURIComponent(m[1])}`); if(!r.ok) continue;
+      const d=await r.json(); const arr=(d.fields&&d.fields.hitos&&d.fields.hitos.arrayValue&&d.fields.hitos.arrayValue.values)||[];
+      const it=arr[Number(m[2])]; if(!it||!it.mapValue) continue;
+      it.mapValue.fields=Object.assign({},it.mapValue.fields,{hecho:{booleanValue:true},estado:{stringValue:/^✕/.test(v.accion)?"no aplica":"hecho"},
+        hechoEn:{stringValue:new Date().toISOString()},hechoPor:{stringValue:"cierre_semanal_s"+SEMANA},...(v.texto?{notaCierre:{stringValue:String(v.texto)}}:{})});
+      await fetch(`${FB}/proyectos/${encodeURIComponent(m[1])}?updateMask.fieldPaths=hitos`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:{hitos:{arrayValue:{values:arr}}}})});
+    }catch(e){}
+  }
   let fallos=0;
   for(const c of cerrar){
     try{
@@ -3730,6 +3743,30 @@ async function enviar(){
       window._CIERRE_COB={venc:_v,nFac:_n,clis:_clis,comp:_comp};
     }catch(e){ window._CIERRE_COB=null; }
 
+    // (oct 2026) Hitos de proyectos de sus clientes sin resolver: antes solo salían en el resumen final, no como
+    // punto del parte ni del comité. Mismo criterio de «es mío» que el resumen (código, id, alias o nombre).
+    let hitosP=[];
+    try{
+      const rp=await fetch(`${FB}/proyectos?pageSize=300`);
+      if(rp.ok){ const jp=await rp.json();
+        const NMh=(x)=>ARR(x).normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^A-Z0-9]/g,"");
+        const miNom=NMh((yo&&yo.nombre)||P.get("nombre")||"");
+        const esYoH=(v)=>{ if(!v) return false; if(esClave(v)) return true; const n=NMh(v); return !!(n&&miNom&&(n===miNom||(n.length>4&&miNom.startsWith(n)))); };
+        const hoy0=new Date().toISOString().slice(0,10);
+        (jp.documents||[]).forEach(d=>{
+          const f={}; for(const [k,x] of Object.entries(d.fields||{})) f[k]=x.stringValue!==undefined?x.stringValue:x.booleanValue!==undefined?x.booleanValue:x.doubleValue!==undefined?Number(x.doubleValue):null;
+          if(/cerrad|finaliz|complet|cancel/i.test(String(f.estado||""))) return;
+          const pid=decodeURIComponent(d.name.split("/").pop());
+          const arr=(d.fields&&d.fields.hitos&&d.fields.hitos.arrayValue&&d.fields.hitos.arrayValue.values)||[];
+          const delProy=[f.responsable,f.responsableComercial,f.comercial,f.agente,f.creadoPor].some(esYoH);
+          arr.forEach((v,i)=>{ const h={}; for(const [k,x] of Object.entries((v.mapValue&&v.mapValue.fields)||{})) h[k]=x.stringValue!==undefined?x.stringValue:x.booleanValue!==undefined?x.booleanValue:x.doubleValue!==undefined?Number(x.doubleValue):null;
+            if(h.hecho||h.completado||String(h.estado||"").toLowerCase()==="hecho") return;
+            const resp=h.responsable||h.responsableId||h.asignadoA||h.quien||""; if(resp?!esYoH(resp):!delProy) return;
+            const fe=String(h.fecha||"").slice(0,10), dias=fe?Math.round((Date.parse(fe)-Date.parse(hoy0))/86400000):null;
+            hitosP.push({k:pid+"_"+i,proyId:pid,idx:i,nom:h.nombre||h.titulo||"(sin nombre)",proy:f.nombre||"",cliente:f.cliente||f.clienteNombre||"",fecha:fe,dias}); });
+        });
+        hitosP.sort((a,b)=>String(a.fecha||"9").localeCompare(String(b.fecha||"9"))); }
+    }catch(e){}
     let prometido=[];
     if(plan&&plan.acciones){
       let A={}; try{ A=JSON.parse(plan.acciones); }catch(e){}
@@ -3893,6 +3930,25 @@ async function enviar(){
               .map(o=>`<button class="chip" onclick="marcar('${k}','${o}',this)">${o}</button>`).join("")}</div>
             <textarea placeholder="${x.hecho?"¿Qué salió?":"¿Qué pasó?"}"
               oninput="texto('${k}',this)"></textarea>
+          </div>`;
+        }).join("")}
+      </div>`:""}
+      ${hitosP.length?`<div class="paso" data-k="hitos" style="background:#F5F3FF;border-color:#C4B5FD">
+        <p class="tit"><span class="num" style="background:#6D28D9">📁</span>Hitos de proyectos</p>
+        <p class="sub"><b>${hitosP.length} hito${hitosP.length===1?"":"s"} sin resolver</b>${hitosP.filter(h=>h.dias!=null&&h.dias<0).length?`, ${hitosP.filter(h=>h.dias!=null&&h.dias<0).length} ya vencido${hitosP.filter(h=>h.dias!=null&&h.dias<0).length===1?"":"s"}`:""}. Di en qué está cada uno.</p>
+        ${hitosP.map(h=>{
+          const k="hito:"+h.k; if(h.dias==null||h.dias<=14) PENDIENTES.push(k);
+          const fx=h.fecha?h.fecha.split("-").reverse().join("/"):"sin fecha";
+          const est=h.dias==null?"":h.dias<0?`vencido hace ${-h.dias} d`:h.dias===0?"vence hoy":`faltan ${h.dias} d`;
+          window.NOMBRES_CLAVE[k]="📁 "+h.nom+(h.proy?" · "+h.proy:"");
+          plantear(k,"hito",h.nom,[h.proy,h.cliente,fx,est].filter(Boolean).join(" · "));
+          return `<div class="item" style="display:block;padding:12px 0">
+            <div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline">
+              <div style="min-width:0"><b>${_escR(h.nom)}</b><small>${_escR([h.proy,h.cliente].filter(Boolean).join(" · "))}</small></div>
+              <span class="imp ${h.dias!=null&&h.dias<0?"dn":"pd"}" style="font-size:11px">${_escR(fx)}${est?" · "+_escR(est):""}</span>
+            </div>
+            <div class="acc">${["✅ Hecho","⏳ Sigue pendiente","📅 Cambia la fecha","✕ Ya no aplica"].map(o=>`<button class="chip" onclick="marcar('${k}','${o}',this)">${o}</button>`).join("")}</div>
+            <textarea placeholder="Qué falta, con quién, para cuándo" oninput="texto('${k}',this)"></textarea>
           </div>`;
         }).join("")}
       </div>`:""}
