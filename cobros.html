@@ -134,6 +134,54 @@ const FB_PROJECT = "grupo-consolidado-crm";
 const FB_BASE    = `https://firestore.googleapis.com/v1/projects/${FB_PROJECT}/databases/(default)/documents`;
 const COL_COBROS = "cobros_comercial";
 const COL_META   = "cobros_meta";
+// (oct 2026) Estado de cada factura puesto por Administración (en el seguro, falta pago, reclamada, en disputa,
+// cobrada). Se guarda por nº de factura y empresa en cobros_estado_factura, así sobrevive a cada importación
+// del Excel y se puede seguir semana a semana. «Cobrada» la saca del seguimiento (queda el rastro).
+const COL_ESTADO_FAC = "cobros_estado_factura";
+const ESTADOS_FAC = {
+  seguro:     ["🛡️ En el seguro",   "#6D28D9", "#F5F3FF"],
+  falta_pago: ["⚠️ Falta pago",     "#B91C1C", "#FEF2F2"],
+  reclamada:  ["📨 Reclamada",      "#B45309", "#FFFBEB"],
+  disputa:    ["❓ En disputa",      "#0E7490", "#ECFEFF"],
+  cobrada:    ["✅ Cobrada",         "#15803D", "#F0FDF4"],
+};
+let EF={};   // clave factura → {estado,nota,por,fecha,...}
+const claveEF=(f)=>(String(f.g||"").toUpperCase().replace(/[^A-Z0-9]/g,"")+"_"+normCom(docTxt(f))).replace(/[\/#?]/g,"_");
+const estadoFac=(f)=>{ const e=EF[claveEF(f)]; return e&&e.estado?e:null; };
+async function cargarEstadosFac(){
+  const out={}; let token=null, i=0;
+  do{
+    const r=await fetch(`${FB_BASE}/${COL_ESTADO_FAC}?pageSize=300${token?"&pageToken="+token:""}`,{cache:"no-store"});
+    if(!r.ok) break; const d=await r.json();
+    (d.documents||[]).forEach(x=>{ const o=fromDoc(x); out[decodeURIComponent(x.name.split("/").pop())]=o; });
+    token=d.nextPageToken||null; i++;
+  }while(token&&i<20);
+  return out;
+}
+window.marcarEstadoFac=async(ci,ki,estado,sel)=>{
+  const c=(ST._lista||[])[ci], k=(ST._gk||[])[ki]; if(!c||!k) return;
+  const l=(plazosDe(c)[k]||[]), f=l[0]; if(!f) return;
+  const key=claveEF(f), prev=EF[key]||{};
+  if(!estado){ // quitar el estado
+    if(!confirm("¿Quitar el estado de la factura "+docTxt(f)+"?")){ render(); return; }
+    try{ await fetch(`${FB_BASE}/${COL_ESTADO_FAC}/${encodeURIComponent(key)}`,{method:"DELETE"}); delete EF[key]; }catch(e){ alert("No se ha podido guardar: "+e.message); }
+    render(); return; }
+  let nota=prev.nota||"";
+  if(estado!=="cobrada"){ const n=prompt((ESTADOS_FAC[estado]||[""])[0]+" · "+docTxt(f)+"\nNota (opcional): con quién, qué falta, referencia…",nota); if(n===null){ render(); return; } nota=String(n).trim(); }
+  const doc={estado,nota,por:P.nombre||P.agente||"Administración",fecha:new Date().toISOString(),cliente:c.c||"",comercial:c._cod||"",numero:docTxt(f),empresa:f.g||"",importe:Number(f.im)||0,vencimiento:f.fv||"",
+    historial:JSON.stringify(((()=>{ try{ return JSON.parse(prev.historial||"[]"); }catch(e){ return []; } })()).concat([{estado,nota,por:P.nombre||P.agente||"",fecha:new Date().toISOString()}]).slice(-20))};
+  const fields={}; for(const [kk,v] of Object.entries(doc)) fields[kk]=typeof v==="number"?{doubleValue:v}:{stringValue:String(v)};
+  try{ const r=await fetch(`${FB_BASE}/${COL_ESTADO_FAC}/${encodeURIComponent(key)}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields})});
+    if(!r.ok) throw new Error("HTTP "+r.status); EF[key]=Object.assign({_id:key},doc); }
+  catch(e){ alert("No se ha podido guardar: "+e.message); }
+  render();
+};
+// Resumen de estados sobre las facturas que hay ahora en la cartera
+function resumenEstadosFac(lista){
+  const R={}; Object.keys(ESTADOS_FAC).forEach(k=>R[k]={n:0,im:0});
+  for(const c of lista) for(const [k,l] of Object.entries(plazosDe(c))){ const e=estadoFac(l[0]); if(!e||!R[e.estado]) continue; R[e.estado].n++; R[e.estado].im+=l.reduce((t,x)=>t+(Number(x.im)||0),0); }
+  return R;
+}
 
 const INC_TIPOS = {
   administracion: {label:"📄 Administración", color:"#8B5CF6", resp:"resp_adm"},
@@ -172,6 +220,7 @@ let ST = {
   empresa : "",
   comercial: "",
   interco : "no",          // no | si | solo
+  estadoFac: "",           // (oct 2026) filtro por estado de factura: seguro | falta_pago | reclamada | disputa | cobrada | sin
   compensar: false,        // solo clientes con abonos que cuadran con facturas
   orden   : "antiguedad",   // (oct 2026) Siempre por días de retraso, de mayor a menor
   abiertos: {},
@@ -349,6 +398,7 @@ function clientes(){
   return out;
 }
 
+function preparadosSinEstado(){ const e=ST.estadoFac; ST.estadoFac=""; try{ return preparados(); } finally{ ST.estadoFac=e; } }
 function preparados(){
   const q = ST.buscar.trim().toUpperCase();
   const lista=[];
@@ -356,6 +406,7 @@ function preparados(){
     let facs=lineasDe(c);
     if(ST.empresa) facs=facs.filter(f=>f.g===ST.empresa);
     if(ST.vista==="vencidos") facs=facs.filter(f=>f._saldo ? Math.abs(f.ven)>=1 : (f.fv && f.fv<CORTE));
+    if(ST.estadoFac){ facs=facs.filter(f=>!f._saldo&&(ST.estadoFac==="sin"?!estadoFac(f):(estadoFac(f)||{}).estado===ST.estadoFac)); if(!facs.length) continue; }
     if(ST.seguro){ facs=facsSeguro(c,facs).filter(f=>nivelSeguro(f)===ST.seguro); if(!facs.length) continue; }
     // (sep 2026) Importes oficiales (pestaña TODOS), por empresa si hay filtro
     const O = oficial(c);
@@ -551,6 +602,11 @@ function render(){
         <option value="">Todos los vendedores</option>
         ${comerciales.map(c=>`<option value="${esc(c.id)}" ${ST.comercial===c.id?"selected":""}>${esc(c.n)}</option>`).join("")}
       </select>`:""}
+      ${soloSaldos()?"":`<select onchange="ST.estadoFac=this.value;ST.abiertos={};render()" style="${ST.estadoFac?"border-color:#6D28D9;color:#6D28D9;font-weight:800":""}">
+        <option value="" ${ST.estadoFac===""?"selected":""}>Cualquier estado de factura</option>
+        ${Object.entries(ESTADOS_FAC).map(([k,[lab]])=>`<option value="${k}" ${ST.estadoFac===k?"selected":""}>${lab}</option>`).join("")}
+        <option value="sin" ${ST.estadoFac==="sin"?"selected":""}>Sin estado puesto</option>
+      </select>`}
       ${soloSaldos()?"":`<button class="mini" onclick="ST.compensar=!ST.compensar;ST.abiertos={};render()"
         style="${ST.compensar?"border-color:#0891B2;background:#ECFEFF;color:#0E7490;font-weight:800":""}">
         🔄 Compensables</button>`}
@@ -565,6 +621,9 @@ function render(){
       Aplicar la compensación los saca de la cartera sin cobrar un euro.</span>
     </div>`:""}
 
+    ${(()=>{ if(soloSaldos()) return ""; const R=resumenEstadosFac(ST.estadoFac?preparadosSinEstado():lista); const L=Object.entries(R).filter(([k,x])=>x.n);
+      if(!L.length) return VE_TODO?`<p style="margin:0 0 8px;font-size:11.5px;color:#94A3B8">Administración puede marcar cada factura vencida (en el seguro, falta pago, reclamada, en disputa, cobrada) desde el desplegable de la factura; el estado se conserva entre importaciones.</p>`:"";
+      return `<div style="display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px">${L.map(([k,x])=>{ const [lab,co,bg]=ESTADOS_FAC[k]; return `<button class="mini" onclick="ST.estadoFac=ST.estadoFac==='${k}'?'':'${k}';ST.abiertos={};render()" style="background:${bg};color:${co};border-color:${co}55;font-weight:800${ST.estadoFac===k?";outline:2px solid "+co:""}">${lab} · ${x.n} · ${eur(x.im)}</button>`; }).join("")}</div>`; })()}
     <p style="margin:0 0 10px;font-size:12px;color:#64748B">
       <b>${lista.length}</b> ${lista.length===1?"cliente":"clientes"} · <b>${eur(sumP)}</b>
       ${ST.seguro==="va"?" a enviar al seguro":ST.seguro==="riesgo"?" en riesgo de seguro":ST.vista==="vencidos"?" fuera de plazo":" pendiente"}
@@ -603,7 +662,8 @@ function compDeFactura(c,f){ const d=normCom(docTxt(f));
   return compDe(c).filter(i=>String(i.facturaNum||"").split(/\s*,\s*/).some(x=>x&&normCom(x)===d)); }
 // Facturas (agrupando plazos) con algo vencido, de la más antigua a la más reciente
 function gruposVenc(c){ const venc=(f)=>f.fv&&f.fv<CORTE;
-  return Object.entries(plazosDe(c)).filter(([k,l])=>l.some(f=>venc(f)&&f.im>0&&!f.anul)&&(!ST.empresa||l[0].g===ST.empresa))
+  return Object.entries(plazosDe(c)).filter(([k,l])=>l.some(f=>venc(f)&&f.im>0&&!f.anul)&&(!ST.empresa||l[0].g===ST.empresa)
+      &&(!ST.estadoFac||(ST.estadoFac==="sin"?!estadoFac(l[0]):(estadoFac(l[0])||{}).estado===ST.estadoFac)))
     .map(([k,l])=>({k,l,f:l[0],tot:l.reduce((t,x)=>t+x.im,0),ven:l.filter(venc).reduce((t,x)=>t+x.im,0),v1:l.find(venc)}))
     .sort((a,b)=>String(a.v1.fv).localeCompare(String(b.v1.fv))); }
 const colDias=(d)=>d>110?["#7F1D1D","#fff"]:d>90?["#FEE2E2","#B91C1C"]:d>20?["#FFEDD5","#C2410C"]:["#FEF3C7","#92400E"];
@@ -616,6 +676,10 @@ function facturasVenc(c,ci){
         <div style="font-size:11.5px;color:#64748B">${esc(f.g||"")} · emitida ${fecha(f.ff)}${g.l.length>1?` · ${g.l.length} plazos · pendiente ${eur(g.tot)}`:` · vence ${fecha(f.fv)}`}</div>
         ${g.l.length>1?g.l.map((x,i)=>`<div style="font-size:11.5px;color:${x.fv<CORTE?"#B91C1C":"#64748B"}">plazo ${i+1}: vence ${fecha(x.fv)} · ${eur(x.im)}${x.fv<CORTE?` · ${dias(x.fv)} días`:" · en plazo"}</div>`).join(""):""}
         ${cp.map(i=>`<div style="font-size:11.5px;color:${(RC.ESTADO_COBRO[i.estadoCobro]||[])[1]||"#1D4ED8"};font-weight:700;margin-top:2px">📅 ${esc(i.accionCobro)} · ${esc(RC.fechaES(i.fechaCompromiso))} · ${esc((RC.ESTADO_COBRO[i.estadoCobro]||[""])[0])}</div>`).join("")}
+        ${(()=>{ const e=estadoFac(f); if(!e) return ""; const [lab,co,bg]=ESTADOS_FAC[e.estado]||[e.estado,"#475569","#F1F5F9"];
+          return `<div style="margin-top:3px;font-size:11.5px"><span style="display:inline-block;background:${bg};color:${co};border-radius:8px;padding:1px 7px;font-weight:800">${lab}</span> <span style="color:#64748B">${esc(fecha(String(e.fecha||"").slice(0,10)))}${e.por?" · "+esc(e.por):""}${e.nota?" · «"+esc(e.nota)+"»":""}</span>${e.estado==="cobrada"?`<div style="color:#B45309;font-weight:700">Marcada cobrada pero sigue en el Excel del ${esc(fecha(CORTE))}: revisar</div>`:""}</div>`; })()}
+        ${VE_TODO?`<select onclick="event.stopPropagation()" onchange="event.stopPropagation();marcarEstadoFac(${ci},${kIdx(g.k)},this.value,this)" style="margin-top:4px;font:inherit;font-size:11.5px;padding:3px 6px;border:1px solid #CBD5E1;border-radius:8px;max-width:190px;color:${(ESTADOS_FAC[(estadoFac(f)||{}).estado]||["","#475569"])[1]}">
+          <option value="">${estadoFac(f)?"— quitar estado —":"Estado de la factura…"}</option>${Object.entries(ESTADOS_FAC).map(([k,[lab]])=>`<option value="${k}" ${(estadoFac(f)||{}).estado===k?"selected":""}>${lab}</option>`).join("")}</select>`:""}
       </div>
       <div style="text-align:right;flex:none">
         <div style="font-weight:900;font-size:15px;color:#DC2626;font-variant-numeric:tabular-nums">${eur(g.ven)}</div>
@@ -1029,6 +1093,7 @@ function exportar(){
         "Importe pendiente":f.im, Estado:venc?"Vencida":"En plazo",
         "Días vencida":venc?dias(f.fv):0,
         "Seguro": !facsSeguro(c).includes(f)?"":nivelSeguro(f)==="va"?"A enviar al seguro":nivelSeguro(f)==="riesgo"?"Riesgo de seguro":"",
+        "Estado Admón.": (()=>{ const e=estadoFac(f); return e?((ESTADOS_FAC[e.estado]||[e.estado])[0]+(e.nota?" · "+e.nota:"")+" · "+fecha(String(e.fecha||"").slice(0,10))+(e.por?" · "+e.por:"")):""; })(),
         Categoría:c.c70||c.cat||"", Región:c.r||"",
       });
     }
@@ -1041,9 +1106,9 @@ function exportar(){
 // ── Arranque ────────────────────────────────────────────────────
 (async function(){
   try{
-    const [docs, meta, incid, comp] = await Promise.all([cargarDocs(), cargarMeta(), cargarIncidencias(),
-      (window.RC&&RC.leerCompromisos?RC.leerCompromisos().catch(()=>[]):Promise.resolve([]))]);
-    ST.docs=docs.filter(Boolean); ST.meta=meta; ST.incid=incid; ST.comp=comp||[];
+    const [docs, meta, incid, comp, ef] = await Promise.all([cargarDocs(), cargarMeta(), cargarIncidencias(),
+      (window.RC&&RC.leerCompromisos?RC.leerCompromisos().catch(()=>[]):Promise.resolve([])), cargarEstadosFac().catch(()=>({}))]);
+    ST.docs=docs.filter(Boolean); ST.meta=meta; ST.incid=incid; ST.comp=comp||[]; EF=ef||{};
     { const fs=[meta&&meta.fechaDatos, ...ST.docs.map(d=>d.fechaDatos)].map(x=>String(x||"").slice(0,10)).filter(x=>/^\d{4}-\d\d-\d\d$/.test(x)).sort();
       if(fs.length) CORTE=fs[fs.length-1]; }
     if(ST.docs.length===0){
