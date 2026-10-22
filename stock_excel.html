@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stock SAP · descargar Excel</title>
+<script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+body{margin:0;font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;background:#F4F5F7;color:#0F172A}
+.w{max-width:720px;margin:0 auto;padding:16px}
+h1{font-size:18px;margin:0 0 4px} p{margin:6px 0;color:#475569}
+.card{background:#fff;border-radius:12px;padding:14px;margin-top:12px;border:1px solid #E5E7EB}
+button{font:inherit;font-weight:800;padding:11px 16px;border:0;border-radius:10px;background:#B91C1C;color:#fff;cursor:pointer}
+button[disabled]{opacity:.5;cursor:default}
+.k{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-top:10px}
+.k div{background:#F8FAFC;border-radius:10px;padding:10px}.k b{display:block;font-size:18px}.k span{font-size:11px;color:#64748B;text-transform:uppercase}
+table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:10px}th,td{padding:6px 8px;border-top:1px solid #EEF1F5;text-align:right;white-space:nowrap}th{background:#F8FAFC;font-size:11px;color:#64748B;text-transform:uppercase}td:first-child,th:first-child,td:nth-child(2),th:nth-child(2){text-align:left}
+.m{color:#94A3B8;font-size:12px}
+</style></head><body><div class="w">
+<h1>🏷️ Stock SAP · United Caro</h1>
+<p>Lo que hay ahora mismo en el CRM (colección <code>stock_sap</code>): existencias, entradas previstas y comprometido por código, con la descripción, familia, calibre y metros del detalle. Pulsa el botón y se descarga un Excel con todo.</p>
+<div class="card">
+  <div id="estado">Leyendo el stock…</div>
+  <div class="k" id="kpis" hidden></div>
+  <p style="margin-top:12px"><button id="btn" disabled onclick="descargar()">⬇️ Descargar Excel del stock</button> <span class="m" id="nota"></span></p>
+</div>
+<div class="card"><b>Vista previa</b> <span class="m">(primeras 40 líneas, de mayor a menor stock)</span>
+  <div style="overflow:auto"><table id="t"><thead></thead><tbody></tbody></table></div></div>
+</div>
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const val=(f)=>{ if(!f) return null; if(f.stringValue!==undefined) return f.stringValue; if(f.doubleValue!==undefined) return Number(f.doubleValue); if(f.integerValue!==undefined) return Number(f.integerValue); if(f.booleanValue!==undefined) return f.booleanValue; if(f.arrayValue) return (f.arrayValue.values||[]).map(val); if(f.mapValue){ const o={}; for(const [k,x] of Object.entries(f.mapValue.fields||{})) o[k]=val(x); return o; } return null; };
+async function doc(col,id){ const r=await fetch(`${FB}/${col}/${encodeURIComponent(id)}`,{cache:"no-store"}); if(!r.ok) return null; const j=await r.json(); const o={}; for(const [k,x] of Object.entries(j.fields||{})) o[k]=val(x); o._update=j.updateTime; return o; }
+const esc=(t)=>String(t??"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+let FILAS=[], FECHA="";
+async function cargar(){
+  const res=await doc("stock_sap","resumen"); if(!res) throw new Error("no se puede leer stock_sap/resumen");
+  // exact: {codigo:[stock,entradas,comprometido]} · lineas: a veces viene además un array de líneas con más campos
+  let exact={}, lineas=null;
+  for(const [k,v] of Object.entries(res)){ if(typeof v!=="string"||!/^\s*[\[{]/.test(v)) continue; let x; try{ x=JSON.parse(v); }catch(e){ continue; }
+    if(k==="exact"&&x&&!Array.isArray(x)) exact=x; else if(!lineas&&Array.isArray(x)&&x.length&&x[0]&&typeof x[0]==="object") lineas=x; }
+  const kf=Object.keys(res).find(k=>/^(fecha|actualizad|ultima|updated|subid|cargad)/i.test(k)&&res[k]);
+  FECHA=kf?String(res[kf]):String(res._update||"").slice(0,10);
+  // Detalle por código (descripción, familia, calibre, metros, producto base…)
+  const det={}; let extras=new Set();
+  try{ const m=await doc("stock_sap","meta"); const n=Number(m&&m.chunks)||0;
+    const P=await Promise.all([...Array(n)].map((_,i)=>doc("stock_sap_detalle","chunk_"+i).catch(()=>null)));
+    P.forEach(c=>{ let rows=[]; try{ rows=JSON.parse((c&&c.rows)||"[]"); }catch(e){}
+      rows.forEach(r=>{ const k=String(r.cod==null?"":r.cod).trim().toUpperCase(); if(!k) return; det[k]=r; Object.keys(r).forEach(x=>extras.add(x)); }); }); }catch(e){}
+  const CAMPOS={cod:"Código",base:"Producto base",desc:"Descripción",familia:"Familia",calibre:"Calibre",met:"Metros"};
+  const otros=[...extras].filter(x=>!CAMPOS[x]&&!/^(stock|entradas|comprometido|disponible)$/i.test(x));
+  const num=(v)=>Number(v)||0;
+  const cods=new Set([...Object.keys(exact),...Object.keys(det)]);
+  FILAS=[...cods].map(k=>{ const a=exact[k]||[], d=det[k]||{};
+    const f={"Código":k,"Producto base":d.base||"","Descripción":d.desc||"","Familia":d.familia||"","Calibre":d.calibre||"","Metros":d.met||"",
+      "Stock":num(a[0]),"Entradas previstas":num(a[1]),"Comprometido":num(a[2]),"Disponible":num(a[0])-num(a[2])+num(a[1])};
+    otros.forEach(x=>f[x]=d[x]??""); return f; }).sort((a,b)=>b.Stock-a.Stock);
+  const tot=(k)=>FILAS.reduce((t,f)=>t+(Number(f[k])||0),0);
+  document.getElementById("estado").innerHTML=`<b>${FILAS.length.toLocaleString("es-ES")} códigos</b> · stock del <b>${esc(FECHA||"—")}</b>${lineas?` · ${lineas.length} líneas de detalle`:""}`;
+  const K=document.getElementById("kpis"); K.hidden=false;
+  K.innerHTML=[["Stock",tot("Stock")],["Entradas previstas",tot("Entradas previstas")],["Comprometido",tot("Comprometido")],["Disponible",tot("Disponible")]].map(([l,v])=>`<div><span>${l}</span><b>${Math.round(v).toLocaleString("es-ES")}</b>uds</div>`).join("");
+  const cols=Object.keys(FILAS[0]||{});
+  document.querySelector("#t thead").innerHTML="<tr>"+cols.map(c=>`<th>${esc(c)}</th>`).join("")+"</tr>";
+  document.querySelector("#t tbody").innerHTML=FILAS.slice(0,40).map(f=>"<tr>"+cols.map(c=>`<td>${typeof f[c]==="number"?Math.round(f[c]).toLocaleString("es-ES"):esc(f[c])}</td>`).join("")+"</tr>").join("");
+  document.getElementById("btn").disabled=false;
+  document.getElementById("nota").textContent="Se descarga con todas las columnas de arriba.";
+}
+window.descargar=()=>{ if(typeof XLSX==="undefined"){ alert("Aún se está cargando el exportador. Espera un segundo."); return; }
+  const ws=XLSX.utils.json_to_sheet(FILAS), wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Stock SAP");
+  XLSX.writeFile(wb,`stock_sap_united_caro_${(FECHA||new Date().toISOString().slice(0,10)).replace(/[^0-9]/g,"")}.xlsx`); };
+cargar().catch(e=>{ document.getElementById("estado").innerHTML='<span style="color:#B91C1C">No se ha podido leer el stock: '+esc(e.message)+'</span>'; });
+</script></body></html>
