@@ -536,34 +536,60 @@ const SAP_T = "'PEDIDOS SAP'";
 async function mapeadorSap() {
   let mapaVend = {};
   try { for (const d of await fbLeerColeccion("pedidos_sap_vendedores")) if (d.agente) mapaVend[String(d._id)] = String(d.agente).toUpperCase(); } catch (e) {}
-  let alias = [], usuarios = [];
+  let alias = [], usuarios = [], todosUs = [], codigosPbi = new Set();
   try { alias = await fbLeerColeccion("agentes_alias"); } catch (e) {}
-  try { usuarios = (await fbLeerColeccion("usuarios")).filter((u) => u.activo !== false && /agente|comercial|vendedor|jefe/i.test(String(u.rol || ""))); } catch (e) {}
+  try { todosUs = await fbLeerColeccion("usuarios"); usuarios = todosUs.filter((u) => u.activo !== false && /agente|comercial|vendedor|jefe/i.test(String(u.rol || ""))); } catch (e) {}
+  // Códigos de vendedor con los que trabaja todo el CRM (los de Power BI): el resultado SIEMPRE tiene que ser uno de estos.
+  try { for (const r of await fbLeerColeccion("pbi_resumen_agente")) if (r._id && r._id !== "_TOTAL") codigosPbi.add(String(r._id).toUpperCase()); } catch (e) {}
   const N = (x) => String(x || "").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
-  // Se devuelve el código del CRM (grupoAgente, o el id de la ficha): es con el que cruzan el parte y los cierres
-  const codUsuario = (u) => String(u.grupoAgente || u.catalogoVendedor || u._id || "").toUpperCase();
+  const U = (x) => String(x || "").toUpperCase().trim();
+  const esCod = (c) => !!c && codigosPbi.has(U(c));
+  // Cualquier identificador (id de ficha, canónico de alias, grupoAgente…) → código de vendedor de Power BI
+  const aCodigo = (x) => {
+    const k = U(x); if (!k) return "";
+    if (esCod(k)) return k;
+    const u = todosUs.find((f) => [f._id, f.id, f.crmId, f.username].some((v) => v && U(v) === k));
+    if (u) { for (const c of [u.grupoAgente, u.catalogoVendedor]) if (esCod(c)) return U(c); }
+    // Alias que apuntan a ese canónico y que sí son un código de Power BI (RICARDO → ik2, y RICARDO es el código)
+    const al = alias.filter((a) => U(a.canonico) === k).map((a) => U(a.original || a.alias || a._id)).filter(esCod);
+    if (al.length) return al[0];
+    // Sin lista de Power BI (o código que no está en ella): se devuelve lo que haya, pero nunca un id de ficha
+    if (!codigosPbi.size) return (u && U(u.grupoAgente || u.catalogoVendedor)) || k;
+    return "";
+  };
+  const codUsuario = (u) => aCodigo(u.grupoAgente || u.catalogoVendedor || u._id || "");
   const porNombre = {};
-  for (const a of alias) { const nn = N(a.nombre); if (nn && a.canonico) porNombre[nn] = porNombre[nn] || String(a.canonico).toUpperCase(); }
-  for (const u of usuarios) { const nn = N(u.nombre); if (nn && !porNombre[nn]) porNombre[nn] = codUsuario(u); }
+  for (const a of alias) { const nn = N(a.nombre); if (nn && a.canonico && !porNombre[nn]) { const c = aCodigo(a.canonico); if (c) porNombre[nn] = c; } }
+  for (const u of usuarios) { const nn = N(u.nombre); if (nn && !porNombre[nn]) { const c = codUsuario(u); if (c) porNombre[nn] = c; } }
   const codigoDe = (slp, nombre) => {
     if (mapaVend[String(slp)]) return mapaVend[String(slp)];
     if (/INTERCOMPANY|INTERC\b/.test(N(nombre))) return "INTERCOMPANY";
-    const nn = N(String(nombre || "").replace(/\d+%/g, "").replace(/\b(FABRICANTES|NACIONAL|INTERNACIONAL|POTENCIALES|PORTUGAL|COMERCIAL)\b/gi, ""));
+    const nn = N(String(nombre || "").replace(/\d+%/g, "").replace(/\b(FABRICANTES|NACIONAL|INTERNACIONAL|POTENCIALES|PORTUGAL|COMERCIAL|WIKUK|UNITED)\b/gi, ""));
     if (porNombre[nn]) return porNombre[nn];
     const tok = nn.split(" ").filter(Boolean); if (!tok.length) return "";
-    // nombre + primer apellido coincide con una ficha o un alias (ESTHER BAENA → Esther; AGUSTIN ENRIQUE FERNANDEZ → Agustín)
-    // Primero la tabla de alias (su canónico es el código con el que trabajan parte y cierres); si no, las fichas.
-    // Antes se mezclaban las dos listas y "Agustín" salía dos veces con códigos distintos (alias y ficha) → sin casar.
-    const candA = [], candU = [];
+    // 1 · El propio nombre de SAP es un código de Power BI (ACRUZ, ILOMAYA, GERHARD, ESTHER BAENA → ESTHER)
+    const compacto = nn.replace(/ /g, "");
+    if (esCod(compacto)) return compacto;
+    if (tok.length === 1 && esCod(tok[0])) return tok[0];
+    // 2 · Nombre + primer apellido coincide con una ficha o un alias (AGUSTIN ENRIQUE FERNANDEZ → Agustín)
+    const cand = new Set();
     for (const a of alias) { const an = N(a.nombre).split(" ").filter(Boolean); if (!an.length) continue;
-      if (an[0] === tok[0] && (an.length === 1 || tok.includes(an[1]))) candA.push(String(a.canonico || "").toUpperCase()); }
-    for (const u of usuarios) { const un = N(u.nombre).split(" ").filter(Boolean); if (!un.length) continue;
-      if (un[0] === tok[0] && (un.length === 1 || tok.includes(un[1]))) candU.push(codUsuario(u)); }
-    const uA = [...new Set(candA.filter(Boolean))]; if (uA.length === 1) return uA[0];
-    const uU = [...new Set(candU.filter(Boolean))]; if (!uA.length && uU.length === 1) return uU[0];
+      if (an[0] === tok[0] && (an.length === 1 || tok.includes(an[1]))) { const c = aCodigo(a.canonico); if (c) cand.add(c); } }
+    if (cand.size === 1) return [...cand][0];
+    if (!cand.size) for (const u of usuarios) { const un = N(u.nombre).split(" ").filter(Boolean); if (!un.length) continue;
+      if (un[0] === tok[0] && (un.length === 1 || tok.includes(un[1]))) { const c = codUsuario(u); if (c) cand.add(c); } }
+    if (cand.size === 1) return [...cand][0];
+    // 3 · Código formado con el nombre: inicial + apellido (JULIO REY → JREY, JOAN PUJOLAS → JPUJOLA), nombre + inicial del
+    //     apellido (CARLOS GARCIA → CARLOSG) o nombre solo (SILVIA GARCIA → SILVIA, GUSTO GARANTIZADO → GUSTOG)
+    if (!cand.size && tok.length >= 2 && codigosPbi.size) {
+      const ini = tok[0][0] + tok[1], pref = tok[0] + tok[1][0], nom = tok[0];
+      const c3 = [...codigosPbi].filter((c) => c === ini || ini.startsWith(c) && c.length >= 4 || c === pref || (c === nom) || (c.startsWith(nom) && c.length <= nom.length + 2 && tok.slice(1).some((t) => t[0] === c[nom.length])));
+      const u3 = [...new Set(c3)];
+      if (u3.length === 1) return u3[0];
+    }
     return "";   // si hay dudas (dos Carlos), se deja para la tabla manual
   };
-  return { codigoDe, mapaVend };
+  return { codigoDe, mapaVend, codigosPbi };
 }
 
 // Fecha de corte: 1) fijada a mano en pbi_config/pedidos {sapDesde:"2026-10-06"} (o con ?sapDesde= en la URL,
@@ -4900,6 +4926,9 @@ EVALUATE
 
         out.escritos = await fbCommit("pbi_pedidos", docs);
         out.agentesConEntrada = await fbCommit("pbi_entrada_agente", resumen);
+        // (oct 2026) Fuera los comerciales que ya no salen (p. ej. códigos mal casados de una pasada anterior, como IK2)
+        try { const vivos = new Set(resumen.map((r) => r._id)); const previos = await fbLeerColeccion("pbi_entrada_agente");
+          const sobran = previos.map((d) => d._id).filter((id) => !vivos.has(id)); if (sobran.length) { await fbBorrar("pbi_entrada_agente", sobran); out.entradaBorrados = sobran.length; } } catch (e) {}
         // Fuera lo ya servido
         // Reconciliación completa: la colección debe contener exactamente lo
         // que hay ahora en Power BI. Borrar solo lo caducado dejaba dentro los
