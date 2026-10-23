@@ -561,6 +561,8 @@ async function mapeadorSap() {
   const porNombre = {};
   for (const a of alias) { const nn = N(a.nombre); if (nn && a.canonico && !porNombre[nn]) { const c = aCodigo(a.canonico); if (c) porNombre[nn] = c; } }
   for (const u of usuarios) { const nn = N(u.nombre); if (nn && !porNombre[nn]) { const c = codUsuario(u); if (c) porNombre[nn] = c; } }
+  // Lo fijado a mano también pasa por el traductor: la pantalla de vendedores guardaba ids de ficha (IK2, WK2, U_…)
+  for (const k of Object.keys(mapaVend)) { const c = mapaVend[k]; if (c !== "INTERCOMPANY") { const cc = aCodigo(c); if (cc) mapaVend[k] = cc; } }
   const codigoDe = (slp, nombre) => {
     if (mapaVend[String(slp)]) return mapaVend[String(slp)];
     if (/INTERCOMPANY|INTERC\b/.test(N(nombre))) return "INTERCOMPANY";
@@ -637,7 +639,7 @@ EVALUATE
   const { codigoDe, mapaVend } = await mapeadorSap();
   const vistas = {};
   try { for (const d of await fbLeerColeccion("pedidos_sap_lineas")) vistas[d._id] = d; } catch (e) {}
-  const nuevas = [], validados = [], sinMapear = {}; const clavesAbiertas = new Set(), pedidosAbiertos = new Set();
+  const nuevas = [], validados = [], sinMapear = {}; const clavesAbiertas = new Set(), pedidosAbiertos = new Set(), importesCli = {};
   const hoy = new Date().toISOString().slice(0, 10);
   const semDe = (iso) => { const d = new Date(String(iso).slice(0, 10) + "T12:00:00Z"); return isNaN(d) ? "" : isoSemana(d); };
   let pendiente = 0, abiertas = 0;
@@ -660,6 +662,7 @@ EVALUATE
     const cliG = clienteSapAGlobal(g("CodigoCliente"), fichas);
     clavesAbiertas.add(cliG.toUpperCase() + "|" + String(g("ItemCode") || "").trim().toUpperCase());
     pedidosAbiertos.add(String(g("DocNum") || "").replace(/\D/g, ""));
+    (importesCli[cliG.toUpperCase()] = importesCli[cliG.toUpperCase()] || []).push(num(pend));
     validados.push({ Cliente: cliG, Vendedor: "SAP" + slp, AgenteSap: ag || null, Fecha: plan,
       Articulo: String(g("ItemCode") || "").trim(), Familia: null, Uni: open, Precio: uds > 0 ? num(tot / uds) : 0, Subfamilia: null,
       Importe: pend, Pedido: String(g("DocNum") || "").trim(), Empresa: "UC", NombreSap: String(g("NombreCliente") || "").trim(), DescripcionSap: String(g("Dscription") || "").trim() });
@@ -677,10 +680,21 @@ EVALUATE
   if (!dry && nuevas.length) { try { await fbCommit("pedidos_sap_lineas", nuevas); } catch (e) {} }
   // Los pedidos de UC anteriores a SAP siguen en la global (son reales y aún no se han pasado a SAP): se
   // conservan, salvo que SAP ya tenga abierta una línea del mismo cliente y artículo, o el mismo nº de pedido.
+  // (oct 2026) La global sigue recibiendo parte de los pedidos de UC después del corte, con otro nº de pedido
+  // (A 184xxx frente a 2600025xx de SAP) y a veces otro código de artículo, así que el cruce por artículo se
+  // quedaba corto (UNIVERSAL 65.978 € en la global y 66.418 € en SAP, los mismos pedidos). Se considera duplicada
+  // también la línea de la global cuyo importe coincide con una línea abierta de SAP del mismo cliente (±1 €),
+  // consumiendo esa línea para no descontarla dos veces.
+  const usados = {};
   const esDuplicadoGlobal = (r) => {
     const cli = String(pick(r, "Cliente") || "").trim().toUpperCase(); if (cli[0] !== "U") return false;
     const art = String(pick(r, "Articulo") || "").trim().toUpperCase(); const ped = String(pick(r, "Pedido") || "").replace(/\D/g, "");
-    return clavesAbiertas.has(cli + "|" + art) || (ped && pedidosAbiertos.has(ped));
+    if (clavesAbiertas.has(cli + "|" + art) || (ped && pedidosAbiertos.has(ped))) return true;
+    const imp = num(pick(r, "Importe")); if (!(imp > 0)) return false;
+    const L = importesCli[cli] || []; const u = (usados[cli] = usados[cli] || new Set());
+    const i = L.findIndex((x, k) => !u.has(k) && Math.abs(x - imp) <= Math.max(1, imp * 0.005));
+    if (i >= 0) { u.add(i); return true; }
+    return false;
   };
   return { desde, corteFijado: corte.fijado, ultimoDiaGlobalUC: corte.ultimoGlobalUC, lineas: filas.length, abiertas, pendiente: num(pendiente), validados, entrada,
     sinMapear, nuevasEnRegistro: nuevas.length, lineasEnRegistro: Object.keys(vistas).length, esDuplicadoGlobal };
