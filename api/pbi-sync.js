@@ -4565,7 +4565,12 @@ EVALUATE
       let sapU = null;
       try { sapU = await pedidosSap(token, { fichas, dry: req.query.dry === "1" }); } catch (e) { out.errorSap = e.message.slice(0, 300); }
       let filas = await pbiQuery(token, Q.pedidosTodas);
-      if (sapU) { const antes = filas.length; filas = filas.filter((r) => !sapU.esDuplicadoGlobal(r)); out.globalUCQuitadasPorEstarEnSap = antes - filas.length; filas.push(...sapU.validados); out.sap = { desde: sapU.desde, corteFijado: sapU.corteFijado, ultimoDiaGlobalUC: sapU.ultimoDiaGlobalUC, lineas: sapU.lineas, pendientes: sapU.abiertas, pendiente: sapU.pendiente, sinMapear: sapU.sinMapear, nuevasEnRegistro: sapU.nuevasEnRegistro }; }
+      if (sapU) { const antes = filas.length; filas = filas.filter((r) => !sapU.esDuplicadoGlobal(r)); out.globalUCQuitadasPorEstarEnSap = antes - filas.length;
+        // Diagnóstico: líneas de UC de la global que se quedan aunque el cliente tenga algo abierto en SAP (posibles duplicados)
+        try { const sapCli = {}; sapU.validados.forEach((v) => { const k = String(v.Cliente).toUpperCase(); (sapCli[k] = sapCli[k] || []).push(String(v.Pedido) + " " + v.Articulo + " " + num(v.Importe)); });
+          out.sapSolapeRestante = filas.filter((r) => String(pick(r, "Cliente") || "")[0] === "U" && sapCli[String(pick(r, "Cliente")).toUpperCase()]).slice(0, 25)
+            .map((r) => ({ cliente: pick(r, "Cliente"), pedidoGlobal: pick(r, "Pedido"), artGlobal: pick(r, "Articulo"), importe: num(pick(r, "Importe")), enSap: sapCli[String(pick(r, "Cliente")).toUpperCase()].slice(0, 6) })); } catch (e) {}
+        filas.push(...sapU.validados); out.sap = { desde: sapU.desde, corteFijado: sapU.corteFijado, ultimoDiaGlobalUC: sapU.ultimoDiaGlobalUC, lineas: sapU.lineas, pendientes: sapU.abiertas, pendiente: sapU.pendiente, sinMapear: sapU.sinMapear, nuevasEnRegistro: sapU.nuevasEnRegistro }; }
       const crudos = filas.map((r, i) => {
         const cli = String(pick(r, "Cliente") || "").trim();
         const ven = String(pick(r, "Vendedor") || "").trim();
