@@ -622,6 +622,7 @@ window.abrirALT=(id,idx)=>{ selArt(id,idx);
       <button class="chip" onclick="cerrarPE('${id}')">Cancelar</button></div>`;
   RC.activarForms();
 };
+
 window.enviarALT=async(id)=>{
   const c=casoDe(id), arts=artsSel(id);
   const sel=(document.getElementById("alt"+id+"_orig")||{}).value;
@@ -1824,6 +1825,75 @@ const claveC=()=>"comite_"+AGENTE+"_"+SEMANA;
 // (oct 2026) El borrador del comité también va a Firebase: el comercial lo sigue en directo en su móvil
 // (modo «solover») y el jefe puede seguir en otro dispositivo.
 const SOLO_VER_C=MODO_COMITE&&P.get("solover")==="1";
+// ══ (oct 2026) BORRADOR AUTOMÁTICO ═══════════════════════════════════════════
+// Todo lo que se escribe (respuestas del parte, estrategias y ofertas a medio rellenar, acciones del comité,
+// qué apartados y formularios estaban abiertos) se guarda al momento en este dispositivo y en Firebase.
+// Si se vuelve atrás, se recarga o se cambia de móvil, se recupera tal cual. Se borra al cerrar.
+const BORR=(()=>{
+  const modo=MODO_COMITE?"comite":"parte";
+  const key=()=>"borr_"+modo+"_"+AGENTE+"_"+SEMANA;
+  const idFb=()=>new Date().getFullYear()+"_s"+SEMANA+"_"+(MODO_COMITE?"comiteborr_":"parteborr_")+String(AGENTE).replace(/[\/\s#?]/g,"_");
+  let D={R:{},vals:{},sel:{},abiertos:[],aps:[],t:0}, t1=null, t2=null, activo=false;
+  const snap=()=>{
+    const app=document.getElementById("app"); if(!app) return;
+    if(!MODO_COMITE) D.R=R;
+    const vals={}; app.querySelectorAll("input[id],textarea[id],select[id]").forEach(el=>{ if(el.type==="hidden"||el.type==="search"||el.disabled) return; const v=el.type==="checkbox"?(el.checked?"1":""):el.value; if(v!==""&&v!=null) vals[el.id]=v; });
+    D.vals=vals;
+    try{ D.sel={}; Object.entries((window.RC&&RC._sel)||{}).forEach(([k,v])=>{ if(v) D.sel[k]=v; }); }catch(e){}
+    D.aps=[...(typeof ABIERTOS_AP!=="undefined"?ABIERTOS_AP:[])];
+    D.t=Date.now();
+  };
+  const guardar=()=>{ if(!activo) return; snap(); clearTimeout(t1); t1=setTimeout(()=>{ try{ localStorage.setItem(key(),JSON.stringify(D)); }catch(e){} },300);
+    if(MODO_COMITE&&typeof SOLO_VER_C!=="undefined"&&SOLO_VER_C) return;
+    clearTimeout(t2); t2=setTimeout(()=>{ const f={borr:{stringValue:JSON.stringify(D)},fecha:{stringValue:new Date().toISOString()},semana:{integerValue:String(SEMANA)},paso:{stringValue:modo+"_borrador"}};
+      fetch(`${FB}/cierres_flujo/${encodeURIComponent(idFb())}?updateMask.fieldPaths=borr&updateMask.fieldPaths=fecha&updateMask.fieldPaths=semana&updateMask.fieldPaths=paso`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:f})}).catch(()=>{}); },2500); };
+  const leer=async()=>{
+    let loc=null; try{ loc=JSON.parse(localStorage.getItem(key())||"null"); }catch(e){}
+    let fb=null; try{ const r=await fetch(`${FB}/cierres_flujo/${encodeURIComponent(idFb())}`,{cache:"no-store"}); if(r.ok){ const f=(await r.json()).fields||{}; fb=JSON.parse((f.borr&&f.borr.stringValue)||"null"); } }catch(e){}
+    const best=[loc,fb].filter(Boolean).sort((a,b)=>(b.t||0)-(a.t||0))[0]; return best||null; };
+  const abrirForm=(fn,args)=>{ D.abiertos=(D.abiertos||[]).filter(x=>!(x.args&&args&&String(x.args[0])===String(args[0]))); D.abiertos.push({fn,args}); guardar(); };
+  const cerrarForm=(id)=>{ D.abiertos=(D.abiertos||[]).filter(x=>!(x.args&&String(x.args[0])===String(id))); guardar(); };
+  const aplicarVals=(vals)=>{ Object.entries(vals||{}).forEach(([id,v])=>{ const el=document.getElementById(id); if(!el) return;
+      if(el.type==="checkbox"){ el.checked=!!v; return; } if(el.value===v) return; el.value=v;
+      // Los campos de precio recalculan el descuento al escribir: se dispara igual
+      try{ el.dispatchEvent(new Event("input",{bubbles:true})); }catch(e){} }); };
+  const restaurar=async()=>{
+    if(MODO_COMITE&&SOLO_VER_C) return;   // el comercial que mira el comité en directo no escribe nada
+    const d=await leer(); activo=true; if(!d) return;
+    const esReciente=(Date.now()-(d.t||0))<14*86400000; if(!esReciente) return;
+    D=Object.assign(D,d);
+    // 1 · Respuestas del parte (solo el comercial: en el comité lo que contestó ya viene de su parte enviado)
+    if(!MODO_COMITE&&d.R&&Object.keys(d.R).length){ Object.assign(R,d.R);
+      const app=document.getElementById("app");
+      app.querySelectorAll('[onclick^="marcar("]').forEach(b=>{ const m=b.getAttribute("onclick").match(/marcar\('([^']+)','([^']*)'/); if(m) b.classList.toggle("on",(R[m[1]]||{}).accion===m[2]); });
+      app.querySelectorAll("textarea[oninput]").forEach(t=>{ const m=(t.getAttribute("oninput")||"").match(/texto\('([^']+)'/); if(m&&(R[m[1]]||{}).texto&&!t.value) t.value=R[m[1]].texto; });
+      app.querySelectorAll('input[data-promouds]').forEach(i=>{ if(!i.value) i.value=(R[i.dataset.promouds]||{}).uds||""; });
+      app.querySelectorAll('input[onchange^="cobFecha("]').forEach(i=>{ const m=i.getAttribute("onchange").match(/cobFecha\('([^']+)'/); if(m&&!i.value) i.value=(R[m[1]]||{}).fecha||""; });
+      try{ refrescar(); }catch(e){} }
+    // 2 · Apartados que estaban abiertos
+    (d.aps||[]).forEach(k=>{ const row=document.querySelector('.prow[data-k="'+k+'"]'); const cont=document.querySelector('.pcont[data-k="'+k+'"]'); if(row&&cont&&cont.hidden) row.click(); });
+    // 3 · Formularios abiertos (estrategia / oferta / alternativa de un cliente) y lo escrito en ellos
+    for(const f of (d.abiertos||[])){ try{ const fn=window[f.fn]; if(typeof fn==="function") await fn.apply(null,f.args||[]); }catch(e){} }
+    try{ Object.entries(d.sel||{}).forEach(([pref,v])=>{ const el=document.querySelector('[data-rcpref="'+pref+'"]'); if(!el||!window.RC) return; RC._sel[pref]=v; RC._key[pref]=el.getAttribute("data-rckey")||""; }); if(window.RC&&RC.activarForms) RC.activarForms(); }catch(e){}
+    setTimeout(()=>{ aplicarVals(d.vals); try{ if(window.RC&&RC.activarForms) RC.activarForms(); }catch(e){} },400);
+    setTimeout(()=>aplicarVals(d.vals),1500);
+    const n=Object.keys(d.vals||{}).length+(d.abiertos||[]).length+(MODO_COMITE?0:Object.keys(d.R||{}).length);
+    if(n){ const av=document.createElement("div"); av.style.cssText="position:fixed;left:50%;bottom:16px;transform:translateX(-50%);background:#0F172A;color:#fff;border-radius:99px;padding:9px 16px;font-size:13px;font-weight:700;z-index:9999;box-shadow:0 6px 20px rgba(0,0,0,.25)";
+      av.textContent="📝 Recuperado lo que tenías a medias"+(d.t?" ("+new Date(d.t).toLocaleString("es-ES",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})+")":""); document.body.appendChild(av); setTimeout(()=>av.remove(),5000); }
+  };
+  const limpiar=()=>{ activo=false; clearTimeout(t1); clearTimeout(t2); try{ localStorage.removeItem(key()); }catch(e){}
+    fetch(`${FB}/cierres_flujo/${encodeURIComponent(idFb())}`,{method:"DELETE"}).catch(()=>{}); };
+  // Cualquier cosa que se escriba o se toque dentro del parte se guarda
+  document.addEventListener("input",(e)=>{ if(e.target&&e.target.closest&&e.target.closest("#app")) guardar(); },true);
+  document.addEventListener("change",(e)=>{ if(e.target&&e.target.closest&&e.target.closest("#app")) guardar(); },true);
+  document.addEventListener("click",(e)=>{ if(e.target&&e.target.closest&&e.target.closest("#app")) setTimeout(guardar,50); },true);
+  window.addEventListener("pagehide",()=>{ if(!activo) return; snap(); try{ localStorage.setItem(key(),JSON.stringify(D)); }catch(e){} });
+  return {guardar,restaurar,limpiar,abrirForm,cerrarForm};
+})();
+// Los formularios de cliente avisan al borrador de que se abren o se cierran
+["abrirPE","abrirOF","abrirALT"].forEach(fn=>{ const o=window[fn]; if(typeof o!=="function") return; window[fn]=function(){ const r=o.apply(this,arguments); BORR.abrirForm(fn,[...arguments]); return r; }; });
+{ const o=window.cerrarPE; if(typeof o==="function") window.cerrarPE=function(id){ const r=o.apply(this,arguments); BORR.cerrarForm(id); return r; }; }
+
 const idBorrC=()=>new Date().getFullYear()+"_s"+SEMANA+"_comiteborr_"+String(AGENTE).replace(/[\/\s#?]/g,"_");
 let _tBorr=null;
 function subirBorrC(){ if(SOLO_VER_C) return; clearTimeout(_tBorr); _tBorr=setTimeout(()=>{
@@ -2008,6 +2078,7 @@ async function montarComite(){
   if(SOLO_VER_C){ document.getElementById("firmasC").remove(); }
   else if(window.FIRMA){ window._PADS.jef=FIRMA.pad(document.getElementById("firmaJef"),"Tu firma ("+JEFE.nombre+", jefe de equipo)",()=>estadoComite()); }
   window._COMITE_LISTO=true; estadoComite();
+  setTimeout(()=>{ try{ BORR.restaurar(); }catch(e){} },300);
   if(SOLO_VER_C) seguirEnDirecto();
 }
 // Comercial: ve el comité de su jefe en directo (se actualiza cada pocos segundos) y, al cerrarse, le sale para firmar
@@ -2177,6 +2248,7 @@ window.cerrarComiteC=async()=>{
       }catch(e){}
     }
     try{ localStorage.removeItem(claveC()); }catch(e){}
+    try{ BORR.limpiar(); }catch(e){}
     if(nInc) alert(nInc+" incidencia"+(nInc===1?"":"s")+" enviada"+(nInc===1?"":"s")+" a: "+[...new Set(depsInc)].join(", "));
     alert(enviado?"Acta enviada a "+(d.para.map(x=>x.nombre).join(", ")||"(el comercial no tiene email)")+(d.copias.length?" · copia a "+d.copias.map(x=>x.nombre).join(", "):"")+"."
       :"Comité guardado. El correo no se ha podido enviar"+(to.length?"":": no encuentro emails")+"; el acta queda en el portal.");
@@ -3109,7 +3181,7 @@ async function enviar(){
     try{ await avisarDelCierre(cerrar.length); }catch(e){}
 
     document.getElementById("app").innerHTML=
-      `<div class="listo"><b>Semana ${SEMANA} cerrada</b>
+      (()=>{ try{ BORR.limpiar(); }catch(e){} return ""; })()+`<div class="listo"><b>Semana ${SEMANA} cerrada</b>
        ${cerrar.length?cerrar.length+" cerradas en el sistema. ":""}Lo que has
        escrito queda guardado y se te preguntará por ello.</div>
        ${VUELVE?`<div style="padding:0 16px"><button class="env"
@@ -4090,6 +4162,7 @@ async function enviar(){
     // se comprueba: cerrar la semana con retrasos sin motivo dejaria el dato
     // muerto y nadie volveria a mirarlo.
     arbolizar();
+    if(!MODO_COMITE) setTimeout(()=>{ try{ BORR.restaurar(); }catch(e){} },300);
     if(window._SIN_RESUMEN||(window._DIAG_CODIGOS&&window._DIAG_CODIGOS.sinClientes)){ const ap=document.getElementById("app"), D=window._DIAG_CODIGOS||{}; if(ap) ap.insertAdjacentHTML("afterbegin",`<div class="card" style="border-color:#F59E0B;background:#FFFBEB;color:#92400E;font-size:13px">
       <b>⚠️ ${window._SIN_RESUMEN?_escR(AGENTE)+" no aparece en el resumen de ventas del Power BI":"No encuentro clientes de "+_escR(AGENTE)+" en el Power BI"}.</b> Se ha buscado con ${_escR([...(window._CLAVES||[AGENTE])].slice(0,6).join(", "))}.
       ${(D.enResumen||[]).length||(D.enClientes||[]).length?`<div style="margin-top:6px">Códigos del Power BI que no son de ninguna ficha del CRM: <b>${_escR([...new Set([...(D.enResumen||[]),...(D.enClientes||[])])].slice(0,8).join(", "))}</b>. Si uno es suyo, ponlo en su ficha de Usuarios como código de vendedor (grupo agente) y las ventas, cobros, recuperación y promoción saldrán solos.</div>`:""}
