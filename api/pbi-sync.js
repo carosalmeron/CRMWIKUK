@@ -691,7 +691,9 @@ EVALUATE
     const cli = String(pick(r, "Cliente") || "").trim().toUpperCase(); if (cli[0] !== "U") return false;
     const art = String(pick(r, "Articulo") || "").trim().toUpperCase(); const ped = String(pick(r, "Pedido") || "").replace(/\D/g, "");
     if (clavesAbiertas.has(cli + "|" + art) || (ped && pedidosAbiertos.has(ped))) return true;
-    const imp = num(pick(r, "Importe")); if (!(imp > 0)) return false;
+    const imp = num(pick(r, "Importe"));
+    // Líneas sin importe (VAR2 «varios», portes…) de un cliente que ya tiene su pedido en SAP: son restos del pedido duplicado
+    if (!(imp > 0)) return !!(importesCli[cli] && importesCli[cli].length);
     const L = importesCli[cli] || []; const u = (usados[cli] = usados[cli] || new Set());
     const i = L.findIndex((x, k) => !u.has(k) && Math.abs(x - imp) <= Math.max(1, imp * 0.005));
     if (i >= 0) { u.add(i); return true; }
@@ -4565,6 +4567,7 @@ EVALUATE
       let sapU = null;
       try { sapU = await pedidosSap(token, { fichas, dry: req.query.dry === "1" }); } catch (e) { out.errorSap = e.message.slice(0, 300); }
       let filas = await pbiQuery(token, Q.pedidosTodas);
+      out.version = "sap-2026-10-24b";
       if (sapU) { const antes = filas.length; filas = filas.filter((r) => !sapU.esDuplicadoGlobal(r)); out.globalUCQuitadasPorEstarEnSap = antes - filas.length;
         // Diagnóstico: líneas de UC de la global que se quedan aunque el cliente tenga algo abierto en SAP (posibles duplicados)
         try { const sapCli = {}; sapU.validados.forEach((v) => { const k = String(v.Cliente).toUpperCase(); (sapCli[k] = sapCli[k] || []).push(String(v.Pedido) + " " + v.Articulo + " " + num(v.Importe)); });
