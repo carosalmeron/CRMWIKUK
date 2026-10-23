@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Auditoría · pedidos de SAP en el CRM</title>
+<style>
+body{margin:0;font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;background:#F4F5F7;color:#0F172A}
+.w{max-width:820px;margin:0 auto;padding:14px}
+h1{font-size:18px;margin:0 0 4px} h2{font-size:14px;margin:16px 0 6px;color:#334155} p{margin:4px 0;color:#475569}
+.card{background:#fff;border-radius:12px;padding:12px 14px;margin-top:10px;border:1px solid #E5E7EB}
+.ok{color:#15803D;font-weight:800}.ko{color:#B91C1C;font-weight:800}.wa{color:#B45309;font-weight:800}
+.k{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:8px}.k div{background:#F8FAFC;border-radius:10px;padding:9px}.k b{display:block;font-size:17px}.k span{font-size:11px;color:#64748B;text-transform:uppercase}
+table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:8px}th,td{padding:5px 8px;border-top:1px solid #EEF1F5;text-align:right;white-space:nowrap}th{background:#F8FAFC;font-size:11px;color:#64748B;text-transform:uppercase}td:first-child,th:first-child{text-align:left}
+code{background:#F1F5F9;border-radius:6px;padding:1px 5px;font-size:12px}
+</style></head><body><div class="w">
+<h1>🔎 ¿Están llegando los pedidos de SAP al CRM?</h1>
+<p>Comprueba, paso a paso, que la tabla PEDIDOS SAP de Power BI se lee, que sus líneas entran en el formulario de pedidos y que se atribuyen a cada comercial.</p>
+<div id="out"><div class="card">Leyendo…</div></div>
+</div>
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const val=(f)=>{ if(!f) return null; if(f.stringValue!==undefined) return f.stringValue; if(f.doubleValue!==undefined) return Number(f.doubleValue); if(f.integerValue!==undefined) return Number(f.integerValue); if(f.booleanValue!==undefined) return f.booleanValue; return null; };
+async function leer(col,max){ const out=[]; let tok=null,v=0; do{ const r=await fetch(`${FB}/${col}?pageSize=300`+(tok?`&pageToken=${encodeURIComponent(tok)}`:""),{cache:"no-store"}); if(!r.ok) break; const j=await r.json();
+  (j.documents||[]).forEach(d=>{ const o={_id:decodeURIComponent(d.name.split("/").pop())}; for(const [k,x] of Object.entries(d.fields||{})) o[k]=val(x); out.push(o); }); tok=j.nextPageToken||null; }while(tok&&v++<(max||40)); return out; }
+async function doc(col,id){ const r=await fetch(`${FB}/${col}/${encodeURIComponent(id)}`,{cache:"no-store"}); if(!r.ok) return null; const j=await r.json(); const o={_id:id}; for(const [k,x] of Object.entries(j.fields||{})) o[k]=val(x); return o; }
+const esc=(t)=>String(t??"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+const eur=(n)=>Math.round(Number(n)||0).toLocaleString("es-ES")+" €";
+const fx=(iso)=>{ if(!iso) return "—"; const d=new Date(iso); return isNaN(d)?String(iso):d.toLocaleString("es-ES",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}); };
+const hace=(iso)=>{ const t=Date.parse(iso||""); return t?Math.round((Date.now()-t)/3600000):null; };
+(async()=>{
+  const S=[]; const card=(h)=>S.push('<div class="card">'+h+'</div>');
+  try{
+    const [latP,latF,latS,cfg,lineas,vend,meta,ped,entr,us]=await Promise.all([doc("pbi_latidos","pedidos"),doc("pbi_latidos","full"),doc("pbi_latidos","pedidosSap"),doc("pbi_config","pedidos"),
+      leer("pedidos_sap_lineas"),leer("pedidos_sap_vendedores"),doc("pedidos_sap_meta","ultimo"),leer("pbi_pedidos"),leer("pbi_entrada_agente"),leer("usuarios")]);
+    // 1 · Sincronización
+    const ult=[latP,latF].filter(Boolean).sort((a,b)=>String(b.cuando).localeCompare(String(a.cuando)))[0];
+    let sapInfo=null; try{ sapInfo=ult&&ult.sap?JSON.parse(ult.sap):null; }catch(e){}
+    const h1=ult?hace(ult.cuando):null;
+    card(`<h2 style="margin-top:0">1 · Última sincronización de pedidos</h2>
+      ${ult?`<p>${esc(ult.modo)} · <b>${fx(ult.cuando)}</b> (hace ${h1} h) · ${ult.errores?'<span class="ko">con errores: '+esc(ult.detalleErrores||"")+'</span>':'<span class="ok">sin errores</span>'}</p>`:'<p class="ko">No hay ningún latido de la sincronización de pedidos: no ha corrido nunca (o la versión de api/pbi-sync.js es anterior).</p>'}
+      ${ult&&ult.errorSap?`<p class="ko">SAP ha fallado en esa pasada: ${esc(ult.errorSap)}</p>`:""}
+      ${sapInfo?`<div class="k"><div><span>Corte UC → SAP</span><b>${esc(sapInfo.desde||"?")}</b>${sapInfo.corteFijado?"fijado a mano":"automático"}</div><div><span>Líneas leídas de SAP</span><b>${sapInfo.lineas??"?"}</b>desde el corte</div><div><span>Pendientes (abiertas)</span><b>${sapInfo.pendientes??"?"}</b>${sapInfo.pendiente!=null?eur(sapInfo.pendiente):""}</div><div><span>Sin casar</span><b>${sapInfo.sinMapear?(typeof sapInfo.sinMapear==="object"?Object.keys(sapInfo.sinMapear).length:sapInfo.sinMapear):0}</b>vendedores</div></div>`
+        :(ult?`<p class="wa">Esa pasada no dejó datos de SAP: o es anterior a la integración, o se ejecutó una versión antigua de <code>api/pbi-sync.js</code>. Lanza <code>api/pbi-sync?solopedidos=1</code> con la versión nueva.</p>`:"")}
+      ${cfg&&cfg.sapDesde?`<p>Corte guardado en <code>pbi_config/pedidos</code>: <b>${esc(cfg.sapDesde)}</b>${cfg.fijadoEl?" (fijado el "+fx(cfg.fijadoEl)+")":""}</p>`:'<p class="wa">No hay corte fijado (se detecta solo cada vez; lo recomendable es fijarlo con <code>&sapDesde=2026-10-05</code>).</p>'}`);
+    // 2 · Registro de líneas
+    const porSem={}; let ultVisto=""; lineas.forEach(l=>{ porSem[l.sem]=porSem[l.sem]||{n:0,imp:0,ag:{}}; porSem[l.sem].n++; porSem[l.sem].imp+=Number(l.imp)||0; if(l.visto>ultVisto) ultVisto=l.visto; });
+    const sems=Object.keys(porSem).sort().slice(-6);
+    card(`<h2 style="margin-top:0">2 · Registro de líneas de SAP (<code>pedidos_sap_lineas</code>)</h2>
+      ${lineas.length?`<p><b>${lineas.length}</b> líneas apuntadas · última vista el <b>${fx(ultVisto)}</b></p>
+      <table><thead><tr><th>Semana de pedido</th><th>Líneas</th><th>Importe</th></tr></thead><tbody>${sems.map(w=>`<tr><td>${esc(w)}</td><td>${porSem[w].n}</td><td>${eur(porSem[w].imp)}</td></tr>`).join("")}</tbody></table>
+      <p style="font-size:12px">Aquí se apunta cada línea la primera vez que se ve; es lo que alimenta «pedidos introducidos» de UC en el parte.</p>`
+      :'<p class="ko">Vacío: todavía no se ha ejecutado la sincronización con SAP (o no ha llegado a escribir).</p>'}`);
+    // 3 · Formulario de pedidos
+    const uc=ped.filter(p=>String(p.empresa||"").toUpperCase()==="UC"||/^SAP/i.test(String(p.vendedor||"")));
+    const otros=ped.filter(p=>!uc.includes(p));
+    const imp=(l)=>l.reduce((t,p)=>t+(Number(p.importe)||0),0);
+    const sello=ped.map(p=>p.sincronizadoEl||p.actualizado).filter(Boolean).sort().pop();
+    const letras={}; otros.forEach(p=>{ const L=String(p.cliente||"")[0]||"?"; letras[L]=(letras[L]||0)+1; });
+    card(`<h2 style="margin-top:0">3 · Formulario de pedidos (<code>pbi_pedidos</code>)</h2>
+      <div class="k"><div><span>Líneas de SAP (UC)</span><b class="${uc.length?"ok":"ko"}">${uc.length}</b>${eur(imp(uc))} · ${new Set(uc.map(p=>p.pedido)).size} pedidos</div><div><span>Resto (global)</span><b>${otros.length}</b>${eur(imp(otros))} · clientes ${esc(Object.entries(letras).map(([k,n])=>k+":"+n).join(" "))}</div><div><span>Última escritura</span><b>${fx(sello)}</b></div></div>
+      ${uc.length?`<p class="ok">Los pedidos de SAP están entrando en el formulario.</p>`:`<p class="ko">No hay ninguna línea de SAP en el formulario. ${ped.length?"La sincronización que lo escribió no llevaba la integración, o SAP falló (mira el punto 1).":"El formulario está vacío."}</p>`}
+      ${uc.filter(p=>!p.agente).length?`<p class="wa">${uc.filter(p=>!p.agente).length} líneas de SAP sin comercial (${eur(imp(uc.filter(p=>!p.agente)))}): no cuentan en el parte de nadie hasta casar el vendedor.</p>`:""}
+      ${uc.filter(p=>String(p.cliente||"")[0]!=="U").length?`<p class="wa">${uc.filter(p=>String(p.cliente||"")[0]!=="U").length} líneas de SAP con código de cliente que no empieza por U (revisar la traducción C0xxxx → U43xxxx).</p>`:""}`);
+    // 4 · Vendedores
+    const porSlp={}; lineas.forEach(l=>{ const k=String(l.slp||""); if(!k) return; porSlp[k]=porSlp[k]||{nombre:l.vendedor||"",auto:"",n:0,imp:0}; porSlp[k].n++; porSlp[k].imp+=Number(l.imp)||0; if(l.vendedor) porSlp[k].nombre=l.vendedor; if(l.agente&&!/^SLP\d+$/.test(l.agente)) porSlp[k].auto=l.agente; });
+    const manual={}; vend.forEach(v=>manual[v._id]=v.agente);
+    let vm={}; try{ vm=JSON.parse((meta&&meta.vendedores)||"{}"); }catch(e){}
+    Object.entries(vm).forEach(([k,v])=>{ porSlp[k]=porSlp[k]||{nombre:v.nombre||"",auto:"",n:0,imp:0}; if(!porSlp[k].nombre) porSlp[k].nombre=v.nombre||""; if(v.agente&&!/^SLP\d+$/.test(v.agente)&&!porSlp[k].auto) porSlp[k].auto=v.agente; });
+    const nomCRM=(cod)=>{ const u=us.find(u=>[u.grupoAgente,u.catalogoVendedor,u._id,u.id].some(k=>k&&String(k).toUpperCase()===String(cod).toUpperCase())); return u?u.nombre:""; };
+    const filasV=Object.entries(porSlp).map(([k,v])=>({slp:k,...v,final:manual[k]||v.auto||""})).sort((a,b)=>(a.final?1:0)-(b.final?1:0)||b.imp-a.imp);
+    const sinCasar=filasV.filter(v=>!v.final);
+    card(`<h2 style="margin-top:0">4 · Vendedores de SAP → comercial del CRM</h2>
+      ${filasV.length?`<p>${filasV.length} vendedores vistos · <span class="${sinCasar.length?"ko":"ok"}">${sinCasar.length} sin casar</span>${sinCasar.length?` (${eur(sinCasar.reduce((t,v)=>t+v.imp,0))} de pedidos sin comercial) → <a href="/vendedores_sap.html">casarlos aquí</a>`:""}</p>
+      <table><thead><tr><th>SAP</th><th>Vendedor</th><th>Comercial CRM</th><th>Líneas</th><th>Importe</th></tr></thead><tbody>${filasV.map(v=>`<tr><td>${esc(v.slp)}</td><td style="text-align:left">${esc(v.nombre)}</td><td style="text-align:left">${v.final?`<span class="ok">${esc(v.final)}</span> ${esc(nomCRM(v.final))}${manual[v.slp]?" (fijado)":" (automático)"}`:'<span class="ko">sin casar</span>'}</td><td>${v.n}</td><td>${eur(v.imp)}</td></tr>`).join("")}</tbody></table>`
+      :'<p class="wa">Todavía no hay vendedores vistos (no ha corrido la sincronización).</p>'}`);
+    // 5 · Entrada por comercial
+    const conSem=entr.filter(e=>Number(e.entradaSem)>0||Number(e.entradaMes)>0).sort((a,b)=>Number(b.entradaMes)-Number(a.entradaMes));
+    card(`<h2 style="margin-top:0">5 · Pedidos introducidos por comercial (<code>pbi_entrada_agente</code>)</h2>
+      ${entr.length?`<p>${entr.length} comerciales · última actualización ${fx(entr.map(e=>e.actualizado).filter(Boolean).sort().pop())}</p>
+      <table><thead><tr><th>Comercial</th><th>Semana</th><th>Mes</th><th>Previsto mes</th></tr></thead><tbody>${conSem.slice(0,25).map(e=>`<tr><td>${esc(e.agente||e._id)} ${esc(nomCRM(e.agente||e._id))}</td><td>${eur(e.entradaSem)}</td><td>${eur(e.entradaMes)}</td><td>${eur(e.previstoMes)}</td></tr>`).join("")}</tbody></table>
+      <p style="font-size:12px">Si un comercial de UC (Ricardo, Carlos G., Antonio Zarco, Verónica, Esther…) sale a 0 en la semana teniendo pedidos en SAP, su vendedor de SAP no está casado (punto 4) o el corte deja fuera sus líneas (punto 1).</p>`
+      :'<p class="ko">Vacío: la sincronización <code>?solopedidos=1</code> no ha escrito la entrada por comercial.</p>'}`);
+    // Veredicto
+    const okSync=!!sapInfo&&!(ult&&ult.errorSap), okForm=uc.length>0, okVend=filasV.length>0&&sinCasar.length===0;
+    S.unshift(`<div class="card" style="border-color:${okSync&&okForm&&okVend?"#86EFAC":okSync&&okForm?"#FCD34D":"#FCA5A5"}"><b style="font-size:15px">${okSync&&okForm&&okVend?"✅ Los pedidos de SAP llegan y están atribuidos.":okSync&&okForm?"🟡 Llegan, pero hay vendedores sin casar o líneas sin comercial.":okSync?"🟡 La sincronización lee SAP, pero no hay líneas en el formulario: mira el punto 3.":"❌ No están llegando: la sincronización no ha corrido con la integración de SAP (punto 1)."}</b></div>`);
+  }catch(e){ S.push('<div class="card ko">Error leyendo: '+esc(e.message)+'</div>'); }
+  document.getElementById("out").innerHTML=S.join("");
+})();
+</script></body></html>
