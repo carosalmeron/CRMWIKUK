@@ -912,6 +912,50 @@ function serializar(datos){
   };
   return {fields:Object.fromEntries(Object.entries(datos).map(([k,v])=>[k,s(v)]))};
 }
+// ── (oct 2026) Cuadre del seguimiento con el Excel recién publicado ───────────
+// Una factura que estaba en seguimiento (acción con el comercial, aviso de falta de pago, en el seguro)
+// y ya no viene en el Excel es que se ha cobrado: se cierra sola para que no vuelva a salir.
+const NZ=(x)=>String(x==null?"":x).toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^A-Z0-9]/g,"");
+async function fsGetRaw(col,id){ const r=await fetch(`https://firestore.googleapis.com/v1/projects/${FB_PROJECT}/databases/(default)/documents/${col}/${encodeURIComponent(id)}`,{cache:"no-store"}); return r.ok?await r.json():null; }
+async function fsPatchRaw(col,id,fields){ const mask=Object.keys(fields).map(k=>"updateMask.fieldPaths="+encodeURIComponent(k)).join("&");
+  const r=await fetch(`https://firestore.googleapis.com/v1/projects/${FB_PROJECT}/databases/(default)/documents/${col}/${encodeURIComponent(id)}?${mask}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields})}); if(!r.ok) throw new Error("HTTP "+r.status); }
+async function fsDeleteRaw(col,id){ await fetch(`https://firestore.googleapis.com/v1/projects/${FB_PROJECT}/databases/(default)/documents/${col}/${encodeURIComponent(id)}`,{method:"DELETE"}); }
+async function fsListRaw(col){ const out=[]; let tok=null,v=0; do{ const r=await fetch(`https://firestore.googleapis.com/v1/projects/${FB_PROJECT}/databases/(default)/documents/${col}?pageSize=300${tok?"&pageToken="+tok:""}`,{cache:"no-store"}); if(!r.ok) break; const j=await r.json(); (j.documents||[]).forEach(d=>out.push(d)); tok=j.nextPageToken||null; }while(tok&&v++<20); return out; }
+const sv=(d,k)=>{ const f=d&&d.fields&&d.fields[k]; return f?(f.stringValue??f.doubleValue??f.integerValue??f.booleanValue??null):null; };
+async function cuadrarSeguimiento(){
+  const fechaTxt=String(RESULTADO.fechaDatos||"").split("-").reverse().join("/");
+  // 1 · Qué hay en el Excel nuevo: facturas vivas (clave empresa+número) y clientes con saldo
+  const vivas=new Set(), vivasNum=new Set(), cliPend=new Set(), cliVenc=new Set();
+  for(const d of RESULTADO.docs){ let cs=[]; try{ cs=JSON.parse(d.datos||"[]"); }catch(e){}
+    for(const c of cs){ const cn=NZ(c.c||c.cliente); if(Number(c.p)>=1||Number(c.ven)>=1) cliPend.add(cn); if(Number(c.ven)>=1) cliVenc.add(cn);
+      for(const f of (c.f||[])){ if(!(Number(f.im)>0)||f.anul) continue; const g=NZ(f.g), n=NZ((f.t?f.t+" ":"")+(f.n||"")), n2=NZ(f.n); if(n){ vivas.add(g+"_"+n); vivasNum.add(n); } if(n2){ vivas.add(g+"_"+n2); vivasNum.add(n2); } } } }
+  const estaViva=(empresa,numero)=>{ const g=NZ(empresa), n=NZ(numero); if(!n) return true; return vivas.has(g+"_"+n)||(!g&&vivasNum.has(n))||[...vivas].some(k=>k.startsWith(g+"_")&&(k.endsWith("_"+n)||k.endsWith(n))); };
+  log("🔎 Cuadrando el seguimiento con el Excel del "+fechaTxt+"…");
+  const hayFacturas=vivas.size>0;   // si el Excel viene sin detalle de facturas (solo saldos), no se toca nada por factura
+  if(!hayFacturas) log("   (este Excel no trae facturas, solo saldos: se cuadran los compromisos por cliente y no se tocan los avisos por factura)","#FBBF24");
+  // 2 · Avisos de falta de pago / en el seguro (cobros_estado_factura)
+  let cerradasEF=0;
+  for(const d of (hayFacturas?await fsListRaw("cobros_estado_factura"):[])){ const id=decodeURIComponent(d.name.split("/").pop());
+    if(estaViva(sv(d,"empresa"),sv(d,"numero"))) continue;
+    const campos=Object.assign({},d.fields,{cobradaEl:{stringValue:new Date().toISOString()},cerradoPor:{stringValue:"Importación de cobros del "+fechaTxt},estadoFinal:{stringValue:"cobrada"}});
+    try{ await fsPatchRaw("cobros_estado_factura_hist",id,campos); await fsDeleteRaw("cobros_estado_factura",id); cerradasEF++;
+      log("   ✅ "+(sv(d,"numero")||id)+" · "+(sv(d,"cliente")||"")+" · ya no está en el Excel → cobrada (sale de «"+(sv(d,"estado")==="seguro"?"En el seguro":"Aviso falta de pago")+"»)"); }catch(e){ log("   ⚠️ "+id+": "+(e.message||e),"#FBBF24"); } }
+  // 3 · Compromisos de pago con los comerciales (incidencias con compromiso=true)
+  let cerradasC=0, revisadas=0;
+  const r=await fetch(`https://firestore.googleapis.com/v1/projects/${FB_PROJECT}/databases/(default)/documents:runQuery`,{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({structuredQuery:{from:[{collectionId:"incidencias"}],where:{fieldFilter:{field:{fieldPath:"compromiso"},op:"EQUAL",value:{booleanValue:true}}}}})});
+  const comps=r.ok?((await r.json())||[]).filter(x=>x.document).map(x=>x.document):[];
+  for(const d of comps){ const id=decodeURIComponent(d.name.split("/").pop());
+    if(sv(d,"eliminada")===true||sv(d,"estadoCobro")==="pagado"||/resuelta|cerrada/.test(String(sv(d,"estado")||""))) continue; revisadas++;
+    const facs=String(sv(d,"facturaNum")||"").split(/\s*,\s*/).filter(Boolean), emp=sv(d,"empresa")||"", cli=NZ(sv(d,"clienteNombre")||sv(d,"cliente"));
+    const cobrado=facs.length?(hayFacturas&&facs.every(n=>!estaViva(emp,n))):(cli&&!cliPend.has(cli));
+    if(!cobrado) continue;
+    const hist=((d.fields.historial&&d.fields.historial.arrayValue&&d.fields.historial.arrayValue.values)||[]).concat([{mapValue:{fields:{accion:{stringValue:"✅ Cobrado"},fecha:{stringValue:new Date().toLocaleDateString("es-ES")},por:{stringValue:"Importación de cobros"},nota:{stringValue:(facs.length?"Las facturas "+facs.join(", "):"El cliente")+" ya no aparece"+(facs.length>1?"n":"")+" en el Excel del "+fechaTxt}}}}]);
+    try{ await fsPatchRaw("incidencias",id,{estadoCobro:{stringValue:"pagado"},estado:{stringValue:"resuelta"},fechaResolucion:{stringValue:new Date().toLocaleDateString("es-ES")},
+        historial:{arrayValue:{values:hist}},fechaUltimoCambio:{stringValue:new Date().toISOString()},ultimoCambioPor:{stringValue:"Importación de cobros"}}); cerradasC++;
+      log("   ✅ Compromiso de "+(sv(d,"clienteNombre")||"")+(facs.length?" · "+facs.join(", "):"")+" → cobrado"); }catch(e){ log("   ⚠️ "+id+": "+(e.message||e),"#FBBF24"); } }
+  log("🧾 Cuadre hecho: "+cerradasEF+" aviso"+(cerradasEF===1?"":"s")+" (falta de pago / seguro) y "+cerradasC+" compromiso"+(cerradasC===1?"":"s")+" cerrados como cobrados · "+revisadas+" compromisos revisados.","#FDE047");
+}
 async function listarIds(col){
   let ids=[], token=null, i=0;
   do{
@@ -1001,6 +1045,8 @@ async function publicar(){
     ]);
     progreso(100);
     log("✅ Publicado. Pendiente "+eur(RESULTADO.totalP)+" · Vencido "+eur(RESULTADO.totalV),"#FDE047");
+    // (oct 2026) Cuadre con el seguimiento: lo que ya no está en este Excel es que se ha cobrado.
+    try{ await cuadrarSeguimiento(); }catch(e){ log("⚠️ No se ha podido cuadrar el seguimiento: "+(e.message||e),"#FBBF24"); }
     btn.textContent="✅ Publicado";
     cargarUltima();
   }catch(e){
