@@ -202,7 +202,29 @@ EVALUATE
     // Pedidos con entrega planificada de hoy en adelante. Es lo que un
     // comercial necesita ver: cuando le va a salir cada pedido.
     // Solo futuro: la tabla conserva entregas desde 2017 sin purgar.
+    // (oct 2026) UC (clientes "U…") ya no entra por la global sino por PEDIDOS SAP (ver pedidosSap()).
+    // Se excluye aquí para no enseñar pedidos de UC que la global ya no actualiza. pedidosTodas = la
+    // consulta original, por si SAP no responde.
     pedidos: `
+DEFINE
+  VAR _hoy = TODAY()
+EVALUATE
+  SELECTCOLUMNS(
+    FILTER('00 Pedidos Validados Global',
+      '00 Pedidos Validados Global'[FECHAPLANIFICADA] >= _hoy
+      && LEFT('00 Pedidos Validados Global'[CLIENTE], 1) <> "U"),
+    "Cliente",  '00 Pedidos Validados Global'[CLIENTE],
+    "Vendedor", '00 Pedidos Validados Global'[VENDEDOR],
+    "Fecha",    '00 Pedidos Validados Global'[FECHAPLANIFICADA],
+    "Articulo", '00 Pedidos Validados Global'[CODIGO],
+    "Familia",  '00 Pedidos Validados Global'[FAMILIA],
+    "Uni",      '00 Pedidos Validados Global'[UNI],
+    "Precio",   '00 Pedidos Validados Global'[PRECIO],
+    "Subfamilia",'00 Pedidos Validados Global'[SUBFAMILIA],
+    "Importe",  '00 Pedidos Validados Global'[BASE],
+    "Pedido",   '00 Pedidos Validados Global'[NumPedido]
+  )`,
+    pedidosTodas: `
 DEFINE
   VAR _hoy = TODAY()
 EVALUATE
@@ -239,6 +261,27 @@ EVALUATE
     // Entrada de pedidos por vendedor, por FECHA de pedido (no de entrega).
     // Mide el trabajo comercial de la semana, que es lo que el vendedor
     // controla: la factura llega semanas despues.
+    // (oct 2026) entradaCorte(fecha): igual que entrada, pero los pedidos de UC ("U…") solo cuentan
+    // hasta el día anterior al corte; desde el corte, UC sale de PEDIDOS SAP (pedidosSap().entrada).
+    entradaCorte: (corteISO) => { const [cy, cm, cd] = String(corteISO || "2099-01-01").split("-").map(Number); const T = "'00 Entrada Pedidos Global'"; return `
+DEFINE
+  VAR _hoy = TODAY()
+  VAR _iniSem = _hoy - WEEKDAY(_hoy, 2) + 1
+  VAR _iniMes = DATE(YEAR(_hoy), MONTH(_hoy), 1)
+  VAR _anoAct = YEAR(_hoy)
+  VAR _anoAnt = _anoAct - 1
+  VAR _corteAnt = DATE(_anoAnt, MONTH(_hoy), DAY(_hoy))
+  VAR _corteSap = DATE(${cy},${cm},${cd})
+EVALUATE
+  SUMMARIZECOLUMNS(
+    ${T}[VENDEDOR],
+    "Sem", CALCULATE(SUM(${T}[BASE]), FILTER(${T}, ${T}[FECHA] >= _iniSem && ${T}[FECHA] <= _hoy && (LEFT(${T}[CLIENTE], 1) <> "U" || ${T}[FECHA] < _corteSap))),
+    "Mes", CALCULATE(SUM(${T}[BASE]), FILTER(${T}, ${T}[FECHA] >= _iniMes && ${T}[FECHA] <= _hoy && (LEFT(${T}[CLIENTE], 1) <> "U" || ${T}[FECHA] < _corteSap))),
+    "Ano", CALCULATE(SUM(${T}[BASE]), FILTER(${T}, YEAR(${T}[FECHA]) = _anoAct && (LEFT(${T}[CLIENTE], 1) <> "U" || ${T}[FECHA] < _corteSap))),
+    "SemAnt", CALCULATE(SUM(${T}[BASE]), FILTER(${T}, ${T}[FECHA] >= _iniSem - 364 && ${T}[FECHA] <= _corteAnt)),
+    "AnoAnt", CALCULATE(SUM(${T}[BASE]), FILTER(${T}, YEAR(${T}[FECHA]) = _anoAnt && ${T}[FECHA] <= _corteAnt))
+  )`; },
+
     entrada: `
 DEFINE
   VAR _hoy = TODAY()
@@ -482,6 +525,186 @@ function pick(row, name) {
   return k === undefined ? null : row[k];
 }
 const num = (v) => (v === null || v === undefined || isNaN(v) ? 0 : Math.round(Number(v) * 100) / 100);
+
+// ─────────────── (oct 2026) PEDIDOS SAP como fuente de pedidos de la empresa UC ───────────────
+// La empresa 1 (UC, clientes "U…") ha pasado a SAP y la tabla global ha dejado de recibir sus pedidos.
+// Desde la fecha de corte (sapDesde), los pedidos de UC salen de 'PEDIDOS SAP'; Bosch ("B…") y Ramírez
+// ("R…") siguen saliendo de la global. Antes del corte, UC también sale de la global (no se duplica nada).
+const SAP_T = "'PEDIDOS SAP'";
+
+// Vendedor de SAP (SlpCode / SlpName) → código de comercial del CRM.
+async function mapeadorSap() {
+  let mapaVend = {};
+  try { for (const d of await fbLeerColeccion("pedidos_sap_vendedores")) if (d.agente) mapaVend[String(d._id)] = String(d.agente).toUpperCase(); } catch (e) {}
+  let alias = [], usuarios = [], todosUs = [], codigosPbi = new Set();
+  try { alias = await fbLeerColeccion("agentes_alias"); } catch (e) {}
+  try { todosUs = await fbLeerColeccion("usuarios"); usuarios = todosUs.filter((u) => u.activo !== false && /agente|comercial|vendedor|jefe/i.test(String(u.rol || ""))); } catch (e) {}
+  // Códigos de vendedor con los que trabaja todo el CRM (los de Power BI): el resultado SIEMPRE tiene que ser uno de estos.
+  try { for (const r of await fbLeerColeccion("pbi_resumen_agente")) if (r._id && r._id !== "_TOTAL") codigosPbi.add(String(r._id).toUpperCase()); } catch (e) {}
+  const N = (x) => String(x || "").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+  const U = (x) => String(x || "").toUpperCase().trim();
+  const esCod = (c) => !!c && codigosPbi.has(U(c));
+  // Cualquier identificador (id de ficha, canónico de alias, grupoAgente…) → código de vendedor de Power BI
+  const aCodigo = (x) => {
+    const k = U(x); if (!k) return "";
+    if (esCod(k)) return k;
+    const u = todosUs.find((f) => [f._id, f.id, f.crmId, f.username].some((v) => v && U(v) === k));
+    if (u) { for (const c of [u.grupoAgente, u.catalogoVendedor]) if (esCod(c)) return U(c); }
+    // Alias que apuntan a ese canónico y que sí son un código de Power BI (RICARDO → ik2, y RICARDO es el código)
+    const al = alias.filter((a) => U(a.canonico) === k).map((a) => U(a.original || a.alias || a._id)).filter(esCod);
+    if (al.length) return al[0];
+    // Sin lista de Power BI (o código que no está en ella): se devuelve lo que haya, pero nunca un id de ficha
+    if (!codigosPbi.size) return (u && U(u.grupoAgente || u.catalogoVendedor)) || k;
+    return "";
+  };
+  const codUsuario = (u) => aCodigo(u.grupoAgente || u.catalogoVendedor || u._id || "");
+  const porNombre = {};
+  for (const a of alias) { const nn = N(a.nombre); if (nn && a.canonico && !porNombre[nn]) { const c = aCodigo(a.canonico); if (c) porNombre[nn] = c; } }
+  for (const u of usuarios) { const nn = N(u.nombre); if (nn && !porNombre[nn]) { const c = codUsuario(u); if (c) porNombre[nn] = c; } }
+  // Lo fijado a mano también pasa por el traductor: la pantalla de vendedores guardaba ids de ficha (IK2, WK2, U_…)
+  for (const k of Object.keys(mapaVend)) { const c = mapaVend[k]; if (c !== "INTERCOMPANY") { const cc = aCodigo(c); if (cc) mapaVend[k] = cc; } }
+  const codigoDe = (slp, nombre) => {
+    if (mapaVend[String(slp)]) return mapaVend[String(slp)];
+    if (/INTERCOMPANY|INTERC\b/.test(N(nombre))) return "INTERCOMPANY";
+    const nn = N(String(nombre || "").replace(/\d+%/g, "").replace(/\b(FABRICANTES|NACIONAL|INTERNACIONAL|POTENCIALES|PORTUGAL|COMERCIAL|WIKUK|UNITED)\b/gi, ""));
+    if (porNombre[nn]) return porNombre[nn];
+    const tok = nn.split(" ").filter(Boolean); if (!tok.length) return "";
+    // 1 · El propio nombre de SAP es un código de Power BI (ACRUZ, ILOMAYA, GERHARD, ESTHER BAENA → ESTHER)
+    const compacto = nn.replace(/ /g, "");
+    if (esCod(compacto)) return compacto;
+    if (tok.length === 1 && esCod(tok[0])) return tok[0];
+    // 2 · Nombre + primer apellido coincide con una ficha o un alias (AGUSTIN ENRIQUE FERNANDEZ → Agustín)
+    const cand = new Set();
+    for (const a of alias) { const an = N(a.nombre).split(" ").filter(Boolean); if (!an.length) continue;
+      if (an[0] === tok[0] && (an.length === 1 || tok.includes(an[1]))) { const c = aCodigo(a.canonico); if (c) cand.add(c); } }
+    if (cand.size === 1) return [...cand][0];
+    if (!cand.size) for (const u of usuarios) { const un = N(u.nombre).split(" ").filter(Boolean); if (!un.length) continue;
+      if (un[0] === tok[0] && (un.length === 1 || tok.includes(un[1]))) { const c = codUsuario(u); if (c) cand.add(c); } }
+    if (cand.size === 1) return [...cand][0];
+    // 3 · Código formado con el nombre: inicial + apellido (JULIO REY → JREY, JOAN PUJOLAS → JPUJOLA), nombre + inicial del
+    //     apellido (CARLOS GARCIA → CARLOSG) o nombre solo (SILVIA GARCIA → SILVIA, GUSTO GARANTIZADO → GUSTOG)
+    if (!cand.size && tok.length >= 2 && codigosPbi.size) {
+      const ini = tok[0][0] + tok[1], pref = tok[0] + tok[1][0], nom = tok[0];
+      const c3 = [...codigosPbi].filter((c) => c === ini || ini.startsWith(c) && c.length >= 4 || c === pref || (c === nom) || (c.startsWith(nom) && c.length <= nom.length + 2 && tok.slice(1).some((t) => t[0] === c[nom.length])));
+      const u3 = [...new Set(c3)];
+      if (u3.length === 1) return u3[0];
+    }
+    return "";   // si hay dudas (dos Carlos), se deja para la tabla manual
+  };
+  return { codigoDe, mapaVend, codigosPbi };
+}
+
+// Fecha de corte: 1) fijada a mano en pbi_config/pedidos {sapDesde:"2026-10-06"} (o con ?sapDesde= en la URL,
+// que la guarda); 2) si no, el día siguiente al último pedido de UC que tiene la tabla global.
+async function sapCorte(token) {
+  let fijado = null;
+  try { const c = await fbLeerDocumento("pbi_config", "pedidos"); if (c && /^\d{4}-\d{2}-\d{2}$/.test(String(c.sapDesde || ""))) fijado = String(c.sapDesde); } catch (e) {}
+  let ultimoGlobalUC = null;
+  try {
+    const f = await pbiQuery(token, `EVALUATE ROW("Ultimo", CALCULATE(MAX('00 Entrada Pedidos Global'[FECHA]), FILTER('00 Entrada Pedidos Global', LEFT('00 Entrada Pedidos Global'[CLIENTE], 1) = "U")))`, true);
+    ultimoGlobalUC = String(pick(f[0] || {}, "Ultimo") || "").slice(0, 10) || null;
+  } catch (e) {}
+  let auto = null;
+  if (ultimoGlobalUC) { const d = new Date(ultimoGlobalUC + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + 1); auto = d.toISOString().slice(0, 10); }
+  return { sapDesde: fijado || auto || "2026-07-30", fijado: !!fijado, ultimoGlobalUC };
+}
+
+// Código de cliente de SAP (C02123) → código de la global/CRM (U432123): "U43" + los 4 últimos dígitos.
+// Si hay maestro de clientes y ese código no existe, se busca una ficha "U…" que acabe en esos 4 dígitos.
+function clienteSapAGlobal(cod, fichas) {
+  const d = String(cod || "").replace(/\D/g, "");
+  if (!d) return String(cod || "").trim();
+  const k4 = d.slice(-4).padStart(4, "0"), k = "U43" + k4;
+  if (fichas && fichas.size && !fichas.has(k)) {
+    for (const f of fichas.keys()) if (String(f)[0] === "U" && String(f).replace(/\D/g, "").slice(-4) === k4) return String(f);
+  }
+  return k;
+}
+
+// Lee PEDIDOS SAP desde el corte y devuelve: las líneas pendientes en el MISMO formato que
+// '00 Pedidos Validados Global' (para el formulario de pedidos) y la entrada de pedidos por comercial
+// (semana / mes / año) sacada del registro pedidos_sap_lineas, que guarda cada línea la primera vez
+// que se ve y no la borra cuando se sirve.
+async function pedidosSap(token, { fichas, dry } = {}) {
+  const corte = await sapCorte(token);
+  const desde = corte.sapDesde; const [dy, dm, dd] = desde.split("-").map(Number);
+  const filas = await pbiQuery(token, `
+EVALUATE
+  SELECTCOLUMNS(
+    FILTER(${SAP_T}, ${SAP_T}[DocDate] >= DATE(${dy},${dm},${dd})),
+    "DocEntry", ${SAP_T}[DocEntry], "DocNum", ${SAP_T}[DocNum], "DocDate", ${SAP_T}[DocDate], "DocDueDate", ${SAP_T}[DocDueDate],
+    "CodigoCliente", ${SAP_T}[CodigoCliente], "NombreCliente", ${SAP_T}[NombreCliente], "LineNum", ${SAP_T}[LineNum],
+    "ItemCode", ${SAP_T}[ItemCode], "Dscription", ${SAP_T}[Dscription], "Unidades", ${SAP_T}[Unidades], "OpenQty", ${SAP_T}[OpenQty],
+    "LineTotal", ${SAP_T}[LineTotal], "FechaPlan", ${SAP_T}[Fecha Planificado], "SlpCode", ${SAP_T}[SlpCode], "SlpName", ${SAP_T}[SlpName])`, true);
+  const { codigoDe, mapaVend } = await mapeadorSap();
+  const vistas = {};
+  try { for (const d of await fbLeerColeccion("pedidos_sap_lineas")) vistas[d._id] = d; } catch (e) {}
+  const nuevas = [], validados = [], sinMapear = {}; const clavesAbiertas = new Set(), pedidosAbiertos = new Set(), importesCli = {}, artsCli = {};
+  const hoy = new Date().toISOString().slice(0, 10);
+  const semDe = (iso) => { const d = new Date(String(iso).slice(0, 10) + "T12:00:00Z"); return isNaN(d) ? "" : isoSemana(d); };
+  let pendiente = 0, abiertas = 0;
+  for (const r of filas) {
+    const g = (k) => pick(r, k);
+    const fecha = String(g("DocDate") || "").slice(0, 10); if (!fecha) continue;
+    const uds = num(g("Unidades")), open = num(g("OpenQty")), tot = num(g("LineTotal"));
+    const pend = uds > 0 ? num(tot * open / uds) : (open > 0 ? tot : 0);
+    const slp = String(g("SlpCode")), slpN = String(g("SlpName") || "").trim();
+    const ag = codigoDe(slp, slpN) || ""; if (!ag) sinMapear[slp] = slpN;
+    const idL = String(g("DocEntry")) + "_" + String(g("LineNum"));
+    if (!vistas[idL]) {
+      vistas[idL] = { _id: idL, ped: String(g("DocNum") || ""), fecha, sem: semDe(fecha), mes: fecha.slice(0, 7), agente: ag || ("SLP" + slp), slp, vendedor: slpN,
+        cliente: String(g("CodigoCliente") || ""), art: String(g("ItemCode") || ""), imp: num(tot), visto: new Date().toISOString() };
+      nuevas.push(vistas[idL]);
+    }
+    if (open <= 0) continue;
+    abiertas++; pendiente += pend;
+    const plan = String(g("FechaPlan") || g("DocDueDate") || "").slice(0, 10) || hoy;
+    const cliG = clienteSapAGlobal(g("CodigoCliente"), fichas);
+    clavesAbiertas.add(cliG.toUpperCase() + "|" + String(g("ItemCode") || "").trim().toUpperCase());
+    pedidosAbiertos.add(String(g("DocNum") || "").replace(/\D/g, ""));
+    (importesCli[cliG.toUpperCase()] = importesCli[cliG.toUpperCase()] || []).push(num(pend));
+    (artsCli[cliG.toUpperCase()] = artsCli[cliG.toUpperCase()] || []).push(String(g("ItemCode") || "").toUpperCase().replace(/[^A-Z0-9]/g, ""));
+    validados.push({ Cliente: cliG, Vendedor: "SAP" + slp, AgenteSap: ag || null, Fecha: plan,
+      Articulo: String(g("ItemCode") || "").trim(), Familia: null, Uni: open, Precio: uds > 0 ? num(tot / uds) : 0, Subfamilia: null,
+      Importe: pend, Pedido: String(g("DocNum") || "").trim(), Empresa: "UC", NombreSap: String(g("NombreCliente") || "").trim(), DescripcionSap: String(g("Dscription") || "").trim() });
+  }
+  // Entrada por comercial, del registro (incluye lo ya servido), solo desde el corte
+  const hoyD = new Date(); const semHoy = isoSemana(hoyD), mesHoy = hoyD.toISOString().slice(0, 7), anio = String(hoyD.getFullYear());
+  const entrada = {};
+  for (const v of Object.values(vistas)) {
+    if (String(v.fecha || "") < desde) continue;
+    const ag = (v.slp && mapaVend[String(v.slp)]) || codigoDe(v.slp, v.vendedor || "") || (v.agente && !/^SLP\d+$/.test(v.agente) ? v.agente : "");
+    if (!ag) continue;
+    const E = entrada[ag] = entrada[ag] || { Sem: 0, Mes: 0, Ano: 0 }; const imp = num(v.imp);
+    if (v.sem === semHoy) E.Sem += imp; if (v.mes === mesHoy) E.Mes += imp; if (String(v.fecha).slice(0, 4) === anio) E.Ano += imp;
+  }
+  if (!dry && nuevas.length) { try { await fbCommit("pedidos_sap_lineas", nuevas); } catch (e) {} }
+  // Los pedidos de UC anteriores a SAP siguen en la global (son reales y aún no se han pasado a SAP): se
+  // conservan, salvo que SAP ya tenga abierta una línea del mismo cliente y artículo, o el mismo nº de pedido.
+  // (oct 2026) La global sigue recibiendo parte de los pedidos de UC después del corte, con otro nº de pedido
+  // (A 184xxx frente a 2600025xx de SAP) y a veces otro código de artículo, así que el cruce por artículo se
+  // quedaba corto (UNIVERSAL 65.978 € en la global y 66.418 € en SAP, los mismos pedidos). Se considera duplicada
+  // también la línea de la global cuyo importe coincide con una línea abierta de SAP del mismo cliente (±1 €),
+  // consumiendo esa línea para no descontarla dos veces.
+  const usados = {};
+  const esDuplicadoGlobal = (r) => {
+    const cli = String(pick(r, "Cliente") || "").trim().toUpperCase(); if (cli[0] !== "U") return false;
+    const art = String(pick(r, "Articulo") || "").trim().toUpperCase(); const ped = String(pick(r, "Pedido") || "").replace(/\D/g, "");
+    if (clavesAbiertas.has(cli + "|" + art) || (ped && pedidosAbiertos.has(ped))) return true;
+    const imp = num(pick(r, "Importe"));
+    // Líneas sin importe (VAR2 «varios», portes…) de un cliente que ya tiene su pedido en SAP: son restos del pedido duplicado
+    if (!(imp > 0)) return !!(importesCli[cli] && importesCli[cli].length);
+    const L = importesCli[cli] || []; const u = (usados[cli] = usados[cli] || new Set());
+    const i = L.findIndex((x, k) => !u.has(k) && Math.abs(x - imp) <= Math.max(1, imp * 0.005));
+    if (i >= 0) { u.add(i); return true; }
+    // Mismo cliente y mismo artículo (con otra grafía del código, p. ej. sufijo de envase) aunque el importe no cuadre:
+    // SAP enseña solo lo que queda por servir y la global el pedido entero (ATIENZA: A 184876 = 260002799)
+    const a = art.replace(/[^A-Z0-9]/g, ""); if (a.length >= 4) for (const b of (artsCli[cli] || [])) { if (b.length >= 4 && (a.startsWith(b) || b.startsWith(a))) return true; }
+    return false;
+  };
+  return { desde, corteFijado: corte.fijado, ultimoDiaGlobalUC: corte.ultimoGlobalUC, lineas: filas.length, abiertas, pendiente: num(pendiente), validados, entrada,
+    sinMapear, nuevasEnRegistro: nuevas.length, lineasEnRegistro: Object.keys(vistas).length, esDuplicadoGlobal };
+}
 
 // ─────────────── Firestore: escritura por lotes ───────────────
 function toFields(obj) {
@@ -2692,6 +2915,258 @@ ${med.join(",\n")}
   // ?cierre=1 → congela la foto de la semana. pbi_resumen_agente solo guarda
   // la semana en curso y se pisa cada mañana: sin esto no hay forma de mirar
   // atras. No toca Power BI.
+  // ═══════════════════════════════════════════════════════════════════════
+  // (oct 2026) ?comparar=1 → compara, semana a semana y por vendedor, lo que hay en la tabla global
+  // ('00 Entrada Pedidos Global', todas las empresas, por fecha de pedido) con lo que trae 'PEDIDOS SAP'
+  // (solo United, solo líneas pendientes). Sirve para ver qué parte del global es SAP y qué falta en cada lado.
+  //   ?comparar=1                 → desde el lunes de hace 10 semanas, en HTML (para verlo en el móvil)
+  //   ?comparar=1&desde=2026-07-30 → desde esa fecha de pedido
+  //   ?comparar=1&json=1          → lo mismo en JSON
+  if (req.query.comparar === "1") {
+    const t1 = Date.now();
+    const out = { ok: true, global: "'00 Entrada Pedidos Global'", sap: "'PEDIDOS SAP'" };
+    try {
+      const { token } = await getToken(req);
+      let desde = String(req.query.desde || "");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(desde)) {
+        const d = new Date(); const dow = d.getDay() || 7; d.setDate(d.getDate() - (dow - 1) - 70); desde = d.toISOString().slice(0, 10);
+      }
+      const [dy, dm, dd] = desde.split("-").map(Number);
+      const T = "'00 Entrada Pedidos Global'", S = "'PEDIDOS SAP'";
+      out.desde = desde;
+
+      // 1 · Qué columnas tiene la tabla global (se pide una fila y se miran las claves)
+      const unaFila = await pbiQuery(token, `EVALUATE TOPN(1, ${T})`, true);
+      const cols = unaFila.length ? Object.keys(unaFila[0]).map((k) => k.replace(/^.*\[/, "").replace(/\]$/, "")) : [];
+      out.columnasGlobal = cols;
+      const col = (re) => cols.find((c) => re.test(c)) || null;
+      const cCli = col(/^CLIENTE$|^CODCLIENTE$|^CODIGOCLIENTE$/i) || col(/CLIENTE/i);
+      const cPed = col(/NUMPEDIDO|^PEDIDO$|NUMERO|DOCNUM/i);
+      const cEmp = col(/EMPRESA|SOCIEDAD|COMPA|ORIGEN/i);
+      const cArt = col(/^CODIGO$|ARTICULO|ITEMCODE/i);
+      const cNom = col(/NOMBRE|RAZON|DESCRIPCIONCLIENTE/i);
+      const sel = [`"Fecha", ${T}[FECHA]`, `"Vendedor", ${T}[VENDEDOR]`, `"Base", ${T}[BASE]`];
+      if (cCli) sel.push(`"Cliente", ${T}[${cCli}]`);
+      if (cPed) sel.push(`"Pedido", ${T}[${cPed}]`);
+      if (cEmp) sel.push(`"Empresa", ${T}[${cEmp}]`);
+      if (cArt) sel.push(`"Articulo", ${T}[${cArt}]`);
+      if (cNom) sel.push(`"Nombre", ${T}[${cNom}]`);
+      const glob = await pbiQuery(token, `EVALUATE SELECTCOLUMNS(FILTER(${T}, ${T}[FECHA] >= DATE(${dy},${dm},${dd})), ${sel.join(", ")})`, true);
+      const sap = await pbiQuery(token, `
+EVALUATE SELECTCOLUMNS(FILTER(${S}, ${S}[DocDate] >= DATE(${dy},${dm},${dd})),
+  "Fecha", ${S}[DocDate], "Pedido", ${S}[DocNum], "Cliente", ${S}[CodigoCliente], "NombreCliente", ${S}[NombreCliente],
+  "Vendedor", ${S}[SlpName], "SlpCode", ${S}[SlpCode], "Base", ${S}[LineTotal], "OpenQty", ${S}[OpenQty], "Articulo", ${S}[ItemCode])`, true);
+
+      // Vendedor global → comercial del CRM: tabla Agentes de PBI y, si no, fichas/alias del CRM por código
+      const agentes = new Map();
+      try { for (const a of await pbiQuery(token, Q.agentes, true)) { const cod = String(pick(a, "CODIGO") || "").trim(); if (cod) agentes.set(cod.replace(/^0+/, ""), String(pick(a, "GRUPOAGENTE") || "").trim() || cod); } } catch (e) {}
+      const fichas = new Map();
+      try { for (const u of await fbLeerColeccion("usuarios")) for (const k of [u._id, u.grupoAgente, u.catalogoVendedor, u.crmId]) if (k) fichas.set(String(k).toUpperCase().replace(/^0+/, ""), (u.nombre || u._id) + (u.grupoAgente ? " · " + u.grupoAgente : "")); } catch (e) {}
+      try { for (const a of await fbLeerColeccion("agentes_alias")) for (const k of [a._id, a.alias, a.original]) if (k && !fichas.has(String(k).toUpperCase())) fichas.set(String(k).toUpperCase().replace(/^0+/, ""), (a.nombre || a.canonico || "") + " · " + (a.canonico || "")); } catch (e) {}
+      const comercialDe = (v) => { const k = String(v).toUpperCase().replace(/^0+/, ""); return agentes.get(k) || fichas.get(k) || ""; };
+      out.agentesPbi = agentes.size; out.muestraAgentesPbi = [...agentes.entries()].slice(0, 6);
+      let mapaVend = {};
+      try { for (const d of await fbLeerColeccion("pedidos_sap_vendedores")) if (d.agente) mapaVend[String(d._id)] = String(d.agente).toUpperCase(); } catch (e) {}
+
+      // Clave de cliente comparable entre tablas: SAP usa C02123 y la global U432123 → se comparan los 4 últimos dígitos
+      // (solo dentro de la empresa que corresponde a SAP, para no cruzar con clientes de otras empresas).
+      const semDe = (iso) => { const d = new Date(String(iso).slice(0, 10) + "T12:00:00Z"); return isNaN(d) ? "" : isoSemana(d); };
+      const K4 = (c) => { const d = String(c || "").replace(/\D/g, ""); return d ? d.slice(-4).padStart(4, "0") : ""; };
+      const sem = {}, vG = {}, vS = {}, empG = {}, empPref = {}, nomG = {}, nomS = {};
+      const S0 = () => ({ gImp: 0, gLin: 0, gCli: new Map(), gEmp: {}, sImp: 0, sLin: 0, sPed: new Set(), sCli: new Map() });
+      for (const r of glob) {
+        const f = String(pick(r, "Fecha") || "").slice(0, 10); if (!f) continue;
+        const w = semDe(f); const x = (sem[w] = sem[w] || S0()); const imp = num(pick(r, "Base"));
+        x.gImp += imp; x.gLin++;
+        const e = cEmp ? String(pick(r, "Empresa") ?? "(sin)") : "(sin)"; empG[e] = (empG[e] || 0) + imp; x.gEmp[e] = (x.gEmp[e] || 0) + imp;
+        const c = String(pick(r, "Cliente") || ""); if (c) { const pre = c.replace(/[0-9].*$/, "") || "(sin letra)"; empPref[e] = empPref[e] || {}; empPref[e][pre] = (empPref[e][pre] || 0) + 1;
+          const k = e + "|" + K4(c); x.gCli.set(k, (x.gCli.get(k) || 0) + imp); nomG[k] = c + (cNom ? " " + String(pick(r, "Nombre") || "") : ""); }
+        const v = String(pick(r, "Vendedor") || "(sin)").trim(); vG[v] = (vG[v] || 0) + imp;
+      }
+      // Empresa de SAP = la que más clientes casa por los 4 últimos dígitos
+      const sapK = new Set(sap.map((r) => K4(pick(r, "Cliente"))).filter(Boolean));
+      const puntos = {}; for (const w of Object.values(sem)) for (const k of w.gCli.keys()) { const [e, k4] = k.split("|"); if (sapK.has(k4)) puntos[e] = (puntos[e] || 0) + 1; }
+      const empSap = Object.entries(puntos).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+      out.empresaQueCasaConSap = empSap; out.clientesSapQueCasanPorEmpresa = puntos;
+      for (const r of sap) {
+        const f = String(pick(r, "Fecha") || "").slice(0, 10); if (!f) continue;
+        const w = semDe(f); const x = (sem[w] = sem[w] || S0()); const imp = num(pick(r, "Base"));
+        x.sImp += imp; x.sLin++; const p = pick(r, "Pedido"); if (p !== null && p !== undefined) x.sPed.add(String(p));
+        const k = empSap + "|" + K4(pick(r, "Cliente")); x.sCli.set(k, (x.sCli.get(k) || 0) + imp); nomS[k] = String(pick(r, "Cliente") || "") + " " + String(pick(r, "NombreCliente") || "");
+        const v = String(pick(r, "Vendedor") || "(sin)").trim() + " [" + String(pick(r, "SlpCode")) + "]"; vS[v] = (vS[v] || 0) + imp;
+      }
+      const semanas = Object.keys(sem).sort().map((w) => { const x = sem[w];
+        const gU = empSap ? (x.gEmp[empSap] || 0) : x.gImp;
+        const comunes = [...x.sCli.keys()].filter((k) => x.gCli.has(k)); const impComun = comunes.reduce((a, k) => a + x.sCli.get(k), 0);
+        const soloSap = [...x.sCli.entries()].filter(([k]) => !x.gCli.has(k)).sort((a, b) => b[1] - a[1]).map(([k, i]) => ({ cliente: nomS[k], importe: num(i) }));
+        const soloGlobal = [...x.gCli.entries()].filter(([k]) => k.startsWith(empSap + "|") && !x.sCli.has(k)).sort((a, b) => b[1] - a[1]).map(([k, i]) => ({ cliente: nomG[k], importe: num(i) }));
+        return { semana: w, globalImporte: num(x.gImp), globalLineas: x.gLin, globalEmpSap: num(gU), globalClientesEmpSap: [...x.gCli.keys()].filter((k) => k.startsWith(empSap + "|")).length,
+          sapImporte: num(x.sImp), sapLineas: x.sLin, sapPedidos: x.sPed.size, sapClientes: x.sCli.size, clientesEnLosDos: comunes.length, importeSapEnLosDos: num(impComun),
+          pctSapSobreEmp: gU ? Math.round((x.sImp / gU) * 100) : null, soloSap, soloGlobal }; });
+      const tot = (k) => num(semanas.reduce((a, s) => a + (s[k] || 0), 0));
+      out.resumen = { semanas: semanas.length, globalImporte: tot("globalImporte"), globalLineas: tot("globalLineas"), globalEmpSap: tot("globalEmpSap"), sapImporte: tot("sapImporte"), sapLineas: tot("sapLineas"),
+        clientesSapEnGlobalMismaSemana: tot("clientesEnLosDos"), importeSapEnLosDos: tot("importeSapEnLosDos") };
+      out.porSemana = semanas;
+      out.porEmpresaGlobal = Object.entries(empG).sort((a, b) => b[1] - a[1]).map(([e, i]) => ({ empresa: e, importe: num(i), letrasCliente: Object.entries(empPref[e] || {}).sort((a, b) => b[1] - a[1]).map(([p, n]) => p + ":" + n).join(" ") }));
+      out.porVendedorGlobal = Object.entries(vG).sort((a, b) => b[1] - a[1]).map(([v, i]) => ({ vendedor: v, comercial: comercialDe(v), importe: num(i) }));
+      out.porVendedorSap = Object.entries(vS).sort((a, b) => b[1] - a[1]).map(([v, i]) => ({ vendedor: v, comercial: mapaVend[(v.match(/\[(.*)\]$/) || [])[1]] || "", importe: num(i) }));
+      // Pendiente de servir: lo que la global (validados, entrega futura) tiene de UC frente a lo abierto en SAP
+      const V = "'00 Pedidos Validados Global'";
+      const pendG = {}, pendS = {}; let pendGImp = 0, pendSImp = 0, pendGLin = 0, pendSLin = 0;
+      try {
+        const vf = await pbiQuery(token, `EVALUATE SELECTCOLUMNS(FILTER(${V}, ${V}[FECHAPLANIFICADA] >= TODAY() && LEFT(${V}[CLIENTE], 1) = "U"), "Cliente", ${V}[CLIENTE], "Fecha", ${V}[FECHAPLANIFICADA], "Importe", ${V}[BASE], "Pedido", ${V}[NumPedido])`, true);
+        for (const r of vf) { const c = String(pick(r, "Cliente") || ""); const k = K4(c); const imp = num(pick(r, "Importe")); pendGImp += imp; pendGLin++;
+          const o = pendG[k] = pendG[k] || { cliente: c, importe: 0, lineas: 0, primera: "", pedidos: "" }; o.importe += imp; o.lineas++; const pn = String(pick(r, "Pedido") || "").trim(); if (pn && !o.pedidos.includes(pn)) o.pedidos += (o.pedidos ? " " : "") + pn; const f = String(pick(r, "Fecha") || "").slice(0, 10); if (!o.primera || f < o.primera) o.primera = f; }
+      } catch (e) { out.errorPendientes = e.message.slice(0, 200); }
+      for (const r of sap) { if (num(pick(r, "OpenQty")) <= 0) continue; const c = String(pick(r, "Cliente") || ""); const k = K4(c); const imp = num(pick(r, "Base")); pendSImp += imp; pendSLin++;
+        const o = pendS[k] = pendS[k] || { cliente: c + " " + String(pick(r, "NombreCliente") || ""), importe: 0, lineas: 0, pedidos: "" }; o.importe += imp; o.lineas++; const pn = String(pick(r, "Pedido") || "").trim(); if (pn && !o.pedidos.includes(pn)) o.pedidos += (o.pedidos ? " " : "") + pn; }
+      const soloG = Object.entries(pendG).filter(([k]) => !pendS[k]).sort((a, b) => b[1].importe - a[1].importe).map(([, o]) => ({ ...o, importe: num(o.importe) }));
+      const soloS = Object.entries(pendS).filter(([k]) => !pendG[k]).sort((a, b) => b[1].importe - a[1].importe).map(([, o]) => ({ ...o, importe: num(o.importe) }));
+      const ambos = Object.entries(pendS).filter(([k]) => pendG[k]).map(([k, o]) => ({ cliente: o.cliente, sap: num(o.importe), global: num(pendG[k].importe), pedidosGlobal: pendG[k].pedidos, pedidosSap: o.pedidos })).sort((a, b) => b.global - a.global);
+      out.pendientesUC = { globalImporte: num(pendGImp), globalLineas: pendGLin, globalClientes: Object.keys(pendG).length, sapImporte: num(pendSImp), sapLineas: pendSLin, sapClientes: Object.keys(pendS).length,
+        soloGlobalImporte: num(soloG.reduce((t, o) => t + o.importe, 0)), soloSapImporte: num(soloS.reduce((t, o) => t + o.importe, 0)), soloGlobal: soloG.slice(0, 60), soloSap: soloS.slice(0, 60), enLosDos: ambos.slice(0, 60) };
+      out.nota = "SAP solo trae líneas pendientes de servir: en semanas pasadas lo servido ya no aparece. Los clientes se casan por los 4 últimos dígitos del código (C02123 ↔ U432123) dentro de la empresa " + empSap + ".";
+      out.segundos = Math.round((Date.now() - t1) / 100) / 10;
+      if (req.query.json === "1") return res.status(200).json(out);
+
+      // HTML sencillo para leerlo en el móvil
+      const E = (s) => String(s ?? "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+      const eur = (n) => (n === null || n === undefined) ? "—" : Math.round(n).toLocaleString("es-ES") + " €";
+      const tabla = (cab, filas) => `<table><thead><tr>${cab.map((c) => `<th>${E(c)}</th>`).join("")}</tr></thead><tbody>${filas.map((f) => `<tr>${f.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+      const R = out.resumen; const ult = semanas.slice(-3);
+      const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Global vs SAP</title>
+<style>body{margin:0;font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;background:#F4F5F7;color:#0F172A}.w{max-width:860px;margin:0 auto;padding:12px}h1{font-size:18px;margin:0 0 4px}h2{font-size:15px;margin:18px 0 6px}h3{font-size:13.5px;margin:12px 0 4px}p{margin:4px 0;color:#475569}
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;font-size:13px}th,td{padding:7px 8px;border-top:1px solid #EEF1F5;text-align:right;white-space:nowrap}th{background:#F8FAFC;font-size:11px;text-transform:uppercase;color:#64748B}td:first-child,th:first-child{text-align:left}
+.k{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:8px 0}.k div{background:#fff;border-radius:10px;padding:10px}.k b{display:block;font-size:18px}.k span{font-size:11.5px;color:#64748B;text-transform:uppercase}.m{color:#94A3B8}</style></head><body><div class="w">
+<h1>📦 Tabla global vs PEDIDOS SAP</h1><p>Pedidos desde el ${E(desde)} · global = todas las empresas, por fecha de pedido · SAP = United, solo líneas pendientes de servir · la empresa de la global que casa con SAP es la <b>${E(empSap)}</b></p>
+<div class="k"><div><span>Global (todas)</span><b>${eur(R.globalImporte)}</b>${R.globalLineas} líneas</div>
+<div><span>Global · empresa ${E(empSap)}</span><b>${eur(R.globalEmpSap)}</b></div>
+<div><span>SAP (pendiente)</span><b>${eur(R.sapImporte)}</b>${R.sapLineas} líneas</div>
+<div><span>SAP que está en la global la misma semana</span><b>${eur(R.importeSapEnLosDos)}</b>${R.clientesSapEnGlobalMismaSemana} cliente-semanas</div></div>
+<h2>Semana a semana</h2>${tabla(["Semana", "Global todas", "Global emp. " + empSap, "SAP", "Ped.", "Clientes SAP", "En la global", "SAP/emp."], semanas.map((s) => [E(s.semana), eur(s.globalImporte), eur(s.globalEmpSap), eur(s.sapImporte), s.sapPedidos, s.sapClientes, s.clientesEnLosDos + " (" + eur(s.importeSapEnLosDos) + ")", s.pctSapSobreEmp === null ? "—" : s.pctSapSobreEmp + " %"]))}
+<h2>Últimas semanas: qué tiene cada tabla y la otra no</h2>
+${ult.map((s) => `<h3>${E(s.semana)} · en SAP y no en la global (${s.soloSap.length})</h3>${s.soloSap.length ? tabla(["Cliente SAP", "Importe"], s.soloSap.slice(0, 25).map((c) => [E(c.cliente), eur(c.importe)])) : "<p>ninguno</p>"}
+<h3>${E(s.semana)} · en la global (emp. ${E(empSap)}) y no en SAP (${s.soloGlobal.length})</h3>${s.soloGlobal.length ? tabla(["Cliente global", "Importe"], s.soloGlobal.slice(0, 25).map((c) => [E(c.cliente), eur(c.importe)])) : "<p>ninguno</p>"}`).join("")}
+${out.pendientesUC ? (() => { const P = out.pendientesUC; return `<h2>Pendiente de servir de UC: global (validados, entrega futura) vs SAP (líneas abiertas)</h2>
+<div class="k"><div><span>Global UC pendiente</span><b>${eur(P.globalImporte)}</b>${P.globalLineas} líneas · ${P.globalClientes} clientes</div><div><span>SAP abierto</span><b>${eur(P.sapImporte)}</b>${P.sapLineas} líneas · ${P.sapClientes} clientes</div>
+<div><span>Solo en la global</span><b>${eur(P.soloGlobalImporte)}</b>${P.soloGlobal.length} clientes</div><div><span>Solo en SAP</span><b>${eur(P.soloSapImporte)}</b>${P.soloSap.length} clientes</div></div>
+<h3>Clientes con pendiente en la global y nada abierto en SAP (${P.soloGlobal.length})</h3>${P.soloGlobal.length ? tabla(["Cliente global", "Importe", "Líneas", "1ª entrega"], P.soloGlobal.slice(0, 40).map((c) => [E(c.cliente), eur(c.importe), c.lineas, E(c.primera)])) : "<p>ninguno</p>"}
+<h3>Clientes en los dos (${P.enLosDos.length})</h3>${P.enLosDos.length ? tabla(["Cliente", "Global", "Nº ped. global", "SAP", "Nº ped. SAP"], P.enLosDos.slice(0, 40).map((c) => [E(c.cliente), eur(c.global), E(c.pedidosGlobal), eur(c.sap), E(c.pedidosSap)])) : "<p>ninguno</p>"}
+<h3>Clientes abiertos en SAP y sin nada en la global (${P.soloSap.length})</h3>${P.soloSap.length ? tabla(["Cliente SAP", "Importe", "Líneas"], P.soloSap.slice(0, 40).map((c) => [E(c.cliente), eur(c.importe), c.lineas])) : "<p>ninguno</p>"}`; })() : ""}
+<h2>Global por empresa</h2>${tabla(["Empresa", "Importe", "Letras de los códigos de cliente"], out.porEmpresaGlobal.map((e) => [E(e.empresa), eur(e.importe), E(e.letrasCliente)]))}
+<h2>Global por vendedor</h2><p class="m">Agentes en la tabla de PBI: ${agentes.size} · muestra: ${E(JSON.stringify(out.muestraAgentesPbi))}</p>${tabla(["Vendedor", "Comercial CRM", "Importe"], out.porVendedorGlobal.map((v) => [E(v.vendedor), E(v.comercial) || "<span class='m'>?</span>", eur(v.importe)]))}
+<h2>SAP por vendedor</h2>${tabla(["Vendedor SAP", "Comercial CRM", "Importe"], out.porVendedorSap.map((v) => [E(v.vendedor), E(v.comercial) || "<span class='m'>sin casar</span>", eur(v.importe)]))}
+<p class="m">${E(out.nota)} · ${out.segundos} s</p></div></body></html>`;
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.status(200).send(html);
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: e.message });
+    }
+  }
+
+  // (oct 2026) PEDIDOS SAP → Firestore. La tabla trae cada LÍNEA de pedido con
+  // fecha de pedido (DocDate), cliente, vendedor (SlpName), artículo, unidades
+  // pedidas y pendientes (OpenQty), importe de línea, fecha planificada de
+  // entrega y el estado de la solicitud a fábrica (U_UC_Solicitud / Estado).
+  //   ?pedidosSap=1            → sincroniza (escribe pedidos_sap_agente, pedidos_sap_cliente, pedidos_sap_semanas)
+  //   ?pedidosSap=1&dry=1      → solo calcula y enseña el resumen (no escribe)
+  //   ?pedidosSap=1&desde=2026-01-01 → desde esa fecha de pedido (por defecto, 1 de enero del año)
+  // Vendedor → comercial del CRM: tabla pedidos_sap_vendedores/{SlpCode} {agente:"CARLOSG"}; si no
+  // hay, se intenta por nombre con la tabla de alias; lo que no case sale en «sinMapear» para rellenarlo.
+  if (req.query.pedidosSap === "1") {
+    const t1 = Date.now();
+    const out = { ok: true, tabla: "PEDIDOS SAP" };
+    try {
+      const { token } = await getToken(req);
+      const anio = new Date().getFullYear();
+      const desde = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.desde || "")) ? String(req.query.desde) : `${anio}-01-01`;
+      const [dy, dm, dd] = desde.split("-").map(Number);
+      const T = "'PEDIDOS SAP'";
+      const filas = await pbiQuery(token, `
+EVALUATE
+  SELECTCOLUMNS(
+    FILTER(${T}, ${T}[DocDate] >= DATE(${dy},${dm},${dd})),
+    "DocEntry", ${T}[DocEntry], "DocNum", ${T}[DocNum], "DocDate", ${T}[DocDate], "DocDueDate", ${T}[DocDueDate],
+    "CodigoCliente", ${T}[CodigoCliente], "NombreCliente", ${T}[NombreCliente], "DocTotal", ${T}[DocTotal],
+    "Estado", ${T}[U_UC_SolicitudEstado], "LineNum", ${T}[LineNum], "ItemCode", ${T}[ItemCode], "Dscription", ${T}[Dscription],
+    "Unidades", ${T}[Unidades], "OpenQty", ${T}[OpenQty], "LineTotal", ${T}[LineTotal], "FechaPlan", ${T}[Fecha Planificado],
+    "Solicitud", ${T}[U_UC_Solicitud], "SlpCode", ${T}[SlpCode], "SlpName", ${T}[SlpName])`, true);
+
+      const { codigoDe, mapaVend } = await mapeadorSap();
+      // Registro de líneas vistas: la tabla solo trae líneas PENDIENTES, así que una línea desaparece al servirse.
+      // Para saber qué se introdujo cada semana se apunta cada línea la primera vez que se ve, y no se borra nunca.
+      let vistas = {};
+      try { for (const d of await fbLeerColeccion("pedidos_sap_lineas")) vistas[d._id] = d; } catch (e) {}
+      const nuevasLineas = [];
+
+      const semDe = (iso) => { const d = new Date(String(iso).slice(0, 10) + "T12:00:00Z"); return isNaN(d) ? "" : isoSemana(d); };
+      const hoy = new Date(); const semHoy = isoSemana(hoy);
+      const semAnt = isoSemana(new Date(hoy.getTime() - 7 * 86400000));
+      const mesHoy = hoy.toISOString().slice(0, 7);
+      const finMes = new Date(hoy.getFullYear(), hoy.getMonth() + 1, 0).toISOString().slice(0, 10);
+
+      const agentes = {}, clientes = {}, semanas = {}, sinMapear = {};
+      let lineas = 0, abiertas = 0, cerradas = 0, minFecha = "", maxFecha = "";
+      for (const r of filas) {
+        const g = (k) => pick(r, k);
+        const fecha = String(g("DocDate") || "").slice(0, 10); if (!fecha) continue;
+        lineas++;
+        if (!minFecha || fecha < minFecha) minFecha = fecha; if (fecha > maxFecha) maxFecha = fecha;
+        const uds = num(g("Unidades")), open = num(g("OpenQty")), tot = num(g("LineTotal"));
+        const pend = uds > 0 ? num(tot * open / uds) : (open > 0 ? tot : 0);
+        if (open > 0) abiertas++; else cerradas++;
+        const slp = g("SlpCode"), slpN = String(g("SlpName") || "").trim();
+        const ag = codigoDe(slp, slpN) || ("SLP" + slp);
+        if (!codigoDe(slp, slpN)) sinMapear[String(slp)] = slpN;
+        const sem = semDe(fecha), mes = fecha.slice(0, 7), plan = String(g("FechaPlan") || "").slice(0, 10);
+        const idL = String(g("DocEntry")) + "_" + String(g("LineNum"));
+        if (!vistas[idL]) { vistas[idL] = { _id: idL, ped: g("DocNum"), fecha, sem, mes, agente: ag, slp: String(slp), cliente: String(g("CodigoCliente") || ""), art: String(g("ItemCode") || ""), imp: num(tot), visto: new Date().toISOString() }; nuevasLineas.push(vistas[idL]); }
+        const A = agentes[ag] = agentes[ag] || { _id: ag, agente: ag, vendedores: {}, pedSem: 0, pedSemAnt: 0, pedMes: 0, pedAnio: 0, pendiente: 0, previstoMes: 0, nLineas: 0, nPedidos: new Set(), porSemana: {}, porMes: {} };
+        A.vendedores[String(slp)] = slpN;
+        A.nLineas++; A.nPedidos.add(g("DocNum"));
+        if (open > 0) { A.pendiente += pend; if (plan && plan <= finMes) A.previstoMes += pend; }
+        if (open > 0) {
+          const cod = String(g("CodigoCliente") || "").trim();
+          const C = clientes[cod] = clientes[cod] || { _id: cod || "SIN", cliente: cod, nombre: String(g("NombreCliente") || ""), agente: ag, pendiente: 0, previstoMes: 0, lineas: [] };
+          C.pendiente += pend; if (plan && plan <= finMes) C.previstoMes += pend;
+          if (C.lineas.length < 60) C.lineas.push({ ped: g("DocNum"), f: fecha, plan, art: g("ItemCode"), desc: g("Dscription"), uds, open, imp: num(pend), sol: g("Solicitud") || "", est: g("Estado") || "" });
+        }
+      }
+      // Introducidos por semana y mes: del REGISTRO (incluye líneas ya servidas), no solo de lo pendiente
+      for (const v of Object.values(vistas)) {
+        const ag = (v.slp && mapaVend[v.slp]) || v.agente || "?";
+        const A = agentes[ag] = agentes[ag] || { _id: ag, agente: ag, vendedores: {}, pedSem: 0, pedSemAnt: 0, pedMes: 0, pedAnio: 0, pendiente: 0, previstoMes: 0, nLineas: 0, nPedidos: new Set(), porSemana: {}, porMes: {} };
+        const imp = num(v.imp);
+        if (v.sem === semHoy) A.pedSem += imp; if (v.sem === semAnt) A.pedSemAnt += imp; if (v.mes === mesHoy) A.pedMes += imp; if (String(v.fecha).slice(0, 4) === String(anio)) A.pedAnio += imp;
+        A.porSemana[v.sem] = num((A.porSemana[v.sem] || 0) + imp); A.porMes[v.mes] = num((A.porMes[v.mes] || 0) + imp);
+        const S = semanas[v.sem] = semanas[v.sem] || { _id: v.sem, semana: v.sem, total: 0, nLineas: 0, porAgente: {} };
+        S.total += imp; S.nLineas++; S.porAgente[ag] = num((S.porAgente[ag] || 0) + imp);
+      }
+      const docsA = Object.values(agentes).map((A) => ({ ...A, nPedidos: A.nPedidos.size, vendedores: JSON.stringify(A.vendedores),
+        pedSem: num(A.pedSem), pedSemAnt: num(A.pedSemAnt), pedMes: num(A.pedMes), pedAnio: num(A.pedAnio), pendiente: num(A.pendiente), previstoMes: num(A.previstoMes),
+        porSemana: JSON.stringify(A.porSemana), porMes: JSON.stringify(A.porMes), semanaHoy: semHoy, actualizado: new Date().toISOString() }));
+      const docsC = Object.values(clientes).map((C) => ({ ...C, pendiente: num(C.pendiente), previstoMes: num(C.previstoMes), nLineas: C.lineas.length, lineas: JSON.stringify(C.lineas), actualizado: new Date().toISOString() }));
+      const docsS = Object.values(semanas).map((S) => ({ ...S, total: num(S.total), porAgente: JSON.stringify(S.porAgente), actualizado: new Date().toISOString() }));
+      out.resumen = { lineas, abiertas, cerradas, desde: minFecha, hasta: maxFecha, lineasNuevasEnRegistro: nuevasLineas.length, lineasEnRegistro: Object.keys(vistas).length, agentes: docsA.length, clientesConPendiente: docsC.length, semanas: docsS.length,
+        pendienteTotal: num(docsA.reduce((t, a) => t + a.pendiente, 0)), introducidoSemanaEnCurso: num(docsA.reduce((t, a) => t + a.pedSem, 0)), introducidoSemanaAnterior: num(docsA.reduce((t, a) => t + a.pedSemAnt, 0)) };
+      out.nota = cerradas ? "La tabla trae también líneas ya servidas (OpenQty 0)." : "La tabla solo trae líneas pendientes: cada línea se apunta en pedidos_sap_lineas la primera vez que se ve y los introducidos por semana salen de ese registro (hay que ejecutar esto a diario).";
+      out.sinMapear = sinMapear;
+      out.porAgente = docsA.map((a) => ({ agente: a.agente, vendedores: a.vendedores, semana: a.pedSem, semanaAnterior: a.pedSemAnt, mes: a.pedMes, pendiente: a.pendiente, previstoMes: a.previstoMes, pedidos: a.nPedidos })).sort((x, y) => y.mes - x.mes);
+      if (!req.query.dry) {
+        out.escritos = { agentes: await fbCommit("pedidos_sap_agente", docsA), clientes: await fbCommit("pedidos_sap_cliente", docsC), semanas: await fbCommit("pedidos_sap_semanas", docsS),
+          lineasNuevas: nuevasLineas.length ? await fbCommit("pedidos_sap_lineas", nuevasLineas) : 0,
+          meta: await fbCommit("pedidos_sap_meta", [{ _id: "ultimo", actualizado: new Date().toISOString(), lineas, sinMapear: JSON.stringify(sinMapear),
+            vendedores: JSON.stringify(Object.values(agentes).reduce((o, A) => { for (const [k, v] of Object.entries(A.vendedores)) o[k] = { nombre: v, agente: A.agente }; return o; }, {})) }]) };
+        try { const previos = await fbLeerColeccion("pedidos_sap_cliente"); const vivos = new Set(docsC.map((d) => d._id));
+          const sobran = previos.filter((d) => !vivos.has(d._id)).map((d) => d._id); if (sobran.length) { await fbBorrar("pedidos_sap_cliente", sobran); out.escritos.clientesBorrados = sobran.length; } } catch (e) {}
+      }
+      out.dry = !!req.query.dry;
+    } catch (e) { out.ok = false; out.error = e.message; }
+    out.segundos = Math.round((Date.now() - t1) / 1000);
+    try { await latido("pedidosSap", { segundos: out.segundos, errores: out.ok ? 0 : 1 }); } catch (e) {}
+    return res.status(out.ok ? 200 : 500).json(out);
+  }
+
   if (req.query.cierre === "1") {
     const t1 = Date.now();
     const out = { ok: true, fuente: "firestore" };
@@ -3141,18 +3616,38 @@ ${med.join(",\n")}
           "EVALUATE INFO.COLUMNS()",
         ],
       };
-      for (const [k, lista] of Object.entries(variantes)) {
+      // (oct 2026) &solo=tablas → solo la lista de nombres de tabla (corta); &buscar=PEDIDO → además,
+      // las tablas que tienen alguna columna con ese texto. Sin esto la respuesta pasaba de 1 MB y se cortaba.
+      const solo = String(req.query.solo || "");
+      const pide = solo ? Object.fromEntries(Object.entries(variantes).filter(([k]) => solo === k || (solo === "tablas" && (k === "tablas" || (req.query.buscar && k === "columnas"))))) : variantes;
+      for (const [k, lista] of Object.entries(pide)) {
         const fallos = [];
         for (const q of lista) {
           try {
             const filas = await pbiQuery(token, q);
-            out[k] = { consultaQueFunciono: q, filas: filas.slice(0, 400) };
+            out[k] = { consultaQueFunciono: q, filas: filas.slice(0, solo ? 5000 : 400) };
             break;
           } catch (e) {
             fallos.push(`${q.slice(0, 40)} -> ${e.message.slice(0, 120)}`);
           }
         }
         if (!out[k]) out[k] = { error: "ninguna variante funciono", intentos: fallos };
+      }
+      if (solo === "tablas" && out.tablas && out.tablas.filas) {
+        const nom = (r) => pick(r, "Name") || r["[Name]"] || "";
+        const idDe = (r) => pick(r, "ID") || r["[ID]"];
+        const tablas = out.tablas.filas.map((r) => ({ id: idDe(r), nombre: nom(r), oculta: !!(pick(r, "IsHidden") || r["[IsHidden]"]) }));
+        if (req.query.buscar && out.columnas && out.columnas.filas) {
+          const q = String(req.query.buscar).toUpperCase();
+          const cols = out.columnas.filas.map((r) => ({ tabla: pick(r, "TableID") || r["[TableID]"], col: pick(r, "ExplicitName") || r["[ExplicitName]"] || pick(r, "Name") || r["[Name]"] || "" }))
+            .filter((c) => String(c.col).toUpperCase().includes(q));
+          const porTabla = {};
+          for (const c of cols) (porTabla[c.tabla] = porTabla[c.tabla] || []).push(c.col);
+          out.coincidencias = tablas.filter((t) => porTabla[t.id]).map((t) => ({ tabla: t.nombre, columnas: porTabla[t.id] }));
+        }
+        out.tablas = tablas.filter((t) => !t.oculta).map((t) => t.nombre).sort();
+        delete out.columnas;
+        out.total = out.tablas.length;
       }
     } catch (e) {
       return res.status(500).json({ ok: false, error: e.message });
@@ -4066,13 +4561,25 @@ EVALUATE
         }
       } catch (e) { /* sin maestro se muestra solo el codigo */ }
 
-      const filas = await pbiQuery(token, Q.pedidos);
+      // (oct 2026) UC viene de PEDIDOS SAP; Bosch y Ramírez de la global. Si SAP falla, se vuelve a la
+      // consulta global completa para no dejar a UC sin pedidos.
+      if (/^\d{4}-\d{2}-\d{2}$/.test(String(req.query.sapDesde || ""))) { await fbCommit("pbi_config", [{ _id: "pedidos", sapDesde: String(req.query.sapDesde), fijadoEl: new Date().toISOString() }]); }
+      let sapU = null;
+      try { sapU = await pedidosSap(token, { fichas, dry: req.query.dry === "1" }); } catch (e) { out.errorSap = e.message.slice(0, 300); }
+      let filas = await pbiQuery(token, Q.pedidosTodas);
+      if (sapU) { const antes = filas.length; filas = filas.filter((r) => !sapU.esDuplicadoGlobal(r)); out.globalUCQuitadasPorEstarEnSap = antes - filas.length;
+        // Diagnóstico: líneas de UC de la global que se quedan aunque el cliente tenga algo abierto en SAP (posibles duplicados)
+        try { const sapCli = {}; sapU.validados.forEach((v) => { const k = String(v.Cliente).toUpperCase(); (sapCli[k] = sapCli[k] || []).push(String(v.Pedido) + " " + v.Articulo + " " + num(v.Importe)); });
+          out.sapSolapeRestante = filas.filter((r) => String(pick(r, "Cliente") || "")[0] === "U" && sapCli[String(pick(r, "Cliente")).toUpperCase()]).slice(0, 25)
+            .map((r) => ({ cliente: pick(r, "Cliente"), pedidoGlobal: pick(r, "Pedido"), artGlobal: pick(r, "Articulo"), importe: num(pick(r, "Importe")), enSap: sapCli[String(pick(r, "Cliente")).toUpperCase()].slice(0, 6) })); } catch (e) {}
+        filas.push(...sapU.validados); out.sap = { desde: sapU.desde, corteFijado: sapU.corteFijado, ultimoDiaGlobalUC: sapU.ultimoDiaGlobalUC, lineas: sapU.lineas, pendientes: sapU.abiertas, pendiente: sapU.pendiente, sinMapear: sapU.sinMapear, nuevasEnRegistro: sapU.nuevasEnRegistro }; }
       const crudos = filas.map((r, i) => {
         const cli = String(pick(r, "Cliente") || "").trim();
         const ven = String(pick(r, "Vendedor") || "").trim();
         const fec = String(pick(r, "Fecha") || "").slice(0, 10);
         const art = String(pick(r, "Articulo") || "").trim();
         const ficha = fichas.get(cli) || fichas.get(canonico(cli)) || {};
+        if (!ficha.nombre && pick(r, "NombreSap")) ficha.nombre = String(pick(r, "NombreSap"));
         return {
           // El identificador no puede depender de la posición de la fila: si
           // Power BI devuelve el resultado en otro orden, la misma línea
@@ -4089,14 +4596,15 @@ EVALUATE
           cliente: cli,
           nombre: ficha.nombre || cli,
           poblacion: ficha.poblacion || null,
-          agente: agentes.get(ven) || null,
+          agente: agentes.get(ven) || pick(r, "AgenteSap") || null,
           vendedor: ven,
+          empresa: pick(r, "Empresa") || null,
           fecha: fec,
           articulo: art,
           familia: String(pick(r, "Familia") || "").trim() || null,
           unidades: num(pick(r, "Uni")),
           precio: num(pick(r, "Precio")),
-          descripcion: (arts.get(art) || {}).descripcion || null,
+          descripcion: (arts.get(art) || {}).descripcion || pick(r, "DescripcionSap") || null,
           metros: (arts.get(art) || {}).metros || null,
           calibre: (arts.get(art) || {}).calibre || null,
           calidad: (arts.get(art) || {}).calidad || null,
@@ -4161,7 +4669,7 @@ EVALUATE
       });
 
       try {
-        for (const e of await pbiQuery(token, Q.entrada)) {
+        for (const e of await pbiQuery(token, sapU ? Q.entradaCorte(sapU.desde) : Q.entrada)) {
           const ven = String(pick(e, "VENDEDOR") || "").trim();
           const ag = agentes.get(ven);
           if (!ag) continue;
@@ -4172,6 +4680,8 @@ EVALUATE
           a.entradaSemAnt += num(pick(e, "SemAnt"));
           a.entradaAnoAnt += num(pick(e, "AnoAnt"));
         }
+        // UC desde el corte: lo introducido en SAP (registro de líneas, incluye lo ya servido)
+        if (sapU) for (const [ag, E] of Object.entries(sapU.entrada)) { const a = dameAg(ag); a.entradaSem += E.Sem; a.entradaMes += E.Mes; a.entradaAno += E.Ano; }
       } catch (e) { out.errorEntrada = e.message.slice(0, 200); }
 
       // Lo que sale esta semana y la que viene, a partir de los pedidos ya
@@ -4441,6 +4951,9 @@ EVALUATE
 
         out.escritos = await fbCommit("pbi_pedidos", docs);
         out.agentesConEntrada = await fbCommit("pbi_entrada_agente", resumen);
+        // (oct 2026) Fuera los comerciales que ya no salen (p. ej. códigos mal casados de una pasada anterior, como IK2)
+        try { const vivos = new Set(resumen.map((r) => r._id)); const previos = await fbLeerColeccion("pbi_entrada_agente");
+          const sobran = previos.map((d) => d._id).filter((id) => !vivos.has(id)); if (sobran.length) { await fbBorrar("pbi_entrada_agente", sobran); out.entradaBorrados = sobran.length; } } catch (e) {}
         // Fuera lo ya servido
         // Reconciliación completa: la colección debe contener exactamente lo
         // que hay ahora en Power BI. Borrar solo lo caducado dejaba dentro los
@@ -4468,6 +4981,10 @@ EVALUATE
       segundos: out.segundos || Math.round((Date.now() - t1) / 1000),
       errores: out.ok ? 0 : 1,
       detalleErrores: out.error ? String(out.error).slice(0, 160) : null,
+      // (oct 2026) Qué aportó PEDIDOS SAP en esta pasada (para la auditoría)
+      sap: out.sap ? JSON.stringify(out.sap).slice(0, 1500) : null,
+      errorSap: out.errorSap || null,
+      globalUCQuitadas: out.globalUCQuitadasPorEstarEnSap != null ? out.globalUCQuitadasPorEstarEnSap : null,
       // Recuentos de lo escrito: sin esto no se distingue "corrió y no hubo
       // movimiento" de "corrió y se cortó". Los dos dejan el día casi vacío.
       pedidos: out.guardados || null,
@@ -5692,7 +6209,11 @@ EVALUATE
         }
       } catch (e) { /* sin maestro se muestra solo el codigo */ }
 
-      const filas = await pbiQuery(token, Q.pedidos);
+      // (oct 2026) UC viene de PEDIDOS SAP; Bosch y Ramírez de la global (ver pedidosSap()).
+      let sapU = null;
+      try { sapU = await pedidosSap(token, { fichas: fichasPed, dry }); log.sap = { desde: sapU.desde, lineas: sapU.lineas, pendientes: sapU.abiertas, sinMapear: Object.keys(sapU.sinMapear).length }; } catch (e) { log.errorSap = e.message.slice(0, 300); }
+      let filas = await pbiQuery(token, Q.pedidosTodas);
+      if (sapU) { const antes = filas.length; filas = filas.filter((r) => !sapU.esDuplicadoGlobal(r)); log.sap.globalUCQuitadasPorEstarEnSap = antes - filas.length; filas.push(...sapU.validados); }
       const crudos = filas.map((r, i) => {
         const cli = String(pick(r, "Cliente") || "").trim();
         const ven = String(pick(r, "Vendedor") || "").trim();
@@ -5700,6 +6221,7 @@ EVALUATE
         const art = String(pick(r, "Articulo") || "").trim();
         const ficha = fichasPed.get(cli.toUpperCase())
           || fichasPed.get(String(canonico(cli)).toUpperCase()) || {};
+        if (!ficha.nombre && pick(r, "NombreSap")) ficha.nombre = String(pick(r, "NombreSap"));
         return {
           // El identificador no puede depender de la posición de la fila: si
           // Power BI devuelve el resultado en otro orden, la misma línea
@@ -5711,14 +6233,15 @@ EVALUATE
           cliente: cli,
           nombre: ficha.nombre || cli,
           poblacion: ficha.poblacion || null,
-          agente: agentesPed.get(ven) || null,
+          agente: agentesPed.get(ven) || pick(r, "AgenteSap") || null,
+          empresa: pick(r, "Empresa") || null,
           vendedor: ven,
           fecha: fec,
           articulo: art,
           familia: String(pick(r, "Familia") || "").trim() || null,
           unidades: num(pick(r, "Uni")),
           precio: num(pick(r, "Precio")),
-          descripcion: (arts.get(art) || {}).descripcion || null,
+          descripcion: (arts.get(art) || {}).descripcion || pick(r, "DescripcionSap") || null,
           metros: (arts.get(art) || {}).metros || null,
           calibre: (arts.get(art) || {}).calibre || null,
           calidad: (arts.get(art) || {}).calidad || null,
@@ -5863,6 +6386,9 @@ EVALUATE
           detalleErrores: log.errores.slice(0, 3).join(" | ") || null,
           ventas: typeof log.ventas === "number" ? log.ventas : null,
           clientes: log.clientesQueCuentan || null,
+          pedidos: typeof log.pedidos === "number" ? log.pedidos : (log.pedidos ? String(log.pedidos) : null),
+          sap: log.sap ? JSON.stringify(log.sap).slice(0, 1500) : null,
+          errorSap: log.errorSap || null,
         }]);
       }
     } catch (e) { /* el latido nunca debe romper la sincronizacion */ }
