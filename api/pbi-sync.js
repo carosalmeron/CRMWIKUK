@@ -639,7 +639,7 @@ EVALUATE
   const { codigoDe, mapaVend } = await mapeadorSap();
   const vistas = {};
   try { for (const d of await fbLeerColeccion("pedidos_sap_lineas")) vistas[d._id] = d; } catch (e) {}
-  const nuevas = [], validados = [], sinMapear = {}; const clavesAbiertas = new Set(), pedidosAbiertos = new Set(), importesCli = {};
+  const nuevas = [], validados = [], sinMapear = {}; const clavesAbiertas = new Set(), pedidosAbiertos = new Set(), importesCli = {}, artsCli = {};
   const hoy = new Date().toISOString().slice(0, 10);
   const semDe = (iso) => { const d = new Date(String(iso).slice(0, 10) + "T12:00:00Z"); return isNaN(d) ? "" : isoSemana(d); };
   let pendiente = 0, abiertas = 0;
@@ -663,6 +663,7 @@ EVALUATE
     clavesAbiertas.add(cliG.toUpperCase() + "|" + String(g("ItemCode") || "").trim().toUpperCase());
     pedidosAbiertos.add(String(g("DocNum") || "").replace(/\D/g, ""));
     (importesCli[cliG.toUpperCase()] = importesCli[cliG.toUpperCase()] || []).push(num(pend));
+    (artsCli[cliG.toUpperCase()] = artsCli[cliG.toUpperCase()] || []).push(String(g("ItemCode") || "").toUpperCase().replace(/[^A-Z0-9]/g, ""));
     validados.push({ Cliente: cliG, Vendedor: "SAP" + slp, AgenteSap: ag || null, Fecha: plan,
       Articulo: String(g("ItemCode") || "").trim(), Familia: null, Uni: open, Precio: uds > 0 ? num(tot / uds) : 0, Subfamilia: null,
       Importe: pend, Pedido: String(g("DocNum") || "").trim(), Empresa: "UC", NombreSap: String(g("NombreCliente") || "").trim(), DescripcionSap: String(g("Dscription") || "").trim() });
@@ -694,6 +695,9 @@ EVALUATE
     const L = importesCli[cli] || []; const u = (usados[cli] = usados[cli] || new Set());
     const i = L.findIndex((x, k) => !u.has(k) && Math.abs(x - imp) <= Math.max(1, imp * 0.005));
     if (i >= 0) { u.add(i); return true; }
+    // Mismo cliente y mismo artículo (con otra grafía del código, p. ej. sufijo de envase) aunque el importe no cuadre:
+    // SAP enseña solo lo que queda por servir y la global el pedido entero (ATIENZA: A 184876 = 260002799)
+    const a = art.replace(/[^A-Z0-9]/g, ""); if (a.length >= 4) for (const b of (artsCli[cli] || [])) { if (b.length >= 4 && (a.startsWith(b) || b.startsWith(a))) return true; }
     return false;
   };
   return { desde, corteFijado: corte.fijado, ultimoDiaGlobalUC: corte.ultimoGlobalUC, lineas: filas.length, abiertas, pendiente: num(pendiente), validados, entrada,
