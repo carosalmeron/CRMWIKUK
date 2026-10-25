@@ -3026,6 +3026,13 @@ let PROMO_EQ=null, PROMO_EQ_CARG=false;
 async function cargarPromoEq(){ if(PROMO_EQ_CARG||!window.PROMOC) return; PROMO_EQ_CARG=true;
   try{ const cods=[...new Set([...USUARIOS.map(u=>U(u.cod)),AGENTE].filter(Boolean))];
     const r=await PROMOC.cargar(cods);
+    // (oct 2026) Pedidos (formulario de pedidos + registro de SAP): para saber qué ofertas/estrategias han acabado en pedido
+    try{ const [pp,sl]=await Promise.all([leer("pbi_pedidos"),leer("pedidos_sap_lineas").catch(()=>[])]);
+      const NC=(x)=>String(x||"").toUpperCase().replace(/[^A-Z0-9]/g,""), K4=(x)=>{ const d=String(x||"").replace(/\D/g,""); return d?d.slice(-4).padStart(4,"0"):""; };
+      const M={}; const add=(cli,o)=>{ const k=NC(cli); if(!k) return; (M[k]=M[k]||[]).push(o); const k4=K4(cli); if(k4) (M["#"+k4]=M["#"+k4]||[]).push(o); };
+      pp.forEach(d=>add(d.cliente,{art:NC(d.articulo),fecha:String(d.fecha||d.fechaPedido||d.sincronizadoEl||"").slice(0,10),pedido:String(d.pedido||""),importe:Number(d.importe)||0,nombre:d.nombre||""}));
+      sl.forEach(d=>add(d.cliente,{art:NC(d.art),fecha:String(d.fecha||"").slice(0,10),pedido:String(d.ped||""),importe:Number(d.imp)||0,nombre:""}));
+      window._PED_X_CLI=M; }catch(e){ window._PED_X_CLI={}; }
     // (oct 2026) Clientes dormidos o bloqueados (plan de recuperación) y descartados de un artículo («ya no lo usa»):
     // no se enseñan, igual que en el parte del comercial. Antes CELEDONIO seguía saliendo después de bloquearlo.
     let casos=[], desc=[];
@@ -3053,7 +3060,7 @@ function seccionPromoEq(){
   // (oct 2026) Ofertas y estrategias ya hechas a ese cliente con ese artículo (desde el comité, el parte o el CRM):
   // se enseñan en la fila del cliente y cuentan como respuesta del comercial, en vez de «no contestó».
   const NC=(x)=>String(x||"").toUpperCase().replace(/[^A-Z0-9.]/g,""), NN=(x)=>String(x||"").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^A-Z0-9]/g,"");
-  const hace=Date.now()-45*86400000;
+  const hace=Date.now()-30*86400000; // ofertas/estrategias de los últimos 30 días
   if(ESTS===null) setTimeout(cargarEsts,0);
   const FUENTE=(()=>{ const m=new Map(); Object.values(DOCS||{}).forEach(d=>{ if(d&&typeof d==="object") m.set(U(d.id||d._id),d); }); (ESTS||[]).forEach(d=>{ if(d&&typeof d==="object") m.set(U(d.id||d._id),d); }); return [...m.values()]; })();
   const docsDe=(it,c)=>{ try{ return FUENTE.filter(d=>{ if(!d||typeof d!=="object"||d.eliminada) return false;
@@ -3063,12 +3070,24 @@ function seccionPromoEq(){
     const L1=Array.isArray(d.ofertas)?d.ofertas:[], L2=Array.isArray(d.lineas)?d.lineas:[];
     const arts=[d.codigo,d.articulo,d.art,...L1.map(o=>o&&(o.codigo||o.art)),...L2.map(l=>l&&(l.codigo||l.art))].filter(x=>typeof x==="string"&&x).map(NC);
     const base=(x)=>x.split(".")[0]; return arts.some(a=>a===NC(it.cod)||base(a)===base(NC(it.cod))); }); }catch(e){ return []; } };
-  const badgeDoc=(d)=>{ const esEst=Array.isArray(d.ofertas)||/estrateg/i.test(d.tipo||"")||d.estado==="pendiente_aprobacion";
+  // ¿Ha acabado en pedido? Pedido del mismo cliente y artículo (misma raíz de código) posterior a la oferta/estrategia,
+  // o el propio seguimiento marcado como pedido / aceptada.
+  const pedidoDe=(d,it,c)=>{ const M=window._PED_X_CLI||{}; const fd=String(d.fechaCreacion||d.fecha||d.creado||"").slice(0,10); const f0=/^\d{4}-\d{2}-\d{2}$/.test(fd)?fd:"";
+    const K4=(x)=>{ const q=String(x||"").replace(/\D/g,""); return q?q.slice(-4).padStart(4,"0"):""; };
+    const L=[...(M[NC(c.cliente)]||[]),...(M["#"+K4(c.cliente)]||[])]; const base=(x)=>String(x||"").split(".")[0];
+    const a0=NC(it.cod); const tope=f0?new Date(Date.parse(f0)+30*86400000).toISOString().slice(0,10):""; const hit=L.filter(o=>(o.art===a0||base(o.art)===base(a0))&&(!f0||!o.fecha||(o.fecha>=f0&&o.fecha<=tope))).sort((a,b)=>String(b.fecha).localeCompare(String(a.fecha)))[0];
+    if(hit) return {pedido:hit.pedido,fecha:hit.fecha,importe:hit.importe,auto:true};
+    const e=String(d.estado||"").toLowerCase(); const ss=d.seguimiento||d.resultado||{}; if(/pedido|acept/.test(e)||/pedido/.test(String(ss.resultado||""))) return {pedido:"",fecha:String(d.fechaResultado||"").slice(0,10),importe:0,auto:false};
+    return null; };
+  let nDocs=0, nPed=0, impPed=0;
+  const badgeDoc=(d,it,c)=>{ const esEst=Array.isArray(d.ofertas)||/estrateg/i.test(d.tipo||"")||d.estado==="pendiente_aprobacion";
+    const pd=it&&c?pedidoDe(d,it,c):null; nDocs++; if(pd){ nPed++; impPed+=pd.importe||0; }
+    const pedH=pd?' <span style="display:inline-block;font-size:11.5px;font-weight:800;border-radius:8px;padding:2px 7px;margin-top:3px;background:#DCFCE7;color:#15803D">✅ Pedido'+(pd.pedido?' '+escT(pd.pedido):'')+(pd.fecha?' · '+fxC(pd.fecha):'')+(pd.importe?' · '+eu(pd.importe):'')+(pd.auto?'':' (marcado por el comercial)')+'</span>':'';
     const o=(esEst?(Array.isArray(d.ofertas)?d.ofertas[0]:null):(Array.isArray(d.lineas)?d.lineas[0]:null))||d||{}; const precio=o.precioFinal||o.precioOferta||o.precio||d.precio||"";
     let est; const e=String(d.estado||"").toLowerCase();
     if(esEst){ est=e==="pendiente_aprobacion"?'⏳ Pendiente de '+(window.RC&&RC.quienLaTiene?escT(RC.quienLaTiene(d).nombre):'aprobar'):e==="aprobada"?'✅ Aprobada':e==="rechazada"?'❌ Rechazada':e==="solicitud_agente"?'⏳ Pedida':escT(d.estado||""); }
     else est=/acept|pedido|ok/.test(e)?'✅ '+escT(d.estado):/rechaz|no/.test(e)?'❌ '+escT(d.estado):e?escT(d.estado):'registrada';
-    return '<span style="display:inline-block;font-size:11.5px;font-weight:700;border-radius:8px;padding:2px 7px;margin-top:3px;background:'+(esEst?'#F5F3FF':'#EFF6FF')+';color:'+(esEst?'#6D28D9':'#1D4ED8')+'">'+(esEst?'💶 Estrategia':'📨 Oferta')+(precio?' · '+escT(precio)+' €/'+escT(String(o.unidad||'m').replace(/^€\s*\/?\s*/,'')):'')+' · '+est+'</span>'; };
+    return '<span style="display:inline-block;font-size:11.5px;font-weight:700;border-radius:8px;padding:2px 7px;margin-top:3px;background:'+(esEst?'#F5F3FF':'#EFF6FF')+';color:'+(esEst?'#6D28D9':'#1D4ED8')+'">'+(esEst?'💶 Estrategia':'📨 Oferta')+(precio?' · '+escT(precio)+' €/'+escT(String(o.unidad||'m').replace(/^€\s*\/?\s*/,'')):'')+' · '+est+'</span>'+pedH; };
   const filaCom=(it,cod,cl)=>{ const u=quien(cod), R=u.id==="_yo"?null:RDe(u), r=R?R["promo:"+it.cod]:null, sg=R?R["promoSeg:"+it.cod]:null;
     const per=-cl.reduce((t,c)=>t+Number(c.diferencia||0),0);
     const hechos=cl.reduce((t,c)=>t+docsDe(it,c).length,0);
@@ -3091,22 +3110,25 @@ function seccionPromoEq(){
     const cli=cl.map(c=>{ const j=it.clientes.indexOf(c); const com=comDe(c);
       return '<div style="display:flex;gap:8px;align-items:center;justify-content:space-between;border-top:1px solid #F1F5F9;padding:5px 0">'
         +'<div style="min-width:0;font-size:12.5px"><b>'+escT(c.nombre||c.cliente)+'</b> '+(c.estado==="perdido"?'<span style="color:#991B1B;font-weight:800">la ha dejado</span>':'<span style="color:#92400E;font-weight:800">se enfría</span>')
-        +'<div style="color:#64748B">'+escT(c.cliente)+' · '+eu(c.ventasAnt)+' → '+eu(c.ventasAct)+'</div>'+(com?'<div style="color:#334155">💬 «'+escT(com)+'»</div>':'')+docsDe(it,c).map(badgeDoc).join(' ')+'</div>'
+        +'<div style="color:#64748B">'+escT(c.cliente)+' · '+eu(c.ventasAnt)+' → '+eu(c.ventasAct)+'</div>'+(com?'<div style="color:#334155">💬 «'+escT(com)+'»</div>':'')+docsDe(it,c).map(d=>badgeDoc(d,it,c)).join(' ')+'</div>'
         +'<div style="display:flex;gap:4px;flex:none"><button class="mini" onclick="PROMOC.abrirCRM(\'of\',PROMO_EQ.items['+i+'],PROMO_EQ.items['+i+'].clientes['+j+'])">📨 Oferta</button>'
         +'<button class="mini" onclick="PROMOC.abrirCRM(\'est\',PROMO_EQ.items['+i+'],PROMO_EQ.items['+i+'].clientes['+j+'])">💶 Estrategia</button></div></div>'; }).join("");
     return '<div style="border-top:1px solid #EEF1F5;padding:6px 0"><div style="display:flex;justify-content:space-between;gap:8px;font-size:13px"><b>'+escT(u.nombre)+'</b><span>'+cl.length+' cliente'+(cl.length===1?'':'s')+' · '+eu(per)+'</span></div>'
       +'<div style="font-size:12.5px">'+dijo+'</div>'+actaH+seg
       +'<details><summary style="cursor:pointer;font-size:12px;color:#475569">Ver clientes</summary>'+cli+'</details></div>'; };
-  const art=(it)=>{ const por=new Map(); it.clientes.forEach(c=>{ const k=U(c.agente); if(!por.has(k)) por.set(k,[]); por.get(k).push(c); });
+  const conv=(it)=>{ let n=0,p=0,imp=0; it.clientes.forEach(c=>docsDe(it,c).forEach(d=>{ n++; const pd=pedidoDe(d,it,c); if(pd){ p++; imp+=pd.importe||0; } })); return {n,p,imp}; };
+  const art=(it)=>{ const por=new Map(); it.clientes.forEach(c=>{ const k=U(c.agente); if(!por.has(k)) por.set(k,[]); por.get(k).push(c); }); const cv=conv(it);
     return '<div style="border:1px solid #E5E7EB;border-left:4px solid '+(it.est==="LIQUIDACIÓN"?"#DC2626":"#D97706")+';border-radius:10px;padding:8px 10px;margin:7px 0;background:#fff">'
       +'<div style="display:flex;justify-content:space-between;gap:8px"><b style="font-size:13.5px">'+escT(it.cod)+' · '+escT(it.nom)+'</b><span style="font-size:11px;font-weight:800;color:'+(it.est==="LIQUIDACIÓN"?"#991B1B":"#92400E")+'">'+(it.est==="LIQUIDACIÓN"?"Liquidación":"Promoción")+'</span></div>'
       +'<div style="font-size:12px;color:#475569">'+[it.cal?"Cal. "+escT(it.cal):"",it.met?escT(it.met)+" m":"",(Number(it.uds)||0).toLocaleString("es-ES")+" uds disponibles"].filter(Boolean).join(" · ")+'</div>'
       +'<div style="font-size:12px">'+PROMOC.preciosH(it)+'</div>'
+      +(cv.n?'<div style="font-size:12px;margin-top:3px"><b>'+cv.n+' oferta'+(cv.n===1?'':'s')+'/estrategia'+(cv.n===1?'':'s')+'</b> → <b style="color:'+(cv.p?'#15803D':'#B45309')+'">'+cv.p+' con pedido</b>'+(cv.imp?' ('+eu(cv.imp)+')':'')+(cv.n?' · '+Math.round(cv.p/cv.n*100)+' %':'')+'</div>':'')
       +((it.ocultos||[]).length?'<details style="font-size:11.5px;color:#64748B"><summary style="cursor:pointer">'+it.ocultos.length+' cliente'+(it.ocultos.length===1?'':'s')+' fuera (dormidos, bloqueados o que ya no lo usan)</summary>'+it.ocultos.map(x=>'<div>'+escT(x.f)+' · '+escT(x.c.nombre||x.c.cliente)+'</div>').join('')+'</details>':'')
       +[...por.entries()].sort((a,b)=>b[1].length-a[1].length).map(([cod,cl])=>filaCom(it,cod,cl)).join("")+'</div>'; };
   const html=PROMOC.porFamilia(L).map(([f,A])=>'<div style="font-size:11.5px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#64748B;margin-top:10px">'+escT(f)+'</div>'+A.map(art).join("")).join("");
   const nCli=new Set(L.flatMap(it=>it.clientes.map(c=>c.cliente))).size, tot=L.reduce((t,it)=>t+it.perdido,0);
-  return {ok:pend===0,d:L.length+" artículo"+(L.length===1?"":"s")+" · "+nCli+" cliente"+(nCli===1?"":"s")+" del equipo los han dejado o compran menos ("+eu(tot)+")"+(uds?" · comprometidas "+uds.toLocaleString("es-ES")+" uds":"")+(pend?" · "+pend+" sin contestar":""),c:html};
+  const CV=L.reduce((a,it)=>{ const x=conv(it); a.n+=x.n; a.p+=x.p; a.imp+=x.imp; return a; },{n:0,p:0,imp:0});
+  return {ok:pend===0,d:L.length+" artículo"+(L.length===1?"":"s")+" · "+nCli+" cliente"+(nCli===1?"":"s")+" del equipo los han dejado o compran menos ("+eu(tot)+")"+(CV.n?" · "+CV.n+" ofertas/estrategias → "+CV.p+" con pedido"+(CV.imp?" ("+eu(CV.imp)+")":""):"")+(uds?" · comprometidas "+uds.toLocaleString("es-ES")+" uds":"")+(pend?" · "+pend+" sin contestar":""),c:html};
 }
 function seccionSeguimiento(){
   const mios=SEGUIM.filter(o=>USUARIOS.some(u=>U(u.id)===U(o.agente)||U(u.cod)===U(o.agente)||(u.alias||[]).map(U).includes(U(o.agente))));
