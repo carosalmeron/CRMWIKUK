@@ -1851,6 +1851,8 @@ window.cerrarSemana=async()=>{
           nom:(USUARIOS.find(u=>U(u.id)===U(o.agente))||{}).nombre||""};
         return a;},{}))};
     await escribir("informes",doc.id,doc);
+    // (oct 2026) Mensajes guardados «para el resumen»: al cerrar, un solo correo por persona con todo lo suyo
+    if(esCeo){ try{ await enviarResumenCEO(); }catch(e){ console.warn("resumen CEO",e); } }
     // (oct 2026) Al cerrar el CEO, I+D recibe el informe de muestras de la semana (ingredientes, deshidratada y general)
     if(esCeo){ try{ const r=await fetch("/api/notificar-incidencia?informeID=1&semana="+SEMANA+"&anio="+ANIO+"&enviar=1",{cache:"no-store"}); const j=await r.json();
         const e=j.enviado||{}; window._INFORME_ID=e.omitido?"ya enviado antes":e.error?("no enviado: "+e.error):("enviado a I+D"+(e.jefeID?" (general)":"")+(e.ingredientes?" · ingredientes":"")+(e.deshidratada?" · deshidratada":"")); }catch(e){ window._INFORME_ID="no se ha podido enviar"; } }
@@ -2013,8 +2015,24 @@ async function cargarPasos(){
   }catch(e){ console.warn("pasos",e); }
   PASOS_DATA=out; if(VISTA==="lista") pintar();
 }
+// (oct 2026) Al cerrar el CEO: los mensajes guardados «para el resumen» (cobros, actividad…) se agrupan por persona
+// y cada uno recibe un solo correo con todos los suyos; después quedan marcados como enviados.
+async function enviarResumenCEO(){
+  const todos=await leer("objetivos_semana");
+  const pend=todos.filter(o=>o.origen==="ceo"&&o.enviarAlCerrar===true&&!o.enviadoEl&&Number(o.anio)===ANIO&&Number(o.semana)===SEMANA+1);
+  if(!pend.length) return 0;
+  const por={}; pend.forEach(o=>{ (por[o.agente]=por[o.agente]||{nombre:o.agenteNombre,items:[]}).items.push(o); });
+  const quien=window._MI_NOMBRE_JEFE||AGENTE||"CEO", ahora=new Date().toISOString();
+  for(const [ag,x] of Object.entries(por)){
+    const texto=x.items.map(o=>"• "+(o.texto||"")).join("\n");
+    try{ await RC.avisarGenerico({agente:ag,quienId:(window._MI_ID_JEFE||AGENTE),quien,titulo:"Resumen del cierre del CEO · semana "+SEMANA,etiqueta:"Cierre semanal",texto,detalle:x.items.length+" punto"+(x.items.length===1?"":"s")+" para la semana "+(SEMANA+1),pie:"Cada punto queda en tu seguimiento de la semana "+(SEMANA+1)+"."}); }catch(e){}
+    for(const o of x.items){ try{ await fetch(FB+"/objetivos_semana/"+encodeURIComponent(o._id||o.id)+"?updateMask.fieldPaths=enviadoEl",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:{enviadoEl:{stringValue:ahora}}})}); }catch(e){} }
+  }
+  window._RESUMEN_CEO=Object.values(por).map(x=>x.nombre+" ("+x.items.length+")").join(", ");
+  return pend.length;
+}
 // (oct 2026) Mensaje del CEO sobre cobros: global (director + todos los jefes) o por comercial (director + su jefe)
-window.enviarOpinionCobros=async(cod,btn)=>{
+window.enviarOpinionCobros=async(cod,btn,modo)=>{ modo=modo||"ahora";
   window._COB_OP=window._COB_OP||{};
   const t=cod?String((window._COB_OP[cod]||{}).texto||"").trim():((document.getElementById("cob_op_global")||{}).value||"").trim();
   if(t.length<5){ alert(cod?"Escribe el mensaje sobre ese comercial.":"Escribe el mensaje."); return; }
@@ -2026,18 +2044,20 @@ window.enviarOpinionCobros=async(cod,btn)=>{
       titulo="Cobros · semana "+SEMANA; const gg=panelGenteCobros(); detalle="Fuera de plazo: "+euT(gg.reduce((a,p)=>a+(Number(p.cobros)||0),0))+" · "+gg.filter(p=>p.limite&&p.cobros>p.limite).length+" comerciales fuera del máximo"; }
     if(!dest.length) throw new Error("no encuentro destinatarios en las fichas");
     for(const d of dest){
-      try{ await RC.avisarGenerico({agente:d.id,quienId:(window._MI_ID_JEFE||AGENTE),quien,titulo,etiqueta:"Cobros · mensaje del CEO",texto:t,detalle,pie:"Queda en tu seguimiento de la semana "+(SEMANA+1)+"."}); }catch(e){}
+      if(modo==="ahora"){ try{ await RC.avisarGenerico({agente:d.id,quienId:(window._MI_ID_JEFE||AGENTE),quien,titulo,etiqueta:"Cobros · mensaje del CEO",texto:t,detalle,pie:"Queda en tu seguimiento de la semana "+(SEMANA+1)+"."}); }catch(e){} }
       const id="obj_ceo_cob_"+ANIO+"_s"+SEMANA+"_"+(cod||"global").replace(/[^A-Za-z0-9]/g,"")+"_"+String(d.id).replace(/[^A-Za-z0-9]/g,"");
-      await escribir("objetivos_semana",id,{id,semana:SEMANA+1,anio:ANIO,agente:d.id,agenteNombre:d.nombre,texto:"Cobros"+(cod?" de "+((panelGenteCobros().find(x=>String(x.cod||x.id)===cod)||{}).nombre||cod):"")+": "+t,tipo:"cobros",origen:"ceo",refCodigo:cod||"",creadoPor:AGENTE,fecha:ahora,claveOrigen:"cob|ceo|"+(cod||"global")});
+      await escribir("objetivos_semana",id,{id,semana:SEMANA+1,anio:ANIO,agente:d.id,agenteNombre:d.nombre,texto:"Cobros"+(cod?" de "+((panelGenteCobros().find(x=>String(x.cod||x.id)===cod)||{}).nombre||cod):"")+": "+t,tipo:"cobros",origen:"ceo",refCodigo:cod||"",creadoPor:AGENTE,fecha:ahora,claveOrigen:"cob|ceo|"+(cod||"global"),
+        enviarAlCerrar:modo==="resumen",enviadoEl:modo==="ahora"?ahora:"",titulo,detalle});
     }
-    if(cod) window._COB_OP[cod]={texto:t,enviado:new Date().toLocaleString("es-ES",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})+" a "+dest.map(d=>d.nombre).join(" y ")};
-    else { window._COB_OP._env=(window._COB_OP._env||[]).concat(["📧 Mensaje global enviado a "+dest.map(d=>d.nombre).join(", ")]); window._COB_OP._global={texto:""}; }
+    const tag=modo==="ahora"?"📧 Enviado ":"💾 Guardado para el resumen del cierre ";
+    if(cod) window._COB_OP[cod]={texto:t,enviado:(modo==="ahora"?"":"(se envía al cerrar) ")+new Date().toLocaleString("es-ES",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})+" · "+dest.map(d=>d.nombre).join(" y ")};
+    else { window._COB_OP._env=(window._COB_OP._env||[]).concat([tag+"· mensaje global · "+dest.map(d=>d.nombre).join(", ")]); window._COB_OP._global={texto:""}; }
     pintar(); }
   catch(e){ alert("No se ha podido enviar: "+e.message); if(btn){ btn.disabled=false; btn.textContent="📧 Enviar"; } }
 };
 // (oct 2026) Opinión del CEO sobre la actividad de UN comercial → correo al director comercial y al jefe de su equipo,
 // y objetivo de seguimiento de la semana siguiente para los dos
-window.enviarOpinionActividad=async(cod,btn)=>{
+window.enviarOpinionActividad=async(cod,btn,modo)=>{ modo=modo||"ahora";
   const o=window._ACT_OP[cod]||{}, t=String(o.texto||"").trim(); if(t.length<5){ alert("Escribe tu opinión sobre ese comercial."); return; }
   const p=panelGente().find(x=>String(x.cod||x.id)===cod); if(!p) return;
   if(btn){ btn.disabled=true; btn.textContent="Enviando…"; }
@@ -2046,11 +2066,13 @@ window.enviarOpinionActividad=async(cod,btn)=>{
     const ob=p.obj||{}; const resumen=p.nombre+" · semana "+SEMANA+": 👋 "+p.vis+(ob.visitas?"/"+ob.visitas:"")+" visitas · 📞 "+p.lla+(ob.llamadas?"/"+ob.llamadas:"")+" llamadas";
     const quien=window._MI_NOMBRE_JEFE||AGENTE||"CEO", ahora=new Date().toISOString();
     for(const d of dest){
-      try{ await RC.avisarGenerico({agente:d.id,quienId:(window._MI_ID_JEFE||AGENTE),quien,titulo:d.esComercial?"Tu actividad · semana "+SEMANA:"Actividad de "+p.nombre+" · semana "+SEMANA,etiqueta:"Opinión del CEO",texto:t,detalle:resumen,pie:"Queda en tu seguimiento de la semana "+(SEMANA+1)+"."}); }catch(e){}
+      const tituloA="Actividad de "+p.nombre+" · semana "+SEMANA;
+      if(modo==="ahora"){ try{ await RC.avisarGenerico({agente:d.id,quienId:(window._MI_ID_JEFE||AGENTE),quien,titulo:tituloA,etiqueta:"Opinión del CEO",texto:t,detalle:resumen,pie:"Queda en tu seguimiento de la semana "+(SEMANA+1)+"."}); }catch(e){} }
       const id="obj_ceo_act_"+ANIO+"_s"+SEMANA+"_"+cod.replace(/[^A-Za-z0-9]/g,"")+"_"+String(d.id).replace(/[^A-Za-z0-9]/g,"");
-      await escribir("objetivos_semana",id,{id,semana:SEMANA+1,anio:ANIO,agente:d.id,agenteNombre:d.nombre,texto:(d.esComercial?"Tu actividad (opinión del CEO): ":"Actividad de "+p.nombre+": ")+t,tipo:"actividad",origen:"ceo",refCodigo:cod,refNombre:p.nombre,creadoPor:AGENTE,fecha:ahora,claveOrigen:"act|ceo|"+cod});
+      await escribir("objetivos_semana",id,{id,semana:SEMANA+1,anio:ANIO,agente:d.id,agenteNombre:d.nombre,texto:"Actividad de "+p.nombre+": "+t,tipo:"actividad",origen:"ceo",refCodigo:cod,refNombre:p.nombre,creadoPor:AGENTE,fecha:ahora,claveOrigen:"act|ceo|"+cod,
+        enviarAlCerrar:modo==="resumen",enviadoEl:modo==="ahora"?ahora:"",titulo:tituloA,detalle:resumen});
     }
-    window._ACT_OP[cod]={texto:t,enviado:new Date().toLocaleString("es-ES",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})+" a "+dest.map(d=>d.nombre).join(" y ")}; pintar(); }
+    window._ACT_OP[cod]={texto:t,enviado:(modo==="ahora"?"":"(se envía al cerrar) ")+new Date().toLocaleString("es-ES",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})+" · "+dest.map(d=>d.nombre).join(" y ")}; pintar(); }
   catch(e){ alert("No se ha podido enviar: "+e.message); if(btn){ btn.disabled=false; btn.textContent="📧 Enviar"; } }
 };
 window.enviarOpinionesActividad=async(btn)=>{ const L=Object.entries(window._ACT_OP||{}).filter(([k,o])=>!o.enviado&&String(o.texto||"").trim().length>=5); if(!L.length){ alert("No hay opiniones escritas sin enviar."); return; }
@@ -2335,8 +2357,8 @@ function seccionActividad(){
         +'<td style="padding:4px 6px;font-size:12px">'+escT(((k.actividad||{}).plan||'').slice(0,90))+'</td></tr>'
         +(esCeo?'<tr><td colspan="4" style="padding:0 6px 8px">'+(env?'<div style="font-size:12px;color:#15803D;font-weight:700">📧 Enviada '+escT(env)+': «'+escT((window._ACT_OP[cod]||{}).texto||'')+'»</div>'
           :'<div style="display:flex;gap:6px;align-items:flex-start"><textarea data-opag="'+escT(cod)+'" oninput="window._ACT_OP[this.dataset.opag]={texto:this.value}" placeholder="Tu opinión sobre '+escT(p.nombre)+' (le llega al director y a su jefe de equipo)" style="flex:1;min-height:38px;padding:6px;font:inherit;font-size:12.5px;border:1.5px solid #C4B5FD;border-radius:8px;background:#F5F3FF">'+escT((window._ACT_OP[cod]||{}).texto||'')+'</textarea>'
-          +'<button class="mini on" style="flex:none" onclick="enviarOpinionActividad(\''+escT(cod)+'\',this)">📧 Enviar</button></div>')+'</td></tr>':'');
-      }).join("")+'</tbody></table>'+(esCeo?'<div style="display:flex;gap:6px;align-items:center;margin-top:6px"><button class="mini on" onclick="enviarOpinionesActividad(this)">📧 Enviar todas las opiniones escritas</button><span style="font-size:12px;color:var(--muted)">Cada una va al director comercial y al jefe de equipo del comercial, y queda en su seguimiento de la semana que viene.</span></div>':''));
+          +'<div style="flex:none;display:flex;flex-direction:column;gap:4px"><button class="mini on" onclick="enviarOpinionActividad(\''+escT(cod)+'\',this,\'ahora\')">📧 Enviar ahora</button><button class="mini" onclick="enviarOpinionActividad(\''+escT(cod)+'\',this,\'resumen\')" title="Se envía junto con el resto cuando cierres tu semana">💾 Para el resumen</button></div></div>')+'</td></tr>':'');
+      }).join("")+'</tbody></table>'+(esCeo?'<div style="display:flex;gap:6px;align-items:center;margin-top:6px"><button class="mini on" onclick="enviarOpinionesActividad(this)">📧 Enviar todas las opiniones escritas</button><span style="font-size:12px;color:var(--muted)">Cada una va al director comercial y al jefe de equipo del comercial, y queda en su seguimiento de la semana que viene. «Para el resumen» la guarda y se envía todo junto, por persona, al cerrar tu semana.</span></div>':''));
   const opinionH='';
   const c=porEq+todosH+opinionH+det("act_no","<b>Comerciales que no llegan</b> · "+no.length,no.length?no.map(p=>{ const k=kpisDe(p)||{}, ag=agDe(p);
       return filaPlan(p.nombre,esJefe?"":p.eqNom,"👋 "+cifra(p.vis,p.obj.visitas)+" · 📞 "+cifra(p.lla,p.obj.llamadas),(k.actividad||{}).plan,ag.id,"Actividad","No llegas a tu actividad de la semana ("+p.vis+" visitas y "+p.lla+" llamadas). ¿Qué visitas y llamadas vas a hacer la semana que viene?"); }).join(""):'<p class="vacio" style="margin:0">Todos llegan.</p>',no.length?"#FCA5A5":"#BBF7D0");
@@ -2560,13 +2582,13 @@ function seccionCobros(){
   if(esCeo) filas.forEach(f=>{ const cod=String(f.p.cod||f.p.id), o=window._COB_OP&&window._COB_OP[cod]||{};
     f.extra='<div style="margin-top:8px;background:#F5F3FF;border:1px solid #DDD6FE;border-radius:10px;padding:8px 10px"><b style="font-size:12.5px">📝 Tu mensaje sobre los cobros de '+escT(f.p.nombre)+'</b><div style="font-size:11.5px;color:#6B7280">Al director comercial y a su jefe de equipo; queda en su seguimiento de la semana que viene.</div>'
       +(o.enviado?'<div style="font-size:12px;color:#15803D;font-weight:700;margin-top:4px">📧 Enviado '+escT(o.enviado)+': «'+escT(o.texto||'')+'»</div>'
-      :'<div style="display:flex;gap:6px;align-items:flex-start;margin-top:5px"><textarea id="cob_op_'+escT(cod)+'" oninput="window._COB_OP[\''+escT(cod)+'\']={texto:this.value}" placeholder="Qué opinas y qué quieres que hagan" style="flex:1;min-height:40px;padding:6px;font:inherit;font-size:12.5px;border:1.5px solid #C4B5FD;border-radius:8px">'+escT(o.texto||'')+'</textarea><button class="mini on" style="flex:none" onclick="event.stopPropagation();enviarOpinionCobros(\''+escT(cod)+'\',this)">📧 Enviar</button></div>')+'</div>'; });
+      :'<div style="display:flex;gap:6px;align-items:flex-start;margin-top:5px"><textarea id="cob_op_'+escT(cod)+'" oninput="window._COB_OP[\''+escT(cod)+'\']={texto:this.value}" placeholder="Qué opinas y qué quieres que hagan" style="flex:1;min-height:40px;padding:6px;font:inherit;font-size:12.5px;border:1.5px solid #C4B5FD;border-radius:8px">'+escT(o.texto||'')+'</textarea><div style="flex:none;display:flex;flex-direction:column;gap:4px"><button class="mini on" onclick="event.stopPropagation();enviarOpinionCobros(\''+escT(cod)+'\',this,\'ahora\')">📧 Enviar ahora</button><button class="mini" onclick="event.stopPropagation();enviarOpinionCobros(\''+escT(cod)+'\',this,\'resumen\')" title="Se envía junto con el resto cuando cierres tu semana">💾 Para el resumen del cierre</button></div></div>')+'</div>'; });
   const filasV=window.COB_FILTRO?filas.filter(f=>String(f.p.cod||f.p.id)===window.COB_FILTRO):filas;
   const filtroH=window.COB_FILTRO?'<div style="margin:4px 0 8px"><span style="display:inline-block;background:#0F172A;color:#fff;border-radius:99px;padding:4px 10px;font-size:12px;font-weight:700">Solo '+escT((filas.find(f=>String(f.p.cod||f.p.id)===window.COB_FILTRO)||{p:{}}).p.nombre||window.COB_FILTRO)+' <a href="#" onclick="window.COB_FILTRO=\'\';pintar();return false" style="color:#fff;margin-left:6px">✕</a></span></div>':'';
   window._COB_OP=window._COB_OP||{};
   const msgH=esCeo?'<div style="margin:8px 0;background:#F5F3FF;border:1px solid #DDD6FE;border-radius:10px;padding:8px 10px">'
     +'<b style="font-size:13px">📝 Mensaje global sobre cobros a los responsables</b><div style="font-size:12px;color:var(--muted)">Al director comercial y a todos los jefes de equipo; queda como seguimiento de la semana que viene. El mensaje sobre un comercial concreto está dentro de su ficha, abajo.</div>'
-    +'<div style="display:flex;gap:6px;align-items:flex-start;margin-top:6px"><textarea id="cob_op_global" oninput="window._COB_OP._global={texto:this.value}" placeholder="Mensaje global sobre los cobros de la semana" style="flex:1;min-height:44px;padding:6px;font:inherit;font-size:12.5px;border:1.5px solid #C4B5FD;border-radius:8px">'+escT((window._COB_OP._global||{}).texto||'')+'</textarea><button class="mini on" style="flex:none" onclick="enviarOpinionCobros(\'\',this)">📧 Enviar a todos</button></div>'
+    +'<div style="display:flex;gap:6px;align-items:flex-start;margin-top:6px"><textarea id="cob_op_global" oninput="window._COB_OP._global={texto:this.value}" placeholder="Mensaje global sobre los cobros de la semana" style="flex:1;min-height:44px;padding:6px;font:inherit;font-size:12.5px;border:1.5px solid #C4B5FD;border-radius:8px">'+escT((window._COB_OP._global||{}).texto||'')+'</textarea><div style="flex:none;display:flex;flex-direction:column;gap:4px"><button class="mini on" onclick="enviarOpinionCobros(\'\',this,\'ahora\')">📧 Enviar ahora</button><button class="mini" onclick="enviarOpinionCobros(\'\',this,\'resumen\')">💾 Para el resumen del cierre</button></div></div>'
     +((window._COB_OP._env||[]).length?'<div style="font-size:12px;color:#15803D;font-weight:700;margin-top:5px">'+window._COB_OP._env.map(escT).join('<br>')+'</div>':'')+'</div>':'';
   // (oct 2026) Aviso de falta de pago y en el seguro: cuánto hay y qué ha cambiado esta semana (marcadas nuevas / cobradas)
   const EFL=Object.values(window._EF||{}), EFH=window._EFH||[]; const lun=lunesSem(), lunISO=lun.toISOString().slice(0,10), finISO=new Date(lun.getTime()+7*86400000).toISOString().slice(0,10);
