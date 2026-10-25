@@ -89,12 +89,12 @@
   //   · CEO: cualquier caso.
   //   · Jefe / jefe de ventas: los de menos de 20.000 €, y cualquiera cuyo
   //     motivo sea que el dato está mal (códigos duplicados, mal asignado).
+  // (25/10/2026, decisión del CEO) Todo pasa por el CEO: archivar, dormir 60 días y bloquear, sea cual sea el importe.
+  // El jefe solo cierra por su cuenta «el dato está mal» (códigos duplicados, cliente mal asignado), que no es una decisión comercial.
   RC.puedeArchivar=(esCeo,esJefe,caso,motivo)=>{
     if(esCeo) return true;
     if(!esJefe) return false;
-    if(motivo===RC.DATO_MAL) return true;
-    if(RC.esPausa(motivo)||RC.esBloqueo(motivo)) return true;   // aparcar y bloquear: siempre el jefe
-    return num(caso&&caso.perdido)<RC.UMBRAL.nivel2;
+    return motivo===RC.DATO_MAL;
   };
   RC.motivosPara=(esCeo,esJefe,caso)=>RC.MOTIVOS_ARCHIVO.filter(m=>RC.puedeArchivar(esCeo,esJefe,caso,m));
   RC.ABIERTOS=["abierto","diagnosticado","en_accion","propuesta_archivo"];
