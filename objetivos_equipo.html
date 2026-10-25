@@ -3027,12 +3027,18 @@ async function cargarPromoEq(){ if(PROMO_EQ_CARG||!window.PROMOC) return; PROMO_
   try{ const cods=[...new Set([...USUARIOS.map(u=>U(u.cod)),AGENTE].filter(Boolean))];
     const r=await PROMOC.cargar(cods);
     // (oct 2026) Pedidos (formulario de pedidos + registro de SAP): para saber qué ofertas/estrategias han acabado en pedido
-    try{ const [pp,sl]=await Promise.all([leer("pbi_pedidos"),leer("pedidos_sap_lineas").catch(()=>[])]);
-      const NC=(x)=>String(x||"").toUpperCase().replace(/[^A-Z0-9]/g,""), K4=(x)=>{ const d=String(x||"").replace(/\D/g,""); return d?d.slice(-4).padStart(4,"0"):""; };
-      const M={}; const add=(cli,o)=>{ const k=NC(cli); if(!k) return; (M[k]=M[k]||[]).push(o); const k4=K4(cli); if(k4) (M["#"+k4]=M["#"+k4]||[]).push(o); };
-      pp.forEach(d=>add(d.cliente,{art:NC(d.articulo),fecha:String(d.fecha||d.fechaPedido||d.sincronizadoEl||"").slice(0,10),pedido:String(d.pedido||""),importe:Number(d.importe)||0,nombre:d.nombre||""}));
-      sl.forEach(d=>add(d.cliente,{art:NC(d.art),fecha:String(d.fecha||"").slice(0,10),pedido:String(d.ped||""),importe:Number(d.imp)||0,nombre:""}));
-      window._PED_X_CLI=M; }catch(e){ window._PED_X_CLI={}; }
+    // Ojo: pbi_pedidos solo tiene los pedidos PENDIENTES de servir; los ya servidos salen de ahí. Por eso se añaden
+    // también las salidas/entradas del diario de cambios (pbi_pedidos_cambios, últimos 30 días) y el registro de SAP.
+    try{ const [pp,sl,cb]=await Promise.all([leer("pbi_pedidos"),leer("pedidos_sap_lineas").catch(()=>[]),leer("pbi_pedidos_cambios").catch(()=>[])]);
+      const NC=(x)=>String(x||"").toUpperCase().replace(/[^A-Z0-9]/g,"");
+      const KC=(x)=>{ const t=String(x||"").toUpperCase().trim(); const d=t.replace(/\D/g,""); if(!d) return ""; let L=(t.match(/^[A-Z]/)||[""])[0]; if(L==="C") L="U"; return "#"+L+d.slice(-4).padStart(4,"0"); };
+      const desde=new Date(Date.now()-30*86400000).toISOString().slice(0,10);
+      const M={}; let nL=0; const add=(cli,o)=>{ if(!o.art) return; nL++; const k=NC(cli); if(k) (M[k]=M[k]||[]).push(o); const k2=KC(cli); if(k2) (M[k2]=M[k2]||[]).push(o); };
+      const A=(x)=>String(x||"").toUpperCase().trim();
+      pp.forEach(d=>add(d.cliente,{art:A(d.articulo),fecha:String(d.fecha||d.fechaPedido||d.sincronizadoEl||"").slice(0,10),pedido:String(d.pedido||""),importe:Number(d.importe)||0}));
+      sl.forEach(d=>add(d.cliente,{art:A(d.art),fecha:String(d.fecha||"").slice(0,10),pedido:String(d.ped||""),importe:Number(d.imp)||0}));
+      cb.forEach(d=>{ if(String(d.fecha||d.id||d._id||"").slice(0,10)<desde) return; ["salidas","entradas"].forEach(k=>{ let L=[]; try{ L=JSON.parse(d[k]||"[]"); }catch(e){} (Array.isArray(L)?L:[]).forEach(m=>{ if(m&&m.tipo!=="anulado") add(m.cliente,{art:A(m.articulo),fecha:String(m.fechaNueva||m.fechaAntes||d.fecha||"").slice(0,10),pedido:String(m.pedido||""),importe:Number(m.importe)||0}); }); }); });
+      window._PED_X_CLI=M; window._PED_X_N=nL; }catch(e){ window._PED_X_CLI={}; window._PED_X_N=0; }
     // (oct 2026) Clientes dormidos o bloqueados (plan de recuperación) y descartados de un artículo («ya no lo usa»):
     // no se enseñan, igual que en el parte del comercial. Antes CELEDONIO seguía saliendo después de bloquearlo.
     let casos=[], desc=[];
@@ -3073,9 +3079,10 @@ function seccionPromoEq(){
   // ¿Ha acabado en pedido? Pedido del mismo cliente y artículo (misma raíz de código) posterior a la oferta/estrategia,
   // o el propio seguimiento marcado como pedido / aceptada.
   const pedidoDe=(d,it,c)=>{ const M=window._PED_X_CLI||{}; const fd=String(d.fechaCreacion||d.fecha||d.creado||"").slice(0,10); const f0=/^\d{4}-\d{2}-\d{2}$/.test(fd)?fd:"";
-    const K4=(x)=>{ const q=String(x||"").replace(/\D/g,""); return q?q.slice(-4).padStart(4,"0"):""; };
-    const L=[...(M[NC(c.cliente)]||[]),...(M["#"+K4(c.cliente)]||[])]; const base=(x)=>String(x||"").split(".")[0];
-    const a0=NC(it.cod); const tope=f0?new Date(Date.parse(f0)+30*86400000).toISOString().slice(0,10):""; const hit=L.filter(o=>(o.art===a0||base(o.art)===base(a0))&&(!f0||!o.fecha||(o.fecha>=f0&&o.fecha<=tope))).sort((a,b)=>String(b.fecha).localeCompare(String(a.fecha)))[0];
+    const KC=(x)=>{ const t=String(x||"").toUpperCase().trim(); const q=t.replace(/\D/g,""); if(!q) return ""; let Lt=(t.match(/^[A-Z]/)||[""])[0]; if(Lt==="C") Lt="U"; return "#"+Lt+q.slice(-4).padStart(4,"0"); };
+    const NX=(x)=>String(x||"").toUpperCase().replace(/[^A-Z0-9]/g,""), base=(x)=>String(x||"").replace(/\..*$/,"");
+    const L=[...(M[NX(c.cliente)]||[]),...(M[KC(c.cliente)]||[])];
+    const a0=String(it.cod||"").toUpperCase().trim(); const tope=f0?new Date(Date.parse(f0)+30*86400000).toISOString().slice(0,10):""; const hit=L.filter(o=>(NX(o.art)===NX(a0)||NX(base(o.art))===NX(base(a0)))&&(!f0||!o.fecha||(o.fecha>=f0&&o.fecha<=tope))).sort((a,b)=>String(b.fecha).localeCompare(String(a.fecha)))[0];
     if(hit) return {pedido:hit.pedido,fecha:hit.fecha,importe:hit.importe,auto:true};
     const e=String(d.estado||"").toLowerCase(); const ss=d.seguimiento||d.resultado||{}; if(/pedido|acept/.test(e)||/pedido/.test(String(ss.resultado||""))) return {pedido:"",fecha:String(d.fechaResultado||"").slice(0,10),importe:0,auto:false};
     return null; };
@@ -3128,7 +3135,7 @@ function seccionPromoEq(){
   const html=PROMOC.porFamilia(L).map(([f,A])=>'<div style="font-size:11.5px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#64748B;margin-top:10px">'+escT(f)+'</div>'+A.map(art).join("")).join("");
   const nCli=new Set(L.flatMap(it=>it.clientes.map(c=>c.cliente))).size, tot=L.reduce((t,it)=>t+it.perdido,0);
   const CV=L.reduce((a,it)=>{ const x=conv(it); a.n+=x.n; a.p+=x.p; a.imp+=x.imp; return a; },{n:0,p:0,imp:0});
-  return {ok:pend===0,d:L.length+" artículo"+(L.length===1?"":"s")+" · "+nCli+" cliente"+(nCli===1?"":"s")+" del equipo los han dejado o compran menos ("+eu(tot)+")"+(CV.n?" · "+CV.n+" ofertas/estrategias → "+CV.p+" con pedido"+(CV.imp?" ("+eu(CV.imp)+")":""):"")+(uds?" · comprometidas "+uds.toLocaleString("es-ES")+" uds":"")+(pend?" · "+pend+" sin contestar":""),c:html};
+  return {ok:pend===0,d:L.length+" artículo"+(L.length===1?"":"s")+" · "+nCli+" cliente"+(nCli===1?"":"s")+" del equipo los han dejado o compran menos ("+eu(tot)+")"+(CV.n?" · "+CV.n+" ofertas/estrategias → "+CV.p+" con pedido"+(CV.imp?" ("+eu(CV.imp)+")":"")+(!CV.p?" (cruzado con "+(window._PED_X_N||0)+" líneas de pedido)":""):"")+(uds?" · comprometidas "+uds.toLocaleString("es-ES")+" uds":"")+(pend?" · "+pend+" sin contestar":""),c:html};
 }
 function seccionSeguimiento(){
   const mios=SEGUIM.filter(o=>USUARIOS.some(u=>U(u.id)===U(o.agente)||U(u.cod)===U(o.agente)||(u.alias||[]).map(U).includes(U(o.agente))));
