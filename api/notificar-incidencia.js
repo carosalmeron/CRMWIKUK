@@ -147,8 +147,9 @@ function cuentaValida(u){
   return u && !u.duplicadaDe && u.activo!==false && !u._legacy;
 }
 
-// Buzones compartidos: solo se usan si la persona no tiene otro email
-const EMAILS_GENERICOS=["info@unitedcaro.com"];
+// Buzones compartidos: solo se usan si la persona no tiene otro email.
+// (oct 2026) Con la variable BUZON_GENERICO=no en Vercel, no se usa nunca: quien no tenga email personal no recibe nada.
+const EMAILS_GENERICOS=(String(process.env.BUZON_GENERICO||"").toLowerCase()==="no"?[]:["info@unitedcaro.com"]);
 
 // Todas las cuentas (portal + usuarios) de una persona por id, deduplicadas
 function emailDeCuenta(datos, cuentaId){
@@ -349,7 +350,7 @@ const CRM       = "https://crmwikuk.vercel.app";
 // Quién recibe cada aviso: Operaciones y lo que cuelga de ella, más dirección
 const RAIZ_DEPTOS = ["operaciones"];
 const SIEMPRE     = ["ceo", "dir"];
-const GENERICOS_R = ["info@unitedcaro.com"];
+const GENERICOS_R = (String(process.env.BUZON_GENERICO||"").toLowerCase()==="no"?[]:["info@unitedcaro.com"]);
 
 // Organigrama base (el de la base de datos manda sobre esto)
 const DEPTOS_BASE = [
@@ -1102,9 +1103,13 @@ async function datosCEO(anio,sem){
           p.mAb.push({id:m._id||m.id||"",cli:m.cliente||m.clienteNombre||"(sin cliente)",prod:m.prod||m.prodNombre||m.producto||"",fecha:fe.toISOString().slice(0,10),dias:Math.round((domingo-fe)/86400000),est:String(m.estado||"")});
         if(!fFb&&!/pedido|positiv|aceptada|proyecto|ko|negativ|rechaz|cerrad/.test(est)&&fe&&(domingo-fe)/86400000>60)
           p.m60.push({cli:m.cliente||m.clienteNombre||"(sin cliente)",prod:m.prod||m.prodNombre||m.producto||"",fecha:fe.toISOString().slice(0,10),dias:Math.round((domingo-fe)/86400000)}); }
-      if(enSem(fechaDocC(m))){ p.mEnv++; }
+      // (oct 2026) Listas de la semana para poder abrir el detalle desde los recuadros del cierre
+      const _mi=()=>({cli:m.cliente||m.clienteNombre||"(sin cliente)",prod:m.prod||m.prodNombre||m.producto||"",fecha:(fechaDocC(m)||new Date(0)).toISOString().slice(0,10),fb:fFb?fFb.toISOString().slice(0,10):"",est:String(m.estado||""),motivo:m.motivo||m.nota||""});
+      p.mSem=p.mSem||[]; p.mOkL=p.mOkL||[]; p.mKoL=p.mKoL||[];
+      if(enSem(fechaDocC(m))){ p.mEnv++; if(p.mSem.length<80) p.mSem.push(_mi()); }
       if(enSem(fFb)){
-        if(/pedido|positiv|aceptada|proyecto/.test(est)){ p.mOk++; }
+        if(/pedido|positiv|aceptada|proyecto/.test(est)){ p.mOk++; if(p.mOkL.length<80) p.mOkL.push(_mi()); }
+        else if(/ko|negativ|rechaz/.test(est)){ if(p.mKoL.length<80) p.mKoL.push(_mi()); }
         else if(/ko|negativ|rechazada/.test(est)){ E.mKo++; G.mKo++;
           G.rechazos.push({cli:m.cliente||m.clienteNombre||"(sin cliente)",prod:m.prod||m.prodNombre||"",
             motivo:m.motivo||m.nota||"Sin motivo",quien:g.nombre,eq:g.equipo}); }
@@ -1543,7 +1548,7 @@ module.exports = async function handler(req, res){
       const anioP=Number(req.query.anio)||hoyP.anio, semP=Number(req.query.semana)||hoyP.sem;
       const D=await datosCEO(anioP,semP);
       const campos=["id","cod","nombre","equipo","ausente","motivo","vSem","sinDatoSem","objSem","mAct","mObj","mAnt","soloCobros","pedSem","pedMes","prevMes","sinDatoPed","pedFuente","vMes","vis","lla","mEnv","mOk","mKo",
-        "mEnvA","mOkA","mKoA","m60","mAb","obj","cobros","nFacV","limite","k","nota","facV","cobFecha"];
+        "mEnvA","mOkA","mKoA","m60","mAb","mSem","mOkL","mKoL","obj","cobros","nFacV","limite","k","nota","facV","cobFecha"];
       res.setHeader("Cache-Control","no-store");
       res.status(200).json({ok:true,sem:D.sem,anio:D.anio,mNum:D.mNum,jefesFuera:(D.G&&D.G.jefesFuera)||[],
         equipos:D.equipos.map(E=>({eq:E.eq,jefe:E.jefe,obj:E.obj,cerr:E.cerr,aus:E.aus,sinCerrar:E.sinCerrar,
