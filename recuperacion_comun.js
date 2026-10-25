@@ -852,7 +852,9 @@
       if((o.dtoCliente!=null&&o.dtoCliente!=="")||!(num(o.precioBase)>0)||!(fin>0)) return;
       try{ const t=await RC.tarifaCliente(e.clienteId||e.clienteCodigo,e.cliente||e.clienteNombre);
         const tar=num(o.precioBase)*(1-t.dto/100);
-        e._dtoCli=t.dto; e._catCli=t.cat; e._sinTarifa=!!t.sinDato; e._tarifaCli=Math.round(tar*100)/100;
+        e._dtoCli=t.dto; e._catCli=t.cat; e._sinTarifa=!!t.sinDato; e._tarifaCli=Math.round(tar*100)/100; e._catalogo=num(o.precioBase);
+        // Descuento sobre el precio de catálogo, calculado aquí: maxDescuento a veces ya venía sobre la tarifa del cliente y se etiquetaba mal
+        e._dtoCat=Math.max(0,Math.round((1-fin/num(o.precioBase))*1000)/10);
         e._dtoEf=tar>0?Math.max(0,Math.round((1-fin/tar)*1000)/10):num(e.maxDescuento); }catch(x){}
     }));
     return lista;
@@ -1572,7 +1574,7 @@
           ${prods?`<div style="font-size:12.5px;color:#374151;margin-top:2px"><b>Artículos:</b> ${RC.esc(prods)}${num(e.precioCampana)?" · "+num(e.precioCampana).toFixed(2)+" €":""}</div>`:""}
           ${num(e.maxDescuento)?`<div style="font-size:12.5px;color:#374151;margin-top:2px"><b>Descuento máximo:</b> ${num(e.maxDescuento)} %</div>`:""}`; })()}
       ${num(o.precioFinal||o.precioOferta)?`<div style="font-size:13px;margin-top:4px">${o.precioActual?RC.esc(o.precioActual)+" € → ":o.precioBase?"catálogo "+RC.esc(o.precioBase)+" € → ":""}<b style="color:#6D28D9">${RC.esc(o.precioFinal||o.precioOferta||"")} €/${RC.esc(o.unidad||"m")}</b> · ${e._dtoEf!=null
-        ?`<b>${e._dtoEf} % sobre su tarifa</b> <span style="color:#6B7280">(tarifa ${num(e._tarifaCli).toFixed(2)} € · ${e._dtoCli} % ${RC.esc(e._catCli||"")}${e._sinTarifa?" · sin tarifa en el CRM":""} · ${num(e.maxDescuento)} % sobre catálogo)</span>`
+        ?`<b>${e._dtoEf} % sobre su tarifa</b> <span style="color:#6B7280">(catálogo ${num(e._catalogo).toFixed(2)} € − ${e._dtoCli} % ${RC.esc(e._catCli||"")} = tarifa del cliente ${num(e._tarifaCli).toFixed(2)} €${e._sinTarifa?" · sin tarifa en el CRM":""} · pide ${num(o.precioFinal||o.precioOferta).toFixed(2)} € = ${e._dtoCat!=null?e._dtoCat:num(e.maxDescuento)} % sobre catálogo)</span>`
         :`descuento ${num(e.maxDescuento)} % <span style="color:#6B7280">sobre ${o.precioActualOrigen==="manual"?"el precio que escribió el comercial":"el precio de catálogo (tarifa general), no sobre la tarifa del cliente"}</span>`}</div>`:""}
       ${e._promo?`<div style="font-size:12.5px;font-weight:700;margin-top:3px;color:${e._promo.ok?"#15803D":"#B45309"}">🏷️ Artículo en ${e._promo.est==="LIQUIDACIÓN"?"liquidación":"promoción"}: hasta −${e._promo.dto} % para ${RC.esc(e._promo.cat||"carnicero")} ya aprobado en Stock${e._promo.ok?" · el precio pedido entra en la promoción, no necesitaba aprobación":e._promo.dtoPedido!=null?" · el precio pedido supone −"+e._promo.dtoPedido+" %, pasa de la promoción":""}</div>`:""}
       <div style="font-size:12px;color:#6B7280;margin-top:2px">${e.solicitudAgente?"Lo pide "+RC.esc(e.agenteNombre||e.agente):"Creada por "+RC.esc(e.creadoPorNombre||"")} · ${RC.fechaTxt(e)}${e.descripcion?" · “"+RC.esc(e.descripcion)+"”":""}</div>
