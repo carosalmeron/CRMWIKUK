@@ -670,6 +670,72 @@ function htmlResumenIncViejas(viejas,porTipo,op){
       <p style="font-size:11px;color:#94A3B8;margin:14px 0 0;text-align:center">CRM Grupo Consolidado · resumen de los lunes</p>
     </div></div>`;
 }
+
+// ═══════════════ (oct 2026) Informe semanal de muestras para I+D ═══════════════
+const ES_DESHIDRATADA=/MAEXTRA|ESPECTA|DESHIDRAT|COLAGEN|COLÁGEN|\bMXP?\d|\bESN\d|\bESL\d|\bESC\d|\bPX\d|\bPR\d/i;
+function tipoMuestraID(m){
+  const t=String(m.tipoProducto||m.categoria||"").toLowerCase();
+  if(/deshidrat|envoltur|colag/.test(t)) return "deshidratada"; if(/ingredient|especia|aditiv/.test(t)) return "ingredientes";
+  const txt=[m.prodCodigo,m.codigo,m.prod,m.prodNombre,m.producto,m.familia].filter(Boolean).join(" ");
+  return ES_DESHIDRATADA.test(txt)?"deshidratada":"ingredientes";
+}
+async function informeMuestrasID(anio,sem,enviar,forzar){
+  const lunes=lunesC(anio,sem); const domingo=new Date(lunes); domingo.setDate(lunes.getDate()+6); domingo.setHours(23,59,59,999);
+  const enSem=d=>d&&d>=lunes&&d<=domingo;
+  const [mues,datos]=await Promise.all([listColeccion("muestras"),cargarDatos()]);
+  const nombreDe=(id)=>{ const u=[...datos.usuarios,...datos.portal].find(u=>u&&[u._id,u.id,u.crmId,u.username,u.grupoAgente,u.catalogoVendedor].some(k=>k&&String(k).toUpperCase()===String(id||"").toUpperCase())); return (u&&u.nombre)||id||""; };
+  const fx=(d)=>d?String(d.getDate()).padStart(2,"0")+"/"+String(d.getMonth()+1).padStart(2,"0"):"";
+  const R={ingredientes:{enviadas:[],positivas:[],negativas:[],sinRespuesta:[]},deshidratada:{enviadas:[],positivas:[],negativas:[],sinRespuesta:[]}};
+  for(const m of mues){
+    if(!m||m.eliminada) continue;
+    const t=tipoMuestraID(m), est=String(m.estado||"").toLowerCase(), fe=fechaDocC(m), fFb=fechaC(m.fechaFeedback);
+    const fila={cliente:m.cliente||m.clienteNombre||"(sin cliente)",producto:[m.prodCodigo||m.codigo||"",m.prod||m.prodNombre||m.producto||""].filter(Boolean).join(" · "),
+      comercial:nombreDe(m.agente||m.agenteId||m.comercial||m.creadoPor),fecha:fx(fe),respuesta:fx(fFb),estado:m.estado||"",
+      comentario:String(m.motivo||m.nota||m.comentario||m.feedback||m.observaciones||"").trim(),dias:fe?Math.round((domingo-fe)/86400000):null};
+    if(enSem(fe)) R[t].enviadas.push(fila);
+    if(enSem(fFb)){ if(/pedido|positiv|aceptada|proyecto/.test(est)) R[t].positivas.push(fila); else if(/ko|negativ|rechaz/.test(est)) R[t].negativas.push(fila); }
+    // Solo lo de la semana: las enviadas y las contestadas en ella. Lo anterior sin cerrar no va (petición del CEO, 25/10).
+  }
+  const esc=(t)=>String(t||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+  const tabla=(L,conResp)=>L.length?`<table style="width:100%;border-collapse:collapse;font-size:13px;margin:4px 0 10px">
+      <tr style="font-size:11px;color:#6B7684;text-transform:uppercase"><td style="padding:4px 6px">Cliente</td><td style="padding:4px 6px">Producto</td><td style="padding:4px 6px">Comercial</td><td style="padding:4px 6px">${conResp?"Respuesta":"Enviada"}</td></tr>
+      ${L.map(f=>`<tr style="border-top:1px solid #EEF1F5"><td style="padding:5px 6px"><b>${esc(f.cliente)}</b></td><td style="padding:5px 6px">${esc(f.producto||"—")}</td><td style="padding:5px 6px">${esc(f.comercial)}</td><td style="padding:5px 6px;white-space:nowrap">${esc(conResp?f.respuesta:f.fecha)}${f.dias!=null&&!conResp&&f.dias>14?` · <span style="color:#B91C1C">${f.dias} d</span>`:""}</td></tr>${f.comentario?`<tr><td colspan="4" style="padding:0 6px 6px;font-size:12.5px;color:#3A424E">↳ ${esc(f.comentario)}</td></tr>`:""}`).join("")}</table>`:'<div style="font-size:12.5px;color:#6B7684;margin:2px 0 10px">ninguna</div>';
+  const bloque=(t,x)=>`<div style="margin-top:14px"><div style="font-size:15px;font-weight:800;color:#14181F">${t==="ingredientes"?"🧂 Ingredientes":"🌯 Deshidratada"} · semana ${sem}</div>
+      <div style="font-size:12.5px;color:#6B7684;margin:2px 0 8px">${x.enviadas.length} enviadas esta semana · <b style="color:#15803D">${x.positivas.length} positivas</b> · <b style="color:#B91C1C">${x.negativas.length} negativas</b></div>
+      <div style="font-weight:800;color:#15803D">✅ Positivas (${x.positivas.length})</div>${tabla(x.positivas,true)}
+      <div style="font-weight:800;color:#B91C1C">❌ Negativas (${x.negativas.length})</div>${tabla(x.negativas,true)}
+      <div style="font-weight:800;color:#14181F">📦 Enviadas esta semana (${x.enviadas.length})</div>${tabla(x.enviadas,false)}</div>`;
+  const envoltura=(titulo,sub,cuerpo)=>`<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:680px;margin:0 auto;color:#14181F">
+      <div style="background:#14181F;color:#fff;padding:16px 20px;border-radius:12px 12px 0 0"><div style="font-size:11px;letter-spacing:.08em;opacity:.7;text-transform:uppercase">Muestras · semana ${sem} (${fx(lunes)}–${fx(new Date(domingo))})</div>
+        <div style="font-size:19px;font-weight:800;margin-top:2px">${esc(titulo)}</div><div style="font-size:12.5px;opacity:.8;margin-top:2px">${esc(sub)}</div></div>
+      <div style="border:1px solid #DCE1E7;border-top:none;border-radius:0 0 12px 12px;padding:14px 20px">${cuerpo}
+        <p style="font-size:11px;color:#94A3B8;margin:14px 0 0;text-align:center">CRM Grupo Consolidado · informe automático del cierre semanal del CEO</p></div></div>`;
+  const htmlIng=envoltura("Muestras de ingredientes","Lo positivo y lo negativo de la semana, para I+D ingredientes",bloque("ingredientes",R.ingredientes));
+  const htmlDes=envoltura("Muestras de deshidratada","Lo positivo y lo negativo de la semana, para I+D envolturas",bloque("deshidratada",R.deshidratada));
+  const htmlGen=envoltura("Informe general de muestras · I+D","Ingredientes y deshidratada",bloque("ingredientes",R.ingredientes)+bloque("deshidratada",R.deshidratada));
+  // Destinatarios por organigrama: departamentos id (jefe de I+D), ingredientes, envolturas
+  const dep=(id)=>datos.departamentos.find(d=>String(d._id||d.id)===id&&d.activo!==false)||datos.departamentos.find(d=>d.activo!==false&&new RegExp("^"+id,"i").test(String(d.nombre||"")));
+  const emailsDep=(id)=>{ const d=dep(id); if(!d) return []; return [...new Set((d.responsableIds||[]).map(x=>emailDeCuenta(datos,x)).filter(Boolean))]; };
+  const dest={jefeID:emailsDep("id"),ingredientes:emailsDep("ingredientes"),deshidratada:emailsDep("envolturas")};
+  const out={ok:true,anio,sem,resumen:Object.fromEntries(Object.entries(R).map(([k,x])=>[k,{enviadas:x.enviadas.length,positivas:x.positivas.length,negativas:x.negativas.length}])),destinatarios:dest,general:htmlGen,enviado:null};
+  if(enviar){
+    const env={};
+    // No se manda dos veces el mismo informe en el mismo día (el CEO puede cerrar y reabrir); con &forzar=1 sí
+    try{ const r=await fetch(`${FB}/informes_id/${anio}_s${sem}`); if(r.ok){ const f=(await r.json()).fields||{}; const cu=f.enviadoEl&&f.enviadoEl.stringValue;
+      if(cu&&Date.now()-Date.parse(cu)<20*3600000&&!forzar){ out.enviado={omitido:"ya enviado el "+cu}; return out; } } }catch(e){}
+    if(dest.ingredientes.length) env.ingredientes=await enviarRetrasos(dest.ingredientes,`🧂 Muestras de ingredientes · semana ${sem}: ${R.ingredientes.positivas.length} positivas · ${R.ingredientes.negativas.length} negativas`,htmlIng);
+    if(dest.deshidratada.length) env.deshidratada=await enviarRetrasos(dest.deshidratada,`🌯 Muestras de deshidratada · semana ${sem}: ${R.deshidratada.positivas.length} positivas · ${R.deshidratada.negativas.length} negativas`,htmlDes);
+    if(dest.jefeID.length) env.jefeID=await enviarRetrasos(dest.jefeID,`🔬 Muestras de la semana ${sem} · informe general I+D`,htmlGen);
+    if(!dest.jefeID.length&&!dest.ingredientes.length&&!dest.deshidratada.length) env.error="Ningún responsable de I+D con email en el organigrama (departamentos id / ingredientes / envolturas)";
+    out.enviado=env;
+    try{ await setDocSimple("informes_id",`${anio}_s${sem}`,{anio,sem,enviadoEl:new Date().toISOString(),destinatarios:JSON.stringify(dest),resumen:JSON.stringify(out.resumen)}); }catch(e){}
+  }
+  return out;
+}
+async function setDocSimple(col,id,obj){
+  const f={}; for(const [k,v] of Object.entries(obj)){ if(v==null) continue; f[k]=typeof v==="number"?{doubleValue:v}:{stringValue:String(v)}; }
+  await fetch(`${FB}/${col}/${encodeURIComponent(id)}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:f})});
+}
 async function enviarRetrasos(to,subject,html){
   const base=process.env.VERCEL_PROJECT_PRODUCTION_URL
     ? "https://"+process.env.VERCEL_PROJECT_PRODUCTION_URL : CRM;
@@ -1543,6 +1609,18 @@ module.exports = async function handler(req, res){
     // ─────── (sep 2026) Datos del cierre de los jefes, en JSON ───────
     // ?panel=semana&semana=39&anio=2026 → mismas cifras que el informe del CEO,
     // por equipo y por comercial (ventas, objetivo, actividad, muestras, cobros)
+    // (oct 2026) ?informeID=1&semana=43&anio=2026[&enviar=1] → informe semanal de MUESTRAS para I+D.
+    // Dos tipos de producto: ingredientes y deshidratada. Cada responsable (departamentos «ingredientes» y
+    // «envolturas» del organigrama) recibe lo positivo y lo negativo de su tipo; el jefe de I+D (departamento
+    // «id») recibe el informe general con los dos. Lo lanza el cierre del CEO; sin &enviar=1 solo lo enseña.
+    if(req.method==="GET" && req.query && req.query.informeID==="1"){
+      const hoyP=isoSemanaC(new Date());
+      const anioP=Number(req.query.anio)||hoyP.anio, semP=Number(req.query.semana)||hoyP.sem;
+      const out=await informeMuestrasID(anioP,semP,req.query.enviar==="1",req.query.forzar==="1");
+      res.setHeader("Cache-Control","no-store");
+      if(req.query.html==="1"){ res.setHeader("Content-Type","text/html; charset=utf-8"); res.status(200).send(out.general||"<p>sin datos</p>"); return; }
+      res.status(200).json(out); return;
+    }
     if(req.method==="GET" && req.query && req.query.panel==="semana"){
       const hoyP=isoSemanaC(new Date());
       const anioP=Number(req.query.anio)||hoyP.anio, semP=Number(req.query.semana)||hoyP.sem;
