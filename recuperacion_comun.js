@@ -1701,7 +1701,8 @@
         +(ab?'<div style="padding:0 15px 8px">'+cuerpo+'</div>':'')+'</div>'; };
     const subCom=(f)=>f.casos.length+' '+cfg.unidad+(f.sub?' · '+f.sub:'')+' · '
       +(!f.mal?'<span style="color:#16A34A;font-weight:700">en objetivo</span>':f.plan?'<span style="color:#D97706;font-weight:700">con plan</span>':'<span style="color:#DC2626;font-weight:700">sin plan</span>');
-    const cuerpoCom=(f)=>planH(f)+(f.casos.length?grupos(f):'<p class="rcu-muted">Ninguno.</p>');
+    // (oct 2026) f.extra: HTML propio de cada pantalla debajo de los datos del comercial (p. ej. mensaje del CEO a sus responsables)
+    const cuerpoCom=(f)=>planH(f)+(f.casos.length?grupos(f):'<p class="rcu-muted">Ninguno.</p>')+(f.extra||"");
     const chipPlan=(f)=>{ const sinA=(f.casos||[]).filter(x=>x.conAccion===false).length;
       return '<div style="margin-top:5px;display:flex;gap:6px;flex-wrap:wrap">'
         +(f.plan?'<span style="background:#DCFCE7;color:#14532D;border-radius:8px;padding:3px 8px;font-size:12px;font-weight:700;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">📝 '+e_(String(f.plan).slice(0,90))+'</span>'
