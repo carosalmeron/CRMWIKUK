@@ -2005,11 +2005,35 @@ async function cargarPasos(){
         &&(esCeo||esDir||!EQUIPO||U(c.equipo).includes(EQUIPO)||EQUIPO.includes(U(c.equipo)))
         &&RC.puedeArchivar(esCeo,true,c,c.archivoMotivo));
       out.recup={n:casos.length,eur:casos.reduce((t,c)=>t+RC.num(c.perdido),0),
-        casos:casos.sort((a,b)=>RC.num(b.perdido)-RC.num(a.perdido)).map(c=>({nombre:c.nombre,agente:c.agente,perdido:RC.num(c.perdido),motivo:c.archivoMotivo||"",nota:c.archivoNota||""}))};
+        casos:casos.sort((a,b)=>RC.num(b.perdido)-RC.num(a.perdido)).map(c=>({id:c._id,nombre:c.nombre,agente:c.agente,agenteNombre:c.agenteNombre||"",perdido:RC.num(c.perdido),motivo:c.archivoMotivo||"",nota:c.archivoNota||"",_c:c}))};
     }
   }catch(e){ console.warn("pasos",e); }
   PASOS_DATA=out; if(VISTA==="lista") pintar();
 }
+// (oct 2026) Decidir una propuesta de «dejar de insistir» desde el cierre (misma lógica que recuperacion.html)
+window.decidirArchivoAqui=async(id,ok,btn)=>{
+  const D=PASOS_DATA||{}, x=(D.recup&&D.recup.casos||[]).find(c=>c.id===id); if(!x||!x._c) return;
+  const c=x._c, t=((document.getElementById("rsq_"+id)||{}).value||"").trim();
+  if(!ok&&t.length<5){ alert("Escribe por qué hay que seguir insistiendo: el comercial lo verá en su parte."); return; }
+  const quien=window._MI_NOMBRE_JEFE||AGENTE||"Dirección", ahora=new Date().toISOString();
+  if(!RC.puedeArchivar(esCeo,true,c,c.archivoMotivo)){ alert("Este lo decide el CEO."); return; }
+  const campos=ok?{...RC.camposAprobar(c.archivoMotivo,ahora),archivoDecision:"aprobado",archivoRespuesta:t,archivadoPor:quien,archivadoEn:ahora}
+    :{estado:RC.tienePlan(c)?"diagnosticado":"abierto",archivoDecision:"rechazado",archivoRespuesta:t,ultimaAccion:c.ultimaAccion||""};
+  campos.historial=(c.historial||[]).concat([{sem:SEMANA,fecha:ahora,por:quien,sistema:ok?`${quien} aprueba dejar de insistir${t?": "+t:""} (${c.archivoMotivo||""})`:`${quien} no aprueba dejar de insistir: ${t}`}]);
+  if(btn){ btn.disabled=true; btn.textContent="Guardando…"; }
+  try{ await RC.guardar(id,campos); Object.assign(c,campos);
+    D.recup.casos=D.recup.casos.filter(y=>y.id!==id); D.recup.n=D.recup.casos.length; D.recup.eur=D.recup.casos.reduce((s,y)=>s+y.perdido,0);
+    const el=document.getElementById("arch_"+id); if(el) el.innerHTML='<div style="font-size:12.5px;color:'+(ok?"#15803D":"#B91C1C")+';font-weight:700">'+(ok?"✅ "+escT(c.nombre)+" · "+escT(RC.txtEstadoCerrado(c)||"archivado"):"✖ "+escT(c.nombre)+" · sigue en el plan del comercial")+'</div>';
+    pintar(); }
+  catch(e){ if(btn){ btn.disabled=false; btn.textContent=ok?"✅ De acuerdo":"Enviar al comercial"; } alert("No se ha guardado: "+e.message); }
+};
+window.decidirArchivoTodos=async(btn)=>{
+  const D=PASOS_DATA||{}, L=(D.recup&&D.recup.casos||[]).slice(); if(!L.length) return;
+  if(!confirm("¿De acuerdo con dejar de insistir a los "+L.length+" clientes de la lista?")) return;
+  btn.disabled=true; btn.textContent="Guardando…";
+  for(const x of L){ try{ await decidirArchivoAqui(x.id,true,null); }catch(e){} }
+  pintar();
+};
 function filasKpis(){
   return USUARIOS.filter(a=>!(typeof noCierra==="function"&&noCierra(a))).map(a=>({nombre:a.nombre,equipo:esJefe?"":(a.equipo||""),
     k:window.RC?RC.parseKpis(((CIERRES[a.id]||{}).info)||{}):null}));
@@ -2973,9 +2997,15 @@ function pasosCierre(sinCerrar){
   // 4 · Plan de recuperación: dejar de insistir
   pasos.push({k:"recup",ok:D.recup?!D.recup.n:false,t:"Clientes que piden dejar de insistir",
     d:!D.recup?"Comprobando…":D.recup.n?`${D.recup.n} que puedes decidir tú (${eu(D.recup.eur)}).`:"Ninguna pendiente de tu decisión.",
-    c:()=>D.recup&&D.recup.n?D.recup.casos.map(c=>'<div style="padding:7px 0;border-top:1px solid rgba(0,0,0,.06);font-size:13px"><div style="display:flex;justify-content:space-between;gap:8px"><b>'+escT(c.nombre)+'</b><b style="color:#B91C1C">−'+eu(c.perdido)+'</b></div>'
-      +'<div style="font-size:12px;color:var(--muted)">'+escT(c.agente)+' · '+escT(c.motivo)+(c.nota?' · “'+escT(c.nota)+'”':'')+'</div></div>').join("")
-      +'<button class="mini on" style="margin-top:6px" onclick="location.href=urlRecup()">Decidir en el Plan de recuperación ›</button>'
+    // (oct 2026) Se decide aquí mismo, caso a caso o todos de golpe: antes solo había un enlace al Plan de recuperación
+    c:()=>D.recup&&D.recup.n?'<div style="font-size:12.5px;color:var(--muted);margin-bottom:4px">Cada comercial pide dejar de insistir a estos clientes por el motivo que indica. <b>De acuerdo</b> = el cliente se archiva, se duerme 60 días o se bloquea según el motivo y desaparece del trabajo diario. <b>Seguir insistiendo</b> = vuelve al plan del comercial con tu respuesta.</div>'
+      +D.recup.casos.map(c=>'<div id="arch_'+escT(c.id)+'" style="padding:7px 0;border-top:1px solid rgba(0,0,0,.06);font-size:13px"><div style="display:flex;justify-content:space-between;gap:8px"><b>'+escT(c.nombre)+'</b><b style="color:#B91C1C">−'+eu(c.perdido)+'</b></div>'
+      +'<div style="font-size:12px;color:var(--muted)">'+escT(c.agenteNombre||c.agente)+' · '+escT(c.motivo)+(c.nota?' · “'+escT(c.nota)+'”':'')+'</div>'
+      +'<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:5px"><button class="mini" style="border-color:#86EFAC;color:#15803D;font-weight:800" onclick="decidirArchivoAqui(\''+escT(c.id)+'\',true,this)">✅ De acuerdo</button>'
+      +'<button class="mini" style="border-color:#FCA5A5;color:#B91C1C;font-weight:800" onclick="var t=this.parentNode.nextElementSibling;t.hidden=!t.hidden;if(!t.hidden)t.querySelector(\'textarea\').focus()">✖ Seguir insistiendo</button></div>'
+      +'<div hidden style="margin-top:5px"><textarea id="rsq_'+escT(c.id)+'" placeholder="Por qué hay que seguir: el comercial lo verá en su parte" style="width:100%;min-height:46px;font:inherit;font-size:13px;padding:7px;border:1.5px solid #FCA5A5;border-radius:8px;box-sizing:border-box"></textarea>'
+      +'<button class="mini" style="margin-top:4px;border-color:#B91C1C;background:#B91C1C;color:#fff;font-weight:800" onclick="decidirArchivoAqui(\''+escT(c.id)+'\',false,this)">Enviar al comercial</button></div></div>').join("")
+      +'<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"><button class="mini on" onclick="decidirArchivoTodos(this)">✅ De acuerdo con los '+D.recup.n+'</button><button class="mini" onclick="location.href=urlRecup()">Ver en el Plan de recuperación ›</button></div>'
       +'<div style="font-size:12px;color:var(--muted);margin-top:4px">'+(esCeo?"A partir de 20.000 € solo las decides tú.":"Por debajo de 20.000 €; las de más las decide el CEO.")+'</div>':""});
   // (sep 2026) Secciones del cierre, en árbol
   if(window.RC){
