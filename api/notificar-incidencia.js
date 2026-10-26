@@ -1106,6 +1106,10 @@ async function datosCEO(anio,sem){
       // nombre) en esta semana o en las cuatro anteriores: Esther pasaba por comité y aun así quedaba fuera.
       const tieneComite=(flujoC||[]).some(f=>f.paso==="comite"&&numC(f.semana)>=sem-4&&numC(f.semana)<=sem&&(A.mismo(f.agente,g.cod)||A.mismo(f.agente,g.id)||A.mismo(f.agenteNombre,g.nombre)));
       if(!tieneParte&&!tieneComite&&!numC((suyo(res,g)||{}).ventasAct)){ (G.jefesFuera=G.jefesFuera||[]).push(g.nombre+" ("+g.cod+"): sin parte de comercial, sin comité ni ventas"); continue; } }
+    // (oct 2026) Si la ficha dice «no entrega parte» pero de hecho entrega (parte suyo esta semana o en las 4 anteriores),
+    // manda la realidad: David Mag tenía una ficha duplicada con «no» y salía como si no entregara.
+    if(g.sinParte){ const parteCom=(i)=>i.tipo!=="responsable"&&(A.mismo(i.agente,g.cod)||A.mismo(i.agente,g.id));
+      if(suInf.some(parteCom)||inf.some(i=>parteCom(i)&&numC(i.semana)>=sem-4&&numC(i.semana)<=sem)){ g.sinParte=false; (G.fichaNoMal=G.fichaNoMal||[]).push(g.nombre+" ("+g.cod+"): la ficha dice «no entrega parte» pero sí entrega"); } }
     const ausente=suInf.some(i=>i.estado==="ausente"||i.ausente===true);
     if(ausente){ E.aus++; E.gente.push({...g,ausente:true,motivo:(suInf.find(i=>i.ausenteMotivo)||{}).ausenteMotivo||"Ausente"}); continue; }
     if(g.sinParte){ /* no entrega parte: ni cerrado ni sin cerrar */ } else if(suInf.length) E.cerr++; else if(g.entrega!=="no") E.sinCerrar.push(g.nombre);
@@ -1632,7 +1636,7 @@ module.exports = async function handler(req, res){
       const campos=["id","cod","nombre","equipo","ausente","motivo","vSem","sinDatoSem","objSem","mAct","mObj","mAnt","soloCobros","pedSem","pedMes","prevMes","sinDatoPed","pedFuente","vMes","vis","lla","mEnv","mOk","mKo",
         "mEnvA","mOkA","mKoA","m60","mAb","mSem","mOkL","mKoL","obj","cobros","nFacV","limite","k","nota","facV","cobFecha","sinParte"];
       res.setHeader("Cache-Control","no-store");
-      res.status(200).json({ok:true,sem:D.sem,anio:D.anio,mNum:D.mNum,jefesFuera:(D.G&&D.G.jefesFuera)||[],fueraPanel:(D.G&&D.G.fueraPanel)||[],
+      res.status(200).json({ok:true,sem:D.sem,anio:D.anio,mNum:D.mNum,jefesFuera:(D.G&&D.G.jefesFuera)||[],fueraPanel:(D.G&&D.G.fueraPanel)||[],fichaNoMal:(D.G&&D.G.fichaNoMal)||[],
         equipos:D.equipos.map(E=>({eq:E.eq,jefe:E.jefe,obj:E.obj,cerr:E.cerr,aus:E.aus,sinCerrar:E.sinCerrar,
           gente:E.gente.map(p=>{ const o={}; campos.forEach(k=>{ if(p[k]!==undefined) o[k]=p[k]; }); return o; })}))});
       return;
