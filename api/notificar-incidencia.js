@@ -1007,7 +1007,11 @@ async function datosCEO(anio,sem){
   // (oct 2026) Misma regla que el portal «Cierre de la semana»: fuera quien NO entrega parte
   // («no reporta»), el personal de departamento y quien no tiene código de vendedor (salvo que
   // esté marcado que sí entrega). Antes aparecían en «Comerciales que no llegan» con 0/56.
-  const gente=Object.values(map).filter(g=>g.equipo&&!(g.noEntrega&&!g.siEntrega)&&!g.tipDep&&(g.conCodigo||g.siEntrega||g.jefeVende));
+  // (oct 2026) Quien NO entrega parte pero tiene código de vendedor (R-JESUS, R-PEPE…) entra igualmente con sus
+  // ventas, marcado sinParte: cuenta en ventas y cobros, y no en partes, actividad ni muestras.
+  const gente=Object.values(map).filter(g=>g.equipo&&!g.tipDep&&(g.conCodigo||g.siEntrega||g.jefeVende))
+    .map(g=>(g.noEntrega&&!g.siEntrega)?{...g,sinParte:true}:g);
+  const fueraPanel=Object.values(map).filter(g=>!gente.some(x=>x.id===g.id)).map(g=>g.nombre+" ("+g.cod+"): "+(!g.equipo?"sin equipo en la ficha":g.tipDep?"personal de departamento ("+g.tipDep+")":"sin código de vendedor (grupoAgente/catalogoVendedor) y sin «sí entrega parte»"));
 
   // Jefes por equipo, para el nombre en la tarjeta
   const jefes={};
@@ -1027,7 +1031,7 @@ async function datosCEO(anio,sem){
   const hoyISO=new Date().toISOString().slice(0,10);
 
   const equipos={};
-  const G={vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,nFacV:0,t30:0,t60:0,t90:0,t90mas:0,
+  const G={fueraPanel,vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,nFacV:0,t30:0,t60:0,t90:0,t90mas:0,
     vis:0,lla:0,mEnv:0,mOk:0,mKo:0,mPend:0,mOkAnt:0,mResAnt:0,objVis:0,objLla:0,objMue:0,objMueOk:0,
     rechazos:[],sinResp:[],peor:[]};
 
@@ -1095,7 +1099,7 @@ async function datosCEO(anio,sem){
     const suInf=inf.filter(i=>numC(i.semana)===sem&&(A.mismo(i.agente,g.cod)||A.mismo(i.agente,g.id)));
     // Jefe que vende: solo si de verdad hace parte de comercial o tiene ventas en Power BI
     // (se queda si: «sí entrega parte», o tiene un parte de comercial esta semana o alguna reciente, o tiene ventas en Power BI)
-    if(g.jefeVende&&!g.siEntrega){
+    if(g.jefeVende&&!g.siEntrega&&!g.sinParte){
       const parteCom=(i)=>i.tipo!=="responsable"&&i.estado!=="ausente"&&(A.mismo(i.agente,g.cod)||A.mismo(i.agente,g.id));
       const tieneParte=suInf.some(parteCom)||inf.some(i=>parteCom(i)&&numC(i.semana)>=sem-4);
       // (oct 2026) También cuenta como comercial si su jefe le ha hecho comité como a un comercial (acta a su
@@ -1104,7 +1108,7 @@ async function datosCEO(anio,sem){
       if(!tieneParte&&!tieneComite&&!numC((suyo(res,g)||{}).ventasAct)){ (G.jefesFuera=G.jefesFuera||[]).push(g.nombre+" ("+g.cod+"): sin parte de comercial, sin comité ni ventas"); continue; } }
     const ausente=suInf.some(i=>i.estado==="ausente"||i.ausente===true);
     if(ausente){ E.aus++; E.gente.push({...g,ausente:true,motivo:(suInf.find(i=>i.ausenteMotivo)||{}).ausenteMotivo||"Ausente"}); continue; }
-    if(suInf.length) E.cerr++; else if(g.entrega!=="no") E.sinCerrar.push(g.nombre);
+    if(g.sinParte){ /* no entrega parte: ni cerrado ni sin cerrar */ } else if(suInf.length) E.cerr++; else if(g.entrega!=="no") E.sinCerrar.push(g.nombre);
 
     const p={...g,vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,nFacV:0,vis:0,lla:0,mEnv:0,mOk:0,semMal:0,
       mKo:0,mEnvA:0,mOkA:0,mKoA:0,m60:[],mAb:[]};
@@ -1626,9 +1630,9 @@ module.exports = async function handler(req, res){
       const anioP=Number(req.query.anio)||hoyP.anio, semP=Number(req.query.semana)||hoyP.sem;
       const D=await datosCEO(anioP,semP);
       const campos=["id","cod","nombre","equipo","ausente","motivo","vSem","sinDatoSem","objSem","mAct","mObj","mAnt","soloCobros","pedSem","pedMes","prevMes","sinDatoPed","pedFuente","vMes","vis","lla","mEnv","mOk","mKo",
-        "mEnvA","mOkA","mKoA","m60","mAb","mSem","mOkL","mKoL","obj","cobros","nFacV","limite","k","nota","facV","cobFecha"];
+        "mEnvA","mOkA","mKoA","m60","mAb","mSem","mOkL","mKoL","obj","cobros","nFacV","limite","k","nota","facV","cobFecha","sinParte"];
       res.setHeader("Cache-Control","no-store");
-      res.status(200).json({ok:true,sem:D.sem,anio:D.anio,mNum:D.mNum,jefesFuera:(D.G&&D.G.jefesFuera)||[],
+      res.status(200).json({ok:true,sem:D.sem,anio:D.anio,mNum:D.mNum,jefesFuera:(D.G&&D.G.jefesFuera)||[],fueraPanel:(D.G&&D.G.fueraPanel)||[],
         equipos:D.equipos.map(E=>({eq:E.eq,jefe:E.jefe,obj:E.obj,cerr:E.cerr,aus:E.aus,sinCerrar:E.sinCerrar,
           gente:E.gente.map(p=>{ const o={}; campos.forEach(k=>{ if(p[k]!==undefined) o[k]=p[k]; }); return o; })}))});
       return;
