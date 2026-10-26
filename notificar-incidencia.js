@@ -147,8 +147,9 @@ function cuentaValida(u){
   return u && !u.duplicadaDe && u.activo!==false && !u._legacy;
 }
 
-// Buzones compartidos: solo se usan si la persona no tiene otro email
-const EMAILS_GENERICOS=["info@unitedcaro.com"];
+// Buzones compartidos: solo se usan si la persona no tiene otro email.
+// (oct 2026) Con la variable BUZON_GENERICO=no en Vercel, no se usa nunca: quien no tenga email personal no recibe nada.
+const EMAILS_GENERICOS=(String(process.env.BUZON_GENERICO||"").toLowerCase()==="no"?[]:["info@unitedcaro.com"]);
 
 // Todas las cuentas (portal + usuarios) de una persona por id, deduplicadas
 function emailDeCuenta(datos, cuentaId){
@@ -349,7 +350,7 @@ const CRM       = "https://crmwikuk.vercel.app";
 // Quién recibe cada aviso: Operaciones y lo que cuelga de ella, más dirección
 const RAIZ_DEPTOS = ["operaciones"];
 const SIEMPRE     = ["ceo", "dir"];
-const GENERICOS_R = ["info@unitedcaro.com"];
+const GENERICOS_R = (String(process.env.BUZON_GENERICO||"").toLowerCase()==="no"?[]:["info@unitedcaro.com"]);
 
 // Organigrama base (el de la base de datos manda sobre esto)
 const DEPTOS_BASE = [
@@ -669,6 +670,72 @@ function htmlResumenIncViejas(viejas,porTipo,op){
       <p style="font-size:11px;color:#94A3B8;margin:14px 0 0;text-align:center">CRM Grupo Consolidado · resumen de los lunes</p>
     </div></div>`;
 }
+
+// ═══════════════ (oct 2026) Informe semanal de muestras para I+D ═══════════════
+const ES_DESHIDRATADA=/MAEXTRA|ESPECTA|DESHIDRAT|COLAGEN|COLÁGEN|\bMXP?\d|\bESN\d|\bESL\d|\bESC\d|\bPX\d|\bPR\d/i;
+function tipoMuestraID(m){
+  const t=String(m.tipoProducto||m.categoria||"").toLowerCase();
+  if(/deshidrat|envoltur|colag/.test(t)) return "deshidratada"; if(/ingredient|especia|aditiv/.test(t)) return "ingredientes";
+  const txt=[m.prodCodigo,m.codigo,m.prod,m.prodNombre,m.producto,m.familia].filter(Boolean).join(" ");
+  return ES_DESHIDRATADA.test(txt)?"deshidratada":"ingredientes";
+}
+async function informeMuestrasID(anio,sem,enviar,forzar){
+  const lunes=lunesC(anio,sem); const domingo=new Date(lunes); domingo.setDate(lunes.getDate()+6); domingo.setHours(23,59,59,999);
+  const enSem=d=>d&&d>=lunes&&d<=domingo;
+  const [mues,datos]=await Promise.all([listColeccion("muestras"),cargarDatos()]);
+  const nombreDe=(id)=>{ const u=[...datos.usuarios,...datos.portal].find(u=>u&&[u._id,u.id,u.crmId,u.username,u.grupoAgente,u.catalogoVendedor].some(k=>k&&String(k).toUpperCase()===String(id||"").toUpperCase())); return (u&&u.nombre)||id||""; };
+  const fx=(d)=>d?String(d.getDate()).padStart(2,"0")+"/"+String(d.getMonth()+1).padStart(2,"0"):"";
+  const R={ingredientes:{enviadas:[],positivas:[],negativas:[],sinRespuesta:[]},deshidratada:{enviadas:[],positivas:[],negativas:[],sinRespuesta:[]}};
+  for(const m of mues){
+    if(!m||m.eliminada) continue;
+    const t=tipoMuestraID(m), est=String(m.estado||"").toLowerCase(), fe=fechaDocC(m), fFb=fechaC(m.fechaFeedback);
+    const fila={cliente:m.cliente||m.clienteNombre||"(sin cliente)",producto:[m.prodCodigo||m.codigo||"",m.prod||m.prodNombre||m.producto||""].filter(Boolean).join(" · "),
+      comercial:nombreDe(m.agente||m.agenteId||m.comercial||m.creadoPor),fecha:fx(fe),respuesta:fx(fFb),estado:m.estado||"",
+      comentario:String(m.motivo||m.nota||m.comentario||m.feedback||m.observaciones||"").trim(),dias:fe?Math.round((domingo-fe)/86400000):null};
+    if(enSem(fe)) R[t].enviadas.push(fila);
+    if(enSem(fFb)){ if(/pedido|positiv|aceptada|proyecto/.test(est)) R[t].positivas.push(fila); else if(/ko|negativ|rechaz/.test(est)) R[t].negativas.push(fila); }
+    // Solo lo de la semana: las enviadas y las contestadas en ella. Lo anterior sin cerrar no va (petición del CEO, 25/10).
+  }
+  const esc=(t)=>String(t||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+  const tabla=(L,conResp)=>L.length?`<table style="width:100%;border-collapse:collapse;font-size:13px;margin:4px 0 10px">
+      <tr style="font-size:11px;color:#6B7684;text-transform:uppercase"><td style="padding:4px 6px">Cliente</td><td style="padding:4px 6px">Producto</td><td style="padding:4px 6px">Comercial</td><td style="padding:4px 6px">${conResp?"Respuesta":"Enviada"}</td></tr>
+      ${L.map(f=>`<tr style="border-top:1px solid #EEF1F5"><td style="padding:5px 6px"><b>${esc(f.cliente)}</b></td><td style="padding:5px 6px">${esc(f.producto||"—")}</td><td style="padding:5px 6px">${esc(f.comercial)}</td><td style="padding:5px 6px;white-space:nowrap">${esc(conResp?f.respuesta:f.fecha)}${f.dias!=null&&!conResp&&f.dias>14?` · <span style="color:#B91C1C">${f.dias} d</span>`:""}</td></tr>${f.comentario?`<tr><td colspan="4" style="padding:0 6px 6px;font-size:12.5px;color:#3A424E">↳ ${esc(f.comentario)}</td></tr>`:""}`).join("")}</table>`:'<div style="font-size:12.5px;color:#6B7684;margin:2px 0 10px">ninguna</div>';
+  const bloque=(t,x)=>`<div style="margin-top:14px"><div style="font-size:15px;font-weight:800;color:#14181F">${t==="ingredientes"?"🧂 Ingredientes":"🌯 Deshidratada"} · semana ${sem}</div>
+      <div style="font-size:12.5px;color:#6B7684;margin:2px 0 8px">${x.enviadas.length} enviadas esta semana · <b style="color:#15803D">${x.positivas.length} positivas</b> · <b style="color:#B91C1C">${x.negativas.length} negativas</b></div>
+      <div style="font-weight:800;color:#15803D">✅ Positivas (${x.positivas.length})</div>${tabla(x.positivas,true)}
+      <div style="font-weight:800;color:#B91C1C">❌ Negativas (${x.negativas.length})</div>${tabla(x.negativas,true)}
+      <div style="font-weight:800;color:#14181F">📦 Enviadas esta semana (${x.enviadas.length})</div>${tabla(x.enviadas,false)}</div>`;
+  const envoltura=(titulo,sub,cuerpo)=>`<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:680px;margin:0 auto;color:#14181F">
+      <div style="background:#14181F;color:#fff;padding:16px 20px;border-radius:12px 12px 0 0"><div style="font-size:11px;letter-spacing:.08em;opacity:.7;text-transform:uppercase">Muestras · semana ${sem} (${fx(lunes)}–${fx(new Date(domingo))})</div>
+        <div style="font-size:19px;font-weight:800;margin-top:2px">${esc(titulo)}</div><div style="font-size:12.5px;opacity:.8;margin-top:2px">${esc(sub)}</div></div>
+      <div style="border:1px solid #DCE1E7;border-top:none;border-radius:0 0 12px 12px;padding:14px 20px">${cuerpo}
+        <p style="font-size:11px;color:#94A3B8;margin:14px 0 0;text-align:center">CRM Grupo Consolidado · informe automático del cierre semanal del CEO</p></div></div>`;
+  const htmlIng=envoltura("Muestras de ingredientes","Lo positivo y lo negativo de la semana, para I+D ingredientes",bloque("ingredientes",R.ingredientes));
+  const htmlDes=envoltura("Muestras de deshidratada","Lo positivo y lo negativo de la semana, para I+D envolturas",bloque("deshidratada",R.deshidratada));
+  const htmlGen=envoltura("Informe general de muestras · I+D","Ingredientes y deshidratada",bloque("ingredientes",R.ingredientes)+bloque("deshidratada",R.deshidratada));
+  // Destinatarios por organigrama: departamentos id (jefe de I+D), ingredientes, envolturas
+  const dep=(id)=>datos.departamentos.find(d=>String(d._id||d.id)===id&&d.activo!==false)||datos.departamentos.find(d=>d.activo!==false&&new RegExp("^"+id,"i").test(String(d.nombre||"")));
+  const emailsDep=(id)=>{ const d=dep(id); if(!d) return []; return [...new Set((d.responsableIds||[]).map(x=>emailDeCuenta(datos,x)).filter(Boolean))]; };
+  const dest={jefeID:emailsDep("id"),ingredientes:emailsDep("ingredientes"),deshidratada:emailsDep("envolturas")};
+  const out={ok:true,anio,sem,resumen:Object.fromEntries(Object.entries(R).map(([k,x])=>[k,{enviadas:x.enviadas.length,positivas:x.positivas.length,negativas:x.negativas.length}])),destinatarios:dest,general:htmlGen,enviado:null};
+  if(enviar){
+    const env={};
+    // No se manda dos veces el mismo informe en el mismo día (el CEO puede cerrar y reabrir); con &forzar=1 sí
+    try{ const r=await fetch(`${FB}/informes_id/${anio}_s${sem}`); if(r.ok){ const f=(await r.json()).fields||{}; const cu=f.enviadoEl&&f.enviadoEl.stringValue;
+      if(cu&&Date.now()-Date.parse(cu)<20*3600000&&!forzar){ out.enviado={omitido:"ya enviado el "+cu}; return out; } } }catch(e){}
+    if(dest.ingredientes.length) env.ingredientes=await enviarRetrasos(dest.ingredientes,`🧂 Muestras de ingredientes · semana ${sem}: ${R.ingredientes.positivas.length} positivas · ${R.ingredientes.negativas.length} negativas`,htmlIng);
+    if(dest.deshidratada.length) env.deshidratada=await enviarRetrasos(dest.deshidratada,`🌯 Muestras de deshidratada · semana ${sem}: ${R.deshidratada.positivas.length} positivas · ${R.deshidratada.negativas.length} negativas`,htmlDes);
+    if(dest.jefeID.length) env.jefeID=await enviarRetrasos(dest.jefeID,`🔬 Muestras de la semana ${sem} · informe general I+D`,htmlGen);
+    if(!dest.jefeID.length&&!dest.ingredientes.length&&!dest.deshidratada.length) env.error="Ningún responsable de I+D con email en el organigrama (departamentos id / ingredientes / envolturas)";
+    out.enviado=env;
+    try{ await setDocSimple("informes_id",`${anio}_s${sem}`,{anio,sem,enviadoEl:new Date().toISOString(),destinatarios:JSON.stringify(dest),resumen:JSON.stringify(out.resumen)}); }catch(e){}
+  }
+  return out;
+}
+async function setDocSimple(col,id,obj){
+  const f={}; for(const [k,v] of Object.entries(obj)){ if(v==null) continue; f[k]=typeof v==="number"?{doubleValue:v}:{stringValue:String(v)}; }
+  await fetch(`${FB}/${col}/${encodeURIComponent(id)}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:f})});
+}
 async function enviarRetrasos(to,subject,html){
   const base=process.env.VERCEL_PROJECT_PRODUCTION_URL
     ? "https://"+process.env.VERCEL_PROJECT_PRODUCTION_URL : CRM;
@@ -884,11 +951,12 @@ async function datosCEO(anio,sem){
   const hace30=new Date(lunes); hace30.setDate(lunes.getDate()-30);
   const enSem=d=>d&&d>=lunes&&d<=domingo;
 
-  const [alias,us,pu,inf,res,cob,estac,objs,objEq,mues,vis,sems,objSem,entr]=await Promise.all([
+  const [alias,us,pu,inf,res,cob,estac,objs,objEq,mues,vis,sems,objSem,entr,flujoC]=await Promise.all([
     leerTodoC("agentes_alias"),leerTodoC("usuarios"),leerTodoC("portal_users"),leerTodoC("informes"),
     leerTodoC("pbi_resumen_agente"),leerTodoC("cobros_comercial"),leerTodoC("pbi_estacionalidad"),
     leerTodoC("pbi_objetivos"),leerTodoC("objetivos_equipo"),leerTodoC("muestras"),leerTodoC("visitas"),
-    leerTodoC("pbi_semanas"),leerTodoC("objetivos_semana"),leerTodoC("pbi_entrada_agente").catch(()=>[])]);
+    leerTodoC("pbi_semanas"),leerTodoC("objetivos_semana"),leerTodoC("pbi_entrada_agente").catch(()=>[]),
+    leerTodoC("cierres_flujo").catch(()=>[])]);
   const A=crearAgentes(alias);
   // (sep 2026) Plan de recuperación: casos de clientes en caída (sin Francia)
   let recup=[];
@@ -903,7 +971,10 @@ async function datosCEO(anio,sem){
   const map={};
   [...us,...pu].forEach(u=>{
     const rol=String(u.rol||"").toLowerCase();
-    if(!["agente","crm_agente","comercial","vendedor"].includes(rol)) return;
+    // (oct 2026) Un jefe de equipo que además vende (Esther) cuenta como comercial: con código de vendedor
+    // o con «sí entrega parte». Se confirma más abajo con que tenga parte o ventas; si no, fuera.
+    const esJefeVende=["jefe","crm_jefe"].includes(rol)&&String(u.entregaParte||"").toLowerCase()!=="no";
+    if(!["agente","crm_agente","comercial","vendedor"].includes(rol)&&!esJefeVende) return;
     if(u.activo===false) return;
     const pos=[u.id,u._id,u.crmId,u.grupoAgente,u.catalogoVendedor,u.username,u.nombre].filter(Boolean);
     let canon=null,ficha=null;
@@ -916,23 +987,31 @@ async function datosCEO(anio,sem){
     const ep=String(u.entregaParte||"").toLowerCase();
     const tipDep=String(u.tipologia||"")||(u.departamentoId&&!/^(eq_|ventas$|comercial)/i.test(String(u.departamentoId))?String(u.departamentoId):"");
     const conCodigo=!!(u.grupoAgente||u.catalogoVendedor);
-    if(!map[canon]) map[canon]={id:canon,nombre,equipo:UC(A.equipo(ficha)||u.equipo||""),
+    // (oct 2026) El equipo manda el de la ficha de usuario; la tabla de alias solo si la ficha no lo dice.
+    // Esther está en INTERKEY en sus dos fichas pero su alias (de cuando era WK5) decía WIKUK y salía en el equipo equivocado.
+    if(!map[canon]) map[canon]={id:canon,nombre,equipo:UC(u.equipo||A.equipo(ficha)||""),
       cod:UC(u.grupoAgente||u.catalogoVendedor||canon),
       perfil:String(u.perfilComercial||"").toLowerCase(),
-      entrega:ep, noEntrega:ep==="no", siEntrega:ep==="si", tipDep, conCodigo};
+      entrega:ep, noEntrega:ep==="no", siEntrega:ep==="si", tipDep, conCodigo, jefeVende:esJefeVende, _eqFicha:!!u.equipo};
     else{ const m=map[canon];
+      if(!esJefeVende) m.jefeVende=false; else if(m.jefeVende===undefined) m.jefeVende=true;
       // (oct 2026) Si en cualquiera de sus fichas pone que NO entrega parte, no entrega
       if(ep==="no") m.noEntrega=true; if(ep==="si") m.siEntrega=true;
       if(tipDep) m.tipDep=tipDep; if(conCodigo) m.conCodigo=true;
       if(nombre.length>m.nombre.length&&!/^[a-z]+$/.test(nombre)) m.nombre=nombre;
-      if(!m.equipo&&u.equipo) m.equipo=UC(u.equipo);
+      if(u.equipo&&(!m.equipo||m.equipo!==UC(u.equipo))&&!m._eqFicha) m.equipo=UC(u.equipo);
+      if(u.equipo) m._eqFicha=true;
       if(!m.perfil&&u.perfilComercial) m.perfil=String(u.perfilComercial).toLowerCase();
       if(!m.entrega&&u.entregaParte) m.entrega=String(u.entregaParte).toLowerCase(); }
   });
   // (oct 2026) Misma regla que el portal «Cierre de la semana»: fuera quien NO entrega parte
   // («no reporta»), el personal de departamento y quien no tiene código de vendedor (salvo que
   // esté marcado que sí entrega). Antes aparecían en «Comerciales que no llegan» con 0/56.
-  const gente=Object.values(map).filter(g=>g.equipo&&!(g.noEntrega&&!g.siEntrega)&&!g.tipDep&&(g.conCodigo||g.siEntrega));
+  // (oct 2026) Quien NO entrega parte pero tiene código de vendedor (R-JESUS, R-PEPE…) entra igualmente con sus
+  // ventas, marcado sinParte: cuenta en ventas y cobros, y no en partes, actividad ni muestras.
+  const gente=Object.values(map).filter(g=>g.equipo&&!g.tipDep&&(g.conCodigo||g.siEntrega||g.jefeVende))
+    .map(g=>(g.noEntrega&&!g.siEntrega)?{...g,sinParte:true}:g);
+  const fueraPanel=Object.values(map).filter(g=>!gente.some(x=>x.id===g.id)).map(g=>g.nombre+" ("+g.cod+"): "+(!g.equipo?"sin equipo en la ficha":g.tipDep?"personal de departamento ("+g.tipDep+")":"sin código de vendedor (grupoAgente/catalogoVendedor) y sin «sí entrega parte»"));
 
   // Jefes por equipo, para el nombre en la tarjeta
   const jefes={};
@@ -952,55 +1031,20 @@ async function datosCEO(anio,sem){
   const hoyISO=new Date().toISOString().slice(0,10);
 
   const equipos={};
-  const G={vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,nFacV:0,t30:0,t60:0,t90:0,t90mas:0,
+  const G={fueraPanel,vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,nFacV:0,t30:0,t60:0,t90:0,t90mas:0,
     vis:0,lla:0,mEnv:0,mOk:0,mKo:0,mPend:0,mOkAnt:0,mResAnt:0,objVis:0,objLla:0,objMue:0,objMueOk:0,
     rechazos:[],sinResp:[],peor:[]};
 
-  for(const g of gente){
-    const E=equipos[g.equipo]||(equipos[g.equipo]={eq:g.equipo,jefe:jefes[g.equipo]||"",
-      gente:[],vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,vis:0,lla:0,mEnv:0,mOk:0,mKo:0,
-      cerr:0,aus:0,sinCerrar:[]});
-    // ¿Ha cerrado? informes de esa semana suyos
-    const suInf=inf.filter(i=>numC(i.semana)===sem&&(A.mismo(i.agente,g.cod)||A.mismo(i.agente,g.id)));
-    const ausente=suInf.some(i=>i.estado==="ausente"||i.ausente===true);
-    if(ausente){ E.aus++; E.gente.push({...g,ausente:true,motivo:(suInf.find(i=>i.ausenteMotivo)||{}).ausenteMotivo||"Ausente"}); continue; }
-    if(suInf.length) E.cerr++; else if(g.entrega!=="no") E.sinCerrar.push(g.nombre);
-
-    const p={...g,vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,nFacV:0,vis:0,lla:0,mEnv:0,mOk:0,semMal:0,
-      mKo:0,mEnvA:0,mOkA:0,mKoA:0,m60:[],mAb:[]};
-    // (sep 2026) Sus planes del parte: cobro, muestras de la semana que viene y actividad
-    try{ const ki=suInf.find(i=>i.kpis); p.k=ki?JSON.parse(ki.kpis):null; }catch(err){ p.k=null; }
-    const r=suyo(res,g), e2=suyo(estac,g), o2=suyo(objs,g);
-    p.vSem=numC(r.ventasSem);
-    // Semana pasada (informe pedido a mano): la foto congelada de esa semana
-    if(sem<isoSemanaC(new Date()).sem){
-      const foto=(sems.find(x=>semDeC(x)===anio*100+sem)||{}).agentes;
-      let ag=[]; try{ ag=JSON.parse(foto||"[]"); }catch(e){}
-      const f=ag.find(x=>A.mismo(x.id||x.agente,g.cod)||A.mismo(x.id||x.agente,g.id));
-      // (oct 2026) ventasSemAnt es la MISMA semana del AÑO PASADO (así está la medida en Power BI), no la semana
-      // anterior: se usaba como tal y el consolidado sumaba semanas de 2025. Sin foto congelada, no hay dato.
-      p.vSem=f?numC(f.ventasSem):0; if(!f) p.sinDatoSem=true;
-      if(f&&numC(f.baseSem)){ r.margenPctSem=numC(f.margenSem)/numC(f.baseSem)*100; } else r.margenPctSem=null;
-    }
-    p.mAct=numC(e2["act_"+mNum]);
-    // (oct 2026) Mes en curso: el resumen diario de Power BI (ventasMes) está más al día que la estacionalidad
-    if(mNum===new Date().getMonth()+1&&numC(r.ventasMes)>p.mAct) p.mAct=numC(r.ventasMes);
-    // Pedidos: introducidos esta semana y en el mes, y lo que queda por servir dentro del mes (pbi_entrada_agente)
-    { const en=suyo(entr,g)||{}; p.pedSem=numC(en.entradaSem); p.pedMes=numC(en.entradaMes); p.prevMes=numC(en.previstoMes); }
-    p.mObj=numC(o2["mes_"+mNum]);
-    if(!p.mObj) p.mObj=numC(o2.objAnual)*(numC(e2["peso_"+mNum])||1/12);
-    p.objSem=p.mObj?p.mObj/4.33:0;
-    p.mg=(r.margenPctSem!=null&&r.margenPctSem!=="")?numC(r.margenPctSem):null;
-    p.mgObj=numC(r.objetivoMargen)||null;
-    p.vMes=numC(r.ventasMes)||p.mAct;
-    // Politica de cobro: vencido <= 5 % de la venta de los dos ultimos meses cerrados
-    p.v2m=[mNum-1,mNum-2].reduce((t,k)=>t+(k>=1?numC(e2["act_"+k]):numC(e2["mes_"+(k+12)])),0);
-    p.limite=p.v2m*0.05;
-    for(const ag of semsPrev){
-      const f=ag.find(x=>A.mismo(x.id||x.agente,g.cod)||A.mismo(x.id||x.agente,g.id));
-      if(f&&p.objSem&&numC(f.ventasSem)<p.objSem*0.5) p.semMal++; else break;
-    }
-    const c=suyo(cob,g);
+  // (oct 2026) Cobros de una persona (sacado a función para poder dar los cobros también a quien no entrega parte)
+  // (oct 2026) Clientes que no van en Cobros (intercompañía y participadas): fuera de las listas y del total
+  const COBROS_EXCLUIR=/GLOBAL\s*CASING|DRIMANO|INTERCOMPA/i;
+  const filtrarCobros=(c)=>{ if(!c||!c.datos) return c||{}; let d=[]; try{ d=JSON.parse(c.datos||"[]"); }catch(e){ return c; }
+    const fuera=d.filter(x=>COBROS_EXCLUIR.test(String(x.c||""))); if(!fuera.length) return c;
+    const resto=d.filter(x=>!COBROS_EXCLUIR.test(String(x.c||"")));
+    return Object.assign({},c,{datos:JSON.stringify(resto),totalVencido:numC(c.totalVencido)-fuera.reduce((t,x)=>t+numC(x.ven),0),
+      nFacturasVencidas:Math.max(0,numC(c.nFacturasVencidas)-fuera.reduce((t,x)=>t+(x.f||[]).length,0))}); };
+  const llenarCobros=(p,g,E)=>{
+    const c=filtrarCobros(suyo(cob,g));
     p.cobFecha=String(c.fechaDatos||c.actualizado||"").slice(0,10);
     try{
       const vistasF=new Set();   // (sep 2026) la misma factura repetida solo cuenta una vez
@@ -1046,6 +1090,75 @@ async function datosCEO(anio,sem){
         G.peor.push({cli:cli.c||"",im:v,dias,tramo,quien:g.nombre});
       }
     }
+  };
+  for(const g of gente){
+    const E=equipos[g.equipo]||(equipos[g.equipo]={eq:g.equipo,jefe:jefes[g.equipo]||"",
+      gente:[],vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,vis:0,lla:0,mEnv:0,mOk:0,mKo:0,
+      cerr:0,aus:0,sinCerrar:[]});
+    // ¿Ha cerrado? informes de esa semana suyos
+    const suInf=inf.filter(i=>numC(i.semana)===sem&&(A.mismo(i.agente,g.cod)||A.mismo(i.agente,g.id)));
+    // Jefe que vende: solo si de verdad hace parte de comercial o tiene ventas en Power BI
+    // (se queda si: «sí entrega parte», o tiene un parte de comercial esta semana o alguna reciente, o tiene ventas en Power BI)
+    if(g.jefeVende&&!g.siEntrega&&!g.sinParte){
+      const parteCom=(i)=>i.tipo!=="responsable"&&i.estado!=="ausente"&&(A.mismo(i.agente,g.cod)||A.mismo(i.agente,g.id));
+      const tieneParte=suInf.some(parteCom)||inf.some(i=>parteCom(i)&&numC(i.semana)>=sem-4);
+      // (oct 2026) También cuenta como comercial si su jefe le ha hecho comité como a un comercial (acta a su
+      // nombre) en esta semana o en las cuatro anteriores: Esther pasaba por comité y aun así quedaba fuera.
+      const tieneComite=(flujoC||[]).some(f=>f.paso==="comite"&&numC(f.semana)>=sem-4&&numC(f.semana)<=sem&&(A.mismo(f.agente,g.cod)||A.mismo(f.agente,g.id)||A.mismo(f.agenteNombre,g.nombre)));
+      if(!tieneParte&&!tieneComite&&!numC((suyo(res,g)||{}).ventasAct)){ (G.jefesFuera=G.jefesFuera||[]).push(g.nombre+" ("+g.cod+"): sin parte de comercial, sin comité ni ventas"); continue; } }
+    // (oct 2026) Si la ficha dice «no entrega parte» pero de hecho entrega (parte suyo esta semana o en las 4 anteriores),
+    // manda la realidad: David Mag tenía una ficha duplicada con «no» y salía como si no entregara.
+    if(g.sinParte){ const parteCom=(i)=>i.tipo!=="responsable"&&(A.mismo(i.agente,g.cod)||A.mismo(i.agente,g.id));
+      if(suInf.some(parteCom)||inf.some(i=>parteCom(i)&&numC(i.semana)>=sem-4&&numC(i.semana)<=sem)){ g.sinParte=false; (G.fichaNoMal=G.fichaNoMal||[]).push(g.nombre+" ("+g.cod+"): la ficha dice «no entrega parte» pero sí entrega"); } }
+    const ausente=suInf.some(i=>i.estado==="ausente"||i.ausente===true);
+    if(ausente){ E.aus++; E.gente.push({...g,ausente:true,motivo:(suInf.find(i=>i.ausenteMotivo)||{}).ausenteMotivo||"Ausente"}); continue; }
+    if(g.sinParte){ /* no entrega parte: ni cerrado ni sin cerrar */ } else if(suInf.length) E.cerr++; else if(g.entrega!=="no") E.sinCerrar.push(g.nombre);
+
+    const p={...g,vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,nFacV:0,vis:0,lla:0,mEnv:0,mOk:0,semMal:0,
+      mKo:0,mEnvA:0,mOkA:0,mKoA:0,m60:[],mAb:[]};
+    // (sep 2026) Sus planes del parte: cobro, muestras de la semana que viene y actividad
+    try{ const ki=suInf.find(i=>i.kpis); p.k=ki?JSON.parse(ki.kpis):null; }catch(err){ p.k=null; }
+    const r=suyo(res,g), e2=suyo(estac,g), o2=suyo(objs,g);
+    p.vSem=numC(r.ventasSem);
+    // Semana pasada (informe pedido a mano): la foto congelada de esa semana
+    if(sem<isoSemanaC(new Date()).sem){
+      const foto=(sems.find(x=>semDeC(x)===anio*100+sem)||{}).agentes;
+      let ag=[]; try{ ag=JSON.parse(foto||"[]"); }catch(e){}
+      const f=ag.find(x=>A.mismo(x.id||x.agente,g.cod)||A.mismo(x.id||x.agente,g.id));
+      // (oct 2026) ventasSemAnt es la MISMA semana del AÑO PASADO (así está la medida en Power BI), no la semana
+      // anterior: se usaba como tal y el consolidado sumaba semanas de 2025. Sin foto congelada, no hay dato.
+      p.vSem=f?numC(f.ventasSem):0; if(!f) p.sinDatoSem=true;
+      // (oct 2026) Lo que el comercial tenía al cerrar su parte (kpis.cifras): ventas y pedidos de ESA semana
+      try{ const cf=p.k&&p.k.cifras; if(cf){ if(!f&&numC(cf.vSem)){ p.vSem=numC(cf.vSem); p.sinDatoSem=false; }
+        p.pedSemCierre=numC(cf.pedSem); p.pedMesCierre=numC(cf.pedMes); p.prevMesCierre=numC(cf.prevMes)||numC(cf.planifMes); p.cifrasDe=cf.fecha||""; } }catch(e){}
+      if(f&&f.entradaSem!==undefined){ p.pedSemFoto=numC(f.entradaSem); p.pedMesFoto=numC(f.entradaMes); p.prevMesFoto=numC(f.previstoMes); }
+      if(f&&numC(f.baseSem)){ r.margenPctSem=numC(f.margenSem)/numC(f.baseSem)*100; } else r.margenPctSem=null;
+    }
+    p.mAct=numC(e2["act_"+mNum]);
+    // (oct 2026) Mes en curso: el resumen diario de Power BI (ventasMes) está más al día que la estacionalidad
+    if(mNum===new Date().getMonth()+1&&numC(r.ventasMes)>p.mAct) p.mAct=numC(r.ventasMes);
+    // Pedidos: introducidos esta semana y en el mes, y lo que queda por servir dentro del mes (pbi_entrada_agente)
+    { const en=suyo(entr,g)||{}; p.pedSem=numC(en.entradaSem); p.pedMes=numC(en.entradaMes); p.prevMes=numC(en.previstoMes);
+      // Semana pasada: los pedidos de ESA semana son los de la foto del viernes o los guardados en el parte, no los de hoy
+      if(sem<isoSemanaC(new Date()).sem){
+        if(p.pedSemFoto!==undefined){ p.pedSem=p.pedSemFoto; p.pedMes=p.pedMesFoto; p.prevMes=p.prevMesFoto; p.pedFuente="foto"; }
+        else if(p.pedSemCierre!==undefined){ p.pedSem=p.pedSemCierre; p.pedMes=p.pedMesCierre; p.prevMes=p.prevMesCierre; p.pedFuente="parte"; }
+        else { p.pedSem=0; p.sinDatoPed=true; p.pedFuente=""; } } }
+    p.mObj=numC(o2["mes_"+mNum]);
+    if(!p.mObj) p.mObj=numC(o2.objAnual)*(numC(e2["peso_"+mNum])||1/12);
+    p.mAnt=numC(e2["mes_"+mNum]);   // (oct 2026) mismo mes del año pasado, completo
+    p.objSem=p.mObj?p.mObj/4.33:0;
+    p.mg=(r.margenPctSem!=null&&r.margenPctSem!=="")?numC(r.margenPctSem):null;
+    p.mgObj=numC(r.objetivoMargen)||null;
+    p.vMes=numC(r.ventasMes)||p.mAct;
+    // Politica de cobro: vencido <= 5 % de la venta de los dos ultimos meses cerrados
+    p.v2m=[mNum-1,mNum-2].reduce((t,k)=>t+(k>=1?numC(e2["act_"+k]):numC(e2["mes_"+(k+12)])),0);
+    p.limite=p.v2m*0.05;
+    for(const ag of semsPrev){
+      const f=ag.find(x=>A.mismo(x.id||x.agente,g.cod)||A.mismo(x.id||x.agente,g.id));
+      if(f&&p.objSem&&numC(f.ventasSem)<p.objSem*0.5) p.semMal++; else break;
+    }
+    llenarCobros(p,g,E);
     for(const v of vis){
       if(v.eliminada||!enSem(fechaDocC(v))||!deQuien(v,g)) continue;
       if(/llamada|no_contesta/i.test(String(v.resultado||v.tipo||""))) p.lla++; else p.vis++;
@@ -1064,9 +1177,13 @@ async function datosCEO(anio,sem){
           p.mAb.push({id:m._id||m.id||"",cli:m.cliente||m.clienteNombre||"(sin cliente)",prod:m.prod||m.prodNombre||m.producto||"",fecha:fe.toISOString().slice(0,10),dias:Math.round((domingo-fe)/86400000),est:String(m.estado||"")});
         if(!fFb&&!/pedido|positiv|aceptada|proyecto|ko|negativ|rechaz|cerrad/.test(est)&&fe&&(domingo-fe)/86400000>60)
           p.m60.push({cli:m.cliente||m.clienteNombre||"(sin cliente)",prod:m.prod||m.prodNombre||m.producto||"",fecha:fe.toISOString().slice(0,10),dias:Math.round((domingo-fe)/86400000)}); }
-      if(enSem(fechaDocC(m))){ p.mEnv++; }
+      // (oct 2026) Listas de la semana para poder abrir el detalle desde los recuadros del cierre
+      const _mi=()=>({cli:m.cliente||m.clienteNombre||"(sin cliente)",prod:m.prod||m.prodNombre||m.producto||"",fecha:(fechaDocC(m)||new Date(0)).toISOString().slice(0,10),fb:fFb?fFb.toISOString().slice(0,10):"",est:String(m.estado||""),motivo:m.motivo||m.nota||""});
+      p.mSem=p.mSem||[]; p.mOkL=p.mOkL||[]; p.mKoL=p.mKoL||[];
+      if(enSem(fechaDocC(m))){ p.mEnv++; if(p.mSem.length<80) p.mSem.push(_mi()); }
       if(enSem(fFb)){
-        if(/pedido|positiv|aceptada|proyecto/.test(est)){ p.mOk++; }
+        if(/pedido|positiv|aceptada|proyecto/.test(est)){ p.mOk++; if(p.mOkL.length<80) p.mOkL.push(_mi()); }
+        else if(/ko|negativ|rechaz/.test(est)){ if(p.mKoL.length<80) p.mKoL.push(_mi()); }
         else if(/ko|negativ|rechazada/.test(est)){ E.mKo++; G.mKo++;
           G.rechazos.push({cli:m.cliente||m.clienteNombre||"(sin cliente)",prod:m.prod||m.prodNombre||"",
             motivo:m.motivo||m.nota||"Sin motivo",quien:g.nombre,eq:g.equipo}); }
@@ -1081,6 +1198,27 @@ async function datosCEO(anio,sem){
     for(const k of ["vSem","objSem","mAct","mObj","cobros","vis","lla","mEnv","mOk"]) E[k]+=p[k];
     for(const k of ["pedSem","pedMes","prevMes"]) E[k]=(E[k]||0)+(p[k]||0);
     for(const k of ["vSem","objSem","mAct","mObj","cobros","nFacV","vis","lla","mEnv","mOk"]) G[k]+=p[k];
+  }
+  // (oct 2026) Los cobros son de TODOS los que tienen vencido, tengan o no obligación de hacer parte (jefes,
+  // «no entrega parte», ausentes, fichas genéricas). Entran como personas «solo cobros»: cuentan en Cobros y en
+  // nada más (ventas, actividad y muestras los ignoran).
+  for(const c of cob){
+    const cod=String(c._id||""); if(!cod||cod==="_TOTAL"||!(numC(c.totalVencido)>=1)) continue;
+    const ya=Object.values(equipos).some(E=>E.gente.some(p=>A.mismo(cod,p.cod)||A.mismo(cod,p.id)||(p.ausente&&(A.mismo(cod,p.cod)||A.mismo(cod,p.id)))));
+    if(ya) continue;
+    const f=[...us,...pu].find(u=>[u.grupoAgente,u.catalogoVendedor,u.crmId,u._id,u.id,u.username].some(k=>k&&A.mismo(k,cod)))||{};
+    const r=res.find(x=>A.mismo(x._id,cod))||{};
+    const eq=UC(c.equipo||f.equipo||r.equipo||A.equipo(cod)||"");
+    if(!eq||/FRANC|DISTRIB/i.test(eq)) continue;
+    const nombre=f.nombre||(A.nombre(cod)!==cod?A.nombre(cod):"")||r.agente||cod;
+    // Fuera canales e intercompañía (Intercompany, Clientes Global, Drimano…): no son personas
+    if(esCanal(cod)||esCanal(nombre)||/INTERC|CLIENTES?\s*GLOBAL|DRIMANO/i.test(cod+" "+nombre)) continue;
+    const g2={id:cod,cod,nombre,equipo:eq,soloCobros:true};
+    const E=equipos[eq]||(equipos[eq]={eq,jefe:jefes[eq]||"",gente:[],vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,vis:0,lla:0,mEnv:0,mOk:0,mKo:0,cerr:0,aus:0,sinCerrar:[]});
+    const p={...g2,vSem:0,objSem:0,mAct:0,mObj:0,cobros:0,nFacV:0,vis:0,lla:0,mEnv:0,mOk:0,mKo:0,mEnvA:0,mOkA:0,mKoA:0,m60:[],mAb:[],k:null};
+    const e2=suyo(estac,g2); p.v2m=[mNum-1,mNum-2].reduce((t,k)=>t+(k>=1?numC(e2["act_"+k]):numC(e2["mes_"+(k+12)])),0); p.limite=p.v2m*0.05;
+    try{ llenarCobros(p,g2,E); }catch(e){ continue; }
+    E.gente.push(p); E.cobros+=p.cobros; G.cobros+=p.cobros; G.nFacV+=p.nFacV;
   }
 
   // Objetivos de actividad por equipo (mensual -> semana -> por cabeza)
@@ -1479,14 +1617,26 @@ module.exports = async function handler(req, res){
     // ─────── (sep 2026) Datos del cierre de los jefes, en JSON ───────
     // ?panel=semana&semana=39&anio=2026 → mismas cifras que el informe del CEO,
     // por equipo y por comercial (ventas, objetivo, actividad, muestras, cobros)
+    // (oct 2026) ?informeID=1&semana=43&anio=2026[&enviar=1] → informe semanal de MUESTRAS para I+D.
+    // Dos tipos de producto: ingredientes y deshidratada. Cada responsable (departamentos «ingredientes» y
+    // «envolturas» del organigrama) recibe lo positivo y lo negativo de su tipo; el jefe de I+D (departamento
+    // «id») recibe el informe general con los dos. Lo lanza el cierre del CEO; sin &enviar=1 solo lo enseña.
+    if(req.method==="GET" && req.query && req.query.informeID==="1"){
+      const hoyP=isoSemanaC(new Date());
+      const anioP=Number(req.query.anio)||hoyP.anio, semP=Number(req.query.semana)||hoyP.sem;
+      const out=await informeMuestrasID(anioP,semP,req.query.enviar==="1",req.query.forzar==="1");
+      res.setHeader("Cache-Control","no-store");
+      if(req.query.html==="1"){ res.setHeader("Content-Type","text/html; charset=utf-8"); res.status(200).send(out.general||"<p>sin datos</p>"); return; }
+      res.status(200).json(out); return;
+    }
     if(req.method==="GET" && req.query && req.query.panel==="semana"){
       const hoyP=isoSemanaC(new Date());
       const anioP=Number(req.query.anio)||hoyP.anio, semP=Number(req.query.semana)||hoyP.sem;
       const D=await datosCEO(anioP,semP);
-      const campos=["id","cod","nombre","equipo","ausente","motivo","vSem","sinDatoSem","objSem","mAct","mObj","pedSem","pedMes","prevMes","vMes","vis","lla","mEnv","mOk","mKo",
-        "mEnvA","mOkA","mKoA","m60","mAb","obj","cobros","nFacV","limite","k","nota","facV","cobFecha"];
+      const campos=["id","cod","nombre","equipo","ausente","motivo","vSem","sinDatoSem","objSem","mAct","mObj","mAnt","soloCobros","pedSem","pedMes","prevMes","sinDatoPed","pedFuente","vMes","vis","lla","mEnv","mOk","mKo",
+        "mEnvA","mOkA","mKoA","m60","mAb","mSem","mOkL","mKoL","obj","cobros","nFacV","limite","k","nota","facV","cobFecha","sinParte"];
       res.setHeader("Cache-Control","no-store");
-      res.status(200).json({ok:true,sem:D.sem,anio:D.anio,mNum:D.mNum,
+      res.status(200).json({ok:true,sem:D.sem,anio:D.anio,mNum:D.mNum,jefesFuera:(D.G&&D.G.jefesFuera)||[],fueraPanel:(D.G&&D.G.fueraPanel)||[],fichaNoMal:(D.G&&D.G.fichaNoMal)||[],
         equipos:D.equipos.map(E=>({eq:E.eq,jefe:E.jefe,obj:E.obj,cerr:E.cerr,aus:E.aus,sinCerrar:E.sinCerrar,
           gente:E.gente.map(p=>{ const o={}; campos.forEach(k=>{ if(p[k]!==undefined) o[k]=p[k]; }); return o; })}))});
       return;
