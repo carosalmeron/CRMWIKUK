@@ -466,17 +466,27 @@ async function getToken(req) {
 // ─────────────── Power BI: executeQueries ───────────────
 // Límites de la API: 100.000 filas y 15 MB por consulta.
 // Por eso siempre se agrega en DAX, nunca se piden filas crudas.
-// (oct 2026) La tabla '00 Pedidos Validados Global' ha perdido la columna SUBFAMILIA (Power BI la quitó el 26/10 y
-// «Pedidos planificados» y «Maestro de clientes» fallaban con DatasetExecuteQueriesError). Se intenta con ella y, si
-// Power BI dice que no existe, se repite la consulta sin esa columna: la subfamilia queda vacía y todo lo demás sigue.
-async function pbiQueryPedidos(token) {
-  try { return await pbiQuery(token, Q.pedidosTodas); }
-  catch (e) {
-    if (!/SUBFAMILIA/i.test(String(e && e.message || e))) throw e;
-    return await pbiQuery(token, Q.pedidosTodas.replace(/\n\s*"Subfamilia",'00 Pedidos Validados Global'\[SUBFAMILIA\],/, ""));
+// (oct 2026) Power BI ha quitado o renombrado columnas (SUBFAMILIA en '00 Pedidos Validados Global', SlpName en
+// 'PEDIDOS SAP') y las consultas fallaban enteras con DatasetExecuteQueriesError. Ahora, si Power BI dice que una
+// columna no existe, se quita ese campo del SELECTCOLUMNS y se repite la consulta: el dato queda vacío y el resto
+// sigue entrando. Lo quitado se apunta en COLUMNAS_QUITADAS (sale en el JSON como columnasQuitadas).
+const COLUMNAS_QUITADAS = [];
+async function pbiQuery(token, query, incluirNulos = false) {
+  for (let i = 0; ; i++) {
+    try { return await pbiQueryRaw(token, query, incluirNulos); }
+    catch (e) {
+      const m = String(e && e.message || e).match(/Column '(?:<oii>)?([^'<]+?)(?:<\/oii>)?' in table '(?:<oii>)?([^'<]+?)(?:<\/oii>)?' cannot be found/i);
+      if (!m || i >= 6) throw e;
+      const col = m[1], tab = m[2], esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`"[^"]+"\\s*,\\s*'?${esc(tab)}'?\\[${esc(col)}\\]\\s*,?\\s*`, "g");
+      let q2 = query.replace(re, "").replace(/,\s*\)/g, ")");
+      if (q2 === query) throw e;   // la columna no está en un SELECTCOLUMNS (p. ej. en el FILTER): no se puede quitar
+      const aviso = `${tab}[${col}]`; if (!COLUMNAS_QUITADAS.includes(aviso)) COLUMNAS_QUITADAS.push(aviso);
+      query = q2;
+    }
   }
 }
-async function pbiQuery(token, query, incluirNulos = false) {
+async function pbiQueryRaw(token, query, incluirNulos = false) {
   const url =
     `https://api.powerbi.com/v1.0/myorg/groups/${ENV.PBI_GROUP_ID}` +
     `/datasets/${ENV.PBI_DATASET_ID}/executeQueries`;
@@ -4576,8 +4586,8 @@ EVALUATE
       if (/^\d{4}-\d{2}-\d{2}$/.test(String(req.query.sapDesde || ""))) { await fbCommit("pbi_config", [{ _id: "pedidos", sapDesde: String(req.query.sapDesde), fijadoEl: new Date().toISOString() }]); }
       let sapU = null;
       try { sapU = await pedidosSap(token, { fichas, dry: req.query.dry === "1" }); } catch (e) { out.errorSap = e.message.slice(0, 300); }
-      let filas = await pbiQueryPedidos(token);
-      out.version = "sap-2026-10-24b";
+      let filas = await pbiQuery(token, Q.pedidosTodas);
+      out.version = "sap-2026-10-27"; if (COLUMNAS_QUITADAS.length) out.columnasQuitadas = COLUMNAS_QUITADAS.slice();
       if (sapU) { const antes = filas.length; filas = filas.filter((r) => !sapU.esDuplicadoGlobal(r)); out.globalUCQuitadasPorEstarEnSap = antes - filas.length;
         // Diagnóstico: líneas de UC de la global que se quedan aunque el cliente tenga algo abierto en SAP (posibles duplicados)
         try { const sapCli = {}; sapU.validados.forEach((v) => { const k = String(v.Cliente).toUpperCase(); (sapCli[k] = sapCli[k] || []).push(String(v.Pedido) + " " + v.Articulo + " " + num(v.Importe)); });
@@ -6223,7 +6233,7 @@ EVALUATE
       // (oct 2026) UC viene de PEDIDOS SAP; Bosch y Ramírez de la global (ver pedidosSap()).
       let sapU = null;
       try { sapU = await pedidosSap(token, { fichas: fichasPed, dry }); log.sap = { desde: sapU.desde, lineas: sapU.lineas, pendientes: sapU.abiertas, sinMapear: Object.keys(sapU.sinMapear).length }; } catch (e) { log.errorSap = e.message.slice(0, 300); }
-      let filas = await pbiQueryPedidos(token);
+      let filas = await pbiQuery(token, Q.pedidosTodas);
       if (sapU) { const antes = filas.length; filas = filas.filter((r) => !sapU.esDuplicadoGlobal(r)); log.sap.globalUCQuitadasPorEstarEnSap = antes - filas.length; filas.push(...sapU.validados); }
       const crudos = filas.map((r, i) => {
         const cli = String(pick(r, "Cliente") || "").trim();
