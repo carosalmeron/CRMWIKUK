@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Flujo de pedidos · SAP</title>
+<style>
+:root{--rojo:#DC2626;--amb:#D97706;--verde:#16A34A;--azul:#2563EB;--muted:#64748B;--line:#E5E7EB}
+body{margin:0;font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;background:#F4F5F7;color:#0F172A}
+.w{max-width:1100px;margin:0 auto;padding:14px 12px 40px}
+h1{font-size:18px;margin:0}.sub{color:var(--muted);font-size:12.5px;margin:2px 0 10px}
+.k{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:10px 0}
+.k>div{background:#fff;border:1px solid var(--line);border-radius:12px;padding:10px 12px;cursor:pointer}
+.k b{display:block;font-size:22px;line-height:1.1}.k span{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.k small{display:block;font-size:12px;margin-top:3px}
+.card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:10px}
+.et{display:flex;align-items:center;gap:8px;cursor:pointer}.et b{flex:1;font-size:14px}.et .n{font-size:12px;color:var(--muted)}
+.p{border-top:1px solid #EEF1F5;padding:8px 0;display:grid;grid-template-columns:1fr auto;gap:4px 10px;font-size:13px}
+.p .c{color:var(--muted);font-size:12px}.p .r{text-align:right;white-space:nowrap}
+.bd{display:inline-block;font-size:11px;font-weight:700;border-radius:7px;padding:1px 6px;margin:2px 3px 0 0;background:#F1F5F9;color:#334155}
+.bd.r{background:#FEE2E2;color:#991B1B}.bd.a{background:#FEF3C7;color:#92400E}.bd.v{background:#DCFCE7;color:#166534}.bd.b{background:#DBEAFE;color:#1E40AF}
+.tarde{color:var(--rojo);font-weight:800}
+button,select,input{font:inherit}.mini{font-size:12px;font-weight:700;border:1.5px solid var(--line);background:#fff;border-radius:9px;padding:5px 9px;cursor:pointer}
+.mini.on{background:#0F172A;color:#fff;border-color:#0F172A}
+details summary{cursor:pointer;font-weight:700}
+.reg{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;font-size:12.5px;margin-top:8px}.reg label{display:flex;flex-direction:column;gap:2px;color:var(--muted)}.reg input{padding:5px 7px;border:1px solid var(--line);border-radius:7px}
+.vacio{color:var(--muted);font-size:12.5px;padding:6px 0}
+@media(max-width:600px){.p{grid-template-columns:1fr}.p .r{text-align:left}.reg{grid-template-columns:1fr}}
+</style></head><body><div class="w">
+<h1>🚦 Flujo de pedidos de UC</h1>
+<div class="sub" id="sub">Leyendo…</div>
+<div id="quien"></div>
+<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0">
+  <select id="fVen" onchange="pintar()"><option value="">Todos los vendedores</option></select>
+  <button class="mini" id="bTarde" onclick="SOLO_TARDE=!SOLO_TARDE;pintar()">⏰ Solo fuera de plazo</button>
+  <span style="flex:1"></span>
+  <details><summary class="mini" style="display:inline-block">⚙️ Reglas</summary>
+    <div class="card" style="margin-top:6px">
+      <div style="font-size:12.5px;color:var(--muted)">Códigos de SAP que marcan cada etapa (campo <code>U_UC_Solicitud</code> y <code>U_UC_SolicitudEstado</code> de cada línea). Ajusta y guarda: se aplican a todos.</div>
+      <div class="reg">
+        <label>Tipos de solicitud de PRODUCCIÓN (coma)<input id="rProd"></label>
+        <label>Tipos de solicitud de COMPRAS (coma)<input id="rComp"></label>
+        <label>Estados = pendiente de validar (coma)<input id="rPend"></label>
+        <label>Estados = validada (coma)<input id="rVal"></label>
+        <label>Horas para validar (Producción / Compras)<input id="rHV" type="number"></label>
+        <label>Horas para revalidar fecha (Customer Service)<input id="rHR" type="number"></label>
+        <label>Horas para validar precio<input id="rHP" type="number"></label>
+      </div>
+      <div style="margin-top:8px"><button class="mini on" onclick="guardarReglas()">💾 Guardar reglas</button> <span id="rMsg" style="font-size:12px;color:var(--muted)"></span></div>
+    </div></details>
+</div>
+<div id="etapas"></div>
+</div>
+<script>
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const val=(f)=>{ if(!f) return null; if(f.stringValue!==undefined) return f.stringValue; if(f.doubleValue!==undefined) return Number(f.doubleValue); if(f.integerValue!==undefined) return Number(f.integerValue); if(f.booleanValue!==undefined) return f.booleanValue; if(f.arrayValue) return (f.arrayValue.values||[]).map(val); if(f.mapValue){ const o={}; for(const [k,x] of Object.entries(f.mapValue.fields||{})) o[k]=val(x); return o; } return null; };
+async function doc(col,id){ const r=await fetch(`${FB}/${col}/${encodeURIComponent(id)}`,{cache:"no-store"}); if(!r.ok) return null; const j=await r.json(); const o={}; for(const [k,x] of Object.entries(j.fields||{})) o[k]=val(x); return o; }
+const esc=(t)=>String(t??"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+const eu=(n)=>Math.round(Number(n)||0).toLocaleString("es-ES")+" €";
+const fx=(d)=>d?String(d).slice(8,10)+"/"+String(d).slice(5,7):"—";
+const HOY=new Date().toISOString().slice(0,10);
+const dias=(d)=>d?Math.round((Date.parse(HOY+"T12:00:00Z")-Date.parse(String(d).slice(0,10)+"T12:00:00Z"))/86400000):0;
+// Horas desde una fecha (y hora si SAP la da; si no, desde las 12:00 de ese día)
+const horas=(d,hm)=>{ if(!d) return 0; const t=Date.parse(String(d).slice(0,10)+"T"+(/^\d{2}:\d{2}$/.test(hm||"")?hm:"12:00")+":00"); return isNaN(t)?0:Math.max(0,(Date.now()-t)/3600000); };
+let REG={prod:"1,3",comp:"2,5,7",pend:"1,2",val:"3,4",hv:24,hr:24,hp:4}, PED=[], META=null, SOLO_TARDE=false, AB={};
+const lista=(s)=>String(s||"").split(",").map(x=>x.trim()).filter(Boolean);
+
+// ── Etapa de cada pedido según las reglas ──
+function etapaDe(p){
+  if(p.estado!=="abierto") return {k:p.estado,due:"",tarde:false};
+  const P=lista(REG.prod), C=lista(REG.comp), PE=lista(REG.pend);
+  const pend=(p.solicitudes||[]).filter(s=>s.abierta!==false&&PE.includes(String(s.estado)));
+  const dProd=pend.filter(s=>P.includes(String(s.tipo))), dComp=pend.filter(s=>C.includes(String(s.tipo)));
+  const desde=p.actualizado||p.creado||p.fecha; const h=horas(desde,p.actualizadoHora);
+  if(p.invRiesgo) return {k:"riesgo",due:"Riesgo",tarde:false,desde};
+  if(p.invPrecios) return {k:"precio",due:"Precios",tarde:h>Number(REG.hp||4),desde};
+  if(dProd.length) return {k:"prod",due:"Producción",tarde:h>Number(REG.hv||24),desde,detalle:dProd.map(s=>s.detalle).filter(Boolean)[0]||""};
+  if(dComp.length) return {k:"comp",due:"Compras",tarde:h>Number(REG.hv||24),desde,detalle:dComp.map(s=>s.detalle).filter(Boolean)[0]||""};
+  if(pend.length) return {k:"otra",due:"Sin asignar",tarde:h>Number(REG.hv||24),desde,detalle:"tipo de solicitud "+pend.map(s=>s.tipo).join(", ")+" (añádelo en Reglas)"};
+  if(!p.confirmado) return {k:"cs",due:"Customer Service",tarde:h>Number(REG.hr||24),desde};
+  if(p.plan&&p.plan<HOY) return {k:"alm_tarde",due:"Almacén",tarde:true,desde:p.plan};
+  if(p.plan===HOY) return {k:"alm_hoy",due:"Almacén",tarde:false,desde:p.plan};
+  return {k:"alm_prog",due:"Almacén",tarde:false,desde:p.plan};
+}
+const ETAPAS=[
+  {k:"riesgo",t:"🛡️ Bloqueados por riesgo",d:"Invalidados por riesgo. No tienen plazo, pero hay que verlos: no avanzan hasta que se resuelva."},
+  {k:"precio",t:"💶 Pendiente de validar precio",d:"Invalidados por precio. Máximo 4 h para validar."},
+  {k:"prod",t:"🏭 Pendiente de validar · Producción",d:"Invalidado por producción. Tiene 24 h para contestar."},
+  {k:"comp",t:"🛒 Pendiente de validar · Compras",d:"Invalidado por compras. Tiene 24 h para contestar."},
+  {k:"otra",t:"❓ Solicitud sin clasificar",d:"Tipo de solicitud que no está en las reglas: dime cuál es."},
+  {k:"cs",t:"📞 Revalidar fecha con el cliente · Customer Service",d:"Validado pero sin confirmar. Hay que revalidar la fecha con el cliente."},
+  {k:"alm_tarde",t:"⛔ Almacén · RETRASADOS",d:"Aprobados con fecha de entrega ya pasada y sin servir. Cada uno es una falta."},
+  {k:"alm_hoy",t:"📦 Almacén · para hoy",d:"Aprobados que hay que preparar hoy."},
+  {k:"alm_prog",t:"📅 Almacén · programados",d:"Aprobados con fecha futura."},
+];
+function pintar(){
+  const ven=document.getElementById("fVen").value;
+  document.getElementById("bTarde").classList.toggle("on",SOLO_TARDE);
+  const L=PED.filter(p=>p.estado==="abierto"&&(!ven||p.vendedor===ven)).map(p=>Object.assign({e:etapaDe(p)},p));
+  const tarde=(k)=>L.filter(p=>p.e.k===k&&p.e.tarde), de=(k)=>L.filter(p=>p.e.k===k);
+  // Quién no cumple
+  const Q=[["Precios","precio",tarde("precio"),"validar en 4 h"],["Producción","prod",tarde("prod"),"validar en 24 h"],["Compras","comp",tarde("comp"),"validar en 24 h"],["Customer Service","cs",tarde("cs"),"revalidar fecha en 24 h"],["Almacén","alm_tarde",tarde("alm_tarde"),"servir en la fecha"]];
+  const R=de("riesgo");
+  document.getElementById("quien").innerHTML='<div class="k">'+Q.map(([n,k,l,q])=>'<div onclick="irA(\''+k+'\')" style="border-left:5px solid '+(l.length?'var(--rojo)':'var(--verde)')+'"><span>'+n+'</span><b style="color:'+(l.length?'var(--rojo)':'var(--verde)')+'">'+l.length+'</b><small>'+(l.length?'fuera de plazo · '+eu(l.reduce((t,p)=>t+p.importePend,0))+' · el más antiguo '+tiempo(Math.max(...l.map(p=>horas(p.e.desde,p.actualizadoHora)))):'al día')+'</small><small style="color:var(--muted)">'+q+'</small></div>').join("")
+    +'<div onclick="irA(\'riesgo\')" style="border-left:5px solid '+(R.length?'var(--amb)':'var(--verde)')+'"><span>Riesgo</span><b style="color:'+(R.length?'var(--amb)':'var(--verde)')+'">'+R.length+'</b><small>'+(R.length?'bloqueados · '+eu(R.reduce((t,p)=>t+p.importePend,0)):'ninguno')+'</small><small style="color:var(--muted)">sin plazo, pero hay que resolverlos</small></div></div>';
+  // Etapas
+  document.getElementById("etapas").innerHTML=ETAPAS.map(E=>{ let l=de(E.k); if(SOLO_TARDE) l=l.filter(p=>p.e.tarde); if(!l.length&&E.k==="otra") return "";
+    l.sort((a,b)=>(b.e.tarde-a.e.tarde)||dias(b.e.desde)-dias(a.e.desde)||b.importePend-a.importePend);
+    const ab=AB[E.k]!==undefined?AB[E.k]:(E.k!=="alm_prog");
+    return '<div class="card" id="et_'+E.k+'"><div class="et" onclick="AB[\''+E.k+'\']=!'+ab+';pintar()"><b>'+E.t+'</b><span class="n">'+l.length+' · '+eu(l.reduce((t,p)=>t+p.importePend,0))+(l.filter(p=>p.e.tarde).length?' · <span class="tarde">'+l.filter(p=>p.e.tarde).length+' fuera de plazo</span>':'')+'</span><span style="color:#94A3B8">'+(ab?"▾":"›")+'</span></div>'
+      +'<div style="font-size:12px;color:var(--muted)">'+E.d+'</div>'
+      +(ab?(l.length?l.map(p=>fila(p)).join(""):'<div class="vacio">Ninguno.</div>'):'')+'</div>'; }).join("");
+}
+function fila(p){ const d=dias(p.e.desde); const badges=[p.invPrecios?'<span class="bd a">⚑ precios</span>':'',p.invCobros?'<span class="bd a">⚑ cobros</span>':'',p.invRiesgo?'<span class="bd a">⚑ riesgo</span>':'',p.confirmado?'<span class="bd v">confirmado</span>':'<span class="bd b">sin confirmar</span>',...(p.solicitudes||[]).filter(s=>s.abierta!==false).map(s=>'<span class="bd">sol. '+esc(s.tipo)+' · est. '+esc(s.estado)+'</span>')].join("");
+  return '<div class="p"><div><b>'+esc(p.nombre)+'</b> <span class="c">'+esc(p.cliente)+' · nº '+esc(p.num)+' · '+esc(p.vendedor||p.slp)+'</span>'+(p.e.detalle?'<div class="c">💬 '+esc(p.e.detalle)+'</div>':'')+'<div>'+badges+'</div></div>'
+    +'<div class="r"><b>'+eu(p.importePend)+'</b><div class="c">'+p.lineasAbiertas+' líneas · entrega '+fx(p.plan)+(p.planIni&&p.planIni!==p.plan?' (inicial '+fx(p.planIni)+')':'')+'</div><div class="'+(p.e.tarde?'tarde':'c')+'">'+(p.e.k==="alm_tarde"?'retraso de '+d+' d':p.e.k.startsWith("alm")?'':tiempo(horas(p.e.desde,p.actualizadoHora))+' en esta etapa')+(p.e.tarde&&!p.e.k.startsWith("alm")?' · fuera de plazo':'')+'</div></div></div>'; }
+const tiempo=(h)=>h<1?"menos de 1 h":h<48?Math.round(h)+" h":Math.round(h/24)+" d";
+window.irA=(k)=>{ AB[k]=true; pintar(); const el=document.getElementById("et_"+k); if(el) el.scrollIntoView({behavior:"smooth"}); };
+window.guardarReglas=async()=>{ REG={prod:rProd.value,comp:rComp.value,pend:rPend.value,val:rVal.value,hv:Number(rHV.value)||24,hr:Number(rHR.value)||24,hp:Number(rHP.value)||4};
+  const f={}; for(const [k,v] of Object.entries(REG)) f[k]=typeof v==="number"?{doubleValue:v}:{stringValue:String(v)};
+  const r=await fetch(`${FB}/pbi_config/flujo_sap`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:f})});
+  document.getElementById("rMsg").textContent=r.ok?"✓ guardadas":"no se han podido guardar"; pintar(); };
+async function cargar(){
+  const [meta,reg]=await Promise.all([doc("sap_flujo","meta"),doc("pbi_config","flujo_sap")]);
+  if(reg) REG=Object.assign(REG,Object.fromEntries(Object.entries(reg).filter(([k,v])=>v!==null&&v!=="")));
+  rProd.value=REG.prod; rComp.value=REG.comp; rPend.value=REG.pend; rVal.value=REG.val; rHV.value=REG.hv; rHR.value=REG.hr; rHP.value=REG.hp;
+  if(!meta) throw new Error("Todavía no hay datos: lanza pbi-sync?flujosap=1");
+  META=meta; const n=Number(meta.partes)||1; let js="";
+  if(n===1){ const d=await doc("sap_flujo","pedidos"); js=(d&&d.json)||""; } else { for(let i=0;i<n;i++){ const d=await doc("sap_flujo","pedidos_"+i); js+=(d&&d.json)||""; } }
+  PED=JSON.parse(js||"[]");
+  const vens=[...new Set(PED.map(p=>p.vendedor).filter(Boolean))].sort(); document.getElementById("fVen").innerHTML='<option value="">Todos los vendedores</option>'+vens.map(v=>'<option>'+esc(v)+'</option>').join("");
+  const ab=PED.filter(p=>p.estado==="abierto"); const hace=Math.round((Date.now()-Date.parse(meta.actualizado))/60000);
+  document.getElementById("sub").innerHTML='<b>'+ab.length+' pedidos abiertos</b> · '+eu(ab.reduce((t,p)=>t+p.importePend,0))+' pendientes de servir · datos de SAP de hace '+(hace<60?hace+' min':Math.round(hace/60)+' h')+(PED.filter(p=>p.estado==="cancelado").length?' · '+PED.filter(p=>p.estado==="cancelado").length+' cancelados (3 días)':'');
+  pintar();
+}
+cargar().catch(e=>{ document.getElementById("sub").innerHTML='<span style="color:var(--rojo)">'+esc(e.message)+'</span>'; });
+</script></body></html>
