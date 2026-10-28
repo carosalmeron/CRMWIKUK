@@ -68,8 +68,9 @@ module.exports = async function handler(req, res) {
     await conSesion(db, async (sl) => {
       if (req.method === "GET" && q.articulos !== undefined) {
         const t = esc(String(q.articulos || "").trim().toUpperCase()); if (t.length < 2) { out.articulos = []; return; }
-        const r = await sl.get(`Items?$select=ItemCode,ItemName,QuantityOnStock,ManageBatchNumbers,TreeType,Valid&$filter=Valid eq 'tYES' and (startswith(ItemCode,'${t}') or contains(ItemName,'${t}'))&$orderby=ItemCode&$top=25`);
-        out.articulos = (r.value || []).map((i) => ({ codigo: i.ItemCode, nombre: i.ItemName, stock: i.QuantityOnStock, porLotes: i.ManageBatchNumbers === "tYES", conEscandallo: i.TreeType === "iProductionTree" || i.TreeType === "iAssemblyTree" }));
+        const r = await sl.get(`Items?$select=ItemCode,ItemName,QuantityOnStock,ManageBatchNumbers,TreeType,Valid,ItemWarehouseInfoCollection&$filter=Valid eq 'tYES' and (startswith(ItemCode,'${t}') or contains(ItemName,'${t}'))&$orderby=ItemCode&$top=25`);
+        const almDe = (i) => Object.fromEntries((i.ItemWarehouseInfoCollection || []).filter((w) => Number(w.InStock) > 0).map((w) => [w.WarehouseCode, Number(w.InStock) - (Number(w.Committed) || 0)]));
+        out.articulos = (r.value || []).map((i) => ({ codigo: i.ItemCode, nombre: i.ItemName, stock: i.QuantityOnStock, porAlmacen: almDe(i), porLotes: i.ManageBatchNumbers === "tYES", conEscandallo: i.TreeType === "iProductionTree" || i.TreeType === "iAssemblyTree" }));
         return;
       }
       if (req.method === "GET" && q.escandallo) {
@@ -77,10 +78,10 @@ module.exports = async function handler(req, res) {
         let t = null; try { t = await sl.get(`ProductTrees('${esc(cod)}')`); } catch (e) { throw new Error("ese artículo no tiene escandallo en SAP (" + String(e.message || e).slice(0, 120) + ")"); }
         const L = (t.ProductTreeLines || []).filter((l) => l.ItemType === "pit_Item" || !l.ItemType || l.ItemCode);
         const info = {}; try { const cods = [...new Set(L.map((l) => l.ItemCode).filter(Boolean))].slice(0, 40);
-          for (const c of cods) { try { const it = await sl.get(`Items('${esc(c)}')?$select=ItemCode,ItemName,ManageBatchNumbers,QuantityOnStock`); info[c] = { nombre: it.ItemName, porLotes: it.ManageBatchNumbers === "tYES", stock: it.QuantityOnStock }; } catch (e) {} } } catch (e) {}
+          for (const c of cods) { try { const it = await sl.get(`Items('${esc(c)}')?$select=ItemCode,ItemName,ManageBatchNumbers,QuantityOnStock,ItemWarehouseInfoCollection`); info[c] = { nombre: it.ItemName, porLotes: it.ManageBatchNumbers === "tYES", stock: it.QuantityOnStock, porAlmacen: Object.fromEntries((it.ItemWarehouseInfoCollection || []).filter((w) => Number(w.InStock) > 0).map((w) => [w.WarehouseCode, Number(w.InStock) - (Number(w.Committed) || 0)])) }; } catch (e) {} } } catch (e) {}
         let padre = {}; try { const it = await sl.get(`Items('${esc(cod)}')?$select=ItemCode,ItemName,ManageBatchNumbers`); padre = { nombre: it.ItemName, porLotes: it.ManageBatchNumbers === "tYES" }; } catch (e) {}
         out.escandallo = { producto: t.TreeCode, nombre: padre.nombre || "", porLotes: !!padre.porLotes, cantidadBase: Number(t.Quantity) || 1, almacen: t.Warehouse || "",
-          componentes: L.map((l) => ({ articulo: l.ItemCode, nombre: (info[l.ItemCode] || {}).nombre || "", cantidadBase: Number(l.Quantity) || 0, almacen: l.Warehouse || t.Warehouse || "", porLotes: !!(info[l.ItemCode] || {}).porLotes, stock: (info[l.ItemCode] || {}).stock })) };
+          componentes: L.map((l) => ({ articulo: l.ItemCode, nombre: (info[l.ItemCode] || {}).nombre || "", cantidadBase: Number(l.Quantity) || 0, almacen: l.Warehouse || t.Warehouse || "", porLotes: !!(info[l.ItemCode] || {}).porLotes, stock: (info[l.ItemCode] || {}).stock, porAlmacen: (info[l.ItemCode] || {}).porAlmacen || {} })) };
         return;
       }
       if (req.method === "GET" && q.almacenes !== undefined) {
@@ -137,7 +138,10 @@ module.exports = async function handler(req, res) {
         out.enviado.salida = salida;
         let sdoc;
         if (p.salidaHecha) { sdoc = { DocNum: p.salidaHecha, DocumentLines: [] }; out.salidaReutilizada = p.salidaHecha; }
-        else { try { sdoc = await sl.post("InventoryGenExits", salida); } catch (e) { out.ordenParaReintentar = o.AbsoluteEntry; throw e; } }
+        else { try { sdoc = await sl.post("InventoryGenExits", salida); } catch (e) { out.ordenParaReintentar = o.AbsoluteEntry;
+          const m = String(e.message || e).match(/\[line: (\d+)\]/); const c = m ? C[Number(m[1])] : null;
+          if (c && /negative inventory/i.test(String(e.message))) throw new Error("no hay stock suficiente de " + c.articulo + " en el almacén " + (c.almacen || p.almacen) + " (se piden " + c.uds + "). Cambia el almacén de ese componente al que tenga stock, o ajusta la cantidad.");
+          if (c) throw new Error(String(e.message || e) + " · componente " + c.articulo); throw e; } }
         out.salida = { DocEntry: sdoc.DocEntry, DocNum: sdoc.DocNum, lineas: (sdoc.DocumentLines || []).map((l) => ({ articulo: l.ItemCode, uds: l.Quantity, almacen: l.WarehouseCode, lotes: (l.BatchNumbers || []).map((b) => ({ lote: b.BatchNumber, uds: b.Quantity })) })) };
         // 3) Entrada del producto con el lote nuevo (tipo base 202)
         const lote = { BatchNumber: String(p.loteNuevo), Quantity: cant }; if (/^\d{4}-\d{2}-\d{2}$/.test(String(p.caducidad || ""))) lote.ExpiryDate = p.caducidad; if (/^\d{4}-\d{2}-\d{2}$/.test(String(p.fabricacion || ""))) lote.ManufacturingDate = p.fabricacion; else lote.ManufacturingDate = fecha;
