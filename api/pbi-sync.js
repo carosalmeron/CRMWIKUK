@@ -659,12 +659,16 @@ async function sapCorte(token) {
 // Se fija con ?fuenteUC=global|sap|auto en la URL. El resultado sale en el JSON como fuenteUC.
 async function decidirFuenteUC(token, filasGlobal, sapU, errorSap) {
   let cfg = "auto";
-  try { const c = await fbLeerDocumento("pbi_config", "pedidos"); if (c && /^(global|sap|auto)$/.test(String(c.fuenteUC || ""))) cfg = String(c.fuenteUC); } catch (e) {}
+  try { const c = await fbLeerDocumento("pbi_config", "pedidos"); if (c && /^(global|sap|sapsl|auto)$/.test(String(c.fuenteUC || ""))) cfg = String(c.fuenteUC); } catch (e) {}
   const hoy = new Date().toISOString().slice(0, 10);
   const uc = filasGlobal.filter((r) => String(pick(r, "Cliente") || "")[0] === "U" && String(pick(r, "Fecha") || "").slice(0, 10) >= hoy);
   const out = { config: cfg, lineasUCenGlobal: uc.length };
   if (cfg === "global") return { ...out, modo: "global", motivo: "fijado a mano" };
-  if (cfg === "sap") return { ...out, modo: "sap", motivo: "fijado a mano" };
+  if (cfg === "sap") return { ...out, modo: "sap", motivo: "fijado a mano (Power BI · PEDIDOS SAP)" };
+  if (cfg === "sapsl") return { ...out, modo: "sapsl", motivo: "fijado a mano (SAP directo)" };
+  // (28/10) Si el CRM tiene conexión directa con SAP, UC sale de SAP y de la global se quitan TODOS los "U…"
+  // (la global ya trae los mismos pedidos de SAP, así que sería duplicarlos)
+  if (sapConfigurado()) return { ...out, modo: "sapsl", motivo: "SAP directo (Service Layer); los U… de la global se descartan" };
   if (sapU) {
     const K = (c, a) => String(c || "").toUpperCase().replace(/\D/g, "").slice(-4) + "|" + String(a || "").toUpperCase().trim();
     const enG = new Set(uc.map((r) => K(pick(r, "Cliente"), pick(r, "Articulo"))));
@@ -693,14 +697,67 @@ function clienteSapAGlobal(cod, fichas) {
   return k;
 }
 
+
+// ─────────────── (28/10/2026) SAP Business One directo, por Service Layer ───────────────
+// Variables en Vercel: SAP_URL (https://ip:50000), SAP_DB (U_CARO_00), SAP_USER, SAP_PASS, SAP_CA (PEM, opcional),
+// SAP_INSECURE=1 (acepta el certificado autofirmado). Mismas que api/sap-test.js.
+// Devuelve las líneas de pedidos de venta desde `desde` con las MISMAS columnas que la tabla 'PEDIDOS SAP' de Power BI,
+// para que pedidosSap() las trate igual: DocEntry, DocNum, DocDate, DocDueDate, CodigoCliente, NombreCliente, LineNum,
+// ItemCode, Dscription, Unidades, OpenQty, LineTotal, FechaPlan, SlpCode, SlpName (+ Estado, Cancelado).
+import https from "https";
+function slPedir(base, ruta, { method = "GET", body, cookies = "", ca, insecure } = {}) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(ruta, base); const datos = body ? JSON.stringify(body) : null;
+    const opts = { method, hostname: u.hostname, port: u.port || 443, path: u.pathname + u.search,
+      headers: { "Content-Type": "application/json", Accept: "application/json", Prefer: "odata.maxpagesize=200", ...(cookies ? { Cookie: cookies } : {}), ...(datos ? { "Content-Length": Buffer.byteLength(datos) } : {}) },
+      timeout: 25000, ...(ca ? { ca } : {}), ...(insecure ? { rejectUnauthorized: false } : {}) };
+    const req = https.request(opts, (res) => { let buf = ""; res.setEncoding("utf8"); res.on("data", (c) => buf += c);
+      res.on("end", () => { let j = null; try { j = buf ? JSON.parse(buf) : null; } catch (e) {} resolve({ status: res.statusCode, headers: res.headers, json: j, texto: buf.slice(0, 300) }); }); });
+    req.on("timeout", () => req.destroy(new Error("SAP: tiempo agotado conectando con " + u.hostname + ":" + (u.port || 443))));
+    req.on("error", reject); if (datos) req.write(datos); req.end();
+  });
+}
+const sapConfigurado = () => !!(ENV.SAP_URL && ENV.SAP_USER && ENV.SAP_PASS);
+async function conSesionSap(fn, db) {
+  if (!sapConfigurado()) throw new Error("faltan SAP_URL, SAP_USER o SAP_PASS");
+  const base = ENV.SAP_URL.replace(/\/+$/, "") + "/b1s/v1/", ca = ENV.SAP_CA ? ENV.SAP_CA.replace(/\\n/g, "\n") : undefined, insecure = ENV.SAP_INSECURE === "1";
+  const login = await slPedir(base, "Login", { method: "POST", body: { CompanyDB: db || ENV.SAP_DB || "U_CARO_00", UserName: ENV.SAP_USER, Password: ENV.SAP_PASS }, ca, insecure });
+  if (login.status !== 200) { const m = login.json && login.json.error && login.json.error.message; throw new Error("SAP login " + login.status + ": " + (m && (m.value || m) || login.texto)); }
+  const cookies = (login.headers["set-cookie"] || []).map((c) => c.split(";")[0]).join("; ");
+  const get = async (ruta) => { const r = await slPedir(base, ruta, { cookies, ca, insecure }); if (r.status >= 300) { const m = r.json && r.json.error && r.json.error.message; throw new Error("SAP " + ruta.split("?")[0] + " → " + r.status + ": " + (m && (m.value || m) || r.texto)); } return r.json; };
+  const todas = async (ruta, max = 5000) => { let out = [], r = await get(ruta); out.push(...(r.value || []));
+    while (r["odata.nextLink"] && out.length < max) { r = await get(String(r["odata.nextLink"]).replace(/^\/?b1s\/v1\//, "")); out.push(...(r.value || [])); } return out; };
+  try { return await fn({ get, todas }); }
+  finally { try { await slPedir(base, "Logout", { method: "POST", cookies, ca, insecure }); } catch (e) {} }
+}
+async function leerPedidosSapSL(desde) {
+  return conSesionSap(async (sl) => {
+    const sel = "DocEntry,DocNum,DocDate,DocDueDate,CardCode,CardName,DocumentStatus,Cancelled,SalesPersonCode,DocumentLines";
+    const ped = await sl.todas(`Orders?$select=${sel}&$filter=DocDate ge '${desde}' or DocumentStatus eq 'bost_Open'&$orderby=DocEntry`);
+    const filas = [];
+    for (const p of ped) {
+      const cancelado = String(p.Cancelled || "") === "tYES", cerrado = p.DocumentStatus !== "bost_Open";
+      for (const l of (p.DocumentLines || [])) {
+        const open = (cancelado || cerrado) ? 0 : Number(l.RemainingOpenQuantity ?? l.OpenQuantity ?? 0) || 0;
+        filas.push({ DocEntry: p.DocEntry, DocNum: p.DocNum, DocDate: String(p.DocDate || "").slice(0, 10), DocDueDate: String(p.DocDueDate || "").slice(0, 10),
+          CodigoCliente: p.CardCode, NombreCliente: p.CardName, LineNum: l.LineNum, ItemCode: l.ItemCode, Dscription: l.ItemDescription,
+          Unidades: Number(l.Quantity) || 0, OpenQty: open, LineTotal: Number(l.LineTotal) || 0, FechaPlan: String(l.ShipDate || p.DocDueDate || "").slice(0, 10),
+          SlpCode: String(p.SalesPersonCode ?? ""), SlpName: "", Estado: cancelado ? "cancelado" : cerrado ? "cerrado" : "abierto", Almacen: l.WarehouseCode || "" });
+      }
+    }
+    return { filas, pedidos: ped.length };
+  });
+}
+
 // Lee PEDIDOS SAP desde el corte y devuelve: las líneas pendientes en el MISMO formato que
 // '00 Pedidos Validados Global' (para el formulario de pedidos) y la entrada de pedidos por comercial
 // (semana / mes / año) sacada del registro pedidos_sap_lineas, que guarda cada línea la primera vez
 // que se ve y no la borra cuando se sirve.
-async function pedidosSap(token, { fichas, dry } = {}) {
+async function pedidosSap(token, { fichas, dry, via } = {}) {
   const corte = await sapCorte(token);
   const desde = corte.sapDesde; const [dy, dm, dd] = desde.split("-").map(Number);
-  const filas = await pbiQuery(token, `
+  let viaUsada = "powerbi", pedidosSL = 0;
+  const filas = via === "sl" ? await (async () => { const r = await leerPedidosSapSL(desde); viaUsada = "service-layer"; pedidosSL = r.pedidos; return r.filas; })() : await pbiQuery(token, `
 EVALUATE
   SELECTCOLUMNS(
     FILTER(${SAP_T}, ${SAP_T}[DocDate] >= DATE(${dy},${dm},${dd})),
@@ -738,7 +795,8 @@ EVALUATE
     (artsCli[cliG.toUpperCase()] = artsCli[cliG.toUpperCase()] || []).push(String(g("ItemCode") || "").toUpperCase().replace(/[^A-Z0-9]/g, ""));
     validados.push({ Cliente: cliG, Vendedor: "SAP" + slp, AgenteSap: ag || null, Fecha: plan,
       Articulo: String(g("ItemCode") || "").trim(), Familia: null, Uni: open, Precio: uds > 0 ? num(tot / uds) : 0, Subfamilia: null,
-      Importe: pend, Pedido: String(g("DocNum") || "").trim(), Empresa: "UC", NombreSap: String(g("NombreCliente") || "").trim(), DescripcionSap: String(g("Dscription") || "").trim() });
+      Importe: pend, Pedido: String(g("DocNum") || "").trim(), Empresa: "UC", NombreSap: String(g("NombreCliente") || "").trim(), DescripcionSap: String(g("Dscription") || "").trim(),
+      EstadoSap: g("Estado") || null, AlmacenSap: g("Almacen") || null });
   }
   // Entrada por comercial, del registro (incluye lo ya servido), solo desde el corte
   const hoyD = new Date(); const semHoy = isoSemana(hoyD), mesHoy = hoyD.toISOString().slice(0, 7), anio = String(hoyD.getFullYear());
@@ -774,7 +832,7 @@ EVALUATE
     const a = art.replace(/[^A-Z0-9]/g, ""); if (a.length >= 4) for (const b of (artsCli[cli] || [])) { if (b.length >= 4 && (a.startsWith(b) || b.startsWith(a))) return true; }
     return false;
   };
-  return { desde, corteFijado: corte.fijado, ultimoDiaGlobalUC: corte.ultimoGlobalUC, lineas: filas.length, abiertas, pendiente: num(pendiente), validados, entrada,
+  return { via: viaUsada, pedidosSL, desde, corteFijado: corte.fijado, ultimoDiaGlobalUC: corte.ultimoGlobalUC, lineas: filas.length, abiertas, pendiente: num(pendiente), validados, entrada,
     sinMapear, nuevasEnRegistro: nuevas.length, lineasEnRegistro: Object.keys(vistas).length, esDuplicadoGlobal };
 }
 
@@ -4644,13 +4702,16 @@ EVALUATE
       // (oct 2026) UC viene de PEDIDOS SAP; Bosch y Ramírez de la global. Si SAP falla, se vuelve a la
       // consulta global completa para no dejar a UC sin pedidos.
       if (/^\d{4}-\d{2}-\d{2}$/.test(String(req.query.sapDesde || ""))) { await fbCommit("pbi_config", [{ _id: "pedidos", sapDesde: String(req.query.sapDesde), fijadoEl: new Date().toISOString() }]); }
-      if (/^(global|sap|auto)$/.test(String(req.query.fuenteUC || ""))) { await fbCommit("pbi_config", [{ _id: "pedidos", fuenteUC: String(req.query.fuenteUC), fuenteFijadaEl: new Date().toISOString() }]); }
-      out.version = "sap-2026-10-28b";
+      if (/^(global|sap|sapsl|auto)$/.test(String(req.query.fuenteUC || ""))) { await fbCommit("pbi_config", [{ _id: "pedidos", fuenteUC: String(req.query.fuenteUC), fuenteFijadaEl: new Date().toISOString() }]); }
+      out.version = "sap-2026-10-28c";
       let filas = await pbiQuery(token, Q.pedidosTodas);
       // (28/10) La global vuelve a traer UC (con SAP dentro). Primero la global: si ya trae UC pendiente, PEDIDOS SAP
       // ni se consulta (ahorra los reintentos que el 28/10 pasaron el cron de tiempo). Solo se mira SAP si falta UC.
       let sapU = null, fu = await decidirFuenteUC(token, filas, null, null);
-      if (fu.modo !== "global" || fu.config === "sap") {
+      if (fu.modo === "sapsl") {
+        try { sapU = await pedidosSap(token, { fichas, dry: req.query.dry === "1", via: "sl" }); } catch (e) { out.errorSap = e.message.slice(0, 300); }
+        if (sapU) { const antes = filas.length; filas = filas.filter((r) => String(pick(r, "Cliente") || "")[0] !== "U"); out.globalUCDescartadas = antes - filas.length; fu.sapLineas = sapU.lineas; fu.sapAbiertas = sapU.abiertas; fu.sapPedidos = sapU.pedidosSL; }
+      } else if (fu.modo !== "global" || fu.config === "sap") {
         try { sapU = await pedidosSap(token, { fichas, dry: req.query.dry === "1" }); } catch (e) { out.errorSap = e.message.slice(0, 300); }
         fu = await decidirFuenteUC(token, filas, sapU, out.errorSap);
       }
@@ -6304,7 +6365,10 @@ EVALUATE
       // (oct 2026) UC viene de PEDIDOS SAP; Bosch y Ramírez de la global (ver pedidosSap()).
       let filas = await pbiQuery(token, Q.pedidosTodas);
       let sapU = null, fu = await decidirFuenteUC(token, filas, null, null);   // (28/10) global con SAP dentro → no duplicar; SAP solo si hace falta
-      if (fu.modo !== "global" || fu.config === "sap") {
+      if (fu.modo === "sapsl") {
+        try { sapU = await pedidosSap(token, { fichas: fichasPed, dry, via: "sl" }); log.sap = { via: "service-layer", desde: sapU.desde, lineas: sapU.lineas, pendientes: sapU.abiertas, sinMapear: Object.keys(sapU.sinMapear).length }; } catch (e) { log.errorSap = e.message.slice(0, 300); }
+        if (sapU) filas = filas.filter((r) => String(pick(r, "Cliente") || "")[0] !== "U");
+      } else if (fu.modo !== "global" || fu.config === "sap") {
         try { sapU = await pedidosSap(token, { fichas: fichasPed, dry }); log.sap = { desde: sapU.desde, lineas: sapU.lineas, pendientes: sapU.abiertas, sinMapear: Object.keys(sapU.sinMapear).length }; } catch (e) { log.errorSap = e.message.slice(0, 300); }
         fu = await decidirFuenteUC(token, filas, sapU, log.errorSap);
       }
