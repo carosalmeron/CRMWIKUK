@@ -83,6 +83,29 @@ module.exports = async function handler(req, res) {
         out.entidad = String(q.que); out.filas = (await sl.get(`${encodeURIComponent(String(q.que))}?$top=${top}${q.select ? "&$select=" + encodeURIComponent(String(q.select)) : ""}${q.filter ? "&$filter=" + encodeURIComponent(String(q.filter)) : ""}`)).value;
         return;
       }
+      if (q.cobros === "1") {   // cobros pendientes: facturas abiertas (y abonos abiertos) por vendedor y cliente, con vencidos
+        const nombres = {}; try { for (const v of await todas(sl, "SalesPersons?$select=SalesEmployeeCode,SalesEmployeeName", 500)) nombres[String(v.SalesEmployeeCode)] = String(v.SalesEmployeeName || "").trim(); } catch (e) {}
+        const sel = "DocEntry,DocNum,DocDate,DocDueDate,CardCode,CardName,SalesPersonCode,DocTotal,PaidToDate,DocumentStatus,Cancelled";
+        const fac = await todas(sl, `Invoices?$select=${sel}&$filter=DocumentStatus eq 'bost_Open'`, 10000);
+        let abo = []; try { abo = await todas(sl, `CreditNotes?$select=${sel}&$filter=DocumentStatus eq 'bost_Open'`, 5000); } catch (e) {}
+        const hoy = new Date().toISOString().slice(0, 10), r2 = (v) => Math.round(v * 100) / 100;
+        const dias = (f) => Math.round((Date.parse(hoy + "T12:00:00Z") - Date.parse(String(f).slice(0, 10) + "T12:00:00Z")) / 86400000);
+        const porV = {}, porC = {}; let tot = { pendiente: 0, vencido: 0, v20: 0, v70: 0, n: 0 };
+        const add = (f, signo) => { if (String(f.Cancelled || "") === "tYES") return; const pend = signo * ((Number(f.DocTotal) || 0) - (Number(f.PaidToDate) || 0)); if (Math.abs(pend) < 0.01) return;
+          const d = dias(f.DocDueDate), venc = d > 0 ? pend : 0, v20 = d > 20 ? pend : 0, v70 = d > 70 ? pend : 0;
+          const k = String(f.SalesPersonCode ?? ""); const g = porV[k] = porV[k] || { vendedor: nombres[k] || ("SLP " + k), slp: k, pendiente: 0, vencido: 0, v20: 0, v70: 0, facturas: 0, clientes: new Set() };
+          g.pendiente += pend; g.vencido += venc; g.v20 += v20; g.v70 += v70; g.facturas++; g.clientes.add(f.CardCode);
+          const c = porC[f.CardCode] = porC[f.CardCode] || { cliente: f.CardCode, nombre: f.CardName, vendedor: g.vendedor, pendiente: 0, vencido: 0, v20: 0, v70: 0, facturas: [] };
+          c.pendiente += pend; c.vencido += venc; c.v20 += v20; c.v70 += v70; c.facturas.push({ n: f.DocNum, fecha: String(f.DocDate).slice(0, 10), vto: String(f.DocDueDate).slice(0, 10), dias: d, importe: r2(pend) });
+          tot.pendiente += pend; tot.vencido += venc; tot.v20 += v20; tot.v70 += v70; tot.n++; };
+        fac.forEach((f) => add(f, 1)); abo.forEach((f) => add(f, -1));
+        out.hoy = hoy; out.facturasAbiertas = fac.length; out.abonosAbiertos = abo.length;
+        out.total = { pendiente: r2(tot.pendiente), vencido: r2(tot.vencido), mas20dias: r2(tot.v20), mas70dias: r2(tot.v70), documentos: tot.n };
+        out.porVendedor = Object.values(porV).map((g) => ({ vendedor: g.vendedor, slp: g.slp, pendiente: r2(g.pendiente), vencido: r2(g.vencido), mas20dias: r2(g.v20), mas70dias: r2(g.v70), facturas: g.facturas, clientes: g.clientes.size })).sort((a, b) => b.vencido - a.vencido);
+        out.clientesVencidos = Object.values(porC).filter((c) => c.vencido >= 1).map((c) => ({ cliente: c.cliente, nombre: c.nombre, vendedor: c.vendedor, pendiente: r2(c.pendiente), vencido: r2(c.vencido), mas20dias: r2(c.v20), mas70dias: r2(c.v70), facturas: c.facturas.filter((x) => x.dias > 0).sort((a, b) => b.dias - a.dias).slice(0, 8) })).sort((a, b) => b.vencido - a.vencido).slice(0, Number(q.top) || 60);
+        out.nota = "Pendiente = total − cobrado de cada factura abierta (menos abonos abiertos). Vencido = con fecha de vencimiento anterior a hoy. Incluye intercompañía: mira el nombre del cliente.";
+        return;
+      }
       if (q.ventas) {   // ventas facturadas de un mes por vendedor, con margen (facturas − abonos)
         const mes = String(q.ventas).slice(0, 7); const [y, m] = mes.split("-").map(Number); const d1 = `${mes}-01`, d2 = new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
         const nombres = {}; try { for (const v of await todas(sl, "SalesPersons?$select=SalesEmployeeCode,SalesEmployeeName", 500)) nombres[String(v.SalesEmployeeCode)] = String(v.SalesEmployeeName || "").trim(); } catch (e) {}
