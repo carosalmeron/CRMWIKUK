@@ -4711,33 +4711,50 @@ EVALUATE
   // QuantityOrderedByCustomers (comprometido), U_SCL_FAMILIA, U_SCL_CALIBRE, U_SCL_BASE/PADRE, U_SCL_Metraje,
   // U_SCL_CALIDAD, SalesQtyPerPackUnit (uds por paquete), ItemsGroupCode → ItemGroups (grupo).
   if (req.query.stocksap === "1") {
-    const t1 = Date.now(); const out = { ok: true, version: "stocksap-2026-10-28" };
+    const t1 = Date.now(); const out = { ok: true, version: "stocksap-2026-10-28b" };
     try {
       if (!sapConfigurado()) throw new Error("faltan SAP_URL, SAP_USER o SAP_PASS en Vercel");
+      // Almacenes que cuentan como stock para el catálogo (el resto se guarda en el detalle por almacén, pero no suma).
+      // Se fija en pbi_config/stock_sap {almacenes:"BA01,EX43"} o con ?almacenes=BA01,EX43 en la URL.
+      let ALM = ["BA01", "EX43"];
+      if (/^[A-Z0-9,\s]+$/i.test(String(req.query.almacenes || ""))) { ALM = String(req.query.almacenes).toUpperCase().split(",").map((x) => x.trim()).filter(Boolean); await fbCommit("pbi_config", [{ _id: "stock_sap", almacenes: ALM.join(","), fijadoEl: new Date().toISOString() }]); }
+      else { try { const c = await fbLeerDocumento("pbi_config", "stock_sap"); if (c && c.almacenes) ALM = String(c.almacenes).toUpperCase().split(",").map((x) => x.trim()).filter(Boolean); } catch (e) {} }
+      out.almacenesCatalogo = ALM;
       const r = await conSesionSap(async (sl) => {
         const grupos = {}; try { for (const g of await sl.todas("ItemGroups?$select=Number,GroupName", 500)) grupos[String(g.Number)] = String(g.GroupName || "").replace(/^\d+\s*-\s*/, "").trim(); } catch (e) {}
+        // Llegadas con fecha: líneas abiertas de pedidos de compra (fecha de entrega prevista, unidades pendientes, almacén)
+        const lleg = {}; let nPO = 0;
+        try { const po = await sl.todas("PurchaseOrders?$select=DocNum,DocDueDate,CardName,DocumentLines&$filter=DocumentStatus eq 'bost_Open'", 3000); nPO = po.length;
+          for (const p of po) for (const l of (p.DocumentLines || [])) { const u = Number(l.RemainingOpenQuantity ?? l.OpenQuantity) || 0; if (u <= 0 || l.LineStatus === "bost_Close") continue;
+            const k = String(l.ItemCode || "").toUpperCase(); (lleg[k] = lleg[k] || []).push({ f: String(l.ShipDate || p.DocDueDate || "").slice(0, 10), u: Math.round(u * 100) / 100, a: l.WarehouseCode || "", p: p.DocNum, prov: String(p.CardName || "").slice(0, 40) }); } } catch (e) { out.avisoCompras = String(e.message || e).slice(0, 160); }
+        out.pedidosCompraAbiertos = nPO;
         const sel = "ItemCode,ItemName,ItemsGroupCode,QuantityOnStock,QuantityOrderedFromVendors,QuantityOrderedByCustomers,SalesQtyPerPackUnit,InventoryItem,Valid,Frozen,U_SCL_FAMILIA,U_SCL_CALIBRE,U_SCL_BASE,U_SCL_PADRE,U_SCL_Metraje,U_SCL_CALIDAD,U_SCL_DIVISIONES,ItemWarehouseInfoCollection";
         const its = await sl.todas(`Items?$select=${sel}&$filter=InventoryItem eq 'tYES' and (QuantityOnStock gt 0 or QuantityOrderedFromVendors gt 0 or QuantityOrderedByCustomers gt 0)`, 20000);
-        return { its, grupos };
+        return { its, grupos, lleg };
       });
       const classify = (d) => { d = (d || "").toUpperCase(); if (d.includes("MAD.CERDO")) return "Tripa Mad. Cerdo"; if (d.includes("MAD.CORDERO")) return "Tripa Mad. Cordero"; if (d.includes("MAD.BUEY") || d.includes("MAD.VACUNO")) return "Tripa Mad. Buey"; if (d.includes("MAD.ROSCAL")) return "Tripa Mad. Roscal"; if (d.includes("ROSCAL") && (d.includes("PIEZA") || d.includes("PIEZAS"))) return "Piezas Roscal"; if (d.includes("SEMIRRIZADA")) return "Semirrizada"; if (d.includes("CIEGO")) return "Ciegos"; if (d.includes("VEJIGA")) return "Vejigas"; if (d.includes("T.SECA") || (d.includes("SECA") && (d.includes("LONG") || d.includes("SHORT")))) return "Tripa Seca"; if (d.includes("ESPECTA+")) return "Especta+"; if (d.includes("MAEXTRA+")) return "Maextra+"; if (d.includes("CULAR")) return "Cular"; if (d.includes("MOLDE")) return "Moldes"; if (d.includes("MULTIBAR")) return "Multibar"; if (d.includes("PECTA")) return "Pecta"; if (d.includes("COLAG")) return "Colágeno"; if (d.includes("TRIPA")) return "Tripa Otros"; if (d.includes("GUANTE")) return "Guantes"; if (d.includes("MALLA")) return "Mallas"; if (d.includes("MADEJA")) return "Madejas"; return "Otros"; };
       const extractMet = (desc) => { const m = (desc || "").match(/P\.(\d+)/); return m ? parseInt(m[1]) : 0; };
       const r2 = (v) => Math.round((Number(v) || 0) * 100) / 100, S = (v) => v === null || v === undefined ? "" : String(v).trim();
-      const rows = r.its.map((i) => { const alm = {}; for (const w of (i.ItemWarehouseInfoCollection || [])) { if ((w.InStock || 0) || (w.Committed || 0) || (w.Ordered || 0)) alm[w.WarehouseCode] = [r2(w.InStock), r2(w.Ordered), r2(w.Committed)]; }
+      const enCat = (w) => ALM.includes(String(w || "").toUpperCase());
+      const rows = r.its.map((i) => { const alm = {}; let st = 0, cm = 0, lg = 0; for (const w of (i.ItemWarehouseInfoCollection || [])) { if ((w.InStock || 0) || (w.Committed || 0) || (w.Ordered || 0)) alm[w.WarehouseCode] = [r2(w.InStock), r2(w.Ordered), r2(w.Committed)]; if (enCat(w.WarehouseCode)) { st += Number(w.InStock) || 0; cm += Number(w.Committed) || 0; lg += Number(w.Ordered) || 0; } }
         const desc = S(i.ItemName), cal = S(i.U_SCL_CALIBRE), fam = S(i.U_SCL_FAMILIA) || r.grupos[String(i.ItemsGroupCode)] || "";
-        return { cod: S(i.ItemCode).toUpperCase(), desc, stock: r2(i.QuantityOnStock), tipo: classify(desc), calibre: cal || "Sin calibre", familia: fam || "Sin familia",
-          llegadas: r2(i.QuantityOrderedFromVendors), comprometido: r2(i.QuantityOrderedByCustomers), base: (S(i.U_SCL_BASE) || S(i.U_SCL_PADRE) || S(i.ItemCode)).toUpperCase(),
+        const cod = S(i.ItemCode).toUpperCase(); const L = (r.lleg[cod] || []).filter((x) => enCat(x.a)).sort((a, b) => String(a.f).localeCompare(String(b.f)));
+        const llegPO = L.reduce((t, x) => t + x.u, 0);
+        return { cod, desc, stock: r2(st), stockTodos: r2(i.QuantityOnStock), tipo: classify(desc), calibre: cal || "Sin calibre", familia: fam || "Sin familia",
+          llegadas: r2(L.length ? llegPO : lg), llegadasTodos: r2(i.QuantityOrderedFromVendors), lleg: L.map((x) => [x.f, x.u, x.a, x.p, x.prov]), proxLlegada: L.length ? L[0].f : "",
+          comprometido: r2(cm), comprometidoTodos: r2(i.QuantityOrderedByCustomers), base: (S(i.U_SCL_BASE) || S(i.U_SCL_PADRE) || S(i.ItemCode)).toUpperCase(),
           qpkg: Number(i.SalesQtyPerPackUnit) > 0 ? Number(i.SalesQtyPerPackUnit) : 1, met: Number(S(i.U_SCL_Metraje).replace(",", ".")) || extractMet(desc),
           calidad: S(i.U_SCL_CALIDAD), grupo: r.grupos[String(i.ItemsGroupCode)] || "", division: S(i.U_SCL_DIVISIONES), alm }; });
-      const exact = {}, base = {};
-      for (const x of rows) { exact[x.cod] = [x.stock, x.llegadas, x.comprometido]; const b = base[x.base] || (base[x.base] = [0, 0, 0]); b[0] += x.stock; b[1] += x.llegadas; b[2] += x.comprometido; }
+      const exact = {}, base = {}, llegadas = {};
+      for (const x of rows) { exact[x.cod] = [x.stock, x.llegadas, x.comprometido]; const b = base[x.base] || (base[x.base] = [0, 0, 0]); b[0] += x.stock; b[1] += x.llegadas; b[2] += x.comprometido; if (x.lleg.length) llegadas[x.cod] = x.lleg.map((l) => [l[0], l[1]]); }
       for (const b of Object.keys(base)) base[b] = base[b].map(r2);
+      out.articulosConLlegadaFechada = Object.keys(llegadas).length; out.stockEnOtrosAlmacenes = r2(rows.reduce((t, x) => t + (x.stockTodos - x.stock), 0));
       const d = new Date(), fecha = `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`, ts = Date.now();
       out.articulos = rows.length; out.stockTotal = r2(rows.reduce((t, x) => t + x.stock, 0)); out.llegadas = r2(rows.reduce((t, x) => t + x.llegadas, 0)); out.comprometido = r2(rows.reduce((t, x) => t + x.comprometido, 0));
       out.sinFamilia = rows.filter((x) => x.familia === "Sin familia").length; out.sinCalibre = rows.filter((x) => x.calibre === "Sin calibre").length; out.muestra = rows.slice(0, 3);
       if (req.query.dry !== "1") {
         const CH = 1200, nch = Math.ceil(rows.length / CH);
-        await fbCommit("stock_sap", [{ _id: "resumen", fecha, ts, exact: JSON.stringify(exact), base: JSON.stringify(base), origen: "SAP Service Layer", actualizado: new Date().toISOString() }]);
+        await fbCommit("stock_sap", [{ _id: "resumen", fecha, ts, exact: JSON.stringify(exact), base: JSON.stringify(base), llegadas: JSON.stringify(llegadas), almacenes: ALM.join(","), origen: "SAP Service Layer", actualizado: new Date().toISOString() }]);
         const chunks = []; for (let i = 0; i < nch; i++) chunks.push({ _id: "chunk_" + i, fecha, ts, rows: JSON.stringify(rows.slice(i * CH, (i + 1) * CH)) });
         await fbCommit("stock_sap_detalle", chunks);
         await fbCommit("stock_sap", [{ _id: "meta", fecha, ts, chunks: nch, total: rows.length, origen: "SAP Service Layer" }]);
