@@ -4652,6 +4652,58 @@ EVALUATE
   // La sincronizacion completa consume casi los 60 s de Vercel con las
   // ventas y nunca llega a este bloque, asi que se puede lanzar aparte.
 
+
+  // ─────────────── (28/10/2026) ?flujosap=1 → estado de cada pedido de UC para el panel de flujo (pedidos_flujo.html) ───────────────
+  // Lee de SAP los pedidos abiertos (y los cerrados/cancelados de los últimos 3 días) con TODOS los campos que marcan
+  // el flujo: confirmado, invalidaciones, solicitudes de producción/compras por línea, fechas planificadas…
+  // Escribe sap_flujo/pedidos (JSON) y sap_flujo/meta. La clasificación por etapas la hace el panel con reglas editables.
+  if (req.query.flujosap === "1") {
+    const t1 = Date.now(); const out = { ok: true, version: "flujosap-2026-10-28b" };
+    try {
+      if (!sapConfigurado()) throw new Error("faltan SAP_URL, SAP_USER o SAP_PASS en Vercel");
+      const hace3 = new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);
+      const { codigoDe } = await mapeadorSap().catch(() => ({ codigoDe: () => "" }));
+      const r = await conSesionSap(async (sl) => {
+        const nombres = {}; try { for (const v of await sl.todas("SalesPersons?$select=SalesEmployeeCode,SalesEmployeeName", 500)) nombres[String(v.SalesEmployeeCode)] = String(v.SalesEmployeeName || "").trim(); } catch (e) {}
+        const sel = "DocEntry,DocNum,DocDate,DocDueDate,CreationDate,UpdateDate,CancelDate,CardCode,CardName,DocumentStatus,Cancelled,Confirmed,SalesPersonCode,DocTotal,Comments,"
+          + "U_SCL_InvalidadoxPrecios,U_SCL_InvalidadoxCobros,U_SCL_InvalidadoxRiesg,U_SCL_InvalidadoxMuestras,U_SCL_ValidadoFijoPrecios,U_SCL_ValidadoFijoCobros,U_SCL_ValidadoFijoRiesgo,U_SCL_FPLANIF_INI,U_SCL_FechaAgente,U_UC_SolicitudEstado,U_SCL_AgenciaPredef,DocumentLines";
+        // Hora de la última modificación (para los plazos de 4 h): si el campo no existe en esta versión, se repite sin él
+        let ped; try { ped = await sl.todas(`Orders?$select=${sel},UpdateTime,CreationTime&$filter=DocumentStatus eq 'bost_Open' or UpdateDate ge '${hace3}'&$orderby=DocEntry desc`, 3000); }
+        catch (e) { ped = await sl.todas(`Orders?$select=${sel}&$filter=DocumentStatus eq 'bost_Open' or UpdateDate ge '${hace3}'&$orderby=DocEntry desc`, 3000); }
+        return { ped, nombres };
+      });
+      const D = (v) => String(v || "").slice(0, 10) || null, Y = (v) => String(v || "").toUpperCase() === "Y" || String(v || "") === "tYES";
+      const pedidos = r.ped.map((p) => {
+        const L = p.DocumentLines || [], ab = L.filter((l) => l.LineStatus === "bost_Open" && (Number(l.RemainingOpenQuantity) || 0) > 0);
+        const fechasAb = ab.map((l) => D(l.ShipDate)).filter(Boolean).sort();
+        const sols = L.filter((l) => String(l.U_UC_Solicitud || "0") !== "0" && String(l.U_UC_Solicitud || "") !== "").map((l) => ({ linea: l.LineNum, art: l.ItemCode, tipo: String(l.U_UC_Solicitud), estado: String(l.U_UC_SolicitudEstado ?? "0"), detalle: String(l.U_UC_SolicitudDetalle || "").slice(0, 160), abierta: l.LineStatus === "bost_Open" }));
+        const slp = String(p.SalesPersonCode ?? ""), slpN = r.nombres[slp] || "";
+        const hhmm = (t) => { if (t === null || t === undefined || t === "") return ""; const x = String(t).replace(/\D/g, "").padStart(4, "0"); return /^\d{2}:\d{2}/.test(String(t)) ? String(t).slice(0, 5) : x.slice(0, 2) + ":" + x.slice(2, 4); };
+        return { num: p.DocNum, entry: p.DocEntry, fecha: D(p.DocDate), creado: D(p.CreationDate), actualizado: D(p.UpdateDate), actualizadoHora: hhmm(p.UpdateTime), creadoHora: hhmm(p.CreationTime), entrega: D(p.DocDueDate), cancelaEl: D(p.CancelDate),
+          planIni: D(p.U_SCL_FPLANIF_INI), fechaAgente: D(p.U_SCL_FechaAgente), plan: fechasAb[0] || D(p.DocDueDate), planMax: fechasAb[fechasAb.length - 1] || null,
+          cliente: p.CardCode, clienteCrm: clienteSapAGlobal(p.CardCode), nombre: p.CardName, slp, vendedor: slpN, agente: codigoDe(slp, slpN) || "",
+          estado: Y(p.Cancelled) ? "cancelado" : p.DocumentStatus === "bost_Open" ? "abierto" : "cerrado", confirmado: Y(p.Confirmed),
+          invPrecios: Y(p.U_SCL_InvalidadoxPrecios), invCobros: Y(p.U_SCL_InvalidadoxCobros), invRiesgo: Y(p.U_SCL_InvalidadoxRiesg), invMuestras: Y(p.U_SCL_InvalidadoxMuestras),
+          valPrecios: Y(p.U_SCL_ValidadoFijoPrecios), valCobros: Y(p.U_SCL_ValidadoFijoCobros), valRiesgo: Y(p.U_SCL_ValidadoFijoRiesgo),
+          solEstadoCab: String(p.U_UC_SolicitudEstado ?? "0"), solicitudes: sols, agencia: String(p.U_SCL_AgenciaPredef ?? ""),
+          total: Number(p.DocTotal) || 0, importePend: Math.round(ab.reduce((t, l) => { const u = Number(l.Quantity) || 0, o = Number(l.RemainingOpenQuantity) || 0, tot = Number(l.LineTotal) || 0; return t + (u > 0 ? tot * o / u : tot); }, 0) * 100) / 100,
+          lineas: L.length, lineasAbiertas: ab.length, almacenes: [...new Set(ab.map((l) => l.WarehouseCode).filter(Boolean))], comentario: String(p.Comments || "").slice(0, 200) };
+      });
+      out.pedidos = pedidos.length; out.abiertos = pedidos.filter((p) => p.estado === "abierto").length; out.cancelados = pedidos.filter((p) => p.estado === "cancelado").length;
+      out.conSolicitud = pedidos.filter((p) => p.solicitudes.length).length; out.sinConfirmar = pedidos.filter((p) => p.estado === "abierto" && !p.confirmado).length;
+      out.muestra = pedidos.slice(0, 2);
+      if (req.query.dry !== "1") {
+        const js = JSON.stringify(pedidos); const CH = 900000, n = Math.ceil(js.length / CH);
+        const docs = []; for (let i = 0; i < n; i++) docs.push({ _id: n === 1 ? "pedidos" : "pedidos_" + i, json: js.slice(i * CH, (i + 1) * CH), parte: i, partes: n });
+        await fbCommit("sap_flujo", [...docs, { _id: "meta", actualizado: new Date().toISOString(), partes: n, pedidos: pedidos.length, abiertos: out.abiertos, version: out.version }]);
+        out.escrito = { partes: n, bytes: js.length };
+      }
+    } catch (e) { out.ok = false; out.error = String(e.message || e).slice(0, 400); }
+    out.segundos = Math.round((Date.now() - t1) / 100) / 10;
+    try { await latido("flujoSap", { segundos: out.segundos, errores: out.ok ? 0 : 1, detalle: out.error || null }); } catch (e) {}
+    return res.status(200).json(out);
+  }
+
   // ─────────────── (28/10/2026) ?stocksap=1 → stock de UC leído de SAP (Service Layer) ───────────────
   // Sustituye la subida del Excel en stock_sap_united_caro.html: escribe lo MISMO (stock_sap/resumen con exact y base,
   // stock_sap_detalle/chunk_N con las filas, stock_sap/meta) para que stock.html, el catálogo y la promoción
