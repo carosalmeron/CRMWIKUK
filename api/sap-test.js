@@ -83,6 +83,24 @@ module.exports = async function handler(req, res) {
         out.entidad = String(q.que); out.filas = (await sl.get(`${encodeURIComponent(String(q.que))}?$top=${top}${q.select ? "&$select=" + encodeURIComponent(String(q.select)) : ""}${q.filter ? "&$filter=" + encodeURIComponent(String(q.filter)) : ""}`)).value;
         return;
       }
+      if (q.codigos === "1") {   // pedidos abiertos agrupados por tipo y estado de solicitud, con ejemplos, para que el CEO diga qué significa cada combinación
+        const ped = await todas(sl, "Orders?$select=DocNum,DocDate,CardCode,CardName,Confirmed,DocTotal,U_SCL_InvalidadoxPrecios,U_SCL_InvalidadoxRiesg,U_SCL_InvalidadoxCobros,U_UC_SolicitudEstado,DocumentLines&$filter=DocumentStatus eq 'bost_Open'&$orderby=DocEntry desc", 600);
+        const G = {}; const otros = { confirmado: {}, invPrecios: {}, invRiesgo: {}, invCobros: {} };
+        const ej = (p) => ({ pedido: p.DocNum, fecha: String(p.DocDate || "").slice(0, 10), cliente: p.CardName, confirmado: p.Confirmed === "tYES", precios: p.U_SCL_InvalidadoxPrecios, riesgo: p.U_SCL_InvalidadoxRiesg, cobros: p.U_SCL_InvalidadoxCobros });
+        for (const p of ped) {
+          const combos = new Map();
+          for (const l of (p.DocumentLines || [])) { const t = String(l.U_UC_Solicitud ?? "0"), e = String(l.U_UC_SolicitudEstado ?? "0"); if (t === "0" && e === "0") continue; const k = "tipo " + t + " · estado " + e; if (!combos.has(k)) combos.set(k, String(l.U_UC_SolicitudDetalle || "").slice(0, 100)); }
+          for (const [k, det] of combos) { const g = G[k] = G[k] || { pedidos: 0, ejemplos: [] }; g.pedidos++; if (g.ejemplos.length < 4) g.ejemplos.push({ ...ej(p), detalle: det }); }
+          const add = (o, k, v) => { const g = o[k] = o[k] || { pedidos: 0, ejemplos: [] }; g.pedidos++; if (g.ejemplos.length < 3) g.ejemplos.push(ej(p)); };
+          add(otros.confirmado, p.Confirmed === "tYES" ? "confirmado SÍ" : "confirmado NO", 1);
+          add(otros.invPrecios, "InvalidadoxPrecios = " + (p.U_SCL_InvalidadoxPrecios || "(vacío)"), 1);
+          add(otros.invRiesgo, "InvalidadoxRiesg = " + (p.U_SCL_InvalidadoxRiesg || "(vacío)"), 1);
+          add(otros.invCobros, "InvalidadoxCobros = " + (p.U_SCL_InvalidadoxCobros || "(vacío)"), 1);
+        }
+        out.pedidosAbiertos = ped.length; out.solicitudesPorTipoYEstado = G; out.cabecera = otros;
+        out.instrucciones = "Dime qué significa cada combinación 'tipo · estado' (producción/compras, pendiente/validada) y qué significa Y/N en precios, riesgo y cobros.";
+        return;
+      }
       if (q.estados === "1") {   // qué estados y qué fechas hay de verdad en los pedidos (últimos 400)
         const ped = await todas(sl, "Orders?$orderby=DocEntry desc", Math.min(Number(q.top) || 400, 1000));
         const cab = {}, lin = {}, fechasCab = {}, fechasLin = {};
