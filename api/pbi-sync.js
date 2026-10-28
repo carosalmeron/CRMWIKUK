@@ -725,8 +725,17 @@ async function conSesionSap(fn, db) {
   if (login.status !== 200) { const m = login.json && login.json.error && login.json.error.message; throw new Error("SAP login " + login.status + ": " + (m && (m.value || m) || login.texto)); }
   const cookies = (login.headers["set-cookie"] || []).map((c) => c.split(";")[0]).join("; ");
   const get = async (ruta) => { const r = await slPedir(base, ruta, { cookies, ca, insecure }); if (r.status >= 300) { const m = r.json && r.json.error && r.json.error.message; throw new Error("SAP " + ruta.split("?")[0] + " → " + r.status + ": " + (m && (m.value || m) || r.texto)); } return r.json; };
-  const todas = async (ruta, max = 5000) => { let out = [], r = await get(ruta); out.push(...(r.value || []));
-    while (r["odata.nextLink"] && out.length < max) { r = await get(String(r["odata.nextLink"]).replace(/^\/?b1s\/v1\//, "")); out.push(...(r.value || [])); } return out; };
+  // Paginación en paralelo: 6 páginas de 200 a la vez con $skip, hasta que una página venga corta. No depende de
+  // $inlinecount (en esta versión del Service Layer no devolvía el total y se caía al modo en serie: 65 s de stock).
+  const todas = async (ruta, max = 5000) => {
+    const sep = ruta.includes("?") ? "&" : "?"; const PS = 200, CONC = 6; let out = [], skip = 0, fin = false;
+    while (!fin && out.length < max) {
+      const lote = await Promise.all([...Array(CONC)].map((_, i) => get(ruta + sep + "$top=" + PS + "&$skip=" + (skip + i * PS))));
+      for (const r of lote) { const v = r.value || []; out.push(...v); if (v.length < PS) { fin = true; break; } }
+      skip += CONC * PS;
+    }
+    return out.slice(0, max);
+  };
   try { return await fn({ get, todas }); }
   finally { try { await slPedir(base, "Logout", { method: "POST", cookies, ca, insecure }); } catch (e) {} }
 }
@@ -1252,6 +1261,8 @@ async function fbBorrar(coleccion, ids) {
 const docId = (v) => String(v || "").trim().replace(/[/#?\[\]*]/g, "_") || "SIN_CODIGO";
 
 // ─────────────── Handler ───────────────
+// (28/10/2026) Tiempo máximo de la función en Vercel: el stock de SAP y la pasada nocturna rozan los 60 s.
+export const config = { maxDuration: 120 };
 export default async function handler(req, res) {
   // (oct 2026) El catálogo (wikukcatalogo.vercel.app) consulta qué clientes han dejado un artículo.
   // Solo esa consulta de lectura se abre a otros dominios.
@@ -4711,7 +4722,7 @@ EVALUATE
   // QuantityOrderedByCustomers (comprometido), U_SCL_FAMILIA, U_SCL_CALIBRE, U_SCL_BASE/PADRE, U_SCL_Metraje,
   // U_SCL_CALIDAD, SalesQtyPerPackUnit (uds por paquete), ItemsGroupCode → ItemGroups (grupo).
   if (req.query.stocksap === "1") {
-    const t1 = Date.now(); const out = { ok: true, version: "stocksap-2026-10-28b" };
+    const t1 = Date.now(); const out = { ok: true, version: "stocksap-2026-10-28d" };
     try {
       if (!sapConfigurado()) throw new Error("faltan SAP_URL, SAP_USER o SAP_PASS en Vercel");
       // Almacenes que cuentan como stock para el catálogo (el resto se guarda en el detalle por almacén, pero no suma).
