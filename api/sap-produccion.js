@@ -116,25 +116,34 @@ module.exports = async function handler(req, res) {
           ProductionOrderStatus: "boposPlanned", ProductionOrderType: tipo,   // SAP solo deja crearla en Planificado; se libera justo después Remarks: String(p.comentario || "").slice(0, 254) || undefined,
           ProductionOrderLines: C.map((c) => ({ ItemNo: String(c.articulo), PlannedQuantity: Number(c.uds), BaseQuantity: Number(c.uds) / cant, Warehouse: String(c.almacen || p.almacen) })) };
         out.enviado = { orden };
-        let o = await sl.post("ProductionOrders", orden);
+        let o;
+        if (Number(p.ordenEntry) > 0) {   // reintento: la orden ya existe (un intento anterior la creó), se sigue con ella
+          o = await sl.get(`ProductionOrders(${Number(p.ordenEntry)})`);
+          if (String(o.ItemNo).toUpperCase() !== String(p.producto).toUpperCase()) throw new Error("la orden " + o.DocumentNumber + " es de " + o.ItemNo + ", no de " + p.producto);
+          if (o.ProductionOrderStatus === "boposClosed" || o.ProductionOrderStatus === "boposCancelled") throw new Error("la orden " + o.DocumentNumber + " está cerrada o cancelada");
+          out.reutilizada = o.DocumentNumber;
+        } else o = await sl.post("ProductionOrders", orden);
         // 1b) Liberar (de Planificado a Liberado): sin esto no se pueden registrar salidas ni entradas contra la orden
-        try { await sl.patch(`ProductionOrders(${o.AbsoluteEntry})`, { ProductionOrderStatus: "boposReleased" }); o = await sl.get(`ProductionOrders(${o.AbsoluteEntry})`); }
+        if (o.ProductionOrderStatus !== "boposReleased") try { await sl.patch(`ProductionOrders(${o.AbsoluteEntry})`, { ProductionOrderStatus: "boposReleased" }); o = await sl.get(`ProductionOrders(${o.AbsoluteEntry})`); }
         catch (e) { out.orden = { AbsoluteEntry: o.AbsoluteEntry, DocumentNumber: o.DocumentNumber, estado: o.ProductionOrderStatus }; throw new Error("la orden " + o.DocumentNumber + " se ha creado en Planificado pero no se ha podido liberar: " + String(e.message || e).slice(0, 200)); }
         out.orden = { AbsoluteEntry: o.AbsoluteEntry, DocumentNumber: o.DocumentNumber, estado: o.ProductionOrderStatus, producto: o.ItemNo, cantidad: o.PlannedQuantity, almacen: o.Warehouse,
           lineas: (o.ProductionOrderLines || []).map((l) => ({ linea: l.LineNumber, articulo: l.ItemNo, planificado: l.PlannedQuantity, almacen: l.Warehouse })) };
         // 2) Salida de componentes (enlazada a la orden, tipo base 202)
         const lineaDe = (art) => { const l = (o.ProductionOrderLines || []).find((x) => String(x.ItemNo).toUpperCase() === String(art).toUpperCase()); return l ? l.LineNumber : null; };
         const salida = { DocDate: fecha, Comments: ("Parte de producción CRM · OF " + o.DocumentNumber).slice(0, 254),
-          DocumentLines: C.map((c) => { const ln = lineaDe(c.articulo); const d = { ItemCode: String(c.articulo), Quantity: Number(c.uds), WarehouseCode: String(c.almacen || p.almacen), BaseType: 202, BaseEntry: o.AbsoluteEntry };
-            if (ln !== null) d.BaseLine = ln; const lotes = (c.lotes || []).filter((b) => b && b.lote && Number(b.uds) > 0); if (lotes.length) d.BatchNumbers = lotes.map((b) => ({ BatchNumber: String(b.lote), Quantity: Number(b.uds) })); return d; }) };
+          // Enlazada a la orden (BaseType 202 + BaseLine): SAP toma el artículo de la línea de la orden y NO admite ItemCode
+          DocumentLines: C.map((c) => { const ln = lineaDe(c.articulo); if (ln === null) throw new Error("el componente " + c.articulo + " no está en la orden " + o.DocumentNumber);
+            const d = { Quantity: Number(c.uds), WarehouseCode: String(c.almacen || p.almacen), BaseType: 202, BaseEntry: o.AbsoluteEntry, BaseLine: ln }; const lotes = (c.lotes || []).filter((b) => b && b.lote && Number(b.uds) > 0); if (lotes.length) d.BatchNumbers = lotes.map((b) => ({ BatchNumber: String(b.lote), Quantity: Number(b.uds) })); return d; }) };
         out.enviado.salida = salida;
-        const sdoc = await sl.post("InventoryGenExits", salida);
+        let sdoc;
+        if (p.salidaHecha) { sdoc = { DocNum: p.salidaHecha, DocumentLines: [] }; out.salidaReutilizada = p.salidaHecha; }
+        else { try { sdoc = await sl.post("InventoryGenExits", salida); } catch (e) { out.ordenParaReintentar = o.AbsoluteEntry; throw e; } }
         out.salida = { DocEntry: sdoc.DocEntry, DocNum: sdoc.DocNum, lineas: (sdoc.DocumentLines || []).map((l) => ({ articulo: l.ItemCode, uds: l.Quantity, almacen: l.WarehouseCode, lotes: (l.BatchNumbers || []).map((b) => ({ lote: b.BatchNumber, uds: b.Quantity })) })) };
         // 3) Entrada del producto con el lote nuevo (tipo base 202)
         const lote = { BatchNumber: String(p.loteNuevo), Quantity: cant }; if (/^\d{4}-\d{2}-\d{2}$/.test(String(p.caducidad || ""))) lote.ExpiryDate = p.caducidad; if (/^\d{4}-\d{2}-\d{2}$/.test(String(p.fabricacion || ""))) lote.ManufacturingDate = p.fabricacion; else lote.ManufacturingDate = fecha;
-        const entrada = { DocDate: fecha, Comments: ("Parte de producción CRM · OF " + o.DocumentNumber).slice(0, 254), DocumentLines: [{ ItemCode: String(p.producto), Quantity: cant, WarehouseCode: String(p.almacen), BaseType: 202, BaseEntry: o.AbsoluteEntry, BatchNumbers: [lote] }] };
+        const entrada = { DocDate: fecha, Comments: ("Parte de producción CRM · OF " + o.DocumentNumber).slice(0, 254), DocumentLines: [{ Quantity: cant, WarehouseCode: String(p.almacen), BaseType: 202, BaseEntry: o.AbsoluteEntry, BatchNumbers: [lote] }] };   // sin ItemCode: lo pone la orden
         out.enviado.entrada = entrada;
-        const edoc = await sl.post("InventoryGenEntries", entrada);
+        let edoc; try { edoc = await sl.post("InventoryGenEntries", entrada); } catch (e) { out.ordenParaReintentar = o.AbsoluteEntry; out.salidaParaReintentar = sdoc.DocNum; throw e; }
         out.entrada = { DocEntry: edoc.DocEntry, DocNum: edoc.DocNum, lineas: (edoc.DocumentLines || []).map((l) => ({ articulo: l.ItemCode, uds: l.Quantity, almacen: l.WarehouseCode, coste: l.UnitPrice, lotes: (l.BatchNumbers || []).map((b) => ({ lote: b.BatchNumber, uds: b.Quantity, caducidad: b.ExpiryDate, fabricacion: b.ManufacturingDate })) })) };
         // 4) Cerrar la orden si se pide
         if (p.cerrar) { try { await sl.patch(`ProductionOrders(${o.AbsoluteEntry})`, { ProductionOrderStatus: "boposClosed" }); out.orden.estado = "boposClosed"; } catch (e) { out.avisoCerrar = String(e.message || e).slice(0, 200); } }
