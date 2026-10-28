@@ -50,6 +50,14 @@ async function conSesion(db, fn) {
 const esc = (s) => String(s || "").replace(/'/g, "''");
 const DB_OK = (d) => /^[A-Z0-9_]+$/i.test(String(d || ""));
 
+// Acepta la clave SAP_PEDIDOS_KEY o el pase firmado que da /api/sap-token al entrar en el portal (30 días)
+function autorizado(dada) {
+  const clave = env("SAP_PEDIDOS_KEY") || env("CRON_SECRET"); if (!clave) return { ok: true };
+  if (dada === clave) return { ok: true, quien: "clave" };
+  const m = String(dada || "").match(/^crm\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/); if (!m) return { ok: false };
+  const h = require("crypto").createHmac("sha256", clave).update(m[1]).digest("base64url"); if (h !== m[2]) return { ok: false };
+  try { const p = JSON.parse(Buffer.from(m[1], "base64url").toString()); if (!(p.exp > Date.now())) return { ok: false, caducado: true }; return { ok: true, quien: p.n || p.u }; } catch (e) { return { ok: false }; }
+}
 module.exports = async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -57,9 +65,8 @@ module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   if (req.method === "OPTIONS") return res.status(204).end();
   const q = req.query || {};
-  const clave = env("SAP_PEDIDOS_KEY") || env("CRON_SECRET");
-  const dada = req.headers["x-crm-key"] || q.key || "";
-  if (clave && dada !== clave) return res.status(401).json({ ok: false, error: "clave incorrecta" });
+  const AUT = autorizado(req.headers["x-crm-key"] || q.key || "");
+  if (!AUT.ok) return res.status(401).json({ ok: false, error: AUT.caducado ? "el pase ha caducado: vuelve a entrar en el portal" : "clave incorrecta" });
   let body = req.body; if (typeof body === "string") { try { body = JSON.parse(body); } catch (e) { body = {}; } }
   const db = String((body && body.db) || q.db || env("SAP_DB") || "U_CARO_00"); if (!DB_OK(db)) return res.status(400).json({ ok: false, error: "base de datos no válida" });
   const out = { ok: true, db };
@@ -149,9 +156,23 @@ module.exports = async function handler(req, res) {
         out.enviado.entrada = entrada;
         let edoc; try { edoc = await sl.post("InventoryGenEntries", entrada); } catch (e) { out.ordenParaReintentar = o.AbsoluteEntry; out.salidaParaReintentar = sdoc.DocNum; throw e; }
         out.entrada = { DocEntry: edoc.DocEntry, DocNum: edoc.DocNum, lineas: (edoc.DocumentLines || []).map((l) => ({ articulo: l.ItemCode, uds: l.Quantity, almacen: l.WarehouseCode, coste: l.UnitPrice, lotes: (l.BatchNumbers || []).map((b) => ({ lote: b.BatchNumber, uds: b.Quantity, caducidad: b.ExpiryDate, fabricacion: b.ManufacturingDate })) })) };
+        // 3b) Solicitud de traslado del lote nuevo al almacén de expedición (si se indica destino distinto del de producción)
+        if (p.trasladoA && String(p.trasladoA).toUpperCase() !== String(p.almacen).toUpperCase()) {
+          try { const tr = await sl.post("InventoryTransferRequests", { DocDate: fecha, DueDate: fecha, FromWarehouse: String(p.almacen), ToWarehouse: String(p.trasladoA).toUpperCase(),
+              Comments: ("Producción OF " + o.DocumentNumber + " · lote " + p.loteNuevo + (p.pedido ? " · pedido " + p.pedido : "")).slice(0, 254),
+              StockTransferLines: [{ ItemCode: String(p.producto), Quantity: cant, FromWarehouseCode: String(p.almacen), WarehouseCode: String(p.trasladoA).toUpperCase(), FreeText: ("Lote: " + p.loteNuevo).slice(0, 100) }] });
+            out.solicitudTraslado = { entry: tr.DocEntry, num: tr.DocNum, origen: tr.FromWarehouse, destino: tr.ToWarehouse }; }
+          catch (e) { out.avisoTraslado = "La producción está hecha, pero no se ha podido crear la solicitud de traslado: " + String(e.message || e).slice(0, 200); }
+        }
+        // 3c) Si la orden viene de un pedido de venta, su línea pasa a «4 Finalizado»
+        try { let pe = o.ProductionOrderOriginEntry || null, ln = null; const m = String(o.Remarks || "").match(/PV:(\d+)\/(\d+)/);
+          if (m) { ln = Number(m[2]); if (!pe) { const r = await sl.get(`Orders?$select=DocEntry&$filter=DocNum eq ${Number(m[1])}`); pe = ((r.value || [])[0] || {}).DocEntry || null; } }
+          if (pe) { const ov = await sl.get(`Orders(${pe})?$select=DocNum,DocumentLines`); const l = (ov.DocumentLines || []).find((x) => ln != null ? Number(x.LineNum) === ln : String(x.ItemCode).toUpperCase() === String(o.ItemNo).toUpperCase());
+            if (l) { await sl.patch(`Orders(${pe})`, { DocumentLines: [{ LineNum: l.LineNum, U_UC_SolicitudEstado: "4" }] }); out.pedidoFinalizado = { pedido: ov.DocNum, linea: l.LineNum }; } } }
+        catch (e) { out.avisoPedido = "Producción hecha, pero no se ha podido marcar el pedido como Finalizado: " + String(e.message || e).slice(0, 160); }
         // 4) Cerrar la orden si se pide
         if (p.cerrar) { try { await sl.patch(`ProductionOrders(${o.AbsoluteEntry})`, { ProductionOrderStatus: "boposClosed" }); out.orden.estado = "boposClosed"; } catch (e) { out.avisoCerrar = String(e.message || e).slice(0, 200); } }
-        out.mensaje = "Orden " + o.DocumentNumber + " · salida " + sdoc.DocNum + " · entrada " + edoc.DocNum + " (" + db + ")";
+        out.mensaje = "Orden " + o.DocumentNumber + " · salida " + sdoc.DocNum + " · entrada " + edoc.DocNum + (out.solicitudTraslado ? " · solicitud de traslado " + out.solicitudTraslado.num + " → " + out.solicitudTraslado.destino : "") + " (" + db + ")";
         return;
       }
       throw new Error("petición no reconocida");

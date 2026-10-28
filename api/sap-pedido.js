@@ -44,6 +44,14 @@ async function conSesion(db, fn) {
 const esc = (s) => String(s || "").replace(/'/g, "''");
 const DB_OK = (d) => /^[A-Z0-9_]+$/i.test(String(d || ""));
 
+// Acepta la clave SAP_PEDIDOS_KEY o el pase firmado que da /api/sap-token al entrar en el portal (30 días)
+function autorizado(dada) {
+  const clave = env("SAP_PEDIDOS_KEY") || env("CRON_SECRET"); if (!clave) return { ok: true };
+  if (dada === clave) return { ok: true, quien: "clave" };
+  const m = String(dada || "").match(/^crm\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/); if (!m) return { ok: false };
+  const h = require("crypto").createHmac("sha256", clave).update(m[1]).digest("base64url"); if (h !== m[2]) return { ok: false };
+  try { const p = JSON.parse(Buffer.from(m[1], "base64url").toString()); if (!(p.exp > Date.now())) return { ok: false, caducado: true }; return { ok: true, quien: p.n || p.u }; } catch (e) { return { ok: false }; }
+}
 module.exports = async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -51,9 +59,8 @@ module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   if (req.method === "OPTIONS") return res.status(204).end();
   const q = req.query || {};
-  const clave = env("SAP_PEDIDOS_KEY") || env("CRON_SECRET");
-  const dada = req.headers["x-crm-key"] || q.key || "";
-  if (clave && dada !== clave) return res.status(401).json({ ok: false, error: "clave incorrecta" });
+  const AUT = autorizado(req.headers["x-crm-key"] || q.key || "");
+  if (!AUT.ok) return res.status(401).json({ ok: false, error: AUT.caducado ? "el pase ha caducado: vuelve a entrar en el portal" : "clave incorrecta" });
   let body = req.body; if (typeof body === "string") { try { body = JSON.parse(body); } catch (e) { body = {}; } }
   const db = String((body && body.db) || q.db || env("SAP_DB") || "U_CARO_00"); if (!DB_OK(db)) return res.status(400).json({ ok: false, error: "base de datos no válida" });
   const out = { ok: true, db };
