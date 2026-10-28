@@ -4722,7 +4722,7 @@ EVALUATE
   // QuantityOrderedByCustomers (comprometido), U_SCL_FAMILIA, U_SCL_CALIBRE, U_SCL_BASE/PADRE, U_SCL_Metraje,
   // U_SCL_CALIDAD, SalesQtyPerPackUnit (uds por paquete), ItemsGroupCode → ItemGroups (grupo).
   if (req.query.stocksap === "1") {
-    const t1 = Date.now(); const out = { ok: true, version: "stocksap-2026-10-28d" };
+    const t1 = Date.now(); const out = { ok: true, version: "stocksap-2026-10-28e" };
     try {
       if (!sapConfigurado()) throw new Error("faltan SAP_URL, SAP_USER o SAP_PASS en Vercel");
       // Almacenes que cuentan como stock para el catálogo (el resto se guarda en el detalle por almacén, pero no suma).
@@ -4757,7 +4757,7 @@ EVALUATE
           qpkg: Number(i.SalesQtyPerPackUnit) > 0 ? Number(i.SalesQtyPerPackUnit) : 1, met: Number(S(i.U_SCL_Metraje).replace(",", ".")) || extractMet(desc),
           calidad: S(i.U_SCL_CALIDAD), grupo: r.grupos[String(i.ItemsGroupCode)] || "", division: S(i.U_SCL_DIVISIONES), alm }; });
       const exact = {}, base = {}, llegadas = {};
-      for (const x of rows) { exact[x.cod] = [x.stock, x.llegadas, x.comprometido]; const b = base[x.base] || (base[x.base] = [0, 0, 0]); b[0] += x.stock; b[1] += x.llegadas; b[2] += x.comprometido; if (x.lleg.length) llegadas[x.cod] = x.lleg.map((l) => [l[0], l[1]]); }
+      for (const x of rows) { exact[x.cod] = [x.stock, x.llegadas, x.comprometido]; const b = base[x.base] || (base[x.base] = [0, 0, 0]); b[0] += x.stock; b[1] += x.llegadas; b[2] += x.comprometido; if (x.lleg.length) llegadas[x.cod] = x.lleg.map((l) => [l[0], l[1], l[2], l[3]]); }   // fecha, uds, almacén, nº pedido de compra (sin proveedor: lo ve el catálogo)
       for (const b of Object.keys(base)) base[b] = base[b].map(r2);
       out.articulosConLlegadaFechada = Object.keys(llegadas).length; out.stockEnOtrosAlmacenes = r2(rows.reduce((t, x) => t + (x.stockTodos - x.stock), 0));
       const d = new Date(), fecha = `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`, ts = Date.now();
