@@ -4669,18 +4669,18 @@ EVALUATE
   // el flujo: confirmado, invalidaciones, solicitudes de producción/compras por línea, fechas planificadas…
   // Escribe sap_flujo/pedidos (JSON) y sap_flujo/meta. La clasificación por etapas la hace el panel con reglas editables.
   if (req.query.flujosap === "1") {
-    const t1 = Date.now(); const out = { ok: true, version: "flujosap-2026-10-28b" };
+    const t1 = Date.now(); const out = { ok: true, version: "flujosap-2026-10-28d" };
     try {
       if (!sapConfigurado()) throw new Error("faltan SAP_URL, SAP_USER o SAP_PASS en Vercel");
-      const hace3 = new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);
+      const hace3 = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);   // (28/10) 30 días: el panel lista los pedidos entrados en cualquier día del mes
       const { codigoDe } = await mapeadorSap().catch(() => ({ codigoDe: () => "" }));
       const r = await conSesionSap(async (sl) => {
         const nombres = {}; try { for (const v of await sl.todas("SalesPersons?$select=SalesEmployeeCode,SalesEmployeeName", 500)) nombres[String(v.SalesEmployeeCode)] = String(v.SalesEmployeeName || "").trim(); } catch (e) {}
         const sel = "DocEntry,DocNum,DocDate,DocDueDate,CreationDate,UpdateDate,CancelDate,CardCode,CardName,DocumentStatus,Cancelled,Confirmed,SalesPersonCode,DocTotal,Comments,"
           + "U_SCL_InvalidadoxPrecios,U_SCL_InvalidadoxCobros,U_SCL_InvalidadoxRiesg,U_SCL_InvalidadoxMuestras,U_SCL_ValidadoFijoPrecios,U_SCL_ValidadoFijoCobros,U_SCL_ValidadoFijoRiesgo,U_SCL_FPLANIF_INI,U_SCL_FechaAgente,U_UC_SolicitudEstado,U_SCL_AgenciaPredef,DocumentLines";
         // Hora de la última modificación (para los plazos de 4 h): si el campo no existe en esta versión, se repite sin él
-        let ped; try { ped = await sl.todas(`Orders?$select=${sel},UpdateTime,CreationTime&$filter=DocumentStatus eq 'bost_Open' or UpdateDate ge '${hace3}'&$orderby=DocEntry desc`, 3000); }
-        catch (e) { ped = await sl.todas(`Orders?$select=${sel}&$filter=DocumentStatus eq 'bost_Open' or UpdateDate ge '${hace3}'&$orderby=DocEntry desc`, 3000); }
+        let ped; try { ped = await sl.todas(`Orders?$select=${sel},UpdateTime,CreationTime&$filter=DocumentStatus eq 'bost_Open' or DocDate ge '${hace3}'&$orderby=DocEntry desc`, 3000); }
+        catch (e) { ped = await sl.todas(`Orders?$select=${sel}&$filter=DocumentStatus eq 'bost_Open' or DocDate ge '${hace3}'&$orderby=DocEntry desc`, 3000); }
         return { ped, nombres };
       });
       const D = (v) => String(v || "").slice(0, 10) || null, Y = (v) => String(v || "").toUpperCase() === "Y" || String(v || "") === "tYES";
@@ -4698,7 +4698,10 @@ EVALUATE
           valPrecios: Y(p.U_SCL_ValidadoFijoPrecios), valCobros: Y(p.U_SCL_ValidadoFijoCobros), valRiesgo: Y(p.U_SCL_ValidadoFijoRiesgo),
           solEstadoCab: String(p.U_UC_SolicitudEstado ?? "0"), solicitudes: sols, agencia: String(p.U_SCL_AgenciaPredef ?? ""),
           total: Number(p.DocTotal) || 0, importePend: Math.round(ab.reduce((t, l) => { const u = Number(l.Quantity) || 0, o = Number(l.RemainingOpenQuantity) || 0, tot = Number(l.LineTotal) || 0; return t + (u > 0 ? tot * o / u : tot); }, 0) * 100) / 100,
-          lineas: L.length, lineasAbiertas: ab.length, almacenes: [...new Set(ab.map((l) => l.WarehouseCode).filter(Boolean))], comentario: String(p.Comments || "").slice(0, 200) };
+          lineas: L.length, lineasAbiertas: ab.length, almacenes: [...new Set(ab.map((l) => l.WarehouseCode).filter(Boolean))], comentario: String(p.Comments || "").slice(0, 200),
+          // Detalle de líneas para la ventana del pedido en el panel
+          det: L.map((l) => ({ art: l.ItemCode, desc: String(l.ItemDescription || "").slice(0, 60), uds: Number(l.Quantity) || 0, pend: Number(l.RemainingOpenQuantity) || 0, precio: Number(l.Price) || 0, imp: Number(l.LineTotal) || 0,
+            entrega: D(l.ShipDate), estado: l.LineStatus === "bost_Open" ? "abierta" : "cerrada", alm: l.WarehouseCode || "", tarifa: String(l.U_SCL_FuentePrecios || ""), sol: String(l.U_UC_Solicitud || "0"), solEst: String(l.U_UC_SolicitudEstado ?? "0"), solDet: String(l.U_UC_SolicitudDetalle || "").slice(0, 160) })) };
       });
       out.pedidos = pedidos.length; out.abiertos = pedidos.filter((p) => p.estado === "abierto").length; out.cancelados = pedidos.filter((p) => p.estado === "cancelado").length;
       out.conSolicitud = pedidos.filter((p) => p.solicitudes.length).length; out.sinConfirmar = pedidos.filter((p) => p.estado === "abierto" && !p.confirmado).length;
