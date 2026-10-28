@@ -471,17 +471,36 @@ async function getToken(req) {
 // columna no existe, se quita ese campo del SELECTCOLUMNS y se repite la consulta: el dato queda vacío y el resto
 // sigue entrando. Lo quitado se apunta en COLUMNAS_QUITADAS (sale en el JSON como columnasQuitadas).
 const COLUMNAS_QUITADAS = [];
+// Las columnas que ya se sabe que faltan se guardan en pbi_config/columnas_pbi y se quitan ANTES de consultar: cada
+// reintento cuesta segundos y el 28/10 el cron del maestro de clientes se pasó del tiempo por reintentar 7 veces.
+// Se vuelven a probar una vez al día (reprobadoEl), por si Power BI las repone.
+let _COLS_CARGADAS = null;
+async function columnasQueFaltan() {
+  if (_COLS_CARGADAS) return _COLS_CARGADAS;
+  _COLS_CARGADAS = []; try { const c = await fbLeerDocumento("pbi_config", "columnas_pbi"); const hoy = new Date().toISOString().slice(0, 10);
+    if (c && Array.isArray(c.quitadas) && String(c.reprobadoEl || "").slice(0, 10) === hoy) _COLS_CARGADAS = c.quitadas.map(String);
+    else if (c && Array.isArray(c.quitadas)) { /* nuevo día: se prueban otra vez */ } } catch (e) {}
+  return _COLS_CARGADAS;
+}
+async function guardarColumnasQueFaltan() {
+  try { await fbCommit("pbi_config", [{ _id: "columnas_pbi", quitadas: COLUMNAS_QUITADAS.slice(), reprobadoEl: new Date().toISOString(), aviso: "Columnas que Power BI dice que no existen; se quitan de las consultas. Se reintentan cada día." }]); } catch (e) {}
+}
+function quitarColumna(query, tab, col) {
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`"[^"]+"\\s*,\\s*'?${esc(tab)}'?\\[${esc(col)}\\]\\s*,?\\s*`, "g");
+  return query.replace(re, "").replace(/,\s*\)/g, ")");
+}
 async function pbiQuery(token, query, incluirNulos = false) {
+  for (const k of await columnasQueFaltan()) { const m = k.match(/^(.*)\[([^\]]+)\]$/); if (m) { const q2 = quitarColumna(query, m[1], m[2]); if (q2 !== query) { query = q2; if (!COLUMNAS_QUITADAS.includes(k)) COLUMNAS_QUITADAS.push(k); } } }
   for (let i = 0; ; i++) {
     try { return await pbiQueryRaw(token, query, incluirNulos); }
     catch (e) {
       const m = String(e && e.message || e).match(/Column '(?:<oii>)?([^'<]+?)(?:<\/oii>)?' in table '(?:<oii>)?([^'<]+?)(?:<\/oii>)?' cannot be found/i);
       if (!m || i >= 6) throw e;
-      const col = m[1], tab = m[2], esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const re = new RegExp(`"[^"]+"\\s*,\\s*'?${esc(tab)}'?\\[${esc(col)}\\]\\s*,?\\s*`, "g");
-      let q2 = query.replace(re, "").replace(/,\s*\)/g, ")");
+      const col = m[1], tab = m[2];
+      const q2 = quitarColumna(query, tab, col);
       if (q2 === query) throw e;   // la columna no está en un SELECTCOLUMNS (p. ej. en el FILTER): no se puede quitar
-      const aviso = `${tab}[${col}]`; if (!COLUMNAS_QUITADAS.includes(aviso)) COLUMNAS_QUITADAS.push(aviso);
+      const aviso = `${tab}[${col}]`; if (!COLUMNAS_QUITADAS.includes(aviso)) { COLUMNAS_QUITADAS.push(aviso); await guardarColumnasQueFaltan(); }
       query = q2;
     }
   }
@@ -4626,12 +4645,16 @@ EVALUATE
       // consulta global completa para no dejar a UC sin pedidos.
       if (/^\d{4}-\d{2}-\d{2}$/.test(String(req.query.sapDesde || ""))) { await fbCommit("pbi_config", [{ _id: "pedidos", sapDesde: String(req.query.sapDesde), fijadoEl: new Date().toISOString() }]); }
       if (/^(global|sap|auto)$/.test(String(req.query.fuenteUC || ""))) { await fbCommit("pbi_config", [{ _id: "pedidos", fuenteUC: String(req.query.fuenteUC), fuenteFijadaEl: new Date().toISOString() }]); }
-      let sapU = null;
-      try { sapU = await pedidosSap(token, { fichas, dry: req.query.dry === "1" }); } catch (e) { out.errorSap = e.message.slice(0, 300); }
-      out.version = "sap-2026-10-28"; if (COLUMNAS_QUITADAS.length) out.columnasQuitadas = COLUMNAS_QUITADAS.slice();
+      out.version = "sap-2026-10-28b";
       let filas = await pbiQuery(token, Q.pedidosTodas);
-      // (28/10) La global vuelve a traer UC (con SAP dentro): se decide la fuente para no duplicar
-      const fu = await decidirFuenteUC(token, filas, sapU, out.errorSap); out.fuenteUC = fu;
+      // (28/10) La global vuelve a traer UC (con SAP dentro). Primero la global: si ya trae UC pendiente, PEDIDOS SAP
+      // ni se consulta (ahorra los reintentos que el 28/10 pasaron el cron de tiempo). Solo se mira SAP si falta UC.
+      let sapU = null, fu = await decidirFuenteUC(token, filas, null, null);
+      if (fu.modo !== "global" || fu.config === "sap") {
+        try { sapU = await pedidosSap(token, { fichas, dry: req.query.dry === "1" }); } catch (e) { out.errorSap = e.message.slice(0, 300); }
+        fu = await decidirFuenteUC(token, filas, sapU, out.errorSap);
+      }
+      out.fuenteUC = fu; if (COLUMNAS_QUITADAS.length) out.columnasQuitadas = COLUMNAS_QUITADAS.slice();
       if (fu.modo === "global") { sapU = null; out.errorSap = undefined; }
       // (oct 2026) Si PEDIDOS SAP no responde y UC depende de SAP, NO se reescribe nada: si se siguiera, los pedidos de UC
       // desaparecerían del CRM y el diario los daría por «servidos» (pasó el 27/10). Con &sinSap=1 se fuerza.
@@ -6279,10 +6302,13 @@ EVALUATE
       } catch (e) { /* sin maestro se muestra solo el codigo */ }
 
       // (oct 2026) UC viene de PEDIDOS SAP; Bosch y Ramírez de la global (ver pedidosSap()).
-      let sapU = null;
-      try { sapU = await pedidosSap(token, { fichas: fichasPed, dry }); log.sap = { desde: sapU.desde, lineas: sapU.lineas, pendientes: sapU.abiertas, sinMapear: Object.keys(sapU.sinMapear).length }; } catch (e) { log.errorSap = e.message.slice(0, 300); }
       let filas = await pbiQuery(token, Q.pedidosTodas);
-      const fu = await decidirFuenteUC(token, filas, sapU, log.errorSap); log.fuenteUC = fu;   // (28/10) global con SAP dentro → no duplicar
+      let sapU = null, fu = await decidirFuenteUC(token, filas, null, null);   // (28/10) global con SAP dentro → no duplicar; SAP solo si hace falta
+      if (fu.modo !== "global" || fu.config === "sap") {
+        try { sapU = await pedidosSap(token, { fichas: fichasPed, dry }); log.sap = { desde: sapU.desde, lineas: sapU.lineas, pendientes: sapU.abiertas, sinMapear: Object.keys(sapU.sinMapear).length }; } catch (e) { log.errorSap = e.message.slice(0, 300); }
+        fu = await decidirFuenteUC(token, filas, sapU, log.errorSap);
+      }
+      log.fuenteUC = fu;
       if (fu.modo === "global") { sapU = null; log.errorSap = undefined; }
       if (log.errorSap) throw new Error("PEDIDOS SAP ha fallado, no se tocan los pedidos: " + log.errorSap);   // (oct 2026) ver solopedidos
       if (sapU) { const antes = filas.length; filas = filas.filter((r) => !sapU.esDuplicadoGlobal(r)); log.sap.globalUCQuitadasPorEstarEnSap = antes - filas.length; filas.push(...sapU.validados); }
