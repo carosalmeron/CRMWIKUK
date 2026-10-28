@@ -83,6 +83,31 @@ module.exports = async function handler(req, res) {
         out.entidad = String(q.que); out.filas = (await sl.get(`${encodeURIComponent(String(q.que))}?$top=${top}${q.select ? "&$select=" + encodeURIComponent(String(q.select)) : ""}${q.filter ? "&$filter=" + encodeURIComponent(String(q.filter)) : ""}`)).value;
         return;
       }
+      if (q.ventas) {   // ventas facturadas de un mes por vendedor, con margen (facturas − abonos)
+        const mes = String(q.ventas).slice(0, 7); const [y, m] = mes.split("-").map(Number); const d1 = `${mes}-01`, d2 = new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
+        const nombres = {}; try { for (const v of await todas(sl, "SalesPersons?$select=SalesEmployeeCode,SalesEmployeeName", 500)) nombres[String(v.SalesEmployeeCode)] = String(v.SalesEmployeeName || "").trim(); } catch (e) {}
+        const sel = "DocEntry,DocNum,DocDate,CardCode,CardName,SalesPersonCode,DocTotal,Cancelled,DocumentLines";
+        const fac = await todas(sl, `Invoices?$select=${sel}&$filter=DocDate ge '${d1}' and DocDate le '${d2}'`, 5000);
+        let abo = []; try { abo = await todas(sl, `CreditNotes?$select=${sel}&$filter=DocDate ge '${d1}' and DocDate le '${d2}'`, 5000); } catch (e) { out.avisoAbonos = String(e.message || e).slice(0, 120); }
+        const por = {}; let camposLinea = null; let sinCoste = 0, lineas = 0;
+        const esInter = (n) => /INTERC|WIKUK|DRIMANO|GRUPO CONSOL/i.test(String(n || ""));
+        const suma = (docs, signo) => { for (const f of docs) { if (String(f.Cancelled || "") === "tYES") continue; const k = String(f.SalesPersonCode ?? "");
+          const g = por[k] = por[k] || { vendedor: nombres[k] || ("SLP " + k), slp: k, ventas: 0, coste: 0, margen: 0, facturas: 0, clientes: new Set(), intercompany: 0 };
+          g.facturas += signo; g.clientes.add(f.CardCode);
+          for (const l of (f.DocumentLines || [])) { lineas++; if (!camposLinea) camposLinea = Object.keys(l).filter((x) => /cost|profit|buy|price|total/i.test(x));
+            const base = Number(l.LineTotal) || 0; const uds = Number(l.Quantity) || 0;
+            const costeU = Number(l.GrossBuyPrice) || Number(l.StockInmPrice) || 0; const coste = costeU ? costeU * uds : (Number(l.GrossProfitTotalBasePrice) ? base - Number(l.GrossProfitTotalBasePrice) : NaN);
+            if (esInter(f.CardName)) { g.intercompany += signo * base; continue; }
+            g.ventas += signo * base; if (isFinite(coste)) g.coste += signo * coste; else sinCoste++; } } };
+        suma(fac, 1); suma(abo, -1);
+        const r2 = (v) => Math.round(v * 100) / 100;
+        out.mes = mes; out.facturas = fac.length; out.abonos = abo.length; out.lineas = lineas; out.lineasSinCoste = sinCoste; out.camposDeLinea = camposLinea;
+        out.porVendedor = Object.values(por).map((g) => ({ vendedor: g.vendedor, slp: g.slp, ventas: r2(g.ventas), coste: r2(g.coste), margen: r2(g.ventas - g.coste), margenPct: g.ventas ? r2((g.ventas - g.coste) / g.ventas * 100) : 0, facturas: g.facturas, clientes: g.clientes.size, intercompany: r2(g.intercompany) })).sort((a, b) => b.ventas - a.ventas);
+        const T = out.porVendedor.reduce((t, g) => ({ ventas: t.ventas + g.ventas, coste: t.coste + g.coste, intercompany: t.intercompany + g.intercompany }), { ventas: 0, coste: 0, intercompany: 0 });
+        out.total = { ventas: r2(T.ventas), coste: r2(T.coste), margen: r2(T.ventas - T.coste), margenPct: T.ventas ? r2((T.ventas - T.coste) / T.ventas * 100) : 0, intercompanyExcluido: r2(T.intercompany) };
+        out.nota = "Ventas = base de facturas − abonos del mes (sin IVA), sin intercompañía. Coste = precio de compra bruto de la línea (GrossBuyPrice) × uds; si SAP no lo da, mira camposDeLinea para elegir otro campo.";
+        return;
+      }
       if (q.articulo) {   // de dónde salen las entradas previstas de un artículo: pedidos de compra y órdenes de fabricación
         const cod = String(q.articulo).toUpperCase(); const pref = cod.replace(/'/g, "''");
         const it = (await sl.get(`Items?$select=ItemCode,ItemName,QuantityOnStock,QuantityOrderedFromVendors,QuantityOrderedByCustomers,ItemWarehouseInfoCollection&$filter=startswith(ItemCode,'${pref}')`)).value || [];
