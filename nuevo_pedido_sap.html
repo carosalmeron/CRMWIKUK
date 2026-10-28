@@ -31,7 +31,7 @@ input:focus,textarea:focus{outline:none;border-color:var(--azul)}
 
 <div class="card" id="cardKey" hidden>
   <label>Clave para dar de alta pedidos</label>
-  <div class="g" style="grid-template-columns:1fr auto"><input id="key" type="password" placeholder="Te la da el CEO (SAP_PEDIDOS_KEY)"><button class="btn" onclick="guardarKey()">Guardar</button></div>
+  <div class="g" style="grid-template-columns:1fr auto"><input id="key" type="password" placeholder="La clave SAP_PEDIDOS_KEY de Vercel (si no existe, vale el CRON_SECRET)"><button class="btn" onclick="guardarKey()">Guardar</button></div>
 </div>
 
 <div class="card">
@@ -64,6 +64,25 @@ input:focus,textarea:focus{outline:none;border-color:var(--azul)}
 </div>
 <script>
 const API="/api/sap-pedido";
+// (28/10) Buscadores locales: clientes y artículos que ya tiene el CRM (Firestore), al instante y sin gastar sesión de SAP.
+// Al elegir, se valida contra SAP en segundo plano (vendedor, tarifa, bloqueo / precio del cliente).
+const FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+let CLIENTES_CRM=[], ARTS_CRM=[];
+const N=(t)=>String(t||"").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+const sapDeCrm=(cod)=>{ const d=String(cod||"").replace(/\D/g,""); return d?"C0"+d.slice(-4).padStart(4,"0"):String(cod||""); };
+async function cargarLocales(){
+  try{ const m=await fetch(FB+"/pbi_directorio/clientes").then(r=>r.ok?r.json():null); const n=Number(m&&m.fields&&m.fields.trozos&&(m.fields.trozos.integerValue||m.fields.trozos.doubleValue))||0;
+    const P=await Promise.all([...Array(n)].map((_,i)=>fetch(FB+"/pbi_directorio/clientes_"+i).then(r=>r.ok?r.json():null).catch(()=>null)));
+    P.forEach(d=>{ let o={}; try{ o=JSON.parse(d&&d.fields&&d.fields.nombres&&d.fields.nombres.stringValue||"{}"); }catch(e){}
+      Object.entries(o).forEach(([cod,v])=>{ if(String(cod)[0]!=="U") return; const [nombre,pob]=String(v).split("|"); CLIENTES_CRM.push({crm:cod,codigo:sapDeCrm(cod),nombre,poblacion:pob||"",n:N(nombre+" "+cod+" "+(pob||""))}); }); }); }catch(e){}
+  try{ const m=await fetch(FB+"/stock_sap/meta").then(r=>r.ok?r.json():null); const n=Number(m&&m.fields&&m.fields.chunks&&(m.fields.chunks.integerValue||m.fields.chunks.doubleValue))||0;
+    const P=await Promise.all([...Array(n)].map((_,i)=>fetch(FB+"/stock_sap_detalle/chunk_"+i).then(r=>r.ok?r.json():null).catch(()=>null)));
+    P.forEach(d=>{ let rows=[]; try{ rows=JSON.parse(d&&d.fields&&d.fields.rows&&d.fields.rows.stringValue||"[]"); }catch(e){}
+      rows.forEach(r=>{ if(r&&r.cod) ARTS_CRM.push({codigo:String(r.cod).toUpperCase(),nombre:r.desc||"",calibre:r.calibre||"",metros:r.met||"",stock:Number(r.stock)||0,libre:(Number(r.stock)||0)-(Number(r.comprometido)||0),udsPaquete:Number(r.qpkg)||1,n:N(r.cod+" "+r.desc)}); }); }); }catch(e){}
+  const i=document.getElementById("cliInfo"); if(i&&!CLI) i.textContent=CLIENTES_CRM.length?CLIENTES_CRM.length.toLocaleString("es-ES")+" clientes y "+ARTS_CRM.length.toLocaleString("es-ES")+" artículos del CRM cargados: escribe para buscar.":"";
+}
+const buscarLocal=(L,v,max)=>{ const q=N(v).split(/\s+/).filter(Boolean); if(!q.length) return []; return L.filter(x=>q.every(t=>x.n.includes(t))).slice(0,max||15); };
+cargarLocales();
 let DB=localStorage.getItem("sap_pedido_db")||"U_CARO_99";   // por defecto, PRUEBAS: cambia a U_CARO_00 cuando esté validado
 let KEY=localStorage.getItem("sap_pedido_key")||"";
 let CLI=null, LIN=[];
@@ -75,10 +94,15 @@ window.guardarKey=()=>{ KEY=document.getElementById("key").value.trim(); localSt
 async function api(url,opts){ const r=await fetch(url+(url.includes("?")?"&":"?")+"db="+encodeURIComponent(DB),Object.assign({headers:{"Content-Type":"application/json","x-crm-key":KEY}},opts||{})); const j=await r.json().catch(()=>({ok:false,error:"respuesta no válida"})); if(r.status===401){ document.getElementById("cardKey").hidden=false; throw new Error("clave incorrecta: ponla arriba"); } return j; }
 let tCli=null;
 window.buscarCli=(v)=>{ CLI=null; document.getElementById("cliInfo").textContent=""; clearTimeout(tCli); if(v.trim().length<2){ document.getElementById("cliSug").hidden=true; return; }
-  tCli=setTimeout(async()=>{ try{ const j=await api(API+"?clientes="+encodeURIComponent(v)); const S=document.getElementById("cliSug");
-    S.innerHTML=(j.clientes||[]).map(c=>'<div onclick="elegirCli('+esc(JSON.stringify(c)).replace(/"/g,"&quot;")+')"><b>'+esc(c.nombre)+'</b>'+(c.bloqueado?' <span class="pill" style="background:#FEE2E2;color:#991B1B">bloqueado</span>':'')+'<small>'+esc(c.codigo)+(c.cif?' · '+esc(c.cif):'')+' · vendedor '+esc(c.vendedor)+' · tarifa '+esc(c.listaPrecios)+'</small></div>').join("")||'<div style="color:var(--muted)">Sin resultados</div>'; S.hidden=false; }catch(e){ aviso(e.message,false); } },350); };
-window.elegirCli=(c)=>{ CLI=c; document.getElementById("cli").value=c.nombre; document.getElementById("cliSug").hidden=true;
-  document.getElementById("cliInfo").innerHTML='<b>'+esc(c.codigo)+'</b> · vendedor SAP '+esc(c.vendedor)+' · lista de precios '+esc(c.listaPrecios)+(c.bloqueado?' · <span style="color:var(--rojo);font-weight:700">cliente bloqueado en SAP</span>':'');
+  const S=document.getElementById("cliSug"); const loc=buscarLocal(CLIENTES_CRM,v,15);
+  if(loc.length){ S.innerHTML=loc.map(c=>'<div onclick="elegirCli('+esc(JSON.stringify(c)).replace(/"/g,"&quot;")+')"><b>'+esc(c.nombre)+'</b><small>'+esc(c.codigo)+' (CRM '+esc(c.crm)+')'+(c.poblacion?' · '+esc(c.poblacion):'')+'</small></div>').join("")+'<div style="color:var(--muted);font-size:11.5px" onclick="buscarCliSap(\''+esc(v).replace(/'/g,"")+'\')">🔎 Buscar en SAP…</div>'; S.hidden=false; return; }
+  tCli=setTimeout(()=>buscarCliSap(v),350); };
+window.buscarCliSap=async(v)=>{ try{ const j=await api(API+"?clientes="+encodeURIComponent(v)); const S=document.getElementById("cliSug");
+    S.innerHTML=(j.clientes||[]).map(c=>'<div onclick="elegirCli('+esc(JSON.stringify(c)).replace(/"/g,"&quot;")+')"><b>'+esc(c.nombre)+'</b>'+(c.bloqueado?' <span class="pill" style="background:#FEE2E2;color:#991B1B">bloqueado</span>':'')+'<small>'+esc(c.codigo)+(c.cif?' · '+esc(c.cif):'')+' · vendedor '+esc(c.vendedor)+' · tarifa '+esc(c.listaPrecios)+'</small></div>').join("")||'<div style="color:var(--muted)">Sin resultados</div>'; S.hidden=false; }catch(e){ aviso(e.message,false); } };
+window.elegirCli=async(c)=>{ CLI=c; document.getElementById("cli").value=c.nombre; document.getElementById("cliSug").hidden=true;
+  if(c.vendedor===undefined){ document.getElementById("cliInfo").textContent=c.codigo+" · comprobando en SAP…";
+    try{ const j=await api(API+"?clientes="+encodeURIComponent(c.codigo)); const s=(j.clientes||[]).find(x=>x.codigo===c.codigo); if(!s){ document.getElementById("cliInfo").innerHTML='<span style="color:var(--rojo);font-weight:700">'+esc(c.codigo)+' no existe en SAP con ese código: búscalo con «Buscar en SAP»</span>'; CLI=null; return; } CLI=c=Object.assign(c,s); }catch(e){ document.getElementById("cliInfo").textContent=e.message; return; } }
+  document.getElementById("cliInfo").innerHTML='<b>'+esc(c.codigo)+'</b> · '+esc(c.nombre)+' · vendedor SAP '+esc(c.vendedor)+' · lista de precios '+esc(c.listaPrecios)+(c.bloqueado?' · <span style="color:var(--rojo);font-weight:700">cliente bloqueado en SAP</span>':'');
   if(!document.getElementById("ven").value) document.getElementById("ven").value=c.vendedor||""; LIN.forEach((l,i)=>{ if(l.articulo&&l.precio==="") cargarPrecio(i); }); };
 window.addLinea=()=>{ LIN.push({articulo:"",nombre:"",uds:"",precio:"",entrega:"",stock:null}); pintarLineas(); setTimeout(()=>{ const inputs=document.querySelectorAll("[data-art]"); inputs[inputs.length-1]&&inputs[inputs.length-1].focus(); },0); };
 window.quitar=(i)=>{ LIN.splice(i,1); pintarLineas(); };
@@ -91,8 +115,11 @@ function pintarLineas(){ const E=document.getElementById("lineas");
   total(); }
 let tArt={};
 window.buscarArt=(i,v)=>{ LIN[i].articulo=v; LIN[i].nombre=""; LIN[i].stock=null; clearTimeout(tArt[i]); const S=document.getElementById("artSug"+i); if(v.trim().length<2){ S.hidden=true; return; }
-  tArt[i]=setTimeout(async()=>{ try{ const j=await api(API+"?articulos="+encodeURIComponent(v));
-    S.innerHTML=(j.articulos||[]).map(a=>'<div onclick="elegirArt('+i+','+esc(JSON.stringify(a)).replace(/"/g,"&quot;")+')"><b>'+esc(a.codigo)+'</b> · '+esc(a.nombre)+'<small>'+(a.calibre?'cal. '+esc(a.calibre)+' · ':'')+(a.metros?esc(a.metros)+' m · ':'')+'stock '+esc(a.stock)+' · libre '+esc(a.libre)+(a.udsPaquete>1?' · '+esc(a.udsPaquete)+' uds/paquete':'')+'</small></div>').join("")||'<div style="color:var(--muted)">Sin resultados</div>'; S.hidden=false; }catch(e){ aviso(e.message,false); } },350); };
+  const loc=buscarLocal(ARTS_CRM,v,20);
+  if(loc.length){ S.innerHTML=loc.map(a=>'<div onclick="elegirArt('+i+','+esc(JSON.stringify(a)).replace(/"/g,"&quot;")+')"><b>'+esc(a.codigo)+'</b> · '+esc(a.nombre)+'<small>'+(a.calibre&&a.calibre!=="Sin calibre"?'cal. '+esc(a.calibre)+' · ':'')+(a.metros?esc(a.metros)+' m · ':'')+'stock '+esc(a.stock)+' · libre '+esc(a.libre)+(a.udsPaquete>1?' · '+esc(a.udsPaquete)+' uds/paquete':'')+'</small></div>').join("")+'<div style="color:var(--muted);font-size:11.5px" onclick="buscarArtSap('+i+',\''+esc(v).replace(/'/g,"")+'\')">🔎 Buscar en SAP…</div>'; S.hidden=false; return; }
+  tArt[i]=setTimeout(()=>buscarArtSap(i,v),350); };
+window.buscarArtSap=async(i,v)=>{ const S=document.getElementById("artSug"+i); try{ const j=await api(API+"?articulos="+encodeURIComponent(v));
+    S.innerHTML=(j.articulos||[]).map(a=>'<div onclick="elegirArt('+i+','+esc(JSON.stringify(a)).replace(/"/g,"&quot;")+')"><b>'+esc(a.codigo)+'</b> · '+esc(a.nombre)+'<small>'+(a.calibre?'cal. '+esc(a.calibre)+' · ':'')+(a.metros?esc(a.metros)+' m · ':'')+'stock '+esc(a.stock)+' · libre '+esc(a.libre)+(a.udsPaquete>1?' · '+esc(a.udsPaquete)+' uds/paquete':'')+'</small></div>').join("")||'<div style="color:var(--muted)">Sin resultados</div>'; S.hidden=false; }catch(e){ aviso(e.message,false); } };
 window.elegirArt=(i,a)=>{ LIN[i].articulo=a.codigo; LIN[i].nombre=a.nombre; LIN[i].stock=a.libre; document.getElementById("artSug"+i).hidden=true; pintarLineas(); if(CLI) cargarPrecio(i); };
 async function cargarPrecio(i){ try{ const l=LIN[i]; const j=await api(API+"?precio="+encodeURIComponent(l.articulo)+"&cliente="+encodeURIComponent(CLI.codigo)); if(j.precio!=null&&LIN[i]&&LIN[i].precio===""){ LIN[i].precio=String(j.precio); LIN[i].nombre=(LIN[i].nombre||"")+" · tarifa "+j.precio+" €"; pintarLineas(); } }catch(e){} }
 window.total=()=>{ const t=LIN.reduce((s,l)=>s+(Number(l.uds)||0)*(Number(l.precio)||0),0); document.getElementById("total").textContent=eu(t); };
