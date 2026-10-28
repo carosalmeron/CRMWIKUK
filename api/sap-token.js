@@ -8,12 +8,23 @@ const crypto = require("crypto");
 const env = (k) => { const v = process.env[k]; return v === undefined ? undefined : String(v).trim(); };
 const FB = () => `https://firestore.googleapis.com/v1/projects/${env("FB_PROJECT_ID") || "grupo-consolidado-crm"}/databases/(default)/documents`;
 const val = (f) => { if (!f) return null; if (f.stringValue !== undefined) return f.stringValue; if (f.booleanValue !== undefined) return f.booleanValue; if (f.integerValue !== undefined) return Number(f.integerValue); if (f.doubleValue !== undefined) return Number(f.doubleValue); if (f.arrayValue) return (f.arrayValue.values || []).map(val); if (f.mapValue) { const o = {}; for (const [k, x] of Object.entries(f.mapValue.fields || {})) o[k] = val(x); return o; } return null; };
-async function leerUsuario(id) {
-  for (const col of ["portal_users", "usuarios"]) {
-    const r = await fetch(`${FB()}/${col}/${encodeURIComponent(id)}${env("FB_API_KEY") ? "?key=" + env("FB_API_KEY") : ""}`);
-    if (!r.ok) continue; const j = await r.json(); const o = {}; for (const [k, x] of Object.entries(j.fields || {})) o[k] = val(x); o._col = col; return o;
+// Busca al usuario en portal_users y en usuarios por id, nombre de usuario o nombre (como hace el login del portal)
+async function listar(col) {
+  const out = []; let tok = "";
+  for (let i = 0; i < 10; i++) {
+    const r = await fetch(`${FB()}/${col}?pageSize=300${tok ? "&pageToken=" + encodeURIComponent(tok) : ""}${env("FB_API_KEY") ? "&key=" + env("FB_API_KEY") : ""}`);
+    if (!r.ok) break; const j = await r.json();
+    for (const d of (j.documents || [])) { const o = {}; for (const [k, x] of Object.entries(d.fields || {})) o[k] = val(x); o._docId = decodeURIComponent(d.name.split("/").pop()); o._col = col; if (!o.id) o.id = o._docId; out.push(o); }
+    if (!j.nextPageToken) break; tok = j.nextPageToken;
   }
-  return null;
+  return out;
+}
+async function buscarUsuarios(t) {
+  t = String(t || "").trim().toLowerCase(); const res = [];
+  for (const col of ["portal_users", "usuarios"]) for (const u of await listar(col)) {
+    if ([u.id, u._docId, u.username, u.nombre].some((x) => x && String(x).trim().toLowerCase() === t)) res.push(u);
+  }
+  return res;
 }
 const secreto = () => env("SAP_PEDIDOS_KEY") || env("CRON_SECRET") || "";
 function firmar(payload) { const p = Buffer.from(JSON.stringify(payload)).toString("base64url"); const h = crypto.createHmac("sha256", secreto()).update(p).digest("base64url"); return "crm." + p + "." + h; }
@@ -25,13 +36,17 @@ module.exports = async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "usa POST" });
   if (!secreto()) return res.status(500).json({ ok: false, error: "falta SAP_PEDIDOS_KEY en Vercel" });
   let b = req.body; if (typeof b === "string") { try { b = JSON.parse(b); } catch (e) { b = {}; } } b = b || {};
-  const id = String(b.usuario || "").trim(), h = String(b.passHash || "").trim().toLowerCase();
+  let id = String(b.usuario || "").trim(); const h = String(b.passHash || "").trim().toLowerCase();
   if (!id || !/^[a-f0-9]{64}$/.test(h)) return res.status(400).json({ ok: false, error: "faltan usuario o clave" });
   try {
-    const u = await leerUsuario(id);
-    if (!u || !u.passHash || String(u.passHash).toLowerCase() !== h) return res.status(401).json({ ok: false, error: "usuario o clave incorrectos" });
+    const C = await buscarUsuarios(id);
+    if (!C.length) return res.status(401).json({ ok: false, error: "no encuentro el usuario «" + id + "» en el portal" });
+    const sha = (x) => crypto.createHash("sha256").update(String(x)).digest("hex");
+    // Contraseña: hash guardado o, en fichas antiguas, la clave en claro
+    const u = C.find((x) => (x.passHash && String(x.passHash).toLowerCase() === h) || (x.pass && sha(String(x.pass).trim()) === h));
+    if (!u) return res.status(401).json({ ok: false, error: "la contraseña no coincide con la del portal para «" + id + "»" });
     if (u.bloqueado) return res.status(403).json({ ok: false, error: "usuario bloqueado" });
-    const rol = String(u.rol || "").toLowerCase(), acc = (u.accesos || []).map((x) => String(x).toLowerCase());
+    id = String(u.id || u._docId); const rol = String(u.rol || "").toLowerCase(), acc = (u.accesos || []).map((x) => String(x).toLowerCase());
     // En pruebas: solo el CEO. Para abrirlo, cambia SOLO_CEO a false (entonces valen admin/director y los accesos «pedido_sap» / «produccion»)
     const SOLO_CEO = env("SAP_SOLO_CEO") !== "no";
     const esCeo = id === "ceo" || rol === "ceo";
