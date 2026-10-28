@@ -33,6 +33,12 @@ module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(204).end();
+  // Diagnóstico: GET ?diag=usuario&key=SAP_PEDIDOS_KEY → qué fichas encuentra y si tienen contraseña guardada (sin enseñarla)
+  if (req.method === "GET" && req.query && req.query.diag) {
+    if (!secreto() || req.query.key !== secreto()) return res.status(401).json({ ok: false, error: "clave incorrecta" });
+    const C = await buscarUsuarios(req.query.diag);
+    return res.status(200).json({ ok: true, buscado: req.query.diag, encontrados: C.map((u) => ({ coleccion: u._col, docId: u._docId, id: u.id, username: u.username || null, nombre: u.nombre || null, rol: u.rol || null, bloqueado: !!u.bloqueado, tieneHash: !!u.passHash, tieneClaveAntigua: !!u.pass, accesos: u.accesos || [] })), soloCeo: env("SAP_SOLO_CEO") !== "no" });
+  }
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "usa POST" });
   if (!secreto()) return res.status(500).json({ ok: false, error: "falta SAP_PEDIDOS_KEY en Vercel" });
   let b = req.body; if (typeof b === "string") { try { b = JSON.parse(b); } catch (e) { b = {}; } } b = b || {};
