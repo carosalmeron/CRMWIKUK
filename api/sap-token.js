@@ -35,9 +35,22 @@ module.exports = async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(204).end();
   // Diagnóstico: GET ?diag=usuario&key=SAP_PEDIDOS_KEY → qué fichas encuentra y si tienen contraseña guardada (sin enseñarla)
   if (req.method === "GET" && req.query && req.query.diag) {
-    if (!secreto() || req.query.key !== secreto()) return res.status(401).json({ ok: false, error: "clave incorrecta" });
+    const vale = [env("SAP_PEDIDOS_KEY"), env("CRON_SECRET")].filter(Boolean); if (!vale.includes(String(req.query.key || ""))) return res.status(401).json({ ok: false, error: "clave incorrecta" });
     const C = await buscarUsuarios(req.query.diag);
     return res.status(200).json({ ok: true, buscado: req.query.diag, encontrados: C.map((u) => ({ coleccion: u._col, docId: u._docId, id: u.id, username: u.username || null, nombre: u.nombre || null, rol: u.rol || null, bloqueado: !!u.bloqueado, tieneHash: !!u.passHash, tieneClaveAntigua: !!u.pass, accesos: u.accesos || [] })), soloCeo: env("SAP_SOLO_CEO") !== "no" });
+  }
+  // Activación directa en este aparato: GET ?activar=usuario&key=CLAVE → guarda el pase (30 días) y vuelve al portal.
+  // Para el CEO en pruebas: se abre una vez el enlace en el móvil o el ordenador y listo, sin contraseñas.
+  if (req.method === "GET" && req.query && req.query.activar) {
+    const vale = [env("SAP_PEDIDOS_KEY"), env("CRON_SECRET")].filter(Boolean);
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    if (!vale.includes(String(req.query.key || ""))) return res.status(401).send("<h2 style='font-family:system-ui'>Clave incorrecta</h2>");
+    const C = await buscarUsuarios(req.query.activar); const u = C.find((x) => x._col === "portal_users") || C[0];
+    if (!u) return res.status(404).send("<h2 style='font-family:system-ui'>No encuentro ese usuario</h2>");
+    const uid = String(u.id || u._docId), rol = String(u.rol || "").toLowerCase();
+    if (env("SAP_SOLO_CEO") !== "no" && !(uid === "ceo" || rol === "ceo")) return res.status(403).send("<h2 style='font-family:system-ui'>En pruebas: solo el CEO</h2>");
+    const exp = Date.now() + 30 * 86400000, tok = firmar({ u: uid, n: u.nombre || uid, exp });
+    return res.status(200).send(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><body style="font-family:system-ui;padding:30px;text-align:center"><div style="font-size:64px">✅</div><h2>Permiso de SAP activado en este aparato</h2><p>Para ${String(u.nombre || uid).replace(/[<>&]/g, "")} · hasta el ${new Date(exp).toLocaleDateString("es-ES")}</p><p><a href="/" style="font-size:18px">Volver al portal</a></p><script>try{localStorage.setItem("sap_pedido_key",${JSON.stringify(tok)});localStorage.removeItem("sap_pase_error");}catch(e){document.body.innerHTML="<h2>Este navegador no deja guardar el permiso</h2>";}setTimeout(function(){location.href="/";},2500);</script></body>`);
   }
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "usa POST" });
   if (!secreto()) return res.status(500).json({ ok: false, error: "falta SAP_PEDIDOS_KEY en Vercel" });
