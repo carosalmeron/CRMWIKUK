@@ -629,6 +629,39 @@ async function sapCorte(token) {
   return { sapDesde: fijado || auto || "2026-07-30", fijado: !!fijado, ultimoGlobalUC };
 }
 
+
+// ─────────────── (oct 2026, 28/10) ¿De dónde salen los pedidos de UC: de la global o de PEDIDOS SAP? ───────────────
+// El 28/10 la tabla global ha vuelto a traer los pedidos de UC (ya con los de SAP dentro). Si se siguiera sumando
+// PEDIDOS SAP, cada pedido de UC saldría dos veces. Regla:
+//   pbi_config/pedidos.fuenteUC = "global" → solo la global (PEDIDOS SAP se ignora para los pedidos)
+//                               = "sap"    → como hasta ahora (UC de SAP, se quitan de la global las repetidas)
+//                               = "auto"   → (por defecto) se mide cuántas líneas abiertas de SAP están ya en la global:
+//                                            si ≥ 70 % (o SAP no responde y la global trae UC reciente) → global.
+// Se fija con ?fuenteUC=global|sap|auto en la URL. El resultado sale en el JSON como fuenteUC.
+async function decidirFuenteUC(token, filasGlobal, sapU, errorSap) {
+  let cfg = "auto";
+  try { const c = await fbLeerDocumento("pbi_config", "pedidos"); if (c && /^(global|sap|auto)$/.test(String(c.fuenteUC || ""))) cfg = String(c.fuenteUC); } catch (e) {}
+  const hoy = new Date().toISOString().slice(0, 10);
+  const uc = filasGlobal.filter((r) => String(pick(r, "Cliente") || "")[0] === "U" && String(pick(r, "Fecha") || "").slice(0, 10) >= hoy);
+  const out = { config: cfg, lineasUCenGlobal: uc.length };
+  if (cfg === "global") return { ...out, modo: "global", motivo: "fijado a mano" };
+  if (cfg === "sap") return { ...out, modo: "sap", motivo: "fijado a mano" };
+  if (sapU) {
+    const K = (c, a) => String(c || "").toUpperCase().replace(/\D/g, "").slice(-4) + "|" + String(a || "").toUpperCase().trim();
+    const enG = new Set(uc.map((r) => K(pick(r, "Cliente"), pick(r, "Articulo"))));
+    const enGped = new Set(uc.map((r) => String(pick(r, "Pedido") || "").trim()).filter(Boolean));
+    const ab = sapU.validados || []; let hit = 0;
+    for (const v of ab) if (enG.has(K(v.Cliente, v.Articulo)) || (v.Pedido && enGped.has(v.Pedido))) hit++;
+    const cob = ab.length ? hit / ab.length : 0;
+    out.sapAbiertas = ab.length; out.sapYaEnGlobal = hit; out.cobertura = Math.round(cob * 100) + " %";
+    if (ab.length >= 5 && cob >= 0.7) return { ...out, modo: "global", motivo: "la global ya trae los pedidos de SAP (" + out.cobertura + " de las líneas abiertas de SAP están en la global)" };
+    if (ab.length >= 5) return { ...out, modo: "sap", motivo: "la global solo cubre el " + out.cobertura + " de SAP" };
+  }
+  if (errorSap && uc.length >= 20) return { ...out, modo: "global", motivo: "PEDIDOS SAP no responde y la global trae " + uc.length + " líneas de UC pendientes" };
+  if (!sapU && uc.length >= 20) return { ...out, modo: "global", motivo: "sin SAP; la global trae UC" };
+  return { ...out, modo: "sap", motivo: "sin datos para decidir: se mantiene SAP" };
+}
+
 // Código de cliente de SAP (C02123) → código de la global/CRM (U432123): "U43" + los 4 últimos dígitos.
 // Si hay maestro de clientes y ese código no existe, se busca una ficha "U…" que acabe en esos 4 dígitos.
 function clienteSapAGlobal(cod, fichas) {
@@ -4539,6 +4572,14 @@ EVALUATE
   // ?solopedidos=1 → sincroniza unicamente los pedidos planificados.
   // La sincronizacion completa consume casi los 60 s de Vercel con las
   // ventas y nunca llega a este bloque, asi que se puede lanzar aparte.
+  // (oct 2026) ?deshacerFoto=YYYY-MM-DD → borra la foto y el diario de cambios de ese día (para cuando una pasada
+  // ha escrito datos falsos, como el 27/10 sin SAP). La siguiente pasada compara contra la foto anterior.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(req.query.deshacerFoto || ""))) {
+    const dia = String(req.query.deshacerFoto); const out = { ok: true, dia };
+    try { await getToken(req); await fbBorrar("pbi_pedidos_foto", [dia]); await fbBorrar("pbi_pedidos_cambios", [dia]); out.borrado = ["pbi_pedidos_foto/" + dia, "pbi_pedidos_cambios/" + dia]; }
+    catch (e) { out.ok = false; out.error = String(e.message || e).slice(0, 300); }
+    return res.status(200).json(out);
+  }
   if (req.query.solopedidos === "1") {
     const t1 = Date.now();
     const out = { ok: true };
@@ -4584,10 +4625,17 @@ EVALUATE
       // (oct 2026) UC viene de PEDIDOS SAP; Bosch y Ramírez de la global. Si SAP falla, se vuelve a la
       // consulta global completa para no dejar a UC sin pedidos.
       if (/^\d{4}-\d{2}-\d{2}$/.test(String(req.query.sapDesde || ""))) { await fbCommit("pbi_config", [{ _id: "pedidos", sapDesde: String(req.query.sapDesde), fijadoEl: new Date().toISOString() }]); }
+      if (/^(global|sap|auto)$/.test(String(req.query.fuenteUC || ""))) { await fbCommit("pbi_config", [{ _id: "pedidos", fuenteUC: String(req.query.fuenteUC), fuenteFijadaEl: new Date().toISOString() }]); }
       let sapU = null;
       try { sapU = await pedidosSap(token, { fichas, dry: req.query.dry === "1" }); } catch (e) { out.errorSap = e.message.slice(0, 300); }
+      out.version = "sap-2026-10-28"; if (COLUMNAS_QUITADAS.length) out.columnasQuitadas = COLUMNAS_QUITADAS.slice();
       let filas = await pbiQuery(token, Q.pedidosTodas);
-      out.version = "sap-2026-10-27"; if (COLUMNAS_QUITADAS.length) out.columnasQuitadas = COLUMNAS_QUITADAS.slice();
+      // (28/10) La global vuelve a traer UC (con SAP dentro): se decide la fuente para no duplicar
+      const fu = await decidirFuenteUC(token, filas, sapU, out.errorSap); out.fuenteUC = fu;
+      if (fu.modo === "global") { sapU = null; out.errorSap = undefined; }
+      // (oct 2026) Si PEDIDOS SAP no responde y UC depende de SAP, NO se reescribe nada: si se siguiera, los pedidos de UC
+      // desaparecerían del CRM y el diario los daría por «servidos» (pasó el 27/10). Con &sinSap=1 se fuerza.
+      if (out.errorSap && req.query.sinSap !== "1") { out.ok = false; out.noTocado = "SAP ha fallado: se dejan los pedidos de ayer tal cual. Arregla Power BI o fuerza con &sinSap=1 (solo Bosch y Ramírez)."; return res.status(200).json(out); }
       if (sapU) { const antes = filas.length; filas = filas.filter((r) => !sapU.esDuplicadoGlobal(r)); out.globalUCQuitadasPorEstarEnSap = antes - filas.length;
         // Diagnóstico: líneas de UC de la global que se quedan aunque el cliente tenga algo abierto en SAP (posibles duplicados)
         try { const sapCli = {}; sapU.validados.forEach((v) => { const k = String(v.Cliente).toUpperCase(); (sapCli[k] = sapCli[k] || []).push(String(v.Pedido) + " " + v.Articulo + " " + num(v.Importe)); });
@@ -6234,6 +6282,9 @@ EVALUATE
       let sapU = null;
       try { sapU = await pedidosSap(token, { fichas: fichasPed, dry }); log.sap = { desde: sapU.desde, lineas: sapU.lineas, pendientes: sapU.abiertas, sinMapear: Object.keys(sapU.sinMapear).length }; } catch (e) { log.errorSap = e.message.slice(0, 300); }
       let filas = await pbiQuery(token, Q.pedidosTodas);
+      const fu = await decidirFuenteUC(token, filas, sapU, log.errorSap); log.fuenteUC = fu;   // (28/10) global con SAP dentro → no duplicar
+      if (fu.modo === "global") { sapU = null; log.errorSap = undefined; }
+      if (log.errorSap) throw new Error("PEDIDOS SAP ha fallado, no se tocan los pedidos: " + log.errorSap);   // (oct 2026) ver solopedidos
       if (sapU) { const antes = filas.length; filas = filas.filter((r) => !sapU.esDuplicadoGlobal(r)); log.sap.globalUCQuitadasPorEstarEnSap = antes - filas.length; filas.push(...sapU.validados); }
       const crudos = filas.map((r, i) => {
         const cli = String(pick(r, "Cliente") || "").trim();
