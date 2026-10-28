@@ -113,11 +113,13 @@ module.exports = async function handler(req, res) {
         let tieneBom = false; try { await sl.get(`ProductTrees('${esc(String(p.producto))}')?$select=TreeCode,TreeType`); tieneBom = true; } catch (e) {}
         const tipo = (p.tipo === "especial" || !tieneBom) ? "bopotSpecial" : "bopotStandard"; out.tipoOrden = tipo === "bopotSpecial" ? "especial (sin escandallo en SAP)" : "estándar (con escandallo)";
         const orden = { ItemNo: String(p.producto), PlannedQuantity: cant, Warehouse: String(p.almacen), PostingDate: fecha, StartDate: fecha, DueDate: fecha,
-          ProductionOrderStatus: "boposReleased", ProductionOrderType: tipo, Remarks: String(p.comentario || "").slice(0, 254) || undefined,
+          ProductionOrderStatus: "boposPlanned", ProductionOrderType: tipo,   // SAP solo deja crearla en Planificado; se libera justo después Remarks: String(p.comentario || "").slice(0, 254) || undefined,
           ProductionOrderLines: C.map((c) => ({ ItemNo: String(c.articulo), PlannedQuantity: Number(c.uds), BaseQuantity: Number(c.uds) / cant, Warehouse: String(c.almacen || p.almacen) })) };
         out.enviado = { orden };
         let o = await sl.post("ProductionOrders", orden);
-        if (o.ProductionOrderStatus !== "boposReleased") { try { await sl.patch(`ProductionOrders(${o.AbsoluteEntry})`, { ProductionOrderStatus: "boposReleased" }); o = await sl.get(`ProductionOrders(${o.AbsoluteEntry})`); } catch (e) { out.avisoLiberar = String(e.message || e).slice(0, 200); } }
+        // 1b) Liberar (de Planificado a Liberado): sin esto no se pueden registrar salidas ni entradas contra la orden
+        try { await sl.patch(`ProductionOrders(${o.AbsoluteEntry})`, { ProductionOrderStatus: "boposReleased" }); o = await sl.get(`ProductionOrders(${o.AbsoluteEntry})`); }
+        catch (e) { out.orden = { AbsoluteEntry: o.AbsoluteEntry, DocumentNumber: o.DocumentNumber, estado: o.ProductionOrderStatus }; throw new Error("la orden " + o.DocumentNumber + " se ha creado en Planificado pero no se ha podido liberar: " + String(e.message || e).slice(0, 200)); }
         out.orden = { AbsoluteEntry: o.AbsoluteEntry, DocumentNumber: o.DocumentNumber, estado: o.ProductionOrderStatus, producto: o.ItemNo, cantidad: o.PlannedQuantity, almacen: o.Warehouse,
           lineas: (o.ProductionOrderLines || []).map((l) => ({ linea: l.LineNumber, articulo: l.ItemNo, planificado: l.PlannedQuantity, almacen: l.Warehouse })) };
         // 2) Salida de componentes (enlazada a la orden, tipo base 202)
