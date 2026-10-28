@@ -17002,10 +17002,11 @@ function PlanificacionCompras({usuario, clientesFB}){
         if(!j||!j.fields||!j.fields.exact){ setStockMap({}); return; }
         var raw=j.fields.exact.stringValue||"{}";
         var obj=JSON.parse(raw);
+        var LL={}; try{ LL=JSON.parse((j.fields.llegadas&&j.fields.llegadas.stringValue)||"{}"); }catch(e){}   // (28/10) llegadas con fecha: {cod:[[fecha,uds],…]}
         var m={};
         Object.keys(obj).forEach(function(cod){
           var a=obj[cod]||[];
-          m[String(cod).toUpperCase()]={stock:Number(a[0])||0, entradas:Number(a[1])||0, comprometido:Number(a[2])||0};
+          m[String(cod).toUpperCase()]={stock:Number(a[0])||0, entradas:Number(a[1])||0, comprometido:Number(a[2])||0, lleg:LL[String(cod).toUpperCase()]||[]};
         });
         setStockMap(m);
       }).catch(function(){ setStockMap({}); });
@@ -17023,7 +17024,7 @@ function PlanificacionCompras({usuario, clientesFB}){
     if(!cod) return res;
     Object.keys(stockMap).forEach(function(k){
       if(k===cod || k.indexOf(cod+".")===0){ // el propio codigo y sus envases (COD.XX)
-        res.stock+=stockMap[k].stock; res.entradas+=stockMap[k].entradas; res.comprometido+=stockMap[k].comprometido;
+        res.stock+=stockMap[k].stock; res.entradas+=stockMap[k].entradas; res.comprometido+=stockMap[k].comprometido; res.lleg=(res.lleg||[]).concat(stockMap[k].lleg||[]);
         res.encontrado=true;
       }
     });
@@ -17076,7 +17077,7 @@ function PlanificacionCompras({usuario, clientesFB}){
   productos.forEach(function(g){
     var s=_stockDe(g);
     if(s){
-      g.stock=s.stock; g.entradas=s.entradas; g.comprometido=s.comprometido;
+      g.stock=s.stock; g.entradas=s.entradas; g.comprometido=s.comprometido; g.lleg=(s.lleg||[]).slice().sort(function(a,b){ return String(a[0]).localeCompare(String(b[0])); });
       g.stockEncontrado=s.encontrado; g.codStock=s.cod;
       g.libre=s.stock-s.comprometido;               // stock realmente libre
       g.disponible=g.libre+s.entradas;              // libre + entradas previstas
@@ -17268,7 +17269,7 @@ function PlanificacionCompras({usuario, clientesFB}){
           h+="<td class='met'>"+(Array.from(g.metros||[]).join(", ")||"&mdash;")+"</td>";
           h+="<td class='num'>"+nf(g.stock)+"</td>";
           h+="<td class='num' style='color:#B45309'>-"+nf(g.comprometido)+"</td>";
-          h+="<td class='num' style='color:#0369A1'>+"+nf(g.entradas)+"</td>";
+          h+="<td class='num' style='color:#0369A1'>+"+nf(g.entradas)+((g.lleg||[]).length?"<small style='display:block;font-weight:400;color:#64748B'>"+g.lleg.slice(0,3).map(function(l){ return nf(l[1])+" el "+String(l[0]).slice(8,10)+"/"+String(l[0]).slice(5,7); }).join(" · ")+(g.lleg.length>3?" · …":"")+"</small>":"")+"</td>";
           h+="<td class='num'>"+nf(g.disponible)+"</td>";
           mesesLista.forEach(function(m){
             var cons=g.porMes[m]||0;
@@ -44704,10 +44705,11 @@ function AvisoStock({codigo, compacto}){
         const m={};
         try{
           const obj=JSON.parse((j&&j.fields&&j.fields.exact&&j.fields.exact.stringValue)||"{}");
+          let LL={}; try{ LL=JSON.parse((j.fields.llegadas&&j.fields.llegadas.stringValue)||"{}"); }catch(e){}
           Object.keys(obj).forEach(function(c){
             const a=obj[c]||[];
             m[String(c).toUpperCase()]={stock:Number(a[0])||0,
-              entradas:Number(a[1])||0, comprometido:Number(a[2])||0};
+              entradas:Number(a[1])||0, comprometido:Number(a[2])||0, lleg:LL[String(c).toUpperCase()]||[]};
           });
         }catch(e){}
         _STOCK_CACHE=m;
@@ -44725,7 +44727,7 @@ function AvisoStock({codigo, compacto}){
   // Coincidencia en los dos sentidos: el stock puede estar desglosado por
   // envase ("SC122.60") o al contrario, el artículo puede ser más específico
   // que la ficha de stock ("SC122.60/65" frente a "SC122").
-  let stock=0, entradas=0, comprometido=0, hallados=0;
+  let stock=0, entradas=0, comprometido=0, hallados=0, lleg=[];
   const raiz=cod.split(/[.\/ ]/)[0];
   for(const k of Object.keys(st)){
     const coincide = k===cod
@@ -44734,7 +44736,7 @@ function AvisoStock({codigo, compacto}){
       || (raiz.length>=4 && k.startsWith(raiz));
     if(coincide){
       stock+=st[k].stock; entradas+=st[k].entradas;
-      comprometido+=st[k].comprometido; hallados++;
+      comprometido+=st[k].comprometido; hallados++; lleg=lleg.concat(st[k].lleg||[]);
     }
   }
   if(!hallados) return (
@@ -44749,11 +44751,15 @@ function AvisoStock({codigo, compacto}){
   const libre=stock-comprometido;
   const color = libre>0 ? T.green : entradas>0 ? T.amber : T.red;
   const n=(v)=>Math.round(v).toLocaleString("es-ES");
+  // (28/10) Llegadas con fecha, de los pedidos de compra de SAP: [[fecha, uds], …] ordenadas por fecha
+  lleg.sort((a,b)=>String(a[0]).localeCompare(String(b[0])));
+  const fdm=(f)=>String(f).slice(8,10)+"/"+String(f).slice(5,7);
+  const llegTxt=lleg.length?lleg.slice(0,3).map(l=>`${n(l[1])} el ${fdm(l[0])}`).join(", ")+(lleg.length>3?"…":""):"";
 
   if(compacto) return (
     <p style={{margin:"5px 0 0",fontSize:11.5,fontWeight:700,color}}>
       Stock libre {n(libre)}
-      {entradas>0?` · entran ${n(entradas)}`:""}
+      {entradas>0?` · entran ${llegTxt||n(entradas)}`:""}
       {comprometido>0?` · comprometido ${n(comprometido)}`:""}
     </p>
   );
@@ -44773,6 +44779,9 @@ function AvisoStock({codigo, compacto}){
         {entradas>0?` · ${n(entradas)} por entrar`:""}
         {hallados>1?` · ${hallados} envases`:""}
       </p>
+      {llegTxt && (
+        <p style={{margin:"2px 0 0",fontSize:11.5,fontWeight:700,color:"#0369A1"}}>🚚 Llega: {llegTxt}</p>
+      )}
       {libre<=0 && entradas>0 && (
         <p style={{margin:"5px 0 0",fontSize:11.5,fontWeight:700,color:T.amber}}>
           Sin stock libre, pero hay entradas previstas
