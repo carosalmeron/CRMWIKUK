@@ -4,6 +4,7 @@
 //   + SAP_PEDIDOS_KEY  clave que debe mandar la página (cabecera x-crm-key). Si no existe, se admite CRON_SECRET.
 //
 // GET  ?clientes=texto · ?articulos=texto · ?precio=ITEM&cliente=CARDCODE   (igual que sap-pedido.js)
+// GET  ?almacenes=1                   → almacenes activos (código y nombre)
 // GET  ?lotes=ITEM[&almacen=WHS]       → lotes con existencias de ese artículo (lote, almacén, cantidad, caducidad)
 // GET  ?factura=DOCNUM                 → consulta una factura creada
 // POST { db?, factura:{ cliente, fecha?, vencimiento?, comentario?, vendedor?, almacen?, lineas:[{ articulo, uds, precio?, almacen?, lotes:[{lote, uds}] }] } }
@@ -79,6 +80,10 @@ module.exports = async function handler(req, res) {
         const it = await sl.get(`Items('${esc(q.precio)}')?$select=ItemCode,ItemPrices`);
         const P = it.ItemPrices || []; const p = lista != null ? P.find((x) => Number(x.PriceList) === Number(lista)) : null;
         out.precio = p ? p.Price : null; out.listaPrecios = lista; return;
+      }
+      if (req.method === "GET" && q.almacenes !== undefined) {   // lista de almacenes (código y nombre) para elegir el de salida
+        const r = await sl.get("Warehouses?$select=WarehouseCode,WarehouseName,Inactive&$orderby=WarehouseCode");
+        out.almacenes = (r.value || []).filter((w) => w.Inactive !== "tYES").map((w) => ({ codigo: w.WarehouseCode, nombre: w.WarehouseName })); return;
       }
       if (req.method === "GET" && q.lotes) {
         const item = String(q.lotes).toUpperCase(), alm = q.almacen ? String(q.almacen).toUpperCase() : "";
