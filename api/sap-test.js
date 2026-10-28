@@ -14,6 +14,7 @@
 //    /api/sap-test?secret=…&db=U_CARO_99 → lo mismo contra la base de pruebas
 //    /api/sap-test?secret=…&pedidos=1    → líneas de pedidos de venta abiertos (hasta 200)
 //    /api/sap-test?secret=…&stock=1      → stock por artículo y almacén (hasta 200)
+//    /api/sap-test?secret=…&estados=1    → qué estados y fechas hay de verdad en los pedidos (cabecera y líneas)
 //    /api/sap-test?secret=…&que=Items&top=5   → cualquier entidad del Service Layer, para explorar
 //
 // Siempre cierra la sesión al terminar (Logout) para no dejar ocupada una licencia de SAP.
@@ -80,6 +81,22 @@ module.exports = async function handler(req, res) {
       if (q.que) {   // explorar cualquier entidad
         const top = Math.min(Number(q.top) || 5, 50);
         out.entidad = String(q.que); out.filas = (await sl.get(`${encodeURIComponent(String(q.que))}?$top=${top}${q.select ? "&$select=" + encodeURIComponent(String(q.select)) : ""}${q.filter ? "&$filter=" + encodeURIComponent(String(q.filter)) : ""}`)).value;
+        return;
+      }
+      if (q.estados === "1") {   // qué estados y qué fechas hay de verdad en los pedidos (últimos 400)
+        const ped = await todas(sl, "Orders?$orderby=DocEntry desc", Math.min(Number(q.top) || 400, 1000));
+        const cab = {}, lin = {}, fechasCab = {}, fechasLin = {};
+        const esFecha = (v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v);
+        const cuenta = (o, k, v) => { const m = o[k] = o[k] || {}; const s = v === null || v === undefined ? "(vacío)" : String(v); m[s] = (m[s] || 0) + 1; };
+        const CAB = ["DocumentStatus", "Cancelled", "Confirmed", "AuthorizationStatus", "Printed", "DocObjectCode", "DocumentSubType", "Indicator", "PaymentBlock", "ReserveInvoice", "DocType"];
+        const LIN = ["LineStatus", "TreeType", "WarehouseCode", "SalesPersonCode"];
+        for (const p of ped) {
+          for (const k of Object.keys(p)) { if (CAB.includes(k) || /^U_/.test(k) && !esFecha(p[k]) && typeof p[k] !== "object") cuenta(cab, k, p[k]); if (esFecha(p[k])) { const f = fechasCab[k] = fechasCab[k] || { con: 0, sin: 0, min: null, max: null }; f.con++; const d = p[k].slice(0, 10); if (!f.min || d < f.min) f.min = d; if (!f.max || d > f.max) f.max = d; } else if (/Date$/.test(k)) { const f = fechasCab[k] = fechasCab[k] || { con: 0, sin: 0, min: null, max: null }; f.sin++; } }
+          for (const l of (p.DocumentLines || [])) for (const k of Object.keys(l)) { if (LIN.includes(k) || /^U_/.test(k) && !esFecha(l[k]) && typeof l[k] !== "object") cuenta(lin, k, l[k]); if (esFecha(l[k])) { const f = fechasLin[k] = fechasLin[k] || { con: 0, sin: 0, min: null, max: null }; f.con++; const d = l[k].slice(0, 10); if (!f.min || d < f.min) f.min = d; if (!f.max || d > f.max) f.max = d; } else if (/Date$/.test(k)) { const f = fechasLin[k] = fechasLin[k] || { con: 0, sin: 0, min: null, max: null }; f.sin++; } }
+        }
+        // Solo los campos con más de un valor o con campos U_ (los fijos de un solo valor no dicen nada)
+        const util = (o) => Object.fromEntries(Object.entries(o).filter(([k, m]) => Object.keys(m).length > 1 || /^U_/.test(k) || ["DocumentStatus", "Cancelled", "LineStatus"].includes(k)).map(([k, m]) => [k, Object.fromEntries(Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 12))]));
+        out.pedidosLeidos = ped.length; out.estadosCabecera = util(cab); out.estadosLinea = util(lin); out.fechasCabecera = fechasCab; out.fechasLinea = fechasLin;
         return;
       }
       if (q.pedidos === "1") {   // líneas abiertas de pedidos de venta
