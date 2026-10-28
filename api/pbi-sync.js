@@ -734,6 +734,8 @@ async function leerPedidosSapSL(desde) {
   return conSesionSap(async (sl) => {
     const sel = "DocEntry,DocNum,DocDate,DocDueDate,CardCode,CardName,DocumentStatus,Cancelled,SalesPersonCode,DocumentLines";
     const ped = await sl.todas(`Orders?$select=${sel}&$filter=DocDate ge '${desde}' or DocumentStatus eq 'bost_Open'&$orderby=DocEntry`);
+    // Nombres de los vendedores (el mapeo a códigos del CRM usa el nombre cuando el código no está en la tabla manual)
+    const nombres = {}; try { for (const v of await sl.todas("SalesPersons?$select=SalesEmployeeCode,SalesEmployeeName", 500)) nombres[String(v.SalesEmployeeCode)] = String(v.SalesEmployeeName || "").trim(); } catch (e) {}
     const filas = [];
     for (const p of ped) {
       const cancelado = String(p.Cancelled || "") === "tYES", cerrado = p.DocumentStatus !== "bost_Open";
@@ -742,7 +744,7 @@ async function leerPedidosSapSL(desde) {
         filas.push({ DocEntry: p.DocEntry, DocNum: p.DocNum, DocDate: String(p.DocDate || "").slice(0, 10), DocDueDate: String(p.DocDueDate || "").slice(0, 10),
           CodigoCliente: p.CardCode, NombreCliente: p.CardName, LineNum: l.LineNum, ItemCode: l.ItemCode, Dscription: l.ItemDescription,
           Unidades: Number(l.Quantity) || 0, OpenQty: open, LineTotal: Number(l.LineTotal) || 0, FechaPlan: String(l.ShipDate || p.DocDueDate || "").slice(0, 10),
-          SlpCode: String(p.SalesPersonCode ?? ""), SlpName: "", Estado: cancelado ? "cancelado" : cerrado ? "cerrado" : "abierto", Almacen: l.WarehouseCode || "" });
+          SlpCode: String(p.SalesPersonCode ?? ""), SlpName: nombres[String(p.SalesPersonCode ?? "")] || "", Estado: cancelado ? "cancelado" : cerrado ? "cerrado" : "abierto", Almacen: l.WarehouseCode || "" });
       }
     }
     return { filas, pedidos: ped.length };
@@ -4649,6 +4651,53 @@ EVALUATE
   // ?solopedidos=1 → sincroniza unicamente los pedidos planificados.
   // La sincronizacion completa consume casi los 60 s de Vercel con las
   // ventas y nunca llega a este bloque, asi que se puede lanzar aparte.
+
+  // ─────────────── (28/10/2026) ?stocksap=1 → stock de UC leído de SAP (Service Layer) ───────────────
+  // Sustituye la subida del Excel en stock_sap_united_caro.html: escribe lo MISMO (stock_sap/resumen con exact y base,
+  // stock_sap_detalle/chunk_N con las filas, stock_sap/meta) para que stock.html, el catálogo y la promoción
+  // sigan leyendo igual. Campos de SAP: QuantityOnStock, QuantityOrderedFromVendors (llegadas),
+  // QuantityOrderedByCustomers (comprometido), U_SCL_FAMILIA, U_SCL_CALIBRE, U_SCL_BASE/PADRE, U_SCL_Metraje,
+  // U_SCL_CALIDAD, SalesQtyPerPackUnit (uds por paquete), ItemsGroupCode → ItemGroups (grupo).
+  if (req.query.stocksap === "1") {
+    const t1 = Date.now(); const out = { ok: true, version: "stocksap-2026-10-28" };
+    try {
+      if (!sapConfigurado()) throw new Error("faltan SAP_URL, SAP_USER o SAP_PASS en Vercel");
+      const r = await conSesionSap(async (sl) => {
+        const grupos = {}; try { for (const g of await sl.todas("ItemGroups?$select=Number,GroupName", 500)) grupos[String(g.Number)] = String(g.GroupName || "").replace(/^\d+\s*-\s*/, "").trim(); } catch (e) {}
+        const sel = "ItemCode,ItemName,ItemsGroupCode,QuantityOnStock,QuantityOrderedFromVendors,QuantityOrderedByCustomers,SalesQtyPerPackUnit,InventoryItem,Valid,Frozen,U_SCL_FAMILIA,U_SCL_CALIBRE,U_SCL_BASE,U_SCL_PADRE,U_SCL_Metraje,U_SCL_CALIDAD,U_SCL_DIVISIONES,ItemWarehouseInfoCollection";
+        const its = await sl.todas(`Items?$select=${sel}&$filter=InventoryItem eq 'tYES' and (QuantityOnStock gt 0 or QuantityOrderedFromVendors gt 0 or QuantityOrderedByCustomers gt 0)`, 20000);
+        return { its, grupos };
+      });
+      const classify = (d) => { d = (d || "").toUpperCase(); if (d.includes("MAD.CERDO")) return "Tripa Mad. Cerdo"; if (d.includes("MAD.CORDERO")) return "Tripa Mad. Cordero"; if (d.includes("MAD.BUEY") || d.includes("MAD.VACUNO")) return "Tripa Mad. Buey"; if (d.includes("MAD.ROSCAL")) return "Tripa Mad. Roscal"; if (d.includes("ROSCAL") && (d.includes("PIEZA") || d.includes("PIEZAS"))) return "Piezas Roscal"; if (d.includes("SEMIRRIZADA")) return "Semirrizada"; if (d.includes("CIEGO")) return "Ciegos"; if (d.includes("VEJIGA")) return "Vejigas"; if (d.includes("T.SECA") || (d.includes("SECA") && (d.includes("LONG") || d.includes("SHORT")))) return "Tripa Seca"; if (d.includes("ESPECTA+")) return "Especta+"; if (d.includes("MAEXTRA+")) return "Maextra+"; if (d.includes("CULAR")) return "Cular"; if (d.includes("MOLDE")) return "Moldes"; if (d.includes("MULTIBAR")) return "Multibar"; if (d.includes("PECTA")) return "Pecta"; if (d.includes("COLAG")) return "Colágeno"; if (d.includes("TRIPA")) return "Tripa Otros"; if (d.includes("GUANTE")) return "Guantes"; if (d.includes("MALLA")) return "Mallas"; if (d.includes("MADEJA")) return "Madejas"; return "Otros"; };
+      const extractMet = (desc) => { const m = (desc || "").match(/P\.(\d+)/); return m ? parseInt(m[1]) : 0; };
+      const r2 = (v) => Math.round((Number(v) || 0) * 100) / 100, S = (v) => v === null || v === undefined ? "" : String(v).trim();
+      const rows = r.its.map((i) => { const alm = {}; for (const w of (i.ItemWarehouseInfoCollection || [])) { if ((w.InStock || 0) || (w.Committed || 0) || (w.Ordered || 0)) alm[w.WarehouseCode] = [r2(w.InStock), r2(w.Ordered), r2(w.Committed)]; }
+        const desc = S(i.ItemName), cal = S(i.U_SCL_CALIBRE), fam = S(i.U_SCL_FAMILIA) || r.grupos[String(i.ItemsGroupCode)] || "";
+        return { cod: S(i.ItemCode).toUpperCase(), desc, stock: r2(i.QuantityOnStock), tipo: classify(desc), calibre: cal || "Sin calibre", familia: fam || "Sin familia",
+          llegadas: r2(i.QuantityOrderedFromVendors), comprometido: r2(i.QuantityOrderedByCustomers), base: (S(i.U_SCL_BASE) || S(i.U_SCL_PADRE) || S(i.ItemCode)).toUpperCase(),
+          qpkg: Number(i.SalesQtyPerPackUnit) > 0 ? Number(i.SalesQtyPerPackUnit) : 1, met: Number(S(i.U_SCL_Metraje).replace(",", ".")) || extractMet(desc),
+          calidad: S(i.U_SCL_CALIDAD), grupo: r.grupos[String(i.ItemsGroupCode)] || "", division: S(i.U_SCL_DIVISIONES), alm }; });
+      const exact = {}, base = {};
+      for (const x of rows) { exact[x.cod] = [x.stock, x.llegadas, x.comprometido]; const b = base[x.base] || (base[x.base] = [0, 0, 0]); b[0] += x.stock; b[1] += x.llegadas; b[2] += x.comprometido; }
+      for (const b of Object.keys(base)) base[b] = base[b].map(r2);
+      const d = new Date(), fecha = `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`, ts = Date.now();
+      out.articulos = rows.length; out.stockTotal = r2(rows.reduce((t, x) => t + x.stock, 0)); out.llegadas = r2(rows.reduce((t, x) => t + x.llegadas, 0)); out.comprometido = r2(rows.reduce((t, x) => t + x.comprometido, 0));
+      out.sinFamilia = rows.filter((x) => x.familia === "Sin familia").length; out.sinCalibre = rows.filter((x) => x.calibre === "Sin calibre").length; out.muestra = rows.slice(0, 3);
+      if (req.query.dry !== "1") {
+        const CH = 1200, nch = Math.ceil(rows.length / CH);
+        await fbCommit("stock_sap", [{ _id: "resumen", fecha, ts, exact: JSON.stringify(exact), base: JSON.stringify(base), origen: "SAP Service Layer", actualizado: new Date().toISOString() }]);
+        const chunks = []; for (let i = 0; i < nch; i++) chunks.push({ _id: "chunk_" + i, fecha, ts, rows: JSON.stringify(rows.slice(i * CH, (i + 1) * CH)) });
+        await fbCommit("stock_sap_detalle", chunks);
+        await fbCommit("stock_sap", [{ _id: "meta", fecha, ts, chunks: nch, total: rows.length, origen: "SAP Service Layer" }]);
+        const sobran = []; for (let i = nch; i < nch + 12; i++) sobran.push("chunk_" + i); try { await fbBorrar("stock_sap_detalle", sobran); } catch (e) {}
+        out.escrito = { chunks: nch, fecha };
+      }
+    } catch (e) { out.ok = false; out.error = String(e.message || e).slice(0, 400); }
+    out.segundos = Math.round((Date.now() - t1) / 100) / 10;
+    try { await latido("stockSap", { segundos: out.segundos, errores: out.ok ? 0 : 1, detalle: out.error || null }); } catch (e) {}
+    return res.status(200).json(out);
+  }
+
   // (oct 2026) ?deshacerFoto=YYYY-MM-DD → borra la foto y el diario de cambios de ese día (para cuando una pasada
   // ha escrito datos falsos, como el 27/10 sin SAP). La siguiente pasada compara contra la foto anterior.
   if (/^\d{4}-\d{2}-\d{2}$/.test(String(req.query.deshacerFoto || ""))) {
@@ -4703,14 +4752,16 @@ EVALUATE
       // consulta global completa para no dejar a UC sin pedidos.
       if (/^\d{4}-\d{2}-\d{2}$/.test(String(req.query.sapDesde || ""))) { await fbCommit("pbi_config", [{ _id: "pedidos", sapDesde: String(req.query.sapDesde), fijadoEl: new Date().toISOString() }]); }
       if (/^(global|sap|sapsl|auto)$/.test(String(req.query.fuenteUC || ""))) { await fbCommit("pbi_config", [{ _id: "pedidos", fuenteUC: String(req.query.fuenteUC), fuenteFijadaEl: new Date().toISOString() }]); }
-      out.version = "sap-2026-10-28c";
+      out.version = "sap-2026-10-28d";
       let filas = await pbiQuery(token, Q.pedidosTodas);
       // (28/10) La global vuelve a traer UC (con SAP dentro). Primero la global: si ya trae UC pendiente, PEDIDOS SAP
       // ni se consulta (ahorra los reintentos que el 28/10 pasaron el cron de tiempo). Solo se mira SAP si falta UC.
       let sapU = null, fu = await decidirFuenteUC(token, filas, null, null);
       if (fu.modo === "sapsl") {
         try { sapU = await pedidosSap(token, { fichas, dry: req.query.dry === "1", via: "sl" }); } catch (e) { out.errorSap = e.message.slice(0, 300); }
-        if (sapU) { const antes = filas.length; filas = filas.filter((r) => String(pick(r, "Cliente") || "")[0] !== "U"); out.globalUCDescartadas = antes - filas.length; fu.sapLineas = sapU.lineas; fu.sapAbiertas = sapU.abiertas; fu.sapPedidos = sapU.pedidosSL; }
+        if (sapU) { const antes = filas.length; const impU = filas.filter((r) => String(pick(r, "Cliente") || "")[0] === "U").reduce((t, r) => t + num(pick(r, "Importe")), 0);
+          filas = filas.filter((r) => String(pick(r, "Cliente") || "")[0] !== "U"); out.globalUCDescartadas = antes - filas.length; out.globalUCImporteDescartado = num(impU);
+          fu.sapLineas = sapU.lineas; fu.sapAbiertas = sapU.abiertas; fu.sapPedidos = sapU.pedidosSL; fu.sapPendiente = sapU.pendiente; fu.sapVendedoresSinMapear = sapU.sinMapear; }
       } else if (fu.modo !== "global" || fu.config === "sap") {
         try { sapU = await pedidosSap(token, { fichas, dry: req.query.dry === "1" }); } catch (e) { out.errorSap = e.message.slice(0, 300); }
         fu = await decidirFuenteUC(token, filas, sapU, out.errorSap);
