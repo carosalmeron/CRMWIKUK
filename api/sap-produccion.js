@@ -106,9 +106,14 @@ module.exports = async function handler(req, res) {
         if (!C.length) throw new Error("no hay componentes con cantidad");
         const hoy = new Date().toISOString().slice(0, 10), fecha = /^\d{4}-\d{2}-\d{2}$/.test(String(p.fecha || "")) ? p.fecha : hoy;
         for (const c of C) { const lotes = (c.lotes || []).filter((b) => b && b.lote && Number(b.uds) > 0); if (lotes.length) { const s = lotes.reduce((t, b) => t + Number(b.uds), 0); if (Math.abs(s - Number(c.uds)) > 0.0001) throw new Error("en " + c.articulo + " los lotes suman " + s + " y el componente lleva " + c.uds); } }
-        // 1) Orden de fabricación liberada con los componentes del parte
+        // 1) Orden de fabricación liberada con los componentes del parte.
+        //    «Estándar» exige que el producto tenga lista de materiales de producción en SAP; si no la tiene
+        //    (Invalid production bill of materials [OWOR.ItemCode]) se crea como «Especial», que admite cualquier
+        //    artículo con los componentes que se indiquen.
+        let tieneBom = false; try { await sl.get(`ProductTrees('${esc(String(p.producto))}')?$select=TreeCode,TreeType`); tieneBom = true; } catch (e) {}
+        const tipo = (p.tipo === "especial" || !tieneBom) ? "bopotSpecial" : "bopotStandard"; out.tipoOrden = tipo === "bopotSpecial" ? "especial (sin escandallo en SAP)" : "estándar (con escandallo)";
         const orden = { ItemNo: String(p.producto), PlannedQuantity: cant, Warehouse: String(p.almacen), PostingDate: fecha, StartDate: fecha, DueDate: fecha,
-          ProductionOrderStatus: "boposReleased", ProductionOrderType: "bopotStandard", Remarks: String(p.comentario || "").slice(0, 254) || undefined,
+          ProductionOrderStatus: "boposReleased", ProductionOrderType: tipo, Remarks: String(p.comentario || "").slice(0, 254) || undefined,
           ProductionOrderLines: C.map((c) => ({ ItemNo: String(c.articulo), PlannedQuantity: Number(c.uds), BaseQuantity: Number(c.uds) / cant, Warehouse: String(c.almacen || p.almacen) })) };
         out.enviado = { orden };
         let o = await sl.post("ProductionOrders", orden);
