@@ -83,6 +83,18 @@ module.exports = async function handler(req, res) {
         out.entidad = String(q.que); out.filas = (await sl.get(`${encodeURIComponent(String(q.que))}?$top=${top}${q.select ? "&$select=" + encodeURIComponent(String(q.select)) : ""}${q.filter ? "&$filter=" + encodeURIComponent(String(q.filter)) : ""}`)).value;
         return;
       }
+      if (q.articulo) {   // de dónde salen las entradas previstas de un artículo: pedidos de compra y órdenes de fabricación
+        const cod = String(q.articulo).toUpperCase(); const pref = cod.replace(/'/g, "''");
+        const it = (await sl.get(`Items?$select=ItemCode,ItemName,QuantityOnStock,QuantityOrderedFromVendors,QuantityOrderedByCustomers,ItemWarehouseInfoCollection&$filter=startswith(ItemCode,'${pref}')`)).value || [];
+        out.articulos = it.map((i) => ({ codigo: i.ItemCode, stock: i.QuantityOnStock, pedidoAProveedor: i.QuantityOrderedFromVendors, comprometido: i.QuantityOrderedByCustomers,
+          almacenes: (i.ItemWarehouseInfoCollection || []).filter((w) => w.InStock || w.Committed || w.Ordered).map((w) => ({ alm: w.WarehouseCode, stock: w.InStock, comprometido: w.Committed, pedido: w.Ordered })) }));
+        const po = await todas(sl, "PurchaseOrders?$select=DocNum,DocDate,DocDueDate,CardName,DocumentStatus,DocumentLines&$filter=DocumentStatus eq 'bost_Open'", 1000);
+        out.pedidosCompra = []; for (const p of po) for (const l of (p.DocumentLines || [])) if (String(l.ItemCode || "").toUpperCase().startsWith(cod)) out.pedidosCompra.push({ pedido: p.DocNum, proveedor: p.CardName, articulo: l.ItemCode, fechaEntrega: l.ShipDate || p.DocDueDate, uds: l.Quantity, pendientes: l.RemainingOpenQuantity ?? l.OpenQuantity, estadoLinea: l.LineStatus, almacen: l.WarehouseCode });
+        try { const pr = await todas(sl, `ProductionOrders?$select=AbsoluteEntry,DocumentNumber,ItemNo,PlannedQuantity,CompletedQuantity,ProductionOrderStatus,DueDate,StartDate,PostingDate,Warehouse&$filter=ProductionOrderStatus eq 'boposReleased' or ProductionOrderStatus eq 'boposPlanned'`, 2000);
+          out.ordenesFabricacion = pr.filter((o) => String(o.ItemNo || "").toUpperCase().startsWith(cod)).map((o) => ({ orden: o.DocumentNumber, articulo: o.ItemNo, estado: o.ProductionOrderStatus, planificado: o.PlannedQuantity, hecho: o.CompletedQuantity, fechaFin: o.DueDate, inicio: o.StartDate, almacen: o.Warehouse }));
+          out.ordenesFabricacionAbiertasTotal = pr.length; } catch (e) { out.ordenesFabricacion = "no se han podido leer: " + String(e.message || e).slice(0, 160); }
+        return;
+      }
       if (q.codigos === "1") {   // pedidos abiertos agrupados por tipo y estado de solicitud, con ejemplos, para que el CEO diga qué significa cada combinación
         const ped = await todas(sl, "Orders?$select=DocNum,DocDate,CardCode,CardName,Confirmed,DocTotal,U_SCL_InvalidadoxPrecios,U_SCL_InvalidadoxRiesg,U_SCL_InvalidadoxCobros,U_UC_SolicitudEstado,DocumentLines&$filter=DocumentStatus eq 'bost_Open'&$orderby=DocEntry desc", 600);
         const G = {}; const otros = { confirmado: {}, invPrecios: {}, invRiesgo: {}, invCobros: {} };
