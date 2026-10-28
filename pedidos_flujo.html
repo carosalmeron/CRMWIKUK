@@ -33,10 +33,11 @@ details summary{cursor:pointer;font-weight:700}
   <span style="flex:1"></span>
   <details><summary class="mini" style="display:inline-block">⚙️ Reglas</summary>
     <div class="card" style="margin-top:6px">
-      <div style="font-size:12.5px;color:var(--muted)">Códigos de SAP que marcan cada etapa (campo <code>U_UC_Solicitud</code> y <code>U_UC_SolicitudEstado</code> de cada línea). Ajusta y guarda: se aplican a todos.</div>
+      <div style="font-size:12.5px;color:var(--muted)">Códigos de SAP: <b>Solicitud</b> 1 Prod. Baza Fresca · 2 Prod. Baza Seca · 3 Prod. Drimano · 4 Planificador · 5 Compras · 6 Prod. Lleida · 7 Prod. Valencia. <b>Estado</b> 0 No iniciado · 1 En proceso · 2 Gestionado · 3 Planificado · 4 Finalizado. Solo cambia esto si cambia el flujo.</div>
       <div class="reg">
         <label>Tipos de solicitud de PRODUCCIÓN (coma)<input id="rProd"></label>
         <label>Tipos de solicitud de COMPRAS (coma)<input id="rComp"></label>
+        <label>Tipos de solicitud del PLANIFICADOR (coma)<input id="rPlan"></label>
         <label>Estados = pendiente de validar (coma)<input id="rPend"></label>
         <label>Estados = validada (coma)<input id="rVal"></label>
         <label>Horas para validar (Producción / Compras)<input id="rHV" type="number"></label>
@@ -59,20 +60,26 @@ const HOY=new Date().toISOString().slice(0,10);
 const dias=(d)=>d?Math.round((Date.parse(HOY+"T12:00:00Z")-Date.parse(String(d).slice(0,10)+"T12:00:00Z"))/86400000):0;
 // Horas desde una fecha (y hora si SAP la da; si no, desde las 12:00 de ese día)
 const horas=(d,hm)=>{ if(!d) return 0; const t=Date.parse(String(d).slice(0,10)+"T"+(/^\d{2}:\d{2}$/.test(hm||"")?hm:"12:00")+":00"); return isNaN(t)?0:Math.max(0,(Date.now()-t)/3600000); };
-let REG={prod:"1,3",comp:"2,5,7",pend:"1,2",val:"3,4",hv:24,hr:24,hp:4}, PED=[], META=null, SOLO_TARDE=false, AB={};
+// Códigos de SAP (confirmados el 28/10 en pantalla de SAP):
+//   Solicitud (tipo): 1 Prod.BazaFresca · 2 Prod.BazaSeca · 3 Prod.Drimano · 4 Planificador · 5 Compras · 6 Prod.Lleida · 7 Prod.Valencia · 0 Sin acción
+//   Solicitud estado: 0 No iniciado · 1 En proceso · 2 Gestionado · 3 Planificado · 4 Finalizado
+const TIPO_N={"1":"Prod. Baza Fresca","2":"Prod. Baza Seca","3":"Prod. Drimano","4":"Planificador","5":"Compras","6":"Prod. Lleida","7":"Prod. Valencia","0":"Sin acción"};
+const EST_N={"0":"No iniciado","1":"En proceso","2":"Gestionado","3":"Planificado","4":"Finalizado"};
+let REG={v:2,prod:"1,2,3,6,7",plan:"4",comp:"5",pend:"0,1",val:"2,3,4",hv:24,hr:24,hp:4}, PED=[], META=null, SOLO_TARDE=false, AB={};
 const lista=(s)=>String(s||"").split(",").map(x=>x.trim()).filter(Boolean);
 
 // ── Etapa de cada pedido según las reglas ──
 function etapaDe(p){
   if(p.estado!=="abierto") return {k:p.estado,due:"",tarde:false};
-  const P=lista(REG.prod), C=lista(REG.comp), PE=lista(REG.pend);
+  const P=lista(REG.prod), C=lista(REG.comp), PL=lista(REG.plan), PE=lista(REG.pend);
   const pend=(p.solicitudes||[]).filter(s=>s.abierta!==false&&PE.includes(String(s.estado)));
-  const dProd=pend.filter(s=>P.includes(String(s.tipo))), dComp=pend.filter(s=>C.includes(String(s.tipo)));
+  const dProd=pend.filter(s=>P.includes(String(s.tipo))), dComp=pend.filter(s=>C.includes(String(s.tipo))), dPlan=pend.filter(s=>PL.includes(String(s.tipo)));
   const desde=p.actualizado||p.creado||p.fecha; const h=horas(desde,p.actualizadoHora);
   if(p.invRiesgo) return {k:"riesgo",due:"Riesgo",tarde:false,desde};
   if(p.invPrecios) return {k:"precio",due:"Precios",tarde:h>Number(REG.hp||4),desde};
   if(dProd.length) return {k:"prod",due:"Producción",tarde:h>Number(REG.hv||24),desde,detalle:dProd.map(s=>s.detalle).filter(Boolean)[0]||""};
   if(dComp.length) return {k:"comp",due:"Compras",tarde:h>Number(REG.hv||24),desde,detalle:dComp.map(s=>s.detalle).filter(Boolean)[0]||""};
+  if(dPlan.length) return {k:"plan",due:"Planificador",tarde:h>Number(REG.hv||24),desde,detalle:dPlan.map(s=>s.detalle).filter(Boolean)[0]||""};
   if(pend.length) return {k:"otra",due:"Sin asignar",tarde:h>Number(REG.hv||24),desde,detalle:"tipo de solicitud "+pend.map(s=>s.tipo).join(", ")+" (añádelo en Reglas)"};
   if(!p.confirmado) return {k:"cs",due:"Customer Service",tarde:h>Number(REG.hr||24),desde};
   if(p.plan&&p.plan<HOY) return {k:"alm_tarde",due:"Almacén",tarde:true,desde:p.plan};
@@ -84,6 +91,7 @@ const ETAPAS=[
   {k:"precio",t:"💶 Pendiente de validar precio",d:"Invalidados por precio. Máximo 4 h para validar."},
   {k:"prod",t:"🏭 Pendiente de validar · Producción",d:"Invalidado por producción. Tiene 24 h para contestar."},
   {k:"comp",t:"🛒 Pendiente de validar · Compras",d:"Invalidado por compras. Tiene 24 h para contestar."},
+  {k:"plan",t:"📋 Pendiente · Planificador",d:"Solicitud al planificador. 24 h para contestar."},
   {k:"otra",t:"❓ Solicitud sin clasificar",d:"Tipo de solicitud que no está en las reglas: dime cuál es."},
   {k:"cs",t:"📞 Revalidar fecha con el cliente · Customer Service",d:"Validado pero sin confirmar. Hay que revalidar la fecha con el cliente."},
   {k:"alm_tarde",t:"⛔ Almacén · RETRASADOS",d:"Aprobados con fecha de entrega ya pasada y sin servir. Cada uno es una falta."},
@@ -96,7 +104,7 @@ function pintar(){
   const L=PED.filter(p=>p.estado==="abierto"&&(!ven||p.vendedor===ven)).map(p=>Object.assign({e:etapaDe(p)},p));
   const tarde=(k)=>L.filter(p=>p.e.k===k&&p.e.tarde), de=(k)=>L.filter(p=>p.e.k===k);
   // Quién no cumple
-  const Q=[["Precios","precio",tarde("precio"),"validar en 4 h"],["Producción","prod",tarde("prod"),"validar en 24 h"],["Compras","comp",tarde("comp"),"validar en 24 h"],["Customer Service","cs",tarde("cs"),"revalidar fecha en 24 h"],["Almacén","alm_tarde",tarde("alm_tarde"),"servir en la fecha"]];
+  const Q=[["Precios","precio",tarde("precio"),"validar en 4 h"],["Producción","prod",tarde("prod"),"validar en 24 h"],["Compras","comp",tarde("comp"),"validar en 24 h"],["Planificador","plan",tarde("plan"),"contestar en 24 h"],["Customer Service","cs",tarde("cs"),"revalidar fecha en 24 h"],["Almacén","alm_tarde",tarde("alm_tarde"),"servir en la fecha"]];
   const R=de("riesgo");
   document.getElementById("quien").innerHTML='<div class="k">'+Q.map(([n,k,l,q])=>'<div onclick="irA(\''+k+'\')" style="border-left:5px solid '+(l.length?'var(--rojo)':'var(--verde)')+'"><span>'+n+'</span><b style="color:'+(l.length?'var(--rojo)':'var(--verde)')+'">'+l.length+'</b><small>'+(l.length?'fuera de plazo · '+eu(l.reduce((t,p)=>t+p.importePend,0))+' · el más antiguo '+tiempo(Math.max(...l.map(p=>horas(p.e.desde,p.actualizadoHora)))):'al día')+'</small><small style="color:var(--muted)">'+q+'</small></div>').join("")
     +'<div onclick="irA(\'riesgo\')" style="border-left:5px solid '+(R.length?'var(--amb)':'var(--verde)')+'"><span>Riesgo</span><b style="color:'+(R.length?'var(--amb)':'var(--verde)')+'">'+R.length+'</b><small>'+(R.length?'bloqueados · '+eu(R.reduce((t,p)=>t+p.importePend,0)):'ninguno')+'</small><small style="color:var(--muted)">sin plazo, pero hay que resolverlos</small></div></div>';
@@ -108,19 +116,19 @@ function pintar(){
       +'<div style="font-size:12px;color:var(--muted)">'+E.d+'</div>'
       +(ab?(l.length?l.map(p=>fila(p)).join(""):'<div class="vacio">Ninguno.</div>'):'')+'</div>'; }).join("");
 }
-function fila(p){ const d=dias(p.e.desde); const badges=[p.invPrecios?'<span class="bd a">⚑ precios</span>':'',p.invCobros?'<span class="bd a">⚑ cobros</span>':'',p.invRiesgo?'<span class="bd a">⚑ riesgo</span>':'',p.confirmado?'<span class="bd v">confirmado</span>':'<span class="bd b">sin confirmar</span>',...(p.solicitudes||[]).filter(s=>s.abierta!==false).map(s=>'<span class="bd">sol. '+esc(s.tipo)+' · est. '+esc(s.estado)+'</span>')].join("");
+function fila(p){ const d=dias(p.e.desde); const badges=[p.invPrecios?'<span class="bd a">⚑ precios</span>':'',p.invCobros?'<span class="bd a">⚑ cobros</span>':'',p.invRiesgo?'<span class="bd a">⚑ riesgo</span>':'',p.confirmado?'<span class="bd v">confirmado</span>':'<span class="bd b">sin confirmar</span>',...(p.solicitudes||[]).filter(s=>s.abierta!==false).map(s=>'<span class="bd'+(lista(REG.pend).includes(String(s.estado))?' a':'')+'">'+esc(TIPO_N[String(s.tipo)]||("sol. "+s.tipo))+' · '+esc(EST_N[String(s.estado)]||("est. "+s.estado))+'</span>')].join("");
   return '<div class="p"><div><b>'+esc(p.nombre)+'</b> <span class="c">'+esc(p.cliente)+' · nº '+esc(p.num)+' · '+esc(p.vendedor||p.slp)+'</span>'+(p.e.detalle?'<div class="c">💬 '+esc(p.e.detalle)+'</div>':'')+'<div>'+badges+'</div></div>'
     +'<div class="r"><b>'+eu(p.importePend)+'</b><div class="c">'+p.lineasAbiertas+' líneas · entrega '+fx(p.plan)+(p.planIni&&p.planIni!==p.plan?' (inicial '+fx(p.planIni)+')':'')+'</div><div class="'+(p.e.tarde?'tarde':'c')+'">'+(p.e.k==="alm_tarde"?'retraso de '+d+' d':p.e.k.startsWith("alm")?'':tiempo(horas(p.e.desde,p.actualizadoHora))+' en esta etapa')+(p.e.tarde&&!p.e.k.startsWith("alm")?' · fuera de plazo':'')+'</div></div></div>'; }
 const tiempo=(h)=>h<1?"menos de 1 h":h<48?Math.round(h)+" h":Math.round(h/24)+" d";
 window.irA=(k)=>{ AB[k]=true; pintar(); const el=document.getElementById("et_"+k); if(el) el.scrollIntoView({behavior:"smooth"}); };
-window.guardarReglas=async()=>{ REG={prod:rProd.value,comp:rComp.value,pend:rPend.value,val:rVal.value,hv:Number(rHV.value)||24,hr:Number(rHR.value)||24,hp:Number(rHP.value)||4};
+window.guardarReglas=async()=>{ REG={v:2,prod:rProd.value,comp:rComp.value,plan:rPlan.value,pend:rPend.value,val:rVal.value,hv:Number(rHV.value)||24,hr:Number(rHR.value)||24,hp:Number(rHP.value)||4};
   const f={}; for(const [k,v] of Object.entries(REG)) f[k]=typeof v==="number"?{doubleValue:v}:{stringValue:String(v)};
   const r=await fetch(`${FB}/pbi_config/flujo_sap`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:f})});
   document.getElementById("rMsg").textContent=r.ok?"✓ guardadas":"no se han podido guardar"; pintar(); };
 async function cargar(){
   const [meta,reg]=await Promise.all([doc("sap_flujo","meta"),doc("pbi_config","flujo_sap")]);
-  if(reg) REG=Object.assign(REG,Object.fromEntries(Object.entries(reg).filter(([k,v])=>v!==null&&v!=="")));
-  rProd.value=REG.prod; rComp.value=REG.comp; rPend.value=REG.pend; rVal.value=REG.val; rHV.value=REG.hv; rHR.value=REG.hr; rHP.value=REG.hp;
+  if(reg&&Number(reg.v)>=2) REG=Object.assign(REG,Object.fromEntries(Object.entries(reg).filter(([k,v])=>v!==null&&v!=="")));   // reglas guardadas antes del 28/10 (suposiciones) se ignoran
+  rProd.value=REG.prod; rComp.value=REG.comp; rPlan.value=REG.plan; rPend.value=REG.pend; rVal.value=REG.val; rHV.value=REG.hv; rHR.value=REG.hr; rHP.value=REG.hp;
   if(!meta) throw new Error("Todavía no hay datos: lanza pbi-sync?flujosap=1");
   META=meta; const n=Number(meta.partes)||1; let js="";
   if(n===1){ const d=await doc("sap_flujo","pedidos"); js=(d&&d.json)||""; } else { for(let i=0;i<n;i++){ const d=await doc("sap_flujo","pedidos_"+i); js+=(d&&d.json)||""; } }
