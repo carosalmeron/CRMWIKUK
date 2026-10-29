@@ -94,6 +94,28 @@ module.exports = async function handler(req, res) {
       const pedido = async (entry) => { const o = await sl.get(`Orders(${Number(entry)})?$select=DocEntry,DocNum,CardName,DocumentStatus,Confirmed,DocumentLines`); if (o.DocumentStatus !== "bost_Open") throw new Error("el pedido " + o.DocNum + " ya está cerrado"); return o; };
 
       // Diagnóstico: qué valores tienen los campos propios (U_) de cabecera en los pedidos abiertos
+      // Envasado: GET ?envasado=GRANEL → lotes del granel con existencias y formatos de envase (artículos GRANEL.xxx con su receta)
+      if (req.method === "GET" && q.envasado) {
+        const g = String(q.envasado).toUpperCase().trim();
+        const it = await sl.get(`Items('${esc(g)}')?$select=ItemCode,ItemName,InventoryUOM,ManageBatchNumbers,ItemWarehouseInfoCollection`);
+        out.granel = { cod: it.ItemCode, nom: it.ItemName, ud: it.InventoryUOM || "", lotes: it.ManageBatchNumbers === "tYES", stock: (it.ItemWarehouseInfoCollection || []).filter((w) => Number(w.InStock) > 0).map((w) => ({ alm: w.WarehouseCode, stock: r3(w.InStock), libre: r3((Number(w.InStock) || 0) - (Number(w.Committed) || 0)) })) };
+        // Lotes con existencias (consulta guardada sobre OIBT, la misma que usa la factura)
+        const NOMBRE = "CRM_LotesStock"; let lotes = null;
+        const sqls = [`SELECT T0."ItemCode", T0."BatchNum", T0."WhsCode", T0."Quantity", T0."ExpDate", T0."InDate" FROM OIBT T0 WHERE T0."ItemCode" = :ItemCode AND T0."Quantity" > 0`, `SELECT T0.ItemCode, T0.BatchNum, T0.WhsCode, T0.Quantity, T0.ExpDate, T0.InDate FROM OIBT T0 WHERE T0.ItemCode = :ItemCode AND T0.Quantity > 0`];
+        for (let i = 0; i < 2 && !lotes; i++) { try { const r = await sl.get(`SQLQueries('${NOMBRE}')/List?ItemCode='${esc(g)}'`); lotes = r.value || []; }
+          catch (e) { if (i === 0) { for (const sq of sqls) { try { await sl.post("SQLQueries", { SqlCode: NOMBRE, SqlName: "Lotes con stock por almacén (CRM)", SqlText: sq }); break; } catch (e2) {} } } } }
+        out.lotes = (lotes || []).map((l) => ({ lote: l.BatchNum, alm: l.WhsCode, uds: r3(l.Quantity), caduca: D(l.ExpDate), entrada: D(l.InDate) })).sort((a, b) => String(a.caduca || "9").localeCompare(String(b.caduca || "9")) || String(a.entrada).localeCompare(String(b.entrada)));
+        if (!lotes) out.avisoLotes = "no se han podido leer los lotes con cantidades";
+        // Formatos: artículos cuyo código empieza por GRANEL. (p. ej. MX243.20R2.C140); unidades por envase y embalaje desde su receta
+        const fm = await todas(`Items?$select=ItemCode,ItemName,InventoryUOM,Frozen&$filter=startswith(ItemCode,'${esc(g)}.')`, 200);
+        out.formatos = await Promise.all(fm.filter((x) => x.Frozen !== "tYES").map(async (x) => {
+          const f = { cod: x.ItemCode, nom: x.ItemName, ud: x.InventoryUOM || "", receta: false, porEnvase: null, embalaje: [] };
+          try { const t = await sl.get(`ProductTrees('${esc(x.ItemCode)}')?$select=Quantity,ProductTreeLines`); const b = Number(t.Quantity) || 1; f.receta = true;
+            for (const l of (t.ProductTreeLines || [])) { if (!l.ItemCode) continue; const por = (Number(l.Quantity) || 0) / b; if (l.ItemCode === g) f.porEnvase = Math.round(por * 1e6) / 1e6; else f.embalaje.push({ cod: l.ItemCode, nom: l.ItemName || "", porEnvase: Math.round(por * 1e6) / 1e6 }); } } catch (e) {}
+          if (f.porEnvase === null) { const m = x.ItemCode.slice(g.length + 1).match(/(\d+)/); f.porEnvaseSugerido = m ? Number(m[1]) : null; }
+          return f; }));
+        return;
+      }
       // Receta (lista de materiales) de un artículo: GET ?receta=ART&uds=1000 → componentes con stock libre y si a su vez tienen receta
       if (req.method === "GET" && q.receta) {
         const art = String(q.receta).toUpperCase(), uds = Number(q.uds) || 0;
