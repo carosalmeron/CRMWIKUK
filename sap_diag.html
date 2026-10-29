@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Diagnóstico permiso SAP</title>
+<style>body{font:16px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;margin:0;padding:16px;background:#F4F5F7;color:#0F172A}
+.p{background:#fff;border:1px solid #E5E7EB;border-radius:12px;padding:10px 12px;margin:8px 0}.ok{color:#166534;font-weight:800}.ko{color:#B91C1C;font-weight:800}
+pre{white-space:pre-wrap;word-break:break-all;font-size:12px;background:#F8FAFC;padding:8px;border-radius:8px;margin:6px 0 0}
+button{font:inherit;font-weight:800;padding:12px 16px;border:0;border-radius:10px;background:#0F172A;color:#fff}</style></head><body>
+<h2 style="margin:0 0 4px">🔎 Diagnóstico del permiso de SAP</h2>
+<div style="color:#64748B;font-size:14px">Comprueba paso a paso por qué este navegador no tiene permiso. Haz captura de pantalla del resultado.</div>
+<div id="r"></div>
+<button onclick="location.reload()">Repetir</button>
+<script>
+const R=document.getElementById("r"), FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents";
+const paso=(n,ok,txt,det)=>{ R.insertAdjacentHTML("beforeend",'<div class="p"><b>'+n+'</b> · <span class="'+(ok?'ok':'ko')+'">'+(ok?'✓ ':'✗ ')+String(txt).replace(/[<>&]/g,"")+'</span>'+(det?'<pre>'+String(det).replace(/[<>&]/g,"").slice(0,600)+'</pre>':'')+'</div>'); };
+(async()=>{
+  R.insertAdjacentHTML("beforeend",'<div class="p">Navegador: '+navigator.userAgent.replace(/[<>&]/g,"")+'</div>');
+  let pu=null; try{ pu=JSON.parse(localStorage.getItem("gc_portal_user")||"null"); }catch(e){ paso("1 Sesión del portal",false,"no se puede leer localStorage: "+e.message); return; }
+  if(!pu||!pu.id){ paso("1 Sesión del portal",false,"en este navegador no hay sesión del portal: entra al portal y vuelve aquí"); return; }
+  paso("1 Sesión del portal",true,"usuario "+pu.id+" · rol "+(pu.rol||"—")+" · hash en la sesión: "+(pu.passHash?"sí":"no"));
+  let h=pu.passHash||"";
+  try{ const r=await fetch(FB+"/portal_users/"+encodeURIComponent(pu.id)); const j=await r.json(); const x=j&&j.fields&&j.fields.passHash&&j.fields.passHash.stringValue;
+    paso("2 Ficha del portal en Firestore",r.ok&&!!x,r.ok?(x?"tiene contraseña guardada":"sin contraseña guardada"):"HTTP "+r.status);
+    if(x&&h&&x!==h) paso("2b Comparación",false,"la contraseña de la sesión no coincide con la de la ficha: se usa la de la ficha"); if(x) h=x; }
+  catch(e){ paso("2 Ficha del portal en Firestore",false,e.message); }
+  if(!h){ paso("3 Pedir permiso",false,"no hay contraseña con la que pedirlo"); return; }
+  let tok="";
+  try{ const r=await fetch("/api/sap-token",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({usuario:pu.id,passHash:h})}); const t=await r.text(); let j={}; try{ j=JSON.parse(t); }catch(e){}
+    paso("3 Pedir permiso a /api/sap-token",!!(j&&j.ok&&j.token),j&&j.ok?"concedido hasta "+(j.caduca||"?"):("HTTP "+r.status+" · "+((j&&j.error)||t.slice(0,200))));
+    if(j&&j.ok&&j.token) tok=j.token; }
+  catch(e){ paso("3 Pedir permiso a /api/sap-token",false,e.message); return; }
+  if(!tok) return;
+  try{ localStorage.setItem("sap_pedido_key",tok); const back=localStorage.getItem("sap_pedido_key"); paso("4 Guardar el permiso en este navegador",back===tok,back===tok?"guardado":"no se ha podido guardar"); }catch(e){ paso("4 Guardar el permiso",false,e.message); }
+  for(const api of ["sap-planificacion?almacenes=1","sap-produccion?almacenes=1","sap-traslado?almacenes=1"]){
+    try{ const r=await fetch("/api/"+api+"&db=U_CARO_99",{headers:{"x-crm-key":tok}}); const t=await r.text(); let j={}; try{ j=JSON.parse(t); }catch(e){}
+      paso("5 Probar /api/"+api.split("?")[0],r.ok&&j.ok!==false,r.ok?"✓ responde ("+((j.almacenes||[]).length)+" almacenes)":"HTTP "+r.status+" · "+((j&&j.error)||t.slice(0,160))); }
+    catch(e){ paso("5 Probar "+api,false,e.message); } }
+})();
+</script></body></html>
