@@ -93,6 +93,23 @@ module.exports = async function handler(req, res) {
       const pedido = async (entry) => { const o = await sl.get(`Orders(${Number(entry)})?$select=DocEntry,DocNum,CardName,DocumentStatus,Confirmed,DocumentLines`); if (o.DocumentStatus !== "bost_Open") throw new Error("el pedido " + o.DocNum + " ya está cerrado"); return o; };
 
       // Diagnóstico: qué valores tienen los campos propios (U_) de cabecera en los pedidos abiertos
+      // Diagnóstico beas: GET ?beas=1[&articulo=X] → ¿hay recetas en SAP estándar? ¿se pueden leer las tablas de beas?
+      if (req.method === "GET" && q.beas !== undefined) {
+        const R = {}; const prueba = async (k, f) => { try { R[k] = await f(); } catch (e) { R[k] = "✗ " + String(e.message || e).slice(0, 200); } };
+        await prueba("recetasSAP", async () => { const r = await sl.get("ProductTrees/$count"); return typeof r === "number" ? r : r; });
+        await prueba("ejemploRecetaSAP", async () => { const r = await sl.get("ProductTrees?$select=TreeCode,TreeType,Quantity&$top=5"); return (r.value || []).map((x) => x.TreeCode + " (" + x.TreeType + ")"); });
+        const art = String(q.articulo || "").toUpperCase();
+        if (art) await prueba("recetaSAPdeArticulo", async () => { const t = await sl.get(`ProductTrees('${esc(art)}')`); return { cantidad: t.Quantity, lineas: (t.ProductTreeLines || []).map((l) => l.ItemCode + " × " + l.Quantity) }; });
+        // Tablas de beas por consulta guardada (si SAP lo permite)
+        const tablas = ["BEAS_STL", "BEAS_APLPOS", "BEAS_FTSTL", "BEAS_FTHAUPT"];
+        for (const t of tablas) await prueba("tabla_" + t, async () => {
+          const code = "CRM_BEAS_" + t.replace(/[^A-Z]/g, "").slice(0, 12);
+          try { await sl.post("SQLQueries", { SqlCode: code, SqlName: "Prueba lectura " + t + " (CRM)", SqlText: `SELECT TOP 5 * FROM "${t}"` }); } catch (e) { if (!/already|exist|duplic/i.test(String(e.message))) { try { await sl.post("SQLQueries", { SqlCode: code, SqlName: "Prueba lectura " + t + " (CRM)", SqlText: `SELECT * FROM "${t}" LIMIT 5` }); } catch (e2) { if (!/already|exist|duplic/i.test(String(e2.message))) throw e2; } } }
+          const r = await sl.get(`SQLQueries('${code}')/List`); const v = r.value || []; return { filas: v.length, columnas: v[0] ? Object.keys(v[0]).slice(0, 40) : [], ejemplo: v[0] || null };
+        });
+        await prueba("camposBeasEnArticulos", async () => { const r = await sl.get("Items?$top=1"); const it = (r.value || [])[0] || {}; return Object.keys(it).filter((k) => /beas/i.test(k)); });
+        out.beas = R; return;
+      }
       // Diagnóstico de bloqueos: GET ?bloqueos=260002888,260002877 → marcas de riesgo/precio/cobros de esos pedidos y de todos los abiertos con alguna marca
       if (req.method === "GET" && q.bloqueos !== undefined) {
         const C = "DocEntry,DocNum,CardCode,CardName,DocDate,DocTotal,Confirmed,DocumentStatus,U_SCL_InvalidadoxRiesg,U_SCL_ValidadoFijoRiesgo,U_SCL_InvalidadoxPrecios,U_SCL_ValidadoFijoPrecios,U_SCL_InvalidadoxCobros,U_SCL_ValidadoFijoCobros";
@@ -345,7 +362,8 @@ module.exports = async function handler(req, res) {
         // Explosión nivel a nivel; los semielaborados (con receta) se netean contra su stock antes de bajar
         const RES = {}; let nivel = [];
         await precarga(dem.map((d) => d.art));
-        for (const d of dem) { const b = BOM[d.art]; if (!b) { out.sinReceta = out.sinReceta || []; if (!out.sinReceta.includes(d.art)) out.sinReceta.push(d.art); continue; } for (const x of b.l) nivel.push({ c: x.c, uds: d.uds * x.q / b.q, fecha: d.fecha, para: d.art, de: d.de, n: 1 }); }
+        const SR = {}; for (const d of dem) { const b = BOM[d.art]; if (!b) { const x = SR[d.art] = SR[d.art] || { art: d.art, uds: 0, n: 0, fecha: null }; x.uds += d.uds; x.n++; if (d.fecha && (!x.fecha || d.fecha < x.fecha)) x.fecha = d.fecha; continue; } for (const x of b.l) nivel.push({ c: x.c, uds: d.uds * x.q / b.q, fecha: d.fecha, para: d.art, de: d.de, n: 1 }); }
+        await leeInf(Object.keys(SR)); out.sinRecetaDet = Object.values(SR).map((x) => ({ art: x.art, nom: (INF[x.art] || {}).nom || "", ud: (INF[x.art] || {}).ud || "", uds: r3(x.uds), producciones: x.n, fecha: x.fecha })).sort((a, b) => b.uds - a.uds); out.sinReceta = out.sinRecetaDet.map((x) => x.art);
         const usado = {};
         for (let n = 1; n <= 5 && nivel.length; n++) {
           await precarga(nivel.map((x) => x.c)); await leeInf(nivel.map((x) => x.c));
