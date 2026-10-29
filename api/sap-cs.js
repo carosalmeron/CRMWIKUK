@@ -103,9 +103,12 @@ module.exports = async function handler(req, res) {
         // Tablas de beas por consulta guardada (si SAP lo permite)
         const tablas = ["BEAS_STL", "BEAS_APLPOS", "BEAS_FTSTL", "BEAS_FTHAUPT"];
         for (const t of tablas) await prueba("tabla_" + t, async () => {
-          const code = "CRM_BEAS_" + t.replace(/[^A-Z]/g, "").slice(0, 12);
-          try { await sl.post("SQLQueries", { SqlCode: code, SqlName: "Prueba lectura " + t + " (CRM)", SqlText: `SELECT TOP 5 * FROM "${t}"` }); } catch (e) { if (!/already|exist|duplic/i.test(String(e.message))) { try { await sl.post("SQLQueries", { SqlCode: code, SqlName: "Prueba lectura " + t + " (CRM)", SqlText: `SELECT * FROM "${t}" LIMIT 5` }); } catch (e2) { if (!/already|exist|duplic/i.test(String(e2.message))) throw e2; } } }
-          const r = await sl.get(`SQLQueries('${code}')/List`); const v = r.value || []; return { filas: v.length, columnas: v[0] ? Object.keys(v[0]).slice(0, 40) : [], ejemplo: v[0] || null };
+          const base = "CRM_B_" + t.replace(/[^A-Z]/g, "").slice(0, 14), intentos = [], formas = [`SELECT * FROM ${t}`, `SELECT * FROM [${t}]`, `SELECT * FROM "${t}"`];
+          for (let i = 0; i < formas.length; i++) { const code = base + i;
+            try { try { await sl.post("SQLQueries", { SqlCode: code, SqlName: "Prueba lectura " + t + " (CRM)", SqlText: formas[i] }); } catch (e) { if (!/already|exist|duplic/i.test(String(e.message))) throw e; }
+              const r = await sl.get(`SQLQueries('${code}')/List?$top=3`); const v = r.value || []; return { forma: formas[i], filas: v.length, columnas: v[0] ? Object.keys(v[0]).slice(0, 60) : [], ejemplo: v[0] || null }; }
+            catch (e) { intentos.push(formas[i] + " → " + String(e.message || e).replace(/^SAP no ha aceptado /, "").slice(0, 160)); } }
+          return "✗ " + intentos.join(" | ");
         });
         await prueba("camposBeasEnArticulos", async () => { const r = await sl.get("Items?$top=1"); const it = (r.value || [])[0] || {}; return Object.keys(it).filter((k) => /beas/i.test(k)); });
         out.beas = R; return;
