@@ -6,6 +6,8 @@
 // POST {accion:"validar", entry}                          → pedido confirmado (pasa al almacén). No deja si hay líneas esperando a producción/compras
 // POST {accion:"solicitud", entry, linea, tipo, detalle}  → manda la línea a producción (1,2,3,6,7) o compras (5); detalle obligatorio
 // POST {accion:"fecha", entry, linea?, fecha, motivo?}    → cambia la fecha de servicio de una línea (o de todas si no se indica)
+// Producción/compras: GET ?pedidos=1&solo=prod (más rápido) · GET ?almacenes=1
+// POST {accion:"en_proceso"|"confirmar"(fecha)|"devolver"(motivo)|"compra_hecha"|"ordenar"(fecha, almacen, uds), entry, linea}
 // POST {accion:"anular_solicitud", entry, linea}          → quita la solicitud de una línea (vuelve a Customer Service)
 const https = require("https");
 const { URL } = require("url");
@@ -119,12 +121,12 @@ module.exports = async function handler(req, res) {
           mide("compras", async () => { try { for (const p of await todas("PurchaseOrders?$select=DocNum,DocDueDate,DocumentLines&$filter=DocumentStatus eq 'bost_Open'", 2000)) for (const l of (p.DocumentLines || [])) { const u = Number(l.RemainingOpenQuantity) || 0; if (u > 0 && l.LineStatus !== "bost_Close") addL(l.ItemCode, { fecha: D(l.ShipDate || p.DocDueDate), uds: u, de: "compra " + p.DocNum, alm: l.WarehouseCode }); } } catch (e) { out.avisoCompras = String(e.message).slice(0, 120); } }),
           mide("fabricacion", async () => { try { for (const o of await todas("ProductionOrders?$select=DocumentNumber,ItemNo,PlannedQuantity,CompletedQuantity,DueDate,Warehouse,ProductionOrderStatus&$filter=ProductionOrderStatus eq 'boposPlanned' or ProductionOrderStatus eq 'boposReleased'", 2000)) { const u = (Number(o.PlannedQuantity) || 0) - (Number(o.CompletedQuantity) || 0); if (u > 0) addL(o.ItemNo, { fecha: D(o.DueDate), uds: u, de: "fabricación " + o.DocumentNumber, alm: o.Warehouse }); } } catch (e) {} }),
           // Entregas y facturas hechas desde pedidos (BaseType 17): lo único que cuenta como SERVIDO
-          mide("entregas", async () => { const desdeE = new Date(Date.now() - (diasS + 10) * 864e5).toISOString().slice(0, 10);
+          mide("entregas", async () => { if (q.solo === "prod") return; const desdeE = new Date(Date.now() - (diasS + 10) * 864e5).toISOString().slice(0, 10);
             for (const [ent, tipo] of [["DeliveryNotes", "entrega"], ["Invoices", "factura"]]) { try {
               for (const d of await todas(`${ent}?$select=DocEntry,DocNum,DocDate,Cancelled,DocumentLines&$filter=DocDate ge '${desdeE}' and Cancelled eq 'tNO'`, 4000))
                 for (const l of (d.DocumentLines || [])) if (Number(l.BaseType) === 17 && l.BaseEntry) { const k = l.BaseEntry + "|" + l.BaseLine, e = ENT[k] = ENT[k] || { uds: 0, fecha: "", docs: [] }; e.uds += Number(l.Quantity) || 0; if (String(d.DocDate) > e.fecha) e.fecha = D(d.DocDate); e.docs.push(tipo + " " + d.DocNum); }
             } catch (e) { entregasOk = false; out.avisoEntregas = (out.avisoEntregas || "") + ent + ": " + String(e.message).slice(0, 120) + " "; } } }),
-          mide("servidos", async () => { try { cerr = await todas(`Orders?$select=DocEntry,DocNum,DocDate,DocDueDate,ClosingDate,UpdateDate,CardCode,CardName,SalesPersonCode,DocTotal,U_SCL_FechaAgente,DocumentLines&$filter=DocumentStatus eq 'bost_Close' and Cancelled eq 'tNO' and UpdateDate ge '${desdeS}'&$orderby=DocEntry desc`, 1500); } catch (e) { try { cerr = await todas(`Orders?$select=DocEntry,DocNum,DocDate,DocDueDate,UpdateDate,CardCode,CardName,SalesPersonCode,DocTotal,DocumentLines&$filter=DocumentStatus eq 'bost_Close' and Cancelled eq 'tNO' and UpdateDate ge '${desdeS}'&$orderby=DocEntry desc`, 1500); } catch (e2) { out.avisoServidos = String(e2.message).slice(0, 160); } } }),
+          mide("servidos", async () => { if (q.solo === "prod") return; try { cerr = await todas(`Orders?$select=DocEntry,DocNum,DocDate,DocDueDate,ClosingDate,UpdateDate,CardCode,CardName,SalesPersonCode,DocTotal,U_SCL_FechaAgente,DocumentLines&$filter=DocumentStatus eq 'bost_Close' and Cancelled eq 'tNO' and UpdateDate ge '${desdeS}'&$orderby=DocEntry desc`, 1500); } catch (e) { try { cerr = await todas(`Orders?$select=DocEntry,DocNum,DocDate,DocDueDate,UpdateDate,CardCode,CardName,SalesPersonCode,DocTotal,DocumentLines&$filter=DocumentStatus eq 'bost_Close' and Cancelled eq 'tNO' and UpdateDate ge '${desdeS}'&$orderby=DocEntry desc`, 1500); } catch (e2) { out.avisoServidos = String(e2.message).slice(0, 160); } } }),
         ]);
         const sel = "DocEntry,DocNum,DocDate,DocDueDate,UpdateDate,CardCode,CardName,SalesPersonCode,Confirmed,Comments,DocTotal,U_SCL_InvalidadoxPrecios,U_SCL_InvalidadoxCobros,U_SCL_InvalidadoxRiesg,U_SCL_InvalidadoxMuestras,U_SCL_ValidadoFijoPrecios,U_SCL_ValidadoFijoCobros,U_SCL_ValidadoFijoRiesgo,U_SCL_ValidadoFijoMuestra,U_SCL_FechaAgente,DocumentLines";
         const ped = await mide("pedidos", () => todas(`Orders?$select=${sel}&$filter=DocumentStatus eq 'bost_Open'&$orderby=DocEntry desc`, 1500));
@@ -200,6 +202,49 @@ module.exports = async function handler(req, res) {
         if (L.length === ab.length || body.fecha > String(o.DocDueDate || "").slice(0, 10)) cambio.DocDueDate = body.fecha;
         await sl.patch(`Orders(${o.DocEntry})`, cambio);
         out.mensaje = "Fecha de servicio cambiada al " + body.fecha.split("-").reverse().join("/") + (L.length === 1 ? " (" + L[0].ItemCode + ")" : " (todo el pedido)"); return;
+      }
+      // ===== Panel de producción y compras =====
+      if (req.method === "GET" && q.almacenes !== undefined) {
+        const r = await todas("Warehouses?$select=WarehouseCode,WarehouseName,Inactive&$orderby=WarehouseCode", 300);
+        out.almacenes = r.filter((w) => w.Inactive !== "tYES").map((w) => ({ codigo: w.WarehouseCode, nombre: w.WarehouseName })); return;
+      }
+      const lineaDe = async () => { const o = await pedido(body.entry); const l = (o.DocumentLines || []).find((x) => Number(x.LineNum) === Number(body.linea)); if (!l) throw new Error("línea no encontrada"); if (!TIPOS[String(l.U_UC_Solicitud ?? "0")]) throw new Error("esta línea ya no está mandada a producción ni a compras"); return { o, l }; };
+      const ponLinea = (o, l, campos) => sl.patch(`Orders(${o.DocEntry})`, { DocumentLines: [{ LineNum: l.LineNum, ...campos }] });
+      const nota = (l, t) => (String(l.U_UC_SolicitudDetalle || "") + (t ? " | " + t : "")).slice(-250);
+      if (req.method === "POST" && body.accion === "en_proceso") {
+        const { o, l } = await lineaDe(); await ponLinea(o, l, { U_UC_SolicitudEstado: "1", ...(body.nota ? { U_UC_SolicitudDetalle: nota(l, body.nota) } : {}) });
+        out.mensaje = l.ItemCode + " marcado «en proceso»"; return;
+      }
+      if (req.method === "POST" && body.accion === "confirmar") {
+        if (!F(body.fecha)) throw new Error("pon la fecha en que estará listo (es obligatoria)");
+        if (body.fecha < new Date().toISOString().slice(0, 10)) throw new Error("la fecha no puede ser anterior a hoy");
+        const { o, l } = await lineaDe();
+        await ponLinea(o, l, { U_UC_SolicitudEstado: "2", ShipDate: body.fecha, U_UC_SolicitudDetalle: nota(l, "Confirmado para el " + body.fecha.split("-").reverse().join("/") + (body.nota ? ": " + body.nota : "")) });
+        out.mensaje = l.ItemCode + " confirmado para el " + body.fecha.split("-").reverse().join("/") + " · Customer Service lo verá para reconfirmar con el cliente"; return;
+      }
+      if (req.method === "POST" && body.accion === "devolver") {
+        if (String(body.motivo || "").trim().length < 3) throw new Error("escribe por qué se devuelve (es obligatorio)");
+        const { o, l } = await lineaDe();
+        await ponLinea(o, l, { U_UC_Solicitud: "0", U_UC_SolicitudEstado: "0", U_UC_SolicitudDetalle: nota(l, "DEVUELTO por " + (TIPOS[String(l.U_UC_Solicitud)] || "") + ": " + body.motivo) });
+        out.mensaje = l.ItemCode + " devuelto a Customer Service"; return;
+      }
+      if (req.method === "POST" && body.accion === "compra_hecha") {
+        const { o, l } = await lineaDe();
+        await ponLinea(o, l, { U_UC_SolicitudEstado: "3", U_UC_SolicitudDetalle: nota(l, "Compra pedida" + (body.nota ? ": " + body.nota : "")) });
+        out.mensaje = l.ItemCode + " marcado «compra pedida»"; return;
+      }
+      if (req.method === "POST" && body.accion === "ordenar") {
+        if (!F(body.fecha)) throw new Error("falta el día de fabricación"); if (!body.almacen) throw new Error("falta el almacén donde se fabrica");
+        const uds = Number(body.uds); if (!(uds > 0)) throw new Error("falta la cantidad a fabricar");
+        const { o, l } = await lineaDe();
+        let tieneBom = false; try { await sl.get(`ProductTrees('${esc(l.ItemCode)}')?$select=TreeCode`); tieneBom = true; } catch (e) {}
+        if (!tieneBom) throw new Error(l.ItemCode + " no tiene receta (escandallo) en SAP: no se puede ordenar la producción");
+        const base = { ItemNo: l.ItemCode, PlannedQuantity: uds, Warehouse: String(body.almacen).toUpperCase(), PostingDate: new Date().toISOString().slice(0, 10), StartDate: body.fecha, DueDate: body.fecha, ProductionOrderStatus: "boposPlanned", ProductionOrderType: "bopotStandard",
+          Remarks: ("PV:" + o.DocNum + "/" + l.LineNum + " · " + o.CardName + (body.nota ? " · " + body.nota : "")).slice(0, 254) };
+        let r; try { r = await sl.post("ProductionOrders", Object.assign({ ProductionOrderOrigin: "bopooSalesOrder", ProductionOrderOriginEntry: o.DocEntry, CustomerCode: o.CardCode }, base)); }
+        catch (e) { r = await sl.post("ProductionOrders", base); }
+        await ponLinea(o, l, { U_UC_SolicitudEstado: "3", U_UC_SolicitudDetalle: nota(l, "Orden de fabricación " + r.DocumentNumber + " para el " + body.fecha.split("-").reverse().join("/")) });
+        out.orden = r.DocumentNumber; out.mensaje = "Orden de fabricación " + r.DocumentNumber + " creada: " + uds + " de " + l.ItemCode + " para el " + body.fecha.split("-").reverse().join("/"); return;
       }
       throw new Error("petición no reconocida");
     });
