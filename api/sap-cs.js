@@ -90,6 +90,18 @@ module.exports = async function handler(req, res) {
       const pedido = async (entry) => { const o = await sl.get(`Orders(${Number(entry)})?$select=DocEntry,DocNum,CardName,DocumentStatus,Confirmed,DocumentLines`); if (o.DocumentStatus !== "bost_Open") throw new Error("el pedido " + o.DocNum + " ya está cerrado"); return o; };
 
       // Diagnóstico: qué valores tienen los campos propios (U_) de cabecera en los pedidos abiertos
+      // Diagnóstico de bloqueos: GET ?bloqueos=260002888,260002877 → marcas de riesgo/precio/cobros de esos pedidos y de todos los abiertos con alguna marca
+      if (req.method === "GET" && q.bloqueos !== undefined) {
+        const C = "DocEntry,DocNum,CardCode,CardName,DocDate,DocTotal,Confirmed,DocumentStatus,U_SCL_InvalidadoxRiesg,U_SCL_ValidadoFijoRiesgo,U_SCL_InvalidadoxPrecios,U_SCL_ValidadoFijoPrecios,U_SCL_InvalidadoxCobros,U_SCL_ValidadoFijoCobros";
+        const fila = (p) => ({ num: p.DocNum, cliente: p.CardCode + " " + String(p.CardName || "").slice(0, 28), estado: p.DocumentStatus === "bost_Open" ? "abierto" : "cerrado", confirmado: p.Confirmed === "tYES" ? "sí" : "no",
+          riesgo: (p.U_SCL_InvalidadoxRiesg || "-") + "/" + (p.U_SCL_ValidadoFijoRiesgo || "-"), precio: (p.U_SCL_InvalidadoxPrecios || "-") + "/" + (p.U_SCL_ValidadoFijoPrecios || "-"), cobros: (p.U_SCL_InvalidadoxCobros || "-") + "/" + (p.U_SCL_ValidadoFijoCobros || "-") });
+        const nums = String(q.bloqueos || "").split(/[^0-9]+/).filter(Boolean).slice(0, 60);
+        out.leyenda = "riesgo/precio/cobros = Invalidado / ValidadoFijo";
+        if (nums.length) { const r = await sl.get(`Orders?$select=${C}&$filter=${encodeURIComponent(nums.map((n) => "DocNum eq " + Number(n)).join(" or "))}&$top=100`); out.pedidos = (r.value || []).map(fila).sort((a, b) => a.num - b.num); }
+        const ab = await todas(`Orders?$select=${C}&$filter=DocumentStatus eq 'bost_Open' and U_SCL_InvalidadoxRiesg eq 'Y'&$orderby=DocNum`, 1500);
+        out.abiertosConRiesgoY = ab.map(fila);
+        return;
+      }
       // Diagnóstico de un pedido: GET ?orden=260002906 → estado y a qué documentos se copió cada línea
       if (req.method === "GET" && q.orden) {
         const r = await sl.get(`Orders?$filter=DocNum eq ${Number(q.orden)}&$top=1`); const o = (r.value || [])[0]; if (!o) throw new Error("no encuentro el pedido " + q.orden);
@@ -219,7 +231,9 @@ module.exports = async function handler(req, res) {
         if (!F(body.fecha)) throw new Error("pon la fecha en que estará listo (es obligatoria)");
         if (body.fecha < new Date().toISOString().slice(0, 10)) throw new Error("la fecha no puede ser anterior a hoy");
         const { o, l } = await lineaDe();
-        await ponLinea(o, l, { U_UC_SolicitudEstado: "2", ShipDate: body.fecha, U_UC_SolicitudDetalle: nota(l, "Confirmado para el " + body.fecha.split("-").reverse().join("/") + (body.nota ? ": " + body.nota : "")) });
+        // Fecha nueva o cambiada → el pedido vuelve a Customer Service para que la apruebe con el cliente
+        const cambia = String(l.ShipDate || "").slice(0, 10) !== body.fecha || String(l.U_UC_SolicitudEstado) !== "2";
+        await sl.patch(`Orders(${o.DocEntry})`, { ...(cambia ? { Confirmed: "tNO" } : {}), DocumentLines: [{ LineNum: l.LineNum, U_UC_SolicitudEstado: "2", ShipDate: body.fecha, U_UC_SolicitudDetalle: nota(l, "Confirmado para el " + body.fecha.split("-").reverse().join("/") + (body.nota ? ": " + body.nota : "")) }] });
         out.mensaje = l.ItemCode + " confirmado para el " + body.fecha.split("-").reverse().join("/") + " · Customer Service lo verá para reconfirmar con el cliente"; return;
       }
       if (req.method === "POST" && body.accion === "devolver") {
