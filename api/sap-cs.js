@@ -94,6 +94,29 @@ module.exports = async function handler(req, res) {
       const pedido = async (entry) => { const o = await sl.get(`Orders(${Number(entry)})?$select=DocEntry,DocNum,CardName,DocumentStatus,Confirmed,DocumentLines`); if (o.DocumentStatus !== "bost_Open") throw new Error("el pedido " + o.DocNum + " ya está cerrado"); return o; };
 
       // Diagnóstico: qué valores tienen los campos propios (U_) de cabecera en los pedidos abiertos
+      // ===== Recetas (listas de materiales) desde beas =====
+      // POST {accion:"recetas_check", arts:[...], comps:[...]} → qué recetas ya existen en SAP y qué artículos no existen
+      if (req.method === "POST" && body.accion === "recetas_check") {
+        const arts = [...new Set((body.arts || []).map((x) => String(x).toUpperCase()))].slice(0, 3000), comps = [...new Set((body.comps || []).map((x) => String(x).toUpperCase()))].slice(0, 5000);
+        const todos = [...new Set([...arts, ...comps])], existe = {};
+        const tz = []; for (let i = 0; i < todos.length; i += 40) tz.push(todos.slice(i, i + 40));
+        for (let i = 0; i < tz.length; i += 6) await Promise.all(tz.slice(i, i + 6).map(async (z) => { try { const r = await sl.get(`Items?$select=ItemCode,ItemName&$filter=${encodeURIComponent(z.map((c) => `ItemCode eq '${esc(c)}'`).join(" or "))}&$top=100`); for (const it of (r.value || [])) existe[String(it.ItemCode).toUpperCase()] = it.ItemName; } catch (e) {} }));
+        const conReceta = {}; const pt = await todas("ProductTrees?$select=TreeCode", 5000); for (const t of pt) conReceta[String(t.TreeCode).toUpperCase()] = true;
+        out.noExisten = todos.filter((c) => !existe[c]); out.conReceta = arts.filter((c) => conReceta[c]); out.nombres = existe; out.recetasEnSap = pt.length; return;
+      }
+      // POST {accion:"recetas_crear", recetas:[{art, cantidad, lineas:[{cod, uds, alm?}]}]} → crea las que no existen (de 20 en 20)
+      if (req.method === "POST" && body.accion === "recetas_crear") {
+        const R = (body.recetas || []).slice(0, 25); out.creadas = []; out.saltadas = []; out.errores = [];
+        for (const x of R) { const art = String(x.art || "").toUpperCase(); try {
+            const L = (x.lineas || []).filter((l) => l && l.cod && Number(l.uds) > 0); if (!L.length) throw new Error("sin componentes");
+            let ya = false; try { await sl.get(`ProductTrees('${esc(art)}')?$select=TreeCode`); ya = true; } catch (e) {}
+            if (ya) { out.saltadas.push(art); continue; }
+            await sl.post("ProductTrees", { TreeCode: art, TreeType: "iProductionTree", Quantity: Number(x.cantidad) || 1,
+              ProductTreeLines: L.map((l) => Object.assign({ ItemCode: String(l.cod).toUpperCase(), Quantity: Math.round(Number(l.uds) * 1e6) / 1e6, ItemType: "pit_Item" }, l.alm ? { Warehouse: String(l.alm).toUpperCase() } : {})) });
+            out.creadas.push(art);
+          } catch (e) { out.errores.push({ art, error: String(e.message || e).replace(/^SAP no ha aceptado /, "").slice(0, 220) }); } }
+        return;
+      }
       // Envasado: GET ?envasado=GRANEL → lotes del granel con existencias y formatos de envase (artículos GRANEL.xxx con su receta)
       if (req.method === "GET" && q.envasado) {
         const g = String(q.envasado).toUpperCase().trim();
