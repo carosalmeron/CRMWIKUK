@@ -170,7 +170,8 @@ module.exports = async function handler(req, res) {
           return { entry: p.DocEntry, num: p.DocNum, fecha: D(p.DocDate), entrega: D(p.DocDueDate), pideComercial: D(p.U_SCL_FechaAgente), actualizado: D(p.UpdateDate), cliente: p.CardCode, nombre: p.CardName,
             vendedor: nombres[String(p.SalesPersonCode)] || "", total: Number(p.DocTotal) || 0, comentario: String(p.Comments || "").slice(0, 200), confirmado: conf,
             // Bloqueado = invalidado y nadie lo ha validado (ValidadoFijo = N)
-            precios: Y(p.U_SCL_InvalidadoxPrecios) && !Y(p.U_SCL_ValidadoFijoPrecios), cobros: Y(p.U_SCL_InvalidadoxCobros) && !Y(p.U_SCL_ValidadoFijoCobros), riesgo: Y(p.U_SCL_InvalidadoxRiesg) && !Y(p.U_SCL_ValidadoFijoRiesgo), muestras: Y(p.U_SCL_InvalidadoxMuestras) && !Y(p.U_SCL_ValidadoFijoMuestra), etapa, todoStock: L.length > 0 && L.every((l) => l.hay || (l.sol && !l.sol.pendiente)), lineas: L };
+            // (29/10/2026) La lista de SAP de «invalidados por riesgo» coincide con la marca U_SCL_InvalidadoxCobros = Y (sin mirar ValidadoFijo ni si está confirmado)
+            precios: Y(p.U_SCL_InvalidadoxPrecios) && !Y(p.U_SCL_ValidadoFijoPrecios), cobros: false, riesgo: Y(p.U_SCL_InvalidadoxCobros), muestras: Y(p.U_SCL_InvalidadoxMuestras) && !Y(p.U_SCL_ValidadoFijoMuestra), etapa, todoStock: L.length > 0 && L.every((l) => l.hay || (l.sol && !l.sol.pendiente)), lineas: L };
         }).filter((p) => p.lineas.length);
         for (const p of out.pedidos) { const o = ped.find((x) => x.DocEntry === p.entry); p.servidoParcial = (o.DocumentLines || []).filter((l) => (Number(l.Quantity) || 0) - (Number(l.RemainingOpenQuantity) || 0) > 0 && (l.LineStatus !== "bost_Close" || ENT[o.DocEntry + "|" + l.LineNum])).length; }
         for (const p of cerr) {
