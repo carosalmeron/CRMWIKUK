@@ -306,7 +306,7 @@ const USERS_DEFAULT=[
 
 // ── Persistencia ─────────────────────────────────────────────────
 // ── Versión del Portal (mantener sincronizada en cada cambio) ──
-const PORTAL_VERSION="3.70.1";   // 29/10/2026 · pase SAP automático
+const PORTAL_VERSION="3.70.2";   // 29/10/2026 · pase SAP automático
 const PORTAL_BUILD="29/10/2026-pase-sap";
 try{var _pv=document.getElementById('portal-ver');if(_pv)_pv.textContent='Portal v'+PORTAL_VERSION;}catch(e){}
 // Habia tres numeros de version distintos escritos a mano en este archivo y
@@ -718,6 +718,8 @@ function showEntry(){showScreen('entry');}
 function showLogin(){showScreen('login-screen');document.getElementById('inp-user').focus();}
 // (28/10/2026) Pase de SAP: se pide al entrar y también al recuperar la sesión (el portal guarda la sesión y no
 // siempre pasa por el login). Usa el hash de la contraseña que ya tiene el usuario; se renueva si caduca en < 5 días.
+// Identificador del usuario aunque su ficha no tenga el campo «id» (se busca por id, documento, usuario o nombre)
+function idPortal(u){ return u?String(u.id||u._docId||u.docId||u.username||u.nombre||'').trim():''; }
 function asegurarPaseSap(u){
   try{
     if(!esCeoPruebasSap(u)) return;
@@ -726,12 +728,13 @@ function asegurarPaseSap(u){
     var m=/^crm\.([A-Za-z0-9_-]+)\./.exec(t), exp=0;
     if(m){ try{ exp=JSON.parse(atob(m[1].replace(/-/g,'+').replace(/_/g,'/'))).exp||0; }catch(e){} }
     if(exp>Date.now()+5*86400000){ try{ localStorage.removeItem('sap_pase_error'); }catch(e){} return; }
-    var h=u.passHash||((loadUsers()||[]).find(function(x){ return x.id===u.id; })||{}).passHash;
-    var pedir=function(h){ return fetch('/api/sap-token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({usuario:u.id,passHash:h})}); };
-    if(!h){ fetch(PORTAL_FB+'/portal_users/'+encodeURIComponent(u.id)).then(function(r){ return r.ok?r.json():null; }).then(function(j){ var x=j&&j.fields&&j.fields.passHash&&j.fields.passHash.stringValue; if(!x) return; return pedir(x).then(function(r){ return r.json(); }).then(function(j2){ if(j2&&j2.ok&&j2.token){ try{ localStorage.setItem('sap_pedido_key',j2.token); localStorage.removeItem('sap_pase_error'); }catch(e){} } else { try{ localStorage.setItem('sap_pase_error',(j2&&j2.error)||'sin respuesta'); }catch(e){} } try{ marcaVersion(); }catch(e){} }); }).catch(function(){}); return; }
-    fetch('/api/sap-token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({usuario:u.id,passHash:h})})
+    var h=u.passHash||''; try{ var LU=loadUsers(); if(!h&&Array.isArray(LU)) h=(LU.find(function(x){ return idPortal(x)===idPortal(u); })||{}).passHash||''; }catch(e){}
+    var pedir=function(h){ return fetch('/api/sap-token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({usuario:idPortal(u),passHash:h})}); };
+    try{ localStorage.setItem('sap_pase_error','pidiendo permiso para '+idPortal(u)+'…'); }catch(e){}
+    if(!h){ fetch(PORTAL_FB+'/portal_users/'+encodeURIComponent(idPortal(u))).then(function(r){ return r.ok?r.json():null; }).then(function(j){ var x=j&&j.fields&&j.fields.passHash&&j.fields.passHash.stringValue; if(!x) return; return pedir(x).then(function(r){ return r.json(); }).then(function(j2){ if(j2&&j2.ok&&j2.token){ try{ localStorage.setItem('sap_pedido_key',j2.token); localStorage.removeItem('sap_pase_error'); }catch(e){} } else { try{ localStorage.setItem('sap_pase_error',(j2&&j2.error)||'sin respuesta'); }catch(e){} } try{ marcaVersion(); }catch(e){} }); }).catch(function(e){ try{ localStorage.setItem('sap_pase_error','no se lee la ficha: '+e.message); }catch(x){} }); return; }
+    fetch('/api/sap-token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({usuario:idPortal(u),passHash:h})})
       .then(function(r){ return r.json().catch(function(){ return {ok:false,error:'HTTP '+r.status}; }); }).then(function(j){ try{ if(j&&j.ok&&j.token){ localStorage.setItem('sap_pedido_key',j.token); localStorage.removeItem('sap_pase_error'); } else localStorage.setItem('sap_pase_error',(j&&j.error)||'sin respuesta'); }catch(e){} try{ marcaVersion(); }catch(e){} }).catch(function(){});
-  }catch(e){}
+  }catch(e){ try{ localStorage.setItem('sap_pase_error','error en el portal: '+e.message); }catch(x){} }
 }
 // Versión del portal: se ve abajo a la derecha para comprobar que está subida la última
 function marcaVersion(){ try{ var v=document.getElementById('portal-version'); if(!v){ v=document.createElement('div'); v.id='portal-version'; v.setAttribute('style','position:fixed;right:8px;bottom:6px;font:600 11px system-ui,sans-serif;color:#64748B;background:rgba(255,255,255,.92);padding:3px 8px;border-radius:7px;z-index:99999;max-width:80vw'); document.body.appendChild(v); }
@@ -744,8 +747,9 @@ function showHub(){
   marcaVersion();
   // (29/10) El login del portal no guarda la sesión en el navegador (solo en memoria): se apunta quién ha entrado
   // para que las pantallas de SAP puedan pedir su permiso solas.
-  try{ if(currentUser&&currentUser.id) localStorage.setItem('sap_portal_id',currentUser.id); }catch(e){}
+  try{ if(idPortal(currentUser)) localStorage.setItem('sap_portal_id',idPortal(currentUser)); }catch(e){}
   try{ asegurarPaseSap(currentUser); }catch(e){}
+  try{ marcaVersion(); var _n=0, _t=setInterval(function(){ marcaVersion(); if(++_n>15) clearInterval(_t); },2000); }catch(e){}
   document.getElementById('hub-user-name').textContent=(currentUser.icon||'👤')+' '+currentUser.nombre;
   renderHub();
   showScreen('hub');
@@ -1021,7 +1025,7 @@ function doLogin(){
       migrarUsuarioHash(found,pHash);
       currentUser=found;
       // (28/10/2026) Pase para las pantallas de SAP: así no hay que teclear la clave en cada formulario (30 días)
-      try{ if(pHash&&esCeoPruebasSap(found)) fetch('/api/sap-token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({usuario:found.id,passHash:pHash})})
+      try{ if(pHash&&esCeoPruebasSap(found)) fetch('/api/sap-token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({usuario:idPortal(found),passHash:pHash})})
         .then(function(r){ return r.json().catch(function(){ return {ok:false,error:'HTTP '+r.status}; }); }).then(function(j){ try{ if(j&&j.ok&&j.token){ localStorage.setItem('sap_pedido_key',j.token); localStorage.removeItem('sap_pase_error'); } else localStorage.setItem('sap_pase_error',(j&&j.error)||'sin respuesta'); }catch(e){} try{ marcaVersion(); }catch(e){} }).catch(function(e){ try{ localStorage.setItem('sap_pase_error','no se llega a /api/sap-token: '+e.message); }catch(x){} }); else if(esCeoPruebasSap(found)) { try{ localStorage.setItem('sap_pase_error','el navegador no ha podido cifrar la contraseña'); }catch(e){} } }catch(e){}
       document.getElementById('inp-user').value='';
       document.getElementById('inp-pass').value='';
