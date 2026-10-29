@@ -381,6 +381,18 @@ module.exports = async function handler(req, res) {
         catch (e) { const u = env("SAP_USER"); if (!u) throw e; r = await sl.post("PurchaseRequests", Object.assign({ ReqType: 12, Requester: u }, doc)); }
         out.solicitud = r.DocNum; out.mensaje = "Solicitud de compra " + r.DocNum + " creada en SAP con " + L.length + " material" + (L.length > 1 ? "es" : ""); return;
       }
+      // Movimientos de almacén (entradas, salidas, traslados y solicitudes): GET ?movimientos=1&dias=7&almacen=
+      if (req.method === "GET" && q.movimientos !== undefined) {
+        const dias = Math.min(Number(q.dias) || 7, 60); const desde = new Date(Date.now() - dias * 86400000).toISOString().slice(0, 10); const alm = q.almacen ? String(q.almacen).toUpperCase() : "";
+        const sel = "DocEntry,DocNum,DocDate,Comments,JournalMemo,DocumentLines"; const res2 = [];
+        const add = (tipo, docs, lineasDe) => { for (const d of docs) for (const l of lineasDe(d)) { if (alm && l.de !== alm && l.a !== alm && l.alm !== alm) continue; res2.push(Object.assign({ tipo, num: d.DocNum, fecha: D(d.DocDate), nota: String(d.Comments || d.JournalMemo || "").slice(0, 120) }, l)); } };
+        const bat = (l) => (l.BatchNumbers || []).map((b) => b.BatchNumber + (b.Quantity !== l.Quantity ? " (" + b.Quantity + ")" : "")).join(", ");
+        try { add("entrada", await todas(`InventoryGenEntries?$select=${sel}&$filter=DocDate ge '${desde}'&$orderby=DocEntry desc`, 400), (d) => (d.DocumentLines || []).map((l) => ({ articulo: l.ItemCode, descripcion: l.ItemDescription, uds: l.Quantity, alm: l.WarehouseCode, lotes: bat(l), produccion: Number(l.BaseType) === 202 }))); } catch (e) { out.avisoEntradas = String(e.message).slice(0, 120); }
+        try { add("salida", await todas(`InventoryGenExits?$select=${sel}&$filter=DocDate ge '${desde}'&$orderby=DocEntry desc`, 400), (d) => (d.DocumentLines || []).map((l) => ({ articulo: l.ItemCode, descripcion: l.ItemDescription, uds: -Number(l.Quantity), alm: l.WarehouseCode, lotes: bat(l), produccion: Number(l.BaseType) === 202 }))); } catch (e) { out.avisoSalidas = String(e.message).slice(0, 120); }
+        try { add("traslado", await todas(`StockTransfers?$select=DocEntry,DocNum,DocDate,Comments,FromWarehouse,ToWarehouse,StockTransferLines&$filter=DocDate ge '${desde}'&$orderby=DocEntry desc`, 400), (d) => (d.StockTransferLines || []).map((l) => ({ articulo: l.ItemCode, descripcion: l.ItemDescription, uds: l.Quantity, de: l.FromWarehouseCode || d.FromWarehouse, a: l.WarehouseCode || d.ToWarehouse, lotes: bat(l) }))); } catch (e) { out.avisoTraslados = String(e.message).slice(0, 120); }
+        try { add("solicitud traslado", await todas(`InventoryTransferRequests?$select=DocEntry,DocNum,DocDate,Comments,FromWarehouse,ToWarehouse,DocumentStatus,StockTransferLines&$filter=DocDate ge '${desde}'&$orderby=DocEntry desc`, 400), (d) => (d.StockTransferLines || []).map((l) => ({ articulo: l.ItemCode, descripcion: l.ItemDescription, uds: l.Quantity, de: l.FromWarehouseCode || d.FromWarehouse, a: l.WarehouseCode || d.ToWarehouse, lotes: String(l.FreeText || ""), pendiente: d.DocumentStatus === "bost_Open" && l.LineStatus !== "bost_Close" }))); } catch (e) { out.avisoSolicitudes = String(e.message).slice(0, 120); }
+        out.movimientos = res2.sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)) || b.num - a.num); out.desde = desde; return;
+      }
       if (req.method === "POST" && body.accion === "ordenar") {
         if (!F(body.fecha)) throw new Error("falta el día de fabricación"); if (!body.almacen) throw new Error("falta el almacén donde se fabrica");
         const uds = Number(body.uds); if (!(uds > 0)) throw new Error("falta la cantidad a fabricar");
