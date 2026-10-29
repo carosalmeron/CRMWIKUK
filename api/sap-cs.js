@@ -133,6 +133,21 @@ module.exports = async function handler(req, res) {
           } catch (e) { out.errores.push({ art, error: String(e.message || e).replace(/^SAP no ha aceptado /, "").slice(0, 220) }); } }
         return;
       }
+      // Mismo producto en otros envases: GET ?hermanos=C5.8F.N32 → granel (C5.8F) y otros formatos (C5.8F.xxx) con stock libre
+      if (req.method === "GET" && q.hermanos) {
+        const art = String(q.hermanos).toUpperCase().trim(), partes = art.split("."); out.articulo = art; out.granel = null; out.otros = [];
+        if (partes.length < 2) return;
+        const base = partes.slice(0, -1).join("."), libre = (it) => { let st = 0, co = 0, pe = 0; for (const w of (it.ItemWarehouseInfoCollection || [])) { st += Number(w.InStock) || 0; co += Number(w.Committed) || 0; pe += Number(w.Ordered) || 0; } return { stock: r3(st), libre: r3(st - co), pedido: r3(pe) }; };
+        try { const g = await sl.get(`Items('${esc(base)}')?$select=ItemCode,ItemName,InventoryUOM,ItemWarehouseInfoCollection`); out.granel = Object.assign({ cod: g.ItemCode, nom: g.ItemName, ud: g.InventoryUOM || "" }, libre(g)); } catch (e) {}
+        const fm = await todas(`Items?$select=ItemCode,ItemName,InventoryUOM,Frozen,ItemWarehouseInfoCollection&$filter=startswith(ItemCode,'${esc(base)}.')`, 100);
+        out.otros = await Promise.all(fm.filter((x) => x.ItemCode !== art && x.Frozen !== "tYES").map(async (x) => { const o = Object.assign({ cod: x.ItemCode, nom: x.ItemName, ud: x.InventoryUOM || "" }, libre(x));
+          try { const t = await sl.get(`ProductTrees('${esc(x.ItemCode)}')?$select=Quantity,ProductTreeLines`); const l = (t.ProductTreeLines || []).find((y) => y.ItemCode === base); if (l) o.porEnvase = Math.round((Number(l.Quantity) || 0) / (Number(t.Quantity) || 1) * 1e6) / 1e6; } catch (e) {}
+          return o; }));
+        out.otros.sort((a, b) => b.libre - a.libre);
+        if (!out.granel && !out.otros.length) out.noEsEnvasado = true;
+        try { const t = await sl.get(`ProductTrees('${esc(art)}')?$select=Quantity,ProductTreeLines`); const l = (t.ProductTreeLines || []).find((y) => y.ItemCode === base); if (l) out.porEnvase = Math.round((Number(l.Quantity) || 0) / (Number(t.Quantity) || 1) * 1e6) / 1e6; } catch (e) {}
+        return;
+      }
       // Envasado: GET ?envasado=GRANEL → lotes del granel con existencias y formatos de envase (artículos GRANEL.xxx con su receta)
       if (req.method === "GET" && q.envasado) {
         const g = String(q.envasado).toUpperCase().trim();
