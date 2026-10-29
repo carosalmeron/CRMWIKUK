@@ -94,6 +94,19 @@ module.exports = async function handler(req, res) {
       const pedido = async (entry) => { const o = await sl.get(`Orders(${Number(entry)})?$select=DocEntry,DocNum,CardName,DocumentStatus,Confirmed,DocumentLines`); if (o.DocumentStatus !== "bost_Open") throw new Error("el pedido " + o.DocNum + " ya está cerrado"); return o; };
 
       // Diagnóstico: qué valores tienen los campos propios (U_) de cabecera en los pedidos abiertos
+      // Receta (lista de materiales) de un artículo: GET ?receta=ART&uds=1000 → componentes con stock libre y si a su vez tienen receta
+      if (req.method === "GET" && q.receta) {
+        const art = String(q.receta).toUpperCase(), uds = Number(q.uds) || 0;
+        let t; try { t = await sl.get(`ProductTrees('${esc(art)}')?$select=TreeCode,Quantity,TreeType,Warehouse,ProductTreeLines`); } catch (e) { out.receta = null; out.mensaje = art + " no tiene receta en SAP"; return; }
+        const base = Number(t.Quantity) || 1, L = (t.ProductTreeLines || []).filter((x) => x.ItemCode);
+        const cods = [...new Set(L.map((x) => x.ItemCode))], inf = {}, conBom = {};
+        for (let i = 0; i < cods.length; i += 40) { const z = cods.slice(i, i + 40); try { const r = await sl.get(`Items?$select=ItemCode,ItemName,InventoryUOM,ItemWarehouseInfoCollection&$filter=${encodeURIComponent(z.map((c) => `ItemCode eq '${esc(c)}'`).join(" or "))}&$top=100`);
+          for (const it of (r.value || [])) { let st = 0, co = 0, pe = 0; for (const w of (it.ItemWarehouseInfoCollection || [])) { st += Number(w.InStock) || 0; co += Number(w.Committed) || 0; pe += Number(w.Ordered) || 0; } inf[it.ItemCode] = { nom: it.ItemName, ud: it.InventoryUOM || "", libre: r3(st - co), stock: r3(st), enCompra: r3(pe) }; } } catch (e) {} }
+        await Promise.all(cods.map(async (c) => { try { await sl.get(`ProductTrees('${esc(c)}')?$select=TreeCode`); conBom[c] = true; } catch (e) { conBom[c] = false; } }));
+        out.receta = { art, base, tipo: t.TreeType, almacen: t.Warehouse || "", uds, lineas: L.map((x) => { const i = inf[x.ItemCode] || {}, por = (Number(x.Quantity) || 0) / base, nec = uds ? r3(por * uds) : null;
+          return { cod: x.ItemCode, nom: i.nom || x.ItemName || "", ud: i.ud || "", cantidad: Number(x.Quantity) || 0, porUnidad: Math.round(por * 1e6) / 1e6, necesita: nec, libre: i.libre ?? null, stock: i.stock ?? null, enCompra: i.enCompra ?? null, alm: x.Warehouse || "", semi: !!conBom[x.ItemCode], falta: nec !== null && i.libre !== undefined ? r3(Math.max(0, nec - Math.max(0, i.libre))) : null }; }) };
+        return;
+      }
       // Diagnóstico beas: GET ?beas=1[&articulo=X] → ¿hay recetas en SAP estándar? ¿se pueden leer las tablas de beas?
       if (req.method === "GET" && q.beas !== undefined) {
         const R = {}; const prueba = async (k, f) => { try { R[k] = await f(); } catch (e) { R[k] = "✗ " + String(e.message || e).slice(0, 200); } };
