@@ -1,6 +1,7 @@
 // api/sap-cs.js — Panel de Customer Service: pedidos de UC con su disponibilidad, y cambios de estado escritos en SAP.
 //
 // Misma autorización que el resto (pase del portal o SAP_PEDIDOS_KEY).
+// GET  ?campos=1                → diagnóstico: valores de los campos U_ de cabecera en los pedidos abiertos
 // GET  ?pedidos=1[&dias=60]  → pedidos abiertos con líneas, stock disponible por línea, próxima llegada y estado del flujo
 // POST {accion:"validar", entry}                          → pedido confirmado (pasa al almacén). No deja si hay líneas esperando a producción/compras
 // POST {accion:"solicitud", entry, linea, tipo, detalle}  → manda la línea a producción (1,2,3,6,7) o compras (5); detalle obligatorio
@@ -72,6 +73,18 @@ module.exports = async function handler(req, res) {
       const todas = async (ruta, max = 3000) => { let o = [], r = await sl.get(ruta); for (;;) { o.push(...(r.value || [])); const sig = r["odata.nextLink"] || r["@odata.nextLink"]; if (!sig || o.length >= max) break; r = await sl.get(String(sig).replace(/^.*\/b1s\/v\d\//, "")); } return o; };
       const pedido = async (entry) => { const o = await sl.get(`Orders(${Number(entry)})?$select=DocEntry,DocNum,CardName,DocumentStatus,Confirmed,DocumentLines`); if (o.DocumentStatus !== "bost_Open") throw new Error("el pedido " + o.DocNum + " ya está cerrado"); return o; };
 
+      // Diagnóstico: qué valores tienen los campos propios (U_) de cabecera en los pedidos abiertos
+      if (req.method === "GET" && q.campos !== undefined) {
+        const uno = await sl.get("Orders?$filter=DocumentStatus eq 'bost_Open'&$orderby=DocEntry desc&$top=1");
+        const ej = (uno.value || [])[0] || {};
+        const campos = Object.keys(ej).filter((k) => /^U_/.test(k) && !Array.isArray(ej[k]));
+        const todos = await todas(`Orders?$select=DocEntry,DocNum,Confirmed,${campos.join(",")}&$filter=DocumentStatus eq 'bost_Open'`, 1500);
+        const reparto = {}; for (const k of ["Confirmed", ...campos]) { const c = {}; for (const p of todos) { const v = p[k] === null || p[k] === undefined || p[k] === "" ? "(vacío)" : String(p[k]).slice(0, 30); c[v] = (c[v] || 0) + 1; } if (Object.keys(c).length <= 12 || /Invalid|Valid|Riesg|Cobro|Precio|Bloq/i.test(k)) reparto[k] = c; }
+        const cruce = {}; for (const p of todos) { const k = "riesgo=" + p.U_SCL_InvalidadoxRiesg + " · precios=" + p.U_SCL_InvalidadoxPrecios + " · cobros=" + p.U_SCL_InvalidadoxCobros + " · confirmado=" + p.Confirmed; cruce[k] = (cruce[k] || 0) + 1; }
+        out.pedidosAbiertos = todos.length; out.reparto = reparto; out.combinaciones = cruce;
+        out.ejemplo = Object.fromEntries(Object.entries(ej).filter(([k]) => /Invalid|Valid|Riesg|Cobro|Precio|Bloq|Confirm|Status|Approv|Autor/i.test(k)));
+        return;
+      }
       if (req.method === "GET" && q.pedidos !== undefined) {
         const nombres = {}; try { for (const v of await todas("SalesPersons?$select=SalesEmployeeCode,SalesEmployeeName", 500)) nombres[String(v.SalesEmployeeCode)] = String(v.SalesEmployeeName || "").trim(); } catch (e) {}
         const sel = "DocEntry,DocNum,DocDate,DocDueDate,UpdateDate,CardCode,CardName,SalesPersonCode,Confirmed,Comments,DocTotal,U_SCL_InvalidadoxPrecios,U_SCL_InvalidadoxCobros,U_SCL_InvalidadoxRiesg,U_SCL_FechaAgente,DocumentLines";
