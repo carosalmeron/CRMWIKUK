@@ -71,7 +71,13 @@ module.exports = async function handler(req, res) {
     const SOLO_CEO = env("SAP_SOLO_CEO") !== "no";
     const esCeo = id === "ceo" || rol === "ceo";
     const puede = esCeo || (!SOLO_CEO && (["admin", "crm_director"].includes(rol) || acc.includes("pedido_sap") || acc.includes("produccion")));
-    if (!puede) return res.status(403).json({ ok: false, error: SOLO_CEO ? "en pruebas: solo el CEO" : "sin permiso para SAP (acceso «pedido_sap» o «produccion»)" });
+    if (!puede) {
+      // Resto de usuarios: pase de SOLO LECTURA para el panel de Customer Service (firmado con otra clave: las demás APIs de SAP no lo aceptan)
+      const exp = Date.now() + 30 * 86400000, p = Buffer.from(JSON.stringify({ u: id, n: u.nombre || id, exp, s: "ver" })).toString("base64url");
+      const tok = "crm." + p + "." + crypto.createHmac("sha256", secreto() + "|cs-ver").update(p).digest("base64url");
+      res.setHeader("Set-Cookie", "cs_pase=" + encodeURIComponent(tok) + "; Path=/; Max-Age=" + 30 * 86400 + "; SameSite=Lax; Secure");
+      return res.status(200).json({ ok: true, token: tok, soloVer: true, caduca: new Date(exp).toISOString().slice(0, 10) });
+    }
     const exp = Date.now() + 30 * 86400000;
     const tok = firmar({ u: id, n: u.nombre || id, exp }); res.setHeader("Set-Cookie", galleta(tok));
     return res.status(200).json({ ok: true, token: tok, caduca: new Date(exp).toISOString().slice(0, 10) });

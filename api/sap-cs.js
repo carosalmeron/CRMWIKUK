@@ -54,6 +54,13 @@ function autorizado(dada) {
   const h = require("crypto").createHmac("sha256", clave).update(m[1]).digest("base64url"); if (h !== m[2]) return { ok: false };
   try { const p = JSON.parse(Buffer.from(m[1], "base64url").toString()); if (!(p.exp > Date.now())) return { ok: false, caducado: true }; return { ok: true, quien: p.n || p.u }; } catch (e) { return { ok: false }; }
 }
+// Pase de solo lectura (resto de usuarios): firmado con la clave + "|cs-ver"
+function soloVer(dada) {
+  const clave = env("SAP_PEDIDOS_KEY") || env("CRON_SECRET"); if (!clave) return { ok: false };
+  const m = String(dada || "").match(/^crm\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/); if (!m) return { ok: false };
+  if (require("crypto").createHmac("sha256", clave + "|cs-ver").update(m[1]).digest("base64url") !== m[2]) return { ok: false };
+  try { const p = JSON.parse(Buffer.from(m[1], "base64url").toString()); if (!(p.exp > Date.now())) return { ok: false, caducado: true }; return { ok: true, quien: p.n || p.u, soloVer: true }; } catch (e) { return { ok: false }; }
+}
 module.exports = async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -64,10 +71,12 @@ module.exports = async function handler(req, res) {
   const galleta = (String(req.headers.cookie || "").match(/(?:^|;\s*)sap_pase=([^;]+)/) || [])[1] || "";
   let AUT = autorizado(req.headers["x-crm-key"] || q.key || "");
   if (!AUT.ok && galleta) AUT = autorizado(decodeURIComponent(galleta));
+  if (!AUT.ok) { const g2 = (String(req.headers.cookie || "").match(/(?:^|;\s*)cs_pase=([^;]+)/) || [])[1] || ""; for (const t of [req.headers["x-crm-key"] || q.key || "", decodeURIComponent(g2)]) { const v = soloVer(t); if (v.ok) { AUT = v; break; } } }
+  if (AUT.soloVer && req.method === "POST") return res.status(403).json({ ok: false, error: "puedes ver el panel, pero de momento solo el CEO puede cambiar pedidos en SAP" });
   if (!AUT.ok) return res.status(401).json({ ok: false, error: AUT.caducado ? "el pase ha caducado: vuelve a entrar en el portal" : "clave incorrecta" });
   let body = req.body; if (typeof body === "string") { try { body = JSON.parse(body); } catch (e) { body = {}; } } body = body || {};
   const db = String(body.db || q.db || env("SAP_DB") || "U_CARO_00"); if (!DB_OK(db)) return res.status(400).json({ ok: false, error: "base de datos no válida" });
-  const out = { ok: true, db, quien: AUT.quien || "" }; const t0 = Date.now();
+  const out = { ok: true, db, quien: AUT.quien || "", puedeEscribir: !AUT.soloVer }; const t0 = Date.now();
   try {
     await conSesion(db, async (sl) => {
       const todas = async (ruta, max = 3000) => { let o = [], r = await sl.get(ruta); for (;;) { o.push(...(r.value || [])); const sig = r["odata.nextLink"] || r["@odata.nextLink"]; if (!sig || o.length >= max) break; r = await sl.get(String(sig).replace(/^.*\/b1s\/v\d\//, "")); } return o; };
