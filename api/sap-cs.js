@@ -130,8 +130,8 @@ module.exports = async function handler(req, res) {
         let cerr = []; const diasS = Math.min(60, Math.max(1, Number(q.dias) || 15)), desdeS = new Date(Date.now() - diasS * 864e5).toISOString().slice(0, 10);
         const paralelo = Promise.all([
           mide("comerciales", async () => { try { for (const v of await todas("SalesPersons?$select=SalesEmployeeCode,SalesEmployeeName", 500)) nombres[String(v.SalesEmployeeCode)] = String(v.SalesEmployeeName || "").trim(); } catch (e) {} }),
-          mide("compras", async () => { try { for (const p of await todas("PurchaseOrders?$select=DocNum,DocDueDate,DocumentLines&$filter=DocumentStatus eq 'bost_Open'", 2000)) for (const l of (p.DocumentLines || [])) { const u = Number(l.RemainingOpenQuantity) || 0; if (u > 0 && l.LineStatus !== "bost_Close") addL(l.ItemCode, { fecha: D(l.ShipDate || p.DocDueDate), uds: u, de: "compra " + p.DocNum, alm: l.WarehouseCode }); } } catch (e) { out.avisoCompras = String(e.message).slice(0, 120); } }),
-          mide("fabricacion", async () => { try { for (const o of await todas("ProductionOrders?$select=DocumentNumber,ItemNo,PlannedQuantity,CompletedQuantity,DueDate,Warehouse,ProductionOrderStatus&$filter=ProductionOrderStatus eq 'boposPlanned' or ProductionOrderStatus eq 'boposReleased'", 2000)) { const u = (Number(o.PlannedQuantity) || 0) - (Number(o.CompletedQuantity) || 0); if (u > 0) addL(o.ItemNo, { fecha: D(o.DueDate), uds: u, de: "fabricación " + o.DocumentNumber, alm: o.Warehouse }); } } catch (e) {} }),
+          mide("compras", async () => { try { for (const p of await todas("PurchaseOrders?$select=DocNum,DocDueDate,DocumentLines&$filter=DocumentStatus eq 'bost_Open'", 2000)) for (const l of (p.DocumentLines || [])) { const u = Number(l.RemainingOpenQuantity) || 0; if (u > 0 && l.LineStatus !== "bost_Close") addL(l.ItemCode, { fecha: D(l.ShipDate || p.DocDueDate), uds: u, de: "compra " + p.DocNum, alm: l.WarehouseCode, tipo: "comp", orden: p.DocNum }); } } catch (e) { out.avisoCompras = String(e.message).slice(0, 120); } }),
+          mide("fabricacion", async () => { try { for (const o of await todas("ProductionOrders?$select=DocumentNumber,ItemNo,PlannedQuantity,CompletedQuantity,DueDate,Warehouse,ProductionOrderStatus&$filter=ProductionOrderStatus eq 'boposPlanned' or ProductionOrderStatus eq 'boposReleased'", 2000)) { const u = (Number(o.PlannedQuantity) || 0) - (Number(o.CompletedQuantity) || 0); if (u > 0) addL(o.ItemNo, { fecha: D(o.DueDate), uds: u, de: "fabricación " + o.DocumentNumber, alm: o.Warehouse, tipo: "fab", orden: o.DocumentNumber, estado: o.ProductionOrderStatus === "boposReleased" ? "Liberada" : "Planificada", hecho: Number(o.CompletedQuantity) || 0 }); } } catch (e) {} }),
           // Entregas y facturas hechas desde pedidos (BaseType 17): lo único que cuenta como SERVIDO
           mide("entregas", async () => { if (q.solo === "prod") return; const desdeE = new Date(Date.now() - (diasS + 10) * 864e5).toISOString().slice(0, 10);
             for (const [ent, tipo] of [["DeliveryNotes", "entrega"], ["Invoices", "factura"]]) { try {
@@ -149,7 +149,7 @@ module.exports = async function handler(req, res) {
         const trozos = []; for (let i = 0; i < items.length; i += 40) trozos.push(items.slice(i, i + 40));
         for (let i = 0; i < trozos.length; i += 8) await Promise.all(trozos.slice(i, i + 8).map(async (tz) => { try {
           const r = await sl.get(`Items?$select=ItemCode,InventoryUOM,SalesUnit,ItemWarehouseInfoCollection&$filter=${encodeURIComponent(tz.map((c) => `ItemCode eq '${esc(c)}'`).join(" or "))}&$top=100`);
-          for (const it of (r.value || [])) { const w = {}; for (const x of (it.ItemWarehouseInfoCollection || [])) w[x.WarehouseCode] = { stock: Number(x.InStock) || 0, comp: Number(x.Committed) || 0 }; stock[it.ItemCode] = { w, ud: it.SalesUnit || it.InventoryUOM || "" }; } } catch (e) {} }));
+          for (const it of (r.value || [])) { const w = {}; for (const x of (it.ItemWarehouseInfoCollection || [])) w[x.WarehouseCode] = { stock: Number(x.InStock) || 0, comp: Number(x.Committed) || 0, ped: Number(x.Ordered) || 0 }; stock[it.ItemCode] = { w, ud: it.SalesUnit || it.InventoryUOM || "" }; } } catch (e) {} }));
         });
         await paralelo; out.tiempos = T;
         for (const k of Object.keys(lleg)) lleg[k].sort((a, b) => String(a.fecha).localeCompare(String(b.fecha)));
@@ -184,6 +184,11 @@ module.exports = async function handler(req, res) {
           out.pedidos.push({ entry: p.DocEntry, num: p.DocNum, fecha: D(p.DocDate), entrega: D(p.DocDueDate), pideComercial: D(p.U_SCL_FechaAgente), servidoEl: (algo && ultima) || D(p.ClosingDate || p.UpdateDate), cliente: p.CardCode, nombre: p.CardName,
             vendedor: nombres[String(p.SalesPersonCode)] || "", total: Number(p.DocTotal) || 0, comentario: "", confirmado: true, etapa: algo ? "servido" : "anulado", lineas: L });
         }
+        // Detalle por artículo (para desplegar): stock y comprometido por almacén, órdenes de fabricación y compras abiertas
+        out.articulos = {};
+        for (const [c, v] of Object.entries(stock)) out.articulos[c] = {
+          alm: Object.entries(v.w).filter(([, x]) => x.stock || x.comp || x.ped).map(([k, x]) => ({ alm: k, stock: r3(x.stock), comp: r3(x.comp), ped: r3(x.ped), libre: r3(x.stock - x.comp) })).sort((a, b) => b.stock - a.stock),
+          fab: (lleg[c] || []).filter((x) => x.tipo === "fab"), compras: (lleg[c] || []).filter((x) => x.tipo === "comp") };
         out.tipos = TIPOS; return;
       }
       if (req.method === "POST" && body.accion === "validar") {
