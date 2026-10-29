@@ -37,7 +37,8 @@ async function conSesion(db, fn) {
   const get = async (ruta) => { const r = await pedir(base, ruta, { cookies, ca, insecure }); if (r.status >= 300) throw new Error(ruta.split("?")[0] + " → " + r.status + ": " + msgDe(r)); return r.json; };
   const post = async (ruta, body) => { const r = await pedir(base, ruta, { method: "POST", body, cookies, ca, insecure }); if (r.status >= 300) throw new Error("SAP no ha aceptado " + ruta + " (" + r.status + "): " + msgDe(r)); return r.json; };
   const patch = async (ruta, body) => { const r = await pedir(base, ruta, { method: "PATCH", body, cookies, ca, insecure }); if (r.status >= 300) throw new Error("SAP no ha aceptado el cambio en " + ruta + " (" + r.status + "): " + msgDe(r)); return r.json; };
-  try { return await fn({ get, post, patch }); }
+  const del = async (ruta) => { const r = await pedir(base, ruta, { method: "DELETE", cookies, ca, insecure }); if (r.status >= 300) throw new Error("SAP no ha borrado " + ruta + " (" + r.status + "): " + msgDe(r)); return true; };
+  try { return await fn({ get, post, patch, del }); }
   finally { try { await pedir(base, "Logout", { method: "POST", cookies, ca, insecure }); } catch (e) {} }
 }
 const esc = (s) => String(s || "").replace(/'/g, "''");
@@ -102,14 +103,17 @@ module.exports = async function handler(req, res) {
         if (art) await prueba("recetaSAPdeArticulo", async () => { const t = await sl.get(`ProductTrees('${esc(art)}')`); return { cantidad: t.Quantity, lineas: (t.ProductTreeLines || []).map((l) => l.ItemCode + " × " + l.Quantity) }; });
         // Tablas de beas por consulta guardada (si SAP lo permite)
         const tablas = ["BEAS_STL", "BEAS_APLPOS", "BEAS_FTSTL", "BEAS_FTHAUPT"];
-        for (const t of tablas) await prueba("tabla_" + t, async () => {
-          const base = "CRM_B_" + t.replace(/[^A-Z]/g, "").slice(0, 14), intentos = [], formas = [`SELECT * FROM ${t}`, `SELECT * FROM [${t}]`, `SELECT * FROM "${t}"`];
-          for (let i = 0; i < formas.length; i++) { const code = base + i;
-            try { try { await sl.post("SQLQueries", { SqlCode: code, SqlName: "Prueba lectura " + t + " (CRM)", SqlText: formas[i] }); } catch (e) { if (!/already|exist|duplic/i.test(String(e.message))) throw e; }
-              const r = await sl.get(`SQLQueries('${code}')/List?$top=3`); const v = r.value || []; return { forma: formas[i], filas: v.length, columnas: v[0] ? Object.keys(v[0]).slice(0, 60) : [], ejemplo: v[0] || null }; }
-            catch (e) { intentos.push(formas[i] + " → " + String(e.message || e).replace(/^SAP no ha aceptado /, "").slice(0, 160)); } }
-          return "✗ " + intentos.join(" | ");
-        });
+        // SAP no admite SELECT *: se prueban columnas una a una (consulta temporal que se borra después)
+        const consulta = async (code, sql, top) => { try { await sl.post("SQLQueries", { SqlCode: code, SqlName: "Prueba CRM", SqlText: sql }); } catch (e) { if (!/already|exist|duplic/i.test(String(e.message))) throw e; await sl.patch(`SQLQueries('${code}')`, { SqlText: sql }); }
+          try { const r = await sl.get(`SQLQueries('${code}')/List?$top=${top || 3}`); return r.value || []; } finally { try { await pedirBorrar(code); } catch (e) {} } };
+        const pedirBorrar = async (code) => { try { await sl.del(`SQLQueries('${code}')`); } catch (e) {} };
+        await prueba("columnasPorCatalogo", async () => { const v = await consulta("CRM_B_COLS", "SELECT T0.TABLE_NAME, T0.COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS T0 WHERE T0.TABLE_NAME LIKE 'BEAS_STL%' OR T0.TABLE_NAME LIKE 'BEAS_FT%'", 400); return v.map((x) => x.TABLE_NAME + "." + x.COLUMN_NAME); });
+        const CAND = { BEAS_STL: ["ItemCode", "POS_ID", "ART1_ID", "ItemName", "BEZ", "MENGE", "MENGE_JE", "MENGE_VERBRAUCH", "MENGE_LAGER", "ME_VERBR", "ME_LAGER", "UMRECHNUNG", "WhsCode", "SORTID", "AUSSCHUSS", "VERSCHNITT", "POS_TEXT", "ArtikelID", "DistNumber", "VERSION", "ART_ID", "KOMP_ID", "SubItemCode", "Quantity"],
+          BEAS_FTHAUPT: ["BELNR_ID", "ItemCode", "MENGE", "STATUS", "CardCode"] };
+        for (const [t, cols] of Object.entries(CAND)) await prueba("columnas_" + t, async () => { const ok = [], no = [];
+          for (let i = 0; i < cols.length; i++) { try { await consulta("CRM_B_C" + i, `SELECT T0.${cols[i]} FROM ${t} T0`, 1); ok.push(cols[i]); } catch (e) { no.push(cols[i] + ": " + String(e.message || "").replace(/^.*Invalid SQL syntax:/, "").slice(0, 70)); } }
+          let ejemplo = null; if (ok.length) { try { ejemplo = await consulta("CRM_B_EJ", `SELECT ${ok.map((c) => "T0." + c).join(", ")} FROM ${t} T0`, 5); } catch (e) { ejemplo = "✗ " + String(e.message).slice(0, 160); } }
+          return { existen: ok, ejemplo, noExisten: no.slice(0, 6) }; });
         await prueba("camposBeasEnArticulos", async () => { const r = await sl.get("Items?$top=1"); const it = (r.value || [])[0] || {}; return Object.keys(it).filter((k) => /beas/i.test(k)); });
         out.beas = R; return;
       }
