@@ -228,6 +228,13 @@ module.exports = async function handler(req, res) {
         await ponLinea(o, l, { U_UC_Solicitud: "0", U_UC_SolicitudEstado: "0", U_UC_SolicitudDetalle: nota(l, "DEVUELTO por " + (TIPOS[String(l.U_UC_Solicitud)] || "") + ": " + body.motivo) });
         out.mensaje = l.ItemCode + " devuelto a Customer Service"; return;
       }
+      if (req.method === "POST" && body.accion === "reasignar") {
+        const tipo = String(body.tipo || ""); if (!TIPOS[tipo]) throw new Error("elige a quién se pasa");
+        const { o, l } = await lineaDe(); const antes = String(l.U_UC_Solicitud);
+        if (antes === tipo) throw new Error("ya está en " + TIPOS[tipo]);
+        await ponLinea(o, l, { U_UC_Solicitud: tipo, U_UC_SolicitudEstado: "0", U_UC_SolicitudDetalle: nota(l, "Pasado de " + (TIPOS[antes] || antes) + " a " + TIPOS[tipo] + (body.motivo ? ": " + body.motivo : "")) });
+        out.mensaje = l.ItemCode + " pasado de " + (TIPOS[antes] || antes) + " a " + TIPOS[tipo]; return;
+      }
       if (req.method === "POST" && body.accion === "compra_hecha") {
         const { o, l } = await lineaDe();
         await ponLinea(o, l, { U_UC_SolicitudEstado: "3", U_UC_SolicitudDetalle: nota(l, "Compra pedida" + (body.nota ? ": " + body.nota : "")) });
