@@ -59,7 +59,10 @@ module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   if (req.method === "OPTIONS") return res.status(204).end();
   const q = req.query || {};
-  const AUT = autorizado(req.headers["x-crm-key"] || q.key || "");
+  // El pase llega en la cabecera (páginas) o en la cookie «sap_pase» que pone /api/sap-token (cualquier navegador)
+  const galleta = (String(req.headers.cookie || "").match(/(?:^|;\s*)sap_pase=([^;]+)/) || [])[1] || "";
+  let AUT = autorizado(req.headers["x-crm-key"] || q.key || "");
+  if (!AUT.ok && galleta) AUT = autorizado(decodeURIComponent(galleta));
   if (!AUT.ok) return res.status(401).json({ ok: false, error: AUT.caducado ? "el pase ha caducado: vuelve a entrar en el portal" : "clave incorrecta" });
   let body = req.body; if (typeof body === "string") { try { body = JSON.parse(body); } catch (e) { body = {}; } }
   const db = String((body && body.db) || q.db || env("SAP_DB") || "U_CARO_00"); if (!DB_OK(db)) return res.status(400).json({ ok: false, error: "base de datos no válida" });

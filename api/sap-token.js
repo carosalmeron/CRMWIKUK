@@ -27,6 +27,7 @@ async function buscarUsuarios(t) {
   return res;
 }
 const secreto = () => env("SAP_PEDIDOS_KEY") || env("CRON_SECRET") || "";
+const galleta = (tok) => "sap_pase=" + encodeURIComponent(tok) + "; Path=/; Max-Age=" + 30 * 86400 + "; SameSite=Lax; Secure";
 function firmar(payload) { const p = Buffer.from(JSON.stringify(payload)).toString("base64url"); const h = crypto.createHmac("sha256", secreto()).update(p).digest("base64url"); return "crm." + p + "." + h; }
 module.exports = async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
@@ -49,7 +50,7 @@ module.exports = async function handler(req, res) {
     if (!u) return res.status(404).send("<h2 style='font-family:system-ui'>No encuentro ese usuario</h2>");
     const uid = String(u.id || u._docId), rol = String(u.rol || "").toLowerCase();
     if (env("SAP_SOLO_CEO") !== "no" && !(uid === "ceo" || rol === "ceo")) return res.status(403).send("<h2 style='font-family:system-ui'>En pruebas: solo el CEO</h2>");
-    const exp = Date.now() + 30 * 86400000, tok = firmar({ u: uid, n: u.nombre || uid, exp });
+    const exp = Date.now() + 30 * 86400000, tok = firmar({ u: uid, n: u.nombre || uid, exp }); res.setHeader("Set-Cookie", galleta(tok));
     return res.status(200).send(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><body style="font-family:system-ui;padding:30px;text-align:center"><div style="font-size:64px">✅</div><h2>Permiso de SAP activado en este aparato</h2><p>Para ${String(u.nombre || uid).replace(/[<>&]/g, "")} · hasta el ${new Date(exp).toLocaleDateString("es-ES")}</p><p><a href="/" style="font-size:18px">Volver al portal</a></p><script>try{localStorage.setItem("sap_pedido_key",${JSON.stringify(tok)});localStorage.removeItem("sap_pase_error");}catch(e){document.body.innerHTML="<h2>Este navegador no deja guardar el permiso</h2>";}setTimeout(function(){location.href="/";},2500);</script></body>`);
   }
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "usa POST" });
@@ -72,6 +73,7 @@ module.exports = async function handler(req, res) {
     const puede = esCeo || (!SOLO_CEO && (["admin", "crm_director"].includes(rol) || acc.includes("pedido_sap") || acc.includes("produccion")));
     if (!puede) return res.status(403).json({ ok: false, error: SOLO_CEO ? "en pruebas: solo el CEO" : "sin permiso para SAP (acceso «pedido_sap» o «produccion»)" });
     const exp = Date.now() + 30 * 86400000;
-    return res.status(200).json({ ok: true, token: firmar({ u: id, n: u.nombre || id, exp }), caduca: new Date(exp).toISOString().slice(0, 10) });
+    const tok = firmar({ u: id, n: u.nombre || id, exp }); res.setHeader("Set-Cookie", galleta(tok));
+    return res.status(200).json({ ok: true, token: tok, caduca: new Date(exp).toISOString().slice(0, 10) });
   } catch (e) { return res.status(500).json({ ok: false, error: String(e.message || e).slice(0, 200) }); }
 };
