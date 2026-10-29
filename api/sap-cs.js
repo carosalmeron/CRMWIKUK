@@ -93,7 +93,9 @@ module.exports = async function handler(req, res) {
         const r = await sl.get(`Orders?$filter=DocNum eq ${Number(q.orden)}&$top=1`); const o = (r.value || [])[0]; if (!o) throw new Error("no encuentro el pedido " + q.orden);
         out.pedido = { num: o.DocNum, estado: o.DocumentStatus, cancelado: o.Cancelled, cierre: o.ClosingDate, actualizado: o.UpdateDate, confirmado: o.Confirmed };
         out.lineas = (o.DocumentLines || []).map((l) => Object.fromEntries(Object.entries(l).filter(([k]) => /^(LineNum|ItemCode|Quantity|RemainingOpenQuantity|OpenAmount|LineStatus|DeliveredQuantity|Target|Base|Shipped|Delivered)/i.test(k))));
-        out.conEntrega = (o.DocumentLines || []).map((l) => conEntrega(l)); return;
+        const ents = [];
+        for (const ent of ["DeliveryNotes", "Invoices"]) { try { for (const d of await todas(`${ent}?$select=DocNum,DocDate,DocumentLines&$filter=DocDate ge '${String(o.DocDate).slice(0, 10)}' and CardCode eq '${esc(o.CardCode)}'`, 500)) for (const l of (d.DocumentLines || [])) if (Number(l.BaseType) === 17 && Number(l.BaseEntry) === Number(o.DocEntry)) ents.push({ doc: ent + " " + d.DocNum, fecha: D(d.DocDate), linea: l.BaseLine, uds: l.Quantity }); } catch (e) { ents.push({ error: ent + ": " + String(e.message).slice(0, 100) }); } }
+        out.entregas = ents; out.servido = ents.some((x) => x.uds > 0); return;
       }
       if (req.method === "GET" && q.campos !== undefined) {
         const uno = await sl.get("Orders?$filter=DocumentStatus eq 'bost_Open'&$orderby=DocEntry desc&$top=1");
@@ -110,11 +112,18 @@ module.exports = async function handler(req, res) {
         const T = {}, mide = async (k, f) => { const t = Date.now(); try { return await f(); } finally { T[k] = Math.round((Date.now() - t) / 100) / 10; } };
         // Todo lo que no depende de los pedidos va EN PARALELO (comerciales, compras, fabricación, servidos)
         const nombres = {}; const lleg = {}; const addL = (it, o) => { (lleg[it] = lleg[it] || []).push(o); };
+        const ENT = {}; let entregasOk = true;
         let cerr = []; const diasS = Math.min(60, Math.max(1, Number(q.dias) || 15)), desdeS = new Date(Date.now() - diasS * 864e5).toISOString().slice(0, 10);
         const paralelo = Promise.all([
           mide("comerciales", async () => { try { for (const v of await todas("SalesPersons?$select=SalesEmployeeCode,SalesEmployeeName", 500)) nombres[String(v.SalesEmployeeCode)] = String(v.SalesEmployeeName || "").trim(); } catch (e) {} }),
           mide("compras", async () => { try { for (const p of await todas("PurchaseOrders?$select=DocNum,DocDueDate,DocumentLines&$filter=DocumentStatus eq 'bost_Open'", 2000)) for (const l of (p.DocumentLines || [])) { const u = Number(l.RemainingOpenQuantity) || 0; if (u > 0 && l.LineStatus !== "bost_Close") addL(l.ItemCode, { fecha: D(l.ShipDate || p.DocDueDate), uds: u, de: "compra " + p.DocNum, alm: l.WarehouseCode }); } } catch (e) { out.avisoCompras = String(e.message).slice(0, 120); } }),
           mide("fabricacion", async () => { try { for (const o of await todas("ProductionOrders?$select=DocumentNumber,ItemNo,PlannedQuantity,CompletedQuantity,DueDate,Warehouse,ProductionOrderStatus&$filter=ProductionOrderStatus eq 'boposPlanned' or ProductionOrderStatus eq 'boposReleased'", 2000)) { const u = (Number(o.PlannedQuantity) || 0) - (Number(o.CompletedQuantity) || 0); if (u > 0) addL(o.ItemNo, { fecha: D(o.DueDate), uds: u, de: "fabricación " + o.DocumentNumber, alm: o.Warehouse }); } } catch (e) {} }),
+          // Entregas y facturas hechas desde pedidos (BaseType 17): lo único que cuenta como SERVIDO
+          mide("entregas", async () => { const desdeE = new Date(Date.now() - (diasS + 10) * 864e5).toISOString().slice(0, 10);
+            for (const [ent, tipo] of [["DeliveryNotes", "entrega"], ["Invoices", "factura"]]) { try {
+              for (const d of await todas(`${ent}?$select=DocEntry,DocNum,DocDate,Cancelled,DocumentLines&$filter=DocDate ge '${desdeE}' and Cancelled eq 'tNO'`, 4000))
+                for (const l of (d.DocumentLines || [])) if (Number(l.BaseType) === 17 && l.BaseEntry) { const k = l.BaseEntry + "|" + l.BaseLine, e = ENT[k] = ENT[k] || { uds: 0, fecha: "", docs: [] }; e.uds += Number(l.Quantity) || 0; if (String(d.DocDate) > e.fecha) e.fecha = D(d.DocDate); e.docs.push(tipo + " " + d.DocNum); }
+            } catch (e) { entregasOk = false; out.avisoEntregas = (out.avisoEntregas || "") + ent + ": " + String(e.message).slice(0, 120) + " "; } } }),
           mide("servidos", async () => { try { cerr = await todas(`Orders?$select=DocEntry,DocNum,DocDate,DocDueDate,ClosingDate,UpdateDate,CardCode,CardName,SalesPersonCode,DocTotal,U_SCL_FechaAgente,DocumentLines&$filter=DocumentStatus eq 'bost_Close' and Cancelled eq 'tNO' and UpdateDate ge '${desdeS}'&$orderby=DocEntry desc`, 1500); } catch (e) { try { cerr = await todas(`Orders?$select=DocEntry,DocNum,DocDate,DocDueDate,UpdateDate,CardCode,CardName,SalesPersonCode,DocTotal,DocumentLines&$filter=DocumentStatus eq 'bost_Close' and Cancelled eq 'tNO' and UpdateDate ge '${desdeS}'&$orderby=DocEntry desc`, 1500); } catch (e2) { out.avisoServidos = String(e2.message).slice(0, 160); } } }),
         ]);
         const sel = "DocEntry,DocNum,DocDate,DocDueDate,UpdateDate,CardCode,CardName,SalesPersonCode,Confirmed,Comments,DocTotal,U_SCL_InvalidadoxPrecios,U_SCL_InvalidadoxCobros,U_SCL_InvalidadoxRiesg,U_SCL_InvalidadoxMuestras,U_SCL_ValidadoFijoPrecios,U_SCL_ValidadoFijoCobros,U_SCL_ValidadoFijoRiesgo,U_SCL_ValidadoFijoMuestra,U_SCL_FechaAgente,DocumentLines";
@@ -149,11 +158,16 @@ module.exports = async function handler(req, res) {
             // Bloqueado = invalidado y nadie lo ha validado (ValidadoFijo = N)
             precios: Y(p.U_SCL_InvalidadoxPrecios) && !Y(p.U_SCL_ValidadoFijoPrecios), cobros: Y(p.U_SCL_InvalidadoxCobros) && !Y(p.U_SCL_ValidadoFijoCobros), riesgo: Y(p.U_SCL_InvalidadoxRiesg) && !Y(p.U_SCL_ValidadoFijoRiesgo), muestras: Y(p.U_SCL_InvalidadoxMuestras) && !Y(p.U_SCL_ValidadoFijoMuestra), etapa, todoStock: L.length > 0 && L.every((l) => l.hay || (l.sol && !l.sol.pendiente)), lineas: L };
         }).filter((p) => p.lineas.length);
-        for (const p of out.pedidos) { const o = ped.find((x) => x.DocEntry === p.entry); p.servidoParcial = (o.DocumentLines || []).filter((l) => conEntrega(l) && udsServidas(l) > 0).length; }
+        for (const p of out.pedidos) { const o = ped.find((x) => x.DocEntry === p.entry); p.servidoParcial = (o.DocumentLines || []).filter((l) => (Number(l.Quantity) || 0) - (Number(l.RemainingOpenQuantity) || 0) > 0 && (l.LineStatus !== "bost_Close" || ENT[o.DocEntry + "|" + l.LineNum])).length; }
         for (const p of cerr) {
-          const L = (p.DocumentLines || []).map((l) => ({ linea: l.LineNum, articulo: l.ItemCode, descripcion: l.ItemDescription, pide: r3(l.Quantity), servido: r3(udsServidas(l)), conEntrega: conEntrega(l), destino: l.TargetType === 13 ? "factura" : l.TargetType === 15 ? "entrega" : "", ud: l.MeasureUnit || "", alm: l.WarehouseCode || "", entrega: D(l.ShipDate), importe: Number(l.LineTotal) || 0, hay: true, llegadas: [], otros: [], sol: null }));
-          out.pedidos.push({ entry: p.DocEntry, num: p.DocNum, fecha: D(p.DocDate), entrega: D(p.DocDueDate), pideComercial: D(p.U_SCL_FechaAgente), servidoEl: D(p.ClosingDate || p.UpdateDate), cliente: p.CardCode, nombre: p.CardName,
-            vendedor: nombres[String(p.SalesPersonCode)] || "", total: Number(p.DocTotal) || 0, comentario: "", confirmado: true, etapa: L.some((l) => l.conEntrega && l.servido > 0) ? "servido" : "anulado", lineas: L });
+          let ultima = "";
+          const L = (p.DocumentLines || []).map((l) => {
+            const e = ENT[p.DocEntry + "|" + l.LineNum]; const uds = entregasOk ? (e ? e.uds : 0) : udsServidas(l); if (e && e.fecha > ultima) ultima = e.fecha;
+            return { linea: l.LineNum, articulo: l.ItemCode, descripcion: l.ItemDescription, pide: r3(l.Quantity), servido: r3(Math.min(uds, Number(l.Quantity) || uds)), conEntrega: uds > 0, docs: e ? [...new Set(e.docs)].slice(0, 3) : [], ud: l.MeasureUnit || "", alm: l.WarehouseCode || "", entrega: D(l.ShipDate), importe: Number(l.LineTotal) || 0, hay: true, llegadas: [], otros: [], sol: null };
+          });
+          const algo = L.some((l) => l.conEntrega);
+          out.pedidos.push({ entry: p.DocEntry, num: p.DocNum, fecha: D(p.DocDate), entrega: D(p.DocDueDate), pideComercial: D(p.U_SCL_FechaAgente), servidoEl: (algo && ultima) || D(p.ClosingDate || p.UpdateDate), cliente: p.CardCode, nombre: p.CardName,
+            vendedor: nombres[String(p.SalesPersonCode)] || "", total: Number(p.DocTotal) || 0, comentario: "", confirmado: true, etapa: algo ? "servido" : "anulado", lineas: L });
         }
         out.tipos = TIPOS; return;
       }
