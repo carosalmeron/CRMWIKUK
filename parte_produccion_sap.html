@@ -24,7 +24,7 @@ input,textarea,select{width:100%;box-sizing:border-box;padding:9px 10px;border:1
 </style></head><body><div class="w">
 <h1>🏭 Parte de producción en SAP</h1>
 <div class="sub">Crea la orden de fabricación, da de baja los componentes (con sus lotes) y da de alta el producto con un lote nuevo. Base: <span id="dbPill" class="pill"></span> <button class="btn sec" style="padding:3px 8px;font-size:11.5px" onclick="cambiarDb()">cambiar</button></div>
-<div class="card" id="cardKey" hidden>
+<div class="card" id="cardKey" hidden data-old="1" style="display:none">
   <label>Clave</label>
   <div class="g" style="grid-template-columns:1fr auto"><input id="key" type="password" placeholder="SAP_PEDIDOS_KEY de Vercel"><button class="btn" onclick="guardarKey()">Guardar y probar</button></div>
   <div id="keyMsg" style="font-size:12.5px;margin-top:6px;color:var(--muted)"></div>
@@ -68,6 +68,56 @@ input,textarea,select{width:100%;box-sizing:border-box;padding:9px 10px;border:1
   <pre id="res" style="white-space:pre-wrap;font-size:12px;background:#F8FAFC;border-radius:10px;padding:10px;margin-top:10px" hidden></pre>
 </div>
 </div>
+<script>/* pase SAP: lo da el portal al entrar */
+(function(){
+  // Pase de SAP: lo da el portal al entrar (usuario y contraseña del portal, una vez cada 30 días).
+  // Aquí no se pide ninguna contraseña: si falta el pase, se explica y se ofrece salir y volver a entrar.
+  var K='sap_pedido_key';
+  function galleta(){ var m=/(?:^|;\s*)sap_pase=([^;]+)/.exec(document.cookie||''); return m?decodeURIComponent(m[1]):''; }
+  function get(){ var t=''; try{ t=localStorage.getItem(K)||''; }catch(e){} return exp(t)>Date.now()?t:galleta(); }
+  function exp(t){ var m=/^crm\.([A-Za-z0-9_-]+)\./.exec(t||''); if(!m) return 0; try{ return JSON.parse(atob(m[1].replace(/-/g,'+').replace(/_/g,'/'))).exp||0; }catch(e){ return 0; } }
+  var abierto=false;
+  function ventana(motivo){
+    if(abierto) return; abierto=true;
+    var d=document.createElement('div');
+    d.setAttribute('style','position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:100000;display:flex;align-items:center;justify-content:center;padding:16px;font-family:system-ui,-apple-system,Segoe UI,sans-serif');
+    d.innerHTML='<div style="background:#fff;border-radius:16px;max-width:380px;width:100%;padding:18px;box-shadow:0 16px 48px rgba(0,0,0,.3)">'
+      +'<div style="font-weight:800;font-size:18px">🔐 Falta el permiso de SAP</div>'
+      +'<div style="font-size:14px;color:#334155;margin:8px 0 14px;line-height:1.45">'+(motivo||'Este aparato todavía no tiene permiso para SAP.')+'<br><br>Sal del portal y vuelve a entrar con tu usuario: el permiso se activa solo y dura 30 días.'+(function(){ var e=''; try{ e=localStorage.getItem('sap_pase_error')||''; }catch(x){} return e?'<div style="margin-top:10px;background:#FEE2E2;color:#991B1B;border-radius:8px;padding:8px;font-weight:700">Último intento: '+String(e).replace(/[<>&]/g,'')+'</div>':''; })()+'</div>'
+      +'<button id="sp_out" style="width:100%;font-size:17px;font-weight:800;padding:12px;border:0;border-radius:10px;background:#0F172A;color:#fff">Salir y volver a entrar</button>'
+      +'<button id="sp_x" style="width:100%;font-size:15px;font-weight:700;padding:10px;border:0;background:transparent;color:#64748B;margin-top:6px">Ahora no</button></div>';
+    document.body.appendChild(d);
+    document.getElementById('sp_x').onclick=function(){ d.remove(); abierto=false; };
+    document.getElementById('sp_out').onclick=function(){
+      try{ localStorage.removeItem(K); localStorage.removeItem('gc_portal_user'); }catch(e){}
+      try{ if(window.top&&window.top.doLogout){ window.top.doLogout(); return; } }catch(e){}
+      try{ window.top.location.href='/'; }catch(e){ location.href='/'; }
+    };
+  }
+  // Intento automático: con la sesión del portal abierta en ESTE navegador (gc_portal_user), se lee la ficha del usuario
+  // y se pide el pase sin preguntar nada. Así funciona en Safari, Chrome o cualquier navegador donde se haya entrado al portal.
+  async function auto(){
+    var pu=null; try{ pu=JSON.parse(localStorage.getItem('gc_portal_user')||'null'); if(!pu||!pu.id){ var sid=localStorage.getItem('sap_portal_id')||decodeURIComponent((/(?:^|;\s*)sap_portal_id=([^;]+)/.exec(document.cookie)||[])[1]||''); if(sid) pu={id:sid}; } }catch(e){}
+    if(!pu||!pu.id) return 'no hay sesión del portal en este navegador';
+    var h=pu.passHash||'';
+    if(!h){ try{ var FB='https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents';
+      for(var col of ['portal_users','usuarios']){ var r=await fetch(FB+'/'+col+'/'+encodeURIComponent(pu.id)); if(!r.ok) continue; var j=await r.json(); var f=(j.fields||{}).passHash; if(f&&f.stringValue){ h=f.stringValue; break; } } }catch(e){} }
+    if(!h) return 'no encuentro la ficha del usuario '+pu.id;
+    try{ var r2=await fetch('/api/sap-token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({usuario:pu.id,passHash:h})});
+      var j2=await r2.json().catch(function(){ return {ok:false,error:'HTTP '+r2.status}; });
+      if(j2&&j2.ok&&j2.token){ try{ localStorage.setItem(K,j2.token); localStorage.removeItem('sap_pase_error'); }catch(e){} return ''; }
+      return (j2&&j2.error)||'sin respuesta'; }catch(e){ return 'no se llega al servidor: '+e.message; } }
+  var intentado=false;
+  async function resolver(motivo){
+    if(!intentado){ intentado=true; var err=await auto(); if(!err){ location.reload(); return; } try{ localStorage.setItem('sap_pase_error',err); }catch(e){} }
+    ventana(motivo);
+  }
+  window.pedirPaseSap=resolver;
+  var f0=window.fetch;
+  window.fetch=function(u,o){ return f0.apply(this,arguments).then(function(r){ try{ if(r.status===401&&/\/api\/sap-(pedido|factura|produccion|traslado|planificacion)/.test(String(u&&u.url||u))) setTimeout(function(){ resolver(exp(get())?'El permiso guardado ya no vale.':''); },0); }catch(e){} return r; }); };
+  if(!(exp(get())>Date.now())){ if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',function(){ resolver(); }); else resolver(); }
+})();
+</script>
 <script>
 const API="/api/sap-produccion";
 let DB=localStorage.getItem("sap_prod_db")||"U_CARO_99", KEY=localStorage.getItem("sap_pedido_key")||"";
