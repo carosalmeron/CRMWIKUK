@@ -72,11 +72,13 @@ module.exports = async function handler(req, res) {
   let AUT = autorizado(req.headers["x-crm-key"] || q.key || "");
   if (!AUT.ok && galleta) AUT = autorizado(decodeURIComponent(galleta));
   if (!AUT.ok) { const g2 = (String(req.headers.cookie || "").match(/(?:^|;\s*)cs_pase=([^;]+)/) || [])[1] || ""; for (const t of [req.headers["x-crm-key"] || q.key || "", decodeURIComponent(g2)]) { const v = soloVer(t); if (v.ok) { AUT = v; break; } } }
-  if (AUT.soloVer && req.method === "POST") return res.status(403).json({ ok: false, error: "puedes ver el panel, pero de momento solo el CEO puede cambiar pedidos en SAP" });
+  // (29/10/2026) Por decisión del CEO: cualquier usuario del portal puede hacer cambios desde este panel.
+  // Para volver a solo consulta, pon la variable CS_SOLO_VER=si en Vercel.
+  if (AUT.soloVer && req.method === "POST" && env("CS_SOLO_VER") === "si") return res.status(403).json({ ok: false, error: "puedes ver el panel, pero ahora mismo los cambios están desactivados" });
   if (!AUT.ok) return res.status(401).json({ ok: false, error: AUT.caducado ? "el pase ha caducado: vuelve a entrar en el portal" : "clave incorrecta" });
   let body = req.body; if (typeof body === "string") { try { body = JSON.parse(body); } catch (e) { body = {}; } } body = body || {};
   const db = String(body.db || q.db || env("SAP_DB") || "U_CARO_00"); if (!DB_OK(db)) return res.status(400).json({ ok: false, error: "base de datos no válida" });
-  const out = { ok: true, db, quien: AUT.quien || "", puedeEscribir: !AUT.soloVer }; const t0 = Date.now();
+  const out = { ok: true, db, quien: AUT.quien || "", puedeEscribir: !(AUT.soloVer && env("CS_SOLO_VER") === "si") }; const t0 = Date.now();
   try {
     await conSesion(db, async (sl) => {
       const todas = async (ruta, max = 3000) => { let o = [], r = await sl.get(ruta); for (;;) { o.push(...(r.value || [])); const sig = r["odata.nextLink"] || r["@odata.nextLink"]; if (!sig || o.length >= max) break; r = await sl.get(String(sig).replace(/^.*\/b1s\/v\d\//, "")); } return o; };
