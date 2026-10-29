@@ -270,7 +270,7 @@ window.dlgGlobal=async(a)=>{ await almacenes(); const M=mesDe(MES), A=ART[a]||{a
   const dem=LIN.filter(l=>l.articulo===a&&aceptada(l)).reduce((t,l)=>t+l.pide,0), bal=A.alm.reduce((t,x)=>t+x.stock-x.comp,0)+A.fab.reduce((t,x)=>t+x.uds,0)+A.compras.reduce((t,x)=>t+x.uds,0);
   const sug=bal<0?-bal:dem, cen=centroDe(a), def=(cen&&LS("pc_alm_"+cen))||"BA01";
   dialogo('<h2>📦 Producción global del periodo</h2><p>Una orden <b>planificada</b> con el total; luego sacarás de ella las órdenes semanales o diarias.</p>'
-   +'<p><b>Artículo</b></p><input class="num" id="ga" value="'+esc(a)+'" placeholder="Código del artículo" style="font-size:20px">'
+   +'<p><b>Artículo</b></p><input class="num" id="ga" data-buscador value="'+esc(a)+'" placeholder="🔎 Escribe código o descripción" style="font-size:20px">'
    +'<p><b>¿Cuánto en total?</b>'+(a?' <span class="sub">(balance '+n(bal)+' · aceptado '+n(dem)+')</span>':'')+'</p><input class="num" type="number" inputmode="decimal" id="gu" value="'+(sug>0?Math.round(sug):"")+'">'
    +'<p><b>Periodo</b></p><div class="cen" style="flex-wrap:wrap">'+meses.map((m,i)=>'<button id="gm'+i+'" class="'+(m.k===MES?'on':'')+'" onclick="gMes('+i+')">'+esc(m.nom.replace(" (este mes)",""))+'</button>').join("")+'</div>'
    +'<div style="display:flex;gap:8px"><div style="flex:1"><p><b>Desde</b></p><input type="date" id="gd" value="'+(M.ini<HOY?HOY:M.ini)+'"></div><div style="flex:1"><p><b>Hasta</b></p><input type="date" id="gh" value="'+M.fin+'"></div></div>'
@@ -296,4 +296,29 @@ window.liberar=(abs,num)=>dialogo('<h2>▶️ Liberar orden '+num+'</h2><p>La or
 pill(); cargar();
 </script>
 <script>(function(){ if(!/[?&]menu=1/.test(location.search)) return; var b=document.createElement('a'); b.href='produccion_menu.html'; b.textContent='← Producción'; b.setAttribute('style','display:block;background:#0F172A;color:#fff;font:700 15px system-ui,sans-serif;padding:10px 16px;text-decoration:none'); document.body.insertBefore(b,document.body.firstChild); })();</script>
+<script>/* Buscador automático de artículos (catálogo del CRM, el mismo que usa «Nuevo pedido») */
+(function(){
+  var FB="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents", ARTS=null, carga=null;
+  var N=function(t){ return String(t||"").toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g,""); };
+  function cargar(){ if(carga) return carga; carga=(async function(){ var L=[]; try{ var m=await fetch(FB+"/stock_sap/meta").then(function(r){ return r.ok?r.json():null; }); var n=Number(m&&m.fields&&m.fields.chunks&&(m.fields.chunks.integerValue||m.fields.chunks.doubleValue))||0;
+      var P=await Promise.all(Array.from({length:n},function(_,i){ return fetch(FB+"/stock_sap_detalle/chunk_"+i).then(function(r){ return r.ok?r.json():null; }).catch(function(){ return null; }); }));
+      P.forEach(function(d){ var rows=[]; try{ rows=JSON.parse(d&&d.fields&&d.fields.rows&&d.fields.rows.stringValue||"[]"); }catch(e){} rows.forEach(function(r){ if(r&&r.cod) L.push({c:String(r.cod).toUpperCase(),d:r.desc||"",s:(Number(r.stockTodos!=null?r.stockTodos:r.stock)||0),n:N(r.cod+" "+r.desc)}); }); }); }catch(e){}
+    ARTS=L; return L; })(); return carga; }
+  var css=document.createElement("style"); css.textContent=".bsug{position:absolute;left:0;right:0;top:100%;background:#fff;border:2px solid #CBD5E1;border-radius:12px;box-shadow:0 10px 28px rgba(0,0,0,.18);z-index:60;max-height:320px;overflow:auto;margin-top:4px}.bsug div{padding:12px 14px;border-bottom:1px solid #F1F5F9;cursor:pointer;font-size:18px;text-align:left}.bsug div:hover,.bsug div.on{background:#EFF6FF}.bsug b{display:block}.bsug small{color:#64748B;font-size:15px}"; document.head.appendChild(css);
+  var esc=function(t){ return String(t==null?"":t).replace(/[<>&"]/g,function(c){ return {"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]; }); };
+  // Pon data-buscador en cualquier <input> (o llama a window.buscadorArticulos(input)) y tendrá sugerencias al escribir
+  window.buscadorArticulos=function(inp,alElegir){ if(!inp||inp._bus) return; inp._bus=1; inp.setAttribute("autocomplete","off"); cargar();
+    var caja=document.createElement("div"); caja.className="bsug"; caja.hidden=true; var w=document.createElement("div"); w.style.position="relative"; w.style.flex=getComputedStyle(inp).flex; inp.parentNode.insertBefore(w,inp); w.appendChild(inp); w.appendChild(caja);
+    var sel=-1, R=[];
+    function pinta(){ caja.innerHTML=R.map(function(a,i){ return '<div class="'+(i===sel?'on':'')+'" data-i="'+i+'"><b>'+esc(a.c)+'</b><small>'+esc(a.d)+' · stock '+a.s.toLocaleString("es-ES")+'</small></div>'; }).join("")||'<div style="color:#64748B;cursor:default">'+(ARTS?'Sin resultados':'Cargando artículos…')+'</div>'; caja.hidden=false; }
+    function elige(a){ inp.value=a.c; caja.hidden=true; if(alElegir) alElegir(a); inp.dispatchEvent(new Event("change")); }
+    inp.addEventListener("input",async function(){ var q=N(inp.value).split(/\s+/).filter(Boolean); if(!q.length){ caja.hidden=true; return; } if(!ARTS){ R=[]; pinta(); await cargar(); }
+      R=ARTS.filter(function(a){ return q.every(function(t){ return a.n.indexOf(t)>=0; }); }).sort(function(a,b){ return (a.c.indexOf(q[0])===0?0:1)-(b.c.indexOf(q[0])===0?0:1)||b.s-a.s; }).slice(0,20); sel=-1; pinta(); });
+    inp.addEventListener("keydown",function(e){ if(caja.hidden) return; if(e.key==="ArrowDown"){ sel=Math.min(R.length-1,sel+1); pinta(); e.preventDefault(); } else if(e.key==="ArrowUp"){ sel=Math.max(0,sel-1); pinta(); e.preventDefault(); } else if(e.key==="Enter"&&R[sel>=0?sel:0]){ elige(R[sel>=0?sel:0]); e.preventDefault(); } else if(e.key==="Escape") caja.hidden=true; });
+    caja.addEventListener("mousedown",function(e){ var d=e.target.closest("[data-i]"); if(d){ e.preventDefault(); elige(R[Number(d.getAttribute("data-i"))]); } });
+    inp.addEventListener("blur",function(){ setTimeout(function(){ caja.hidden=true; },150); }); };
+  new MutationObserver(function(){ document.querySelectorAll("input[data-buscador]").forEach(function(i){ window.buscadorArticulos(i); }); }).observe(document.documentElement,{childList:true,subtree:true});
+  document.addEventListener("DOMContentLoaded",function(){ document.querySelectorAll("input[data-buscador]").forEach(function(i){ window.buscadorArticulos(i); }); });
+})();
+</script>
 </body></html>
