@@ -116,7 +116,7 @@ input.num{width:100%;font:inherit;font-size:24px;font-weight:800;padding:12px;bo
 <script>
 const API="/api/sap-cs";
 const LS=(k,v)=>{ try{ if(v===undefined) return localStorage.getItem(k); localStorage.setItem(k,v); }catch(e){ return null; } };
-let DB=LS("cs_db_real")||"U_CARO_00", TAB="pend", CEN=LS("pc_centro")||"", LIN=[], TIPOS={}, ALMS=[];
+let DB=LS("cs_db_real")||"U_CARO_00", TAB="pend", CEN=LS("pc_centro")||"", LIN=[], TIPOS={}, ALMS=[], ART={}, PEDS=[], VERD={};
 const esc=(t)=>String(t??"").replace(/[<>&"]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]));
 const fx=(d)=>d?String(d).slice(8,10)+"/"+String(d).slice(5,7)+"/"+String(d).slice(0,4):"—";
 const n=(v)=>(Math.round((Number(v)||0)*100)/100).toLocaleString("es-ES");
@@ -125,6 +125,8 @@ const HOY=new Date().toISOString().slice(0,10);
 const dias=(d)=>d?Math.round((new Date(HOY)-new Date(String(d).slice(0,10)))/864e5):0;
 const hace=(d)=>{ const x=dias(d); return x<=0?"hoy":x===1?"ayer":"hace "+x+" días"; };
 const PROD=["1","2","3","6","7"];
+// Fecha que quiere el cliente: la que puso el comercial; si no la hay, la fecha de entrega del pedido
+const quiere=(p)=>p.pideComercial||p.entrega||"";
 const TB={pend:["⏳","Por confirmar","Contestar en 24 h"],cs:["🔁","En Customer Service","Esperando su aprobación"],conf:["✅","Aprobado","Siguiente paso"],hecho:["🏭","Ordenados","Ya en marcha"]};
 // Confirmado por producción/compras (2) → Customer Service lo reconfirma con el cliente (pedido confirmado) → siguiente paso
 const tabDe=(l)=>["0","1"].includes(l.sol.estado)?"pend":l.sol.estado==="2"?(l.p.confirmado?"conf":"cs"):"hecho";
@@ -134,7 +136,7 @@ window.ponDb=(d)=>{ DB=d; LS("cs_db_real",d); LIN=[]; cerrar(); pill(); cargar()
 async function api(url,opts){ const r=await fetch(url+(url.includes("?")?"&":"?")+"db="+encodeURIComponent(DB),Object.assign({credentials:"same-origin",headers:{"Content-Type":"application/json","x-crm-key":LS("sap_pedido_key")||""}},opts||{})); return r.json().catch(()=>({ok:false,error:"sin respuesta del servidor (HTTP "+r.status+")"})); }
 function aviso(t,ok){ const d=document.createElement("div"); d.className="msg"; d.style.background=ok?"#16A34A":"#B91C1C"; d.style.color="#fff"; d.textContent=t; document.body.appendChild(d); setTimeout(()=>d.remove(),ok?4000:9000); }
 function marcaCarga(t){ let m=document.getElementById("cargando"); if(!m){ m=document.createElement("div"); m.id="cargando"; m.setAttribute("style","margin-top:8px;font-size:15px;font-weight:700;color:#1D4ED8"); document.querySelector(".top").appendChild(m); } m.textContent=t||""; m.hidden=!t; }
-function aplicar(j){ TIPOS=j.tipos||{}; LIN=[];
+function aplicar(j){ TIPOS=j.tipos||{}; LIN=[]; ART=j.articulos||{}; PEDS=(j.pedidos||[]).filter(p=>p.etapa!=="servido"&&p.etapa!=="anulado");
   (j.pedidos||[]).forEach(p=>(p.lineas||[]).forEach(l=>{ if(l.sol&&l.sol.estado!=="4") LIN.push(Object.assign({},l,{p})); })); pintar(); }
 async function cargar(){
   let copia=false; if(!LIN.length){ try{ const c=JSON.parse(sessionStorage.getItem("pc_cache_"+DB)||"null"); if(c&&c.pedidos){ aplicar(c); copia=true; } }catch(e){} }
@@ -153,7 +155,8 @@ function lineaH(l,i){ const p=l.p, s=l.sol, esProd=PROD.includes(s.tipo), esComp
   if(tab==="conf") chips.push('<span class="ch cv">✅ Aprobado por Customer Service para el '+fx(l.entrega)+' · ¡adelante!</span>');
   if(tab==="hecho") chips.push('<span class="ch cz">🏭 '+esc(s.estadoN)+'</span>');
   if(p.riesgo) chips.push('<span class="ch cr">🛑 Pedido bloqueado por riesgo en SAP</span>');
-  if(p.pideComercial) chips.push('<span class="ch '+(p.pideComercial<=HOY?'cr':'cg')+'">📅 El cliente lo quiere el '+fx(p.pideComercial)+'</span>');
+  if(quiere(p)) chips.push('<span class="ch '+(quiere(p)<=HOY?'cr':'cg')+'">📅 El cliente lo quiere el '+fx(quiere(p))+(quiere(p)<HOY?' (ya pasó)':'')+'</span>');
+  if(l.entrega&&l.entrega!==quiere(p)&&tab==="pend") chips.push('<span class="ch cg">🗓 En el pedido: servir el '+fx(l.entrega)+'</span>');
   const ll=(l.llegadas||[]);
   let bts="";
   if(tab==="pend") bts='<button class="bt v" onclick="dlgConf('+i+')">📅 Confirmar o proponer fecha</button>'+(s.estado==="0"?'<button class="bt a" onclick="enProceso('+i+')">⏳ En proceso</button>':'')+'<button class="bt z" onclick="dlgReas('+i+')">🔀 Pasar a otro centro</button><button class="bt g" onclick="dlgDev('+i+')">↩️ Devolver a CS</button>';
@@ -164,7 +167,24 @@ function lineaH(l,i){ const p=l.p, s=l.sol, esProd=PROD.includes(s.tipo), esComp
    +'<div class="meta">'+esc(p.nombre)+' · pedido <b>'+p.num+'</b> · '+esc(p.vendedor||"")+' · entró el '+fx(p.fecha)+'</div>'
    +(s.detalle?'<div class="sub" style="font-size:18px;margin-top:6px">💬 '+esc(s.detalle)+'</div>':'')
    +(ll.length?'<div class="sub">🚚 Entra: '+ll.map(x=>fx(x.fecha)+' · '+n(x.uds)+' ('+esc(x.de)+')').join(' · ')+'</div>':'')
-   +'<div class="chips">'+chips.join("")+'</div>'+(bts?'<div class="acc">'+bts+'</div>':'')+'</div></div>'; }
+   +'<div class="chips">'+chips.join("")+'</div>'+'<button class="bt g" style="margin-top:10px;width:100%" onclick="verDet(\''+esc(l.articulo)+'|'+p.entry+'|'+l.linea+'\')">'+(VERD[l.articulo+'|'+p.entry+'|'+l.linea]?'▾ Ocultar':'▸ Ver')+' stock, compromisos y producción</button>'+(VERD[l.articulo+'|'+p.entry+'|'+l.linea]?detalleH(l):'')+(bts?'<div class="acc">'+bts+'</div>':'')+'</div></div>'; }
+window.verDet=(k)=>{ VERD[k]=!VERD[k]; pintar(); };
+function detalleH(l){ const a=ART[l.articulo]||{alm:[],fab:[],compras:[]};
+  const tabla=(cab,filas)=>'<table style="width:100%;border-collapse:collapse;font-size:16px;margin-top:6px"><tr>'+cab.map(c=>'<th style="text-align:left;border-bottom:2px solid #E2E8F0;padding:5px 4px;color:#64748B;font-size:14px">'+c+'</th>').join('')+'</tr>'+filas.join('')+'</table>';
+  const td=(v,b)=>'<td style="padding:6px 4px;border-bottom:1px solid #F1F5F9'+(b?';font-weight:800':'')+'">'+v+'</td>';
+  const alm=a.alm.map(x=>'<tr'+(x.alm===l.alm?' style="background:#FEF3C7"':'')+'>'+td(esc(x.alm),1)+td(n(x.stock))+td(n(x.comp))+td('<span style="color:'+(x.libre<0?'#B91C1C':'#15803D')+'">'+n(x.libre)+'</span>',1)+td(n(x.ped))+'</tr>');
+  const otros=[]; PEDS.forEach(p=>p.lineas.forEach(x=>{ if(x.articulo===l.articulo) otros.push({p,x}); }));
+  otros.sort((a,b)=>String(quiere(a.p)).localeCompare(String(quiere(b.p))));
+  const ped=otros.map(o=>'<tr'+(o.p.entry===l.p.entry&&o.x.linea===l.linea?' style="background:#DBEAFE"':'')+'>'+td(esc(o.p.nombre.slice(0,26)))+td(o.p.num)+td(n(o.x.pide),1)+td(fx(quiere(o.p)))+'</tr>');
+  const fab=a.fab.map(x=>'<tr>'+td(x.orden,1)+td(esc(x.estado))+td(n(x.uds),1)+td(fx(x.fecha)+(x.fecha&&x.fecha<HOY?' <b style="color:#B91C1C">tarde</b>':''))+td(esc(x.alm))+'</tr>');
+  const com=a.compras.map(x=>'<tr>'+td(x.orden,1)+td(n(x.uds),1)+td(fx(x.fecha)+(x.fecha&&x.fecha<HOY?' <b style="color:#B91C1C">tarde</b>':''))+td(esc(x.alm))+'</tr>');
+  const totP=otros.reduce((t,o)=>t+(Number(o.x.pide)||0),0), totF=a.fab.reduce((t,x)=>t+x.uds,0), totC=a.compras.reduce((t,x)=>t+x.uds,0), totS=a.alm.reduce((t,x)=>t+x.stock,0), totCo=a.alm.reduce((t,x)=>t+x.comp,0), bal=totS-totCo+totF+totC;
+  return '<div style="background:#F8FAFC;border:2px solid #E2E8F0;border-radius:14px;padding:12px;margin-top:10px">'
+   +'<div style="font-weight:800;font-size:18px">📦 Stock por almacén</div>'+(alm.length?tabla(['Almacén','Stock','Comprom.','Libre','Pedido'],alm):'<div class="sub">Sin stock en ningún almacén.</div>')
+   +'<div style="font-weight:800;font-size:18px;margin-top:12px">🧾 Pedidos abiertos que lo piden ('+otros.length+' · '+n(totP)+')</div>'+tabla(['Cliente','Pedido','Uds','Lo quiere'],ped)
+   +'<div style="font-weight:800;font-size:18px;margin-top:12px">🏭 En producción con orden ('+a.fab.length+' · '+n(totF)+')</div>'+(fab.length?tabla(['Orden','Estado','Faltan','Fecha','Alm.'],fab):'<div class="sub">Ninguna orden de fabricación abierta.</div>')
+   +(com.length?'<div style="font-weight:800;font-size:18px;margin-top:12px">🛒 Compras pendientes de llegar ('+n(totC)+')</div>'+tabla(['Pedido','Uds','Fecha','Alm.'],com):'')
+   +'<div style="margin-top:12px;font-size:18px;font-weight:800;background:#fff;border-radius:10px;padding:10px">Balance: stock '+n(totS)+' − comprometido '+n(totCo)+' + producción '+n(totF)+(totC?' + compras '+n(totC):'')+' = <span style="color:'+(bal<0?'#B91C1C':'#15803D')+'">'+n(bal)+'</span>'+(bal<0?'<div style="font-size:16px;color:#B91C1C">Faltan '+n(-bal)+' aunque se termine todo lo que está en producción.</div>':'')+'</div></div>'; }
 let VIS=[];
 function pintar(){ pill();
   const cent=[...new Set(LIN.map(l=>l.sol.tipo))].sort((a,b)=>(a==="5")-(b==="5")||a.localeCompare(b));
@@ -175,22 +195,22 @@ function pintar(){ pill();
   document.getElementById("tabs").innerHTML=Object.keys(TB).map(k=>'<div class="tab'+(TAB===k?' on':'')+'" onclick="verTab(\''+k+'\')"><b>'+cnt[k]+'</b>'+TB[k][0]+' '+TB[k][1]+'</div>').join("");
   const q=document.getElementById("bus").value.trim().toLowerCase();
   VIS=base.filter(l=>tabDe(l)===TAB).filter(l=>!q||(l.articulo+" "+l.descripcion+" "+l.p.nombre+" "+l.p.num).toLowerCase().includes(q));
-  VIS.sort((a,b)=>String(a.p.pideComercial||a.entrega||"9").localeCompare(String(b.p.pideComercial||b.entrega||"9"))||a.p.num-b.p.num);
+  VIS.sort((a,b)=>String(quiere(a.p)||a.entrega||"9").localeCompare(String(quiere(b.p)||b.entrega||"9"))||a.p.num-b.p.num);
   const uds=VIS.reduce((t,l)=>t+(Number(l.pide)||0),0);
   document.getElementById("lista").innerHTML=VIS.length?VIS.map(lineaH).join("")+'<div class="tot">Total: '+VIS.length+' artículo'+(VIS.length>1?'s':'')+' · '+n(uds)+' uds · '+eur(VIS.reduce((t,l)=>t+l.importe,0))+'</div>':'<div class="nada">'+TB[TAB][0]+' No hay nada aquí'+(CEN?' para '+esc(TIPOS[CEN]||CEN):'')+'.</div>'; }
 /* ---------- diálogos ---------- */
 function dialogo(h){ cerrar(); const d=document.createElement("div"); d.className="velo"; d.id="velo"; d.innerHTML='<div class="dlg">'+h+'</div>'; d.onclick=(e)=>{ if(e.target===d) cerrar(); }; document.body.appendChild(d); }
 window.cerrar=()=>{ const d=document.getElementById("velo"); if(d) d.remove(); };
-const cab=(l)=>'<p><b>'+esc(l.articulo)+'</b> · '+n(l.pide)+' '+esc(l.ud)+'<br>'+esc(l.p.nombre)+' · pedido '+l.p.num+(l.p.pideComercial?'<br>El cliente lo quiere el <b>'+fx(l.p.pideComercial)+'</b>':'')+'</p>';
+const cab=(l)=>'<p><b>'+esc(l.articulo)+'</b> · '+n(l.pide)+' '+esc(l.ud)+'<br>'+esc(l.p.nombre)+' · pedido '+l.p.num+(quiere(l.p)?'<br>El cliente lo quiere el <b>'+fx(quiere(l.p))+'</b>':'')+'</p>';
 async function escribir(body,boton){ if(boton){ boton.disabled=true; boton.textContent="Escribiendo en SAP…"; }
   const j=await api(API,{method:"POST",body:JSON.stringify(body)}); cerrar();
   if(j.ok){ aviso("✅ "+(j.mensaje||"Hecho"),true); cargar(); } else aviso("❌ SAP no lo ha aceptado: "+(j.error||"error"),false); }
 const ids=(l)=>({entry:l.p.entry,linea:l.linea});
-window.dlgConf=(i)=>{ const l=VIS[i]; const ini=(l.entrega&&l.entrega>=HOY)?l.entrega:(l.p.pideComercial&&l.p.pideComercial>=HOY?l.p.pideComercial:HOY);
-  dialogo('<h2>📅 ¿Cuándo estará listo?</h2>'+cab(l)+(l.p.pideComercial?'<button class="bt v op" onclick="ponF(\''+(l.p.pideComercial>=HOY?l.p.pideComercial:HOY)+'\')">👍 Sí llegamos al '+fx(l.p.pideComercial>=HOY?l.p.pideComercial:HOY)+'</button>':'')+'<p><b>O propón otra fecha</b></p><input type="date" id="f" min="'+HOY+'" value="'+ini+'" oninput="compara('+i+')"><div id="cmp" style="font-weight:800;font-size:18px;margin-top:8px"></div><p><b>Nota</b> (opcional)</p><textarea id="nt" rows="2" placeholder="Ej.: fabricamos el martes en turno de mañana"></textarea>'
+window.dlgConf=(i)=>{ const l=VIS[i]; const ini=(l.entrega&&l.entrega>=HOY)?l.entrega:(quiere(l.p)>=HOY?quiere(l.p):HOY);
+  dialogo('<h2>📅 ¿Cuándo estará listo?</h2>'+cab(l)+(quiere(l.p)?'<button class="bt v op" onclick="ponF(\''+(quiere(l.p)>=HOY?quiere(l.p):HOY)+'\')">👍 Sí llegamos al '+fx(quiere(l.p)>=HOY?quiere(l.p):HOY)+'</button>':'')+'<p><b>O propón otra fecha</b></p><input type="date" id="f" min="'+HOY+'" value="'+ini+'" oninput="compara('+i+')"><div id="cmp" style="font-weight:800;font-size:18px;margin-top:8px"></div><p><b>Nota</b> (opcional)</p><textarea id="nt" rows="2" placeholder="Ej.: fabricamos el martes en turno de mañana"></textarea>'
    +'<button class="bt v op" onclick="enviarConf('+i+',this)">Guardar fecha en SAP</button><button class="bt g op" onclick="cerrar()">Cancelar</button>'); compara(i); };
 window.ponF=(f)=>{ document.getElementById("f").value=f; document.getElementById("f").dispatchEvent(new Event("input")); };
-window.compara=(i)=>{ const l=VIS[i], f=document.getElementById("f").value, q=l.p.pideComercial, c=document.getElementById("cmp"); if(!c) return; if(!f||!q){ c.textContent=""; return; } const d=Math.round((new Date(f)-new Date(q))/864e5); c.style.color=d>0?"#B91C1C":"#15803D"; c.textContent=d>0?"⚠️ "+d+" día"+(d>1?"s":"")+" más tarde de lo que quiere el cliente: Customer Service se lo reconfirmará":"✅ Llega a tiempo para el cliente"; };
+window.compara=(i)=>{ const l=VIS[i], f=document.getElementById("f").value, q=quiere(l.p), c=document.getElementById("cmp"); if(!c) return; if(!f||!q){ c.textContent=""; return; } const d=Math.round((new Date(f)-new Date(q))/864e5); c.style.color=d>0?"#B91C1C":"#15803D"; c.textContent=d>0?"⚠️ "+d+" día"+(d>1?"s":"")+" más tarde de lo que quiere el cliente: Customer Service se lo reconfirmará":"✅ Llega a tiempo para el cliente"; };
 window.enviarConf=(i,b)=>{ const f=document.getElementById("f").value; if(!f) return aviso("Pon la fecha",false); escribir(Object.assign({accion:"confirmar",fecha:f,nota:document.getElementById("nt").value.trim()},ids(VIS[i])),b); };
 window.enProceso=(i)=>{ const l=VIS[i]; dialogo('<h2>⏳ En proceso</h2>'+cab(l)+'<p>Customer Service verá que lo estáis mirando.</p><button class="bt a op" onclick="escribir(Object.assign({accion:\'en_proceso\'},ids(VIS['+i+'])),this)">Sí, en proceso</button><button class="bt g op" onclick="cerrar()">Cancelar</button>'); };
 window.dlgDev=(i)=>{ const l=VIS[i]; dialogo('<h2>↩️ Devolver a Customer Service</h2>'+cab(l)+'<p><b>¿Por qué?</b> (obligatorio)</p><textarea id="mt" rows="3" placeholder="Ej.: no lo fabricamos aquí, mandar a Lleida"></textarea><button class="bt op" onclick="enviarDev('+i+',this)">Devolver</button><button class="bt g op" onclick="cerrar()">Cancelar</button>'); };
