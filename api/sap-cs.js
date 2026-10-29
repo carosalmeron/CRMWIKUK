@@ -8,6 +8,8 @@
 // POST {accion:"fecha", entry, linea?, fecha, motivo?}    → cambia la fecha de servicio de una línea (o de todas si no se indica)
 // Producción/compras: GET ?pedidos=1&solo=prod (más rápido) · GET ?almacenes=1
 // POST {accion:"en_proceso"|"confirmar"(fecha)|"devolver"(motivo)|"compra_hecha"|"ordenar"(fecha, almacen, uds), entry, linea}
+// Planificación: GET ?plan=1[&desde=] · POST global(articulo,uds,desde,hasta,almacen) · hija(global,uds,fecha[,entry,linea,liberar]) · liberar(abs)
+// MRP: POST {accion:"mrp", hasta, aceptados, extra:[{art,uds,fecha}]} (solo lee) · POST {accion:"solicitud_compra", lineas:[{art,uds,fecha}]}
 // POST {accion:"anular_solicitud", entry, linea}          → quita la solicitud de una línea (vuelve a Customer Service)
 const https = require("https");
 const { URL } = require("url");
@@ -66,6 +68,7 @@ function soloVer(dada) {
   if (require("crypto").createHmac("sha256", clave + "|cs-ver").update(m[1]).digest("base64url") !== m[2]) return { ok: false };
   try { const p = JSON.parse(Buffer.from(m[1], "base64url").toString()); if (!(p.exp > Date.now())) return { ok: false, caducado: true }; return { ok: true, quien: p.n || p.u, soloVer: true }; } catch (e) { return { ok: false }; }
 }
+const body0 = (req) => { let b = req.body; if (typeof b === "string") { try { b = JSON.parse(b); } catch (e) { b = {}; } } return b || {}; };
 module.exports = async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -79,7 +82,7 @@ module.exports = async function handler(req, res) {
   if (!AUT.ok) { const g2 = (String(req.headers.cookie || "").match(/(?:^|;\s*)cs_pase=([^;]+)/) || [])[1] || ""; for (const t of [req.headers["x-crm-key"] || q.key || "", decodeURIComponent(g2)]) { const v = soloVer(t); if (v.ok) { AUT = v; break; } } }
   // (29/10/2026) Por decisión del CEO: cualquier usuario del portal puede hacer cambios desde este panel.
   // Para volver a solo consulta, pon la variable CS_SOLO_VER=si en Vercel.
-  if (AUT.soloVer && req.method === "POST" && env("CS_SOLO_VER") === "si") return res.status(403).json({ ok: false, error: "puedes ver el panel, pero ahora mismo los cambios están desactivados" });
+  if (AUT.soloVer && req.method === "POST" && env("CS_SOLO_VER") === "si" && (body0(req).accion !== "mrp")) return res.status(403).json({ ok: false, error: "puedes ver el panel, pero ahora mismo los cambios están desactivados" });
   if (!AUT.ok) return res.status(401).json({ ok: false, error: AUT.caducado ? "el pase ha caducado: vuelve a entrar en el portal" : "clave incorrecta" });
   let body = req.body; if (typeof body === "string") { try { body = JSON.parse(body); } catch (e) { body = {}; } } body = body || {};
   const db = String(body.db || q.db || env("SAP_DB") || "U_CARO_00"); if (!DB_OK(db)) return res.status(400).json({ ok: false, error: "base de datos no válida" });
@@ -259,6 +262,124 @@ module.exports = async function handler(req, res) {
         const { o, l } = await lineaDe();
         await ponLinea(o, l, { U_UC_SolicitudEstado: "3", U_UC_SolicitudDetalle: nota(l, "Compra pedida" + (body.nota ? ": " + body.nota : "")) });
         out.mensaje = l.ItemCode + " marcado «compra pedida»"; return;
+      }
+      // ===== Planificación de producción: órdenes del periodo, globales (PG) y sus hijas (PGH:num) =====
+      const ESTF = { boposPlanned: "Planificada", boposReleased: "Liberada", boposClosed: "Cerrada", boposCancelled: "Cancelada" };
+      const leeOrden = (o) => { const rm = String(o.Remarks || ""), pv = rm.match(/PV:(\d+)\/(\d+)/), h = rm.match(/PGH:(\d+)/), tot = rm.match(/Total\s+([\d.,]+)/i), per = rm.match(/Periodo\s+([0-9/]+)/i);
+        return { abs: o.AbsoluteEntry, num: o.DocumentNumber, art: o.ItemNo, desc: o.ProductDescription || "", uds: r3(o.PlannedQuantity), hecho: r3(o.CompletedQuantity), inicio: D(o.StartDate), fecha: D(o.DueDate), alm: o.Warehouse,
+          estado: ESTF[o.ProductionOrderStatus] || o.ProductionOrderStatus, est: o.ProductionOrderStatus, cliente: o.CustomerCode || "", nota: rm.slice(0, 200),
+          tipo: /^PG\b/.test(rm) ? "global" : h ? "hija" : pv ? "pedido" : "libre", padre: h ? Number(h[1]) : null, pedido: pv ? { num: Number(pv[1]), linea: Number(pv[2]) } : null,
+          total: tot ? Number(tot[1].replace(/\./g, "").replace(",", ".")) : null, periodo: per ? per[1] : "" }; };
+      const conReceta = async (it) => { try { await sl.get(`ProductTrees('${esc(it)}')?$select=TreeCode`); return true; } catch (e) { return false; } };
+      if (req.method === "GET" && q.plan !== undefined) {
+        const desde = F(q.desde) ? q.desde : new Date(Date.now() - 31 * 864e5).toISOString().slice(0, 10);
+        const r = await todas(`ProductionOrders?$select=AbsoluteEntry,DocumentNumber,ItemNo,ProductDescription,PlannedQuantity,CompletedQuantity,StartDate,DueDate,Warehouse,ProductionOrderStatus,CustomerCode,Remarks&$filter=DueDate ge '${desde}' or ProductionOrderStatus eq 'boposPlanned' or ProductionOrderStatus eq 'boposReleased'&$orderby=DueDate`, 4000);
+        out.ordenes = r.map(leeOrden); return;
+      }
+      if (req.method === "POST" && body.accion === "global") {
+        const it = String(body.articulo || "").trim(), uds = Number(body.uds);
+        if (!it) throw new Error("falta el artículo"); if (!(uds > 0)) throw new Error("falta la cantidad total");
+        if (!F(body.desde) || !F(body.hasta)) throw new Error("falta el periodo"); if (!body.almacen) throw new Error("falta el almacén");
+        if (!(await conReceta(it))) throw new Error(it + " no tiene receta (escandallo) en SAP: no se puede planificar");
+        const per = body.desde.slice(5, 7) + "/" + body.desde.slice(0, 4) + (body.desde.slice(0, 7) !== body.hasta.slice(0, 7) ? "-" + body.hasta.slice(5, 7) + "/" + body.hasta.slice(0, 4) : "");
+        const r = await sl.post("ProductionOrders", { ItemNo: it, PlannedQuantity: uds, Warehouse: String(body.almacen).toUpperCase(), PostingDate: new Date().toISOString().slice(0, 10), StartDate: body.desde, DueDate: body.hasta,
+          ProductionOrderStatus: "boposPlanned", ProductionOrderType: "bopotStandard", Remarks: ("PG · Total " + uds + " · Periodo " + per + (body.nota ? " · " + body.nota : "")).slice(0, 254) });
+        out.orden = r.DocumentNumber; out.mensaje = "Producción global " + r.DocumentNumber + " creada: " + uds + " de " + it + " para " + per; return;
+      }
+      if (req.method === "POST" && body.accion === "hija") {
+        const uds = Number(body.uds); if (!(uds > 0)) throw new Error("falta la cantidad"); if (!F(body.fecha)) throw new Error("falta el día");
+        const g = await sl.get(`ProductionOrders(${Number(body.global)})`); const G = leeOrden(g);
+        if (G.tipo !== "global") throw new Error("esa orden no es una producción global");
+        if (g.ProductionOrderStatus !== "boposPlanned") throw new Error("la global " + G.num + " ya está " + (ESTF[g.ProductionOrderStatus] || "cerrada"));
+        if (uds > G.uds + 1e-9) throw new Error("de la global " + G.num + " solo quedan " + G.uds + " por repartir");
+        let o = null, l = null; if (body.entry) { ({ o, l } = await lineaDe()); if (l.ItemCode !== G.art) throw new Error("el pedido es de otro artículo (" + l.ItemCode + ")"); }
+        const base = { ItemNo: G.art, PlannedQuantity: uds, Warehouse: String(body.almacen || G.alm).toUpperCase(), PostingDate: new Date().toISOString().slice(0, 10), StartDate: body.fecha, DueDate: body.fecha, ProductionOrderStatus: "boposPlanned", ProductionOrderType: "bopotStandard",
+          Remarks: ("PGH:" + G.num + (o ? " · PV:" + o.DocNum + "/" + l.LineNum + " · " + o.CardName : "") + (body.nota ? " · " + body.nota : "")).slice(0, 254) };
+        let r; if (o) { try { r = await sl.post("ProductionOrders", Object.assign({ ProductionOrderOrigin: "bopooSalesOrder", ProductionOrderOriginEntry: o.DocEntry, CustomerCode: o.CardCode }, base)); } catch (e) { r = await sl.post("ProductionOrders", base); } }
+        else r = await sl.post("ProductionOrders", base);
+        out.orden = r.DocumentNumber; const avisos = [];
+        if (body.liberar) { try { await sl.patch(`ProductionOrders(${r.AbsoluteEntry})`, { ProductionOrderStatus: "boposReleased" }); } catch (e) { avisos.push("no se ha podido liberar: " + String(e.message).slice(0, 120)); } }
+        // La global baja lo que se ha sacado (así SAP no cuenta dos veces lo que se va a fabricar)
+        try { const queda = r3(G.uds - uds);
+          if (queda > 0) await sl.patch(`ProductionOrders(${G.abs})`, { PlannedQuantity: queda });
+          else await sl.patch(`ProductionOrders(${G.abs})`, { ProductionOrderStatus: "boposCancelled", Remarks: (String(g.Remarks || "") + " · repartida entera").slice(0, 254) });
+        } catch (e) { avisos.push("la global " + G.num + " no se ha podido rebajar: " + String(e.message).slice(0, 120)); }
+        if (o) { try { await ponLinea(o, l, { U_UC_SolicitudEstado: "3", U_UC_SolicitudDetalle: nota(l, "Orden " + r.DocumentNumber + " (de la global " + G.num + ") para el " + body.fecha.split("-").reverse().join("/")) }); } catch (e) { avisos.push("no se ha marcado el pedido: " + String(e.message).slice(0, 100)); } }
+        out.avisos = avisos; out.mensaje = "Orden " + r.DocumentNumber + " creada de la global " + G.num + ": " + uds + " para el " + body.fecha.split("-").reverse().join("/") + (o ? " (pedido " + o.DocNum + ")" : "") + (avisos.length ? " · ⚠️ " + avisos.join(" · ") : ""); return;
+      }
+      if (req.method === "POST" && body.accion === "liberar") {
+        const g = await sl.get(`ProductionOrders(${Number(body.abs)})?$select=DocumentNumber,ProductionOrderStatus,Remarks`);
+        if (/^PG\b/.test(String(g.Remarks || ""))) throw new Error("una producción global no se libera: saca de ella órdenes semanales o diarias");
+        if (g.ProductionOrderStatus !== "boposPlanned") throw new Error("la orden " + g.DocumentNumber + " ya está " + (ESTF[g.ProductionOrderStatus] || ""));
+        await sl.patch(`ProductionOrders(${Number(body.abs)})`, { ProductionOrderStatus: "boposReleased" }); out.mensaje = "Orden " + g.DocumentNumber + " liberada: ya se puede fabricar"; return;
+      }
+      // ===== MRP: explosión de recetas (varios niveles) y cruce con stock, comprometido y compras =====
+      // Necesidad = órdenes PLANIFICADAS (incl. globales) + pedidos aceptados sin orden + simulación.
+      // Las órdenes LIBERADAS ya están en el «comprometido» de SAP, por eso no se suman otra vez (salen como información).
+      if (req.method === "POST" && body.accion === "mrp") {
+        const hasta = F(body.hasta) ? body.hasta : new Date(Date.now() + 31 * 864e5).toISOString().slice(0, 10), T = {}, t0 = Date.now(), mark = (k) => { T[k] = Math.round((Date.now() - t0) / 100) / 10; };
+        const dem = [], ACE = [];   // {art, uds, fecha, de}
+        const ords = await todas(`ProductionOrders?$select=AbsoluteEntry,DocumentNumber,ItemNo,PlannedQuantity,CompletedQuantity,StartDate,DueDate,ProductionOrderStatus,Remarks&$filter=ProductionOrderStatus eq 'boposPlanned' or ProductionOrderStatus eq 'boposReleased'`, 4000);
+        const liberadas = [];
+        for (const o of ords) { const f = D(o.StartDate || o.DueDate); if (f && f > hasta) continue; const u = (Number(o.PlannedQuantity) || 0) - (Number(o.CompletedQuantity) || 0); if (u <= 0) continue;
+          const de = (/^PG\b/.test(String(o.Remarks || "")) ? "global " : "orden ") + o.DocumentNumber;
+          if (o.ProductionOrderStatus === "boposReleased") liberadas.push({ art: o.ItemNo, uds: r3(u), fecha: f, de }); else dem.push({ art: o.ItemNo, uds: u, fecha: f, de }); }
+        mark("ordenes");
+        for (const x of (body.extra || []).slice(0, 100)) if (x && x.art && Number(x.uds) > 0) dem.push({ art: String(x.art).toUpperCase(), uds: Number(x.uds), fecha: F(x.fecha) ? x.fecha : null, de: "simulación" });
+        // Recetas (con caché) — ProductTrees: Quantity del padre y líneas con cantidad por esa cantidad
+        const BOM = {}; const leeBom = async (c) => { if (BOM[c] !== undefined) return BOM[c]; try { const t = await sl.get(`ProductTrees('${esc(c)}')?$select=TreeCode,Quantity,ProductTreeLines`); BOM[c] = { q: Number(t.Quantity) || 1, l: (t.ProductTreeLines || []).filter((x) => x.ItemCode && String(x.ItemType || "pit_Item").includes("Item")).map((x) => ({ c: x.ItemCode, q: Number(x.Quantity) || 0 })) }; } catch (e) { BOM[c] = null; } return BOM[c]; };
+        const precarga = async (cods) => { const f = [...new Set(cods)].filter((c) => BOM[c] === undefined); for (let i = 0; i < f.length; i += 8) await Promise.all(f.slice(i, i + 8).map(leeBom)); };
+        // Stock por artículo (todos los almacenes)
+        const INF = {}; const leeInf = async (cods) => { const f = [...new Set(cods)].filter((c) => !INF[c]); const tz = []; for (let i = 0; i < f.length; i += 40) tz.push(f.slice(i, i + 40));
+          for (let i = 0; i < tz.length; i += 6) await Promise.all(tz.slice(i, i + 6).map(async (z) => { try { const r = await sl.get(`Items?$select=ItemCode,ItemName,InventoryUOM,PurchaseItem,LeadTime,ItemWarehouseInfoCollection&$filter=${encodeURIComponent(z.map((c) => `ItemCode eq '${esc(c)}'`).join(" or "))}&$top=100`);
+            for (const it of (r.value || [])) { let st = 0, co = 0, pe = 0; for (const w of (it.ItemWarehouseInfoCollection || [])) { st += Number(w.InStock) || 0; co += Number(w.Committed) || 0; pe += Number(w.Ordered) || 0; }
+              INF[it.ItemCode] = { nom: it.ItemName, ud: it.InventoryUOM || "", compra: it.PurchaseItem === "tYES", plazo: Number(it.LeadTime) || 0, st, co, pe }; } } catch (e) {} })); };
+        if (body.aceptados) { const ped = await todas("Orders?$select=DocNum,CardName,DocDueDate,DocumentLines&$filter=DocumentStatus eq 'bost_Open'", 1500);
+          for (const p of ped) for (const l of (p.DocumentLines || [])) if (l.LineStatus !== "bost_Close" && ["1", "2", "3", "6", "7"].includes(String(l.U_UC_Solicitud)) && ["0", "1", "2"].includes(String(l.U_UC_SolicitudEstado ?? "0"))) {
+            const f = D(l.ShipDate || p.DocDueDate); if (f && f > hasta) continue; ACE.push({ art: l.ItemCode, uds: Number(l.RemainingOpenQuantity) || 0, fecha: f, de: "pedido " + p.DocNum + " · " + String(p.CardName || "").slice(0, 24) + (String(l.U_UC_SolicitudEstado) === "2" ? "" : " (sin confirmar)") }); }
+          // Solo lo que no cubren el stock ni las órdenes que ya hay: falta = −(stock − comprometido + pedido); el comprometido ya incluye estos pedidos
+          await leeInf(ACE.map((x) => x.art)); const porA = {}; for (const x of ACE) (porA[x.art] = porA[x.art] || []).push(x);
+          for (const [art, xs] of Object.entries(porA)) { const i = INF[art] || { st: 0, co: 0, pe: 0 }; let falta = Math.max(0, -(i.st - i.co + i.pe)); xs.sort((a, b) => String(a.fecha || "9").localeCompare(String(b.fecha || "9")));
+            for (const x of xs) { if (falta <= 0) break; const u = Math.min(falta, x.uds); falta -= u; dem.push(Object.assign({}, x, { uds: u })); } }
+          mark("pedidos"); }
+        // Explosión nivel a nivel; los semielaborados (con receta) se netean contra su stock antes de bajar
+        const RES = {}; let nivel = [];
+        await precarga(dem.map((d) => d.art));
+        for (const d of dem) { const b = BOM[d.art]; if (!b) { out.sinReceta = out.sinReceta || []; if (!out.sinReceta.includes(d.art)) out.sinReceta.push(d.art); continue; } for (const x of b.l) nivel.push({ c: x.c, uds: d.uds * x.q / b.q, fecha: d.fecha, para: d.art, de: d.de, n: 1 }); }
+        const usado = {};
+        for (let n = 1; n <= 5 && nivel.length; n++) {
+          await precarga(nivel.map((x) => x.c)); await leeInf(nivel.map((x) => x.c));
+          const sig = []; const porItem = {}; for (const x of nivel) (porItem[x.c] = porItem[x.c] || []).push(x);
+          for (const [c, xs] of Object.entries(porItem)) {
+            const r = RES[c] = RES[c] || { cod: c, nivel: n, necesita: 0, fecha: null, para: [] };
+            const tot = xs.reduce((t, x) => t + x.uds, 0); r.necesita += tot;
+            for (const x of xs) { if (x.fecha && (!r.fecha || x.fecha < r.fecha)) r.fecha = x.fecha; r.para.push({ art: x.para, uds: r3(x.uds), de: x.de, fecha: x.fecha }); }
+            const b = BOM[c]; if (b && b.l.length) { r.semi = true; const inf = INF[c] || { st: 0, co: 0, pe: 0 }; const libre = Math.max(0, inf.st - inf.co + inf.pe - (usado[c] || 0)); const cubre = Math.min(libre, tot); usado[c] = (usado[c] || 0) + cubre; const falta = tot - cubre;
+              if (falta > 1e-9) for (const x of xs) for (const y of b.l) sig.push({ c: y.c, uds: (x.uds * falta / tot) * y.q / b.q, fecha: x.fecha, para: c, de: x.de, n: n + 1 }); }
+          }
+          nivel = sig; mark("nivel" + n);
+        }
+        // Compras en camino por artículo
+        const LL = {}; try { const cods = new Set(Object.keys(RES)); for (const p of await todas("PurchaseOrders?$select=DocNum,DocDueDate,CardName,DocumentLines&$filter=DocumentStatus eq 'bost_Open'", 2000)) for (const l of (p.DocumentLines || [])) { const u = Number(l.RemainingOpenQuantity) || 0; if (u > 0 && cods.has(l.ItemCode) && l.LineStatus !== "bost_Close") (LL[l.ItemCode] = LL[l.ItemCode] || []).push({ fecha: D(l.ShipDate || p.DocDueDate), uds: r3(u), num: p.DocNum }); } } catch (e) { out.avisoCompras = String(e.message).slice(0, 120); }
+        const SOLS = {}; try { const cods = new Set(Object.keys(RES)); for (const p of await todas("PurchaseRequests?$select=DocNum,DocDate,RequriedDate,DocumentLines&$filter=DocumentStatus eq 'bost_Open'", 1000)) for (const l of (p.DocumentLines || [])) { const u = Number(l.RemainingOpenQuantity) || Number(l.Quantity) || 0; if (u > 0 && cods.has(l.ItemCode) && l.LineStatus !== "bost_Close") (SOLS[l.ItemCode] = SOLS[l.ItemCode] || []).push({ num: p.DocNum, uds: r3(u), fecha: D(l.RequiredDate || p.RequriedDate) }); } } catch (e) { out.avisoSolicitudes = String(e.message).slice(0, 120); }
+        mark("compras");
+        out.materiales = Object.values(RES).map((r) => { const i = INF[r.cod] || { st: 0, co: 0, pe: 0 }; const libre = i.st - i.co, disp = libre + i.pe, falta = r.necesita - disp, faltaHoy = r.necesita - libre;
+          const ll = (LL[r.cod] || []).sort((a, b) => String(a.fecha).localeCompare(String(b.fecha)));
+          return { cod: r.cod, nom: i.nom || "", ud: i.ud || "", nivel: r.nivel, semi: !!r.semi, compra: !!i.compra, plazo: i.plazo, necesita: r3(r.necesita), stock: r3(i.st), comprometido: r3(i.co), enCompra: r3(i.pe), libre: r3(libre),
+            solicitado: SOLS[r.cod] || [], falta: r3(Math.max(0, falta)), faltaSinCompras: r3(Math.max(0, faltaHoy)), fecha: r.fecha, llegadas: ll.slice(0, 5), llegaTarde: !!(r.fecha && ll.length && faltaHoy > 0 && ll[0].fecha > r.fecha),
+            para: Object.values(r.para.reduce((m, x) => { const k = x.art + "|" + x.de; m[k] = m[k] || { art: x.art, de: x.de, uds: 0, fecha: x.fecha }; m[k].uds = r3(m[k].uds + x.uds); return m; }, {})).sort((a, b) => b.uds - a.uds).slice(0, 25) }; })
+          .sort((a, b) => (b.falta > 0) - (a.falta > 0) || (b.faltaSinCompras > 0) - (a.faltaSinCompras > 0) || String(a.fecha || "9").localeCompare(String(b.fecha || "9")));
+        out.demanda = { planificada: dem.length, liberadas: liberadas.length, hasta }; out.liberadas = liberadas.slice(0, 200); out.tiempos = T; return;
+      }
+      // Solicitud de compra desde el MRP: POST {accion:"solicitud_compra", lineas:[{art, uds, fecha}], nota}
+      if (req.method === "POST" && body.accion === "solicitud_compra") {
+        const L = (body.lineas || []).filter((x) => x && x.art && Number(x.uds) > 0).slice(0, 200); if (!L.length) throw new Error("no hay nada que pedir");
+        const hoy = new Date().toISOString().slice(0, 10), fechas = L.map((x) => F(x.fecha) && x.fecha >= hoy ? x.fecha : hoy).sort();
+        const doc = { DocDate: hoy, RequriedDate: fechas[0], Comments: ("Desde el MRP del CRM" + (AUT.quien ? " · " + AUT.quien : "") + (body.nota ? " · " + body.nota : "")).slice(0, 254),
+          DocumentLines: L.map((x) => ({ ItemCode: String(x.art).toUpperCase(), Quantity: Math.round(Number(x.uds) * 1000) / 1000, RequiredDate: F(x.fecha) && x.fecha >= hoy ? x.fecha : hoy })) };
+        let r; try { r = await sl.post("PurchaseRequests", doc); }
+        catch (e) { const u = env("SAP_USER"); if (!u) throw e; r = await sl.post("PurchaseRequests", Object.assign({ ReqType: 12, Requester: u }, doc)); }
+        out.solicitud = r.DocNum; out.mensaje = "Solicitud de compra " + r.DocNum + " creada en SAP con " + L.length + " material" + (L.length > 1 ? "es" : ""); return;
       }
       if (req.method === "POST" && body.accion === "ordenar") {
         if (!F(body.fecha)) throw new Error("falta el día de fabricación"); if (!body.almacen) throw new Error("falta el almacén donde se fabrica");
