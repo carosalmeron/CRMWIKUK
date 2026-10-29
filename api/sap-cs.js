@@ -80,14 +80,14 @@ module.exports = async function handler(req, res) {
         const campos = Object.keys(ej).filter((k) => /^U_/.test(k) && !Array.isArray(ej[k]));
         const todos = await todas(`Orders?$select=DocEntry,DocNum,Confirmed,${campos.join(",")}&$filter=DocumentStatus eq 'bost_Open'`, 1500);
         const reparto = {}; for (const k of ["Confirmed", ...campos]) { const c = {}; for (const p of todos) { const v = p[k] === null || p[k] === undefined || p[k] === "" ? "(vacío)" : String(p[k]).slice(0, 30); c[v] = (c[v] || 0) + 1; } if (Object.keys(c).length <= 12 || /Invalid|Valid|Riesg|Cobro|Precio|Bloq/i.test(k)) reparto[k] = c; }
-        const cruce = {}; for (const p of todos) { const k = "riesgo=" + p.U_SCL_InvalidadoxRiesg + " · precios=" + p.U_SCL_InvalidadoxPrecios + " · cobros=" + p.U_SCL_InvalidadoxCobros + " · confirmado=" + p.Confirmed; cruce[k] = (cruce[k] || 0) + 1; }
+        const cruce = {}; for (const p of todos) { const b = (i, f) => (p[i] === "Y" && p[f] !== "Y") ? "BLOQ" : "ok"; const k = "riesgo " + b("U_SCL_InvalidadoxRiesg", "U_SCL_ValidadoFijoRiesgo") + " · precio " + b("U_SCL_InvalidadoxPrecios", "U_SCL_ValidadoFijoPrecios") + " · cobros " + b("U_SCL_InvalidadoxCobros", "U_SCL_ValidadoFijoCobros") + " · confirmado=" + p.Confirmed; cruce[k] = (cruce[k] || 0) + 1; }
         out.pedidosAbiertos = todos.length; out.reparto = reparto; out.combinaciones = cruce;
         out.ejemplo = Object.fromEntries(Object.entries(ej).filter(([k]) => /Invalid|Valid|Riesg|Cobro|Precio|Bloq|Confirm|Status|Approv|Autor/i.test(k)));
         return;
       }
       if (req.method === "GET" && q.pedidos !== undefined) {
         const nombres = {}; try { for (const v of await todas("SalesPersons?$select=SalesEmployeeCode,SalesEmployeeName", 500)) nombres[String(v.SalesEmployeeCode)] = String(v.SalesEmployeeName || "").trim(); } catch (e) {}
-        const sel = "DocEntry,DocNum,DocDate,DocDueDate,UpdateDate,CardCode,CardName,SalesPersonCode,Confirmed,Comments,DocTotal,U_SCL_InvalidadoxPrecios,U_SCL_InvalidadoxCobros,U_SCL_InvalidadoxRiesg,U_SCL_FechaAgente,DocumentLines";
+        const sel = "DocEntry,DocNum,DocDate,DocDueDate,UpdateDate,CardCode,CardName,SalesPersonCode,Confirmed,Comments,DocTotal,U_SCL_InvalidadoxPrecios,U_SCL_InvalidadoxCobros,U_SCL_InvalidadoxRiesg,U_SCL_InvalidadoxMuestras,U_SCL_ValidadoFijoPrecios,U_SCL_ValidadoFijoCobros,U_SCL_ValidadoFijoRiesgo,U_SCL_ValidadoFijoMuestra,U_SCL_FechaAgente,DocumentLines";
         const ped = await todas(`Orders?$select=${sel}&$filter=DocumentStatus eq 'bost_Open'&$orderby=DocEntry desc`, 1500);
         // Stock por artículo y almacén (libre = en stock − comprometido)
         const items = [...new Set(ped.flatMap((p) => (p.DocumentLines || []).filter((l) => l.LineStatus !== "bost_Close").map((l) => String(l.ItemCode))))].filter(Boolean);
@@ -120,7 +120,8 @@ module.exports = async function handler(req, res) {
           const etapa = conf ? "validado" : esperando ? "esperando" : resueltas ? "reconfirmar" : "nuevo";
           return { entry: p.DocEntry, num: p.DocNum, fecha: D(p.DocDate), entrega: D(p.DocDueDate), pideComercial: D(p.U_SCL_FechaAgente), actualizado: D(p.UpdateDate), cliente: p.CardCode, nombre: p.CardName,
             vendedor: nombres[String(p.SalesPersonCode)] || "", total: Number(p.DocTotal) || 0, comentario: String(p.Comments || "").slice(0, 200), confirmado: conf,
-            precios: Y(p.U_SCL_InvalidadoxPrecios), cobros: Y(p.U_SCL_InvalidadoxCobros), riesgo: Y(p.U_SCL_InvalidadoxRiesg), etapa, todoStock: L.length > 0 && L.every((l) => l.hay || (l.sol && !l.sol.pendiente)), lineas: L };
+            // Bloqueado = invalidado y nadie lo ha validado (ValidadoFijo = N)
+            precios: Y(p.U_SCL_InvalidadoxPrecios) && !Y(p.U_SCL_ValidadoFijoPrecios), cobros: Y(p.U_SCL_InvalidadoxCobros) && !Y(p.U_SCL_ValidadoFijoCobros), riesgo: Y(p.U_SCL_InvalidadoxRiesg) && !Y(p.U_SCL_ValidadoFijoRiesgo), muestras: Y(p.U_SCL_InvalidadoxMuestras) && !Y(p.U_SCL_ValidadoFijoMuestra), etapa, todoStock: L.length > 0 && L.every((l) => l.hay || (l.sol && !l.sol.pendiente)), lineas: L };
         }).filter((p) => p.lineas.length);
         for (const p of out.pedidos) { const o = ped.find((x) => x.DocEntry === p.entry); p.servidoParcial = (o.DocumentLines || []).filter((l) => (Number(l.Quantity) || 0) - (Number(l.RemainingOpenQuantity) || 0) > 0).length; }
         for (const p of cerr) {
