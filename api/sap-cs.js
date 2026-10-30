@@ -133,6 +133,15 @@ module.exports = async function handler(req, res) {
           } catch (e) { out.errores.push({ art, error: String(e.message || e).replace(/^SAP no ha aceptado /, "").slice(0, 220) }); } }
         return;
       }
+      // Diagnóstico de padres: GET ?padre=C5.8F.N32 → campos U_SCL_BASE / U_SCL_PADRE del artículo, de su granel y de sus hermanos
+      if (req.method === "GET" && q.padre) {
+        const art = String(q.padre).toUpperCase().trim(), base = art.split(".").slice(0, -1).join(".") || art;
+        const camp = (it) => { const o = { cod: it.ItemCode, nom: it.ItemName }; for (const k of Object.keys(it)) if (/^U_SCL_(BASE|PADRE|FAMILIA)/i.test(k)) o[k] = it[k]; return o; };
+        const leer = async (c) => { try { return camp(await sl.get(`Items('${esc(c)}')`)); } catch (e) { return { cod: c, error: "no existe" }; } };
+        out.articulo = await leer(art); out.granel = base !== art ? await leer(base) : null;
+        try { const r = await sl.get(`Items?$filter=startswith(ItemCode,'${esc(base)}.')&$top=20`); out.hermanos = (r.value || []).map(camp); } catch (e) { out.hermanos = "✗ " + String(e.message).slice(0, 120); }
+        return;
+      }
       // Mismo producto en otros envases: GET ?hermanos=C5.8F.N32 → granel (C5.8F) y otros formatos (C5.8F.xxx) con stock libre
       if (req.method === "GET" && q.hermanos) {
         const art = String(q.hermanos).toUpperCase().trim(), partes = art.split("."); out.articulo = art; out.granel = null; out.otros = [];

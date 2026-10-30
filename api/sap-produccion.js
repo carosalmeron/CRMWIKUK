@@ -65,7 +65,10 @@ module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   if (req.method === "OPTIONS") return res.status(204).end();
   const q = req.query || {};
-  const AUT = autorizado(req.headers["x-crm-key"] || q.key || "");
+  // El pase llega en la cabecera (páginas) o en la cookie «sap_pase» que pone /api/sap-token (cualquier navegador)
+  const galleta = (String(req.headers.cookie || "").match(/(?:^|;\s*)sap_pase=([^;]+)/) || [])[1] || "";
+  let AUT = autorizado(req.headers["x-crm-key"] || q.key || "");
+  if (!AUT.ok && galleta) AUT = autorizado(decodeURIComponent(galleta));
   if (!AUT.ok) return res.status(401).json({ ok: false, error: AUT.caducado ? "el pase ha caducado: vuelve a entrar en el portal" : "clave incorrecta" });
   let body = req.body; if (typeof body === "string") { try { body = JSON.parse(body); } catch (e) { body = {}; } }
   const db = String((body && body.db) || q.db || env("SAP_DB") || "U_CARO_00"); if (!DB_OK(db)) return res.status(400).json({ ok: false, error: "base de datos no válida" });
@@ -168,7 +171,8 @@ module.exports = async function handler(req, res) {
         try { let pe = o.ProductionOrderOriginEntry || null, ln = null; const m = String(o.Remarks || "").match(/PV:(\d+)\/(\d+)/);
           if (m) { ln = Number(m[2]); if (!pe) { const r = await sl.get(`Orders?$select=DocEntry&$filter=DocNum eq ${Number(m[1])}`); pe = ((r.value || [])[0] || {}).DocEntry || null; } }
           if (pe) { const ov = await sl.get(`Orders(${pe})?$select=DocNum,DocumentLines`); const l = (ov.DocumentLines || []).find((x) => ln != null ? Number(x.LineNum) === ln : String(x.ItemCode).toUpperCase() === String(o.ItemNo).toUpperCase());
-            if (l) { await sl.patch(`Orders(${pe})`, { DocumentLines: [{ LineNum: l.LineNum, U_UC_SolicitudEstado: "4" }] }); out.pedidoFinalizado = { pedido: ov.DocNum, linea: l.LineNum }; } } }
+            if (l) { let fin = "4"; try { const r = await sl.get("UserFieldsMD?$filter=TableName eq 'RDR1' and Name eq 'UC_SolicitudEstado'&$select=ValidValuesMD"); const x = ((((r.value || [])[0] || {}).ValidValuesMD) || []).find((y) => /finaliz|termin/i.test(String(y.Description || ""))); if (x) fin = String(x.Value); } catch (e) {}
+              await sl.patch(`Orders(${pe})`, { DocumentLines: [{ LineNum: l.LineNum, U_UC_SolicitudEstado: fin }] }); out.pedidoFinalizado = { pedido: ov.DocNum, linea: l.LineNum }; } } }
         catch (e) { out.avisoPedido = "Producción hecha, pero no se ha podido marcar el pedido como Finalizado: " + String(e.message || e).slice(0, 160); }
         // 4) Cerrar la orden si se pide
         if (p.cerrar) { try { await sl.patch(`ProductionOrders(${o.AbsoluteEntry})`, { ProductionOrderStatus: "boposClosed" }); out.orden.estado = "boposClosed"; } catch (e) { out.avisoCerrar = String(e.message || e).slice(0, 200); } }
