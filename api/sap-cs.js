@@ -133,6 +133,18 @@ module.exports = async function handler(req, res) {
           } catch (e) { out.errores.push({ art, error: String(e.message || e).replace(/^SAP no ha aceptado /, "").slice(0, 220) }); } }
         return;
       }
+      // Diagnóstico: GET ?config_cs=1 → ¿dónde guarda SAP qué Customer Service lleva cada vendedor?
+      if (req.method === "GET" && q.config_cs !== undefined) {
+        const R = {}, prueba = async (k, f) => { try { R[k] = await f(); } catch (e) { R[k] = "✗ " + String(e.message || e).slice(0, 160); } };
+        const propios = (o) => Object.fromEntries(Object.entries(o || {}).filter(([k, v]) => /^U_/.test(k) || /Employee|Manager|Owner|Group|Email|Mobile|Telephone|Active|Locked/i.test(k)).filter(([, v]) => v !== null && v !== "" && typeof v !== "object"));
+        await prueba("vendedores", async () => { const v = await todas("SalesPersons", 200); return v.map((x) => Object.assign({ codigo: x.SalesEmployeeCode, nombre: x.SalesEmployeeName }, propios(x))); });
+        await prueba("camposVendedor", async () => { const r = await sl.get("UserFieldsMD?$filter=TableName eq 'OSLP'&$select=Name,Description"); return (r.value || []).map((f) => "U_" + f.Name + " · " + f.Description); });
+        await prueba("empleadosConVendedor", async () => { const r = await sl.get("EmployeesInfo?$select=EmployeeID,FirstName,LastName,SalesPersonCode,Department,Position,Manager,eMail&$filter=SalesPersonCode ne -1&$top=100"); return (r.value || []).map((e) => ({ id: e.EmployeeID, nombre: (e.FirstName || "") + " " + (e.LastName || ""), vendedor: e.SalesPersonCode, departamento: e.Department, puesto: e.Position, jefe: e.Manager, email: e.eMail })); });
+        await prueba("camposCliente", async () => { const r = await sl.get("UserFieldsMD?$filter=TableName eq 'OCRD'&$select=Name,Description"); return (r.value || []).map((f) => "U_" + f.Name + " · " + f.Description); });
+        await prueba("camposPedido", async () => { const r = await sl.get("UserFieldsMD?$filter=TableName eq 'ORDR'&$select=Name,Description"); return (r.value || []).map((f) => "U_" + f.Name + " · " + f.Description); });
+        await prueba("departamentos", async () => { const r = await sl.get("Departments?$select=Code,Name"); return (r.value || []).map((d) => d.Code + " " + d.Name); });
+        out.configCs = R; return;
+      }
       // Diagnóstico de padres: GET ?padre=C5.8F.N32 → campos U_SCL_BASE / U_SCL_PADRE del artículo, de su granel y de sus hermanos
       if (req.method === "GET" && q.padre) {
         const art = String(q.padre).toUpperCase().trim(), base = art.split(".").slice(0, -1).join(".") || art;
