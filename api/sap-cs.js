@@ -284,7 +284,7 @@ module.exports = async function handler(req, res) {
       if (req.method === "GET" && q.asignacion_cs !== undefined) {
         const v = await todas("SalesPersons?$select=SalesEmployeeCode,SalesEmployeeName,Email,Active,Locked,U_UC_GrupoSeguimiento,U_SCL_Agrup", 300);
         out.vendedores = v.filter((x) => Number(x.SalesEmployeeCode) >= 0).map((x) => ({ codigo: x.SalesEmployeeCode, nombre: x.SalesEmployeeName, email: x.Email || "", activo: x.Active !== "tNO" && x.Locked !== "tYES", cs: x.U_UC_GrupoSeguimiento || "", grupo: x.U_SCL_Agrup ?? null }));
-        try { const r = await sl.get("UserFieldsMD?$filter=TableName eq 'OSLP' and Name eq 'UC_GrupoSeguimiento'&$select=Name,Type,Size,EditSize,ValidValuesMD"); const f = (r.value || [])[0] || {}; out.campo = { tipo: f.Type, tam: f.EditSize || f.Size, valores: (f.ValidValuesMD || []).map((x) => ({ v: x.Value, d: x.Description })) }; } catch (e) { out.campo = { error: String(e.message).slice(0, 120) }; }
+        try { const r = await sl.get("UserFieldsMD?$filter=TableName eq 'OSLP' and Name eq 'UC_GrupoSeguimiento'"); const f = (r.value || [])[0] || {}; out.campo = { tipo: f.Type, sub: f.SubType, tabla: f.LinkedTable || f.LinkedUDO || "", obligatorio: f.Mandatory, tam: f.EditSize || f.Size, valores: (f.ValidValuesMD || []).map((x) => ({ v: x.Value, d: x.Description })) }; } catch (e) { out.campo = { error: String(e.message).slice(0, 120) }; }
         // Pedidos abiertos por vendedor (para saber a quién afecta)
         try { const r = await todas("Orders?$select=SalesPersonCode&$filter=DocumentStatus eq 'bost_Open'", 3000); out.pedidosAbiertos = {}; for (const p of r) out.pedidosAbiertos[p.SalesPersonCode] = (out.pedidosAbiertos[p.SalesPersonCode] || 0) + 1; } catch (e) {}
         return;
@@ -293,7 +293,7 @@ module.exports = async function handler(req, res) {
         const L = (body.cambios || []).filter((x) => x && Number(x.vendedor) >= 0).slice(0, 200); if (!L.length) throw new Error("no hay cambios");
         out.hechos = []; out.errores = [];
         for (const x of L) { try { await sl.patch(`SalesPersons(${Number(x.vendedor)})`, { U_UC_GrupoSeguimiento: String(x.cs || "").slice(0, 100) }); out.hechos.push(Number(x.vendedor)); } catch (e) { out.errores.push({ vendedor: x.vendedor, error: String(e.message || e).replace(/^SAP no ha aceptado /, "").slice(0, 200) }); } }
-        out.ok = !out.errores.length || out.hechos.length > 0; out.mensaje = out.hechos.length + " vendedor(es) actualizados en SAP" + (out.errores.length ? " · " + out.errores.length + " con error" : ""); return;
+        out.ok = !out.errores.length || out.hechos.length > 0; if (!out.ok) out.error = "SAP no ha guardado ninguno: " + out.errores[0].error; out.mensaje = out.hechos.length + " vendedor(es) actualizados en SAP" + (out.errores.length ? " · " + out.errores.length + " con error" : ""); return;
       }
       // Diagnóstico: GET ?config_cs=1 → ¿dónde guarda SAP qué Customer Service lleva cada vendedor?
       if (req.method === "GET" && q.config_cs !== undefined) {
