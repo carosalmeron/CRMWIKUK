@@ -147,9 +147,50 @@ module.exports = async function handler(req, res) {
               for (const x of (r.value || [])) { const pp = (x.ItemPrices || []).find((y) => Number(y.PriceList) === Number(lc.PriceListNo)); if (pp && Number(pp.Price) > 0) { it[x.ItemCode].compra = Number(pp.Price); } } } catch (e) {} } } } catch (e) {} }
         if (cods.some((c) => !it[c])) { try { for (const x of await leeRecursos()) if (cods.includes(x.code)) it[x.code] = { nom: x.nom, ud: x.ud, coste: x.coste, metodo: "Recurso", tipo: x.tipo, recurso: true }; } catch (e) {} }
         return it; };
+      // GET ?coste_art=COD → de dónde sale (o no) el coste de un artículo: campos de coste de la ficha, por almacén y listas de precios
+      if (req.method === "GET" && q.coste_art) {
+        if (AUT.soloVer) throw new Error("los costes solo los puede ver dirección");
+        const x = await sl.get(`Items('${esc(String(q.coste_art))}')`); out.campos = Object.fromEntries(Object.entries(x).filter(([k, v]) => /price|cost|valu|method|uom|manage/i.test(k) && typeof v !== "object"));
+        out.almacenes = (x.ItemWarehouseInfoCollection || []).filter((w) => Number(w.InStock) || Number(w.StandardAveragePrice)).map((w) => ({ alm: w.WarehouseCode, stock: w.InStock, coste: w.StandardAveragePrice }));
+        out.precios = (x.ItemPrices || []).filter((p) => Number(p.Price)).map((p) => ({ lista: p.PriceList, precio: p.Price, moneda: p.Currency }));
+        const c = await costesArt([String(q.coste_art)]); out.calculado = c[String(q.coste_art)]; out.sqlCompras = c.__sql; return;
+      }
+      // POST {accion:"diag_costes", cods} → por qué un artículo no tiene coste en SAP: ficha + movimientos de inventario (OINM) por tipo de documento
+      if (req.method === "POST" && body.accion === "diag_costes") {
+        if (AUT.soloVer) throw new Error("los costes solo los puede ver dirección");
+        const cods = [...new Set((body.cods || []).map(String))].slice(0, 300), F = {}, MOV = {};
+        const tz = []; for (let i = 0; i < cods.length; i += 40) tz.push(cods.slice(i, i + 40));
+        for (const z of tz) { try { const rr = await sl.get(`Items?$select=ItemCode,ItemName,InventoryItem,PurchaseItem,SalesItem,AvgStdPrice,CostAccountingMethod,QuantityOnStock,Frozen,ItemWarehouseInfoCollection&$filter=${encodeURIComponent(z.map((c) => `ItemCode eq '${esc(c)}'`).join(" or "))}&$top=100`);
+          for (const x of (rr.value || [])) { const ws = (x.ItemWarehouseInfoCollection || []); F[x.ItemCode] = { nom: x.ItemName, inventario: x.InventoryItem === "tYES", compra: x.PurchaseItem === "tYES", metodo: x.CostAccountingMethod, coste: Number(x.AvgStdPrice) || 0, stock: Number(x.QuantityOnStock) || ws.reduce((t, w) => t + (Number(w.InStock) || 0), 0), negativo: ws.some((w) => Number(w.InStock) < 0), costeAlm: Math.max(0, ...ws.map((w) => Number(w.StandardAveragePrice) || 0)), bloqueado: x.Frozen === "tYES" }; } } catch (e) { out.errorFichas = String(e.message).slice(0, 150); } }
+        // Movimientos de inventario agrupados por artículo y tipo de documento (cantidad que entra/sale y valor con que entra)
+        const lotes = []; for (let i = 0; i < cods.length; i += 50) lotes.push(cods.slice(i, i + 50)); out.sqlMov = [];
+        for (const tabla of ["OINM", "OIVL"]) { let ok = true;
+          for (const z of lotes) { const code = "CRM_DiagCoste"; const lista = z.map((c) => "'" + String(c).replace(/'/g, "''") + "'").join(",");
+            const sql = `SELECT T0."ItemCode", T0."TransType", SUM(T0."InQty") AS "Ent", SUM(T0."OutQty") AS "Sal", SUM(T0."TransValue") AS "Val", MAX(T0."DocDate") AS "Ult", COUNT(T0."ItemCode") AS "N" FROM ${tabla} T0 WHERE T0."ItemCode" IN (${lista}) GROUP BY T0."ItemCode", T0."TransType"`;
+            try { try { await sl.post("SQLQueries", { SqlCode: code, SqlName: "Diagnóstico de coste (CRM)", SqlText: sql }); } catch (e) { if (!/already|exist|duplic/i.test(String(e.message))) throw e; await sl.patch(`SQLQueries('${code}')`, { SqlText: sql }); }
+              for (const x of await todas(`SQLQueries('${code}')/List`, 20000)) (MOV[x.ItemCode] = MOV[x.ItemCode] || []).push({ tipo: Number(x.TransType), ent: Number(x.Ent) || 0, sal: Number(x.Sal) || 0, val: Number(x.Val) || 0, ult: D(x.Ult), n: Number(x.N) || 0 }); }
+            catch (e) { ok = false; out.sqlMov.push(tabla + ": " + String(e.message).slice(0, 120)); break; } }
+          if (ok) { out.tablaMov = tabla; break; } for (const k of Object.keys(MOV)) delete MOV[k]; }
+        const TT = { 13: "factura de venta", 14: "abono de venta", 15: "entrega", 16: "devolución de venta", 18: "factura de compra", 19: "abono de compra", 20: "entrada de mercancía (compra)", 21: "devolución a proveedor", 59: "entrada de mercancía manual", 60: "salida de mercancía manual", 67: "traslado", 69: "precio de entrega/landed cost", 162: "revalorización", 202: "orden de fabricación", 310000001: "saldo inicial", 10000071: "recuento de inventario" };
+        const ENTRADAS = [18, 20, 59, 162, 202, 310000001, 10000071, 69];
+        out.diag = cods.map((c) => { const f = F[c], m = MOV[c] || [];
+          if (!f) return { cod: c, causa: "noexiste", texto: "No existe como artículo en SAP" };
+          const tipos = m.map((x) => ({ doc: TT[x.tipo] || "tipo " + x.tipo, tipo: x.tipo, entra: r3(x.ent), sale: r3(x.sal), valor: Math.round(x.val * 100) / 100, ultimo: x.ult, n: x.n }));
+          const entradas = m.filter((x) => x.ent > 0), conValor = entradas.filter((x) => Math.abs(x.val) > 0.005), compras = m.filter((x) => [18, 20].includes(x.tipo));
+          const base = { cod: c, nom: f.nom, metodo: f.metodo, stock: r3(f.stock), coste: f.coste, movimientos: tipos };
+          if (!f.inventario) return Object.assign(base, { causa: "noinventario", texto: "No es «artículo de inventario»: SAP no lleva su stock ni su coste, así que en producción siempre consume a 0 €" });
+          if (f.coste > 0 || f.costeAlm > 0) return Object.assign(base, { causa: "tiene", texto: "Sí tiene coste en SAP (" + (f.coste || f.costeAlm) + " €)" });
+          if (f.metodo === "bis_Standard") return Object.assign(base, { causa: "estandar", texto: "Se valora a coste estándar y el estándar está a 0" });
+          if (!m.length) return Object.assign(base, { causa: "sinmov", texto: "Nunca ha tenido un movimiento de stock en SAP: no se compra ni se da entrada en SAP" });
+          if (!entradas.length) return Object.assign(base, { causa: "solosalidas", texto: "Solo tiene salidas, nunca una entrada: se consume sin haber entrado (stock negativo)" });
+          if (!conValor.length) return Object.assign(base, { causa: "entradas0", texto: "Ha entrado stock pero siempre con valor 0 (" + [...new Set(entradas.map((x) => TT[x.tipo] || x.tipo))].join(", ") + ")" });
+          if (f.negativo || f.stock <= 0) return Object.assign(base, { causa: "negativo", texto: "Entró con valor, pero el stock está a cero o en negativo y el coste se ha quedado a 0" + (compras.length ? "" : "; además no se compra en SAP") });
+          return Object.assign(base, { causa: "otro", texto: "Tiene entradas con valor y stock, pero el coste es 0: revisar con el partner (posible revalorización a 0)" }); });
+        return;
+      }
       if (req.method === "POST" && body.accion === "costes_art") {
         if (AUT.soloVer) throw new Error("los costes solo los puede ver dirección");
-        const cods = [...new Set((body.cods || []).map(String))].slice(0, 4000); const it = await costesArt(cods); out.listaCompra = it.__lista; delete it.__lista; out.articulos = it; out.noExisten = cods.filter((c) => !it[c]); return;
+        const cods = [...new Set((body.cods || []).map(String))].slice(0, 4000); const it = await costesArt(cods); out.listaCompra = it.__lista; out.sqlCompras = it.__sql; delete it.__lista; delete it.__sql; out.articulos = it; out.noExisten = cods.filter((c) => !it[c]); return;
       }
       // GET ?costes=1 → escandallo valorado: recetas + coste de cada artículo en SAP + consumo real de las órdenes cerradas (solo CEO)
       if (req.method === "GET" && q.costes !== undefined) {
@@ -162,7 +203,7 @@ module.exports = async function handler(req, res) {
         out.ordenes = ords.filter((o) => Number(o.CompletedQuantity) > 0).map((o) => ({ num: o.DocumentNumber, art: o.ItemNo, hecho: Number(o.CompletedQuantity) || 0, plan: Number(o.PlannedQuantity) || 0, fecha: D(o.ClosingDate), l: (o.ProductionOrderLines || []).filter((x) => x.ItemNo && Number(x.IssuedQuantity) > 0).map((x) => ({ c: x.ItemNo, q: Number(x.IssuedQuantity) || 0 })) }));
         mk("ordenes");
         const cods = [...new Set([...out.recetas.flatMap((r) => [r.art, ...r.l.map((x) => x.c)]), ...out.ordenes.flatMap((o) => [o.art, ...o.l.map((x) => x.c)])])];
-        const it = await costesArt(cods); out.listaCompra = it.__lista; delete it.__lista; mk("articulos");
+        const it = await costesArt(cods); out.listaCompra = it.__lista; out.sqlCompras = it.__sql; delete it.__lista; delete it.__sql; mk("articulos");
         out.articulos = it; out.noExisten = cods.filter((c) => !it[c]); mk("compra"); out.tiempos = T; return;
       }
       // POST {accion:"recetas_crear", recetas:[{art, cantidad, lineas:[{cod, uds, alm?}]}]} → crea las que no existen (de 20 en 20)
