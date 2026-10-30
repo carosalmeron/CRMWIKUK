@@ -321,11 +321,13 @@ module.exports = async function handler(req, res) {
             const tipo = tipC(l.U_UC_Solicitud), est = estC(l.U_UC_SolicitudEstado), conSol = !!TIPOS[tipo];
             // Avisos de retraso: la fabricación acaba después de la fecha, no hay stock ni entrada a tiempo, o la fecha ya pasó
             const alertas = [], fl = D(l.ShipDate) || D(p.DocDueDate), of = PVK[p.DocNum + "/" + l.LineNum];
+            const detL = String(l.U_UC_SolicitudDetalle || ""), avisarCS = detL.includes("[AVISAR CS]");
+            if (avisarCS) { const m = detL.replace(/\s*\[AVISAR CS\]/g, "").split(" | ").reverse().find((x) => /fecha .*\u2192/.test(x)); alertas.push((TIPOS[tipC(l.U_UC_Solicitud)] || "Producci\u00f3n/compras") + " ha cambiado la fecha" + (m ? ": " + m.replace(/^\d\d\/\d\d: (fecha )?/, "") : "") + " \u2014 avisa al cliente"); }
             if (fl && fl < hoy) alertas.push("la fecha (" + fl.split("-").reverse().join("/") + ") ya pas\u00f3 y sigue sin servir");
             else if (of && of.fecha && fl && of.fecha > fl) alertas.push("la fabricaci\u00f3n (orden " + of.num + ") termina el " + of.fecha.split("-").reverse().join("/"));
             else if (!of && libre < pend && fl) { const ent = (lleg[l.ItemCode] || []).find((x) => x.fecha && x.fecha >= hoy && x.uds > 0); if (!ent) alertas.push("no hay stock ni ninguna entrada prevista"); else if (ent.fecha > fl) alertas.push("la pr\u00f3xima entrada (" + ent.de + ") llega el " + ent.fecha.split("-").reverse().join("/")); }
             return { linea: l.LineNum, articulo: l.ItemCode, descripcion: l.ItemDescription, pide: r3(pend), ud: s.ud || l.MeasureUnit || "", alm, stock: r3(w.stock), libre, hay: libre >= pend,
-              otros, alertas, llegadas: (lleg[l.ItemCode] || []).filter((x) => !x.fecha || x.fecha >= hoy).slice(0, 3), entrega: D(l.ShipDate), precio: Number(l.Price) || 0, importe: Number(l.LineTotal) || 0,
+              otros, alertas, avisarCS, llegadas: (lleg[l.ItemCode] || []).filter((x) => !x.fecha || x.fecha >= hoy).slice(0, 3), entrega: D(l.ShipDate), precio: Number(l.Price) || 0, importe: Number(l.LineTotal) || 0,
               sol: conSol ? { tipo, quien: TIPOS[tipo], estado: est, estadoN: ESTADOS[est] || est, detalle: String(l.U_UC_SolicitudDetalle || ""), pendiente: est === "0" || est === "1",
                 orden: (PVK[p.DocNum + "/" + l.LineNum] || {}).num || null, ordenada: !!PVK[p.DocNum + "/" + l.LineNum] || /Compra pedida|Orden (de fabricación )?\d+/i.test(String(l.U_UC_SolicitudDetalle || "")) } : null };
           });
@@ -397,6 +399,13 @@ module.exports = async function handler(req, res) {
         await sl.patch(`Orders(${o.DocEntry})`, { DocumentLines: [{ LineNum: l.LineNum, U_UC_Solicitud: tipS("0"), U_UC_SolicitudEstado: estS("0") }] });
         out.mensaje = "Solicitud quitada de " + l.ItemCode; return;
       }
+      if (req.method === "POST" && body.accion === "visto") {
+        const o = await pedido(body.entry); const L = (o.DocumentLines || []).filter((x) => String(x.U_UC_SolicitudDetalle || "").includes("[AVISAR CS]") && (body.linea === undefined || body.linea === null || Number(x.LineNum) === Number(body.linea)));
+        if (!L.length) { out.mensaje = "Ya estaba marcado"; return; }
+        const hoyF = new Date().toISOString().slice(8, 10) + "/" + new Date().toISOString().slice(5, 7);
+        await sl.patch(`Orders(${o.DocEntry})`, { DocumentLines: L.map((x) => ({ LineNum: x.LineNum, U_UC_SolicitudDetalle: (String(x.U_UC_SolicitudDetalle).replace(/\s*\[AVISAR CS\]/g, "") + " | " + hoyF + ": cliente avisado" + (AUT.quien ? " \u00b7 " + AUT.quien : "")).slice(-250) })) });
+        out.mensaje = "Marcado: cliente avisado de la nueva fecha"; return;
+      }
       if (req.method === "POST" && body.accion === "fecha") {
         if (!F(body.fecha)) throw new Error("elige la nueva fecha de servicio");
         if (body.fecha < new Date().toISOString().slice(0, 10)) throw new Error("la fecha no puede ser anterior a hoy");
@@ -407,7 +416,7 @@ module.exports = async function handler(req, res) {
         if (conf && motivo.length < 3) throw new Error("el pedido ya est\u00e1 confirmado: elige el motivo del cambio de fecha");
         const antes = String(L[0].ShipDate || o.DocDueDate || "").slice(0, 10), fx = (d) => d ? d.split("-").reverse().join("/") : "\u2014";
         const hist = " | " + new Date().toISOString().slice(8, 10) + "/" + new Date().toISOString().slice(5, 7) + ": fecha " + fx(antes) + " \u2192 " + fx(body.fecha) + (motivo ? " (" + motivo + ")" : "") + (AUT.quien ? " \u00b7 " + AUT.quien : "");
-        const cambio = { DocumentLines: L.map((x) => ({ LineNum: x.LineNum, ShipDate: body.fecha, ...(conf ? { U_UC_SolicitudDetalle: (String(x.U_UC_SolicitudDetalle || "") + hist).slice(-250) } : {}) })) };
+        const cambio = { DocumentLines: L.map((x) => ({ LineNum: x.LineNum, ShipDate: body.fecha, ...(conf ? { U_UC_SolicitudDetalle: (String(x.U_UC_SolicitudDetalle || "").replace(/\s*\[AVISAR CS\]/g, "") + hist).slice(-250) } : {}) })) };
         if (L.length === ab.length || body.fecha > String(o.DocDueDate || "").slice(0, 10)) cambio.DocDueDate = body.fecha;
         // Fecha planificaci\u00f3n inicial (la primera vez) y anterior: as\u00ed se sabe cu\u00e1ntas veces y cu\u00e1nto se movi\u00f3
         if (conf && antes) { cambio.U_SCL_FPLANIF_ANT = antes; if (!o.U_SCL_FPLANIF_INI) cambio.U_SCL_FPLANIF_INI = antes; }
@@ -431,6 +440,20 @@ module.exports = async function handler(req, res) {
         if (!F(body.fecha)) throw new Error("pon la fecha en que estará listo (es obligatoria)");
         if (body.fecha < new Date().toISOString().slice(0, 10)) throw new Error("la fecha no puede ser anterior a hoy");
         const { o, l } = await lineaDe();
+        // Pedido ya definitivo (en almacén): producción/compras cambian la fecha → se cambia en el pedido, sigue en almacén y Customer Service lo ve en «Avisos»
+        if (Y(o.Confirmed) && estC(l.U_UC_SolicitudEstado) === "3") {
+          const motivo = String(body.motivo || "").trim(); if (motivo.length < 3) throw new Error("el pedido ya es definitivo: elige el motivo del cambio de fecha");
+          const antes = String(l.ShipDate || o.DocDueDate || "").slice(0, 10), fx = (d) => d ? d.split("-").reverse().join("/") : "\u2014";
+          if (antes === body.fecha) throw new Error("es la misma fecha que ya tiene");
+          const hist = new Date().toISOString().slice(8, 10) + "/" + new Date().toISOString().slice(5, 7) + ": fecha " + fx(antes) + " \u2192 " + fx(body.fecha) + " (" + motivo + (body.nota ? ": " + body.nota : "") + ")" + (AUT.quien ? " \u00b7 " + AUT.quien : "");
+          const det = String(l.U_UC_SolicitudDetalle || "").replace(/\s*\[AVISAR CS\]/g, "");
+          const cambio = { DocumentLines: [{ LineNum: l.LineNum, ShipDate: body.fecha, U_UC_SolicitudDetalle: (det + " | " + hist).slice(-(250 - 13)) + " [AVISAR CS]" }] };
+          if (body.fecha > String(o.DocDueDate || "").slice(0, 10)) cambio.DocDueDate = body.fecha;
+          if (antes) { cambio.U_SCL_FPLANIF_ANT = antes; if (!o.U_SCL_FPLANIF_INI) cambio.U_SCL_FPLANIF_INI = antes; }
+          try { await sl.patch(`Orders(${o.DocEntry})`, cambio); }
+          catch (e) { if (/U_SCL_FPLANIF/i.test(String(e.message))) { delete cambio.U_SCL_FPLANIF_ANT; delete cambio.U_SCL_FPLANIF_INI; await sl.patch(`Orders(${o.DocEntry})`, cambio); } else throw e; }
+          out.mensaje = l.ItemCode + ": fecha cambiada al " + fx(body.fecha) + " · el pedido sigue en almacén con la nueva fecha y Customer Service ya lo ve en Avisos"; return;
+        }
         // Fecha nueva o cambiada → el pedido vuelve a Customer Service para que la apruebe con el cliente
         const cambia = String(l.ShipDate || "").slice(0, 10) !== body.fecha || estC(l.U_UC_SolicitudEstado) !== "2";
         await sl.patch(`Orders(${o.DocEntry})`, { ...(cambia ? { Confirmed: "tNO" } : {}), DocumentLines: [{ LineNum: l.LineNum, U_UC_SolicitudEstado: estS("2"), ShipDate: body.fecha, U_UC_SolicitudDetalle: nota(l, "Confirmado para el " + body.fecha.split("-").reverse().join("/") + (body.nota ? ": " + body.nota : "")) }] });
