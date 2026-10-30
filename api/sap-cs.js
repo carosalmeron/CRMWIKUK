@@ -149,9 +149,11 @@ module.exports = async function handler(req, res) {
         const MET = { bis_MovingAverage: "Precio medio", bis_Standard: "Estándar", bis_FIFO: "FIFO", bis_SNB: "Por lote/serie" }, it = {};
         const tz = []; for (let i = 0; i < cods.length; i += 40) tz.push(cods.slice(i, i + 40));
         for (let i = 0; i < tz.length; i += 6) await Promise.all(tz.slice(i, i + 6).map(async (z) => { try {
-          const r = await sl.get(`Items?$select=ItemCode,ItemName,InventoryUOM,AvgStdPrice,CostAccountingMethod,ItemWarehouseInfoCollection&$filter=${encodeURIComponent(z.map((c) => `ItemCode eq '${esc(c)}'`).join(" or "))}&$top=100`);
+          const f = encodeURIComponent(z.map((c) => `ItemCode eq '${esc(c)}'`).join(" or ")); let r;
+          try { r = await sl.get(`Items?$select=ItemCode,ItemName,InventoryUOM,AvgStdPrice,CostAccountingMethod,U_SCL_BASE,ItemWarehouseInfoCollection&$filter=${f}&$top=100`); }
+          catch (e) { r = await sl.get(`Items?$select=ItemCode,ItemName,InventoryUOM,AvgStdPrice,CostAccountingMethod,ItemWarehouseInfoCollection&$filter=${f}&$top=100`); }
           for (const x of (r.value || [])) { let alm = 0, st = 0; for (const w of (x.ItemWarehouseInfoCollection || [])) { st += Number(w.InStock) || 0; const pr = Number(w.StandardAveragePrice) || 0; if (pr > alm) alm = pr; }
-            it[x.ItemCode] = { nom: x.ItemName || "", ud: x.InventoryUOM || "", coste: Number(x.AvgStdPrice) || alm || 0, metodo: MET[x.CostAccountingMethod] || x.CostAccountingMethod || "", stock: r3(st) }; } } catch (e) {} }));
+            it[x.ItemCode] = { nom: x.ItemName || "", ud: x.InventoryUOM || "", coste: Number(x.AvgStdPrice) || alm || 0, metodo: MET[x.CostAccountingMethod] || x.CostAccountingMethod || "", base: x.U_SCL_BASE || "", stock: r3(st) }; } } catch (e) {} }));
         
         // Si no tiene coste, el último precio de compra (lista de precios «compra») como referencia
         const sin = cods.filter((c) => it[c] && !it[c].coste);
