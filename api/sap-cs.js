@@ -62,7 +62,7 @@ const estS = (c) => (MAPA && MAPA.c2e[c] !== undefined ? MAPA.c2e[c] : c);
 const tipC = (v) => { v = String(v ?? "0"); return MAPA && MAPA.t2c[v] !== undefined ? MAPA.t2c[v] : v; };
 const tipS = (c) => (MAPA && MAPA.c2t[c] !== undefined ? MAPA.c2t[c] : c);
 const F = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ""));
-const D = (v) => String(v || "").slice(0, 10) || null;
+const D = (v) => { const t = String(v || ""); return /^\d{8}/.test(t) ? t.slice(0, 4) + "-" + t.slice(4, 6) + "-" + t.slice(6, 8) : t.slice(0, 10) || null; };
 const Y = (v) => String(v || "").toUpperCase() === "Y" || String(v || "") === "tYES";
 // Una línea está SERVIDA solo si SAP la ha copiado a una entrega (15) o factura (13). Cerrar a mano no es servir.
 const conEntrega = (l) => { const t = l.TargetType; if (t === undefined || t === null) return (Number(l.Quantity) || 0) - (Number(l.RemainingOpenQuantity) || 0) > 0; return [15, 13].includes(Number(t)); };
@@ -131,6 +131,20 @@ module.exports = async function handler(req, res) {
         try { const arb = await todas("ProductTrees?$select=TreeCode,ProductTreeLines", 6000); const conR = arb.filter((t) => (t.ProductTreeLines || []).some((l) => /Resource/.test(String(l.ItemType)))); out.recetasConRecursos = conR.length; out.ejemplos = conR.slice(0, 5).map((t) => ({ art: t.TreeCode, recursos: t.ProductTreeLines.filter((l) => /Resource/.test(String(l.ItemType))).map((l) => ({ c: l.ItemCode, q: l.Quantity })) })); out.recetas = arb.length; } catch (e) {}
         return;
       }
+      // Lotes con stock y el precio de la entrada de mercancía (PDN1) que los creó; StockPrice = precio por unidad de inventario en moneda local
+      const sqlLoteEntrada = (lista) => `SELECT T0."ItemCode", T0."BatchNum", T0."WhsCode", T0."Quantity", T1."StockPrice", T1."Price", T1."NumPerMsr", T2."DocNum", T2."DocDate" FROM OIBT T0 INNER JOIN PDN1 T1 ON T1."DocEntry" = T0."BaseEntry" AND T1."LineNum" = T0."BaseLinNum" INNER JOIN OPDN T2 ON T2."DocEntry" = T1."DocEntry" WHERE T0."BaseType" = 20 AND T0."Quantity" > 0 AND T0."ItemCode" IN (${lista})`;
+      // Coste de cada lote tal como lo guarda SAP (valoración por lote): se prueban las tablas posibles y se usa la primera que responde
+      let TABLA_LOTE = null;
+      const loteSap = async (lista) => {
+        const cand = [["OBTN", `SELECT T0."ItemCode", T0."DistNumber" AS "Lote", '' AS "WhsCode", T0."Quantity", T0."CostTotal" FROM OBTN T0 WHERE T0."ItemCode" IN (${lista}) AND T0."Quantity" > 0`],
+          ["OBTN+OBTQ", `SELECT T1."ItemCode", T1."DistNumber" AS "Lote", T0."WhsCode", T0."Quantity", T1."CostTotal", T1."Quantity" AS "QTot" FROM OBTQ T0 INNER JOIN OBTN T1 ON T1."AbsEntry" = T0."MdAbsEntry" WHERE T1."ItemCode" IN (${lista}) AND T0."Quantity" > 0`],
+          ["OBTW+OBTQ", `SELECT T1."ItemCode", T1."DistNumber" AS "Lote", T0."WhsCode", T2."Quantity", T0."CostTotal", T2."Quantity" AS "QTot" FROM OBTW T0 INNER JOIN OBTN T1 ON T1."AbsEntry" = T0."MdAbsEntry" INNER JOIN OBTQ T2 ON T2."MdAbsEntry" = T0."MdAbsEntry" AND T2."WhsCode" = T0."WhsCode" WHERE T1."ItemCode" IN (${lista}) AND T2."Quantity" > 0`]];
+        const errs = []; for (const [nom, sql] of (TABLA_LOTE ? cand.filter((c) => c[0] === TABLA_LOTE) : cand)) { const code = "CRM_CosteLoteSap";
+          try { try { await sl.post("SQLQueries", { SqlCode: code, SqlName: "Coste de lotes en SAP (CRM)", SqlText: sql }); } catch (e) { if (!/already|exist|duplic/i.test(String(e.message))) throw e; await sl.patch(`SQLQueries('${code}')`, { SqlText: sql }); }
+            const rows = await todas(`SQLQueries('${code}')/List`, 20000); TABLA_LOTE = nom;
+            return { tabla: nom, filas: rows.map((x) => { const q = Number(x.Quantity) || 0, qt = Number(x.QTot) || q, ct = Number(x.CostTotal) || 0; return { art: x.ItemCode, lote: x.Lote, alm: x.WhsCode || "", uds: q, coste: qt > 0 ? ct / qt : 0 }; }) }; }
+          catch (e) { errs.push(nom + ": " + String(e.message).slice(0, 90)); } }
+        return { error: errs.join(" · ") }; };
       const costesArt = async (cods) => {
         const MET = { bis_MovingAverage: "Precio medio", bis_Standard: "Estándar", bis_FIFO: "FIFO", bis_SNB: "Por lote/serie" }, it = {};
         const tz = []; for (let i = 0; i < cods.length; i += 40) tz.push(cods.slice(i, i + 40));
@@ -145,6 +159,29 @@ module.exports = async function handler(req, res) {
           if (lc) { it.__lista = lc.PriceListName; const tz2 = []; for (let i = 0; i < sin.length; i += 40) tz2.push(sin.slice(i, i + 40));
             for (const z of tz2) { try { const r = await sl.get(`Items?$select=ItemCode,ItemPrices&$filter=${encodeURIComponent(z.map((c) => `ItemCode eq '${esc(c)}'`).join(" or "))}&$top=100`);
               for (const x of (r.value || [])) { const pp = (x.ItemPrices || []).find((y) => Number(y.PriceList) === Number(lc.PriceListNo)); if (pp && Number(pp.Price) > 0) { it[x.ItemCode].compra = Number(pp.Price); } } } catch (e) {} } } } catch (e) {} }
+        // Valoración por lote/serie (bis_SNB): el coste está en cada lote, no en la ficha → coste medio de los lotes con stock;
+        // si no se puede leer, el de las entradas con valor de los últimos 12 meses (que es el coste con que entraron esos lotes)
+        const snb = cods.filter((c) => it[c] && !it[c].coste && it[c].metodo === MET.bis_SNB);
+        if (snb.length) { const lista = snb.map((c) => "'" + String(c).replace(/'/g, "''") + "'").join(","), desde = new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10).replace(/-/g, "");
+          // Precio de ENTREGA (entradas de mercancía) primero; el coste de los lotes solo si no hay entregas
+          const intentos = [["entradas de mercancía de los últimos 12 meses", `SELECT T0."ItemCode", SUM(T0."TransValue") AS "Val", SUM(T0."InQty") AS "Uds" FROM OINM T0 WHERE T0."ItemCode" IN (${lista}) AND T0."TransType" = 20 AND T0."InQty" > 0 AND T0."TransValue" > 0 AND T0."DocDate" >= '${desde}' GROUP BY T0."ItemCode"`],
+            ["entradas de mercancía de los últimos 12 meses", `SELECT T0."ItemCode", SUM(T0."TransValue") AS "Val", SUM(T0."InQty") AS "Uds" FROM OIVL T0 WHERE T0."ItemCode" IN (${lista}) AND T0."TransType" = 20 AND T0."InQty" > 0 AND T0."TransValue" > 0 AND T0."DocDate" >= '${desde}' GROUP BY T0."ItemCode"`],
+            ["lotes en stock", `SELECT T0."ItemCode", SUM(T0."CostTotal") AS "Val", SUM(T0."Quantity") AS "Uds" FROM OBTN T0 WHERE T0."ItemCode" IN (${lista}) AND T0."Quantity" > 0 GROUP BY T0."ItemCode"`]];
+          const falta = new Set(snb); it.__sql = [];
+          // 1º: el coste de cada lote en stock tal como lo tiene SAP (media ponderada por stock)
+          { const L = await loteSap(lista); if (L.error) it.__sql.push("coste lote SAP: " + L.error); else { const ac = {}; for (const x of L.filas) if (x.coste > 0 && x.uds > 0) { const a = ac[x.art] = ac[x.art] || { v: 0, q: 0, n: 0 }; a.v += x.coste * x.uds; a.q += x.uds; a.n++; }
+            for (const [c, a] of Object.entries(ac)) if (falta.has(c)) { it[c].coste = Math.round(a.v / a.q * 1e6) / 1e6; it[c].fuente = "coste de lote en SAP (" + a.n + " lote" + (a.n > 1 ? "s" : "") + ")"; falta.delete(c); } it.__sql.push("coste lote SAP ok (" + L.tabla + ")"); } }
+          // 2º: si SAP no tiene coste en el lote, cada lote al precio de la ENTRADA de mercancía con que entró
+          if (falta.size) try { const code = "CRM_LotePrecioEntrada", sqlL = sqlLoteEntrada(lista);
+            try { await sl.post("SQLQueries", { SqlCode: code, SqlName: "Lotes en stock con su precio de entrada (CRM)", SqlText: sqlL }); } catch (e) { if (!/already|exist|duplic/i.test(String(e.message))) throw e; await sl.patch(`SQLQueries('${code}')`, { SqlText: sqlL }); }
+            const ac = {}; for (const x of await todas(`SQLQueries('${code}')/List`, 20000)) { const pu = Number(x.StockPrice) || ((Number(x.Price) || 0) / (Number(x.NumPerMsr) || 1)), q = Number(x.Quantity) || 0; if (pu > 0 && q > 0) { const a = ac[x.ItemCode] = ac[x.ItemCode] || { v: 0, q: 0, n: 0 }; a.v += pu * q; a.q += q; a.n++; } }
+            for (const [c, a] of Object.entries(ac)) if (falta.has(c) && a.q > 0) { it[c].coste = Math.round(a.v / a.q * 1e6) / 1e6; it[c].fuente = "lotes en stock a su precio de entrada (" + a.n + " lote" + (a.n > 1 ? "s" : "") + ")"; falta.delete(c); }
+            it.__sql.push("lotes ok"); } catch (e) { it.__sql.push("lotes: " + String(e.message).slice(0, 100)); }
+          for (const [fuente, sql] of intentos) { if (!falta.size) break; const code = "CRM_CosteLote";
+            try { try { await sl.post("SQLQueries", { SqlCode: code, SqlName: "Coste por lote (CRM)", SqlText: sql }); } catch (e) { if (!/already|exist|duplic/i.test(String(e.message))) throw e; await sl.patch(`SQLQueries('${code}')`, { SqlText: sql }); }
+              for (const x of await todas(`SQLQueries('${code}')/List`, 5000)) { const c = x.ItemCode, u = Number(x.Uds) || 0, v = Number(x.Val) || 0; if (falta.has(c) && u > 0 && v > 0) { it[c].coste = Math.round(v / u * 1e6) / 1e6; it[c].fuente = "coste por lote (" + fuente + ")"; falta.delete(c); } }
+              it.__sql.push(fuente + " ok"); }
+            catch (e) { it.__sql.push(fuente + ": " + String(e.message).slice(0, 100)); } } }
         if (cods.some((c) => !it[c])) { try { for (const x of await leeRecursos()) if (cods.includes(x.code)) it[x.code] = { nom: x.nom, ud: x.ud, coste: x.coste, metodo: "Recurso", tipo: x.tipo, recurso: true }; } catch (e) {} }
         return it; };
       // GET ?coste_art=COD → de dónde sale (o no) el coste de un artículo: campos de coste de la ficha, por almacén y listas de precios
@@ -180,6 +217,7 @@ module.exports = async function handler(req, res) {
           const base = { cod: c, nom: f.nom, metodo: f.metodo, stock: r3(f.stock), coste: f.coste, movimientos: tipos };
           if (!f.inventario) return Object.assign(base, { causa: "noinventario", texto: "No es «artículo de inventario»: SAP no lleva su stock ni su coste, así que en producción siempre consume a 0 €" });
           if (f.coste > 0 || f.costeAlm > 0) return Object.assign(base, { causa: "tiene", texto: "Sí tiene coste en SAP (" + (f.coste || f.costeAlm) + " €)" });
+          if (f.metodo === "bis_SNB") { const ve = entradas.filter((x) => x.val > 0 && x.tipo === 20); return Object.assign(base, { causa: ve.length ? "lote" : "lote0", texto: ve.length ? "Se valora por lote: el coste está en cada lote, no en la ficha (precio de entrega " + Math.round(ve.reduce((t, x) => t + x.val, 0) / Math.max(1e-9, ve.reduce((t, x) => t + x.ent, 0)) * 1000) / 1000 + " €/ud)" : "Se valora por lote y sus entradas no tienen valor" }); }
           if (f.metodo === "bis_Standard") return Object.assign(base, { causa: "estandar", texto: "Se valora a coste estándar y el estándar está a 0" });
           if (!m.length) return Object.assign(base, { causa: "sinmov", texto: "Nunca ha tenido un movimiento de stock en SAP: no se compra ni se da entrada en SAP" });
           if (!entradas.length) return Object.assign(base, { causa: "solosalidas", texto: "Solo tiene salidas, nunca una entrada: se consume sin haber entrado (stock negativo)" });
@@ -194,7 +232,12 @@ module.exports = async function handler(req, res) {
         const art = String(q.compras_art);
         try { const x = await sl.get(`Items('${esc(art)}')?$select=ItemCode,ItemName,InventoryItem,PurchaseItem,AvgStdPrice,CostAccountingMethod,InventoryUOM,PurchaseUnit,PurchaseItemsPerUnit,QuantityOnStock,Mainsupplier`);
           out.ficha = { cod: x.ItemCode, nom: x.ItemName, inventario: x.InventoryItem === "tYES", compra: x.PurchaseItem === "tYES", coste: Number(x.AvgStdPrice) || 0, metodo: x.CostAccountingMethod, udInv: x.InventoryUOM, udCompra: x.PurchaseUnit, porUd: x.PurchaseItemsPerUnit, stock: x.QuantityOnStock, proveedor: x.Mainsupplier }; } catch (e) { out.ficha = { error: String(e.message).slice(0, 150) }; }
-        out.compras = []; out.errores = [];
+        out.compras = []; out.errores = []; out.lotes = [];
+        try { const code = "CRM_LotePrecioEntrada", sqlL = sqlLoteEntrada("'" + art.replace(/'/g, "''") + "'");
+          try { await sl.post("SQLQueries", { SqlCode: code, SqlName: "Lotes en stock con su precio de entrada (CRM)", SqlText: sqlL }); } catch (e) { if (!/already|exist|duplic/i.test(String(e.message))) throw e; await sl.patch(`SQLQueries('${code}')`, { SqlText: sqlL }); }
+          out.lotes = (await todas(`SQLQueries('${code}')/List`, 2000)).map((x) => ({ lote: x.BatchNum, alm: x.WhsCode, uds: Number(x.Quantity) || 0, precio: Number(x.StockPrice) || ((Number(x.Price) || 0) / (Number(x.NumPerMsr) || 1)), entrada: x.DocNum, fecha: D(x.DocDate) })); }
+        catch (e) { out.errores.push("Lotes: " + String(e.message).slice(0, 120)); }
+        { const L = await loteSap("'" + art.replace(/'/g, "''") + "'"); if (L.error) out.errores.push("Coste de lote en SAP: " + L.error); else { out.tablaLote = L.tabla; out.lotesSap = L.filas.map((x) => ({ lote: x.lote, alm: x.alm, uds: r3(x.uds), coste: Math.round(x.coste * 1e4) / 1e4 })); } }
         for (const [cab, lin, tipo] of [["OPOR", "POR1", "Pedido de compra"], ["OPDN", "PDN1", "Entrada de mercancía"], ["OPCH", "PCH1", "Factura de compra"]]) { const code = "CRM_ComprasArt_" + lin;
           const sql = `SELECT T1."DocNum", T1."DocDate", T1."CardName", T1."CANCELED", T0."Quantity", T0."unitMsr", T0."NumPerMsr", T0."Price", T0."Currency", T0."LineTotal", T0."WhsCode", T0."BaseType", T0."LineStatus" FROM ${lin} T0 INNER JOIN ${cab} T1 ON T0."DocEntry" = T1."DocEntry" WHERE T0."ItemCode" = :ItemCode ORDER BY T1."DocDate" DESC`;
           try { try { await sl.post("SQLQueries", { SqlCode: code, SqlName: "Compras de un artículo (CRM)", SqlText: sql }); } catch (e) { if (!/already|exist|duplic/i.test(String(e.message))) throw e; await sl.patch(`SQLQueries('${code}')`, { SqlText: sql }); }
@@ -205,7 +248,7 @@ module.exports = async function handler(req, res) {
       }
       if (req.method === "POST" && body.accion === "costes_art") {
         if (AUT.soloVer) throw new Error("los costes solo los puede ver dirección");
-        const cods = [...new Set((body.cods || []).map(String))].slice(0, 4000); const it = await costesArt(cods); out.listaCompra = it.__lista; out.sqlCompras = it.__sql; delete it.__lista; delete it.__sql; out.articulos = it; out.noExisten = cods.filter((c) => !it[c]); return;
+        const cods = [...new Set((body.cods || []).map(String))].slice(0, 4000); const it = await costesArt(cods); out.listaCompra = it.__lista; out.sqlLotes = it.__sql; delete it.__lista; delete it.__sql; out.articulos = it; out.noExisten = cods.filter((c) => !it[c]); return;
       }
       // GET ?costes=1 → escandallo valorado: recetas + coste de cada artículo en SAP + consumo real de las órdenes cerradas (solo CEO)
       if (req.method === "GET" && q.costes !== undefined) {
@@ -218,7 +261,7 @@ module.exports = async function handler(req, res) {
         out.ordenes = ords.filter((o) => Number(o.CompletedQuantity) > 0).map((o) => ({ num: o.DocumentNumber, art: o.ItemNo, hecho: Number(o.CompletedQuantity) || 0, plan: Number(o.PlannedQuantity) || 0, fecha: D(o.ClosingDate), l: (o.ProductionOrderLines || []).filter((x) => x.ItemNo && Number(x.IssuedQuantity) > 0).map((x) => ({ c: x.ItemNo, q: Number(x.IssuedQuantity) || 0 })) }));
         mk("ordenes");
         const cods = [...new Set([...out.recetas.flatMap((r) => [r.art, ...r.l.map((x) => x.c)]), ...out.ordenes.flatMap((o) => [o.art, ...o.l.map((x) => x.c)])])];
-        const it = await costesArt(cods); out.listaCompra = it.__lista; out.sqlCompras = it.__sql; delete it.__lista; delete it.__sql; mk("articulos");
+        const it = await costesArt(cods); out.listaCompra = it.__lista; out.sqlLotes = it.__sql; delete it.__lista; delete it.__sql; mk("articulos");
         out.articulos = it; out.noExisten = cods.filter((c) => !it[c]); mk("compra"); out.tiempos = T; return;
       }
       // POST {accion:"recetas_crear", recetas:[{art, cantidad, lineas:[{cod, uds, alm?}]}]} → crea las que no existen (de 20 en 20)
