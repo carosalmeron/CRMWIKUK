@@ -70,7 +70,7 @@ input.num{width:100%;font:inherit;font-size:24px;font-weight:800;padding:12px;bo
 <div class="top"><div class="fila"><h1>🎧 Customer Service por vendedor</h1><button class="pill" id="dbPill" onclick="cambiarDb()"></button></div>
 <div class="sub" style="font-size:16px">Cada vendedor, con su Customer Service. Se guarda en SAP (ficha del vendedor · «Grupo Seguimiento») y el panel de pedidos lo usará para que cada uno vea solo lo suyo.</div>
 <div class="cen" id="fil"></div></div>
-<div class="w"><div id="org"></div><input class="bus" id="bus" placeholder="🔎 Buscar vendedor" oninput="pintar()"><div id="lista"><div class="carg">Cargando vendedores de SAP y el organigrama…</div></div></div>
+<div class="w"><div id="org"></div><div id="mapa"></div><input class="bus" id="bus" placeholder="🔎 Buscar vendedor" oninput="pintar()"><div id="lista"><div class="carg">Cargando vendedores de SAP y el organigrama…</div></div></div>
 <script>/* pase SAP: lo da el portal al entrar */
 (function(){
   // Pase de SAP: lo da el portal al entrar (usuario y contraseña del portal, una vez cada 30 días).
@@ -124,7 +124,21 @@ input.num{width:100%;font:inherit;font-size:24px;font-weight:800;padding:12px;bo
 <script>
 const API="/api/sap-cs";
 const LS=(k,v)=>{ try{ if(v===undefined) return localStorage.getItem(k); localStorage.setItem(k,v); }catch(e){ return null; } };
-let DB=LS("cs_db_real")||"U_CARO_00", V=[], CAMPO={}, PED={}, CS=[], NUEVO={}, FIL="pedidos";
+let DB=LS("cs_db_real")||"U_CARO_00", V=[], CAMPO={}, PED={}, CS=[], NUEVO={}, FIL="pedidos", EMP=[], USR=[], MAPA={fuente:"usuario",personas:{}}, MAPN={};
+// El campo de SAP es un número: cada persona del organigrama se enlaza con su número de SAP (usuario o empleado). El enlace se guarda en el portal.
+const FBM="https://firestore.googleapis.com/v1/projects/grupo-consolidado-crm/databases/(default)/documents/config_cs/mapa_sap";
+const nrm=(t)=>String(t||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toUpperCase().replace(/[^A-Z0-9 ]/g," ").replace(/\s+/g," ").trim();
+async function leeMapa(){ try{ const r=await fetch(FBM); if(r.ok){ const j=await r.json(); const t=((j.fields||{}).datos||{}).stringValue; if(t) MAPA=Object.assign({fuente:"usuario",personas:{}},JSON.parse(t)); } }catch(e){} }
+async function guardaMapa(){ const r=await fetch(FBM,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:{datos:{stringValue:JSON.stringify(MAPA)},actualizado:{timestampValue:new Date().toISOString()}}})}); if(!r.ok) throw new Error("HTTP "+r.status); }
+const esNum=()=>CAMPO.tipo==="db_Numeric";
+const lista=()=>MAPA.fuente==="empleado"?EMP:USR;
+// Sugerencia automática: código de usuario igual al nombre, o nombre completo que contenga todas las palabras
+function sugiere(nombre){ const k=nrm(nombre), L=lista(); let x=L.find(p=>nrm(p.cod)===k)||L.find(p=>nrm(p.nom)===k);
+  if(!x){ const w=k.split(" ").filter(z=>z.length>1); x=L.find(p=>w.length&&w.every(z=>nrm(p.nom).split(" ").includes(z))); }
+  if(!x&&/^[A-Z][A-Z]{3,}$/.test(k)){ const ini=k[0], ap=k.slice(1); x=L.find(p=>{ const t=nrm(p.nom).split(" "); return t.length>1&&t[0][0]===ini&&t.slice(1).includes(ap); }); }
+  return x?x.n:null; }
+function numDe(nombre){ const v=MAPA.personas[nombre]; return v!==undefined&&v!==null&&v!==""?Number(v):null; }
+function nomDeNum(n){ return Object.keys(MAPA.personas).find(k=>String(MAPA.personas[k])===String(n))||null; }
 const esc=(t)=>String(t??"").replace(/[<>&"]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]));
 function pill(){ const p=document.getElementById("dbPill"); p.textContent=DB==="U_CARO_00"?"SAP REAL":"SAP PRUEBAS"; p.className="pill "+(DB==="U_CARO_00"?"pv":"pp"); }
 function dialogo(h){ cerrar(); const d=document.createElement("div"); d.className="velo"; d.id="velo"; d.innerHTML='<div class="dlg">'+h+'</div>'; d.onclick=(e)=>{ if(e.target===d) cerrar(); }; document.body.appendChild(d); }
@@ -146,16 +160,26 @@ async function leerOrganigrama(){ const T=window.top; if(!T||T===window||typeof 
 async function cargar(){ pill(); document.getElementById("lista").innerHTML='<div class="carg">Cargando vendedores de SAP y el organigrama…</div>';
   let errOrg=""; try{ CS=await leerOrganigrama(); }catch(e){ errOrg=e.message; CS=[]; }
   const j=await api(API+"?asignacion_cs=1"); if(!j.ok){ document.getElementById("lista").innerHTML='<div class="nada" style="color:#B91C1C">'+esc(j.error)+'</div>'; return; }
-  V=j.vendedores||[]; CAMPO=j.campo||{}; PED=j.pedidosAbiertos||{};
+  V=j.vendedores||[]; CAMPO=j.campo||{}; PED=j.pedidosAbiertos||{}; EMP=(j.empleados||[]).filter(x=>x.activo); USR=(j.usuarios||[]).filter(x=>x.activo); await leeMapa();
   const vv=(CAMPO.valores||[]);
   document.getElementById("org").innerHTML='<div class="tot" style="font-weight:600;font-size:17px">'
    +(errOrg?'<span style="color:#B91C1C">⚠️ '+esc(errOrg)+'</span>':CS.length?'Customer Service y Coordinación en el organigrama: '+CS.map(c=>'<b>'+esc(c.nombre)+'</b>'+(c.dep||c.jefe?' ('+[c.dep,c.jefe?'jefe':''].filter(Boolean).join(', ')+')':'')).join(' · '):'<span style="color:#B45309">⚠️ Los departamentos Customer Service y Coordinación del organigrama no tienen personas. Añádelas en Administrador → Organigrama.</span>')
-   +'<br><span style="color:#334155">Campo en SAP (ficha del vendedor · Grupo Seguimiento): '+(CAMPO.error?'<b style="color:#B91C1C">no se ha podido leer: '+esc(CAMPO.error)+'</b>':'tipo <b>'+esc(({db_Alpha:"texto",db_Numeric:"número",db_Date:"fecha",db_Float:"decimal",db_Memo:"texto largo"})[CAMPO.tipo]||CAMPO.tipo||"?")+'</b>'+(CAMPO.tam?' · máximo <b>'+esc(CAMPO.tam)+'</b> caracteres':'')+(CAMPO.tabla?' · <b style="color:#B91C1C">enlazado a la tabla '+esc(CAMPO.tabla)+': solo admite códigos que existan en ella</b>':'')+(vv.length||CAMPO.tabla?'':' · admite texto libre'))+'</span>'
+   +'<br><span style="color:#334155">Campo en SAP (ficha del vendedor · Grupo Seguimiento): '+(CAMPO.error?'<b style="color:#B91C1C">no se ha podido leer: '+esc(CAMPO.error)+'</b>':'tipo <b>'+esc(({db_Alpha:"texto",db_Numeric:"número",db_Date:"fecha",db_Float:"decimal",db_Memo:"texto largo"})[CAMPO.tipo]||CAMPO.tipo||"?")+'</b>'+(CAMPO.tam?' · máximo <b>'+esc(CAMPO.tam)+'</b> caracteres':'')+(CAMPO.tabla?' · <b style="color:#B91C1C">enlazado a la tabla '+esc(CAMPO.tabla)+': solo admite códigos que existan en ella</b>':'')+(vv.length||CAMPO.tabla||CAMPO.tipo==="db_Numeric"?'':' · admite texto libre'))+'</span>'
      +(()=>{ const largo=CAMPO.tam?CS.filter(c=>String(c.nombre).length>Number(CAMPO.tam)):[]; return largo.length?'<br><span style="color:#B91C1C">⚠️ Estos nombres no caben en el campo: '+esc(largo.map(c=>c.nombre).join(", "))+'</span>':''; })()
-     +(CAMPO.tipo&&CAMPO.tipo!=="db_Alpha"&&CAMPO.tipo!=="db_Memo"?'<br><span style="color:#B91C1C">⚠️ El campo no es de texto: no puede guardar nombres de personas.</span>':'')
+     +(esNum()?'<br><span style="color:#1D4ED8;font-weight:700">El campo guarda un número: cada persona se enlaza abajo con su número de SAP.</span>':'')
    +(vv.length?'<br><span style="color:#B45309">En SAP este campo solo admite estos valores: '+esc(vv.map(x=>x.v+(x.d&&x.d!==x.v?' ('+x.d+')':'')).join(', '))+'</span>':'')+'</div>';
-  pintar(); }
-const opciones=()=>{ const vv=(CAMPO.valores||[]); return vv.length?vv.map(x=>({v:x.v,t:x.d||x.v})):CS.map(c=>({v:c.nombre,t:c.nombre+(c.dep||c.jefe?' ('+[c.dep,c.jefe?'jefe':''].filter(Boolean).join(', ')+')':'')})); };
+  pintaMapa(); pintar(); }
+function pintaMapa(){ const e=document.getElementById("mapa"); if(!e) return; if(!esNum()){ e.innerHTML=""; return; } const L=lista();
+  e.innerHTML='<div class="tot" style="font-size:17px;margin-top:10px"><b>🔗 Número de SAP de cada persona</b><div class="sub">El número que se guarda en el vendedor. Elige de dónde sale:</div>'
+   +'<div class="fila" style="gap:8px;margin:8px 0"><button class="dia'+(MAPA.fuente==="usuario"?' on':'')+'" onclick="ponFuente(\'usuario\')">Usuarios de SAP ('+USR.length+')</button><button class="dia'+(MAPA.fuente==="empleado"?' on':'')+'" onclick="ponFuente(\'empleado\')">Empleados de SAP ('+EMP.length+')</button></div>'
+   +CS.map((c,i)=>{ const act=numDe(c.nombre), sug=act===null?sugiere(c.nombre):null, val=act!==null?act:sug;
+     return '<div class="fv"><div class="nv"><b>'+esc(c.nombre)+'</b><div class="sub">'+(act!==null?'enlazado al nº '+act:sug!==null?'<span style="color:#B45309">sugerido nº '+sug+' · confirma y guarda</span>':'<span style="color:#B91C1C">sin enlazar</span>')+'</div></div><select id="mp'+i+'"><option value="">— Elegir —</option>'+L.map(p=>'<option value="'+p.n+'"'+(String(p.n)===String(val)?' selected':'')+'>'+p.n+' · '+esc(p.nom)+(p.cod&&p.cod!==p.nom?' ('+esc(p.cod)+')':'')+'</option>').join("")+'</select></div>'; }).join("")
+   +'<button class="bt z" style="width:100%;margin-top:10px" onclick="guardarMapa(this)">💾 Guardar enlaces</button></div>'; }
+window.ponFuente=(f)=>{ MAPA.fuente=f; pintaMapa(); };
+window.guardarMapa=async(b)=>{ const P={}; CS.forEach((c,i)=>{ const v=document.getElementById("mp"+i).value; if(v) P[c.nombre]=Number(v); });
+  const dup=Object.values(P).filter((v,i,a)=>a.indexOf(v)!==i); if(dup.length) return aviso("Hay dos personas con el mismo número ("+dup[0]+")",false);
+  b.disabled=true; MAPA.personas=P; try{ await guardaMapa(); aviso("✅ Enlaces guardados",true); }catch(e){ aviso("❌ No se han podido guardar: "+e.message,false); } b.disabled=false; pintaMapa(); pintar(); };
+const opciones=()=>{ const vv=(CAMPO.valores||[]); if(esNum()) return CS.filter(c=>numDe(c.nombre)!==null).map(c=>({v:String(numDe(c.nombre)),t:c.nombre+(c.dep||c.jefe?' ('+[c.dep,c.jefe?'jefe':''].filter(Boolean).join(', ')+')':'')})); return vv.length?vv.map(x=>({v:x.v,t:x.d||x.v})):CS.map(c=>({v:c.nombre,t:c.nombre+(c.dep||c.jefe?' ('+[c.dep,c.jefe?'jefe':''].filter(Boolean).join(', ')+')':'')})); };
 window.ponFil=(f)=>{ FIL=f; pintar(); };
 window.cambia=(cod,v)=>{ const x=V.find(y=>y.codigo===cod); if(v===(x.cs||"")) delete NUEVO[cod]; else NUEVO[cod]=v; pintar(true); };
 function pintar(suave){ const q=document.getElementById("bus").value.trim().toUpperCase(), op=opciones();
@@ -166,7 +190,7 @@ function pintar(suave){ const q=document.getElementById("bus").value.trim().toUp
   const nC=Object.keys(NUEVO).length;
   document.getElementById("lista").innerHTML=L.map(x=>{ const val=NUEVO[x.codigo]!==undefined?NUEVO[x.codigo]:(x.cs||""), fuera=val&&!op.some(o=>o.v===val);
     return '<div class="fv'+(NUEVO[x.codigo]!==undefined?' cambia':'')+'"><div class="nv"><b style="font-size:19px">'+esc(x.nombre)+'</b><div class="sub">'+(PED[x.codigo]?'<b>'+PED[x.codigo]+'</b> pedido'+(PED[x.codigo]>1?'s':'')+' abierto'+(PED[x.codigo]>1?'s':''):'sin pedidos abiertos')+(x.email?' · '+esc(x.email):'')+' · código '+x.codigo+'</div></div>'
-     +'<select onchange="cambia('+x.codigo+',this.value)"><option value="">— Sin Customer Service —</option>'+(fuera?'<option value="'+esc(val)+'" selected>'+esc(val)+' (no está en el organigrama)</option>':'')+op.map(o=>'<option value="'+esc(o.v)+'"'+(o.v===val?' selected':'')+'>'+esc(o.t)+'</option>').join("")+'</select></div>'; }).join("")||'<div class="nada">Nada aquí.</div>';
+     +'<select onchange="cambia('+x.codigo+',this.value)"><option value="">— Sin Customer Service —</option>'+(fuera?'<option value="'+esc(val)+'" selected>'+esc(esNum()?'nº '+val+(nomDeNum(val)?' · '+nomDeNum(val):' (sin enlazar)'):val+' (no está en el organigrama)')+'</option>':'')+op.map(o=>'<option value="'+esc(o.v)+'"'+(o.v===val?' selected':'')+'>'+esc(o.t)+'</option>').join("")+'</select></div>'; }).join("")||'<div class="nada">Nada aquí.</div>';
   let b=document.getElementById("barra"); if(!b){ b=document.createElement("div"); b.id="barra"; b.setAttribute("style","position:fixed;left:0;right:0;bottom:0;background:#fff;border-top:2px solid #E2E8F0;padding:12px 16px;z-index:20"); document.body.appendChild(b); }
   b.style.display=nC?"block":"none"; b.innerHTML='<button class="bt v" style="width:100%;font-size:21px;padding:16px" onclick="guardar(this)">💾 Guardar '+nC+' cambio'+(nC>1?'s':'')+' en SAP</button>'; }
 window.guardar=async(b)=>{ const cambios=Object.entries(NUEVO).map(([k,v])=>({vendedor:Number(k),cs:v})); b.disabled=true; b.textContent="Guardando en SAP…";
