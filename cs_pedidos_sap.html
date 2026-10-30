@@ -50,12 +50,13 @@ input.bus{width:100%;font:inherit;font-size:20px;padding:14px 16px;border:2px so
 .msg{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:60;font-weight:800;font-size:19px;padding:14px 20px;border-radius:14px;max-width:92%;box-shadow:0 10px 30px rgba(0,0,0,.25)}
 .carg{text-align:center;padding:40px;font-size:21px;color:var(--g)}
 @media(max-width:640px){body{font-size:18px}.tabs{gap:5px;grid-template-columns:repeat(4,1fr)}.tab{font-size:11px;padding:8px 1px}.tab b{font-size:26px}h1{font-size:22px}.cli{font-size:21px}}
+select.sel{width:100%;font:inherit;font-size:18px;padding:12px;border:2px solid var(--l);border-radius:12px;background:#fff;color:var(--t)}
 </style></head><body>
 <div class="top"><div class="fila"><h1>📋 Customer Service · Pedidos</h1>
 <button class="pill" id="dbPill" onclick="cambiarDb()"></button>
 <button class="bt g" style="padding:9px 14px;font-size:16px" onclick="cargar()">🔄 Actualizar</button></div>
 <div class="tabs" id="tabs"></div></div>
-<div class="w"><div id="filtro"></div><input class="bus" id="bus" placeholder="🔎 Buscar cliente, nº de pedido, ref. cliente o artículo" oninput="pintar()"><div id="lista"><div class="carg">Cargando pedidos de SAP…</div></div></div>
+<div class="w"><div id="alcance"></div><div id="filtro"></div><input class="bus" id="bus" placeholder="🔎 Buscar cliente, nº de pedido, ref. cliente o artículo" oninput="pintar()"><div id="lista"><div class="carg">Cargando pedidos de SAP…</div></div></div>
 <script>/* pase SAP: lo da el portal al entrar */
 (function(){
   // Pase de SAP: lo da el portal al entrar (usuario y contraseña del portal, una vez cada 30 días).
@@ -140,12 +141,50 @@ async function cargar(){
   try{ sessionStorage.setItem("cs_cache_"+DB,JSON.stringify(j)); }catch(e){}
   marcaCarga("✓ Actualizado a las "+new Date().toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}));
   aplicar(j); }
+// ===== Quién ve qué: cada Customer Service sus vendedores; el jefe los suyos o todo el equipo; CEO y dirección, todo =====
+// La asignación vendedor → Customer Service está en SAP (ficha del vendedor · Grupo Seguimiento); las personas, en el organigrama del portal.
+let TODOS=[], YO={tipo:"todos", nombre:"", equipo:[]}, ALC=LS("cs_alcance")||"mios", FCS="", FVEN="";
+const nrm=(s)=>String(s||"").toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g,"").trim();
+async function quienSoy(){ const T=window.top; let u=null; try{ u=T&&T!==window?T.currentUser:null; }catch(e){} if(!u){ try{ u=JSON.parse(localStorage.getItem("gc_portal_user")||"null"); }catch(e){} }
+  if(!u) return {tipo:"todos",nombre:"",equipo:[]};
+  const rol=String(u.rol||"").toLowerCase(), ceo=u.id==="ceo"||["ceo","crm_director","director","admin"].includes(rol);
+  let equipo=[], jefes=[], p=null;
+  try{ if(T&&T!==window&&typeof T.loadOrgData==="function"){ if(typeof T.loadUsersFB==="function"&&!(T.adminUsers||[]).length){ T.adminUsers=await T.loadUsersFB(); } await T.loadOrgData();
+      const dep=(T.DEPTOS||[]).find(d=>d.id==="customer")||(T.DEPTOS||[]).find(d=>/customer/i.test(d.nombre||""));
+      if(dep){ jefes=T.orgRespsDe(dep.id); equipo=jefes.concat(T.orgMiembrosDe(dep.id)); }
+      p=T.orgPersona(typeof T.idPortal==="function"?T.idPortal(u):u.id)||T.orgPersona(u.nombre); } }catch(e){}
+  const nombre=(p&&p.nombre)||u.nombre||u.id, claves=[nrm(nombre),nrm(u.nombre),nrm(u.id)].filter(Boolean);
+  const esJefe=jefes.some(x=>claves.includes(nrm(x.nombre))||(p&&x.orgId===p.orgId)), esCS=esJefe||equipo.some(x=>claves.includes(nrm(x.nombre))||(p&&x.orgId===p.orgId));
+  return {tipo:ceo?"todos":esJefe?"jefe":esCS?"cs":"todos", nombre, claves, equipo:equipo.map(x=>x.nombre), ceo};
+}
+const esMio=(p)=>YO.claves&&YO.claves.includes(nrm(p.cs));
+const delEquipo=(p)=>YO.equipo.some(n=>nrm(n)===nrm(p.cs));
+function filtrar(){ PED=TODOS.filter(p=>{
+    if(YO.tipo==="cs"&&!esMio(p)) return false;
+    if(YO.tipo==="jefe"&&ALC==="mios"&&!esMio(p)) return false;
+    if(YO.tipo==="jefe"&&ALC==="equipo"&&!(esMio(p)||delEquipo(p))) return false;
+    if(FCS&&(FCS==="__sin"?p.cs:nrm(p.cs)!==nrm(FCS))) return false;
+    if(FVEN&&String(p.vendedorCod)!==FVEN) return false;
+    return true; });
+  pintaAlcance(); pintar(); }
+function pintaAlcance(){ const el=document.getElementById("alcance"); if(!el) return; let h="";
+  const base=TODOS.filter(p=>YO.tipo==="cs"?esMio(p):YO.tipo==="jefe"?(ALC==="mios"?esMio(p):(esMio(p)||delEquipo(p))):true);
+  if(YO.tipo==="jefe") h+='<div class="dias">'+[["mios","👤 Mis vendedores"],["equipo","👥 Todo mi equipo"]].map(o=>'<button class="dia'+(ALC===o[0]?' on':'')+'" onclick="ponAlc(\''+o[0]+'\')">'+o[1]+'</button>').join("")+'</div>';
+  if(YO.tipo==="cs") h+='<div class="sub" style="margin-bottom:8px;font-weight:700">👤 Pedidos de tus vendedores ('+esc(YO.nombre)+')</div>';
+  const css=[...new Set(TODOS.map(p=>p.cs).filter(Boolean))].sort(), vens=[...new Map(base.map(p=>[String(p.vendedorCod),p.vendedor])).entries()].filter(x=>x[1]).sort((a,b)=>a[1].localeCompare(b[1]));
+  h+='<div class="fila" style="margin-bottom:10px">'+((YO.tipo==="todos"||(YO.tipo==="jefe"&&ALC==="equipo"))?'<select class="sel" style="flex:1;margin:0" onchange="ponFCS(this.value)"><option value="">Todos los Customer Service</option>'+css.map(c=>'<option value="'+esc(c)+'"'+(FCS===c?' selected':'')+'>🎧 '+esc(c)+'</option>').join("")+'<option value="__sin"'+(FCS==="__sin"?' selected':'')+'>⚠️ Vendedores sin Customer Service</option></select>':'')
+   +'<select class="sel" style="flex:1;margin:0" onchange="ponFVEN(this.value)"><option value="">Todos los vendedores</option>'+vens.map(v=>'<option value="'+esc(v[0])+'"'+(FVEN===v[0]?' selected':'')+'>'+esc(v[1])+'</option>').join("")+'</select></div>';
+  el.innerHTML=h; }
+window.ponAlc=(a)=>{ ALC=a; LS("cs_alcance",a); FCS=""; filtrar(); };
+window.ponFCS=(v)=>{ FCS=v; filtrar(); };
+window.ponFVEN=(v)=>{ FVEN=v; filtrar(); };
+quienSoy().then(y=>{ YO=y; if(TODOS.length) filtrar(); });
 function aplicar(j){
-  PED=j.pedidos||[]; TIPOS=j.tipos||{}; PUEDE=j.puedeEscribir!==false;
+  TODOS=j.pedidos||[]; PED=TODOS; TIPOS=j.tipos||{}; PUEDE=j.puedeEscribir!==false;
   // Invalidados por riesgo, precio o cobros (y sin confirmar) van aparte: en las demás pestañas solo queda lo que se puede ejecutar
   // Riesgo: como la lista de SAP, aunque el pedido esté confirmado. Precio/muestras: solo si no está confirmado
-    PED.forEach(p=>{ if(p.etapa==="servido"||p.etapa==="anulado") return; if(p.riesgo||(!p.confirmado&&bloqueos(p).length)){ p.etapaFlujo=p.etapa; p.etapa="bloqueado"; } });
-  pintar(); }
+    TODOS.forEach(p=>{ if(p.etapa==="servido"||p.etapa==="anulado") return; if(p.riesgo||(!p.confirmado&&bloqueos(p).length)){ p.etapaFlujo=p.etapa; p.etapa="bloqueado"; } });
+  filtrar(); }
 function bloqueos(p){ const b=[]; if(p.riesgo) b.push("🛑 Bloqueado por riesgo"+(p.confirmado?" (estaba confirmado)":"")); if(p.precios) b.push("💶 Pendiente de precio"); if(p.cobros) b.push("💳 Bloqueado por cobros"); if(p.muestras) b.push("🧪 Bloqueado por muestras"); return b; }
 function lineaH(p,l){
   let cls, dice, sub="";
@@ -198,7 +237,7 @@ function pedidoH(p){
         +(puede?(falta?'<div class="sub" style="color:#B91C1C;font-weight:700;margin-top:8px">⚠️ Hay artículos sin stock: si validas, el almacén no podrá servirlos completos.</div>':'')+(b.length?'<div class="sub" style="color:#B91C1C;font-weight:700;margin-top:8px">⚠️ '+b.join(" · ")+'</div>':''):'<div class="sub" style="margin-top:8px">No se puede validar hasta que producción/compras contesten.</div>'); }
     cuerpo+='</div>'; }
   return '<div class="ped'+(b.length?' bloq':'')+'"><div class="cab" onclick="abrir('+p.entry+')"><div class="cli">'+(ab?'▾ ':'▸ ')+esc(p.nombre)+'</div>'
-    +'<div class="meta">Pedido <b>'+p.num+'</b> · Ref. cliente: <b>'+(p.ref?esc(p.ref):'—')+'</b> · '+esc(p.vendedor||"sin comercial")+' · entró el '+fx(p.fecha)+' · se pidió para el <b>'+fx(p.pideComercial||p.entrega)+'</b> · '+eur(p.total)+'</div>'
+    +'<div class="meta">Pedido <b>'+p.num+'</b> · Ref. cliente: <b>'+(p.ref?esc(p.ref):'—')+'</b> · '+esc(p.vendedor||"sin comercial")+(p.cs?' · 🎧 '+esc(p.cs):'')+' · entró el '+fx(p.fecha)+' · se pidió para el <b>'+fx(p.pideComercial||p.entrega)+'</b> · '+eur(p.total)+'</div>'
     +'<div class="chips">'+chips.join("")+'</div></div>'+cuerpo+'</div>';
 }
 window.abrir=(e)=>{ ABIERTO[e]=!ABIERTO[e]; pintar(); };
@@ -232,7 +271,7 @@ function pintar(){ pill();
     const caja=(id,ic,t,arr,col)=>'<div onclick="ponVer(\''+id+'\')" style="'+(VER===id?'border-color:#0F172A;':'')+(col?'color:'+col:'')+'"><b>'+arr.length+'</b>'+ic+' '+t+'<span style="display:block;font-size:14px;color:#64748B">'+eur(arr.reduce((t,p)=>t+p.total,0))+'</span></div>';
     F.innerHTML='<div class="res">'+caja("","📊","Todos",PED)+caja("nuevo","🆕","Nuevos",g("nuevo"))+caja("esperando","⏳","Esperando",g("esperando"))+caja("reconfirmar","🔁","Reconfirmar",g("reconfirmar"))+caja("validado","📦","En almacén",g("validado"))+caja("servido","🚚","Servidos",g("servido"))+caja("anulado","❌","Cerrados sin entrega",g("anulado"))+caja("bloq","🛑","Invalidados",bl,"#B91C1C")+caja("tarde","⚠️","Atrasados",at,"#B91C1C")+'</div>';
     if(VER==="bloq") L=bl; else if(VER==="tarde") L=at; else if(VER) L=g(VER); }
-  if(q) L=L.filter(p=>(p.nombre+" "+p.num+" "+(p.ref||"")+" "+p.cliente+" "+p.vendedor+" "+p.lineas.map(l=>l.articulo+" "+l.descripcion).join(" ")).toLowerCase().includes(q));
+  if(q) L=L.filter(p=>(p.nombre+" "+p.num+" "+(p.ref||"")+" "+p.cliente+" "+p.vendedor+" "+(p.cs||"")+" "+p.lineas.map(l=>l.articulo+" "+l.descripcion).join(" ")).toLowerCase().includes(q));
   L.sort(TAB==="servido"||TAB==="anulado"?(a,b)=>String(b.servidoEl).localeCompare(String(a.servidoEl))||b.num-a.num:TAB==="validado"?(a,b)=>String(fserv(a)).localeCompare(String(fserv(b))):(a,b)=>String(a.fecha).localeCompare(String(b.fecha))||a.num-b.num);
   const tot=L.reduce((t,p)=>t+p.total,0);
   document.getElementById("lista").innerHTML=L.length?L.map(pedidoH).join("")+'<div class="tot">Total: '+L.length+' pedido'+(L.length>1?'s':'')+' · '+eur(tot)+'</div>':'<div class="nada">'+ET[TAB][0]+' No hay pedidos aquí'+(TAB==="validado"?' para ese día':'')+'.</div>';
