@@ -133,6 +133,21 @@ module.exports = async function handler(req, res) {
           } catch (e) { out.errores.push({ art, error: String(e.message || e).replace(/^SAP no ha aceptado /, "").slice(0, 220) }); } }
         return;
       }
+      // Asignación de Customer Service a vendedores, guardada en SAP: campo U_UC_GrupoSeguimiento de la ficha del vendedor
+      if (req.method === "GET" && q.asignacion_cs !== undefined) {
+        const v = await todas("SalesPersons?$select=SalesEmployeeCode,SalesEmployeeName,Email,Active,Locked,U_UC_GrupoSeguimiento,U_SCL_Agrup", 300);
+        out.vendedores = v.filter((x) => Number(x.SalesEmployeeCode) >= 0).map((x) => ({ codigo: x.SalesEmployeeCode, nombre: x.SalesEmployeeName, email: x.Email || "", activo: x.Active !== "tNO" && x.Locked !== "tYES", cs: x.U_UC_GrupoSeguimiento || "", grupo: x.U_SCL_Agrup ?? null }));
+        try { const r = await sl.get("UserFieldsMD?$filter=TableName eq 'OSLP' and Name eq 'UC_GrupoSeguimiento'&$select=Name,Type,Size,EditSize,ValidValuesMD"); const f = (r.value || [])[0] || {}; out.campo = { tipo: f.Type, tam: f.EditSize || f.Size, valores: (f.ValidValuesMD || []).map((x) => ({ v: x.Value, d: x.Description })) }; } catch (e) { out.campo = { error: String(e.message).slice(0, 120) }; }
+        // Pedidos abiertos por vendedor (para saber a quién afecta)
+        try { const r = await todas("Orders?$select=SalesPersonCode&$filter=DocumentStatus eq 'bost_Open'", 3000); out.pedidosAbiertos = {}; for (const p of r) out.pedidosAbiertos[p.SalesPersonCode] = (out.pedidosAbiertos[p.SalesPersonCode] || 0) + 1; } catch (e) {}
+        return;
+      }
+      if (req.method === "POST" && body.accion === "asignar_cs") {
+        const L = (body.cambios || []).filter((x) => x && Number(x.vendedor) >= 0).slice(0, 200); if (!L.length) throw new Error("no hay cambios");
+        out.hechos = []; out.errores = [];
+        for (const x of L) { try { await sl.patch(`SalesPersons(${Number(x.vendedor)})`, { U_UC_GrupoSeguimiento: String(x.cs || "").slice(0, 100) }); out.hechos.push(Number(x.vendedor)); } catch (e) { out.errores.push({ vendedor: x.vendedor, error: String(e.message || e).replace(/^SAP no ha aceptado /, "").slice(0, 200) }); } }
+        out.ok = !out.errores.length || out.hechos.length > 0; out.mensaje = out.hechos.length + " vendedor(es) actualizados en SAP" + (out.errores.length ? " · " + out.errores.length + " con error" : ""); return;
+      }
       // Diagnóstico: GET ?config_cs=1 → ¿dónde guarda SAP qué Customer Service lleva cada vendedor?
       if (req.method === "GET" && q.config_cs !== undefined) {
         const R = {}, prueba = async (k, f) => { try { R[k] = await f(); } catch (e) { R[k] = "✗ " + String(e.message || e).slice(0, 160); } };
@@ -268,11 +283,11 @@ module.exports = async function handler(req, res) {
       if (req.method === "GET" && q.pedidos !== undefined) {
         const T = {}, mide = async (k, f) => { const t = Date.now(); try { return await f(); } finally { T[k] = Math.round((Date.now() - t) / 100) / 10; } };
         // Todo lo que no depende de los pedidos va EN PARALELO (comerciales, compras, fabricación, servidos)
-        const nombres = {}; const lleg = {}; const addL = (it, o) => { (lleg[it] = lleg[it] || []).push(o); };
+        const nombres = {}, csDe = {}; const lleg = {}; const addL = (it, o) => { (lleg[it] = lleg[it] || []).push(o); };
         const ENT = {}; let entregasOk = true; const PVK = {};
         let cerr = []; const diasS = Math.min(60, Math.max(1, Number(q.dias) || 15)), desdeS = new Date(Date.now() - diasS * 864e5).toISOString().slice(0, 10);
         const paralelo = Promise.all([
-          mide("comerciales", async () => { try { for (const v of await todas("SalesPersons?$select=SalesEmployeeCode,SalesEmployeeName", 500)) nombres[String(v.SalesEmployeeCode)] = String(v.SalesEmployeeName || "").trim(); } catch (e) {} }),
+          mide("comerciales", async () => { try { for (const v of await todas("SalesPersons?$select=SalesEmployeeCode,SalesEmployeeName,U_UC_GrupoSeguimiento", 500)) { nombres[String(v.SalesEmployeeCode)] = String(v.SalesEmployeeName || "").trim(); csDe[String(v.SalesEmployeeCode)] = String(v.U_UC_GrupoSeguimiento || "").trim(); } } catch (e) {} }),
           mide("compras", async () => { try { for (const p of await todas("PurchaseOrders?$select=DocNum,DocDueDate,DocumentLines&$filter=DocumentStatus eq 'bost_Open'", 2000)) for (const l of (p.DocumentLines || [])) { const u = Number(l.RemainingOpenQuantity) || 0; if (u > 0 && l.LineStatus !== "bost_Close") addL(l.ItemCode, { fecha: D(l.ShipDate || p.DocDueDate), uds: u, de: "compra " + p.DocNum, alm: l.WarehouseCode, tipo: "comp", orden: p.DocNum, clase: "pedido de compra" }); } } catch (e) { out.avisoCompras = String(e.message).slice(0, 120); } }),
           mide("fabricacion", async () => { try { for (const o of await todas("ProductionOrders?$select=DocumentNumber,ItemNo,PlannedQuantity,CompletedQuantity,DueDate,Warehouse,ProductionOrderStatus,Remarks&$filter=ProductionOrderStatus eq 'boposPlanned' or ProductionOrderStatus eq 'boposReleased'", 2000)) { const pv = String(o.Remarks || "").match(/PV:(\d+)\/(\d+)/); if (pv) PVK[pv[1] + "/" + pv[2]] = o.DocumentNumber; const u = (Number(o.PlannedQuantity) || 0) - (Number(o.CompletedQuantity) || 0); if (u > 0) addL(o.ItemNo, { fecha: D(o.DueDate), uds: u, de: "fabricación " + o.DocumentNumber, alm: o.Warehouse, tipo: "fab", orden: o.DocumentNumber, estado: o.ProductionOrderStatus === "boposReleased" ? "Liberada" : "Planificada", hecho: Number(o.CompletedQuantity) || 0 }); } } catch (e) {} }),
           // Entregas y facturas hechas desde pedidos (BaseType 17): lo único que cuenta como SERVIDO
@@ -313,7 +328,7 @@ module.exports = async function handler(req, res) {
           // Gestionado (2): producción/compras han dado fecha → en Reconfirmar, Customer Service la confirma (pasa a 3 Planificado; el pedido sigue sin confirmar)
           const etapa = conf ? "validado" : esperando ? "esperando" : (gestionadas || enFab || L.some((l) => l.sol && !l.sol.pendiente)) ? "reconfirmar" : "nuevo";
           return { entry: p.DocEntry, num: p.DocNum, ref: String(p.NumAtCard || "").trim(), fecha: D(p.DocDate), entrega: D(p.DocDueDate), pideComercial: D(p.U_SCL_FechaAgente), actualizado: D(p.UpdateDate), cliente: p.CardCode, nombre: p.CardName,
-            vendedor: nombres[String(p.SalesPersonCode)] || "", total: Number(p.DocTotal) || 0, comentario: String(p.Comments || ""), confirmado: conf,
+            vendedor: nombres[String(p.SalesPersonCode)] || "", vendedorCod: p.SalesPersonCode, cs: csDe[String(p.SalesPersonCode)] || "", total: Number(p.DocTotal) || 0, comentario: String(p.Comments || ""), confirmado: conf,
             // Bloqueado = invalidado y nadie lo ha validado (ValidadoFijo = N)
             // (29/10/2026) La lista de SAP de «invalidados por riesgo» coincide con la marca U_SCL_InvalidadoxCobros = Y (sin mirar ValidadoFijo ni si está confirmado)
             precios: Y(p.U_SCL_InvalidadoxPrecios) && !Y(p.U_SCL_ValidadoFijoPrecios), cobros: false, riesgo: Y(p.U_SCL_InvalidadoxCobros), muestras: Y(p.U_SCL_InvalidadoxMuestras) && !Y(p.U_SCL_ValidadoFijoMuestra), etapa, todoStock: L.length > 0 && L.every((l) => l.hay || (l.sol && !l.sol.pendiente)), lineas: L };
@@ -327,7 +342,7 @@ module.exports = async function handler(req, res) {
           });
           const algo = L.some((l) => l.conEntrega);
           out.pedidos.push({ entry: p.DocEntry, num: p.DocNum, ref: String(p.NumAtCard || "").trim(), fecha: D(p.DocDate), entrega: D(p.DocDueDate), pideComercial: D(p.U_SCL_FechaAgente), servidoEl: (algo && ultima) || D(p.ClosingDate || p.UpdateDate), cliente: p.CardCode, nombre: p.CardName,
-            vendedor: nombres[String(p.SalesPersonCode)] || "", total: Number(p.DocTotal) || 0, comentario: String(p.Comments || ""), confirmado: true, etapa: algo ? "servido" : "anulado", lineas: L });
+            vendedor: nombres[String(p.SalesPersonCode)] || "", vendedorCod: p.SalesPersonCode, cs: csDe[String(p.SalesPersonCode)] || "", total: Number(p.DocTotal) || 0, comentario: String(p.Comments || ""), confirmado: true, etapa: algo ? "servido" : "anulado", lineas: L });
         }
         // Detalle por artículo (para desplegar): stock y comprometido por almacén, órdenes de fabricación y compras abiertas
         out.articulos = {};
