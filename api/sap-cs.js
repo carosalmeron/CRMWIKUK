@@ -188,6 +188,21 @@ module.exports = async function handler(req, res) {
           return Object.assign(base, { causa: "otro", texto: "Tiene entradas con valor y stock, pero el coste es 0: revisar con el partner (posible revalorización a 0)" }); });
         return;
       }
+      // GET ?compras_art=COD → cómo se compra un artículo: pedidos, entradas y facturas de compra (precio, unidad, almacén) y su ficha
+      if (req.method === "GET" && q.compras_art) {
+        if (AUT.soloVer) throw new Error("los costes solo los puede ver dirección");
+        const art = String(q.compras_art);
+        try { const x = await sl.get(`Items('${esc(art)}')?$select=ItemCode,ItemName,InventoryItem,PurchaseItem,AvgStdPrice,CostAccountingMethod,InventoryUOM,PurchaseUnit,PurchaseItemsPerUnit,QuantityOnStock,Mainsupplier`);
+          out.ficha = { cod: x.ItemCode, nom: x.ItemName, inventario: x.InventoryItem === "tYES", compra: x.PurchaseItem === "tYES", coste: Number(x.AvgStdPrice) || 0, metodo: x.CostAccountingMethod, udInv: x.InventoryUOM, udCompra: x.PurchaseUnit, porUd: x.PurchaseItemsPerUnit, stock: x.QuantityOnStock, proveedor: x.Mainsupplier }; } catch (e) { out.ficha = { error: String(e.message).slice(0, 150) }; }
+        out.compras = []; out.errores = [];
+        for (const [cab, lin, tipo] of [["OPOR", "POR1", "Pedido de compra"], ["OPDN", "PDN1", "Entrada de mercancía"], ["OPCH", "PCH1", "Factura de compra"]]) { const code = "CRM_ComprasArt_" + lin;
+          const sql = `SELECT T1."DocNum", T1."DocDate", T1."CardName", T1."CANCELED", T0."Quantity", T0."unitMsr", T0."NumPerMsr", T0."Price", T0."Currency", T0."LineTotal", T0."WhsCode", T0."BaseType", T0."LineStatus" FROM ${lin} T0 INNER JOIN ${cab} T1 ON T0."DocEntry" = T1."DocEntry" WHERE T0."ItemCode" = :ItemCode ORDER BY T1."DocDate" DESC`;
+          try { try { await sl.post("SQLQueries", { SqlCode: code, SqlName: "Compras de un artículo (CRM)", SqlText: sql }); } catch (e) { if (!/already|exist|duplic/i.test(String(e.message))) throw e; await sl.patch(`SQLQueries('${code}')`, { SqlText: sql }); }
+            const r = await sl.get(`SQLQueries('${code}')/List?ItemCode='${esc(art)}'`);
+            for (const x of (r.value || []).slice(0, 15)) out.compras.push({ tipo, num: x.DocNum, fecha: D(x.DocDate), proveedor: x.CardName, anulado: x.CANCELED === "Y", uds: Number(x.Quantity) || 0, ud: x.unitMsr || "", porUd: Number(x.NumPerMsr) || 1, precio: Number(x.Price) || 0, moneda: x.Currency || "", importe: Number(x.LineTotal) || 0, alm: x.WhsCode, deDoc: Number(x.BaseType), abierta: x.LineStatus === "O" }); }
+          catch (e) { out.errores.push(tipo + ": " + String(e.message).slice(0, 120)); } }
+        return;
+      }
       if (req.method === "POST" && body.accion === "costes_art") {
         if (AUT.soloVer) throw new Error("los costes solo los puede ver dirección");
         const cods = [...new Set((body.cods || []).map(String))].slice(0, 4000); const it = await costesArt(cods); out.listaCompra = it.__lista; out.sqlCompras = it.__sql; delete it.__lista; delete it.__sql; out.articulos = it; out.noExisten = cods.filter((c) => !it[c]); return;
