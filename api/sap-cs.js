@@ -283,8 +283,11 @@ module.exports = async function handler(req, res) {
       // Asignación de Customer Service a vendedores, guardada en SAP: campo U_UC_GrupoSeguimiento de la ficha del vendedor
       if (req.method === "GET" && q.asignacion_cs !== undefined) {
         const v = await todas("SalesPersons?$select=SalesEmployeeCode,SalesEmployeeName,Email,Active,Locked,U_UC_GrupoSeguimiento,U_SCL_Agrup", 300);
-        out.vendedores = v.filter((x) => Number(x.SalesEmployeeCode) >= 0).map((x) => ({ codigo: x.SalesEmployeeCode, nombre: x.SalesEmployeeName, email: x.Email || "", activo: x.Active !== "tNO" && x.Locked !== "tYES", cs: x.U_UC_GrupoSeguimiento || "", grupo: x.U_SCL_Agrup ?? null }));
+        out.vendedores = v.filter((x) => Number(x.SalesEmployeeCode) >= 0).map((x) => ({ codigo: x.SalesEmployeeCode, nombre: x.SalesEmployeeName, email: x.Email || "", activo: x.Active !== "tNO" && x.Locked !== "tYES", cs: x.U_UC_GrupoSeguimiento ? String(x.U_UC_GrupoSeguimiento) : "", grupo: x.U_SCL_Agrup ?? null }));
         try { const r = await sl.get("UserFieldsMD?$filter=TableName eq 'OSLP' and Name eq 'UC_GrupoSeguimiento'"); const f = (r.value || [])[0] || {}; out.campo = { tipo: f.Type, sub: f.SubType, tabla: f.LinkedTable || f.LinkedUDO || "", obligatorio: f.Mandatory, tam: f.EditSize || f.Size, valores: (f.ValidValuesMD || []).map((x) => ({ v: x.Value, d: x.Description })) }; } catch (e) { out.campo = { error: String(e.message).slice(0, 120) }; }
+        // El campo es un número: personas de SAP a las que puede referirse (empleados y usuarios)
+        try { out.empleados = (await todas("EmployeesInfo?$select=EmployeeID,FirstName,MiddleName,LastName,Active", 2000)).map((x) => ({ n: x.EmployeeID, nom: [x.FirstName, x.MiddleName, x.LastName].filter(Boolean).join(" "), activo: x.Active !== "tNO" })); } catch (e) { out.empleados = []; out.errorEmpleados = String(e.message).slice(0, 120); }
+        try { out.usuarios = (await todas("Users?$select=InternalKey,UserCode,UserName,Locked", 1000)).map((x) => ({ n: x.InternalKey, cod: x.UserCode, nom: x.UserName || x.UserCode, activo: x.Locked !== "tYES" })); } catch (e) { out.usuarios = []; out.errorUsuarios = String(e.message).slice(0, 120); }
         // Pedidos abiertos por vendedor (para saber a quién afecta)
         try { const r = await todas("Orders?$select=SalesPersonCode&$filter=DocumentStatus eq 'bost_Open'", 3000); out.pedidosAbiertos = {}; for (const p of r) out.pedidosAbiertos[p.SalesPersonCode] = (out.pedidosAbiertos[p.SalesPersonCode] || 0) + 1; } catch (e) {}
         return;
@@ -292,7 +295,8 @@ module.exports = async function handler(req, res) {
       if (req.method === "POST" && body.accion === "asignar_cs") {
         const L = (body.cambios || []).filter((x) => x && Number(x.vendedor) >= 0).slice(0, 200); if (!L.length) throw new Error("no hay cambios");
         out.hechos = []; out.errores = [];
-        for (const x of L) { try { await sl.patch(`SalesPersons(${Number(x.vendedor)})`, { U_UC_GrupoSeguimiento: String(x.cs || "").slice(0, 100) }); out.hechos.push(Number(x.vendedor)); } catch (e) { out.errores.push({ vendedor: x.vendedor, error: String(e.message || e).replace(/^SAP no ha aceptado /, "").slice(0, 200) }); } }
+        for (const x of L) { try { const val = x.cs === "" || x.cs === null || x.cs === undefined ? null : /^\d+$/.test(String(x.cs)) ? Number(x.cs) : String(x.cs).slice(0, 100);
+            await sl.patch(`SalesPersons(${Number(x.vendedor)})`, { U_UC_GrupoSeguimiento: val }); out.hechos.push(Number(x.vendedor)); } catch (e) { out.errores.push({ vendedor: x.vendedor, error: String(e.message || e).replace(/^SAP no ha aceptado /, "").slice(0, 200) }); } }
         out.ok = !out.errores.length || out.hechos.length > 0; if (!out.ok) out.error = "SAP no ha guardado ninguno: " + out.errores[0].error; out.mensaje = out.hechos.length + " vendedor(es) actualizados en SAP" + (out.errores.length ? " · " + out.errores.length + " con error" : ""); return;
       }
       // Diagnóstico: GET ?config_cs=1 → ¿dónde guarda SAP qué Customer Service lleva cada vendedor?
