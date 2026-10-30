@@ -107,7 +107,7 @@ module.exports = async function handler(req, res) {
     await conSesion(db, async (sl) => {
       MAPA = await cargarMapa(sl); out.mapaSap = { estados: MAPA.valores.UC_SolicitudEstado || null, centros: MAPA.valores.UC_Solicitud || null, error: MAPA.error || undefined };
       const todas = async (ruta, max = 3000) => { let o = [], r = await sl.get(ruta); for (;;) { o.push(...(r.value || [])); const sig = r["odata.nextLink"] || r["@odata.nextLink"]; if (!sig || o.length >= max) break; r = await sl.get(String(sig).replace(/^.*\/b1s\/v\d\//, "")); } return o; };
-      const pedido = async (entry) => { const o = await sl.get(`Orders(${Number(entry)})?$select=DocEntry,DocNum,CardName,DocumentStatus,Confirmed,DocumentLines`); if (o.DocumentStatus !== "bost_Open") throw new Error("el pedido " + o.DocNum + " ya está cerrado"); return o; };
+      const pedido = async (entry) => { const o = await sl.get(`Orders(${Number(entry)})?$select=DocEntry,DocNum,CardName,DocumentStatus,Confirmed,DocDueDate,U_SCL_FPLANIF_INI,U_SCL_FPLANIF_ANT,DocumentLines`); if (o.DocumentStatus !== "bost_Open") throw new Error("el pedido " + o.DocNum + " ya está cerrado"); return o; };
 
       // Diagnóstico: qué valores tienen los campos propios (U_) de cabecera en los pedidos abiertos
       // ===== Recetas (listas de materiales) desde beas =====
@@ -289,7 +289,7 @@ module.exports = async function handler(req, res) {
         const paralelo = Promise.all([
           mide("comerciales", async () => { try { for (const v of await todas("SalesPersons?$select=SalesEmployeeCode,SalesEmployeeName,U_UC_GrupoSeguimiento", 500)) { nombres[String(v.SalesEmployeeCode)] = String(v.SalesEmployeeName || "").trim(); csDe[String(v.SalesEmployeeCode)] = String(v.U_UC_GrupoSeguimiento || "").trim(); } } catch (e) {} }),
           mide("compras", async () => { try { for (const p of await todas("PurchaseOrders?$select=DocNum,DocDueDate,DocumentLines&$filter=DocumentStatus eq 'bost_Open'", 2000)) for (const l of (p.DocumentLines || [])) { const u = Number(l.RemainingOpenQuantity) || 0; if (u > 0 && l.LineStatus !== "bost_Close") addL(l.ItemCode, { fecha: D(l.ShipDate || p.DocDueDate), uds: u, de: "compra " + p.DocNum, alm: l.WarehouseCode, tipo: "comp", orden: p.DocNum, clase: "pedido de compra" }); } } catch (e) { out.avisoCompras = String(e.message).slice(0, 120); } }),
-          mide("fabricacion", async () => { try { for (const o of await todas("ProductionOrders?$select=DocumentNumber,ItemNo,PlannedQuantity,CompletedQuantity,DueDate,Warehouse,ProductionOrderStatus,Remarks&$filter=ProductionOrderStatus eq 'boposPlanned' or ProductionOrderStatus eq 'boposReleased'", 2000)) { const pv = String(o.Remarks || "").match(/PV:(\d+)\/(\d+)/); if (pv) PVK[pv[1] + "/" + pv[2]] = o.DocumentNumber; const u = (Number(o.PlannedQuantity) || 0) - (Number(o.CompletedQuantity) || 0); if (u > 0) addL(o.ItemNo, { fecha: D(o.DueDate), uds: u, de: "fabricación " + o.DocumentNumber, alm: o.Warehouse, tipo: "fab", orden: o.DocumentNumber, estado: o.ProductionOrderStatus === "boposReleased" ? "Liberada" : "Planificada", hecho: Number(o.CompletedQuantity) || 0 }); } } catch (e) {} }),
+          mide("fabricacion", async () => { try { for (const o of await todas("ProductionOrders?$select=DocumentNumber,ItemNo,PlannedQuantity,CompletedQuantity,DueDate,Warehouse,ProductionOrderStatus,Remarks&$filter=ProductionOrderStatus eq 'boposPlanned' or ProductionOrderStatus eq 'boposReleased'", 2000)) { const pv = String(o.Remarks || "").match(/PV:(\d+)\/(\d+)/); if (pv) PVK[pv[1] + "/" + pv[2]] = { num: o.DocumentNumber, fecha: D(o.DueDate) }; const u = (Number(o.PlannedQuantity) || 0) - (Number(o.CompletedQuantity) || 0); if (u > 0) addL(o.ItemNo, { fecha: D(o.DueDate), uds: u, de: "fabricación " + o.DocumentNumber, alm: o.Warehouse, tipo: "fab", orden: o.DocumentNumber, estado: o.ProductionOrderStatus === "boposReleased" ? "Liberada" : "Planificada", hecho: Number(o.CompletedQuantity) || 0 }); } } catch (e) {} }),
           // Entregas y facturas hechas desde pedidos (BaseType 17): lo único que cuenta como SERVIDO
           mide("entregas", async () => { if (q.solo === "prod") return; const desdeE = new Date(Date.now() - (diasS + 10) * 864e5).toISOString().slice(0, 10);
             for (const [ent, tipo] of [["DeliveryNotes", "entrega"], ["Invoices", "factura"]]) { try {
@@ -319,10 +319,15 @@ module.exports = async function handler(req, res) {
             const libre = r3(w.stock - (w.comp - pend));
             const otros = Object.entries(s.w).filter(([k, v]) => k !== alm && v.stock - v.comp > 0).map(([k, v]) => ({ alm: k, libre: r3(v.stock - v.comp) })).sort((a, b) => b.libre - a.libre).slice(0, 3);
             const tipo = tipC(l.U_UC_Solicitud), est = estC(l.U_UC_SolicitudEstado), conSol = !!TIPOS[tipo];
+            // Avisos de retraso: la fabricación acaba después de la fecha, no hay stock ni entrada a tiempo, o la fecha ya pasó
+            const alertas = [], fl = D(l.ShipDate) || D(p.DocDueDate), of = PVK[p.DocNum + "/" + l.LineNum];
+            if (fl && fl < hoy) alertas.push("la fecha (" + fl.split("-").reverse().join("/") + ") ya pas\u00f3 y sigue sin servir");
+            else if (of && of.fecha && fl && of.fecha > fl) alertas.push("la fabricaci\u00f3n (orden " + of.num + ") termina el " + of.fecha.split("-").reverse().join("/"));
+            else if (!of && libre < pend && fl) { const ent = (lleg[l.ItemCode] || []).find((x) => x.fecha && x.fecha >= hoy && x.uds > 0); if (!ent) alertas.push("no hay stock ni ninguna entrada prevista"); else if (ent.fecha > fl) alertas.push("la pr\u00f3xima entrada (" + ent.de + ") llega el " + ent.fecha.split("-").reverse().join("/")); }
             return { linea: l.LineNum, articulo: l.ItemCode, descripcion: l.ItemDescription, pide: r3(pend), ud: s.ud || l.MeasureUnit || "", alm, stock: r3(w.stock), libre, hay: libre >= pend,
-              otros, llegadas: (lleg[l.ItemCode] || []).filter((x) => !x.fecha || x.fecha >= hoy).slice(0, 3), entrega: D(l.ShipDate), precio: Number(l.Price) || 0, importe: Number(l.LineTotal) || 0,
+              otros, alertas, llegadas: (lleg[l.ItemCode] || []).filter((x) => !x.fecha || x.fecha >= hoy).slice(0, 3), entrega: D(l.ShipDate), precio: Number(l.Price) || 0, importe: Number(l.LineTotal) || 0,
               sol: conSol ? { tipo, quien: TIPOS[tipo], estado: est, estadoN: ESTADOS[est] || est, detalle: String(l.U_UC_SolicitudDetalle || ""), pendiente: est === "0" || est === "1",
-                orden: PVK[p.DocNum + "/" + l.LineNum] || null, ordenada: !!PVK[p.DocNum + "/" + l.LineNum] || /Compra pedida|Orden (de fabricación )?\d+/i.test(String(l.U_UC_SolicitudDetalle || "")) } : null };
+                orden: (PVK[p.DocNum + "/" + l.LineNum] || {}).num || null, ordenada: !!PVK[p.DocNum + "/" + l.LineNum] || /Compra pedida|Orden (de fabricación )?\d+/i.test(String(l.U_UC_SolicitudDetalle || "")) } : null };
           });
           const conf = Y(p.Confirmed), esperando = L.some((l) => l.sol && l.sol.pendiente), gestionadas = L.some((l) => l.sol && l.sol.estado === "2"), enFab = L.some((l) => l.sol && l.sol.estado === "3");
           // Gestionado (2): producción/compras han dado fecha → en Reconfirmar, Customer Service la confirma (pasa a 3 Planificado; el pedido sigue sin confirmar)
@@ -363,8 +368,16 @@ module.exports = async function handler(req, res) {
         const o = await pedido(body.entry);
         const L = (o.DocumentLines || []).filter((l) => l.LineStatus !== "bost_Close" && TIPOS[tipC(l.U_UC_Solicitud)] && estC(l.U_UC_SolicitudEstado) === "2" && (body.linea === undefined || body.linea === null || body.linea === "" || Number(l.LineNum) === Number(body.linea)));
         if (!L.length) throw new Error("no hay líneas con fecha propuesta por producción/compras");
-        await sl.patch(`Orders(${o.DocEntry})`, { DocumentLines: L.map((l) => ({ LineNum: l.LineNum, U_UC_SolicitudEstado: estS("3"), U_UC_SolicitudDetalle: (String(l.U_UC_SolicitudDetalle || "") + " | Fecha confirmada con el cliente: " + String(l.ShipDate || "").slice(0, 10).split("-").reverse().join("/")).slice(-250) })) });
-        out.mensaje = "Fecha de producción confirmada en " + L.length + " línea" + (L.length > 1 ? "s" : "") + " del pedido " + o.DocNum + " (" + L.map((l) => l.ItemCode).join(", ") + "). El pedido sigue sin confirmar hasta que esté listo."; return;
+        // (30/10/2026) Al confirmar: las líneas pasan a Planificado (producción/compras lo ven como pendiente de ejecutar) y,
+        // si ya no queda ninguna línea pendiente de respuesta, el pedido se CONFIRMA y queda en almacén con la fecha propuesta.
+        const hechas = new Set(L.map((l) => l.LineNum)), abiertas = (o.DocumentLines || []).filter((l) => l.LineStatus !== "bost_Close");
+        const quedan = abiertas.filter((l) => !hechas.has(l.LineNum) && TIPOS[tipC(l.U_UC_Solicitud)] && ["0", "1", "2"].includes(estC(l.U_UC_SolicitudEstado)));
+        const fechas = abiertas.map((l) => String(l.ShipDate || "").slice(0, 10)).filter(F).sort(), ultima = fechas[fechas.length - 1];
+        const cambio = { DocumentLines: L.map((l) => ({ LineNum: l.LineNum, U_UC_SolicitudEstado: estS("3"), U_UC_SolicitudDetalle: (String(l.U_UC_SolicitudDetalle || "") + " | Fecha confirmada con el cliente: " + String(l.ShipDate || "").slice(0, 10).split("-").reverse().join("/")).slice(-250) })) };
+        if (!quedan.length) { cambio.Confirmed = "tYES"; if (ultima && ultima > String(o.DocDueDate || "").slice(0, 10)) cambio.DocDueDate = ultima; }
+        await sl.patch(`Orders(${o.DocEntry})`, cambio);
+        out.confirmado = !quedan.length;
+        out.mensaje = "Fecha confirmada en " + L.length + " línea" + (L.length > 1 ? "s" : "") + " del pedido " + o.DocNum + (quedan.length ? ". El pedido sigue abierto: faltan " + quedan.length + " línea(s) por contestar (" + quedan.map((l) => l.ItemCode).join(", ") + ")" : ". Pasa al almacén y a producción/compras como definitivo"); return;
       }
       // Comentarios del pedido (abierto o cerrado): sustituye el texto entero. SAP admite hasta 254 caracteres
       if (req.method === "POST" && body.accion === "comentario") {
@@ -390,10 +403,17 @@ module.exports = async function handler(req, res) {
         const o = await pedido(body.entry); const ab = (o.DocumentLines || []).filter((x) => x.LineStatus !== "bost_Close");
         const L = body.linea !== undefined && body.linea !== null && body.linea !== "" ? ab.filter((x) => Number(x.LineNum) === Number(body.linea)) : ab;
         if (!L.length) throw new Error("línea no encontrada");
-        const cambio = { DocumentLines: L.map((x) => ({ LineNum: x.LineNum, ShipDate: body.fecha })) };
+        const conf = Y(o.Confirmed), motivo = String(body.motivo || "").trim();
+        if (conf && motivo.length < 3) throw new Error("el pedido ya est\u00e1 confirmado: elige el motivo del cambio de fecha");
+        const antes = String(L[0].ShipDate || o.DocDueDate || "").slice(0, 10), fx = (d) => d ? d.split("-").reverse().join("/") : "\u2014";
+        const hist = " | " + new Date().toISOString().slice(8, 10) + "/" + new Date().toISOString().slice(5, 7) + ": fecha " + fx(antes) + " \u2192 " + fx(body.fecha) + (motivo ? " (" + motivo + ")" : "") + (AUT.quien ? " \u00b7 " + AUT.quien : "");
+        const cambio = { DocumentLines: L.map((x) => ({ LineNum: x.LineNum, ShipDate: body.fecha, ...(conf ? { U_UC_SolicitudDetalle: (String(x.U_UC_SolicitudDetalle || "") + hist).slice(-250) } : {}) })) };
         if (L.length === ab.length || body.fecha > String(o.DocDueDate || "").slice(0, 10)) cambio.DocDueDate = body.fecha;
-        await sl.patch(`Orders(${o.DocEntry})`, cambio);
-        out.mensaje = "Fecha de servicio cambiada al " + body.fecha.split("-").reverse().join("/") + (L.length === 1 ? " (" + L[0].ItemCode + ")" : " (todo el pedido)"); return;
+        // Fecha planificaci\u00f3n inicial (la primera vez) y anterior: as\u00ed se sabe cu\u00e1ntas veces y cu\u00e1nto se movi\u00f3
+        if (conf && antes) { cambio.U_SCL_FPLANIF_ANT = antes; if (!o.U_SCL_FPLANIF_INI) cambio.U_SCL_FPLANIF_INI = antes; }
+        try { await sl.patch(`Orders(${o.DocEntry})`, cambio); }
+        catch (e) { if (/U_SCL_FPLANIF/i.test(String(e.message))) { delete cambio.U_SCL_FPLANIF_ANT; delete cambio.U_SCL_FPLANIF_INI; await sl.patch(`Orders(${o.DocEntry})`, cambio); out.aviso = "no se ha podido guardar la fecha anterior en SAP"; } else throw e; }
+        out.mensaje = "Fecha de servicio cambiada al " + fx(body.fecha) + (L.length === 1 ? " (" + L[0].ItemCode + ")" : " (todo el pedido)") + (motivo ? " \u00b7 motivo: " + motivo : ""); return;
       }
       // ===== Panel de producción y compras =====
       if (req.method === "GET" && q.almacenes !== undefined) {
@@ -506,8 +526,8 @@ module.exports = async function handler(req, res) {
             for (const it of (r.value || [])) { let st = 0, co = 0, pe = 0; for (const w of (it.ItemWarehouseInfoCollection || [])) { st += Number(w.InStock) || 0; co += Number(w.Committed) || 0; pe += Number(w.Ordered) || 0; }
               INF[it.ItemCode] = { nom: it.ItemName, ud: it.InventoryUOM || "", compra: it.PurchaseItem === "tYES", plazo: Number(it.LeadTime) || 0, st, co, pe }; } } catch (e) {} })); };
         if (body.aceptados) { const ped = await todas("Orders?$select=DocNum,CardName,DocDueDate,DocumentLines&$filter=DocumentStatus eq 'bost_Open'", 1500);
-          for (const p of ped) for (const l of (p.DocumentLines || [])) if (l.LineStatus !== "bost_Close" && ["1", "2", "3", "6", "7"].includes(tipC(l.U_UC_Solicitud)) && ["0", "1", "2"].includes(estC(l.U_UC_SolicitudEstado))) {
-            const f = D(l.ShipDate || p.DocDueDate); if (f && f > hasta) continue; ACE.push({ art: l.ItemCode, uds: Number(l.RemainingOpenQuantity) || 0, fecha: f, de: "pedido " + p.DocNum + " · " + String(p.CardName || "").slice(0, 24) + (estC(l.U_UC_SolicitudEstado) === "2" ? "" : " (sin confirmar)") }); }
+          for (const p of ped) for (const l of (p.DocumentLines || [])) if (l.LineStatus !== "bost_Close" && ["1", "2", "3", "6", "7"].includes(tipC(l.U_UC_Solicitud)) && ["0", "1", "2", "3"].includes(estC(l.U_UC_SolicitudEstado))) {
+            const f = D(l.ShipDate || p.DocDueDate); if (f && f > hasta) continue; ACE.push({ art: l.ItemCode, uds: Number(l.RemainingOpenQuantity) || 0, fecha: f, de: "pedido " + p.DocNum + " · " + String(p.CardName || "").slice(0, 24) + (estC(l.U_UC_SolicitudEstado) === "3" ? "" : " (sin confirmar)") }); }
           // Solo lo que no cubren el stock ni las órdenes que ya hay: falta = −(stock − comprometido + pedido); el comprometido ya incluye estos pedidos
           await leeInf(ACE.map((x) => x.art)); const porA = {}; for (const x of ACE) (porA[x.art] = porA[x.art] || []).push(x);
           for (const [art, xs] of Object.entries(porA)) { const i = INF[art] || { st: 0, co: 0, pe: 0 }; let falta = Math.max(0, -(i.st - i.co + i.pe)); xs.sort((a, b) => String(a.fecha || "9").localeCompare(String(b.fecha || "9")));
