@@ -129,7 +129,9 @@ function dialogo(h){ cerrar(); const d=document.createElement("div"); d.classNam
 window.cerrar=()=>{ const d=document.getElementById("velo"); if(d) d.remove(); };
 window.cambiarDb=()=>dialogo('<h2>¿En qué SAP?</h2><button class="bt a op" onclick="ponDb(\'U_CARO_99\')">🧪 Pruebas · U_CARO_99</button><button class="bt op" style="background:#B91C1C" onclick="ponDb(\'U_CARO_00\')">⚠️ Real · U_CARO_00</button><button class="bt g op" onclick="cerrar()">Cancelar</button>');
 window.ponDb=(d)=>{ DB=d; LS("rec_db",d); cerrar(); pill(); HECHO={}; if(REC.length) comprobar(); };
-async function api(url,opts){ const r=await fetch(url+(url.includes("?")?"&":"?")+"db="+encodeURIComponent(DB),Object.assign({credentials:"same-origin",headers:{"Content-Type":"application/json","x-crm-key":LS("sap_pedido_key")||""}},opts||{})); return r.json().catch(()=>({ok:false,error:"sin respuesta del servidor (HTTP "+r.status+")"})); }
+async function api(url,opts){ const ac=new AbortController(), to=setTimeout(()=>ac.abort(),75000);
+  try{ const r=await fetch(url+(url.includes("?")?"&":"?")+"db="+encodeURIComponent(DB),Object.assign({credentials:"same-origin",signal:ac.signal,headers:{"Content-Type":"application/json","x-crm-key":LS("sap_pedido_key")||""}},opts||{})); return await r.json().catch(()=>({ok:false,error:"sin respuesta del servidor (HTTP "+r.status+")"})); }
+  catch(e){ return {ok:false,error:ac.signal.aborted?"SAP ha tardado demasiado: pulsa Reintentar":"sin conexión: pulsa Reintentar"}; } finally{ clearTimeout(to); } }
 // Números de beas: «0,59» (coma decimal) · «5.000» (punto de miles) · «1»
 const num=(v)=>{ v=String(v||"").trim(); if(!v||v==="?") return null; if(v.includes(",")) v=v.replace(/\./g,"").replace(",","."); else if(/^\d{1,3}(\.\d{3})+$/.test(v)) v=v.replace(/\./g,""); const x=Number(v); return isFinite(x)?x:null; };
 const mcd=(a,b)=>b?mcd(b,a%b):a, mcm=(a,b)=>a/mcd(a,b)*b;
@@ -162,6 +164,7 @@ function pintar(){ pill(); if(!CHK) return; const c={}; Object.keys(ET).forEach(
   document.getElementById("res").innerHTML=document.getElementById("res").innerHTML.split('<div class="carg">')[0].split('<div class="tabs"')[0]
    +'<div class="tabs" style="grid-template-columns:repeat('+tabs.length+',1fr);margin-top:12px">'+tabs.map(k=>'<div class="tab'+(TAB===k?' on':'')+'" onclick="verTab(\''+k+'\')"><b>'+c[k]+'</b>'+ET[k][0]+' '+ET[k][1]+'</div>').join("")+'</div>'
    +(TAB==="nueva"&&c.nueva?'<button class="bt v" style="width:100%;font-size:21px;padding:18px;margin-top:12px" onclick="crear()">✅ Crear '+c.nueva+' receta'+(c.nueva>1?'s':'')+' en '+(DB==="U_CARO_00"?"SAP REAL":"SAP PRUEBAS")+'</button>':'')
+   +(TAB==="error"&&c.error?'<button class="bt v" style="width:100%;font-size:21px;padding:18px;margin-top:12px" onclick="reintentar()">🔁 Reintentar '+c.error+' con error</button>':'')
    +(TAB==="mal"?'<div class="sub" style="margin-top:10px;font-size:17px">Estas no se pueden crear hasta que existan en SAP los artículos marcados en rojo (o el propio artículo fabricado).</div>':'')
    +(TAB==="ya"?'<div class="sub" style="margin-top:10px;font-size:17px">Ya tienen receta en SAP: no se tocan.</div>':'');
   document.getElementById("lista").innerHTML=L.slice(0,300).map(r=>'<div class="lin '+(r.estado==="nueva"?"re":r.estado==="mal"||r.estado==="error"?"no":"ok")+'"><div class="art" onclick="verRec(\''+esc(r.art)+'\')" style="cursor:pointer">'+(VER[r.art]?'▾ ':'▸ ')+esc(r.art)+' <span class="desc">'+esc(r.nombre)+'</span>'+(r.envasado?' <span class="ch cz">envasado</span>':'')+'</div>'
@@ -171,14 +174,23 @@ function pintar(){ pill(); if(!CHK) return; const c={}; Object.keys(ET).forEach(
    +(L.length>300?'<div class="tot">… y '+(L.length-300)+' más (usa el buscador)</div>':'')+(L.length?'':'<div class="nada">Nada aquí.</div>'); }
 window.crear=()=>{ const N=REC.filter(r=>r.estado==="nueva"); dialogo('<h2>✅ Crear '+N.length+' recetas</h2><p>En <b>'+(DB==="U_CARO_00"?"SAP REAL (U_CARO_00)":"SAP PRUEBAS (U_CARO_99)")+'</b>. Las que ya existen no se tocan.</p>'
    +(DB==="U_CARO_00"?'<p style="color:#B91C1C;font-weight:800">⚠️ Es el SAP real. ¿Las has revisado antes en pruebas?</p>':'')+'<button class="bt v op" onclick="crearYa(this)">Sí, crear</button><button class="bt g op" onclick="cerrar()">Cancelar</button>'); };
-window.crearYa=async(b)=>{ b.disabled=true; const N=REC.filter(r=>r.estado==="nueva"); let hechas=0;
-  for(let i=0;i<N.length;i+=20){ b.textContent="Creando "+Math.min(i+20,N.length)+" de "+N.length+"…"; const T=N.slice(i,i+20);
+window.crearYa=async(b,est)=>{ b.disabled=true; const N=REC.filter(r=>r.estado===(est||"nueva")); let ok=0, ko=0, ya=0, cola=N.slice(), hechas=0, vueltas=0;
+  let wl=null; try{ wl=await navigator.wakeLock.request("screen"); }catch(e){}
+  const p=document.createElement("div"); p.style.cssText="font-size:19px;font-weight:800;margin-top:12px;text-align:center"; b.after(p);
+  const pinta=()=>{ b.textContent="Creando… "+hechas+" de "+N.length; p.innerHTML="✅ "+ok+" creadas · ⏭ "+ya+" ya estaban · ❌ "+ko+" con error<br><span style=\"font-weight:600;font-size:16px;color:#64748B\">No cierres esta pantalla</span>"; };
+  pinta();
+  while(cola.length&&vueltas<400){ vueltas++; const T=cola.splice(0,5);
     const j=await api(API,{method:"POST",body:JSON.stringify({accion:"recetas_crear",recetas:T.map(r=>({art:r.art,cantidad:r.cantidad,lineas:r.lineas.map(l=>({cod:l.cod,uds:l.uds,alm:l.alm}))}))})});
-    if(!j.ok){ T.forEach(r=>{ r.estado=HECHO[r.art]="error"; r.err=j.error; }); continue; }
-    (j.creadas||[]).forEach(a=>{ const r=REC.find(x=>x.art===a); if(r){ r.estado=HECHO[a]="creada"; hechas++; } });
-    (j.saltadas||[]).forEach(a=>{ const r=REC.find(x=>x.art===a); if(r) r.estado=HECHO[a]="ya"; });
-    (j.errores||[]).forEach(e=>{ const r=REC.find(x=>x.art===e.art); if(r){ r.estado=HECHO[e.art]="error"; r.err=e.error; } }); }
-  cerrar(); TAB=REC.some(r=>r.estado==="error")?"error":"creada"; pintar(); };
+    if(!j.ok){ T.forEach(r=>{ r.estado=HECHO[r.art]="error"; r.err=j.error; }); ko+=T.length; hechas+=T.length; pinta(); continue; }
+    (j.creadas||[]).forEach(a=>{ const r=REC.find(x=>x.art===a); if(r){ r.estado=HECHO[a]="creada"; r.err=""; ok++; hechas++; } });
+    (j.saltadas||[]).forEach(a=>{ const r=REC.find(x=>x.art===a); if(r){ r.estado=HECHO[a]="ya"; ya++; hechas++; } });
+    (j.errores||[]).forEach(e=>{ const r=REC.find(x=>x.art===e.art); if(r){ r.estado=HECHO[e.art]="error"; r.err=e.error; ko++; hechas++; } });
+    (j.pendientes||[]).forEach(a=>{ const r=REC.find(x=>x.art===a); if(r) cola.push(r); });
+    pinta(); }
+  try{ wl&&wl.release(); }catch(e){}
+  cerrar(); TAB=REC.some(r=>r.estado==="error")?"error":"creada"; pintar(); aviso(ok+" recetas creadas"+(ko?" · "+ko+" con error":""),!ko); };
+function aviso(t,ok){ const d=document.createElement("div"); d.style.cssText="position:fixed;left:16px;right:16px;bottom:20px;padding:14px 16px;border-radius:12px;font:800 18px system-ui,sans-serif;z-index:100001;color:#fff;background:"+(ok?"#16A34A":"#B91C1C"); d.textContent=t; document.body.appendChild(d); setTimeout(()=>d.remove(),6000); }
+window.reintentar=()=>{ const N=REC.filter(r=>r.estado==="error"); dialogo('<h2>🔁 Reintentar '+N.length+' recetas</h2><p>En <b>'+(DB==="U_CARO_00"?"SAP REAL (U_CARO_00)":"SAP PRUEBAS (U_CARO_99)")+'</b>.</p><button class="bt v op" onclick="crearYa(this,\'error\')">Sí, reintentar</button><button class="bt g op" onclick="cerrar()">Cancelar</button>'); };
 pill();
 </script>
 <script>(function(){ if(!/[?&]menu=1/.test(location.search)) return; var b=document.createElement('a'); b.href='produccion_menu.html'; b.textContent='← Producción'; b.setAttribute('style','display:block;background:#0F172A;color:#fff;font:700 15px system-ui,sans-serif;padding:10px 16px;text-decoration:none'); document.body.insertBefore(b,document.body.firstChild); })();</script>
