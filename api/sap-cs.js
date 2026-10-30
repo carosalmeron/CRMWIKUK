@@ -122,15 +122,16 @@ module.exports = async function handler(req, res) {
       }
       // POST {accion:"recetas_crear", recetas:[{art, cantidad, lineas:[{cod, uds, alm?}]}]} → crea las que no existen (de 20 en 20)
       if (req.method === "POST" && body.accion === "recetas_crear") {
-        const R = (body.recetas || []).slice(0, 25); out.creadas = []; out.saltadas = []; out.errores = [];
-        for (const x of R) { const art = String(x.art || "").toUpperCase(); try {
+        const R = (body.recetas || []).slice(0, 25); out.creadas = []; out.saltadas = []; out.errores = []; out.pendientes = [];
+        for (const x of R) { const art = String(x.art || "").toUpperCase();
+          // Vercel corta a los 60 s: lo que no dé tiempo se devuelve como pendiente y la pantalla lo vuelve a mandar
+          if (Date.now() - t0 > 40000) { out.pendientes.push(art); continue; }
+          try {
             const L = (x.lineas || []).filter((l) => l && l.cod && Number(l.uds) > 0); if (!L.length) throw new Error("sin componentes");
-            let ya = false; try { await sl.get(`ProductTrees('${esc(art)}')?$select=TreeCode`); ya = true; } catch (e) {}
-            if (ya) { out.saltadas.push(art); continue; }
             await sl.post("ProductTrees", { TreeCode: art, TreeType: "iProductionTree", Quantity: Number(x.cantidad) || 1,
               ProductTreeLines: L.map((l) => Object.assign({ ItemCode: String(l.cod).toUpperCase(), Quantity: Math.round(Number(l.uds) * 1e6) / 1e6, ItemType: "pit_Item" }, l.alm ? { Warehouse: String(l.alm).toUpperCase() } : {})) });
             out.creadas.push(art);
-          } catch (e) { out.errores.push({ art, error: String(e.message || e).replace(/^SAP no ha aceptado /, "").slice(0, 220) }); } }
+          } catch (e) { const m = String(e.message || e); if (/already exists|ya existe|-2035/i.test(m)) { out.saltadas.push(art); continue; } out.errores.push({ art, error: m.replace(/^SAP no ha aceptado /, "").slice(0, 220) }); } }
         return;
       }
       // Asignación de Customer Service a vendedores, guardada en SAP: campo U_UC_GrupoSeguimiento de la ficha del vendedor
