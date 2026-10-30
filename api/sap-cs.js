@@ -145,10 +145,13 @@ module.exports = async function handler(req, res) {
       // Mismo producto en otros envases: GET ?hermanos=C5.8F.N32 → granel (C5.8F) y otros formatos (C5.8F.xxx) con stock libre
       if (req.method === "GET" && q.hermanos) {
         const art = String(q.hermanos).toUpperCase().trim(), partes = art.split("."); out.articulo = art; out.granel = null; out.otros = [];
-        if (partes.length < 2) return;
-        const base = partes.slice(0, -1).join("."), libre = (it) => { let st = 0, co = 0, pe = 0; for (const w of (it.ItemWarehouseInfoCollection || [])) { st += Number(w.InStock) || 0; co += Number(w.Committed) || 0; pe += Number(w.Ordered) || 0; } return { stock: r3(st), libre: r3(st - co), pedido: r3(pe) }; };
+        // El padre (granel) está en la ficha del artículo: U_SCL_BASE (o U_SCL_PADRE). Si no, se deduce del código quitando la última parte
+        let base = ""; try { const a0 = await sl.get(`Items('${esc(art)}')?$select=ItemCode,U_SCL_BASE,U_SCL_PADRE`); base = String(a0.U_SCL_BASE || a0.U_SCL_PADRE || "").toUpperCase().trim(); } catch (e) {}
+        out.padreDe = base ? "ficha (U_SCL_BASE)" : "código"; if (!base) { if (partes.length < 2) return; base = partes.slice(0, -1).join("."); }
+        const libre = (it) => { let st = 0, co = 0, pe = 0; for (const w of (it.ItemWarehouseInfoCollection || [])) { st += Number(w.InStock) || 0; co += Number(w.Committed) || 0; pe += Number(w.Ordered) || 0; } return { stock: r3(st), libre: r3(st - co), pedido: r3(pe) }; };
         try { const g = await sl.get(`Items('${esc(base)}')?$select=ItemCode,ItemName,InventoryUOM,ItemWarehouseInfoCollection`); out.granel = Object.assign({ cod: g.ItemCode, nom: g.ItemName, ud: g.InventoryUOM || "" }, libre(g)); } catch (e) {}
-        const fm = await todas(`Items?$select=ItemCode,ItemName,InventoryUOM,Frozen,ItemWarehouseInfoCollection&$filter=startswith(ItemCode,'${esc(base)}.')`, 100);
+        let fm = []; try { fm = await todas(`Items?$select=ItemCode,ItemName,InventoryUOM,Frozen,ItemWarehouseInfoCollection&$filter=U_SCL_BASE eq '${esc(base)}' or startswith(ItemCode,'${esc(base)}.')`, 150); } catch (e) { fm = await todas(`Items?$select=ItemCode,ItemName,InventoryUOM,Frozen,ItemWarehouseInfoCollection&$filter=startswith(ItemCode,'${esc(base)}.')`, 100); }
+        fm = fm.filter((x) => String(x.ItemCode).toUpperCase() !== base);
         out.otros = await Promise.all(fm.filter((x) => x.ItemCode !== art && x.Frozen !== "tYES").map(async (x) => { const o = Object.assign({ cod: x.ItemCode, nom: x.ItemName, ud: x.InventoryUOM || "" }, libre(x));
           try { const t = await sl.get(`ProductTrees('${esc(x.ItemCode)}')?$select=Quantity,ProductTreeLines`); const l = (t.ProductTreeLines || []).find((y) => y.ItemCode === base); if (l) o.porEnvase = Math.round((Number(l.Quantity) || 0) / (Number(t.Quantity) || 1) * 1e6) / 1e6; } catch (e) {}
           return o; }));
@@ -169,8 +172,9 @@ module.exports = async function handler(req, res) {
           catch (e) { if (i === 0) { for (const sq of sqls) { try { await sl.post("SQLQueries", { SqlCode: NOMBRE, SqlName: "Lotes con stock por almacén (CRM)", SqlText: sq }); break; } catch (e2) {} } } } }
         out.lotes = (lotes || []).map((l) => ({ lote: l.BatchNum, alm: l.WhsCode, uds: r3(l.Quantity), caduca: D(l.ExpDate), entrada: D(l.InDate) })).sort((a, b) => String(a.caduca || "9").localeCompare(String(b.caduca || "9")) || String(a.entrada).localeCompare(String(b.entrada)));
         if (!lotes) out.avisoLotes = "no se han podido leer los lotes con cantidades";
-        // Formatos: artículos cuyo código empieza por GRANEL. (p. ej. MX243.20R2.C140); unidades por envase y embalaje desde su receta
-        const fm = await todas(`Items?$select=ItemCode,ItemName,InventoryUOM,Frozen&$filter=startswith(ItemCode,'${esc(g)}.')`, 200);
+        // Formatos: artículos cuyo padre (U_SCL_BASE) es el granel, o cuyo código empieza por GRANEL.; unidades por envase y embalaje desde su receta
+        let fm = []; try { fm = await todas(`Items?$select=ItemCode,ItemName,InventoryUOM,Frozen&$filter=U_SCL_BASE eq '${esc(g)}' or startswith(ItemCode,'${esc(g)}.')`, 200); } catch (e) { fm = await todas(`Items?$select=ItemCode,ItemName,InventoryUOM,Frozen&$filter=startswith(ItemCode,'${esc(g)}.')`, 200); }
+        fm = fm.filter((x) => String(x.ItemCode).toUpperCase() !== g);
         out.formatos = await Promise.all(fm.filter((x) => x.Frozen !== "tYES").map(async (x) => {
           const f = { cod: x.ItemCode, nom: x.ItemName, ud: x.InventoryUOM || "", receta: false, porEnvase: null, embalaje: [] };
           try { const t = await sl.get(`ProductTrees('${esc(x.ItemCode)}')?$select=Quantity,ProductTreeLines`); const b = Number(t.Quantity) || 1; f.receta = true;
