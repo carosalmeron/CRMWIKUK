@@ -120,6 +120,32 @@ module.exports = async function handler(req, res) {
         const conReceta = {}; const pt = await todas("ProductTrees?$select=TreeCode", 5000); for (const t of pt) conReceta[String(t.TreeCode).toUpperCase()] = true;
         out.noExisten = todos.filter((c) => !existe[c]); out.conReceta = arts.filter((c) => conReceta[c]); out.nombres = existe; out.recetasEnSap = pt.length; return;
       }
+      // GET ?costes=1 → escandallo valorado: recetas + coste de cada artículo en SAP + consumo real de las órdenes cerradas (solo CEO)
+      if (req.method === "GET" && q.costes !== undefined) {
+        if (AUT.soloVer) throw new Error("los costes solo los puede ver dirección");
+        const T = {}, t0c = Date.now(), mk = (k) => { T[k] = Math.round((Date.now() - t0c) / 100) / 10; };
+        const arb = await todas("ProductTrees?$select=TreeCode,Quantity,ProductTreeLines", 6000); mk("recetas");
+        out.recetas = arb.map((t) => ({ art: t.TreeCode, q: Number(t.Quantity) || 1, l: (t.ProductTreeLines || []).filter((x) => x.ItemCode && String(x.ItemType || "pit_Item").includes("Item")).map((x) => ({ c: x.ItemCode, q: Number(x.Quantity) || 0 })) }));
+        const desde = new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10);
+        let ords = []; try { ords = await todas(`ProductionOrders?$select=DocumentNumber,ItemNo,PlannedQuantity,CompletedQuantity,ClosingDate,ProductionOrderLines&$filter=ProductionOrderStatus eq 'boposClosed' and ClosingDate ge '${desde}'&$orderby=ClosingDate desc`, 600); } catch (e) { out.avisoOrdenes = String(e.message).slice(0, 120); }
+        out.ordenes = ords.filter((o) => Number(o.CompletedQuantity) > 0).map((o) => ({ num: o.DocumentNumber, art: o.ItemNo, hecho: Number(o.CompletedQuantity) || 0, plan: Number(o.PlannedQuantity) || 0, fecha: D(o.ClosingDate), l: (o.ProductionOrderLines || []).filter((x) => x.ItemNo && Number(x.IssuedQuantity) > 0).map((x) => ({ c: x.ItemNo, q: Number(x.IssuedQuantity) || 0 })) }));
+        mk("ordenes");
+        const cods = [...new Set([...out.recetas.flatMap((r) => [r.art, ...r.l.map((x) => x.c)]), ...out.ordenes.flatMap((o) => [o.art, ...o.l.map((x) => x.c)])])];
+        const MET = { bis_MovingAverage: "Precio medio", bis_Standard: "Estándar", bis_FIFO: "FIFO", bis_SNB: "Por lote/serie" }, it = {};
+        const tz = []; for (let i = 0; i < cods.length; i += 40) tz.push(cods.slice(i, i + 40));
+        for (let i = 0; i < tz.length; i += 6) await Promise.all(tz.slice(i, i + 6).map(async (z) => { try {
+          const r = await sl.get(`Items?$select=ItemCode,ItemName,InventoryUOM,AvgStdPrice,CostAccountingMethod,ItemWarehouseInfoCollection&$filter=${encodeURIComponent(z.map((c) => `ItemCode eq '${esc(c)}'`).join(" or "))}&$top=100`);
+          for (const x of (r.value || [])) { let alm = 0, st = 0; for (const w of (x.ItemWarehouseInfoCollection || [])) { st += Number(w.InStock) || 0; const pr = Number(w.StandardAveragePrice) || 0; if (pr > alm && (Number(w.InStock) || 0) > 0) alm = pr; }
+            it[x.ItemCode] = { nom: x.ItemName || "", ud: x.InventoryUOM || "", coste: Number(x.AvgStdPrice) || alm || 0, metodo: MET[x.CostAccountingMethod] || x.CostAccountingMethod || "", stock: r3(st) }; } } catch (e) {} }));
+        mk("articulos");
+        // Si no tiene coste, el último precio de compra (lista de precios «compra») como referencia
+        const sin = cods.filter((c) => it[c] && !it[c].coste);
+        if (sin.length) { try { const pl = await todas("PriceLists?$select=PriceListNo,PriceListName", 200); const lc = pl.find((x) => /[uú]ltimo.*compra|compra/i.test(x.PriceListName || ""));
+          if (lc) { out.listaCompra = lc.PriceListName; const tz2 = []; for (let i = 0; i < sin.length; i += 40) tz2.push(sin.slice(i, i + 40));
+            for (const z of tz2) { try { const r = await sl.get(`Items?$select=ItemCode,ItemPrices&$filter=${encodeURIComponent(z.map((c) => `ItemCode eq '${esc(c)}'`).join(" or "))}&$top=100`);
+              for (const x of (r.value || [])) { const pp = (x.ItemPrices || []).find((y) => Number(y.PriceList) === Number(lc.PriceListNo)); if (pp && Number(pp.Price) > 0) { it[x.ItemCode].compra = Number(pp.Price); } } } catch (e) {} } } } catch (e) {} }
+        out.articulos = it; out.noExisten = cods.filter((c) => !it[c]); mk("compra"); out.tiempos = T; return;
+      }
       // POST {accion:"recetas_crear", recetas:[{art, cantidad, lineas:[{cod, uds, alm?}]}]} → crea las que no existen (de 20 en 20)
       if (req.method === "POST" && body.accion === "recetas_crear") {
         const R = (body.recetas || []).slice(0, 25); out.creadas = []; out.saltadas = []; out.errores = []; out.pendientes = [];
