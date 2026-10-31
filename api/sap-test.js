@@ -16,6 +16,7 @@
 //    /api/sap-test?secret=…&stock=1      → stock por artículo y almacén (hasta 200)
 //    /api/sap-test?secret=…&estados=1    → qué estados y fechas hay de verdad en los pedidos (cabecera y líneas)
 //    /api/sap-test?secret=…&que=Items&top=5   → cualquier entidad del Service Layer, para explorar
+//    /api/sap-test?secret=…&tablas=1       → TODAS las tablas: entidades del Service Layer, tablas de usuario (@) y campos U_ por tabla (&buscar=texto filtra)
 //
 // Siempre cierra la sesión al terminar (Logout) para no dejar ocupada una licencia de SAP.
 
@@ -78,6 +79,23 @@ module.exports = async function handler(req, res) {
   try {
     await conSesion(db, async (sl) => {
       out.loginMs = sl.msLogin; out.serviceLayer = sl.version || null;
+      if (q.tablas === "1") {   // (31/10/2026) todas las tablas que expone SAP: entidades del Service Layer + tablas de usuario (@) + campos de usuario (U_) por tabla
+        const buscar = String(q.buscar || "").toLowerCase();
+        const doc = await sl.get("");   // documento de servicio: la lista de todas las entidades
+        const ent = (doc && (doc.value || doc.EntitySets) || []).map((e) => typeof e === "string" ? e : (e.name || e.Name || e.url)).filter(Boolean);
+        out.entidades = [...new Set(ent)].filter((n) => !buscar || n.toLowerCase().includes(buscar)).sort();
+        out.totalEntidades = out.entidades.length;
+        try { const u = await todas(sl, "UserTablesMD?$select=TableName,TableDescription,TableType", 2000);
+          out.tablasDeUsuario = u.map((t) => ({ tabla: "@" + t.TableName, descripcion: t.TableDescription, tipo: t.TableType })).filter((t) => !buscar || (t.tabla + " " + t.descripcion).toLowerCase().includes(buscar)).sort((a, b) => a.tabla.localeCompare(b.tabla));
+          out.totalTablasDeUsuario = out.tablasDeUsuario.length;
+        } catch (e) { out.tablasDeUsuario = "no se han podido leer: " + String(e.message || e).slice(0, 160); }
+        try { const f = await todas(sl, "UserFieldsMD?$select=TableName,Name,Description", 20000); const por = {};
+          for (const c of f) { const t = String(c.TableName || ""); (por[t] = por[t] || []).push("U_" + c.Name + (c.Description ? " · " + c.Description : "")); }
+          out.camposDeUsuarioPorTabla = Object.fromEntries(Object.entries(por).filter(([t, cs]) => !buscar || t.toLowerCase().includes(buscar) || cs.some((c) => c.toLowerCase().includes(buscar))).sort((a, b) => a[0].localeCompare(b[0])));
+        } catch (e) { out.camposDeUsuarioPorTabla = "no se han podido leer: " + String(e.message || e).slice(0, 160); }
+        out.nota = "Las entidades son los nombres del Service Layer (Items = OITM, Orders = ORDR, BusinessPartners = OCRD, ProductionOrders = OWOR, ProductTrees = OITT…). Para ver los datos de una: &que=<entidad>&top=5. Las tablas de usuario se leen con &que=U_<NOMBRE> (sin la @).";
+        return;
+      }
       if (q.que) {   // explorar cualquier entidad
         const top = Math.min(Number(q.top) || 5, 50);
         out.entidad = String(q.que); out.filas = (await sl.get(`${encodeURIComponent(String(q.que))}?$top=${top}${q.select ? "&$select=" + encodeURIComponent(String(q.select)) : ""}${q.filter ? "&$filter=" + encodeURIComponent(String(q.filter)) : ""}`)).value;
